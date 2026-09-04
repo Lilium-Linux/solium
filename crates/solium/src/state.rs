@@ -4,13 +4,16 @@
 //! owns both. Layout and presentation deliberately do not live here — see
 //! `docs/architecture.md`.
 
-use smithay::utils::{Logical, Point, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
     delegate_xdg_shell,
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
-    input::{Seat, SeatHandler, SeatState, pointer::CursorImageStatus},
+    input::{
+        Seat, SeatHandler, SeatState,
+        pointer::{CursorImageStatus, Focus, GrabStartData},
+    },
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
@@ -29,9 +32,16 @@ use smithay::{
         selection::data_device::{
             ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
         },
-        shell::xdg::{PopupSurface, PositionerState, XdgShellHandler, XdgShellState},
+        shell::xdg::{
+            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+        },
         shm::{ShmHandler, ShmState},
     },
+};
+
+use crate::{
+    input::{grab::MoveGrab, profile::Profile},
+    present::{self, Clock},
 };
 
 /// Per-client state Smithay asks us to store.
@@ -57,8 +67,16 @@ pub(crate) struct Solium {
 
     pub(crate) space: Space<Window>,
     pub(crate) popups: PopupManager,
-    #[allow(dead_code)]
     pub(crate) seat: Seat<Self>,
+
+    /// The one animation clock. Ticked by the render loop, read by everything.
+    pub(crate) clock: Clock,
+
+    /// Per-form-factor input behaviour.
+    pub(crate) profile: Profile,
+
+    /// Whether overview mode is on. Becomes script-owned state in #17.
+    pub(crate) overview: bool,
 }
 
 impl Solium {
@@ -66,10 +84,13 @@ impl Solium {
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "winit");
 
-        // A keyboard and pointer are added unconditionally for now. #12 replaces
-        // this with an input profile so touch is a profile rather than a retrofit.
+        // Every capability is advertised on every form factor. Which of them a
+        // machine actually has is a hardware question; how it behaves is the
+        // profile's, and advertising a capability that never sends events is
+        // cheaper than a client that cannot discover a device that appears.
         let _ = seat.add_keyboard(Default::default(), 200, 25);
         let _ = seat.add_pointer();
+        let _ = seat.add_touch();
 
         Self {
             compositor_state: CompositorState::new::<Self>(&display_handle),
@@ -81,29 +102,164 @@ impl Solium {
             space: Space::default(),
             popups: PopupManager::default(),
             seat,
+            clock: Clock::new(),
+            profile: Profile::from_env(),
+            overview: false,
             display_handle,
         }
     }
 }
 
 impl Solium {
-    /// The surface at a point in compositor space, with its origin.
+    /// Where a window actually lives, as opposed to where it is drawn.
     ///
-    /// E2 changes this to consult the presentation transform, so a window in
-    /// overview is clickable where it is *drawn*, not where it lives.
+    /// The layout's answer. Transforms are expressed relative to it and never
+    /// write back to it, which is what makes leaving a mode exact.
+    pub(crate) fn real_geometry(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+        let location = self.space.element_location(window)?;
+        Some(Rectangle::new(location, window.geometry().size))
+    }
+
+    /// The output windows are placed on. Multi-output arrives with E4.
+    pub(crate) fn output_geometry(&self) -> Option<Rectangle<i32, Logical>> {
+        let output = self.space.outputs().next()?;
+        self.space.output_geometry(output)
+    }
+
+    /// The window drawn at a point, topmost first, with its real geometry.
+    ///
+    /// Hit-testing follows the transform: in overview a window is clickable
+    /// where the thumbnail is, not where the window lives.
+    pub(crate) fn window_under(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(Window, Rectangle<i32, Logical>)> {
+        let now = self.clock.now();
+        self.space.elements().rev().find_map(|window| {
+            let real = self.real_geometry(window)?;
+            present::frame(window, real, now)
+                .rect
+                .contains(location)
+                .then(|| (window.clone(), real))
+        })
+    }
+
+    /// The surface at a point, and the origin to measure it from.
+    ///
+    /// The origin is chosen so that `location - origin` is the point in
+    /// surface-local coordinates. That is what keeps a scaled window honest:
+    /// the client is told where in *itself* the pointer is, and never learns
+    /// that it is being drawn at half size.
     pub(crate) fn surface_under(
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let now = self.clock.now();
+
+        for window in self.space.elements().rev() {
+            let Some(real) = self.real_geometry(window) else {
+                continue;
+            };
+            let frame = present::frame(window, real, now);
+            if !frame.rect.contains(location) {
+                continue;
+            }
+
+            let in_window = present::to_window_space(frame, real, location) - real.loc.to_f64();
+            if let Some((surface, surface_offset)) =
+                window.surface_under(in_window, WindowSurfaceType::ALL)
+            {
+                let in_surface = in_window - surface_offset.to_f64();
+                return Some((surface, location - in_surface));
+            }
+        }
+
+        None
+    }
+
+    /// Raise a window and give it the keyboard.
+    pub(crate) fn focus_window(&mut self, window: &Window, serial: Serial) {
+        let Some(location) = self.space.element_location(window) else {
+            return;
+        };
+        // `true` restacks: a clicked window comes to the front.
+        self.space.map_element(window.clone(), location, true);
+
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            let surface = window
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface().clone());
+            keyboard.set_focus(self, surface, serial);
+        }
+    }
+
+    /// Place and animate a window the first time it has something to show.
+    ///
+    /// Both belong to this moment rather than to the map request: until the
+    /// client has committed a buffer it has no size, and placing or animating
+    /// a zero-sized window is placing nothing.
+    fn show_if_new(&mut self, window: &Window) {
+        // A client's first commit is typically empty — it commits to receive
+        // the initial configure, then draws. Claiming the first-show moment on
+        // that commit places and animates a zero-sized window, which lands it
+        // at half the output away from where it belongs.
+        let size = window.geometry().size;
+        if size.w <= 0 || size.h <= 0 {
+            return;
+        }
+
+        if !present::mark_shown(window) {
+            return;
+        }
+
+        let location = self.initial_placement(window);
+        self.space.map_element(window.clone(), location, true);
+
+        if let Some(real) = self.real_geometry(window) {
+            present::open(window, real, self.clock.now());
+        }
+    }
+
+    /// Where a new window goes.
+    ///
+    /// Centred, then cascaded, so a second window is not hidden exactly behind
+    /// the first. This is *not* a layout engine and is not trying to be one —
+    /// E4 replaces it with floating, tiling and scrolling behind one interface.
+    /// It exists because "every window at (0, 0)" is not a usable compositor.
+    fn initial_placement(&self, window: &Window) -> Point<i32, Logical> {
+        let Some(output) = self.output_geometry() else {
+            return (0, 0).into();
+        };
+        let size = window.geometry().size;
+
+        const CASCADE: i32 = 44;
+        const WRAP: usize = 6;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "the index is taken modulo a small constant"
+        )]
+        let step = CASCADE * (self.space.elements().count() % WRAP) as i32;
+
+        let centred = |available: i32, window: i32| (available - window) / 2;
+        let x = output.loc.x + centred(output.size.w, size.w).max(0) + step;
+        let y = output.loc.y + centred(output.size.h, size.h).max(0) + step;
+
+        // Kept on the output even if the cascade would walk a large window off
+        // the bottom right.
+        (
+            x.min(output.loc.x + (output.size.w - size.w).max(0)),
+            y.min(output.loc.y + (output.size.h - size.h).max(0)),
+        )
+            .into()
+    }
+
+    /// The window owning a surface, if any.
+    fn window_for(&self, surface: &WlSurface) -> Option<Window> {
         self.space
-            .element_under(location)
-            .and_then(|(window, window_location)| {
-                window
-                    .surface_under(location - window_location.to_f64(), WindowSurfaceType::ALL)
-                    .map(|(surface, surface_offset)| {
-                        (surface, (window_location + surface_offset).to_f64())
-                    })
-            })
+            .elements()
+            .find(|window| window.toplevel().map(ToplevelSurface::wl_surface) == Some(surface))
+            .cloned()
     }
 }
 
@@ -134,13 +290,9 @@ impl CompositorHandler for Solium {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
-            if let Some(window) = self
-                .space
-                .elements()
-                .find(|w| w.toplevel().map(|t| t.wl_surface()) == Some(&root))
-                .cloned()
-            {
+            if let Some(window) = self.window_for(&root) {
                 window.on_commit();
+                self.show_if_new(&window);
             }
         }
         self.popups.commit(surface);
@@ -194,7 +346,34 @@ impl XdgShellHandler for Solium {
         }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: smithay::utils::Serial) {}
+    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+
+    /// A client asking to be dragged — what client-side decorations send when
+    /// their own titlebar is grabbed.
+    fn move_request(&mut self, surface: ToplevelSurface, seat: WlSeat, serial: Serial) {
+        let Some(seat) = Seat::<Self>::from_resource(&seat) else {
+            return;
+        };
+        let Some(start_data) = self.drag_start_data(&seat, surface.wl_surface(), serial) else {
+            return;
+        };
+        let Some(window) = self.window_for(surface.wl_surface()) else {
+            return;
+        };
+        let Some(location) = self.space.element_location(&window) else {
+            return;
+        };
+        let Some(pointer) = seat.get_pointer() else {
+            return;
+        };
+
+        pointer.set_grab(
+            self,
+            MoveGrab::new(start_data, window, location),
+            serial,
+            Focus::Clear,
+        );
+    }
 
     fn reposition_request(
         &mut self,
@@ -207,6 +386,34 @@ impl XdgShellHandler for Solium {
             state.positioner = positioner;
         });
         surface.send_repositioned(token);
+    }
+}
+
+impl Solium {
+    /// Validate a client's request to start a drag.
+    ///
+    /// A client may only be dragged from a press it actually received: the
+    /// serial has to match the live grab, and the surface that was pressed has
+    /// to belong to the same client as the one asking. Without both checks any
+    /// client could start a drag of any window at any time.
+    fn drag_start_data(
+        &self,
+        seat: &Seat<Self>,
+        surface: &WlSurface,
+        serial: Serial,
+    ) -> Option<GrabStartData<Self>> {
+        use smithay::reexports::wayland_server::Resource;
+
+        let pointer = seat.get_pointer()?;
+        if !pointer.has_grab(serial) {
+            return None;
+        }
+        let start_data = pointer.grab_start_data()?;
+        let (focused, _) = start_data.focus.as_ref()?;
+        if !focused.id().same_client_as(&surface.id()) {
+            return None;
+        }
+        Some(start_data)
     }
 }
 

@@ -5,6 +5,9 @@
 
 mod capture;
 mod input;
+mod mode;
+mod present;
+mod render;
 mod state;
 mod winit;
 
