@@ -1,7 +1,7 @@
 # Solium
 
 The compositor of [Lilium DE](https://github.com/Lilium-Linux). Wayland, written
-in Rust on [Smithay](https://github.com/Smithay/smithay), rendering with Vulkan.
+in Rust on [Smithay](https://github.com/Smithay/smithay).
 
 One compositor for phone, tablet, laptop and desktop — tiling, scrolling,
 floating and overview modes, all scriptable, all animated by the same engine.
@@ -18,10 +18,14 @@ rather than being a bet.
 **Rust** because this codebase is meant to last. Memory safety removes an entire
 class of compositor crash, and a crash in a compositor takes the session with it.
 
-**Vulkan** because every mode we want — overview, app switcher, peek, the
-icon→window genie — is the same operation: place a window's texture somewhere
-other than its real geometry and animate between the two. That wants explicit,
-modern GPU control, not a compatibility layer.
+**GLES2 to start**, through Smithay's renderer traits. Smithay has no Vulkan
+renderer — its `backend::vulkan` is device enumeration only — and niri, the
+reference implementation we chose this stack for, uses GLES. Vulkan would mean
+writing a renderer backend plus NVIDIA dmabuf import before a single window
+appeared. See `docs/spikes/2026-08-27-vulkan-on-smithay.md`.
+
+The transform layer is written against Smithay's `Renderer`/`Frame` traits, not
+against GLES directly, so a Vulkan backend stays a contained change later.
 
 ## Status
 
