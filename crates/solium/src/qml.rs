@@ -45,6 +45,10 @@ mod ffi {
         pub(super) fn solium_qml_scene_render(scene: *mut Scene) -> c_int;
         pub(super) fn solium_qml_scene_pixels(scene: *const Scene, stride: *mut c_int)
         -> *const u8;
+        pub(super) fn solium_qml_scene_take_string(
+            scene: *mut Scene,
+            name: *const c_char,
+        ) -> *const c_char;
         pub(super) fn solium_qml_scene_set_string(
             scene: *mut Scene,
             name: *const c_char,
@@ -55,6 +59,7 @@ mod ffi {
             name: *const c_char,
             value: c_int,
         );
+        pub(super) fn solium_qml_scene_get_bool(scene: *const Scene, name: *const c_char) -> c_int;
         pub(super) fn solium_qml_scene_set_real(
             scene: *mut Scene,
             name: *const c_char,
@@ -187,6 +192,29 @@ impl Scene {
         })
     }
 
+    /// Read a string property and clear it.
+    ///
+    /// The one direction state flows out of QML: a button writes it, the
+    /// compositor takes it. A property both sides wrote would be two
+    /// authorities over one piece of state, which is the mistake the old
+    /// fork's drawer made.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn take_string(&mut self, name: &str) -> Option<String> {
+        let name = CString::new(name).ok()?;
+        // SAFETY: `name` outlives the call.
+        let value = unsafe { ffi::solium_qml_scene_take_string(self.scene, name.as_ptr()) };
+        if value.is_null() {
+            return None;
+        }
+        // SAFETY: non-null means the host stored a NUL-terminated string that
+        // stays valid until the next call on this scene, and it is copied here.
+        Some(
+            unsafe { CStr::from_ptr(value) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn set_string(&mut self, name: &str, value: &str) {
         let (Ok(name), Ok(value)) = (CString::new(name), CString::new(value)) else {
@@ -205,6 +233,16 @@ impl Scene {
         };
         // SAFETY: `name` outlives the call.
         unsafe { ffi::solium_qml_scene_set_bool(self.scene, name.as_ptr(), c_int::from(value)) }
+    }
+
+    /// Read a bool property QML owns.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn get_bool(&self, name: &str) -> bool {
+        let Ok(name) = CString::new(name) else {
+            return false;
+        };
+        // SAFETY: `name` outlives the call.
+        unsafe { ffi::solium_qml_scene_get_bool(self.scene, name.as_ptr()) != 0 }
     }
 
     #[expect(unsafe_code, reason = "calling into the Qt host")]

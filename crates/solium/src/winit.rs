@@ -216,7 +216,7 @@ pub(crate) fn run() -> Result<()> {
                 // Every window reaches the screen through the presentation
                 // transform, so a mode cannot animate differently from the
                 // layout -- they are the same code path.
-                let mut elements = render::elements(&state, renderer, 1.0);
+                let mut elements = render::elements(&mut state, renderer, 1.0);
 
                 // The bar goes in front of everything: it is the top of the
                 // stack, and it owns its strip of screen rather than sharing it.

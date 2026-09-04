@@ -58,11 +58,13 @@ pub(crate) fn enter_overview(state: &mut Solium) {
     let rows = windows.len().div_ceil(columns);
 
     for (index, window) in windows.iter().enumerate() {
-        let Some(real) = state.real_geometry(window) else {
+        // The outer rect, so a thumbnail includes its titlebar and the frame
+        // scales with the window instead of overflowing the cell.
+        let Some(outer) = state.outer_geometry(window) else {
             continue;
         };
-        let target = fit(real, cell(output, columns, rows, index));
-        present::present(window, real, target, now, ENTER, Easing::OutCubic);
+        let target = fit(outer, cell(output, columns, rows, index));
+        present::present(window, outer, target, now, ENTER, Easing::OutCubic);
     }
 
     state.overview = true;
@@ -79,10 +81,10 @@ pub(crate) fn leave_overview(state: &mut Solium) {
     let windows: Vec<Window> = state.space.elements().cloned().collect();
 
     for window in &windows {
-        let Some(real) = state.real_geometry(window) else {
+        let Some(outer) = state.outer_geometry(window) else {
             continue;
         };
-        present::clear(window, real, now, LEAVE, Easing::OutCubic);
+        present::clear(window, outer, now, LEAVE, Easing::OutCubic);
     }
 
     state.overview = false;
