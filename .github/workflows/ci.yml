@@ -24,7 +24,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwayland-dev libinput-dev libudev-dev libseat-dev \
             libxkbcommon-dev libgbm-dev libegl1-mesa-dev libdrm-dev \
-            libdisplay-info-dev pkg-config
+            libdisplay-info-dev pkg-config \
+            qt6-base-dev qt6-declarative-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:

@@ -7,7 +7,9 @@ mod capture;
 mod input;
 mod mode;
 mod present;
+mod qml;
 mod render;
+mod shell;
 mod state;
 mod winit;
 

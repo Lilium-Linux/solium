@@ -25,7 +25,7 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{
             CompositorClientState, CompositorHandler, CompositorState, get_parent,
-            is_sync_subsurface,
+            is_sync_subsurface, with_states,
         },
         output::{OutputHandler, OutputManagerState},
         selection::SelectionHandler,
@@ -34,6 +34,7 @@ use smithay::{
         },
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            XdgToplevelSurfaceData,
         },
         shm::{ShmHandler, ShmState},
     },
@@ -42,6 +43,7 @@ use smithay::{
 use crate::{
     input::{grab::MoveGrab, profile::Profile},
     present::{self, Clock},
+    shell::{BAR_HEIGHT, Bar, BarState},
 };
 
 /// Per-client state Smithay asks us to store.
@@ -77,6 +79,11 @@ pub(crate) struct Solium {
 
     /// Whether overview mode is on. Becomes script-owned state in #17.
     pub(crate) overview: bool,
+
+    /// The QML top bar, once the renderer exists for Qt to borrow a context
+    /// from. `None` if it failed to load — a compositor with no bar is worse
+    /// but usable, one that will not start because a QML file has a typo is not.
+    pub(crate) bar: Option<Bar>,
 }
 
 impl Solium {
@@ -105,6 +112,7 @@ impl Solium {
             clock: Clock::new(),
             profile: Profile::from_env(),
             overview: false,
+            bar: None,
             display_handle,
         }
     }
@@ -124,6 +132,47 @@ impl Solium {
     pub(crate) fn output_geometry(&self) -> Option<Rectangle<i32, Logical>> {
         let output = self.space.outputs().next()?;
         self.space.output_geometry(output)
+    }
+
+    /// The output area windows may use: everything the bar has not reserved.
+    ///
+    /// The bar is not a panel that windows slide under — it owns its strip of
+    /// screen, and every placement decision reads this rather than the raw
+    /// output.
+    pub(crate) fn work_area(&self) -> Option<Rectangle<i32, Logical>> {
+        let output = self.output_geometry()?;
+        Some(Rectangle::new(
+            (output.loc.x, output.loc.y + BAR_HEIGHT).into(),
+            (output.size.w, (output.size.h - BAR_HEIGHT).max(1)).into(),
+        ))
+    }
+
+    /// What the bar should show this frame.
+    pub(crate) fn bar_state(&self) -> BarState {
+        let title = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|surface| self.window_for(&surface))
+            .and_then(|window| window.toplevel().map(ToplevelSurface::wl_surface).cloned())
+            .and_then(|surface| {
+                with_states(&surface, |states| {
+                    states
+                        .data_map
+                        .get::<XdgToplevelSurfaceData>()
+                        // A poisoned lock means another thread panicked while
+                        // holding it. Showing no title beats propagating that.
+                        .and_then(|data| data.lock().ok())
+                        .and_then(|attributes| attributes.title.clone())
+                })
+            })
+            .unwrap_or_default();
+
+        BarState {
+            title,
+            windows: self.space.elements().count(),
+            overview: self.overview,
+        }
     }
 
     /// The window drawn at a point, topmost first, with its real geometry.
@@ -227,7 +276,7 @@ impl Solium {
     /// E4 replaces it with floating, tiling and scrolling behind one interface.
     /// It exists because "every window at (0, 0)" is not a usable compositor.
     fn initial_placement(&self, window: &Window) -> Point<i32, Logical> {
-        let Some(output) = self.output_geometry() else {
+        let Some(output) = self.work_area() else {
             return (0, 0).into();
         };
         let size = window.geometry().size;

@@ -28,3 +28,9 @@ anyhow = "1"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+# Qt Quick is hosted in-process, so a small C++ shim is compiled in. See
+# crates/solium/qml/host.cpp for why in-process rather than over a protocol.
+cc = "1"
+pkg-config = "0.3"

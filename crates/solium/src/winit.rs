@@ -24,7 +24,7 @@ use smithay::{
 };
 
 use crate::{
-    capture, mode, present, render,
+    capture, mode, present, render, shell,
     state::{ClientState, Solium},
 };
 
@@ -117,6 +117,18 @@ pub(crate) fn run() -> Result<()> {
     output.set_preferred(mode);
     state.space.map_output(&output, (0, 0));
 
+    state.bar = {
+        match shell::Bar::new(size.w) {
+            Ok(bar) => Some(bar),
+            Err(err) => {
+                // A compositor with no bar is worse but usable; one that
+                // refuses to start because a QML file has a typo in it is not.
+                tracing::error!(?err, "the top bar failed to load, continuing without it");
+                None
+            }
+        }
+    };
+
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
 
     // Frames are captured a few ticks in, not on the first one: a client that
@@ -204,7 +216,17 @@ pub(crate) fn run() -> Result<()> {
                 // Every window reaches the screen through the presentation
                 // transform, so a mode cannot animate differently from the
                 // layout -- they are the same code path.
-                let elements = render::elements(&state, renderer, 1.0);
+                let mut elements = render::elements(&state, renderer, 1.0);
+
+                // The bar goes in front of everything: it is the top of the
+                // stack, and it owns its strip of screen rather than sharing it.
+                let bar_state = state.bar_state();
+                if let Some(bar) = state.bar.as_mut()
+                    && let Some(element) = bar.frame(renderer, size.w, now, &bar_state)
+                {
+                    elements.insert(0, element);
+                }
+
                 let result = damage_tracker.render_output(
                     renderer,
                     &mut framebuffer,

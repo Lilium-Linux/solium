@@ -101,6 +101,17 @@ fn pointer_motion(
         return;
     };
     let location = absolute_location(output, &event);
+
+    // The bar is offered the event first and swallows it when the pointer is
+    // over it. It reserves its height, so nothing below it is under the cursor
+    // there — forwarding to a client as well would send it a hover it cannot
+    // see the reason for.
+    if let Some(bar) = state.bar.as_mut()
+        && bar.pointer(location.x, location.y, None)
+    {
+        return;
+    }
+
     let under = state.surface_under(location);
 
     pointer.motion(
@@ -123,6 +134,16 @@ fn pointer_button(state: &mut Solium, event: impl PointerButtonEvent<WinitInput>
     let button = event.button_code();
     let button_state = event.state();
     let location = pointer.current_location();
+
+    if let Some(bar) = state.bar.as_mut()
+        && bar.pointer(
+            location.x,
+            location.y,
+            Some(button_state == ButtonState::Pressed),
+        )
+    {
+        return;
+    }
 
     if button_state == ButtonState::Pressed && !pointer.is_grabbed() {
         let modifiers = state

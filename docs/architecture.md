@@ -86,11 +86,34 @@ comes back through the event stream, not as a reply.
 **A protocol carries one concern.** When a name is hard to choose, the interface
 is doing too much.
 
-**In-process for anything window-coupled.** Decorations, the animation engine
-and mode overlays run inside the compositor. Notifications, settings UI,
-launcher and media controls are ordinary clients — none of them touch window
-geometry. Dock and bar sit between: separate processes that publish geometry,
-never pixels.
+**In-process for anything window-coupled.** Decorations, the animation engine,
+the bar and mode overlays run inside the compositor. Notifications, settings
+UI, launcher and media controls are ordinary clients — none of them touch
+window geometry.
+
+### Chrome is QML, hosted in-process
+
+**Decided 2026-09-04.** The bar and window decorations are authored in QML and
+rendered by Qt's scene graph *inside the compositor process* — the model KWin
+uses for Aurorae. Out-of-process was tried in the Hyprland fork and measured at
+~15 fps and 39% CPU, with the process boundary as the ceiling.
+
+Concretely: a C ABI shim (`crates/solium/qml/host.cpp`), `QQuickRenderControl`
+with no visible window, and animations driven by **the compositor's clock**
+through an animation driver the render loop advances. That last part is not a
+detail — QML animating off Qt's own timer would drift against every window
+transform beside it, which is the same mistake as having two animation clocks.
+
+Rendering goes through Qt's *software* scene graph and is uploaded as a memory
+buffer, because no Qt QPA plugin available here will adopt the compositor's EGL
+context. See `docs/spikes/2026-09-04-qml-in-compositor.md` for the measurement,
+the two Qt traps it hides, and the two routes back to the GPU. Chrome is small
+and only re-uploaded when Qt reports it changed, so this is not on the critical
+path.
+
+**The bar reserves its height.** `work_area` excludes it, so windows are placed
+below it, never under it. A bar windows slide beneath is a panel; a bar that
+owns its strip of screen is part of the desktop.
 
 ## Form factors
 
