@@ -15,7 +15,7 @@ Item {
     // Set from the compositor.
     property string windowTitle: ""
     property int windowCount: 0
-    property bool overviewActive: false
+    property string status: ""
     property real clockSeconds: 0
 
     Rectangle {
@@ -43,7 +43,7 @@ Item {
             height: 9
             radius: 4.5
             anchors.verticalCenter: parent.verticalCenter
-            color: bar.overviewActive ? "#7aa2f7" : "#9ece6a"
+            color: bar.status === "" ? "#9ece6a" : "#7aa2f7"
 
             SequentialAnimation on opacity {
                 loops: Animation.Infinite
@@ -62,8 +62,11 @@ Item {
 
         Text {
             anchors.verticalCenter: parent.verticalCenter
-            text: bar.overviewActive ? "overview" : (bar.windowCount === 1 ? "1 window"
-                                                                          : bar.windowCount + " windows")
+            // Whatever the active script called itself, or the window count
+            // when no mode is active. The bar has no list of modes.
+            text: bar.status !== "" ? bar.status
+                                    : (bar.windowCount === 1 ? "1 window"
+                                                             : bar.windowCount + " windows")
             color: "#7f8798"
             font { pixelSize: 12; family: "monospace" }
         }

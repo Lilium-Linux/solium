@@ -40,7 +40,9 @@ pub(crate) const BAR_HEIGHT: i32 = 34;
 pub(crate) struct BarState {
     pub(crate) title: String,
     pub(crate) windows: usize,
-    pub(crate) overview: bool,
+    /// The active mode's name, straight from the script. The compositor has no
+    /// list of modes to check it against, which is what keeps the mode set open.
+    pub(crate) status: String,
 }
 
 /// The top bar: a QML scene and the buffer it is uploaded through.
@@ -95,11 +97,11 @@ impl Bar {
                 reason = "a window count large enough to lose precision is not reachable"
             )]
             self.scene.set_real("windowCount", state.windows as f64);
-            self.scene.set_bool("overviewActive", state.overview);
+            self.scene.set_string("status", &state.status);
             self.shown = BarState {
                 title: state.title.clone(),
                 windows: state.windows,
-                overview: state.overview,
+                status: state.status.clone(),
             };
         }
         self.scene.set_real("clockSeconds", now.as_secs_f64());

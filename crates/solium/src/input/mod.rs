@@ -11,14 +11,14 @@ pub(crate) mod profile;
 use smithay::{
     backend::{
         input::{
-            AbsolutePositionEvent, Axis, AxisSource, ButtonState, InputEvent, KeyboardKeyEvent,
-            PointerAxisEvent, PointerButtonEvent, TouchDownEvent,
+            AbsolutePositionEvent, Axis, AxisSource, ButtonState, InputEvent, KeyState,
+            KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, TouchDownEvent,
             TouchMotionEvent as TouchMotionEventTrait, TouchUpEvent,
         },
         winit::WinitInput,
     },
     input::{
-        keyboard::{FilterResult, Keysym},
+        keyboard::{FilterResult, Keysym, ModifiersState, xkb},
         pointer::{AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent},
         touch::{DownEvent, MotionEvent as TouchMotionEvent, UpEvent},
     },
@@ -26,20 +26,17 @@ use smithay::{
     utils::{Logical, Point, SERIAL_COUNTER},
 };
 
-use crate::{decoration::Decoration, mode, state::Solium};
+use crate::{decoration::Decoration, script, state::Solium};
 
 use grab::MoveGrab;
 
-/// Something a key binding asked the compositor to do.
+/// A key combination a script has claimed.
 ///
-/// Returned from the keyboard filter rather than performed inside it: the
-/// filter runs while the keyboard handle holds the compositor state, and
-/// reaching for the space or the seat from in there is how you get a
-/// re-entrant borrow.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action {
-    ToggleOverview,
-}
+/// Carried out of the keyboard filter rather than acted on inside it: the
+/// filter runs while the seat holds its own lock, and a script that focused a
+/// window from in there would re-enter the keyboard and deadlock.
+#[derive(Clone, Debug)]
+struct Bound(String);
 
 /// Route one backend event to the seat.
 pub(crate) fn handle(state: &mut Solium, output: &Output, event: InputEvent<WinitInput>) {
@@ -70,26 +67,64 @@ fn keyboard(state: &mut Solium, event: impl KeyboardKeyEvent<WinitInput>) {
         return;
     };
 
-    let action = keyboard.input(
+    let pressed = event.state() == KeyState::Pressed;
+
+    let bound = keyboard.input(
         state,
         event.key_code(),
         event.state(),
         SERIAL_COUNTER.next_serial(),
         event.time_msec(),
-        |_state, modifiers, handle| {
-            if handle.modified_sym() == Keysym::space && modifiers.logo {
-                // Intercepted, not forwarded: a binding the compositor acts on
-                // must not also reach the focused client.
-                return FilterResult::Intercept(Action::ToggleOverview);
+        |state, modifiers, handle| {
+            if !pressed {
+                // Releases are never bindings, but they must still reach a
+                // client that received the press, or it holds the key forever.
+                return if state.script_grab {
+                    FilterResult::Intercept(None)
+                } else {
+                    FilterResult::Forward
+                };
             }
-            FilterResult::Forward
+
+            let combo = combo_for(modifiers, handle.modified_sym());
+            let claimed = state
+                .scripts
+                .as_ref()
+                .is_some_and(|scripts| scripts.has_binding(&combo));
+
+            if claimed {
+                FilterResult::Intercept(Some(Bound(combo)))
+            } else if state.script_grab {
+                // A mode owns input: keys it did not bind are swallowed rather
+                // than leaking to whatever is underneath it.
+                FilterResult::Intercept(None)
+            } else {
+                FilterResult::Forward
+            }
         },
     );
 
-    match action {
-        Some(Action::ToggleOverview) => mode::toggle_overview(state),
-        None => {}
+    if let Some(Some(Bound(combo))) = bound {
+        state.trigger(&combo);
     }
+}
+
+/// The canonical name of a key combination, as scripts bind them.
+fn combo_for(modifiers: &ModifiersState, keysym: Keysym) -> String {
+    let mut combo = String::new();
+    for (held, name) in [
+        (modifiers.ctrl, "ctrl"),
+        (modifiers.alt, "alt"),
+        (modifiers.shift, "shift"),
+        (modifiers.logo, "super"),
+    ] {
+        if held {
+            combo.push_str(name);
+            combo.push('+');
+        }
+    }
+    combo.push_str(&xkb::keysym_get_name(keysym));
+    script::normalise_combo(&combo)
 }
 
 fn pointer_motion(
@@ -152,6 +187,15 @@ fn pointer_button(state: &mut Solium, event: impl PointerButtonEvent<WinitInput>
             Some(button_state == ButtonState::Pressed),
         )
     {
+        return;
+    }
+
+    // While a mode owns input, every press is the mode's: it decides what a
+    // click on a thumbnail means, and nothing underneath should see it.
+    if state.script_grab {
+        if button_state == ButtonState::Pressed {
+            state.trigger_click(location.x, location.y);
+        }
         return;
     }
 

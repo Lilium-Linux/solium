@@ -24,7 +24,9 @@ use smithay::{
 };
 
 use crate::{
-    capture, mode, present, render, shell,
+    capture, dev, present, render,
+    script::Scripts,
+    shell,
     state::{ClientState, Solium},
 };
 
@@ -117,6 +119,18 @@ pub(crate) fn run() -> Result<()> {
     output.set_preferred(mode);
     state.space.map_output(&output, (0, 0));
 
+    // Scripts are loaded before the first frame so a mode can be triggered
+    // immediately. A broken config leaves the compositor usable and unbound
+    // rather than refusing to start.
+    let config = Scripts::config_path();
+    state.scripts = match Scripts::load(&config) {
+        Ok(scripts) => Some(scripts),
+        Err(err) => {
+            tracing::error!(?err, config = %config.display(), "no scripts loaded");
+            None
+        }
+    };
+
     state.bar = {
         match shell::Bar::new(size.w) {
             Ok(bar) => Some(bar),
@@ -134,14 +148,17 @@ pub(crate) fn run() -> Result<()> {
     // Frames are captured a few ticks in, not on the first one: a client that
     // has just been configured has not drawn yet, and a capture of an empty
     // compositor is exactly the misleading result this exists to avoid.
-    let mut capture = capture::requested();
+    let mut capture = dev::capture_path();
     let mut settled = 0_u32;
 
     // Dev knobs, both documented in dev/README.md. They exist so the transform
     // path can be exercised and photographed without a human at the keyboard,
     // which is the only way this becomes a regression test later.
-    let capture_at = capture::capture_at();
-    let mut overview_at = capture::overview_at();
+    let capture_at = dev::capture_at();
+    let mut triggers = dev::triggers();
+    let mut clicks = dev::clicks();
+    triggers.reverse();
+    clicks.reverse();
 
     // Which host monitor the nested window landed on cannot be asked for at
     // startup: a Wayland client learns its output only when the host sends
@@ -195,11 +212,19 @@ pub(crate) fn run() -> Result<()> {
         state.clock.tick();
         let now = state.clock.now();
 
-        if let Some(at) = overview_at
-            && now >= at
-        {
-            overview_at = None;
-            mode::toggle_overview(&mut state);
+        // Scripted input, fired through the same paths a keypress and a click
+        // take. A knob that bypassed them would prove the knob works.
+        while triggers.last().is_some_and(|(at, _)| now >= *at) {
+            if let Some((_, combo)) = triggers.pop() {
+                tracing::info!(combo, "scripted trigger");
+                state.trigger(&combo);
+            }
+        }
+        while clicks.last().is_some_and(|(at, _)| now >= *at) {
+            if let Some((_, (x, y))) = clicks.pop() {
+                tracing::info!(x, y, "scripted click");
+                state.trigger_click(x, y);
+            }
         }
 
         let size = backend.window_size();

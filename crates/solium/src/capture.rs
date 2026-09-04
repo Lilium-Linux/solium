@@ -8,49 +8,16 @@
 //! The format is binary PPM — no encoder dependency, and every image tool reads
 //! it. Enabled per run:
 //!
-//! ```sh
-//! SOLIUM_CAPTURE=/tmp/frame.ppm ./solium
-//! ```
+//! Enabled per run with `SOLIUM_CAPTURE` — see `dev.rs` for that and the rest
+//! of the knobs.
 
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::{io::Write, path::Path};
 
 use anyhow::{Context, Result};
 use smithay::{
     backend::{allocator::Fourcc, renderer::ExportMem},
     utils::Rectangle,
 };
-
-/// Where to write the next captured frame, if a capture was asked for.
-pub(crate) fn requested() -> Option<PathBuf> {
-    std::env::var_os("SOLIUM_CAPTURE").map(PathBuf::from)
-}
-
-/// When to capture, if a moment was named instead of "once a window settles".
-///
-/// Naming a moment is what makes a capture of an *animation* possible: the
-/// interesting frames are the ones part-way through.
-pub(crate) fn capture_at() -> Option<std::time::Duration> {
-    millis_from_env("SOLIUM_CAPTURE_AT")
-}
-
-/// When to toggle overview, for exercising the transform without a keyboard.
-pub(crate) fn overview_at() -> Option<std::time::Duration> {
-    millis_from_env("SOLIUM_OVERVIEW_AT")
-}
-
-fn millis_from_env(name: &str) -> Option<std::time::Duration> {
-    let raw = std::env::var(name).ok()?;
-    match raw.trim().parse::<u64>() {
-        Ok(millis) => Some(std::time::Duration::from_millis(millis)),
-        Err(err) => {
-            tracing::warn!(?err, variable = name, value = raw, "not a number, ignoring");
-            None
-        }
-    }
-}
 
 /// Read a rendered frame back off the GPU and write it out.
 ///
