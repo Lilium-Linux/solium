@@ -1,8 +1,27 @@
 //! Solium — the Wayland compositor of Lilium DE.
 //!
-//! Nothing runs yet. This exists so the workspace, lints and CI have something
-//! to build; see `docs/roadmap.md` for what lands next.
+//! See `docs/architecture.md`. Layout and presentation are deliberately not in
+//! the protocol handlers; every mode is a transform over window textures.
 
-fn main() {
-    println!("solium {}", env!("CARGO_PKG_VERSION"));
+mod capture;
+mod input;
+mod state;
+mod winit;
+
+use std::io::IsTerminal;
+
+use anyhow::Result;
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        // Escape codes in a redirected log break anything grepping it.
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting solium");
+    winit::run()
 }
