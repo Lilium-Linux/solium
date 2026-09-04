@@ -30,7 +30,7 @@ something** — that is the test.
 ├──────────────────────────────────────────────┤
 │  Presentation transform + animation clock    │  Rust
 ├──────────────────────────────────────────────┤
-│  Render: Vulkan                              │  Rust
+│  Render: Smithay renderer traits (GLES2)     │  Rust
 ├──────────────────────────────────────────────┤
 │  Smithay: protocols, input, backends         │  crate
 └──────────────────────────────────────────────┘
@@ -50,6 +50,12 @@ Rules:
   clickable where it was, not where it is drawn.
 - **One animation clock**, ticked from the render loop. Not per window, not per
   subsystem, not per script.
+
+**Backend independence.** The transform layer talks to Smithay's `Renderer` and
+`Frame` traits, never to GLES directly. Scaling and cross-fading textures is
+unremarkable work that GLES2 does well; the reasons to want Vulkan later are
+compute shaders, explicit sync and multi-GPU, none of which overview mode needs.
+Reaching past the traits into GLES specifics closes that option quietly.
 
 ### Scripting
 
