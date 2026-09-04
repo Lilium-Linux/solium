@@ -1,0 +1,269 @@
+//! Winit backend: a window on a host compositor, for development.
+//!
+//! Never the path to a real session — that is DRM, later. This exists so the
+//! compositor can be run and tested nested, without touching the developer's
+//! live session.
+
+use anyhow::{Context, Result};
+use smithay::{
+    backend::{
+        renderer::{
+            damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
+            gles::GlesRenderer,
+        },
+        winit::{self, WinitEvent},
+    },
+    desktop::space::render_output,
+    output::{Mode, Output, PhysicalProperties, Subpixel},
+    reexports::{
+        calloop::EventLoop,
+        wayland_server::Display,
+        winit::{
+            dpi::LogicalSize,
+            platform::{pump_events::PumpStatus, wayland::WindowAttributesExtWayland},
+            window::WindowAttributes,
+        },
+    },
+    utils::{Rectangle, Transform},
+};
+
+use crate::{
+    capture,
+    state::{ClientState, Solium},
+};
+
+/// Frames a window must have been mapped for before a capture is honoured.
+///
+/// Counted from the first mapped window rather than from startup: a capture
+/// taken before any client has drawn shows an empty compositor, which is the
+/// misleading result this whole mechanism exists to avoid.
+const CAPTURE_SETTLE_FRAMES: u32 = 30;
+
+pub(crate) fn run() -> Result<()> {
+    let mut event_loop: EventLoop<Solium> =
+        EventLoop::try_new().context("creating the event loop")?;
+    let display: Display<Solium> = Display::new().context("creating the wayland display")?;
+    let display_handle = display.handle();
+
+    let mut state = Solium::new(display_handle.clone());
+
+    // The socket clients connect to. Named, not guessed: a client that resolves
+    // WAYLAND_DISPLAY to empty gets the *default* socket, which on a developer
+    // machine is their real session.
+    let source = smithay::wayland::socket::ListeningSocketSource::new_auto()
+        .context("binding a wayland socket")?;
+    let socket_name = source.socket_name().to_string_lossy().into_owned();
+
+    event_loop
+        .handle()
+        .insert_source(source, |client_stream, _, state| {
+            if let Err(err) = state
+                .display_handle
+                .insert_client(client_stream, std::sync::Arc::new(ClientState::default()))
+            {
+                tracing::warn!(?err, "rejecting a client we could not insert");
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("inserting the socket source: {e}"))?;
+
+    event_loop
+        .handle()
+        .insert_source(
+            smithay::reexports::calloop::generic::Generic::new(
+                display,
+                smithay::reexports::calloop::Interest::READ,
+                smithay::reexports::calloop::Mode::Level,
+            ),
+            |_, display, state| {
+                // SAFETY: Smithay requires this to be unsafe because the display
+                // must not be dispatched re-entrantly. It is dispatched only
+                // here, from a single-threaded event loop, so that holds.
+                #[allow(unsafe_code)]
+                let dispatched = unsafe { display.get_mut().dispatch_clients(state) };
+                dispatched?;
+                Ok(smithay::reexports::calloop::PostAction::Continue)
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("inserting the display source: {e}"))?;
+
+    // The app_id is stable and specific so the host compositor can be told
+    // where to put this window and to leave the focus alone -- developing a
+    // compositor should not steal focus from whatever is already running.
+    let (mut backend, mut winit) = winit::init_from_attributes::<GlesRenderer>(
+        WindowAttributes::default()
+            .with_title("Solium (nested)")
+            .with_name("solium-nested", "solium-nested")
+            .with_inner_size(LogicalSize::new(1600.0, 900.0)),
+    )
+    .map_err(|e| anyhow::anyhow!("initialising the winit backend: {e}"))?;
+
+    let size = backend.window_size();
+    let mode = Mode {
+        size,
+        refresh: 60_000,
+    };
+    let output = Output::new(
+        "winit".to_string(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "Solium".into(),
+            model: "Winit".into(),
+        },
+    );
+    let _global = output.create_global::<Solium>(&display_handle);
+    output.change_current_state(
+        Some(mode),
+        Some(Transform::Flipped180),
+        None,
+        Some((0, 0).into()),
+    );
+    output.set_preferred(mode);
+    state.space.map_output(&output, (0, 0));
+
+    let mut damage_tracker = OutputDamageTracker::from_output(&output);
+
+    // Frames are captured a few ticks in, not on the first one: a client that
+    // has just been configured has not drawn yet, and a capture of an empty
+    // compositor is exactly the misleading result this exists to avoid.
+    let mut capture = capture::requested();
+    let mut settled = 0_u32;
+
+    // Which host monitor the nested window landed on cannot be asked for at
+    // startup: a Wayland client learns its output only when the host sends
+    // wl_surface.enter, which is after the first frames. So it is reported once,
+    // as soon as it is knowable.
+    let mut monitor_reported = false;
+
+    // Deliberately not exported into our own environment: clients need it in
+    // *theirs*, and silently inheriting it is how a nested client ends up on the
+    // developer's real session.
+    tracing::info!(socket = %socket_name, "solium is up -- run clients with WAYLAND_DISPLAY set to this");
+
+    loop {
+        let status = winit.dispatch_new_events(|event| match event {
+            WinitEvent::Resized { size, .. } => {
+                output.change_current_state(
+                    Some(Mode {
+                        size,
+                        refresh: 60_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                );
+            }
+            WinitEvent::Input(event) => crate::input::handle(&mut state, &output, event),
+            WinitEvent::Focus(focused) => {
+                tracing::info!(focused, "nested window focus changed");
+            }
+            _ => {}
+        });
+
+        if let PumpStatus::Exit(_) = status {
+            tracing::info!("window closed, shutting down");
+            break;
+        }
+
+        if !monitor_reported && let Some(monitor) = backend.window().current_monitor() {
+            let position = monitor.position();
+            tracing::info!(
+                monitor = monitor.name().unwrap_or_else(|| "unknown".to_owned()),
+                x = position.x,
+                y = position.y,
+                "nested window is on this host monitor"
+            );
+            monitor_reported = true;
+        }
+
+        let size = backend.window_size();
+        let damage = Rectangle::from_size(size);
+
+        // The renderer borrow must end before submit(), so rendering happens in
+        // its own scope and only two flags escape.
+        let (rendered, captured) = match backend.bind() {
+            Err(err) => {
+                tracing::warn!(?err, "could not bind the backend buffer, skipping frame");
+                (false, false)
+            }
+            Ok((renderer, mut framebuffer)) => {
+                let result = render_output::<_, WaylandSurfaceRenderElement<_>, _, _>(
+                    &output,
+                    renderer,
+                    &mut framebuffer,
+                    1.0,
+                    0,
+                    [&state.space],
+                    &[],
+                    &mut damage_tracker,
+                    [0.05, 0.05, 0.06, 1.0],
+                );
+                if let Err(err) = &result {
+                    tracing::warn!(?err, "render failed");
+                }
+
+                let mut captured = false;
+                if result.is_ok()
+                    && settled > CAPTURE_SETTLE_FRAMES
+                    && let Some(path) = capture.take()
+                {
+                    captured = true;
+                    match capture::take_frame(renderer, &framebuffer, size.w, size.h, &path) {
+                        Ok(()) => tracing::info!(
+                            path = %path.display(),
+                            width = size.w,
+                            height = size.h,
+                            "captured a frame"
+                        ),
+                        Err(err) => tracing::warn!(?err, "capturing a frame failed"),
+                    }
+                }
+
+                (result.is_ok(), captured)
+            }
+        };
+
+        // Reading the framebuffer back invalidates the bind, so a captured
+        // frame is not presented. One frame of a 60 Hz window is not visible,
+        // and attempting the submit anyway costs an EGL surface reallocation
+        // that fails.
+        if rendered
+            && !captured
+            && let Err(err) = backend.submit(Some(&[damage]))
+        {
+            tracing::warn!(?err, "submit failed");
+        }
+
+        state.space.elements().for_each(|window| {
+            window.send_frame(
+                &output,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default(),
+                Some(std::time::Duration::ZERO),
+                |_, _| Some(output.clone()),
+            );
+        });
+
+        settled = if state.space.elements().next().is_some() {
+            settled.saturating_add(1)
+        } else {
+            0
+        };
+
+        state.space.refresh();
+        state.popups.cleanup();
+        if let Err(err) = state.display_handle.flush_clients() {
+            tracing::warn!(?err, "flushing clients failed");
+        }
+
+        if event_loop
+            .dispatch(Some(std::time::Duration::from_millis(16)), &mut state)
+            .is_err()
+        {
+            break;
+        }
+    }
+
+    Ok(())
+}

@@ -10,3 +10,21 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# Wayland plumbing, input and backends. Rendering goes through Smithay's
+# renderer traits (GLES2 for now) -- see docs/spikes/2026-08-27-vulkan-on-smithay.md
+# for why, and why the transform layer must not reach past those traits.
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_winit",
+    "backend_egl",
+    "renderer_gl",
+    "wayland_frontend",
+    "desktop",
+    "use_system_lib",
+] }
+
+# Errors are propagated, never unwrapped: panic is denied at the workspace
+# level because a compositor crash takes the session with it.
+anyhow = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
