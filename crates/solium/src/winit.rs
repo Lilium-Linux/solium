@@ -7,13 +7,9 @@
 use anyhow::{Context, Result};
 use smithay::{
     backend::{
-        renderer::{
-            damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
-            gles::GlesRenderer,
-        },
+        renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
         winit::{self, WinitEvent},
     },
-    desktop::space::render_output,
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
         calloop::EventLoop,
@@ -28,7 +24,7 @@ use smithay::{
 };
 
 use crate::{
-    capture,
+    capture, mode, present, render,
     state::{ClientState, Solium},
 };
 
@@ -129,6 +125,12 @@ pub(crate) fn run() -> Result<()> {
     let mut capture = capture::requested();
     let mut settled = 0_u32;
 
+    // Dev knobs, both documented in dev/README.md. They exist so the transform
+    // path can be exercised and photographed without a human at the keyboard,
+    // which is the only way this becomes a regression test later.
+    let capture_at = capture::capture_at();
+    let mut overview_at = capture::overview_at();
+
     // Which host monitor the nested window landed on cannot be asked for at
     // startup: a Wayland client learns its output only when the host sends
     // wl_surface.enter, which is after the first frames. So it is reported once,
@@ -176,6 +178,18 @@ pub(crate) fn run() -> Result<()> {
             monitor_reported = true;
         }
 
+        // One clock, sampled once, before anything reads it. Two samples in a
+        // frame would let two windows animate from different instants.
+        state.clock.tick();
+        let now = state.clock.now();
+
+        if let Some(at) = overview_at
+            && now >= at
+        {
+            overview_at = None;
+            mode::toggle_overview(&mut state);
+        }
+
         let size = backend.window_size();
         let damage = Rectangle::from_size(size);
 
@@ -187,15 +201,15 @@ pub(crate) fn run() -> Result<()> {
                 (false, false)
             }
             Ok((renderer, mut framebuffer)) => {
-                let result = render_output::<_, WaylandSurfaceRenderElement<_>, _, _>(
-                    &output,
+                // Every window reaches the screen through the presentation
+                // transform, so a mode cannot animate differently from the
+                // layout -- they are the same code path.
+                let elements = render::elements(&state, renderer, 1.0);
+                let result = damage_tracker.render_output(
                     renderer,
                     &mut framebuffer,
-                    1.0,
                     0,
-                    [&state.space],
-                    &[],
-                    &mut damage_tracker,
+                    &elements,
                     [0.05, 0.05, 0.06, 1.0],
                 );
                 if let Err(err) = &result {
@@ -203,8 +217,12 @@ pub(crate) fn run() -> Result<()> {
                 }
 
                 let mut captured = false;
+                let due = match capture_at {
+                    Some(at) => now >= at,
+                    None => settled > CAPTURE_SETTLE_FRAMES,
+                };
                 if result.is_ok()
-                    && settled > CAPTURE_SETTLE_FRAMES
+                    && due
                     && let Some(path) = capture.take()
                 {
                     captured = true;
@@ -250,6 +268,13 @@ pub(crate) fn run() -> Result<()> {
         } else {
             0
         };
+
+        // Retire transforms that have landed, so a settled window costs nothing
+        // to draw. Every window is visited deliberately: a short-circuiting
+        // check would leave later windows transformed forever.
+        for window in state.space.elements() {
+            present::settle(window, now);
+        }
 
         state.space.refresh();
         state.popups.cleanup();
