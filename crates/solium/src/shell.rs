@@ -8,9 +8,9 @@
 //!
 //! QML is rasterised by Qt's software scene graph and uploaded as a memory
 //! buffer — see `qml/host.cpp` for why that rather than rendering straight into
-//! one of our GL textures. It costs an upload per changed frame, which for a
+//! one of our GL textures. It costs an upload per *changed* frame, which for a
 //! strip of chrome is a few hundred kilobytes, and it keeps this module on
-//! Smithay's renderer traits instead of reaching into GLES.
+//! Smithay's renderer traits rather than reaching into GLES.
 
 use std::{path::PathBuf, time::Duration};
 
@@ -19,11 +19,11 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
+            ImportMem, Renderer,
             element::{
                 Kind,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
             },
-            gles::GlesRenderer,
         },
     },
     utils::{Rectangle, Transform},
@@ -72,13 +72,17 @@ impl Bar {
     /// `now` is the compositor's clock, and it drives the QML animations —
     /// there is one clock here, and a bar animating off Qt's own timer would
     /// drift against every window transform beside it.
-    pub(crate) fn frame(
+    pub(crate) fn frame<R>(
         &mut self,
-        renderer: &mut GlesRenderer,
+        renderer: &mut R,
         width: i32,
         now: Duration,
         state: &BarState,
-    ) -> Option<Element<GlesRenderer>> {
+    ) -> Option<Element<R>>
+    where
+        R: Renderer + ImportMem,
+        R::TextureId: Send + Clone + 'static,
+    {
         let width = width.max(1);
         self.scene.resize(width, BAR_HEIGHT);
 
@@ -158,7 +162,7 @@ impl Bar {
         )
         .inspect_err(|err| tracing::warn!(?err, "could not upload the bar"))
         .ok()
-        .map(Element::Bar)
+        .map(Element::Chrome)
     }
 
     /// Pointer input, in output coordinates. Returns whether the bar took it.

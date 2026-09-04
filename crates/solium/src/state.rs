@@ -4,18 +4,21 @@
 //! owns both. Layout and presentation deliberately do not live here — see
 //! `docs/architecture.md`.
 
+use smithay::reexports::wayland_server::{Resource, backend::ObjectId};
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{
         Seat, SeatHandler, SeatState,
         pointer::{CursorImageStatus, Focus, GrabStartData},
     },
     reexports::{
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_protocols::xdg::{
+            decoration::zv1::server::zxdg_toplevel_decoration_v1, shell::server::xdg_toplevel,
+        },
         wayland_server::{
             Client, DisplayHandle,
             protocol::{wl_seat::WlSeat, wl_surface::WlSurface},
@@ -35,12 +38,15 @@ use smithay::{
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
             XdgToplevelSurfaceData,
+            decoration::{XdgDecorationHandler, XdgDecorationState},
         },
         shm::{ShmHandler, ShmState},
     },
 };
+use zxdg_toplevel_decoration_v1::Mode;
 
 use crate::{
+    decoration::{Action, Decorations, TITLEBAR_HEIGHT},
     input::{grab::MoveGrab, profile::Profile},
     present::{self, Clock},
     shell::{BAR_HEIGHT, Bar, BarState},
@@ -66,6 +72,11 @@ pub(crate) struct Solium {
     pub(crate) output_manager_state: OutputManagerState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device_state: DataDeviceState,
+    #[expect(
+        dead_code,
+        reason = "registers the xdg-decoration global; dropping it would remove it"
+    )]
+    pub(crate) xdg_decoration_state: XdgDecorationState,
 
     pub(crate) space: Space<Window>,
     pub(crate) popups: PopupManager,
@@ -80,10 +91,13 @@ pub(crate) struct Solium {
     /// Whether overview mode is on. Becomes script-owned state in #17.
     pub(crate) overview: bool,
 
-    /// The QML top bar, once the renderer exists for Qt to borrow a context
-    /// from. `None` if it failed to load — a compositor with no bar is worse
-    /// but usable, one that will not start because a QML file has a typo is not.
+    /// The QML top bar. `None` if it failed to load — a compositor with no bar
+    /// is worse but usable, one that will not start because a QML file has a
+    /// typo in it is not.
     pub(crate) bar: Option<Bar>,
+
+    /// Every decorated window's frame, drawn by us from QML.
+    pub(crate) decorations: Decorations,
 }
 
 impl Solium {
@@ -105,6 +119,7 @@ impl Solium {
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
+            xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
             seat_state,
             space: Space::default(),
             popups: PopupManager::default(),
@@ -113,6 +128,7 @@ impl Solium {
             profile: Profile::from_env(),
             overview: false,
             bar: None,
+            decorations: Decorations::default(),
             display_handle,
         }
     }
@@ -134,6 +150,34 @@ impl Solium {
         self.space.output_geometry(output)
     }
 
+    /// A window as drawn, frame included.
+    ///
+    /// The client rect grown upward by the titlebar, when the window has one.
+    /// **Every presentation transform is expressed against this**, which is
+    /// what makes a frame move, scale and animate with its window instead of
+    /// beside it — in overview a thumbnail carries its own titlebar.
+    pub(crate) fn outer_geometry(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+        let real = self.real_geometry(window)?;
+        if !self.is_decorated(window) {
+            return Some(real);
+        }
+        Some(Rectangle::new(
+            (real.loc.x, real.loc.y - TITLEBAR_HEIGHT).into(),
+            (real.size.w, real.size.h + TITLEBAR_HEIGHT).into(),
+        ))
+    }
+
+    /// Whether the compositor draws this window's frame.
+    pub(crate) fn is_decorated(&self, window: &Window) -> bool {
+        self.toplevel_id(window)
+            .is_some_and(|id| self.decorations.contains(&id))
+    }
+
+    /// A window's toplevel surface id, the key frames are stored under.
+    pub(crate) fn toplevel_id(&self, window: &Window) -> Option<ObjectId> {
+        window.toplevel().map(|toplevel| toplevel.wl_surface().id())
+    }
+
     /// The output area windows may use: everything the bar has not reserved.
     ///
     /// The bar is not a panel that windows slide under — it owns its strip of
@@ -147,16 +191,13 @@ impl Solium {
         ))
     }
 
-    /// What the bar should show this frame.
-    pub(crate) fn bar_state(&self) -> BarState {
-        let title = self
-            .seat
-            .get_keyboard()
-            .and_then(|keyboard| keyboard.current_focus())
-            .and_then(|surface| self.window_for(&surface))
-            .and_then(|window| window.toplevel().map(ToplevelSurface::wl_surface).cloned())
+    /// A window's title, as the client set it.
+    pub(crate) fn window_title(&self, window: &Window) -> String {
+        window
+            .toplevel()
+            .map(ToplevelSurface::wl_surface)
             .and_then(|surface| {
-                with_states(&surface, |states| {
+                with_states(surface, |states| {
                     states
                         .data_map
                         .get::<XdgToplevelSurfaceData>()
@@ -166,6 +207,24 @@ impl Solium {
                         .and_then(|attributes| attributes.title.clone())
                 })
             })
+            .unwrap_or_default()
+    }
+
+    /// The window with keyboard focus, if any.
+    pub(crate) fn focused_window(&self) -> Option<Window> {
+        let surface = self.seat.get_keyboard()?.current_focus()?;
+        self.window_for(&surface)
+    }
+
+    pub(crate) fn is_focused(&self, window: &Window) -> bool {
+        self.focused_window().as_ref() == Some(window)
+    }
+
+    /// What the bar should show this frame.
+    pub(crate) fn bar_state(&self) -> BarState {
+        let title = self
+            .focused_window()
+            .map(|window| self.window_title(&window))
             .unwrap_or_default();
 
         BarState {
@@ -185,11 +244,11 @@ impl Solium {
     ) -> Option<(Window, Rectangle<i32, Logical>)> {
         let now = self.clock.now();
         self.space.elements().rev().find_map(|window| {
-            let real = self.real_geometry(window)?;
-            present::frame(window, real, now)
-                .rect
-                .contains(location)
-                .then(|| (window.clone(), real))
+            let outer = self.outer_geometry(window)?;
+            if !present::frame(window, outer, now).rect.contains(location) {
+                return None;
+            }
+            Some((window.clone(), self.real_geometry(window)?))
         })
     }
 
@@ -206,15 +265,22 @@ impl Solium {
         let now = self.clock.now();
 
         for window in self.space.elements().rev() {
-            let Some(real) = self.real_geometry(window) else {
+            let Some(outer) = self.outer_geometry(window) else {
                 continue;
             };
-            let frame = present::frame(window, real, now);
+            let frame = present::frame(window, outer, now);
             if !frame.rect.contains(location) {
                 continue;
             }
 
-            let in_window = present::to_window_space(frame, real, location) - real.loc.to_f64();
+            // Mapped through the *outer* rect, then offset into the client's
+            // own space. A point in the titlebar lands above the client and
+            // finds no surface, which is what should happen: the frame is the
+            // compositor's, not the client's.
+            let inset: Point<f64, Logical> = (0.0, f64::from(self.frame_inset(window))).into();
+            let in_outer = present::to_window_space(frame, outer, location);
+            let in_window = in_outer - outer.loc.to_f64() - inset;
+
             if let Some((surface, surface_offset)) =
                 window.surface_under(in_window, WindowSurfaceType::ALL)
             {
@@ -224,6 +290,113 @@ impl Solium {
         }
 
         None
+    }
+
+    /// The frame at a point, with the point in the frame's own coordinates.
+    ///
+    /// Frame-local rather than compositor coordinates because the frame is
+    /// rasterised at its unscaled size: a titlebar drawn at two-thirds size in
+    /// overview must still be hit-tested against the QML that was drawn at full
+    /// size, or its buttons move out from under the cursor.
+    pub(crate) fn frame_under(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(Window, Point<f64, Logical>)> {
+        let now = self.clock.now();
+
+        self.space.elements().rev().find_map(|window| {
+            if !self.is_decorated(window) {
+                return None;
+            }
+            let outer = self.outer_geometry(window)?;
+            let drawn = present::frame(window, outer, now);
+            if !drawn.rect.contains(location) {
+                return None;
+            }
+
+            let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
+            if in_outer.y >= f64::from(TITLEBAR_HEIGHT) {
+                // Below the frame: the client's, not ours.
+                return None;
+            }
+            Some((window.clone(), in_outer))
+        })
+    }
+
+    /// Act on a frame button.
+    pub(crate) fn frame_action(&mut self, window: &Window, action: Action) {
+        match action {
+            Action::Close => {
+                if let Some(toplevel) = window.toplevel() {
+                    // A request, not a kill: the client decides whether it can
+                    // close, and the window goes away when it does.
+                    toplevel.send_close();
+                }
+            }
+            Action::ToggleMaximize => self.toggle_maximize(window),
+        }
+    }
+
+    /// Fill the work area, or go back to where the window was.
+    ///
+    /// The frame's height comes out of the client's share, which is the same
+    /// arithmetic as placement: a maximised window and its frame together fill
+    /// the work area exactly.
+    fn toggle_maximize(&mut self, window: &Window) {
+        let Some(id) = self.toplevel_id(window) else {
+            return;
+        };
+        let Some(toplevel) = window.toplevel().cloned() else {
+            return;
+        };
+        let Some(work_area) = self.work_area() else {
+            return;
+        };
+        let Some(current) = self.real_geometry(window) else {
+            return;
+        };
+
+        let inset = self.frame_inset(window);
+        let restore = self
+            .decorations
+            .get_mut(&id)
+            .map(|decoration| decoration.restore.take());
+
+        let (location, size, maximized) = match restore {
+            // Restoring: back to exactly where it was, because that rect was
+            // stored rather than recomputed.
+            Some(Some(previous)) => (previous.loc, previous.size, false),
+            _ => (
+                (work_area.loc.x, work_area.loc.y + inset).into(),
+                (work_area.size.w, (work_area.size.h - inset).max(1)).into(),
+                true,
+            ),
+        };
+
+        if maximized && let Some(decoration) = self.decorations.get_mut(&id) {
+            decoration.restore = Some(current);
+        }
+
+        toplevel.with_pending_state(|state| {
+            state.size = Some(size);
+            if maximized {
+                state.states.set(xdg_toplevel::State::Maximized);
+            } else {
+                state.states.unset(xdg_toplevel::State::Maximized);
+            }
+        });
+        toplevel.send_pending_configure();
+        self.space.map_element(window.clone(), location, true);
+        tracing::debug!(maximized, "window maximise toggled");
+    }
+
+    /// How far the client sits below its window's top edge.
+    pub(crate) fn frame_inset(&self, window: &Window) -> i32 {
+        if self.is_decorated(window) {
+            TITLEBAR_HEIGHT
+        } else {
+            0
+        }
     }
 
     /// Raise a window and give it the keyboard.
@@ -264,8 +437,8 @@ impl Solium {
         let location = self.initial_placement(window);
         self.space.map_element(window.clone(), location, true);
 
-        if let Some(real) = self.real_geometry(window) {
-            present::open(window, real, self.clock.now());
+        if let Some(outer) = self.outer_geometry(window) {
+            present::open(window, outer, self.clock.now());
         }
     }
 
@@ -290,15 +463,22 @@ impl Solium {
         )]
         let step = CASCADE * (self.space.elements().count() % WRAP) as i32;
 
+        // The frame is above the client, so the client's own top edge starts
+        // that far down: the pair has to fit in the work area, not just the
+        // client.
+        let inset = self.frame_inset(window);
+        let outer_height = size.h + inset;
+
         let centred = |available: i32, window: i32| (available - window) / 2;
         let x = output.loc.x + centred(output.size.w, size.w).max(0) + step;
-        let y = output.loc.y + centred(output.size.h, size.h).max(0) + step;
+        let y = output.loc.y + centred(output.size.h, outer_height).max(0) + step + inset;
 
         // Kept on the output even if the cascade would walk a large window off
         // the bottom right.
         (
             x.min(output.loc.x + (output.size.w - size.w).max(0)),
-            y.min(output.loc.y + (output.size.h - size.h).max(0)),
+            y.max(output.loc.y + inset)
+                .min(output.loc.y + (output.size.h - outer_height).max(0) + inset),
         )
             .into()
     }
@@ -387,6 +567,13 @@ impl XdgShellHandler for Solium {
         }
     }
 
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        // The frame is dropped with the window it belongs to. Keyed by surface
+        // id rather than kept on the window so that this is the only place it
+        // has to happen.
+        self.decorations.remove(&surface.wl_surface().id());
+    }
+
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
         // Tracking failure here is not fatal: the popup simply will not be
         // positioned, which is better than ending the session.
@@ -466,6 +653,58 @@ impl Solium {
     }
 }
 
+impl XdgDecorationHandler for Solium {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        // Server-side is offered without being asked: the frame is part of the
+        // desktop's look, and a client drawing its own would be a second
+        // titlebar with different rules.
+        self.decorate(&toplevel, Mode::ServerSide);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: Mode) {
+        // A client that insists on drawing its own frame gets to: overriding it
+        // means two frames or none, depending on who gives way.
+        self.decorate(&toplevel, mode);
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        self.decorate(&toplevel, Mode::ServerSide);
+    }
+}
+
+impl Solium {
+    /// Agree a decoration mode with a client and act on it.
+    fn decorate(&mut self, toplevel: &ToplevelSurface, mode: Mode) {
+        let server_side = mode != Mode::ClientSide;
+        let id = toplevel.wl_surface().id();
+
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(if server_side {
+                Mode::ServerSide
+            } else {
+                Mode::ClientSide
+            });
+        });
+
+        if server_side {
+            let width = self
+                .window_for(toplevel.wl_surface())
+                .and_then(|window| self.real_geometry(&window))
+                .map_or(TITLEBAR_HEIGHT * 20, |real| real.size.w);
+            self.decorations.insert(id, width);
+        } else {
+            self.decorations.remove(&id);
+        }
+
+        // The client has to learn its mode before it draws, or it decides for
+        // itself and draws a frame we then draw over.
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+        tracing::debug!(server_side, "decoration mode agreed");
+    }
+}
+
 impl SeatHandler for Solium {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -496,6 +735,7 @@ impl ServerDndGrabHandler for Solium {}
 delegate_compositor!(Solium);
 delegate_shm!(Solium);
 delegate_xdg_shell!(Solium);
+delegate_xdg_decoration!(Solium);
 delegate_seat!(Solium);
 delegate_output!(Solium);
 delegate_data_device!(Solium);

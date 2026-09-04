@@ -4,6 +4,7 @@
 //! the protocol handlers; every mode is a transform over window textures.
 
 mod capture;
+mod decoration;
 mod input;
 mod mode;
 mod present;

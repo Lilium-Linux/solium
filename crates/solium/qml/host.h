@@ -59,8 +59,22 @@ int solium_qml_scene_render(SoliumQmlScene *scene);
  */
 const unsigned char *solium_qml_scene_pixels(const SoliumQmlScene *scene, int *stride);
 
+/*
+ * Read a string property and clear it, returning NULL when it was empty.
+ *
+ * How QML reports back: a button sets `action`, the compositor takes it. One
+ * direction, one owner — a property the compositor also wrote would be two
+ * authorities over one piece of state.
+ *
+ * The returned pointer is owned by the scene and valid until the next call.
+ */
+const char *solium_qml_scene_take_string(SoliumQmlScene *scene, const char *name);
+
 void solium_qml_scene_set_string(SoliumQmlScene *scene, const char *name, const char *value);
 void solium_qml_scene_set_bool(SoliumQmlScene *scene, const char *name, int value);
+
+/* Read a bool property. Non-clearing: this is state QML owns and we observe. */
+int solium_qml_scene_get_bool(const SoliumQmlScene *scene, const char *name);
 void solium_qml_scene_set_real(SoliumQmlScene *scene, const char *name, double value);
 
 /* Pointer input, in scene coordinates. `pressed`: 1 down, 0 up, -1 motion. */

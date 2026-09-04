@@ -26,7 +26,7 @@ use smithay::{
     utils::{Logical, Point, SERIAL_COUNTER},
 };
 
-use crate::{mode, state::Solium};
+use crate::{decoration::Decoration, mode, state::Solium};
 
 use grab::MoveGrab;
 
@@ -112,6 +112,16 @@ fn pointer_motion(
         return;
     }
 
+    // Frames see the pointer before clients do, so buttons light up on hover.
+    // Motion is *also* forwarded to the client, because the pointer leaving a
+    // window has to reach it or it keeps a stale hover state.
+    if let Some((window, local)) = state.frame_under(location)
+        && let Some(id) = state.toplevel_id(&window)
+        && let Some(decoration) = state.decorations.get_mut(&id)
+    {
+        decoration.pointer(local.x, local.y, None);
+    }
+
     let under = state.surface_under(location);
 
     pointer.motion(
@@ -142,6 +152,47 @@ fn pointer_button(state: &mut Solium, event: impl PointerButtonEvent<WinitInput>
             Some(button_state == ButtonState::Pressed),
         )
     {
+        return;
+    }
+
+    // A press on a frame belongs to the frame: it either hits a button or
+    // starts a drag, and either way no client should see it.
+    if !pointer.is_grabbed()
+        && let Some((window, local)) = state.frame_under(location)
+        && let Some(id) = state.toplevel_id(&window)
+    {
+        let pressed = button_state == ButtonState::Pressed;
+        let on_button = state.decorations.get_mut(&id).is_some_and(|decoration| {
+            decoration.pointer(local.x, local.y, Some(pressed));
+            decoration.on_button()
+        });
+
+        // Acted on release, so a press that lands on the wrong button can be
+        // dragged off it and abandoned.
+        if let Some(action) = state
+            .decorations
+            .get_mut(&id)
+            .and_then(Decoration::take_action)
+        {
+            state.frame_action(&window, action);
+        }
+
+        if pressed {
+            state.focus_window(&window, serial);
+            if !on_button && let Some(geometry) = state.real_geometry(&window) {
+                let start_data = GrabStartData {
+                    focus: None,
+                    button,
+                    location,
+                };
+                pointer.set_grab(
+                    state,
+                    MoveGrab::new(start_data, window, geometry.loc),
+                    serial,
+                    Focus::Clear,
+                );
+            }
+        }
         return;
     }
 

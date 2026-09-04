@@ -20,7 +20,7 @@ use smithay::{
             utils::RescaleRenderElement,
         },
     },
-    desktop::PopupManager,
+    desktop::{PopupManager, Window},
     utils::Scale,
 };
 
@@ -34,7 +34,7 @@ render_elements! {
     /// QML top bar, tomorrow window decorations from the same scene graph.
     pub(crate) Element<R> where R: ImportAll + ImportMem;
     Window = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
-    Bar = MemoryRenderBufferRenderElement<R>,
+    Chrome = MemoryRenderBufferRenderElement<R>,
 }
 
 /// Everything to draw this frame, topmost first.
@@ -42,28 +42,61 @@ render_elements! {
 /// Topmost first is what the damage tracker expects; getting it backwards
 /// composites the stack upside down, which looks like a stacking bug rather
 /// than an ordering one.
-pub(crate) fn elements<R>(state: &Solium, renderer: &mut R, scale: f64) -> Vec<Element<R>>
+pub(crate) fn elements<R>(state: &mut Solium, renderer: &mut R, scale: f64) -> Vec<Element<R>>
 where
-    R: Renderer + ImportAll,
-    R::TextureId: Clone + 'static,
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
 {
     let now = state.clock.now();
     let output_scale = Scale::from(scale);
     let mut elements = Vec::new();
 
-    for window in state.space.elements().rev() {
-        let Some(real) = state.real_geometry(window) else {
+    // Collected first because the loop needs `&mut state` to render frames.
+    // `Window` is a handle, so this is a few pointer copies.
+    let windows: Vec<Window> = state.space.elements().rev().cloned().collect();
+
+    for window in windows {
+        let (Some(real), Some(outer)) =
+            (state.real_geometry(&window), state.outer_geometry(&window))
+        else {
             continue;
         };
-        let frame = present::frame(window, real, now);
 
-        // The transform is expressed as a scale about the drawn origin, so the
-        // surface tree is built as if it were at its real size and then scaled.
-        // That keeps subsurface offsets correct for free.
-        let origin = frame.rect.loc.to_physical_precise_round(scale);
+        // The transform is expressed against the *outer* rect — the window
+        // including its frame — so the frame scales and moves with the window
+        // rather than beside it.
+        let frame = present::frame(&window, outer, now);
+        let inset = f64::from(state.frame_inset(&window)) * ratio(frame.rect.size.h, outer.size.h);
+
+        if inset >= 1.0 {
+            let title = state.window_title(&window);
+            let focused = state.is_focused(&window);
+            let bar = present::logical(
+                (frame.rect.loc.x, frame.rect.loc.y),
+                (frame.rect.size.w, inset),
+            );
+            if let Some(id) = state.toplevel_id(&window)
+                && let Some(decoration) = state.decorations.get_mut(&id)
+                && let Some(element) =
+                    decoration.frame(renderer, bar, real.size.w, &title, focused, now)
+            {
+                elements.push(Element::Chrome(element));
+            }
+        }
+
+        // What is left of the drawn rect once the frame has taken its share is
+        // the client's, which is what "the frame reserves its height" means.
+        let client = present::logical(
+            (frame.rect.loc.x, frame.rect.loc.y + inset),
+            (frame.rect.size.w, (frame.rect.size.h - inset).max(1.0)),
+        );
+
+        // The surface tree is built as if at its real size and then scaled,
+        // which keeps subsurface offsets correct for free.
+        let origin = client.loc.to_physical_precise_round(scale);
         let factor = Scale::from((
-            ratio(frame.rect.size.w, real.size.w),
-            ratio(frame.rect.size.h, real.size.h),
+            ratio(client.size.w, real.size.w),
+            ratio(client.size.h, real.size.h),
         ));
 
         // Popups first: they are above the window they belong to.

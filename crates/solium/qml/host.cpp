@@ -36,6 +36,7 @@
 #include "host.h"
 
 #include <QtCore/QAbstractAnimation>
+#include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QUrl>
 #include <QtCore/QVariant>
@@ -93,6 +94,8 @@ struct SoliumQmlScene
     int height = 0;
     /* Whether the scene has changed since it was last rendered. */
     bool dirty = true;
+    /* Backing store for the last value handed out by take_string. */
+    QByteArray taken;
 };
 
 extern "C" int solium_qml_start(void)
@@ -277,6 +280,20 @@ extern "C" const unsigned char *solium_qml_scene_pixels(const SoliumQmlScene *sc
     return scene->image.constBits();
 }
 
+extern "C" const char *solium_qml_scene_take_string(SoliumQmlScene *scene, const char *name)
+{
+    if (scene == nullptr || scene->root == nullptr) {
+        return nullptr;
+    }
+    const QString value = scene->root->property(name).toString();
+    if (value.isEmpty()) {
+        return nullptr;
+    }
+    scene->root->setProperty(name, QVariant(QString()));
+    scene->taken = value.toUtf8();
+    return scene->taken.constData();
+}
+
 extern "C" void solium_qml_scene_set_string(SoliumQmlScene *scene, const char *name,
                                             const char *value)
 {
@@ -292,6 +309,14 @@ extern "C" void solium_qml_scene_set_bool(SoliumQmlScene *scene, const char *nam
         return;
     }
     scene->root->setProperty(name, QVariant(value != 0));
+}
+
+extern "C" int solium_qml_scene_get_bool(const SoliumQmlScene *scene, const char *name)
+{
+    if (scene == nullptr || scene->root == nullptr) {
+        return 0;
+    }
+    return scene->root->property(name).toBool() ? 1 : 0;
 }
 
 extern "C" void solium_qml_scene_set_real(SoliumQmlScene *scene, const char *name, double value)
