@@ -59,9 +59,25 @@ Reaching past the traits into GLES specifics closes that option quietly.
 
 ### Scripting
 
-Lua. Modes are scripts, so their settings belong to the scripts; the compositor
-supplies only primitives — default easings, gesture bindings, and which script
-is bound to which trigger.
+Lua, and **modes really are scripts** — `lua/overview.lua` is overview, and the
+compositor contains no code that knows what overview is. The proof is that the
+Rust that used to implement it was deleted, not wrapped.
+
+The boundary is one module, `script.rs`, and it is shaped so a mode never
+learns a window is a Wayland surface:
+
+- **Reads are a snapshot.** Windows, work area and cursor are built fresh per
+  dispatch and handed to Lua by value.
+- **Writes are commands.** `sol.present` queues; the compositor drains the queue
+  after the handler returns. A script cannot mutate the compositor directly, so
+  its idea of a window's geometry cannot drift from the compositor's — and no
+  borrow of compositor state is alive while Lua runs, which is what stops a
+  script re-entering the seat mid-dispatch and deadlocking.
+- **Ids, not indices.** A window's id is stable for its lifetime and never
+  reused, so a script holding one across frames cannot address a different
+  window with it.
+- **The compositor does not know what modes exist.** A script names itself with
+  `sol.status`, and the bar shows whatever it says.
 
 **No compositor config key per mode.** That is how a mode set becomes closed.
 

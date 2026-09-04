@@ -48,9 +48,37 @@ use zxdg_toplevel_decoration_v1::Mode;
 use crate::{
     decoration::{Action, Decorations, TITLEBAR_HEIGHT},
     input::{grab::MoveGrab, profile::Profile},
-    present::{self, Clock},
+    present::{self, Clock, Frame},
+    script::{Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
     shell::{BAR_HEIGHT, Bar, BarState},
 };
+
+/// A window's script-facing identity.
+///
+/// Stable for the window's lifetime and never reused, so a script that holds an
+/// id across frames can only ever address the window it meant — an index into
+/// the window list would silently come to mean a different window.
+#[derive(Debug)]
+struct WindowId(u64);
+
+pub(crate) fn window_id(window: &Window) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    window
+        .user_data()
+        .insert_if_missing(|| WindowId(NEXT.fetch_add(1, Ordering::Relaxed)));
+    window.user_data().get::<WindowId>().map_or(0, |id| id.0)
+}
+
+fn to_rect(rectangle: Rectangle<i32, Logical>) -> Rect {
+    Rect {
+        x: f64::from(rectangle.loc.x),
+        y: f64::from(rectangle.loc.y),
+        w: f64::from(rectangle.size.w),
+        h: f64::from(rectangle.size.h),
+    }
+}
 
 /// Per-client state Smithay asks us to store.
 #[derive(Default, Debug)]
@@ -88,8 +116,16 @@ pub(crate) struct Solium {
     /// Per-form-factor input behaviour.
     pub(crate) profile: Profile,
 
-    /// Whether overview mode is on. Becomes script-owned state in #17.
-    pub(crate) overview: bool,
+    /// The Lua runtime. Modes live in here, not in the compositor.
+    pub(crate) scripts: Option<Scripts>,
+
+    /// The active mode's name, as a script reported it. The compositor does
+    /// not know what modes exist — it only knows what to put in the bar.
+    pub(crate) status: String,
+
+    /// Whether a mode owns input. While it does, keys and clicks belong to the
+    /// script rather than to clients.
+    pub(crate) script_grab: bool,
 
     /// The QML top bar. `None` if it failed to load — a compositor with no bar
     /// is worse but usable, one that will not start because a QML file has a
@@ -126,7 +162,9 @@ impl Solium {
             seat,
             clock: Clock::new(),
             profile: Profile::from_env(),
-            overview: false,
+            scripts: None,
+            status: String::new(),
+            script_grab: false,
             bar: None,
             decorations: Decorations::default(),
             display_handle,
@@ -230,8 +268,158 @@ impl Solium {
         BarState {
             title,
             windows: self.space.elements().count(),
-            overview: self.overview,
+            status: self.status.clone(),
         }
+    }
+
+    /// What the compositor looks like right now, as a script sees it.
+    ///
+    /// Built fresh per dispatch and handed over by value: a script holding a
+    /// stale view of the windows is the mirror-of-state bug that cost this
+    /// project a week in its previous life.
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        let now = self.clock.now();
+        let focused = self.focused_window();
+        let cursor = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location())
+            .unwrap_or_default();
+
+        // Topmost first, which is the order a hit test wants.
+        let windows = self
+            .space
+            .elements()
+            .rev()
+            .filter_map(|window| {
+                let outer = self.outer_geometry(window)?;
+                let drawn = present::frame(window, outer, now);
+                Some(WindowInfo {
+                    id: window_id(window),
+                    rect: to_rect(outer),
+                    drawn: Rect {
+                        x: drawn.rect.loc.x,
+                        y: drawn.rect.loc.y,
+                        w: drawn.rect.size.w,
+                        h: drawn.rect.size.h,
+                    },
+                    title: self.window_title(window),
+                    focused: focused.as_ref() == Some(window),
+                })
+            })
+            .collect();
+
+        Snapshot {
+            windows,
+            work_area: self.work_area().map(to_rect).unwrap_or_default(),
+            cursor: (cursor.x, cursor.y),
+        }
+    }
+
+    /// Run whatever a key combination is bound to, and apply what it asked for.
+    pub(crate) fn trigger(&mut self, combo: &str) -> bool {
+        let snapshot = self.snapshot();
+        // Taken out for the call so no part of the compositor is borrowed while
+        // Lua runs, and a script cannot re-enter the seat mid-dispatch.
+        let Some(mut scripts) = self.scripts.take() else {
+            return false;
+        };
+        let outcome = scripts.key(combo, snapshot);
+        self.scripts = Some(scripts);
+
+        let handled = outcome.handled;
+        self.apply(outcome);
+        handled
+    }
+
+    /// Give a pointer press to the mode that owns input.
+    pub(crate) fn trigger_click(&mut self, x: f64, y: f64) -> bool {
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return false;
+        };
+        let outcome = scripts.click(x, y, snapshot);
+        self.scripts = Some(scripts);
+
+        let handled = outcome.handled;
+        self.apply(outcome);
+        handled
+    }
+
+    /// Apply what a script asked for.
+    fn apply(&mut self, outcome: Outcome) {
+        if let Some(grab) = outcome.grab
+            && grab != self.script_grab
+        {
+            self.script_grab = grab;
+            tracing::debug!(grab, "script input grab changed");
+        }
+        if let Some(status) = outcome.status
+            && status != self.status
+        {
+            tracing::debug!(status, "mode changed");
+            self.status = status;
+        }
+
+        let now = self.clock.now();
+        for command in outcome.commands {
+            match command {
+                Command::Present {
+                    id,
+                    rect,
+                    opacity,
+                    animation,
+                } => {
+                    let Some(window) = self.window_by_id(id) else {
+                        continue;
+                    };
+                    let Some(outer) = self.outer_geometry(&window) else {
+                        continue;
+                    };
+                    let target = Frame {
+                        rect: rect.map_or_else(
+                            || outer.to_f64(),
+                            |rect| present::logical((rect.x, rect.y), (rect.w, rect.h)),
+                        ),
+                        opacity: opacity.unwrap_or(1.0),
+                    };
+                    present::present(
+                        &window,
+                        outer,
+                        target,
+                        now,
+                        animation.duration,
+                        animation.easing,
+                    );
+                }
+                Command::Clear { id, animation } => {
+                    let Some(window) = self.window_by_id(id) else {
+                        continue;
+                    };
+                    let Some(outer) = self.outer_geometry(&window) else {
+                        continue;
+                    };
+                    present::clear(&window, outer, now, animation.duration, animation.easing);
+                }
+                Command::Focus { id } => {
+                    if let Some(window) = self.window_by_id(id) {
+                        tracing::debug!(id, title = self.window_title(&window), "script focused");
+                        self.focus_window(&window, SERIAL_COUNTER.next_serial());
+                    }
+                }
+            }
+        }
+    }
+
+    /// The window a script means by an id.
+    ///
+    /// Ids that no longer exist are simply not found — a window closing while a
+    /// mode holds its id is ordinary, not an error.
+    fn window_by_id(&self, id: u64) -> Option<Window> {
+        self.space
+            .elements()
+            .find(|window| window_id(window) == id)
+            .cloned()
     }
 
     /// The window drawn at a point, topmost first, with its real geometry.

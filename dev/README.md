@@ -8,7 +8,11 @@ a demo into a regression test.
 |---|---|
 | `SOLIUM_CAPTURE=<path>` | Write one rendered frame to `<path>` as a binary PPM. |
 | `SOLIUM_CAPTURE_AT=<ms>` | Capture at this moment instead of "once a window has settled". Naming a moment is what makes capturing an *animation* possible. |
-| `SOLIUM_OVERVIEW_AT=<ms>` | Toggle overview at this moment, for exercising the transform with no keyboard. |
+| `SOLIUM_TRIGGER_AT=` | Fire key bindings, as `<ms>:<combo>` separated by commas — e.g. `5200:super+space,6200:super+space`. Goes through the same path a keypress does. |
+| `SOLIUM_CLICK_AT=` | Fire pointer presses, as `<ms>:<x>,<y>` separated by semicolons. |
+| `SOLIUM_LUA_INIT=<path>` | Load this configuration instead of `~/.config/solium/init.lua` or the bundled one. |
+| `SOLIUM_QML_TOPBAR=`, `SOLIUM_QML_TITLEBAR=` | Load chrome from elsewhere, so it can be restyled without a rebuild. |
+| `SOLIUM_DEV_IMAGE=` | The container `dev/run-nested.sh` runs in. |
 | `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
 | `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |
 
@@ -29,21 +33,39 @@ exists to avoid. A captured frame is not presented — reading the framebuffer
 back invalidates the bind, and the following `submit` would fail to reallocate
 its EGL surface.
 
-## Photographing the transform
+## Driving a mode without a keyboard
 
-Three passes produce `docs/overview-transform.png`:
+Because a mode that can only be checked by someone pressing a key is a mode
+nobody checks twice. Enter overview, click the top-right thumbnail, and
+photograph the result:
 
 ```sh
-SOLIUM_CAPTURE=/tmp/normal.ppm SOLIUM_CAPTURE_AT=4500 dev/run-nested.sh
-SOLIUM_CAPTURE=/tmp/mid.ppm  SOLIUM_CAPTURE_AT=4590 SOLIUM_OVERVIEW_AT=4500 dev/run-nested.sh
-SOLIUM_CAPTURE=/tmp/over.ppm SOLIUM_CAPTURE_AT=4900 SOLIUM_OVERVIEW_AT=4500 dev/run-nested.sh
+SOLIUM_TRIGGER_AT=5200:super+space SOLIUM_CLICK_AT=6000:1200,250   SOLIUM_CAPTURE=/tmp/frame.ppm SOLIUM_CAPTURE_AT=7000 dev/run-nested.sh
 ```
+
+Enter and leave, then compare the frame with one taken at rest — the pixels
+below the bar must be identical, because leaving a mode restores the layout
+exactly:
+
+```sh
+SOLIUM_TRIGGER_AT="5200:super+space,6200:super+space"   SOLIUM_CAPTURE=/tmp/after.ppm SOLIUM_CAPTURE_AT=7400 dev/run-nested.sh
+```
+
+## Where it runs
+
+`dev/run-nested.sh` runs Solium **in the build container**, not on the host. It
+is built there, and the container's C library is newer than the host's — once a
+vendored C dependency (Lua) was compiled in, the resulting binary would not
+start on the host at all. Building and running in one place removes the skew
+rather than papering over it. `/tmp` is shared so captures land where you can
+read them.
 
 ## Bindings
 
 | Input | Effect |
 |---|---|
-| `Super` + `Space` | Overview on/off |
+| `Super` + `Space` | Overview on/off (bound in `lua/overview.lua`, not in Rust) |
+| `Escape` | Leave overview |
 | `Super` + drag | Move a window from anywhere in it |
 | Titlebar drag | Move a window (the client asks, via `xdg_toplevel.move`) |
 | Click | Focus and raise; in overview, focus that window and leave |

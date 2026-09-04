@@ -30,6 +30,9 @@ thumbnail focuses that window.
 
 This epic is the architecture's proof. If overview needs Rust, E2 is incomplete.
 
+**Done.** `lua/overview.lua` is overview; `src/mode.rs` was deleted rather than
+wrapped. Leaving restores the layout to the pixel — measured, not asserted.
+
 ## E4 — Layout engine: floating, tiling, scrolling
 
 Three layouts behind one interface, switchable at runtime. Scrolling follows

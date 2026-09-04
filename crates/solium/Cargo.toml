@@ -28,6 +28,7 @@ anyhow = "1"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+mlua = { version = "0.12.1", features = ["lua54", "vendored"] }
 
 [build-dependencies]
 # Qt Quick is hosted in-process, so a small C++ shim is compiled in. See
