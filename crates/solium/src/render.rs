@@ -11,9 +11,11 @@
 
 use smithay::{
     backend::renderer::{
-        ImportAll, Renderer,
+        ImportAll, ImportMem, Renderer,
         element::{
             AsRenderElements, Kind,
+            memory::MemoryRenderBufferRenderElement,
+            render_elements,
             surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
             utils::RescaleRenderElement,
         },
@@ -24,8 +26,16 @@ use smithay::{
 
 use crate::{present, state::Solium};
 
-/// A window's surface, drawn wherever its presentation says.
-pub(crate) type Element<R> = RescaleRenderElement<WaylandSurfaceRenderElement<R>>;
+render_elements! {
+    /// Everything Solium can draw.
+    ///
+    /// `Window` is a client's surface, placed wherever its presentation says.
+    /// `Bar` is a texture the compositor rendered itself — today that is the
+    /// QML top bar, tomorrow window decorations from the same scene graph.
+    pub(crate) Element<R> where R: ImportAll + ImportMem;
+    Window = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
+    Bar = MemoryRenderBufferRenderElement<R>,
+}
 
 /// Everything to draw this frame, topmost first.
 ///
@@ -73,21 +83,17 @@ where
                         frame.opacity,
                         Kind::Unspecified,
                     );
-                elements.extend(
-                    popup_elements
-                        .into_iter()
-                        .map(|element| RescaleRenderElement::from_element(element, origin, factor)),
-                );
+                elements.extend(popup_elements.into_iter().map(|element| {
+                    Element::Window(RescaleRenderElement::from_element(element, origin, factor))
+                }));
             }
         }
 
         let window_elements: Vec<WaylandSurfaceRenderElement<R>> =
             window.render_elements(renderer, origin, output_scale, frame.opacity);
-        elements.extend(
-            window_elements
-                .into_iter()
-                .map(|element| RescaleRenderElement::from_element(element, origin, factor)),
-        );
+        elements.extend(window_elements.into_iter().map(|element| {
+            Element::Window(RescaleRenderElement::from_element(element, origin, factor))
+        }));
     }
 
     elements

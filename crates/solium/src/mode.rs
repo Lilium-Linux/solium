@@ -40,7 +40,7 @@ pub(crate) fn toggle_overview(state: &mut Solium) {
 
 /// Scale every window down onto a grid.
 pub(crate) fn enter_overview(state: &mut Solium) {
-    let Some(output) = state.output_geometry() else {
+    let Some(output) = state.work_area() else {
         tracing::warn!("no output, refusing to enter overview");
         return;
     };
