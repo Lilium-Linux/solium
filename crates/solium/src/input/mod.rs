@@ -402,6 +402,12 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         },
     );
     pointer.frame(state);
+
+    // Outside the grab now: the pointer's lock is released, so a script may
+    // ask where the pointer is without stopping the compositor.
+    if let Some((window, x, y)) = state.pending_drop.take() {
+        state.trigger_drop(&window, x, y);
+    }
 }
 
 fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEvent<B>) {
