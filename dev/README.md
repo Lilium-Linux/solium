@@ -89,6 +89,33 @@ podman commit lilium-add localhost/lilium-base:v1
 podman rm lilium-add
 ```
 
+## Building
+
+```sh
+podman build -t solium-build:fc44 -f dev/Containerfile dev/
+podman run --rm --userns=keep-id --security-opt label=disable \
+    -v "$HOME:$HOME" -e CARGO_HOME="$HOME/.cargo" -e PATH="$HOME/.cargo/bin:/usr/bin:/bin" \
+    -w "$PWD" localhost/solium-build:fc44 cargo build
+```
+
+**The build image matches the host's distribution on purpose.** Two things go
+wrong otherwise, and both were hit:
+
+* A vendored C dependency (Lua) is compiled by whatever toolchain builds the
+  project. A container with a newer C library produces a binary the host cannot
+  start at all — `GLIBC_2.44 not found`.
+* Working around *that* by running the compositor inside the container costs
+  hardware acceleration. The container has Mesa but no GPU driver, so
+  everything falls back to llvmpipe:
+
+  | | Renderer | Frame rate |
+  |---|---|---|
+  | In the container | `llvmpipe` | 55 fps |
+  | On the host | `NVIDIA RTX 3070` | 260 fps |
+
+  On a 260 Hz display, 55 fps puts a dragged window four frames behind the
+  cursor, which is exactly what it looks like.
+
 ## Where it runs
 
 `dev/run-nested.sh` runs Solium **in the build container**, not on the host. It

@@ -36,8 +36,10 @@ Item {
         anchors { left: parent.left; leftMargin: 18; verticalCenter: parent.verticalCenter }
         spacing: 14
 
-        // The one piece of chrome that moves on its own, so it is obvious at a
-        // glance whether QML animations are actually being driven.
+        // Animates when the mode changes and is still the rest of the time. A
+        // permanently animating bar damages the output every frame, which keeps
+        // the compositor redrawing a screen nobody changed — a pulsing dot is
+        // not worth a core.
         Rectangle {
             width: 9
             height: 9
@@ -45,12 +47,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             color: bar.status === "" ? "#9ece6a" : "#7aa2f7"
 
-            SequentialAnimation on opacity {
-                loops: Animation.Infinite
-                running: true
-                NumberAnimation { to: 0.25; duration: 900; easing.type: Easing.InOutQuad }
-                NumberAnimation { to: 1.0;  duration: 900; easing.type: Easing.InOutQuad }
-            }
+            Behavior on color { ColorAnimation { duration: 200 } }
         }
 
         Text {
