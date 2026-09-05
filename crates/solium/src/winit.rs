@@ -51,6 +51,7 @@ pub(crate) fn run() -> Result<()> {
     let source = smithay::wayland::socket::ListeningSocketSource::new_auto()
         .context("binding a wayland socket")?;
     let socket_name = source.socket_name().to_string_lossy().into_owned();
+    state.socket_name = socket_name.clone();
 
     event_loop
         .handle()

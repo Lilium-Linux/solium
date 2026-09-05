@@ -51,6 +51,33 @@ exactly:
 SOLIUM_TRIGGER_AT="5200:super+space,6200:super+space"   SOLIUM_CAPTURE=/tmp/after.ppm SOLIUM_CAPTURE_AT=7400 dev/run-nested.sh
 ```
 
+## Running programs inside Solium
+
+`Super`+`Return` starts one, and `sol.spawn` binds any other:
+
+```lua
+sol.bind("super+b", function() sol.spawn("firefox") end)
+sol.bind("super+e", function() sol.spawn("foot", "-e", "htop") end)
+```
+
+Programs start as clients of *this* compositor — `sol.spawn` overrides
+`WAYLAND_DISPLAY` in the child, or it would inherit the host's and open its
+window next to the nested compositor rather than inside it.
+
+Because Solium runs in the build container, spawned programs run there too and
+must be installed there. To add some:
+
+```sh
+podman run --rm -it localhost/lilium-base:v1 pacman -S weston
+```
+
+Anything already running elsewhere can be pointed at the socket instead — the
+launcher prints it:
+
+```sh
+WAYLAND_DISPLAY=wayland-1 foot
+```
+
 ## Where it runs
 
 `dev/run-nested.sh` runs Solium **in the build container**, not on the host. It
@@ -64,6 +91,8 @@ read them.
 
 | Input | Effect |
 |---|---|
+| `Super` + `Return` | Open a terminal (`SOLIUM_TERMINAL` picks which) |
+| `Super` + `Q` | Close the focused window |
 | `Super` + `Space` | Overview on/off (bound in `lua/overview.lua`, not in Rust) |
 | `Escape` | Leave overview |
 | `Super` + drag | Move a window from anywhere in it |
