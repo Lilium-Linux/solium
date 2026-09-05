@@ -209,9 +209,23 @@ libseat, and a compositor that needs root is one nobody should get used to
 running.
 
 **Getting back.** `Ctrl`+`Alt`+`F1` or `F2` returns to your desktop session;
-Solium keeps running on its own VT until you switch back and stop it. If it ever
-leaves a TTY in a bad state, switching to another VT and running `pkill -x
-solium` from there clears it — which is worth knowing *before* you need it.
+Solium keeps running on its own VT until you switch back and stop it.
+`Ctrl`+`Alt`+`Backspace` stops it outright.
+
+Both of those are Solium's own doing, and that is not a detail. Once libseat
+puts the VT into graphics mode the *kernel* stops acting on `Ctrl`+`Alt`+F-keys,
+so a compositor that does not handle them itself cannot be escaped from the
+keyboard at all — which is how the first run of this backend ended in a reboot.
+
+Two more things stand between you and that: if libinput reports no input devices
+within five seconds, Solium stops on its own rather than hold a display nobody
+can talk to; and from another VT, `pkill -x solium` always works.
+
+**Reading what happened.** A hardware session writes to
+`~/.local/state/solium/session.log` as well as to the terminal, because the
+terminal is underneath the compositor and cannot be read while it runs. It is
+appended to, so the log of a run that went wrong survives the run that was meant
+to fix it — and, being under `state`, it survives a reboot.
 
 **What is not there yet.** One output: it drives the first connected connector
 and ignores the rest. Several places take the first output rather than the right
@@ -238,6 +252,11 @@ read them.
 | `Super` + `[` / `]` | Scroll the viewport to the previous/next column |
 | Drag a window edge | Resize |
 | `Super` + `Space` | Overview on/off (bound in `lua/overview.lua`, not in Rust) |
+| `Ctrl`+`Alt`+`F1`…`F12` | Switch virtual terminal (hardware session only) |
+| `Ctrl`+`Alt`+`Backspace` | Stop the compositor |
+
+The last two are taken before scripts see them, and cannot be rebound. They are
+the keys that have to work when everything else is broken.
 | `Escape` | Leave overview |
 | `Super` + drag | Move a window from anywhere in it |
 | Titlebar drag | Move a window (the client asks, via `xdg_toplevel.move`) |

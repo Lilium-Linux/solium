@@ -9,6 +9,8 @@
 //! Reaching into GLES specifics here is what would quietly close the option of
 //! a Vulkan backend later — see `docs/spikes/2026-08-27-vulkan-on-smithay.md`.
 
+use std::sync::Mutex;
+
 use smithay::{
     backend::renderer::{
         ImportAll, ImportMem, Renderer,
@@ -21,7 +23,9 @@ use smithay::{
         },
     },
     desktop::{PopupManager, Window, layer_map_for_output},
+    input::pointer::{CursorImageAttributes, CursorImageStatus},
     utils::Scale,
+    wayland::compositor::with_states,
 };
 
 use crate::{layer, present, state::Solium};
@@ -50,6 +54,11 @@ where
     let now = state.clock.now();
     let output_scale = Scale::from(scale);
     let mut elements = Vec::new();
+
+    // The pointer, above everything — including anything a shell anchors on
+    // top. Nothing else draws it, so leaving it out is not a missing detail:
+    // it is a session where the mouse appears not to work.
+    elements.extend(cursor(state, renderer, output_scale, scale, now));
 
     // Anchored surfaces above the windows: panels, notifications, an overlay.
     // Collected first because the frame is built topmost-first.
@@ -173,6 +182,74 @@ where
     }
 
     elements
+}
+
+/// The pointer, however it is currently set.
+///
+/// A client that has set its own cursor gets that surface drawn; everything
+/// else gets ours. `Hidden` draws nothing, which is a request clients make
+/// deliberately — a video player going fullscreen, a game grabbing the pointer
+/// — and not a failure.
+fn cursor<R>(
+    state: &mut Solium,
+    renderer: &mut R,
+    output_scale: Scale<f64>,
+    scale: f64,
+    now: std::time::Duration,
+) -> Vec<Element<R>>
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    let Some(pointer) = state.seat.get_pointer() else {
+        return Vec::new();
+    };
+    let location = pointer.current_location();
+
+    match state.pointer.status.clone() {
+        CursorImageStatus::Hidden => Vec::new(),
+        CursorImageStatus::Surface(surface) => {
+            // The hotspot is where *in the image* the pointer actually points,
+            // and the client is the only one that knows: drawing at the plain
+            // location puts an I-beam's tip a few pixels off the text it is
+            // meant to be between.
+            let hotspot = with_states(&surface, |states| {
+                states
+                    .data_map
+                    .get::<Mutex<CursorImageAttributes>>()
+                    .and_then(|attributes| attributes.lock().ok())
+                    .map(|attributes| attributes.hotspot)
+                    .unwrap_or_default()
+            });
+            let origin = (location.to_i32_round() - hotspot).to_physical_precise_round(scale);
+            let surface_elements: Vec<WaylandSurfaceRenderElement<R>> =
+                render_elements_from_surface_tree(
+                    renderer,
+                    &surface,
+                    origin,
+                    output_scale,
+                    1.0,
+                    Kind::Cursor,
+                );
+            surface_elements
+                .into_iter()
+                .map(|element| {
+                    Element::Window(RescaleRenderElement::from_element(
+                        element,
+                        origin,
+                        Scale::from(1.0),
+                    ))
+                })
+                .collect()
+        }
+        CursorImageStatus::Named(_) => state
+            .pointer
+            .art()
+            .and_then(|cursor| cursor.element(renderer, location, now))
+            .map(Element::Chrome)
+            .into_iter()
+            .collect(),
+    }
 }
 
 /// Drawn size over real size, guarding the degenerate case.
