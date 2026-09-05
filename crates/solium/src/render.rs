@@ -153,8 +153,16 @@ where
             }
         }
 
+        // A surface's top-left is not the window's. A client that draws its own
+        // decorations puts its drop shadow *outside* the window geometry and
+        // tells us so through `set_window_geometry`; drawing the surface at the
+        // window's position therefore lands the shadow where the window should
+        // be and pushes the window itself down and right by the shadow's width.
+        // That is what made Firefox look both misplaced and shadowed. Popups
+        // already did this; toplevels did not.
+        let surface_origin = origin - window.geometry().loc.to_physical_precise_round(scale);
         let window_elements: Vec<WaylandSurfaceRenderElement<R>> =
-            window.render_elements(renderer, origin, output_scale, frame.opacity);
+            window.render_elements(renderer, surface_origin, output_scale, frame.opacity);
         elements.extend(window_elements.into_iter().map(|element| {
             Element::Window(RescaleRenderElement::from_element(element, origin, factor))
         }));

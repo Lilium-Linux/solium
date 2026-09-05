@@ -191,6 +191,7 @@ pub(crate) fn run() -> Result<()> {
         compositor: None,
         output: None,
         input: None,
+        animating: false,
         input_devices: 0,
         drm: None,
         signal: event_loop.get_signal(),
@@ -296,16 +297,15 @@ pub(crate) fn run() -> Result<()> {
 
     event_loop
         .run(Some(Duration::from_millis(16)), &mut state, |state| {
-            // Animations keep running between input events, so a frame is
-            // scheduled whenever anything is still moving.
-            let now = state.solium.clock.now();
-            let animating = state.solium.space.elements().any(|window| {
-                state
-                    .solium
-                    .outer_geometry(window)
-                    .is_some_and(|outer| !present::frame(window, outer, now).rect.is_empty())
-            });
-            if animating {
+            // Drawn when something has changed, and not otherwise. The test
+            // used to be "is any window's drawn rect non-empty", which is true
+            // of every mapped window forever: a completely still screen was
+            // being redrawn every tick, on a 260 Hz panel, for nothing.
+            //
+            // Client damage arrives as an event, so the loop is already awake
+            // when it matters; the timeout only governs how long it sleeps when
+            // nothing at all is happening.
+            if state.solium.redraw || state.animating {
                 state.render();
             }
             state.solium.space.refresh();
@@ -328,6 +328,8 @@ struct State {
     /// comes back holding fds the kernel has already taken away — which is a
     /// session with a display and no way to talk to it.
     input: Option<Libinput>,
+    /// Whether any window was still moving at the last frame.
+    animating: bool,
     /// How many input devices libinput has handed us.
     ///
     /// Zero is not a slow start, it is a session nobody can talk to — see the
@@ -483,6 +485,10 @@ impl State {
 
         self.solium.clock.tick();
         let now = self.solium.clock.now();
+        // Cleared before drawing, not after: a client that commits while we
+        // are rendering has damaged the *next* frame, not this one.
+        self.solium.redraw = false;
+        let mut animating = false;
 
         let elements = render::elements(&mut self.solium, renderer, 1.0);
         match compositor.render_frame(
@@ -509,8 +515,9 @@ impl State {
                 Some(Duration::ZERO),
                 |_, _| Some(output.clone()),
             );
-            present::settle(window, now);
+            animating |= present::settle(window, now);
         }
+        self.animating = animating;
     }
 }
 
