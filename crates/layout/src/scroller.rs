@@ -63,7 +63,10 @@ impl Default for Scroller {
             columns: Vec::new(),
             active: 0,
             view_offset: 0.0,
-            preset: 1,
+            // A third of the view, not a half. Half-width columns mean two on
+            // screen and everything else off the edge, which for a terminal is
+            // far wider than anyone reads at.
+            preset: 0,
         }
     }
 }
@@ -151,6 +154,26 @@ impl Scroller {
         }
     }
 
+    /// Focus a particular window, bringing its column into view.
+    ///
+    /// This is what makes clicking a half-visible column work: the click says
+    /// which window, and the view follows. Without it a column can hold focus
+    /// while hanging off the edge of the screen, which is the state that makes
+    /// a scroller feel like it is fighting you.
+    pub fn focus_window(&mut self, id: u64, area: Rect, settings: Settings) {
+        let Some(column) = self
+            .columns
+            .iter()
+            .position(|column| column.windows.contains(&id))
+        else {
+            return;
+        };
+        if let Some(row) = self.columns[column].windows.iter().position(|w| *w == id) {
+            self.columns[column].active = row;
+        }
+        self.focus_column(column, area, settings);
+    }
+
     /// Move focus one column left or right, taking the view with it.
     pub fn focus_sideways(&mut self, by: isize, area: Rect, settings: Settings) {
         if self.columns.is_empty() {
@@ -236,6 +259,25 @@ impl Scroller {
         let at = self.active + 1;
         self.columns.insert(at, Column::new(taken, width));
         self.focus_column(at, area, settings);
+    }
+
+    /// Widen or narrow the column a window sits in.
+    ///
+    /// Every window in a column shares its width, so a drag on one window's
+    /// edge can only mean the column. Clamped so a column can neither vanish
+    /// nor grow past the view — past that it would be left-aligned anyway and
+    /// dragging further would appear to do nothing.
+    pub fn widen(&mut self, id: u64, by: f64, area: Rect, settings: Settings) {
+        let Some(index) = self
+            .columns
+            .iter()
+            .position(|column| column.windows.contains(&id))
+        else {
+            return;
+        };
+        let column = &mut self.columns[index];
+        column.width = (column.width + by).clamp(0.1, 1.0);
+        self.focus_column(index, area, settings);
     }
 
     /// Cycle the active column through the preset widths.
@@ -536,5 +578,75 @@ mod tests {
             .next()
             .expect("one window");
         assert!(placed.1.x.abs() < 1.0, "left-aligned: {:?}", placed.1);
+    }
+}
+
+#[cfg(test)]
+mod focus_and_width {
+    use super::Scroller;
+    use crate::{Rect, Settings};
+
+    fn area() -> Rect {
+        Rect::new(0.0, 0.0, 1000.0, 600.0)
+    }
+    fn settings() -> Settings {
+        Settings {
+            gap: 0.0,
+            ..Settings::default()
+        }
+    }
+    fn rect_of(scroller: &Scroller, id: u64) -> Rect {
+        scroller
+            .layout(area(), settings())
+            .into_iter()
+            .find(|(other, _)| *other == id)
+            .expect("in the strip")
+            .1
+    }
+
+    /// Clicking a column that is only half on screen must bring it fully into
+    /// view. A column holding focus while hanging off the edge is the state
+    /// that makes a scroller feel like it is fighting you.
+    #[test]
+    fn focusing_a_half_visible_column_brings_it_fully_on_screen() {
+        let mut scroller = Scroller::new();
+        for id in 1..=4 {
+            scroller.insert(id, area(), settings());
+        }
+        scroller.focus_sideways(-3, area(), settings());
+        let off = rect_of(&scroller, 4);
+        assert!(
+            off.x + off.w > 1000.0,
+            "window 4 starts off the edge: {off:?}"
+        );
+
+        scroller.focus_window(4, area(), settings());
+        let now = rect_of(&scroller, 4);
+        assert!(
+            now.x >= -1.0 && now.x + now.w <= 1001.0,
+            "still not fully visible: {now:?}"
+        );
+    }
+
+    #[test]
+    fn widening_changes_the_column_and_every_window_in_it() {
+        let mut scroller = Scroller::new();
+        scroller.insert(1, area(), settings());
+        scroller.insert_into_active(2, area(), settings());
+        let before = rect_of(&scroller, 1).w;
+        scroller.widen(1, 0.2, area(), settings());
+        let (one, two) = (rect_of(&scroller, 1), rect_of(&scroller, 2));
+        assert!(one.w > before, "the column grew");
+        assert!((one.w - two.w).abs() < f64::EPSILON, "both windows with it");
+    }
+
+    #[test]
+    fn a_column_can_neither_vanish_nor_outgrow_the_view() {
+        let mut scroller = Scroller::new();
+        scroller.insert(1, area(), settings());
+        scroller.widen(1, -10.0, area(), settings());
+        assert!(rect_of(&scroller, 1).w >= 99.0, "floor holds");
+        scroller.widen(1, 10.0, area(), settings());
+        assert!(rect_of(&scroller, 1).w <= 1001.0, "ceiling holds");
     }
 }

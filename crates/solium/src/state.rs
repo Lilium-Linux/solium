@@ -164,6 +164,21 @@ pub(crate) struct Solium {
     pub(crate) dmabuf_state: DmabufState,
     pub(crate) dmabuf_global: Option<DmabufGlobal>,
 
+    /// Set while a focus change is being reported to scripts.
+    ///
+    /// A script handling `focus` will often ask for focus itself — a scroller
+    /// focuses the window whose column it just brought into view — and without
+    /// this that answer would be reported straight back to it, forever.
+    focusing: bool,
+
+    /// A resize asked for by an edge drag, not yet applied.
+    ///
+    /// Offered to layouts first: in a tiled or scrolling arrangement a window
+    /// does not have a size of its own to change — dragging its edge moves the
+    /// seam it shares with its neighbour, or the width of its column. Only a
+    /// floating window is resized directly.
+    pub(crate) pending_resize: Option<(Window, Rectangle<i32, Logical>)>,
+
     /// A drag that has finished and not yet been reported to scripts.
     ///
     /// Recorded inside the pointer grab and acted on after it, for exactly the
@@ -237,7 +252,9 @@ impl Solium {
             socket_name: String::new(),
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
+            focusing: false,
             pending_drop: None,
+            pending_resize: None,
             redraw: true,
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
@@ -886,6 +903,15 @@ impl Solium {
                 .map(|toplevel| toplevel.wl_surface().clone());
             keyboard.set_focus(self, surface, serial);
         }
+
+        // A layout may want to follow: a scroller brings the focused column
+        // fully into view, which is the difference between clicking a window
+        // half off the edge and being able to use it.
+        if !self.focusing {
+            self.focusing = true;
+            self.trigger_focus(window);
+            self.focusing = false;
+        }
     }
 
     /// Place and animate a window the first time it has something to show.
@@ -922,6 +948,36 @@ impl Solium {
     }
 
     /// Offer a newly shown window to whatever script wants to animate it in.
+    /// Tell scripts focus moved.
+    fn trigger_focus(&mut self, window: &Window) {
+        let id = window_id(window);
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.focused(id, snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
+    /// Offer a resize to scripts. Returns whether a layout took it.
+    ///
+    /// The delta is what the dragged edge moved by, which is what a layout can
+    /// act on; the absolute rectangle would only be useful to something that
+    /// already agreed the window has its own size.
+    pub(crate) fn trigger_resize(&mut self, window: &Window, dx: f64, dy: f64) -> bool {
+        let id = window_id(window);
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return false;
+        };
+        let outcome = scripts.resized(id, dx, dy, snapshot);
+        self.scripts = Some(scripts);
+        let handled = outcome.handled && !outcome.commands.is_empty();
+        self.apply(outcome);
+        handled
+    }
+
     /// Tell scripts a window has gone, so a layout can forget it.
     pub(crate) fn trigger_close(&mut self, window: &Window) {
         let id = window_id(window);

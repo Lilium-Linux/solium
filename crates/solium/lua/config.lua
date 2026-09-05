@@ -18,8 +18,10 @@ return {
     },
 
     scrolling = {
-        -- Column width as a fraction of the work area.
-        column = 0.44,
+        -- The widths a column cycles through with super+r, as shares of the
+        -- view. A new column starts at `default_width`, an index into these.
+        widths = { 1 / 3, 1 / 2, 2 / 3 },
+        default_width = 1,
         motion = { duration = 260, easing = "outCubic" },
         -- The shorter feel for bringing a column into view.
         snap = { duration = 200, easing = "outCubic" },
