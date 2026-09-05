@@ -170,6 +170,7 @@ read them.
 |---|---|
 | `Super` + `Return` | Open a terminal (`SOLIUM_TERMINAL` picks which) |
 | `Super` + `Q` | Close the focused window |
+| `Super` + `T` | Tiling on/off (`lua/tiling.lua`) |
 | `Super` + `Space` | Overview on/off (bound in `lua/overview.lua`, not in Rust) |
 | `Escape` | Leave overview |
 | `Super` + drag | Move a window from anywhere in it |

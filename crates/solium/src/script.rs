@@ -119,6 +119,13 @@ pub(crate) enum Command {
     Focus {
         id: u64,
     },
+    /// Move and resize a window for real — the layout's authority, not a
+    /// transform. The compositor animates it there from where it was.
+    Place {
+        id: u64,
+        rect: Rect,
+        animation: AnimationSpec,
+    },
     /// Ask a window to close. A request, not a kill: the client decides.
     Close {
         id: u64,
@@ -258,37 +265,18 @@ impl Scripts {
         })
     }
 
-    /// Tell scripts a window has appeared, so one of them can decide how.
+    /// Tell scripts a window has appeared.
     ///
-    /// Returns whether any script took it. Nothing happening is a valid answer:
-    /// the compositor then uses its own plain animation rather than leaving a
-    /// window to pop into existence.
+    /// Every listener runs. Returns whether any of them did: nothing happening
+    /// is a valid answer, and the compositor then uses its own plain animation
+    /// rather than leaving a window to pop into existence.
     pub(crate) fn opened(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| {
-            let handlers: Table = sol.get("_handlers")?;
-            match handlers.get::<Value>("open")? {
-                Value::Function(function) => {
-                    function.call::<()>(id)?;
-                    Ok(true)
-                }
-                _ => Ok(false),
-            }
-        })
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "open", id))
     }
 
     /// Run the handler for a pointer press, while a mode owns input.
     pub(crate) fn click(&mut self, x: f64, y: f64, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| {
-            let handlers: Table = sol.get("_handlers")?;
-            let handler: Value = handlers.get("click")?;
-            match handler {
-                Value::Function(function) => {
-                    function.call::<()>((x, y))?;
-                    Ok(true)
-                }
-                _ => Ok(false),
-            }
-        })
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "click", (x, y)))
     }
 
     /// The shared shape of every dispatch: snapshot in, commands out.
@@ -326,6 +314,30 @@ impl Scripts {
             status: pending.status,
         }
     }
+}
+
+/// Run every listener registered for an event.
+///
+/// One failing listener is logged and the rest still run: a broken script must
+/// not silently disable the others, which is what returning early would do.
+fn call_listeners(
+    sol: &Table,
+    event: &str,
+    args: impl mlua::IntoLuaMulti + Clone,
+) -> mlua::Result<bool> {
+    let handlers: Table = sol.get("_handlers")?;
+    let Value::Table(listeners) = handlers.get::<Value>(event)? else {
+        return Ok(false);
+    };
+
+    let mut called = false;
+    for listener in listeners.sequence_values::<mlua::Function>() {
+        match listener.and_then(|handler| handler.call::<()>(args.clone())) {
+            Ok(()) => called = true,
+            Err(err) => tracing::error!(%err, event, "a listener failed"),
+        }
+    }
+    Ok(called)
 }
 
 /// Turn a Lua error into one of ours.
@@ -476,6 +488,27 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // `place` changes where a window *lives*; `present` changes where it is
+    // *drawn*. A layout uses this one — and leaving a mode afterwards restores
+    // it to wherever the layout has since put it, which is the correct answer
+    // and comes out for free.
+    sol.set(
+        "place",
+        lua.create_function(|lua, (id, options): (u64, Table)| {
+            let Some(rect) = rect_from(&options)? else {
+                return Err(mlua::Error::runtime("sol.place needs a rect"));
+            };
+            with_pending(lua, |pending| {
+                let animation = pending.animation;
+                pending.commands.push(Command::Place {
+                    id,
+                    rect,
+                    animation,
+                });
+            })
+        })?,
+    )?;
+
     sol.set(
         "close",
         lua.create_function(|lua, id: u64| {
@@ -524,12 +557,24 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // Appended, never replaced. Two scripts caring about the same event is
+    // ordinary — a tiling script and an open animation both want to know a
+    // window appeared — and the second one silently unhooking the first is the
+    // kind of bug that gets blamed on the compositor.
     sol.set(
         "on",
         lua.create_function(|lua, (event, handler): (String, mlua::Function)| {
             let sol: Table = lua.globals().get("sol")?;
             let handlers: Table = sol.get("_handlers")?;
-            handlers.set(event, handler)?;
+            let listeners: Table = match handlers.get::<Value>(event.clone())? {
+                Value::Table(existing) => existing,
+                _ => {
+                    let created = lua.create_table()?;
+                    handlers.set(event, &created)?;
+                    created
+                }
+            };
+            listeners.push(handler)?;
             Ok(())
         })?,
     )?;
