@@ -78,3 +78,28 @@ for.
 | Colours and metrics | `Solium.Theme`, one singleton | imported by every scene |
 | What an animation *does* | Lua script | `sol.present_from`, `sol.on("open")` |
 | Foreign panels, wallpapers | Clients | `wlr-layer-shell` |
+
+
+## What arrived with the dock
+
+The first piece of shell drawn by the compositor, and the reason the boundary
+sits where it does.
+
+`shell.rs` holds a dock: a QML scene rendered by the same host that draws the
+window frames, importing the same `Solium.Theme`. `sol.dock` says what it
+holds, because which programs belong on a dock is not the compositor's
+opinion, and it reserves its own strip out of `work_area` the way a
+layer-shell client would with an exclusive zone.
+
+The morph is the whole argument made concrete. Pressing an icon fires a `dock`
+event carrying **the rectangle that icon occupies**; a script spawns the
+program and hands that rectangle to `sol.present_from`; the window grows out
+of it. Captured frame by frame in `docs/morph.png`: 460x208 near the dock,
+then 928x504, 1192x672, and settled at full size about a third of a second
+later.
+
+None of that is reachable from a separate process. A client dock can pass a
+rectangle over IPC, but by the time the window exists the two are separate
+scenes and nothing holds both at once to interpolate between them. That is why
+Quickshell was the wrong tool here, and it is worth saying plainly: the shell
+being a client is what makes an icon and a window unable to be the same thing.

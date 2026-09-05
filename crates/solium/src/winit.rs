@@ -164,13 +164,13 @@ pub(crate) fn run() -> Result<()> {
     // immediately. A broken config leaves the compositor usable and unbound
     // rather than refusing to start.
     let config = Scripts::config_path();
-    state.scripts = match Scripts::load(&config) {
+    state.start_scripts(match Scripts::load(&config) {
         Ok(scripts) => Some(scripts),
         Err(err) => {
             tracing::error!(?err, config = %config.display(), "no scripts loaded");
             None
         }
-    };
+    });
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
 

@@ -47,6 +47,14 @@ return {
         follow_new_windows = true,
     },
 
+    dock = {
+        -- What sits on the dock. Programs, by the name used to run them.
+        items = { "kitty", "firefox" },
+        -- How a window grows out of its icon. Slower than an ordinary open,
+        -- because the distance travelled is the thing being shown.
+        morph = { duration = 340, easing = "outCubic" },
+    },
+
     open = {
         -- The animation a window arrives with.
         motion = { duration = 200, easing = "outCubic" },

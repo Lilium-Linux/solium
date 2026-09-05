@@ -164,6 +164,12 @@ pub(crate) struct Solium {
     pub(crate) dmabuf_state: DmabufState,
     pub(crate) dmabuf_global: Option<DmabufGlobal>,
 
+    /// The shell's dock, drawn by us rather than by a client.
+    ///
+    /// Built on first use: a compositor that cannot start QML should still
+    /// run, without a dock, rather than fail to start at all.
+    pub(crate) dock: Option<crate::shell::Dock>,
+
     /// Set while a focus change is being reported to scripts.
     ///
     /// A script handling `focus` will often ask for focus itself — a scroller
@@ -268,6 +274,7 @@ impl Solium {
             socket_name: String::new(),
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
+            dock: None,
             focusing: false,
             pending_drop: None,
             pending_resize: None,
@@ -325,7 +332,21 @@ impl Solium {
     /// constant here. Every placement decision reads this rather than the raw
     /// output.
     pub(crate) fn work_area(&self) -> Option<Rectangle<i32, Logical>> {
-        Some(layer::work_area(self.space.outputs().next()?))
+        let area = layer::work_area(self.space.outputs().next()?);
+        Some(self.without_dock(area))
+    }
+
+    /// The area a layout may use, with the dock's strip taken out.
+    ///
+    /// A client panel reserves its space through the layer-shell exclusive
+    /// zone. The dock is not a client, so it reserves its own here — the
+    /// alternative being windows tiled underneath it.
+    fn without_dock(&self, area: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+        let Some(dock) = self.dock.as_ref().filter(|dock| !dock.is_empty()) else {
+            return area;
+        };
+        let taken = area.size.h - (dock.rect(area).loc.y - area.loc.y);
+        Rectangle::new(area.loc, (area.size.w, (area.size.h - taken).max(1)).into())
     }
 
     /// A window's title, as the client set it.
@@ -452,6 +473,11 @@ impl Solium {
         {
             self.script_grab = grab;
             tracing::debug!(grab, "script input grab changed");
+        }
+        if let Some(items) = outcome.dock
+            && let Some(dock) = self.dock()
+        {
+            dock.set_items(items);
         }
         if let Some(status) = outcome.status
             && status != self.status
@@ -964,6 +990,66 @@ impl Solium {
     }
 
     /// Offer a newly shown window to whatever script wants to animate it in.
+    /// Take the scripts, and act on whatever they asked for while loading.
+    pub(crate) fn start_scripts(&mut self, scripts: Option<Scripts>) {
+        let Some(mut scripts) = scripts else {
+            self.scripts = None;
+            return;
+        };
+        let outcome = scripts.startup();
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
+    /// The area the dock places itself in: the output's, before the dock's own
+    /// strip is taken out of it. Measuring against the shrunken area would
+    /// move the dock every time it was asked where it is.
+    pub(crate) fn dock_area(&self) -> Option<Rectangle<i32, Logical>> {
+        Some(layer::work_area(self.space.outputs().next()?))
+    }
+
+    /// The dock, made on first use.
+    pub(crate) fn dock(&mut self) -> Option<&mut crate::shell::Dock> {
+        if self.dock.is_none() {
+            match crate::shell::Dock::new() {
+                Ok(dock) => self.dock = Some(dock),
+                Err(err) => {
+                    tracing::error!(?err, "no dock: QML would not start");
+                    return None;
+                }
+            }
+        }
+        self.dock.as_mut()
+    }
+
+    /// Tell scripts an icon was pressed, with the rectangle it occupies.
+    ///
+    /// The rectangle is the point of the event. A script answers it by
+    /// spawning something and remembering where it came from, and the window
+    /// then grows out of exactly that square — which is the whole reason the
+    /// dock is drawn in this process.
+    pub(crate) fn trigger_dock(&mut self, index: usize) {
+        let Some(area) = self.dock_area() else {
+            return;
+        };
+        let Some(dock) = self.dock() else {
+            return;
+        };
+        let Some(rect) = dock.icon_rect(index, area) else {
+            return;
+        };
+        let Some(label) = dock.items().get(index).cloned() else {
+            return;
+        };
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.dock_pressed(&label, to_rect(rect), snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
     /// Tell scripts focus moved.
     fn trigger_focus(&mut self, window: &Window) {
         let id = window_id(window);

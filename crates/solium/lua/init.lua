@@ -6,6 +6,7 @@
 
 require("modes")
 require("open")
+require("dock")
 require("overview")
 require("workspaces")
 require("tiling")
