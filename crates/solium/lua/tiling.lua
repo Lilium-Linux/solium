@@ -16,6 +16,7 @@
 
 local config = require("config")
 local workspaces = require("workspaces")
+local modes = require("modes")
 
 local tiling = { active = false, trees = {} }
 
@@ -70,16 +71,16 @@ function tiling.adopt()
     end
 end
 
-function tiling.toggle()
-    tiling.active = not tiling.active
-    if tiling.active then
-        tiling.adopt()
-        sol.status("tiling")
-        tiling.apply()
-    else
-        sol.status("")
-    end
+function tiling.started()
+    tiling.adopt()
+    tiling.apply()
 end
+
+function tiling.toggle()
+    modes.use("tiling")
+end
+
+modes.register("tiling", tiling)
 
 -- A new window splits whatever the pointer is over. This is the whole of
 -- "the window opens where the cursor is".
@@ -126,21 +127,22 @@ end)
 -- window does not have one: the space is divided, and dragging an edge moves
 -- where the division falls. Returning a command tells the compositor we took
 -- it, so it does not also resize the window directly.
-sol.on("resize", function(id, dx, dy)
+sol.on("resize", function(id, x, y, horizontal, vertical)
     if not tiling.active then
         return
     end
-    local area = sol.monitor()
     local tree = tree_for(workspaces.active)
-    -- Whichever axis moved more is the one the seam runs along; the tree knows
-    -- which way its own branch was cut.
-    local by
-    if math.abs(dx) >= math.abs(dy) then
-        by = dx / math.max(area.w, 1)
-    else
-        by = dy / math.max(area.h, 1)
+    -- The seam goes where the pointer is. Not where it moved to: a delta would
+    -- be measured against a layout this very drag just changed, and the windows
+    -- would shake for as long as the button was held.
+    if horizontal then
+        tree:drag_seam(id, "width", x, y, options())
     end
-    tree:resize(id, by)
+    if vertical then
+        tree:drag_seam(id, "height", x, y, options())
+    end
+    -- Placed immediately. An animation would be chasing the pointer, and the
+    -- pointer wins.
     tiling.apply({ duration = 0 })
 end)
 

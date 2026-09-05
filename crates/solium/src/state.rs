@@ -177,7 +177,7 @@ pub(crate) struct Solium {
     /// does not have a size of its own to change — dragging its edge moves the
     /// seam it shares with its neighbour, or the width of its column. Only a
     /// floating window is resized directly.
-    pub(crate) pending_resize: Option<(Window, Rectangle<i32, Logical>)>,
+    pub(crate) pending_resize: Option<ResizeRequest>,
 
     /// A drag that has finished and not yet been reported to scripts.
     ///
@@ -204,6 +204,22 @@ pub(crate) struct Solium {
     /// filter, holding the seat's lock, and it is shared with the nested
     /// backend where neither action means anything.
     pub(crate) request: Option<Request>,
+}
+
+/// An edge drag in progress.
+///
+/// Carries where the pointer *is* rather than how far it moved. A layout sets
+/// its seam from the position directly, so dragging to the same place twice
+/// gives the same result; feeding it deltas fed the layout's own response back
+/// in as the next input.
+#[derive(Clone, Debug)]
+pub(crate) struct ResizeRequest {
+    pub(crate) window: Window,
+    /// Where a floating window would be put, for when no layout claims it.
+    pub(crate) wanted: Rectangle<i32, Logical>,
+    pub(crate) at: (f64, f64),
+    pub(crate) horizontal: bool,
+    pub(crate) vertical: bool,
 }
 
 /// A request from the input layer that only the backend can honour.
@@ -965,13 +981,18 @@ impl Solium {
     /// The delta is what the dragged edge moved by, which is what a layout can
     /// act on; the absolute rectangle would only be useful to something that
     /// already agreed the window has its own size.
-    pub(crate) fn trigger_resize(&mut self, window: &Window, dx: f64, dy: f64) -> bool {
-        let id = window_id(window);
+    pub(crate) fn trigger_resize(&mut self, request: &ResizeRequest) -> bool {
+        let id = window_id(&request.window);
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return false;
         };
-        let outcome = scripts.resized(id, dx, dy, snapshot);
+        let outcome = scripts.resized(
+            id,
+            request.at,
+            (request.horizontal, request.vertical),
+            snapshot,
+        );
         self.scripts = Some(scripts);
         let handled = outcome.handled && !outcome.commands.is_empty();
         self.apply(outcome);

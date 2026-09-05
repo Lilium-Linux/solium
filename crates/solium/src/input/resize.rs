@@ -39,6 +39,22 @@ pub(crate) const RESIZE_BORDER: i32 = 8;
 /// grabbed again to undo it.
 const MINIMUM: i32 = 120;
 
+/// Which corner a point is pulling, by which quarter of the window it is in.
+///
+/// Used for a modifier drag, where there is no edge to be near: the pointer is
+/// somewhere in the middle of the window and the direction has to come from
+/// where, rather than from what it is touching.
+pub(crate) fn quadrant(outer: Rectangle<i32, Logical>, point: Point<f64, Logical>) -> ResizeEdge {
+    let middle_x = f64::from(outer.loc.x) + f64::from(outer.size.w) / 2.0;
+    let middle_y = f64::from(outer.loc.y) + f64::from(outer.size.h) / 2.0;
+    match (point.x < middle_x, point.y < middle_y) {
+        (true, true) => ResizeEdge::TopLeft,
+        (false, true) => ResizeEdge::TopRight,
+        (true, false) => ResizeEdge::BottomLeft,
+        (false, false) => ResizeEdge::BottomRight,
+    }
+}
+
 /// Which edges of a window a point is near, if any.
 pub(crate) fn edges_at(outer: Rectangle<i32, Logical>, point: Point<f64, Logical>) -> ResizeEdge {
     let border = f64::from(RESIZE_BORDER);
@@ -172,7 +188,29 @@ impl PointerGrab<Solium> for ResizeGrab {
         // than change one window's size, and asking it from in here would call
         // a script while the seat holds the pointer's lock — the deadlock the
         // move grab already taught us about.
-        data.pending_resize = Some((self.window.clone(), self.resized(event.location)));
+        data.pending_resize = Some(crate::state::ResizeRequest {
+            window: self.window.clone(),
+            wanted: self.resized(event.location),
+            at: (event.location.x, event.location.y),
+            horizontal: matches!(
+                self.edges,
+                ResizeEdge::Left
+                    | ResizeEdge::Right
+                    | ResizeEdge::TopLeft
+                    | ResizeEdge::TopRight
+                    | ResizeEdge::BottomLeft
+                    | ResizeEdge::BottomRight
+            ),
+            vertical: matches!(
+                self.edges,
+                ResizeEdge::Top
+                    | ResizeEdge::Bottom
+                    | ResizeEdge::TopLeft
+                    | ResizeEdge::TopRight
+                    | ResizeEdge::BottomLeft
+                    | ResizeEdge::BottomRight
+            ),
+        });
     }
 
     fn relative_motion(

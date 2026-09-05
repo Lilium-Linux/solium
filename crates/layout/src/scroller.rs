@@ -261,6 +261,58 @@ impl Scroller {
         self.focus_column(at, area, settings);
     }
 
+    /// Move a window into the column another window is in.
+    ///
+    /// What a drag means in a scroller: not a free position, but a change of
+    /// which column something belongs to. Dropping onto a window in another
+    /// column stacks it there.
+    pub fn move_to_column_of(&mut self, id: u64, target: u64, area: Rect, settings: Settings) {
+        if id == target {
+            return;
+        }
+        let Some(to) = self
+            .columns
+            .iter()
+            .position(|column| column.windows.contains(&target))
+        else {
+            return;
+        };
+        let Some(from) = self
+            .columns
+            .iter()
+            .position(|column| column.windows.contains(&id))
+        else {
+            return;
+        };
+        if from == to {
+            return;
+        }
+
+        self.columns[from].windows.retain(|other| *other != id);
+        let emptied = self.columns[from].windows.is_empty();
+        if emptied {
+            self.columns.remove(from);
+        } else {
+            let column = &mut self.columns[from];
+            column.active = column.active.min(column.windows.len() - 1);
+        }
+
+        // The target may have shifted left if the column it followed was
+        // removed.
+        let to = if emptied && to > from { to - 1 } else { to };
+        let Some(column) = self.columns.get_mut(to) else {
+            return;
+        };
+        let at = column
+            .windows
+            .iter()
+            .position(|other| *other == target)
+            .map_or(column.windows.len(), |index| index + 1);
+        column.windows.insert(at, id);
+        column.active = at;
+        self.focus_column(to, area, settings);
+    }
+
     /// Widen or narrow the column a window sits in.
     ///
     /// Every window in a column shares its width, so a drag on one window's
@@ -648,5 +700,55 @@ mod focus_and_width {
         assert!(rect_of(&scroller, 1).w >= 99.0, "floor holds");
         scroller.widen(1, 10.0, area(), settings());
         assert!(rect_of(&scroller, 1).w <= 1001.0, "ceiling holds");
+    }
+}
+
+#[cfg(test)]
+mod moving {
+    use super::Scroller;
+    use crate::{Rect, Settings};
+
+    fn area() -> Rect {
+        Rect::new(0.0, 0.0, 1000.0, 600.0)
+    }
+    fn settings() -> Settings {
+        Settings {
+            gap: 0.0,
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn a_window_dropped_on_another_column_joins_it() {
+        let mut scroller = Scroller::new();
+        for id in 1..=3 {
+            scroller.insert(id, area(), settings());
+        }
+        assert_eq!(scroller.columns().len(), 3);
+        scroller.move_to_column_of(3, 1, area(), settings());
+        assert_eq!(scroller.columns().len(), 2, "one column absorbed another");
+        assert!(scroller.columns()[0].windows.contains(&3));
+        assert_eq!(scroller.focused(), Some(3), "focus went with it");
+    }
+
+    #[test]
+    fn moving_out_of_a_stack_leaves_the_column_standing() {
+        let mut scroller = Scroller::new();
+        scroller.insert(1, area(), settings());
+        scroller.insert_into_active(2, area(), settings());
+        scroller.insert(3, area(), settings());
+        scroller.move_to_column_of(2, 3, area(), settings());
+        assert_eq!(scroller.columns().len(), 2);
+        assert_eq!(scroller.columns()[0].windows, vec![1]);
+        assert!(scroller.columns()[1].windows.contains(&2));
+    }
+
+    #[test]
+    fn a_window_cannot_be_moved_onto_itself() {
+        let mut scroller = Scroller::new();
+        scroller.insert(1, area(), settings());
+        scroller.insert(2, area(), settings());
+        scroller.move_to_column_of(1, 1, area(), settings());
+        assert_eq!(scroller.columns().len(), 2);
     }
 }

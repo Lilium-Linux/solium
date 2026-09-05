@@ -308,9 +308,15 @@ impl Scripts {
     ///
     /// Offered to layouts before the compositor resizes anything, so a tiled
     /// window can move its seam instead of growing over its neighbour.
-    pub(crate) fn resized(&mut self, id: u64, dx: f64, dy: f64, snapshot: Snapshot) -> Outcome {
+    pub(crate) fn resized(
+        &mut self,
+        id: u64,
+        at: (f64, f64),
+        edges: (bool, bool),
+        snapshot: Snapshot,
+    ) -> Outcome {
         self.dispatch(snapshot, move |sol| {
-            call_listeners(sol, "resize", (id, dx, dy))
+            call_listeners(sol, "resize", (id, at.0, at.1, edges.0, edges.1))
         })
     }
 
@@ -935,6 +941,15 @@ impl mlua::UserData for Scrolling {
             Ok(())
         });
 
+        methods.add_method_mut(
+            "move_to_column_of",
+            |_, this, (id, target, options): (u64, u64, Table)| {
+                this.0
+                    .move_to_column_of(id, target, area(&options)?, tuning(&options)?);
+                Ok(())
+            },
+        );
+
         methods.add_method_mut("widen", |_, this, (id, by, options): (u64, f64, Table)| {
             this.0.widen(id, by, area(&options)?, tuning(&options)?);
             Ok(())
@@ -1002,6 +1017,21 @@ impl mlua::UserData for TilingTree {
             this.0.resize(id, by);
             Ok(())
         });
+
+        // `axis` is "width" or "height": which way the seam being dragged runs.
+        methods.add_method_mut(
+            "drag_seam",
+            |_, this, (id, axis, x, y, options): (u64, String, f64, f64, Table)| {
+                let axis = if axis == "width" {
+                    solium_layout::tree::Axis::Vertical
+                } else {
+                    solium_layout::tree::Axis::Horizontal
+                };
+                this.0
+                    .drag_seam(id, axis, (x, y), area(&options)?, tuning(&options)?);
+                Ok(())
+            },
+        );
 
         methods.add_method("contains", |_, this, id: u64| Ok(this.0.contains(id)));
 
