@@ -2,150 +2,99 @@
 <meta charset="utf-8">
 <title>Solium animation preview</title>
 <!--
-  Mock windows, animated by Solium's own animation engine.
+  A test harness for Solium's animation engine. Deliberately plain.
 
-  The engine is compiled to WebAssembly and called from this page, so the curve
-  you tune here is the one that will move real windows. A copy of the curves in
-  JavaScript would drift from the Rust the first time either changed, and the
-  drift would be invisible: the page would still animate plausibly.
+  The boxes are boxes. Recreating the compositor's chrome here would be a second
+  copy of its design, drifting from the real one and adding nothing: what needs
+  judging is motion, and motion reads more clearly without decoration.
 
-  What *is* this page's own is the geometry — where a window starts and ends in
-  each scenario. That is layout, and it belongs to the compositor and its
-  scripts. The engine only ever answers "how far along?".
+  The engine itself is compiled to WebAssembly and *called* from this page, so
+  the timing tuned here is the code that will move real windows. A copy of the
+  curves in JavaScript would drift invisibly — the page would still animate
+  plausibly. Geometry is this page's own, because that is layout, not animation.
 
   Regenerate with dev/preview.
 -->
 <style>
-  :root {
-    color-scheme: dark;
-    --bg: #0d0f14; --panel: #151922; --line: #242a36; --screen: #0a0c10;
-    --text: #e6e9ef; --dim: #7f8798; --accent: #7aa2f7;
-    --frame: #1b1f29; --frame-dim: #14171e; --client: #22262e;
-  }
+  :root { color-scheme: dark; --bg:#101216; --line:#2a2f3a; --text:#e6e9ef;
+          --dim:#848c9c; --box:#7aa2f7; }
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 24px; background: var(--bg); color: var(--text);
-         font: 14px/1.5 system-ui, sans-serif; }
-  h1 { font-size: 17px; margin: 0 0 4px; }
-  p.lead { color: var(--dim); margin: 0 0 20px; max-width: 78ch; }
-  .layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--text);
+         font:13px/1.6 system-ui, sans-serif; display:flex; gap:24px;
+         flex-wrap:wrap; align-items:flex-start; }
 
-  /* The mock screen, in Solium's own coordinates scaled down to fit. */
-  #screen { position: relative; width: 960px; height: 540px; flex: none;
-            background: var(--screen); border: 1px solid var(--line);
-            border-radius: 10px; overflow: hidden; }
-  #topbar { position: absolute; inset: 0 0 auto 0; height: 20px;
-            background: #111318; border-bottom: 1px solid #262b36;
-            display: flex; align-items: center; gap: 8px; padding: 0 11px;
-            font: 600 8px/1 monospace; color: var(--text); }
-  #topbar .dot { width: 6px; height: 6px; border-radius: 3px; background: #9ece6a; }
-  #topbar .mode { color: var(--dim); font-weight: 400; }
+  #stage { position:relative; width:800px; height:450px; flex:none;
+           background:#0a0b0e; border:1px solid var(--line); border-radius:4px;
+           overflow:hidden; }
+  .box { position:absolute; background:var(--box); border-radius:2px; }
 
-  .window { position: absolute; border-radius: 3px; overflow: hidden;
-            will-change: transform, opacity; }
-  .window .bar { height: 19px; background: var(--frame); display: flex;
-                 align-items: center; justify-content: center;
-                 font: 7px/1 monospace; color: #c3c9d6; position: relative; }
-  .window.dim .bar { background: var(--frame-dim); color: #666e7d; }
-  .window .bar .buttons { position: absolute; right: 6px; display: flex; gap: 4px; }
-  .window .bar .buttons i { width: 6px; height: 6px; border-radius: 3px;
-                            background: #39414f; display: block; }
-  .window .body { background: var(--client); height: calc(100% - 19px);
-                  padding: 6px; font: 7px/1.6 monospace; color: #8a93a6; }
-
-  .controls { flex: 1; min-width: 320px; display: flex; flex-direction: column; gap: 12px; }
-  fieldset { border: 1px solid var(--line); border-radius: 10px;
-             background: var(--panel); margin: 0; padding: 12px 14px; }
-  legend { color: var(--dim); font-size: 12px; padding: 0 6px; }
-  .field { display: flex; align-items: center; gap: 10px; margin: 7px 0; }
-  .field label { width: 92px; color: var(--dim); font-size: 12px; }
-  .field output { width: 64px; text-align: right;
-                  font-variant-numeric: tabular-nums; color: var(--text); }
-  input[type=range] { flex: 1; accent-color: var(--accent); }
-  select { background: var(--screen); color: var(--text);
-           border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; flex: 1; }
-  button { background: var(--accent); color: #0d0f14; border: 0; border-radius: 7px;
-           padding: 9px 18px; font-weight: 600; cursor: pointer; }
-  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
-  .row { display: flex; gap: 8px; align-items: center; }
-  #plot { display: block; background: var(--screen); border-radius: 6px; margin-top: 4px; }
-  #status { color: var(--dim); font-size: 12px; min-height: 1.4em; }
+  aside { flex:1; min-width:260px; display:flex; flex-direction:column; gap:14px; }
+  .field { display:flex; align-items:center; gap:10px; }
+  .field label { width:78px; color:var(--dim); }
+  .field output { width:58px; text-align:right; font-variant-numeric:tabular-nums; }
+  input[type=range] { flex:1; accent-color:var(--box); }
+  select { flex:1; background:#0a0b0e; color:var(--text);
+           border:1px solid var(--line); border-radius:3px; padding:4px 6px; }
+  button { background:transparent; color:var(--text); border:1px solid var(--line);
+           border-radius:3px; padding:6px 14px; cursor:pointer; font-size:13px; }
+  button.on { border-color:var(--box); color:var(--box); }
+  .row { display:flex; gap:8px; }
+  #plot { display:block; border:1px solid var(--line); border-radius:3px; }
+  #status { color:var(--dim); min-height:1.5em; }
+  hr { border:0; border-top:1px solid var(--line); margin:2px 0; }
 </style>
 
-<h1>Solium animation preview</h1>
-<p class="lead">
-  Mock windows moved by the compositor's animation engine, compiled to
-  WebAssembly and called from this page — so the curve you tune here is the one
-  that will move real windows. Geometry is this page's; timing is the engine's.
-</p>
+<div id="stage"></div>
 
-<div class="layout">
-  <div id="screen">
-    <div id="topbar"><span class="dot"></span>Solium<span class="mode" id="mode"></span></div>
-  </div>
+<aside>
+  <div class="field"><label for="scenario">scenario</label><select id="scenario"></select></div>
+  <div class="field"><label for="curve">curve</label><select id="curve"></select></div>
+  <div class="field"><label for="duration">duration</label>
+    <input type="range" id="duration" min="60" max="1200" step="10" value="260">
+    <output id="durationOut"></output></div>
+  <div class="field"><label for="speed">speed</label>
+    <input type="range" id="speed" min="10" max="100" step="5" value="100">
+    <output id="speedOut"></output></div>
 
-  <div class="controls">
-    <fieldset>
-      <legend>scenario</legend>
-      <div class="field"><label for="scenario">what happens</label>
-        <select id="scenario"></select></div>
-      <div class="field"><label for="curve">curve</label>
-        <select id="curve"></select></div>
-      <div class="field"><label for="duration">duration</label>
-        <input type="range" id="duration" min="60" max="1200" step="10" value="260">
-        <output id="durationOut"></output></div>
-      <div class="field"><label for="speed">playback</label>
-        <input type="range" id="speed" min="10" max="100" step="5" value="100">
-        <output id="speedOut"></output></div>
-      <div class="row"><button id="play">Play</button>
-        <button class="ghost" id="loop">Loop: off</button></div>
-      <div id="status"></div>
-    </fieldset>
+  <hr>
 
-    <fieldset id="springBox">
-      <legend>spring</legend>
-      <div class="field"><label for="stiffness">stiffness</label>
-        <input type="range" id="stiffness" min="50" max="900" step="10" value="300">
-        <output id="stiffnessOut"></output></div>
-      <div class="field"><label for="damping">damping</label>
-        <input type="range" id="damping" min="5" max="80" step="1" value="25">
-        <output id="dampingOut"></output></div>
-      <div class="field"><label for="velocity">throw</label>
-        <input type="range" id="velocity" min="-10" max="20" step="0.5" value="0">
-        <output id="velocityOut"></output></div>
-    </fieldset>
+  <div class="field"><label for="stiffness">stiffness</label>
+    <input type="range" id="stiffness" min="50" max="900" step="10" value="300">
+    <output id="stiffnessOut"></output></div>
+  <div class="field"><label for="damping">damping</label>
+    <input type="range" id="damping" min="5" max="80" step="1" value="25">
+    <output id="dampingOut"></output></div>
+  <div class="field"><label for="velocity">throw</label>
+    <input type="range" id="velocity" min="-10" max="20" step="0.5" value="0">
+    <output id="velocityOut"></output></div>
 
-    <fieldset>
-      <legend>curve shape</legend>
-      <canvas id="plot" width="330" height="110"></canvas>
-    </fieldset>
-  </div>
-</div>
+  <hr>
+
+  <div class="row"><button id="play">Play</button><button id="loop">Loop</button></div>
+  <div id="status"></div>
+  <canvas id="plot" width="280" height="80"></canvas>
+</aside>
 
 <script>
 "use strict";
 
-// Injected by dev/preview. Without them the page says so rather than failing
-// silently.
+// Injected by dev/preview.
 const CURVES = /*CURVES*/ null;
 const WASM_BASE64 = /*WASM*/ "";
 
 // Solium's own coordinates, so a scenario reads the way the compositor sees it.
 const OUTPUT = { w: 1600, h: 900 };
-const BAR = 34, PADDING = 24;
-const SCALE = 960 / OUTPUT.w;
+const BAR = 34, PADDING = 24, SCALE = 800 / OUTPUT.w;
 
 const el = id => document.getElementById(id);
-const screenEl = el("screen");
 const lerp = (a, b, t) => a + (b - a) * t;
-
-let engine = null;
-let springIndex = -1;
+let engine = null, springIndex = -1;
 
 /* ---------- scenarios: geometry only, never timing ---------- */
 
-const win = (x, y, w, h, title) => ({ x, y, w, h, title });
+const win = (x, y, w, h) => ({ x, y, w, h });
 
-// The same fit the overview script does: keep the aspect ratio, never enlarge.
+// The same fit overview.lua does: keep the aspect ratio, never enlarge.
 function fit(r, box) {
   const scale = Math.min(box.w / r.w, box.h / r.h, 1);
   const w = r.w * scale, h = r.h * scale;
@@ -156,134 +105,84 @@ function cell(index, count) {
   const columns = Math.max(1, Math.ceil(Math.sqrt(count)));
   const rows = Math.ceil(count / columns);
   const cw = OUTPUT.w / columns, ch = (OUTPUT.h - BAR) / rows;
-  return {
-    x: (index % columns) * cw + PADDING,
-    y: BAR + Math.floor(index / columns) * ch + PADDING,
-    w: cw - PADDING * 2,
-    h: ch - PADDING * 2,
-  };
+  return { x: (index % columns) * cw + PADDING,
+           y: BAR + Math.floor(index / columns) * ch + PADDING,
+           w: cw - PADDING * 2, h: ch - PADDING * 2 };
 }
 
-const shrink = w => ({
-  ...w,
-  x: w.x + w.w * 0.06, y: w.y + w.h * 0.06,
-  w: w.w * 0.88, h: w.h * 0.88,
-});
+const shrink = w => ({ x: w.x + w.w * 0.06, y: w.y + w.h * 0.06,
+                       w: w.w * 0.88, h: w.h * 0.88 });
 
-const OVERVIEW_WINDOWS = [
-  win(120, 120, 820, 560, "editor"),
-  win(360, 240, 900, 600, "terminal"),
-  win(600, 180, 780, 620, "browser"),
-];
+const THREE = [win(120, 120, 820, 560), win(360, 240, 900, 600), win(600, 180, 780, 620)];
 
 const SCENARIOS = {
-  "window opens": () => {
-    const w = win(430, 220, 740, 520, "a new window");
-    return [{ from: { ...shrink(w), opacity: 0 }, to: { ...w, opacity: 1 }, title: w.title }];
+  "open": () => {
+    const w = win(430, 220, 740, 520);
+    return [{ from: { ...shrink(w), opacity: 0 }, to: { ...w, opacity: 1 } }];
   },
-
-  "window closes": () => {
-    const w = win(430, 220, 740, 520, "goodbye");
-    return [{ from: { ...w, opacity: 1 }, to: { ...shrink(w), opacity: 0 }, title: w.title }];
+  "close": () => {
+    const w = win(430, 220, 740, 520);
+    return [{ from: { ...w, opacity: 1 }, to: { ...shrink(w), opacity: 0 } }];
   },
-
-  "overview: entering": () => OVERVIEW_WINDOWS.map((w, i) => ({
+  "overview: enter": () => THREE.map((w, i) => ({
     from: { ...w, opacity: 1 },
-    to: { ...fit(w, cell(i, OVERVIEW_WINDOWS.length)), opacity: 1 },
-    title: w.title,
+    to: { ...fit(w, cell(i, THREE.length)), opacity: 1 },
   })),
-
-  "overview: leaving": () => SCENARIOS["overview: entering"]()
-    .map(t => ({ from: t.to, to: t.from, title: t.title })),
-
-  "app switcher": () => {
-    const windows = [
-      win(120, 120, 820, 560, "one"),
-      win(300, 200, 820, 560, "two"),
-      win(480, 280, 820, 560, "three"),
-      win(660, 160, 820, 560, "four"),
-    ];
+  "overview: leave": () => SCENARIOS["overview: enter"]()
+    .map(t => ({ from: t.to, to: t.from })),
+  "switcher": () => {
+    const windows = [...THREE, win(660, 160, 820, 560)];
     const slot = (OUTPUT.w - PADDING * 5) / 4;
     return windows.map((w, i) => ({
       from: { ...w, opacity: 1 },
-      to: {
-        ...fit(w, { x: PADDING + i * (slot + PADDING), y: OUTPUT.h / 2 - 170, w: slot, h: 340 }),
-        opacity: 1,
-      },
-      title: w.title,
+      to: { ...fit(w, { x: PADDING + i * (slot + PADDING), y: OUTPUT.h / 2 - 170,
+                        w: slot, h: 340 }), opacity: 1 },
     }));
   },
-
-  "window moves": () => {
-    const w = win(90, 90, 700, 480, "dragged");
-    return [{
-      from: { ...w, opacity: 1 },
-      to: { ...w, x: OUTPUT.w - w.w - 90, y: OUTPUT.h - w.h - 60, opacity: 1 },
-      title: w.title,
-    }];
+  "move": () => {
+    const w = win(90, 90, 700, 480);
+    return [{ from: { ...w, opacity: 1 },
+              to: { ...w, x: OUTPUT.w - w.w - 90, y: OUTPUT.h - w.h - 60, opacity: 1 } }];
   },
-
   "maximise": () => {
-    const w = win(420, 260, 620, 400, "growing");
-    return [{
-      from: { ...w, opacity: 1 },
-      to: { x: 0, y: BAR, w: OUTPUT.w, h: OUTPUT.h - BAR, opacity: 1 },
-      title: w.title,
-    }];
+    const w = win(420, 260, 620, 400);
+    return [{ from: { ...w, opacity: 1 },
+              to: { x: 0, y: BAR, w: OUTPUT.w, h: OUTPUT.h - BAR, opacity: 1 } }];
   },
 };
 
 /* ---------- the engine: everything about *when* ---------- */
 
-const springSettings = () => ({
-  stiffness: +el("stiffness").value,
-  damping: +el("damping").value,
-  velocity: +el("velocity").value,
-});
-
+const spring = () => [+el("stiffness").value, +el("damping").value, 1, +el("velocity").value];
 const isSpring = () => +el("curve").value === springIndex;
 
-function durationMs() {
-  if (isSpring()) {
-    const s = springSettings();
-    // A spring's duration is a property of the spring, so it is asked for
-    // rather than set.
-    return engine.solium_spring_settle_ms(s.stiffness, s.damping, 1, s.velocity);
-  }
-  return +el("duration").value;
-}
+// A spring's duration is a property of the spring, so it is asked for.
+const durationMs = () => isSpring()
+  ? engine.solium_spring_settle_ms(...spring())
+  : +el("duration").value;
 
-function progressAt(elapsedMs) {
-  if (isSpring()) {
-    const s = springSettings();
-    return engine.solium_spring_at(s.stiffness, s.damping, 1, s.velocity, elapsedMs / 1000);
-  }
-  return engine.solium_progress(+el("curve").value, +el("duration").value, elapsedMs);
-}
+const progressAt = ms => isSpring()
+  ? engine.solium_spring_at(...spring(), ms / 1000)
+  : engine.solium_progress(+el("curve").value, +el("duration").value, ms);
 
 /* ---------- drawing ---------- */
 
 let boxes = [];
 
 function build() {
-  boxes.forEach(b => b.node.remove());
-  boxes = SCENARIOS[el("scenario").value]().map((track, i) => {
+  const stage = el("stage");
+  stage.textContent = "";
+  boxes = SCENARIOS[el("scenario").value]().map(track => {
     const node = document.createElement("div");
-    node.className = "window" + (i === 0 ? "" : " dim");
-    node.innerHTML =
-      '<div class="bar"><span></span><span class="buttons"><i></i><i></i></span></div>' +
-      '<div class="body">$&nbsp;</div>';
-    node.querySelector(".bar span").textContent = track.title;
-    screenEl.appendChild(node);
+    node.className = "box";
+    stage.appendChild(node);
     return { track, node };
   });
   place(0);
-  el("mode").textContent = el("scenario").value;
 }
 
 function place(progress) {
-  for (const { track, node } of boxes) {
-    const { from, to } = track;
+  for (const { track: { from, to }, node } of boxes) {
     // Geometry is interpolated here; the engine decided how far along we are.
     node.style.left = (lerp(from.x, to.x, progress) * SCALE) + "px";
     node.style.top = (lerp(from.y, to.y, progress) * SCALE) + "px";
@@ -299,25 +198,24 @@ function plot() {
   ctx.clearRect(0, 0, W, H);
 
   const total = durationMs();
-  const samples = [];
-  for (let i = 0; i <= 200; i++) samples.push(progressAt((i / 200) * total));
+  const samples = Array.from({ length: 201 }, (_, i) => progressAt((i / 200) * total));
   const lo = Math.min(0, ...samples), hi = Math.max(1, ...samples);
-  const y = v => H - 8 - ((v - lo) / (hi - lo)) * (H - 16);
+  const y = v => H - 6 - ((v - lo) / (hi - lo)) * (H - 12);
 
-  ctx.strokeStyle = "#242a36";
+  ctx.strokeStyle = "#2a2f3a";
   for (const level of [0, 1]) {
     ctx.beginPath(); ctx.moveTo(0, y(level)); ctx.lineTo(W, y(level)); ctx.stroke();
   }
-  ctx.strokeStyle = "#7aa2f7"; ctx.lineWidth = 2; ctx.beginPath();
+  ctx.strokeStyle = "#7aa2f7"; ctx.lineWidth = 1.5; ctx.beginPath();
   samples.forEach((v, i) => {
-    const x = (i / (samples.length - 1)) * W;
+    const x = (i / 200) * W;
     i ? ctx.lineTo(x, y(v)) : ctx.moveTo(x, y(v));
   });
   ctx.stroke();
 
   const overshoot = Math.max(0, hi - 1);
-  el("status").textContent = `${Math.round(total)}ms` +
-    (overshoot > 0.005 ? `, overshoots by ${(overshoot * 100).toFixed(1)}%` : ", no overshoot");
+  el("status").textContent = `${Math.round(total)}ms, ` +
+    (overshoot > 0.005 ? `overshoots ${(overshoot * 100).toFixed(1)}%` : "no overshoot");
 }
 
 /* ---------- playback ---------- */
@@ -327,61 +225,49 @@ let looping = false, playing = false;
 function play() {
   if (playing) return;
   playing = true;
-  const total = durationMs();
-  const rate = +el("speed").value / 100;
+  const total = durationMs(), rate = +el("speed").value / 100;
   const started = performance.now();
 
-  function frame(now) {
-    const elapsed = (now - started) * rate;
+  (function frame(now) {
+    const elapsed = ((now ?? started) - started) * rate;
     place(progressAt(Math.min(elapsed, total)));
-    if (elapsed < total) {
-      requestAnimationFrame(frame);
-      return;
-    }
-    place(progressAt(total));
+    if (elapsed < total) return void requestAnimationFrame(frame);
     playing = false;
-    if (looping) {
-      setTimeout(() => { place(0); setTimeout(play, 200); }, 400);
-    }
-  }
-  requestAnimationFrame(frame);
+    if (looping) setTimeout(() => { place(0); setTimeout(play, 180); }, 380);
+  })(started);
 }
 
 /* ---------- wiring ---------- */
 
 function boot() {
-  const scenario = el("scenario");
-  for (const name of Object.keys(SCENARIOS)) scenario.add(new Option(name, name));
-  scenario.value = "overview: entering";
+  for (const name of Object.keys(SCENARIOS)) el("scenario").add(new Option(name, name));
+  el("scenario").value = "overview: enter";
 
-  const curve = el("curve");
   CURVES.forEach((name, index) => {
-    curve.add(new Option(name, index));
+    el("curve").add(new Option(name, index));
     if (name.startsWith("spring")) springIndex = index;
   });
-  const preferred = CURVES.indexOf("outCubic");
-  curve.value = String(preferred >= 0 ? preferred : 0);
+  el("curve").value = String(Math.max(0, CURVES.indexOf("outCubic")));
 
   const refresh = () => {
     el("durationOut").textContent = el("duration").value + "ms";
     el("speedOut").textContent = (+el("speed").value / 100).toFixed(2) + "x";
-    el("stiffnessOut").textContent = el("stiffness").value;
-    el("dampingOut").textContent = el("damping").value;
-    el("velocityOut").textContent = el("velocity").value;
+    for (const id of ["stiffness", "damping", "velocity"]) {
+      el(id + "Out").textContent = el(id).value;
+    }
     el("duration").disabled = isSpring();
-    el("springBox").style.opacity = isSpring() ? "1" : "0.45";
     plot();
   };
 
-  scenario.onchange = () => { build(); refresh(); };
-  curve.onchange = refresh;
+  el("scenario").onchange = () => { build(); refresh(); };
+  el("curve").onchange = refresh;
   for (const id of ["duration", "speed", "stiffness", "damping", "velocity"]) {
     el(id).oninput = refresh;
   }
   el("play").onclick = () => { place(0); play(); };
   el("loop").onclick = () => {
     looping = !looping;
-    el("loop").textContent = "Loop: " + (looping ? "on" : "off");
+    el("loop").classList.toggle("on", looping);
     if (looping) { place(0); play(); }
   };
 
@@ -390,17 +276,12 @@ function boot() {
 }
 
 if (!WASM_BASE64 || !CURVES) {
-  el("status").textContent = "no engine embedded — generate this page with dev/preview";
+  el("status").textContent = "no engine embedded — generate with dev/preview";
 } else {
-  // Embedded rather than fetched, so the page opens straight from disk:
-  // file:// blocks fetching a sibling, and needing a web server to look at an
-  // animation is the friction this tool exists to remove.
-  const bytes = Uint8Array.from(atob(WASM_BASE64), c => c.charCodeAt(0));
-  WebAssembly.instantiate(bytes, {}).then(module => {
-    engine = module.instance.exports;
-    boot();
-  }).catch(err => {
-    el("status").textContent = "engine failed to load: " + err;
-  });
+  // Embedded rather than fetched: file:// blocks fetching a sibling, and
+  // needing a web server to look at an animation is the friction this removes.
+  WebAssembly.instantiate(Uint8Array.from(atob(WASM_BASE64), c => c.charCodeAt(0)), {})
+    .then(module => { engine = module.instance.exports; boot(); })
+    .catch(err => { el("status").textContent = "engine failed to load: " + err; });
 }
 </script>

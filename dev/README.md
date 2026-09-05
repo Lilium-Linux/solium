@@ -58,11 +58,14 @@ dev/preview
 xdg-open crates/animation/preview/preview.html
 ```
 
-Mock windows — with titlebars, on a mock output at Solium's own coordinates —
-animating through the scenarios the compositor actually has: a window opening,
-overview entering and leaving, the app switcher, a drag, a maximise. Curve,
-duration, playback speed and the spring's stiffness, damping and throw are all
-live.
+Plain boxes animating through the scenarios the compositor actually has —
+opening, closing, overview entering and leaving, the app switcher, a drag, a
+maximise — on a mock output in Solium's own coordinates. Curve, duration,
+playback speed and the spring's stiffness, damping and throw are all live.
+
+**Deliberately plain.** The page is a test harness, not a mockup: recreating the
+compositor's chrome here would be a second copy of its design, drifting from the
+real one, and motion reads more clearly without decoration anyway.
 
 **The engine is compiled to WebAssembly and called from the page**, so the curve
 tuned in a browser is the code that will move real windows. Verified rather than

@@ -61,9 +61,14 @@ nothing — no Wayland, no renderer, no Solium. That is not tidiness:
 
 There will be many animations and many settings for them, so the engine has to
 be usable outside the thing it animates. `dev/preview` compiles it to
-WebAssembly and embeds it in a page that animates **mock windows** through the
+WebAssembly and embeds it in a page that animates plain boxes through the
 scenarios the compositor has — opening, overview, the switcher, a drag, a
 maximise — with curve, duration and spring settings live.
+
+That page stays a *test harness* rather than a mockup. Recreating the
+compositor's chrome in it would be a second copy of the design with the same
+drift problem as a second copy of the curves, and motion is easier to judge
+without decoration.
 
 The engine is *called* from that page rather than reimplemented in it. A copy of
 the curves in JavaScript would drift the first time either side changed, and the
