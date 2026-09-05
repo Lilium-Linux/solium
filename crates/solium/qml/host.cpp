@@ -260,11 +260,14 @@ extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)
     // created or resized, and Qt owns it after that.
     scene->window->setRenderTarget(QQuickRenderTarget::fromPaintDevice(&scene->image));
 
+    // polish, sync, render — and *not* beginFrame/endFrame. Those bracket a
+    // frame on the RHI, which the software adaptation does not have; calling
+    // them logs "QQuickRenderControl: No QRhi in beginFrame()" twice per frame
+    // per scene, which with a bar and a frame per window fills the journal with
+    // warnings that look like errors and are not.
     scene->control->polishItems();
-    scene->control->beginFrame();
     scene->control->sync();
     scene->control->render();
-    scene->control->endFrame();
     scene->dirty = false;
     return 1;
 }

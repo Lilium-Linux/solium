@@ -60,11 +60,20 @@ nothing — no Wayland, no renderer, no Solium. That is not tidiness:
 > nobody tunes.**
 
 There will be many animations and many settings for them, so the engine has to
-be usable outside the thing it animates. `cargo run -p solium-animation --bin
-preview` writes a self-contained page that plots every curve and moves a box
-along it, sampled from the engine itself rather than reimplemented in
-JavaScript — a second implementation would drift, and the drift would be
-invisible because the page would still look plausible.
+be usable outside the thing it animates. `dev/preview` compiles it to
+WebAssembly and embeds it in a page that animates **mock windows** through the
+scenarios the compositor has — opening, overview, the switcher, a drag, a
+maximise — with curve, duration and spring settings live.
+
+The engine is *called* from that page rather than reimplemented in it. A copy of
+the curves in JavaScript would drift the first time either side changed, and the
+drift would be invisible because the page would still animate plausibly. The
+wasm and native answers are checked against each other instead of assumed.
+
+The page owns the geometry — where a window starts and ends — because that is
+layout and belongs to the compositor and its scripts. The engine only ever
+answers "how far along?", which is exactly the split inside the compositor: it
+reports progress, and the caller interpolates.
 
 The compositor keeps only the part that needs a compositor: which rectangle a
 window is travelling between. `Curve::from_name` is what scripts bind to, so a

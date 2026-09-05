@@ -51,21 +51,33 @@ exactly:
 SOLIUM_TRIGGER_AT="5200:super+space,6200:super+space"   SOLIUM_CAPTURE=/tmp/after.ppm SOLIUM_CAPTURE_AT=7400 dev/run-nested.sh
 ```
 
-## Looking at animations without running the compositor
+## Tuning animations without running the compositor
 
 ```sh
-cargo run -p solium-animation --bin preview > crates/animation/preview/curves.html
-xdg-open crates/animation/preview/curves.html
+dev/preview
+xdg-open crates/animation/preview/preview.html
 ```
 
-Plots every curve and spring and moves a box along each one. The samples come
-from the engine, so what the page shows is what a window will do — and the page
-is self-contained, because needing a web server to look at an easing curve is
-the friction the tool exists to remove.
+Mock windows — with titlebars, on a mock output at Solium's own coordinates —
+animating through the scenarios the compositor actually has: a window opening,
+overview entering and leaving, the app switcher, a drag, a maximise. Curve,
+duration, playback speed and the spring's stiffness, damping and throw are all
+live.
 
-Curves live in `crates/animation`, which depends on nothing. Add one there and
-it is available to scripts by name (`sol.animate{ easing = "spring" }`) and to
-the preview at once.
+**The engine is compiled to WebAssembly and called from the page**, so the curve
+tuned in a browser is the code that will move real windows. Verified rather than
+asserted: the same calls through wasm and through native Rust agree to six
+decimal places. A reimplementation of the curves in JavaScript would drift the
+first time either side changed, and the drift would be invisible — the page
+would still animate plausibly.
+
+What the page *does* own is geometry: where a window starts and ends in each
+scenario. That is layout, and it belongs to the compositor and its scripts. The
+engine only ever answers "how far along?".
+
+Curves live in `crates/animation`, which depends on nothing so it keeps building
+for the browser. Add one there and it is available to scripts by name
+(`sol.animate{ easing = "spring" }`) and to the preview at once.
 
 ## Running programs inside Solium
 
