@@ -13,12 +13,12 @@ in the background and is focused only by clicking it.
 
 ```ini
 [<uuid>]
-Description=Solium nested — fixed monitor, no focus steal
+Description=Solium nested — opens on one monitor, movable, no focus steal
 wmclass=solium-nested
 wmclassmatch=2
 wmclasscomplete=false
-position=80,120
-positionrule=2
+position=80,1560
+positionrule=3
 fsplevel=4
 fsplevelrule=2
 ```
@@ -30,6 +30,21 @@ Apply without logging out:
 ```sh
 qdbus-qt6 org.kde.KWin /KWin reconfigure
 ```
+
+### `positionrule=3`, not `2`
+
+This one matters and is not obvious. KWin's rule types are numbers:
+
+| Value | Meaning |
+|---|---|
+| 2 | **Force** — KWin keeps the window there, permanently |
+| 3 | **Apply Initially** — KWin places it there once, then leaves it alone |
+
+`Force` is the wrong one, and it fails in a way that reads as a compositor bug:
+the window opens where you asked and then **cannot be dragged at all**, because
+every move is immediately overridden. Nothing logs, nothing errors, the
+titlebar just does not work. Use `3` — the point of the rule is to decide where
+the window *opens*, not to nail it down.
 
 Solium logs which host monitor it landed on, so the rule can be checked rather
 than assumed:
