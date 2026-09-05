@@ -17,8 +17,12 @@ typedef struct SoliumQmlScene SoliumQmlScene;
 /*
  * Start Qt. Must be called once, before any scene, and from the thread that
  * will render. Returns 0 on failure.
+ *
+ * `import_path` is added to the QML import path, so every scene can reach the
+ * shared design system with `import Solium`. One engine serves all scenes, so
+ * that theme is a single object rather than a copy per surface.
  */
-int solium_qml_start(void);
+int solium_qml_start(const char *import_path);
 
 /*
  * Load `qml_path` into a scene rendering at `width` x `height`.

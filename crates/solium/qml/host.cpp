@@ -76,6 +76,18 @@ private:
 
 QGuiApplication *g_app = nullptr;
 CompositorAnimationDriver *g_driver = nullptr;
+
+/*
+ * One engine for every scene.
+ *
+ * This is the difference between "the decorations happen to be QML" and "the
+ * desktop is one design system". Sharing an engine means every scene sees the
+ * same singletons, so a theme is a single object rather than a copy per
+ * surface — and it is the prerequisite for an item ever moving from the dock
+ * into a titlebar, which cannot happen across two scene graphs, let alone two
+ * processes.
+ */
+QQmlEngine *g_engine = nullptr;
 int g_argc = 1;
 char g_arg0[] = "solium";
 char *g_argv[] = { g_arg0, nullptr };
@@ -86,7 +98,6 @@ struct SoliumQmlScene
 {
     QQuickRenderControl *control = nullptr;
     QQuickWindow *window = nullptr;
-    QQmlEngine *engine = nullptr;
     QQmlComponent *component = nullptr;
     QQuickItem *root = nullptr;
     QImage image;
@@ -98,7 +109,7 @@ struct SoliumQmlScene
     QByteArray taken;
 };
 
-extern "C" int solium_qml_start(void)
+extern "C" int solium_qml_start(const char *import_path)
 {
     if (g_app != nullptr) {
         return 1;
@@ -124,6 +135,12 @@ extern "C" int solium_qml_start(void)
 
     g_driver = new CompositorAnimationDriver();
     g_driver->install();
+
+    g_engine = new QQmlEngine();
+    if (import_path != nullptr) {
+        // So a scene can `import Solium` and reach the theme.
+        g_engine->addImportPath(QString::fromUtf8(import_path));
+    }
     return 1;
 }
 
@@ -159,9 +176,8 @@ extern "C" SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width,
     // thread to one client API while another holds it. The software scene graph
     // needs none of it.
 
-    scene->engine = new QQmlEngine();
     scene->component =
-        new QQmlComponent(scene->engine, QUrl::fromLocalFile(QString::fromUtf8(qml_path)));
+        new QQmlComponent(g_engine, QUrl::fromLocalFile(QString::fromUtf8(qml_path)));
     if (scene->component->isError()) {
         static QByteArray reason;
         reason = scene->component->errorString().toUtf8();
@@ -204,7 +220,6 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
     }
     delete scene->root;
     delete scene->component;
-    delete scene->engine;
     delete scene->window;
     delete scene->control;
     delete scene;

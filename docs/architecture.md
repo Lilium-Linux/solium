@@ -141,6 +141,17 @@ the bar and mode overlays run inside the compositor. Notifications, settings
 UI, launcher and media controls are ordinary clients — none of them touch
 window geometry.
 
+### One design system, one engine
+
+**Decided 2026-09-05.** The compositor hosts a single QML engine, and every
+surface the desktop draws is a scene in it: window decorations, and the shell's
+bar, dock and launcher. They import one `Solium.Theme` singleton.
+
+The requirement that forces this is not "consistent styling" — it is that an
+object must be able to *move* from the dock into a titlebar. Two processes
+painting their own pixels cannot do that; the best available would be a fake.
+One engine makes it a reparent. See `docs/shell-boundary.md`.
+
 ### Chrome is QML, hosted in-process
 
 **Decided 2026-09-04.** The bar and window decorations are authored in QML and

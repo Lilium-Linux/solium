@@ -3,11 +3,17 @@
 // Drawn by the compositor, not by the client: the frame reserves its own height
 // so frame and window are one object, and the client is never covered.
 //
+// Every colour and measurement comes from `Solium.Theme`, which the shell's own
+// surfaces import too — one engine, one singleton, so changing a colour there
+// changes the titlebars and the dock together rather than in two places that
+// drift.
+//
 // Properties in (`title`, `focused`) are set from Rust each frame. `action` is
 // the one property that flows the other way — a button sets it, the compositor
 // takes it and clears it. One direction, one owner.
 
 import QtQuick
+import Solium
 
 Item {
     id: frame
@@ -28,16 +34,18 @@ Item {
     component FrameButton: Rectangle {
         id: button
 
-        property color tint: "#3a4150"
+        property color tint: Theme.control
         property string name: ""
 
         width: 13
         height: 13
         radius: width / 2
-        color: pointer.containsMouse ? tint : (frame.focused ? "#39414f" : "#262b35")
+        color: pointer.containsMouse
+               ? tint
+               : (frame.focused ? Theme.control : Theme.controlInactive)
         scale: pointer.pressed ? 0.86 : 1.0
 
-        Behavior on color { ColorAnimation { duration: 120 } }
+        Behavior on color { ColorAnimation { duration: Theme.quick } }
         Behavior on scale {
             NumberAnimation { duration: 100; easing.type: Easing.OutCubic }
         }
@@ -62,15 +70,15 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: frame.focused ? "#1b1f29" : "#14171e"
-        Behavior on color { ColorAnimation { duration: 160 } }
+        color: frame.focused ? Theme.surface : Theme.surfaceInactive
+        Behavior on color { ColorAnimation { duration: Theme.normal } }
 
         // A hairline where the frame meets the client, so the seam reads as
         // deliberate rather than as a gap.
         Rectangle {
             anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
             height: 1
-            color: frame.focused ? "#2f3849" : "#1e232c"
+            color: frame.focused ? Theme.edge : Theme.edgeInactive
         }
     }
 
@@ -80,21 +88,21 @@ Item {
         text: frame.title
         elide: Text.ElideRight
         horizontalAlignment: Text.AlignHCenter
-        color: frame.focused ? "#e6e9ef" : "#666e7d"
-        font { pixelSize: 12; family: "monospace" }
+        color: frame.focused ? Theme.text : Theme.textDim
+        font { pixelSize: Theme.fontSize; family: Theme.fontFamily }
 
-        Behavior on color { ColorAnimation { duration: 160 } }
+        Behavior on color { ColorAnimation { duration: Theme.normal } }
     }
 
     Row {
         anchors {
             right: parent.right
-            rightMargin: 12
+            rightMargin: Theme.margin
             verticalCenter: parent.verticalCenter
         }
-        spacing: 9
+        spacing: Theme.gap
 
-        FrameButton { name: "maximize"; tint: "#d8a33c" }
-        FrameButton { name: "close"; tint: "#e05561" }
+        FrameButton { name: "maximize"; tint: Theme.warning }
+        FrameButton { name: "close"; tint: Theme.danger }
     }
 }
