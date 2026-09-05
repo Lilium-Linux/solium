@@ -14,6 +14,23 @@ pub(crate) fn capture_path() -> Option<PathBuf> {
     std::env::var_os("SOLIUM_CAPTURE").map(PathBuf::from)
 }
 
+/// How many frames to capture, and how far apart.
+///
+/// One frame cannot show whether an animation is smooth — it shows a pose. A
+/// burst can: the window's position per frame is a curve, and a curve can be
+/// checked for jumps, for stalls, and for landing where it was aimed.
+pub(crate) fn capture_frames() -> usize {
+    std::env::var("SOLIUM_CAPTURE_FRAMES")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(1)
+        .max(1)
+}
+
+pub(crate) fn capture_interval() -> Duration {
+    millis("SOLIUM_CAPTURE_INTERVAL").unwrap_or(Duration::from_millis(16))
+}
+
 /// When to capture, if a moment was named instead of "once a window settles".
 ///
 /// Naming a moment is what makes capturing an *animation* possible: the

@@ -7,6 +7,7 @@
 
 pub(crate) mod grab;
 pub(crate) mod profile;
+pub(crate) mod resize;
 
 use smithay::{
     backend::{
@@ -223,6 +224,28 @@ fn pointer_button(state: &mut Solium, event: impl PointerButtonEvent<WinitInput>
                 );
             }
         }
+        return;
+    }
+
+    // An edge drag resizes. Checked before the ordinary click handling, and
+    // before the drag modifier, because the edge is the narrower target and
+    // whoever is on it meant to be.
+    if button_state == ButtonState::Pressed
+        && !pointer.is_grabbed()
+        && let Some((window, edges, outer)) = state.resize_target(location)
+    {
+        state.focus_window(&window, serial);
+        let start_data = GrabStartData {
+            focus: None,
+            button,
+            location,
+        };
+        pointer.set_grab(
+            state,
+            resize::ResizeGrab::new(start_data, window, edges, outer),
+            serial,
+            Focus::Clear,
+        );
         return;
     }
 

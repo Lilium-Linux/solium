@@ -31,6 +31,16 @@ use crate::{
     state::{ClientState, Solium},
 };
 
+/// A capture's path with a frame number in it: `frame.ppm` -> `frame-003.ppm`.
+fn numbered(path: &std::path::Path, index: usize) -> std::path::PathBuf {
+    let extension = path
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{stem}-{index:03}{extension}"))
+}
+
 /// Frames a window must have been mapped for before a capture is honoured.
 ///
 /// Counted from the first mapped window rather than from startup: a capture
@@ -154,6 +164,10 @@ pub(crate) fn run() -> Result<()> {
     // path can be exercised and photographed without a human at the keyboard,
     // which is the only way this becomes a regression test later.
     let capture_at = dev::capture_at();
+    let mut capture_remaining = dev::capture_frames();
+    let capture_interval = dev::capture_interval();
+    let mut capture_due = capture_at;
+    let mut capture_index = 0_usize;
     let mut triggers = dev::triggers();
     let mut clicks = dev::clicks();
     triggers.reverse();
@@ -268,24 +282,36 @@ pub(crate) fn run() -> Result<()> {
                 let damaged = result.as_ref().is_ok_and(|output| output.damage.is_some());
 
                 let mut captured = false;
-                let due = match capture_at {
+                let due = match capture_due {
                     Some(at) => now >= at,
                     None => settled > CAPTURE_SETTLE_FRAMES,
                 };
                 if result.is_ok()
                     && due
-                    && let Some(path) = capture.take()
+                    && capture_remaining > 0
+                    && let Some(path) = capture.as_ref()
                 {
                     captured = true;
+                    // Numbered only when there is a sequence, so a single
+                    // capture keeps the name it was given.
+                    let path = if dev::capture_frames() > 1 {
+                        numbered(path, capture_index)
+                    } else {
+                        path.clone()
+                    };
                     match capture::take_frame(renderer, &framebuffer, size.w, size.h, &path) {
-                        Ok(()) => tracing::info!(
-                            path = %path.display(),
-                            width = size.w,
-                            height = size.h,
-                            "captured a frame"
-                        ),
+                        Ok(()) => tracing::debug!(path = %path.display(), "captured a frame"),
                         Err(err) => tracing::warn!(?err, "capturing a frame failed"),
                     }
+
+                    capture_index += 1;
+                    capture_remaining -= 1;
+                    capture_due = if capture_remaining > 0 {
+                        Some(now + capture_interval)
+                    } else {
+                        capture.take();
+                        None
+                    };
                 }
 
                 (result.is_ok() && damaged, captured)

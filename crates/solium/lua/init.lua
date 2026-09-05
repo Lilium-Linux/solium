@@ -7,6 +7,7 @@
 require("open")
 require("overview")
 require("tiling")
+require("scrolling")
 
 -- Programs. `sol.spawn` starts them as clients of this compositor, whatever
 -- session the compositor itself happens to be nested in.
