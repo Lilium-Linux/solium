@@ -11,25 +11,56 @@
 -- the rest in a column beside it. Scrolling and the phone and tablet layouts
 -- are further scripts beside this one, not modes inside it.
 
-local tiling = { active = false, ratio = 0.6 }
+local tiling = { active = false, ratio = 0.6, order = {} }
 
 local GAP = 12
 local SETTLE = { duration = 240, easing = "outCubic" }
+
+-- The tiled order, kept by the script rather than derived from stacking.
+--
+-- Derived order cannot survive a swap: the moment two windows trade places the
+-- arrangement has to remember that, and stacking order does not. Windows that
+-- have gone are dropped and new ones are appended, so opening a window never
+-- reshuffles the ones already placed.
+function tiling.reconcile()
+    local windows = sol.windows()
+    local by_id = {}
+    for _, window in ipairs(windows) do
+        by_id[window.id] = window
+    end
+
+    local kept, seen = {}, {}
+    for _, id in ipairs(tiling.order) do
+        if by_id[id] then
+            kept[#kept + 1] = id
+            seen[id] = true
+        end
+    end
+    -- Oldest first, so the master is the window that has been there longest
+    -- rather than whichever was clicked last.
+    for i = #windows, 1, -1 do
+        local id = windows[i].id
+        if not seen[id] then
+            kept[#kept + 1] = id
+            seen[id] = true
+        end
+    end
+
+    tiling.order = kept
+    local ordered = {}
+    for _, id in ipairs(kept) do
+        ordered[#ordered + 1] = by_id[id]
+    end
+    return ordered
+end
 
 function tiling.apply()
     if not tiling.active then
         return
     end
-    local windows = sol.windows()
-    if #windows == 0 then
+    local ordered = tiling.reconcile()
+    if #ordered == 0 then
         return
-    end
-
-    -- `sol.windows` is topmost first; tiling wants a stable order, so the
-    -- oldest window is the master rather than whichever was clicked last.
-    local ordered = {}
-    for i = #windows, 1, -1 do
-        ordered[#ordered + 1] = windows[i]
     end
 
     -- The arrangement itself comes from `sol.layout`, which is the same code
@@ -59,6 +90,27 @@ function tiling.toggle()
         sol.status("")
     end
 end
+
+-- A window let go in a tiled layout does not stay where it was dropped: that
+-- is the whole point of tiling. Dropped onto another window the two trade
+-- places; dropped anywhere else it slides back to its own slot.
+sol.on("drop", function(id, x, y)
+    if not tiling.active then
+        return
+    end
+    local target = sol.window_at(x, y)
+    if target and target.id ~= id then
+        local from, to
+        for index, known in ipairs(tiling.order) do
+            if known == id then from = index end
+            if known == target.id then to = index end
+        end
+        if from and to then
+            tiling.order[from], tiling.order[to] = tiling.order[to], tiling.order[from]
+        end
+    end
+    tiling.apply()
+end)
 
 sol.bind("super+t", tiling.toggle)
 

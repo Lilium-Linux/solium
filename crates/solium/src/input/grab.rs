@@ -97,6 +97,11 @@ impl PointerGrab<Solium> for MoveGrab {
         // release, or a second button going up would drop the window.
         let started_with = self.start_data.button;
         if !handle.current_pressed().contains(&started_with) {
+            // Where it was let go, before the grab is torn down. A layout is
+            // told and decides what that means: snap back, or swap with
+            // whatever the cursor is over.
+            let at = handle.current_location();
+            data.trigger_drop(&self.window, at.x, at.y);
             // `true` restores focus to whatever is under the cursor now: the
             // window was dragged out from under the pointer, and leaving focus
             // where the drag started would strand it.

@@ -164,6 +164,14 @@ pub(crate) struct Solium {
     pub(crate) dmabuf_state: DmabufState,
     pub(crate) dmabuf_global: Option<DmabufGlobal>,
 
+    /// Set when anything on screen has changed and not yet been drawn.
+    ///
+    /// The render loop used to ask "is any window non-empty", which is true of
+    /// every mapped window forever — so a still screen was redrawn sixty times
+    /// a second for nothing. Damage is the honest question, and an idle
+    /// compositor should cost nothing.
+    pub(crate) redraw: bool,
+
     /// Something only a backend can carry out: switching VT, or stopping.
     ///
     /// The input layer must not do either itself. It runs inside the keyboard
@@ -218,6 +226,7 @@ impl Solium {
             socket_name: String::new(),
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
+            redraw: true,
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
             request: None,
@@ -883,6 +892,31 @@ impl Solium {
     }
 
     /// Offer a newly shown window to whatever script wants to animate it in.
+    /// Tell scripts a drag finished, so a layout can put the window back.
+    pub(crate) fn trigger_drop(&mut self, window: &Window, x: f64, y: f64) {
+        let id = window_id(window);
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.dropped(id, x, y, snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
+    /// Offer a modified wheel turn to scripts. Returns whether one took it.
+    pub(crate) fn trigger_scroll(&mut self, dx: f64, dy: f64) -> bool {
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return false;
+        };
+        let outcome = scripts.scrolled(dx, dy, snapshot);
+        self.scripts = Some(scripts);
+        let handled = outcome.handled;
+        self.apply(outcome);
+        handled
+    }
+
     fn trigger_open(&mut self, window: &Window) -> bool {
         let id = window_id(window);
         let snapshot = self.snapshot();

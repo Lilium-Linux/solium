@@ -82,6 +82,37 @@ function scrolling.toggle()
     end
 end
 
+-- Super plus the wheel moves the viewport. Unmodified the wheel still belongs
+-- to whatever is under the cursor, because a strip of terminals you cannot
+-- scroll inside is not an improvement on one you cannot scroll between.
+sol.on("scroll", function(_, dy)
+    if not scrolling.active or dy == 0 then
+        return
+    end
+    scrolling.focus(scrolling.focused + (dy > 0 and 1 or -1))
+end)
+
+-- Dropped windows rejoin the strip rather than sitting where the cursor left
+-- them; dropped onto another column, the two trade places.
+sol.on("drop", function(id, x, y)
+    if not scrolling.active then
+        return
+    end
+    local windows = ordered()
+    local target = sol.window_at(x, y)
+    if target and target.id ~= id then
+        local from, to
+        for index, window in ipairs(windows) do
+            if window.id == id then from = index end
+            if window.id == target.id then to = index end
+        end
+        if from and to then
+            scrolling.focus(to)
+        end
+    end
+    scrolling.apply(SNAP)
+end)
+
 sol.bind("super+s", scrolling.toggle)
 sol.bind("super+bracketright", function() scrolling.focus(scrolling.focused + 1) end)
 sol.bind("super+bracketleft", function() scrolling.focus(scrolling.focused - 1) end)

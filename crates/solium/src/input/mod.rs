@@ -409,6 +409,30 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
         return;
     };
 
+    // A wheel turn with the compositor's modifier held is the compositor's:
+    // it is how a scrolling layout moves its viewport. Unmodified, the wheel
+    // belongs to whatever is under the cursor -- a layout that ate every wheel
+    // event would make every terminal inside it unusable.
+    let held_super = state
+        .seat
+        .get_keyboard()
+        .is_some_and(|keyboard| keyboard.modifier_state().logo);
+    if held_super {
+        let horizontal = event.amount(Axis::Horizontal).unwrap_or_default();
+        let vertical = event.amount(Axis::Vertical).unwrap_or_default();
+        let (horizontal, vertical) = if horizontal == 0.0 && vertical == 0.0 {
+            (
+                event.amount_v120(Axis::Horizontal).unwrap_or_default() / 120.0,
+                event.amount_v120(Axis::Vertical).unwrap_or_default() / 120.0,
+            )
+        } else {
+            (horizontal, vertical)
+        };
+        if (horizontal != 0.0 || vertical != 0.0) && state.trigger_scroll(horizontal, vertical) {
+            return;
+        }
+    }
+
     let direction = if state.profile.natural_scroll {
         -1.0
     } else {

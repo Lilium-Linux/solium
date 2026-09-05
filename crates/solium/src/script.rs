@@ -279,6 +279,24 @@ impl Scripts {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "click", (x, y)))
     }
 
+    /// A window was dragged and let go.
+    ///
+    /// The event a layout needs and could not have: without it a drag in a
+    /// tiled layout leaves the window wherever the cursor stopped, because
+    /// nothing ever tells the layout to think again.
+    pub(crate) fn dropped(&mut self, id: u64, x: f64, y: f64, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "drop", (id, x, y)))
+    }
+
+    /// The pointer wheel turned, with the compositor's modifier held.
+    ///
+    /// Only offered to scripts when Super is down, so an unmodified wheel keeps
+    /// belonging to whatever is under the cursor. A scrolling layout that ate
+    /// every wheel event would make every terminal in it unusable.
+    pub(crate) fn scrolled(&mut self, dx: f64, dy: f64, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "scroll", (dx, dy)))
+    }
+
     /// The shared shape of every dispatch: snapshot in, commands out.
     fn dispatch(
         &mut self,
