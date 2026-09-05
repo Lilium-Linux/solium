@@ -1,80 +1,80 @@
 # Where Solium ends and Lilium begins
 
 Solium is the compositor. Lilium is the desktop — its bar, its dock, its
-launcher. This is the line between them, and why it falls where it does.
+launcher. This is the line between them, and the line is not where a Wayland
+tutorial would put it.
 
-## Three kinds of surface, three different relationships
+## The requirement that decides the architecture
 
-**Windows** are clients over `xdg-shell`. The compositor owns their geometry;
-they ask, it decides.
+> An object should be able to move from the dock into a window's titlebar.
 
-**Decorations, modes and animations live inside the compositor.** A titlebar has
-to move in the same frame as its window or the two visibly come apart, and an
-overview transform has to be applied to the same texture the renderer is about
-to draw. Anything *window-coupled* is in-process — which is why the frames are
-QML rendered by the compositor and not by a shell.
+Not "look similar in both". *Move* — one object, travelling, unbroken.
 
-**The shell — bar, dock, launcher — is a separate process.** It attaches over
-`wlr-layer-shell`: it anchors to an edge, says how much room it needs, and the
-compositor keeps windows out of that strip. `Solium::work_area` is whatever is
-left, so a dock that grows pushes windows out of its way without either side
-knowing anything about the other's internals.
+That single requirement rules out the conventional answer. If the shell is a
+separate process painting its own pixels, then a dock icon and a titlebar are
+two scene graphs in two processes with two stylesheets, and an object cannot
+cross between them; the best available is a fake — dissolve one, appear in the
+other — which is exactly the kind of thing this project exists not to build.
 
-The compositor briefly drew its own top bar. That was wrong and has been
-removed: it made the compositor own a design, a font stack and a layout it had
-no business owning, and it hid the interesting question — how a *replaceable*
-shell attaches — rather than answering it.
+The same requirement, in a weaker form, rules it out again: "the shell changes
+colour, so the decorations change too" is trivial when there is one theme
+object, and a synchronisation problem forever when there are two.
 
-## The part `wlr-layer-shell` does not solve
+## So: one engine
 
-The point of building a compositor rather than configuring one is animations
-that cross the boundary: an icon in the dock that grows into a window, a window
-that shrinks back into it. For that, the compositor has to know **where the icon
-is**, and that is geometry the shell owns.
+The compositor hosts **one QML engine**. Window decorations are scenes in it.
+The shell's surfaces — bar, dock, launcher — are scenes in it. They import the
+same `Solium.Theme` singleton, because there is only one of it.
 
-There is exactly one rule about how it arrives, and it is the rule this project
-learned the hard way:
+That gives, in order of how hard they would otherwise be:
 
-> **Geometry the compositor animates against must arrive with the frame that
-> shows it. Never on a side channel.**
+- **One design system.** `qml/Solium/Theme.qml` is read by every surface the
+  desktop draws. Changing a colour there changes the titlebars and the dock
+  together, with no rebuild, because they are the same object and not two
+  copies.
+- **Objects that travel.** An item lifted from the dock into a titlebar is a
+  reparent inside one scene graph. It keeps its colours because it never left
+  the design system, and it can be animated across because both ends are on the
+  compositor's clock.
+- **No protocol for shell geometry.** The dock's icon rectangles are not
+  published to the compositor; the compositor *has* them. The genie animation
+  reads a rectangle out of the same engine that drew the icon, so it cannot be
+  animating against a stale copy — the failure mode a side-channel protocol
+  would have made possible.
 
-A dock that sends "my Files icon is at (120, 980, 48, 48)" whenever it feels
-like it, applied whenever the compositor gets round to it, is a *mirror* of the
-dock's state — and mirrors drift. The window then flies out of where the icon
-used to be, one frame before it moved. The previous incarnation of this project
-lost a week to exactly this shape of bug in a different guise.
+This is the arrangement Apple has, and it is unavailable to anyone configuring
+an existing compositor. It is the reason for writing one.
 
-So: icon rectangles are attached to the dock's surface and applied **atomically
-with its commit**, the same way a surface's damage and buffer are. If the dock
-moves an icon and redraws in one commit, the compositor sees both at once or
-neither. That is a small custom protocol — `solium_shell_v1` — and it is the
-only thing Solium will ask a shell to speak beyond the standard ones.
+## What is still a client
 
-## What the compositor does with it
+Ordinary applications, over `xdg-shell`. And `wlr-layer-shell` stays
+implemented so that *foreign* panels and wallpapers can attach if someone wants
+them — but Lilium's own shell does not use it, and the compositor's work area
+is computed from whatever the hosted shell reserves as readily as from a layer
+surface.
 
-Nothing, by itself. It hands the rectangle to a script:
+## What this costs, honestly
 
-```lua
-sol.on("open", function(id, window)
-    local icon = sol.icon_for(window.app_id)   -- from the dock, or nil
-    sol.animate({ duration = 260, easing = "spring" })
-    sol.present_from(id, icon or shrunk(window))
-end)
-```
+The shell cannot crash independently of the compositor. A separate process can
+be restarted; a QML error in the dock takes the session with it unless the
+compositor is careful. So:
 
-`present_from` puts the window at a rectangle and animates it to where it
-actually lives. With an icon rectangle that is the macOS-style genie; without
-one it is the ordinary open animation; with a different rectangle it is
-something nobody has thought of yet. The compositor supplies the primitive and
-the script decides — which is the same arrangement as overview, and the reason
-adding the genie later will not need new Rust.
+- Every scene is loaded defensively. A scene that fails to load is skipped and
+  logged; it never stops the compositor starting.
+- Scene errors are contained per surface — a broken dock must not take the
+  window frames with it.
+
+That is the trade being made deliberately: robustness through care inside one
+process, in exchange for a desktop that can actually do what the design asks
+for.
 
 ## Summary
 
-| | Where it runs | How it talks to the compositor |
+| | Where it runs | How it reaches the compositor |
 |---|---|---|
-| Windows | Clients | `xdg-shell` |
-| Window frames, modes, animations | In the compositor | — |
-| Bar, dock, launcher | The shell, a separate process | `wlr-layer-shell` for space |
-| Dock icon geometry | The shell | `solium_shell_v1`, atomic with its commit |
-| What an animation *does* | A Lua script | `sol.present_from`, `sol.on("open")` |
+| Applications | Clients | `xdg-shell` |
+| Window frames | Compositor's QML engine | directly |
+| Bar, dock, launcher | The same QML engine | directly |
+| Colours and metrics | `Solium.Theme`, one singleton | imported by every scene |
+| What an animation *does* | Lua script | `sol.present_from`, `sol.on("open")` |
+| Foreign panels, wallpapers | Clients | `wlr-layer-shell` |

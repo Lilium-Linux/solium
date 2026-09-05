@@ -32,7 +32,7 @@ mod ffi {
     }
 
     unsafe extern "C" {
-        pub(super) fn solium_qml_start() -> c_int;
+        pub(super) fn solium_qml_start(import_path: *const c_char) -> c_int;
         pub(super) fn solium_qml_scene_new(
             qml_path: *const c_char,
             width: c_int,
@@ -70,13 +70,32 @@ mod ffi {
 }
 
 /// Start Qt. Idempotent, and must happen on the thread that renders.
+///
+/// Every scene shares one engine and one import path, which is what makes the
+/// design system a single object rather than a copy per surface — see
+/// `qml/Solium/Theme.qml`.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
 pub(crate) fn start() -> Result<()> {
-    // SAFETY: no arguments, and the shim is idempotent.
-    if unsafe { ffi::solium_qml_start() } == 0 {
+    let path = import_path();
+    let path = CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| anyhow!("the QML import path contains a NUL byte"))?;
+
+    // SAFETY: `path` outlives the call, and the shim is idempotent.
+    if unsafe { ffi::solium_qml_start(path.as_ptr()) } == 0 {
         return Err(anyhow!("could not start Qt"));
     }
     Ok(())
+}
+
+/// Where QML modules are found, `Solium` among them.
+///
+/// Overridable so a whole design system can be swapped without rebuilding,
+/// which is most of the point of it being QML.
+fn import_path() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("SOLIUM_QML_PATH") {
+        return std::path::PathBuf::from(path);
+    }
+    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml"))
 }
 
 /// Matches `SOLIUM_QML_UNCHANGED` in `qml/host.h`.
