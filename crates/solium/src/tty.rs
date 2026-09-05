@@ -38,12 +38,15 @@ use smithay::{
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{ImportEgl as _, gles::GlesRenderer},
-        session::{Event as SessionEvent, Session, libseat::LibSeatSession},
+        session::{Event as SessionEvent, Session as _, libseat::LibSeatSession},
         udev,
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
-        calloop::{EventLoop, LoopSignal},
+        calloop::{
+            EventLoop, LoopSignal,
+            timer::{TimeoutAction, Timer},
+        },
         drm::control::{Device as _, Mode as DrmMode, ModeTypeFlags, connector, crtc},
         input::Libinput,
         rustix::fs::OFlags,
@@ -55,7 +58,7 @@ use smithay::{
 use crate::{
     layer, present, render,
     script::Scripts,
-    state::{ClientState, Solium},
+    state::{ClientState, Request, Solium},
 };
 
 /// What we ask the display for, in order of preference.
@@ -187,6 +190,7 @@ pub(crate) fn run() -> Result<()> {
         renderer: None,
         compositor: None,
         output: None,
+        input_devices: 0,
         drm: None,
         signal: event_loop.get_signal(),
         active: true,
@@ -237,6 +241,27 @@ pub(crate) fn run() -> Result<()> {
         })
         .map_err(|err| anyhow!("watching the session: {err}"))?;
 
+    // A compositor with no input devices has taken the machine hostage: it
+    // holds the display, and there is no key anyone can press to get it back —
+    // not even the VT switch, which is itself a key. Better to give the screen
+    // back and say why than to sit there looking like a crash.
+    event_loop
+        .handle()
+        .insert_source(
+            Timer::from_duration(Duration::from_secs(5)),
+            |_, (), state| {
+                if state.input_devices == 0 {
+                    tracing::error!(
+                        "no input devices after 5s -- stopping rather than holding the display \
+                     with no way to escape. check that this user is on an active seat."
+                    );
+                    state.signal.stop();
+                }
+                TimeoutAction::Drop
+            },
+        )
+        .map_err(|err| anyhow!("arming the input watchdog: {err}"))?;
+
     tracing::info!(
         socket = %state.solium.socket_name,
         "solium is up on the hardware -- run clients with WAYLAND_DISPLAY set to this"
@@ -273,9 +298,13 @@ struct State {
     renderer: Option<GlesRenderer>,
     compositor: Option<Compositor>,
     output: Option<Output>,
+    /// How many input devices libinput has handed us.
+    ///
+    /// Zero is not a slow start, it is a session nobody can talk to — see the
+    /// watchdog in `run`.
+    input_devices: usize,
     /// Held for the session's lifetime: dropping it closes the device.
     drm: Option<DrmDevice>,
-    #[expect(dead_code, reason = "held so the loop can be stopped from a binding")]
     signal: LoopSignal,
     active: bool,
 }
@@ -494,9 +523,32 @@ fn start_input(
 
 /// Route a libinput event through the same profile the nested backend uses.
 fn handle_input(state: &mut State, output: &Output, event: InputEvent<LibinputInputBackend>) {
+    if let InputEvent::DeviceAdded { device } = &event {
+        state.input_devices += 1;
+        tracing::info!(device = device.name(), "input device");
+    }
+
     // The same entry point the nested backend uses: a binding, a profile or a
     // grab must not behave differently because libinput is underneath.
     crate::input::handle(&mut state.solium, output, event);
+
+    // Things the input layer cannot do itself, because only a backend has a
+    // session to do them with.
+    if let Some(request) = state.solium.request.take() {
+        match request {
+            Request::Vt(vt) => {
+                tracing::info!(vt, "switching virtual terminal");
+                if let Err(err) = state.session.change_vt(vt) {
+                    tracing::warn!(?err, vt, "could not switch to that terminal");
+                }
+            }
+            Request::Quit => {
+                tracing::info!("stopping: asked to by a key");
+                state.signal.stop();
+            }
+        }
+    }
+
     // Input changes what is on screen, and the vblank has no way to know that.
     state.render();
 }

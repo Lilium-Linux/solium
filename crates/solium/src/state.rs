@@ -146,6 +146,34 @@ pub(crate) struct Solium {
 
     /// Every decorated window's frame, drawn by us from QML.
     pub(crate) decorations: Decorations,
+
+    /// What the pointer should look like right now.
+    ///
+    /// Nested, the host compositor drew the cursor and this could be ignored.
+    /// On the hardware nothing else will draw it, so a compositor that does not
+    /// track this has an invisible pointer — which is indistinguishable, to
+    /// whoever is sitting there, from input being broken.
+    pub(crate) pointer: crate::cursor::Pointer,
+
+    /// Something only a backend can carry out: switching VT, or stopping.
+    ///
+    /// The input layer must not do either itself. It runs inside the keyboard
+    /// filter, holding the seat's lock, and it is shared with the nested
+    /// backend where neither action means anything.
+    pub(crate) request: Option<Request>,
+}
+
+/// A request from the input layer that only the backend can honour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Request {
+    /// Switch to this virtual terminal.
+    ///
+    /// The kernel stops acting on Ctrl+Alt+F-keys once libseat puts the VT into
+    /// graphics mode, so a compositor that does not do this itself is a trap:
+    /// the only way out of it is the power button.
+    Vt(i32),
+    /// Stop the compositor and give the session back.
+    Quit,
 }
 
 impl Solium {
@@ -180,6 +208,8 @@ impl Solium {
             script_grab: false,
             socket_name: String::new(),
             decorations: Decorations::default(),
+            pointer: crate::cursor::Pointer::default(),
+            request: None,
             display_handle,
         }
     }
@@ -1190,7 +1220,12 @@ impl SeatHandler for Solium {
         &mut self.seat_state
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        // A client sets its own cursor when the pointer is over it — an I-beam
+        // over text, a resize arrow on an edge. Dropping this on the floor
+        // leaves every application with our arrow.
+        self.pointer.status = image;
+    }
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
 }
 

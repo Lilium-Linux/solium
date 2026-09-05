@@ -17,7 +17,7 @@ pub(crate) mod resize;
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, InputBackend, InputEvent, KeyState,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, TouchDownEvent,
+        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, TouchDownEvent,
         TouchMotionEvent as TouchMotionEventTrait, TouchUpEvent,
     },
     input::{
@@ -29,22 +29,32 @@ use smithay::{
     utils::{Logical, Point, SERIAL_COUNTER},
 };
 
-use crate::{decoration::Decoration, script, state::Solium};
+use crate::{
+    decoration::Decoration,
+    script,
+    state::{Request, Solium},
+};
 
 use grab::MoveGrab;
 
-/// A key combination a script has claimed.
+/// Something the compositor itself will do with a key press.
 ///
 /// Carried out of the keyboard filter rather than acted on inside it: the
 /// filter runs while the seat holds its own lock, and a script that focused a
 /// window from in there would re-enter the keyboard and deadlock.
 #[derive(Clone, Debug)]
-struct Bound(String);
+enum Action {
+    /// A key combination a script has claimed.
+    Bound(String),
+    /// A backend request: switch VT, or stop.
+    Backend(Request),
+}
 
 /// Route one backend event to the seat.
 pub(crate) fn handle<B: InputBackend>(state: &mut Solium, output: &Output, event: InputEvent<B>) {
     match event {
         InputEvent::Keyboard { event } => keyboard(state, event),
+        InputEvent::PointerMotion { event } => pointer_relative(state, output, event),
         InputEvent::PointerMotionAbsolute { event } => pointer_motion(state, output, event),
         InputEvent::PointerButton { event } => pointer_button(state, event),
         InputEvent::PointerAxis { event } => pointer_axis(state, event),
@@ -89,6 +99,14 @@ fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>
                 };
             }
 
+            // Escape hatches, before anything else can claim them. These are
+            // the only keys that must work when everything else is broken:
+            // without them a compositor that mishandles input is a machine you
+            // can only recover with the power button.
+            if let Some(request) = escape(modifiers, handle.modified_sym()) {
+                return FilterResult::Intercept(Some(Action::Backend(request)));
+            }
+
             let combo = combo_for(modifiers, handle.modified_sym());
             let claimed = state
                 .scripts
@@ -102,7 +120,7 @@ fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>
             tracing::debug!(combo, claimed, "key");
 
             if claimed {
-                FilterResult::Intercept(Some(Bound(combo)))
+                FilterResult::Intercept(Some(Action::Bound(combo)))
             } else if state.script_grab {
                 // A mode owns input: keys it did not bind are swallowed rather
                 // than leaking to whatever is underneath it.
@@ -113,9 +131,38 @@ fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>
         },
     );
 
-    if let Some(Some(Bound(combo))) = bound {
-        state.trigger(&combo);
+    match bound {
+        Some(Some(Action::Bound(combo))) => {
+            state.trigger(&combo);
+        }
+        Some(Some(Action::Backend(request))) => {
+            tracing::info!(?request, "backend request from a key");
+            state.request = Some(request);
+        }
+        _ => {}
     }
+}
+
+/// The key combinations the compositor keeps for itself, whatever else happens.
+///
+/// Ctrl+Alt+F-N reaches us as `XF86Switch_VT_N` under any ordinary keymap. The
+/// kernel would normally act on it, but not once the VT is in graphics mode, so
+/// switching away from Solium is Solium's job. Ctrl+Alt+Backspace stops it
+/// outright: the last resort that does not involve the power button.
+fn escape(modifiers: &ModifiersState, keysym: Keysym) -> Option<Request> {
+    if !(modifiers.ctrl && modifiers.alt) {
+        return None;
+    }
+    if keysym == Keysym::BackSpace {
+        return Some(Request::Quit);
+    }
+    let raw = keysym.raw();
+    (Keysym::XF86_Switch_VT_1.raw()..=Keysym::XF86_Switch_VT_12.raw())
+        .contains(&raw)
+        .then(|| {
+            let offset = raw - Keysym::XF86_Switch_VT_1.raw();
+            Request::Vt(i32::try_from(offset).unwrap_or(0) + 1)
+        })
 }
 
 /// The canonical name of a key combination, as scripts bind them.
@@ -149,12 +196,7 @@ fn pointer_motion<B: InputBackend>(
     // Frames see the pointer before clients do, so buttons light up on hover.
     // Motion is *also* forwarded below, because the pointer leaving a window
     // has to reach it or the window keeps a stale hover state.
-    if let Some((window, local)) = state.frame_under(location)
-        && let Some(id) = state.toplevel_id(&window)
-        && let Some(decoration) = state.decorations.get_mut(&id)
-    {
-        decoration.pointer(local.x, local.y, None);
-    }
+    hover_frame(state, location);
 
     let under = state.surface_under(location);
 
@@ -168,6 +210,64 @@ fn pointer_motion<B: InputBackend>(
         },
     );
     pointer.frame(state);
+}
+
+/// Motion from a device that reports movement, not position — a real mouse.
+///
+/// The nested backend never sends this: winit is a window, so it always knows
+/// where the pointer *is* and reports that. libinput reports how far the mouse
+/// moved and leaves the position to us, which means a compositor that only
+/// handles the absolute case has a pointer that never moves — and no way to
+/// tell that apart from input being dead.
+fn pointer_relative<B: InputBackend>(
+    state: &mut Solium,
+    output: &Output,
+    event: impl PointerMotionEvent<B>,
+) {
+    let Some(pointer) = state.seat.get_pointer() else {
+        return;
+    };
+    let location = confine(output, pointer.current_location() + event.delta());
+    let under = state.surface_under(location);
+
+    hover_frame(state, location);
+    pointer.motion(
+        state,
+        under,
+        &MotionEvent {
+            location,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: event.time_msec(),
+        },
+    );
+    pointer.frame(state);
+}
+
+/// Keep the pointer on the screen.
+///
+/// Relative motion has no bounds of its own: without this the pointer walks off
+/// the output and never comes back, which looks exactly like it froze.
+fn confine(output: &Output, location: Point<f64, Logical>) -> Point<f64, Logical> {
+    let size = output
+        .current_mode()
+        .map(|mode| mode.size)
+        .unwrap_or_default();
+    let last = |edge: i32| f64::from((edge - 1).max(0));
+    (
+        location.x.clamp(0.0, last(size.w)),
+        location.y.clamp(0.0, last(size.h)),
+    )
+        .into()
+}
+
+/// Let a window frame see the pointer, so its buttons light up on hover.
+fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
+    if let Some((window, local)) = state.frame_under(location)
+        && let Some(id) = state.toplevel_id(&window)
+        && let Some(decoration) = state.decorations.get_mut(&id)
+    {
+        decoration.pointer(local.x, local.y, None);
+    }
 }
 
 fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButtonEvent<B>) {
@@ -401,4 +501,107 @@ fn absolute_location<B: InputBackend>(
         .map(|mode| mode.size)
         .unwrap_or_default();
     (event.x_transformed(size.w), event.y_transformed(size.h)).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Request, confine, escape};
+    use smithay::{
+        input::keyboard::{Keysym, ModifiersState},
+        output::{Mode, Output, PhysicalProperties, Subpixel},
+        utils::Transform,
+    };
+
+    fn modifiers(ctrl: bool, alt: bool) -> ModifiersState {
+        ModifiersState {
+            ctrl,
+            alt,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ctrl_alt_f3_asks_for_the_third_terminal() {
+        assert_eq!(
+            escape(&modifiers(true, true), Keysym::XF86_Switch_VT_3),
+            Some(Request::Vt(3))
+        );
+        assert_eq!(
+            escape(&modifiers(true, true), Keysym::XF86_Switch_VT_1),
+            Some(Request::Vt(1))
+        );
+        assert_eq!(
+            escape(&modifiers(true, true), Keysym::XF86_Switch_VT_12),
+            Some(Request::Vt(12))
+        );
+    }
+
+    #[test]
+    fn ctrl_alt_backspace_stops_the_compositor() {
+        assert_eq!(
+            escape(&modifiers(true, true), Keysym::BackSpace),
+            Some(Request::Quit)
+        );
+    }
+
+    /// The escapes must not fire without their modifiers, or backspace in a
+    /// text field would end the session.
+    #[test]
+    fn the_escapes_need_both_modifiers() {
+        assert_eq!(escape(&modifiers(false, false), Keysym::BackSpace), None);
+        assert_eq!(escape(&modifiers(true, false), Keysym::BackSpace), None);
+        assert_eq!(escape(&modifiers(false, true), Keysym::BackSpace), None);
+        assert_eq!(
+            escape(&modifiers(true, false), Keysym::XF86_Switch_VT_2),
+            None
+        );
+    }
+
+    #[test]
+    fn ordinary_keys_are_not_escapes() {
+        assert_eq!(escape(&modifiers(true, true), Keysym::a), None);
+        assert_eq!(escape(&modifiers(true, true), Keysym::Return), None);
+    }
+
+    fn output() -> Output {
+        let output = Output::new(
+            "test".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Solium".into(),
+                model: "test".into(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: (1920, 1080).into(),
+                refresh: 60_000,
+            }),
+            Some(Transform::Normal),
+            None,
+            Some((0, 0).into()),
+        );
+        output
+    }
+
+    /// Relative motion has no bounds of its own. Without this the pointer walks
+    /// off the output and never comes back, which looks exactly like a freeze.
+    #[test]
+    fn the_pointer_stays_on_the_screen() {
+        let output = output();
+        assert_eq!(confine(&output, (-40.0, -10.0).into()), (0.0, 0.0).into());
+        assert_eq!(
+            confine(&output, (9999.0, 9999.0).into()),
+            (1919.0, 1079.0).into()
+        );
+    }
+
+    #[test]
+    fn a_pointer_already_on_the_screen_is_left_alone() {
+        assert_eq!(
+            confine(&output(), (640.0, 480.0).into()),
+            (640.0, 480.0).into()
+        );
+    }
 }
