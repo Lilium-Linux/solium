@@ -255,6 +255,25 @@ start on the host at all. Building and running in one place removes the skew
 rather than papering over it. `/tmp` is shared so captures land where you can
 read them.
 
+## Driving input without a mouse
+
+`SOLIUM_DRAG_AT` performs a drag through the real input path — the real grab,
+the real hit-testing, the real layout scripts:
+
+```sh
+SOLIUM_DRAG_AT="8000:400,25>1200,500"    # at 8s, drag from (400,25) to (1200,500)
+```
+
+Aim the *start* at a titlebar. A press in a client's own area does not begin a
+move grab, so a drag that starts there proves nothing — which it did, the first
+time this was used.
+
+It exists because dragging was the one interaction that needed a hand on a
+mouse, and two bugs shipped there in three commits; the second froze the
+machine. Both are reproducible from a script now: restoring the deadlock and
+running the line above freezes the compositor on demand, CPU flat, which is how
+the fix was confirmed to be a fix rather than a rearrangement.
+
 ## Settings
 
 `crates/solium/lua/config.lua` holds everything tunable — gaps, the master
@@ -283,7 +302,8 @@ the right enters from the right, because that is where it is.
 | `Super` + wheel | Scroll the viewport (scrolling layout) |
 | Drag a window | In a tiled or scrolling layout, swaps or snaps back |
 | `Ctrl`+`Alt`+`F1`…`F12` | Switch virtual terminal (hardware session only) |
-| `Ctrl`+`Alt`+`Backspace` | Stop the compositor |
+| `Super`+`Shift`+`Q` | Stop the compositor (`sol.quit`, rebindable) |
+| `Ctrl`+`Alt`+`Backspace` | Stop the compositor (built in, cannot be rebound) |
 
 The last two are taken before scripts see them, and cannot be rebound. They are
 the keys that have to work when everything else is broken.

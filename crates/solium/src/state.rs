@@ -498,6 +498,10 @@ impl Solium {
                     }
                 }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
+                Command::Quit => {
+                    tracing::info!("a script asked to stop");
+                    self.request = Some(Request::Quit);
+                }
             }
         }
     }

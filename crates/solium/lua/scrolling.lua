@@ -102,12 +102,13 @@ sol.on("drop", function(id, x, y)
         return
     end
     local windows = ordered()
+    -- `sol.window_at` answers with an id, not a window.
     local target = sol.window_at(x, y)
-    if target and target.id ~= id then
+    if target and target ~= id then
         local from, to
         for index, window in ipairs(windows) do
             if window.id == id then from = index end
-            if window.id == target.id then to = index end
+            if window.id == target then to = index end
         end
         if from and to then
             scrolling.focus(to)

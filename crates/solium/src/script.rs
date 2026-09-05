@@ -119,6 +119,8 @@ pub(crate) enum Command {
     Focus {
         id: u64,
     },
+    /// End the session.
+    Quit,
     /// Move and resize a window for real — the layout's authority, not a
     /// transform. The compositor animates it there from where it was.
     Place {
@@ -654,6 +656,17 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "which",
         lua.create_function(|_, program: String| Ok(which(&program)))?,
+    )?;
+
+    // Ending the session, as a command a script issues rather than a key the
+    // compositor keeps for itself. Ctrl+Alt+Backspace still works and always
+    // will — that one has to survive a broken config — but a compositor whose
+    // only way out is hardcoded is not a configurable one.
+    sol.set(
+        "quit",
+        lua.create_function(|lua, ()| {
+            with_pending(lua, |pending| pending.commands.push(Command::Quit))
+        })?,
     )?;
 
     sol.set(

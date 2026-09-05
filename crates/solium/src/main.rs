@@ -19,6 +19,7 @@ mod qml;
 mod render;
 mod script;
 mod state;
+mod synth;
 mod tty;
 mod winit;
 
