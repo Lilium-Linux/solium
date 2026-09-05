@@ -4,13 +4,14 @@
 //! owns both. Layout and presentation deliberately do not live here — see
 //! `docs/architecture.md`.
 
+use smithay::output::Output;
 use smithay::reexports::wayland_server::{Resource, backend::ObjectId};
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_decoration, delegate_xdg_shell,
-    desktop::{PopupManager, Space, Window, WindowSurfaceType},
+    delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
+    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    desktop::{LayerSurface, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
     input::{
         Seat, SeatHandler, SeatState,
         pointer::{CursorImageStatus, Focus, GrabStartData},
@@ -35,10 +36,16 @@ use smithay::{
         selection::data_device::{
             ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
         },
-        shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-            XdgToplevelSurfaceData,
-            decoration::{XdgDecorationHandler, XdgDecorationState},
+        shell::{
+            wlr_layer::{
+                Layer, LayerSurface as WlrLayerSurface, LayerSurfaceConfigure,
+                WlrLayerShellHandler, WlrLayerShellState,
+            },
+            xdg::{
+                PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+                XdgToplevelSurfaceData,
+                decoration::{XdgDecorationHandler, XdgDecorationState},
+            },
         },
         shm::{ShmHandler, ShmState},
     },
@@ -48,9 +55,9 @@ use zxdg_toplevel_decoration_v1::Mode;
 use crate::{
     decoration::{Action, Decorations, TITLEBAR_HEIGHT},
     input::{grab::MoveGrab, profile::Profile},
+    layer,
     present::{self, Clock, Frame},
     script::{Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
-    shell::{BAR_HEIGHT, Bar, BarState},
 };
 
 /// A window's script-facing identity.
@@ -105,6 +112,9 @@ pub(crate) struct Solium {
         reason = "registers the xdg-decoration global; dropping it would remove it"
     )]
     pub(crate) xdg_decoration_state: XdgDecorationState,
+    /// The shell's way in: bars, docks, wallpapers and notification areas are
+    /// ordinary clients that anchor to an output edge. See `layer.rs`.
+    pub(crate) layer_shell_state: WlrLayerShellState,
 
     pub(crate) space: Space<Window>,
     pub(crate) popups: PopupManager,
@@ -131,11 +141,6 @@ pub(crate) struct Solium {
     /// script finds *this* compositor rather than the session it is nested in.
     pub(crate) socket_name: String,
 
-    /// The QML top bar. `None` if it failed to load — a compositor with no bar
-    /// is worse but usable, one that will not start because a QML file has a
-    /// typo in it is not.
-    pub(crate) bar: Option<Bar>,
-
     /// Every decorated window's frame, drawn by us from QML.
     pub(crate) decorations: Decorations,
 }
@@ -160,6 +165,7 @@ impl Solium {
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
+            layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
             seat_state,
             space: Space::default(),
             popups: PopupManager::default(),
@@ -170,7 +176,6 @@ impl Solium {
             status: String::new(),
             script_grab: false,
             socket_name: String::new(),
-            bar: None,
             decorations: Decorations::default(),
             display_handle,
         }
@@ -185,12 +190,6 @@ impl Solium {
     pub(crate) fn real_geometry(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
         let location = self.space.element_location(window)?;
         Some(Rectangle::new(location, window.geometry().size))
-    }
-
-    /// The output windows are placed on. Multi-output arrives with E4.
-    pub(crate) fn output_geometry(&self) -> Option<Rectangle<i32, Logical>> {
-        let output = self.space.outputs().next()?;
-        self.space.output_geometry(output)
     }
 
     /// A window as drawn, frame included.
@@ -221,17 +220,14 @@ impl Solium {
         window.toplevel().map(|toplevel| toplevel.wl_surface().id())
     }
 
-    /// The output area windows may use: everything the bar has not reserved.
+    /// The output area windows may use.
     ///
-    /// The bar is not a panel that windows slide under — it owns its strip of
-    /// screen, and every placement decision reads this rather than the raw
+    /// Whatever is left once every anchored surface has taken its exclusive
+    /// zone — a number the *shell* chooses and may change at runtime, not a
+    /// constant here. Every placement decision reads this rather than the raw
     /// output.
     pub(crate) fn work_area(&self) -> Option<Rectangle<i32, Logical>> {
-        let output = self.output_geometry()?;
-        Some(Rectangle::new(
-            (output.loc.x, output.loc.y + BAR_HEIGHT).into(),
-            (output.size.w, (output.size.h - BAR_HEIGHT).max(1)).into(),
-        ))
+        Some(layer::work_area(self.space.outputs().next()?))
     }
 
     /// A window's title, as the client set it.
@@ -261,20 +257,6 @@ impl Solium {
 
     pub(crate) fn is_focused(&self, window: &Window) -> bool {
         self.focused_window().as_ref() == Some(window)
-    }
-
-    /// What the bar should show this frame.
-    pub(crate) fn bar_state(&self) -> BarState {
-        let title = self
-            .focused_window()
-            .map(|window| self.window_title(&window))
-            .unwrap_or_default();
-
-        BarState {
-            title,
-            windows: self.space.elements().count(),
-            status: self.status.clone(),
-        }
     }
 
     /// What the compositor looks like right now, as a script sees it.
@@ -397,6 +379,31 @@ impl Solium {
                         animation.easing,
                     );
                 }
+                Command::PresentFrom {
+                    id,
+                    rect,
+                    opacity,
+                    animation,
+                } => {
+                    let Some(window) = self.window_by_id(id) else {
+                        continue;
+                    };
+                    let Some(outer) = self.outer_geometry(&window) else {
+                        continue;
+                    };
+                    let start = Frame {
+                        rect: present::logical((rect.x, rect.y), (rect.w, rect.h)),
+                        opacity: opacity.unwrap_or(1.0),
+                    };
+                    present::from(
+                        &window,
+                        outer,
+                        start,
+                        now,
+                        animation.duration,
+                        animation.easing,
+                    );
+                }
                 Command::Clear { id, animation } => {
                     let Some(window) = self.window_by_id(id) else {
                         continue;
@@ -511,6 +518,15 @@ impl Solium {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        // Anchored surfaces above windows are hit first: a click on a panel is
+        // the panel's, and it reserved that strip precisely so nothing of the
+        // client's would be under the cursor there.
+        if let Some(output) = self.space.outputs().next()
+            && let Some(found) = layer::surface_under(output, location)
+        {
+            return Some(found);
+        }
+
         let now = self.clock.now();
 
         for window in self.space.elements().rev() {
@@ -686,9 +702,30 @@ impl Solium {
         let location = self.initial_placement(window);
         self.space.map_element(window.clone(), location, true);
 
-        if let Some(outer) = self.outer_geometry(window) {
+        // How a window appears is a script's decision — that is what makes the
+        // dock-icon genie a script rather than a feature. The built-in is only
+        // a fallback for when nothing has an opinion; a window popping into
+        // existence with no animation at all is worse than a plain one.
+        if !self.trigger_open(window)
+            && let Some(outer) = self.outer_geometry(window)
+        {
             present::open(window, outer, self.clock.now());
         }
+    }
+
+    /// Offer a newly shown window to whatever script wants to animate it in.
+    fn trigger_open(&mut self, window: &Window) -> bool {
+        let id = window_id(window);
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return false;
+        };
+        let outcome = scripts.opened(id, snapshot);
+        self.scripts = Some(scripts);
+
+        let handled = outcome.handled && !outcome.commands.is_empty();
+        self.apply(outcome);
+        handled
     }
 
     /// Where a new window goes.
@@ -902,6 +939,68 @@ impl Solium {
     }
 }
 
+impl WlrLayerShellHandler for Solium {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.layer_shell_state
+    }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: WlrLayerSurface,
+        wl_output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
+        _layer: Layer,
+        namespace: String,
+    ) {
+        // A surface may name an output or leave the choice to us. With one
+        // output the distinction does not bite yet, but honouring the request
+        // now means a shell written against Solium is not written against a
+        // simplification.
+        let output = wl_output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .or_else(|| self.space.outputs().next().cloned());
+        let Some(output) = output else {
+            tracing::warn!(
+                namespace,
+                "a layer surface arrived with no output to put it on"
+            );
+            return;
+        };
+
+        // The protocol object becomes a desktop surface, which is what carries
+        // the geometry and can be arranged.
+        let surface = LayerSurface::new(surface, namespace.clone());
+        if let Err(err) = layer_map_for_output(&output).map_layer(&surface) {
+            tracing::warn!(?err, namespace, "could not map a layer surface");
+            return;
+        }
+        // Arranging assigns the size and position the client is waiting to be
+        // told; it must happen before the client can draw anything.
+        layer::arrange(&output);
+        tracing::info!(namespace, "layer surface mapped");
+    }
+
+    fn ack_configure(&mut self, _surface: WlSurface, _configure: LayerSurfaceConfigure) {}
+
+    fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
+        // Unmapped *and* rearranged: the exclusive zone it held is now free,
+        // and the work area is wrong until someone recomputes it.
+        for output in self.space.outputs().cloned().collect::<Vec<_>>() {
+            let mut map = layer_map_for_output(&output);
+            let found = map
+                .layers()
+                .find(|layer| layer.layer_surface() == &surface)
+                .cloned();
+            if let Some(layer) = found {
+                map.unmap_layer(&layer);
+                drop(map);
+                layer::arrange(&output);
+            }
+        }
+        tracing::info!("layer surface gone");
+    }
+}
+
 impl XdgDecorationHandler for Solium {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         // Server-side is offered without being asked: the frame is part of the
@@ -985,6 +1084,7 @@ delegate_compositor!(Solium);
 delegate_shm!(Solium);
 delegate_xdg_shell!(Solium);
 delegate_xdg_decoration!(Solium);
+delegate_layer_shell!(Solium);
 delegate_seat!(Solium);
 delegate_output!(Solium);
 delegate_data_device!(Solium);

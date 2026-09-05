@@ -20,18 +20,18 @@ use smithay::{
             utils::RescaleRenderElement,
         },
     },
-    desktop::{PopupManager, Window},
+    desktop::{PopupManager, Window, layer_map_for_output},
     utils::Scale,
 };
 
-use crate::{present, state::Solium};
+use crate::{layer, present, state::Solium};
 
 render_elements! {
     /// Everything Solium can draw.
     ///
     /// `Window` is a client's surface, placed wherever its presentation says.
-    /// `Bar` is a texture the compositor rendered itself — today that is the
-    /// QML top bar, tomorrow window decorations from the same scene graph.
+    /// `Chrome` is a texture the compositor rendered itself: window frames,
+    /// drawn from QML.
     pub(crate) Element<R> where R: ImportAll + ImportMem;
     Window = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
     Chrome = MemoryRenderBufferRenderElement<R>,
@@ -50,6 +50,28 @@ where
     let now = state.clock.now();
     let output_scale = Scale::from(scale);
     let mut elements = Vec::new();
+
+    // Anchored surfaces above the windows: panels, notifications, an overlay.
+    // Collected first because the frame is built topmost-first.
+    let output = state.space.outputs().next().cloned();
+    if let Some(output) = output.as_ref() {
+        let map = layer_map_for_output(output);
+        for surface in map.layers().rev().filter(|layer| layer::is_above(layer)) {
+            let Some(geometry) = map.layer_geometry(surface) else {
+                continue;
+            };
+            let origin = geometry.loc.to_physical_precise_round(scale);
+            let layer_elements: Vec<WaylandSurfaceRenderElement<R>> =
+                surface.render_elements(renderer, origin, output_scale, 1.0);
+            elements.extend(layer_elements.into_iter().map(|element| {
+                Element::Window(RescaleRenderElement::from_element(
+                    element,
+                    origin,
+                    Scale::from(1.0),
+                ))
+            }));
+        }
+    }
 
     // Collected first because the loop needs `&mut state` to render frames.
     // `Window` is a handle, so this is a few pointer copies.
@@ -127,6 +149,27 @@ where
         elements.extend(window_elements.into_iter().map(|element| {
             Element::Window(RescaleRenderElement::from_element(element, origin, factor))
         }));
+    }
+
+    // And the ones below: a wallpaper, and anything else a shell puts behind
+    // the windows.
+    if let Some(output) = output.as_ref() {
+        let map = layer_map_for_output(output);
+        for surface in map.layers().rev().filter(|layer| !layer::is_above(layer)) {
+            let Some(geometry) = map.layer_geometry(surface) else {
+                continue;
+            };
+            let origin = geometry.loc.to_physical_precise_round(scale);
+            let layer_elements: Vec<WaylandSurfaceRenderElement<R>> =
+                surface.render_elements(renderer, origin, output_scale, 1.0);
+            elements.extend(layer_elements.into_iter().map(|element| {
+                Element::Window(RescaleRenderElement::from_element(
+                    element,
+                    origin,
+                    Scale::from(1.0),
+                ))
+            }));
+        }
     }
 
     elements

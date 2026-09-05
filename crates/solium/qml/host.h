@@ -75,7 +75,6 @@ void solium_qml_scene_set_bool(SoliumQmlScene *scene, const char *name, int valu
 
 /* Read a bool property. Non-clearing: this is state QML owns and we observe. */
 int solium_qml_scene_get_bool(const SoliumQmlScene *scene, const char *name);
-void solium_qml_scene_set_real(SoliumQmlScene *scene, const char *name, double value);
 
 /* Pointer input, in scene coordinates. `pressed`: 1 down, 0 up, -1 motion. */
 void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed);

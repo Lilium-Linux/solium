@@ -255,7 +255,36 @@ pub(crate) fn mark_shown(window: &Window) -> bool {
     !shown.0.replace(true)
 }
 
+/// Put a window at `start` and animate it to where it actually lives.
+///
+/// The primitive behind every "appears from somewhere" animation. With a dock
+/// icon's rectangle it is the icon-grows-into-a-window genie; with the window's
+/// own rectangle shrunk a little it is an ordinary open; with a rectangle off
+/// the edge of the screen it is something nobody has asked for yet. The
+/// compositor does not decide which — see `docs/shell-boundary.md`.
+pub(crate) fn from(
+    window: &Window,
+    real: Rectangle<i32, Logical>,
+    start: Frame,
+    now: Duration,
+    duration: Duration,
+    easing: Curve,
+) {
+    with_slot(window, |slot| {
+        *slot = Some(Transform {
+            from: start,
+            to: Frame::real(real),
+            animation: Animation::new(now, duration, easing),
+            // Released on arrival: an opened window is an ordinary window.
+            release: true,
+        });
+    });
+}
+
 /// The animation a window plays when it first has something to show.
+///
+/// The fallback for when no script has an opinion. `lua/open.lua` normally
+/// does.
 pub(crate) fn open(window: &Window, real: Rectangle<i32, Logical>, now: Duration) {
     let target = Frame::real(real);
     with_slot(window, |slot| {
