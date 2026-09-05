@@ -22,13 +22,18 @@
   body { margin:0; padding:24px; background:var(--bg); color:var(--text);
          font:13px/1.6 system-ui, sans-serif; display:flex; gap:24px;
          flex-wrap:wrap; align-items:flex-start; }
+  /* A fixed-width panel. `flex:1` gave it half a 2560px window and sliders a
+     metre long. */
+  aside { flex:0 0 320px; display:flex; flex-direction:column; gap:14px; }
 
   #stage { position:relative; width:800px; height:450px; flex:none;
            background:#0a0b0e; border:1px solid var(--line); border-radius:4px;
            overflow:hidden; }
-  .box { position:absolute; background:var(--box); border-radius:2px; }
+  /* Each box gets its own hue: with more than one window — and with tiling and
+     scrolling coming — identical boxes make it impossible to see which window
+     went where. */
+  .box { position:absolute; border-radius:2px; }
 
-  aside { flex:1; min-width:260px; display:flex; flex-direction:column; gap:14px; }
   .field { display:flex; align-items:center; gap:10px; }
   .field label { width:78px; color:var(--dim); }
   .field output { width:58px; text-align:right; font-variant-numeric:tabular-nums; }
@@ -39,7 +44,12 @@
            border-radius:3px; padding:6px 14px; cursor:pointer; font-size:13px; }
   button.on { border-color:var(--box); color:var(--box); }
   .row { display:flex; gap:8px; }
-  #plot { display:block; border:1px solid var(--line); border-radius:3px; }
+  /* Sized here, not by its width/height attributes. A flex column stretches
+     its children, and a stretched canvas keeps the aspect ratio implied by
+     those attributes — so an 280x80 bitmap was being blown up to fill the
+     panel and drawn blurry and enormous. */
+  #plot { display:block; width:100%; height:80px;
+          border:1px solid var(--line); border-radius:3px; }
   #status { color:var(--dim); min-height:1.5em; }
   hr { border:0; border-top:1px solid var(--line); margin:2px 0; }
 </style>
@@ -72,7 +82,7 @@
 
   <div class="row"><button id="play">Play</button><button id="loop">Loop</button></div>
   <div id="status"></div>
-  <canvas id="plot" width="280" height="80"></canvas>
+  <canvas id="plot"></canvas>
 </aside>
 
 <script>
@@ -172,9 +182,15 @@ let boxes = [];
 function build() {
   const stage = el("stage");
   stage.textContent = "";
-  boxes = SCENARIOS[el("scenario").value]().map(track => {
+
+  // Spread around the wheel by the golden angle from a random start: random
+  // enough to differ run to run, spaced enough that two boxes are never a
+  // similar colour, which pure randomness does regularly.
+  const base = Math.random() * 360;
+  boxes = SCENARIOS[el("scenario").value]().map((track, i) => {
     const node = document.createElement("div");
     node.className = "box";
+    node.style.background = `hsl(${(base + i * 137.508) % 360} 62% 64%)`;
     stage.appendChild(node);
     return { track, node };
   });
@@ -194,7 +210,16 @@ function place(progress) {
 
 function plot() {
   const canvas = el("plot"), ctx = canvas.getContext("2d");
-  const { width: W, height: H } = canvas;
+
+  // The bitmap is matched to the element's real size at the display's pixel
+  // ratio, so the line is crisp instead of a scaled-up 280-pixel one.
+  const ratio = window.devicePixelRatio || 1;
+  const W = Math.round(canvas.clientWidth), H = Math.round(canvas.clientHeight);
+  if (canvas.width !== W * ratio || canvas.height !== H * ratio) {
+    canvas.width = W * ratio;
+    canvas.height = H * ratio;
+  }
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, W, H);
 
   const total = durationMs();
@@ -261,6 +286,9 @@ function boot() {
 
   el("scenario").onchange = () => { build(); refresh(); };
   el("curve").onchange = refresh;
+  // The plot is sized from the element, so it has to be redrawn when that
+  // changes.
+  window.addEventListener("resize", plot);
   for (const id of ["duration", "speed", "stiffness", "damping", "velocity"]) {
     el(id).oninput = refresh;
   }
