@@ -20,7 +20,8 @@ use smithay::{
     },
     reexports::{
         wayland_protocols::xdg::{
-            decoration::zv1::server::zxdg_toplevel_decoration_v1, shell::server::xdg_toplevel,
+            decoration::zv1::server::zxdg_toplevel_decoration_v1,
+            shell::server::{xdg_toplevel, xdg_toplevel::ResizeEdge},
         },
         wayland_server::{
             Client, DisplayHandle,
@@ -56,7 +57,7 @@ use zxdg_toplevel_decoration_v1::Mode;
 
 use crate::{
     decoration::{Action, Decorations, TITLEBAR_HEIGHT},
-    input::{grab::MoveGrab, profile::Profile},
+    input::{grab::MoveGrab, profile::Profile, resize},
     layer,
     present::{self, Clock, Frame},
     script::{AnimationSpec, Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
@@ -437,6 +438,72 @@ impl Solium {
                 Command::Spawn { program, args } => self.spawn(&program, &args),
             }
         }
+    }
+
+    /// The window and edges a press at `location` would resize, if any.
+    ///
+    /// Searched topmost first, and only over the edges: the middle of a window
+    /// belongs to the client.
+    pub(crate) fn resize_target(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(Window, ResizeEdge, Rectangle<i32, Logical>)> {
+        let now = self.clock.now();
+
+        self.space.elements().rev().find_map(|window| {
+            let outer = self.outer_geometry(window)?;
+            // Against where the window is *drawn*: a window in a mode should be
+            // resized by its thumbnail's edge or not at all, never by an edge
+            // that is somewhere else on screen.
+            let drawn = present::frame(window, outer, now).rect;
+            let grown = Rectangle::new(
+                (
+                    drawn.loc.x.round() as i32 - resize::RESIZE_BORDER,
+                    drawn.loc.y.round() as i32 - resize::RESIZE_BORDER,
+                )
+                    .into(),
+                (
+                    drawn.size.w.round() as i32 + resize::RESIZE_BORDER * 2,
+                    drawn.size.h.round() as i32 + resize::RESIZE_BORDER * 2,
+                )
+                    .into(),
+            );
+            if !grown.to_f64().contains(location) {
+                return None;
+            }
+
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a drawn rect is screen-sized"
+            )]
+            let drawn_rect = Rectangle::new(
+                (drawn.loc.x.round() as i32, drawn.loc.y.round() as i32).into(),
+                (drawn.size.w.round() as i32, drawn.size.h.round() as i32).into(),
+            );
+            match resize::edges_at(drawn_rect, location) {
+                ResizeEdge::None => None,
+                edges => Some((window.clone(), edges, outer)),
+            }
+        })
+    }
+
+    /// Put a window at an exact rectangle, without animating.
+    ///
+    /// What a resize drag calls every frame: the window must be under the
+    /// pointer's corner *now*, so this deliberately does not go through the
+    /// transform the way `place` does.
+    pub(crate) fn resize_to(&mut self, window: &Window, outer: Rectangle<i32, Logical>) {
+        let inset = self.frame_inset(window);
+        let client = Rectangle::new(
+            (outer.loc.x, outer.loc.y + inset).into(),
+            (outer.size.w, (outer.size.h - inset).max(1)).into(),
+        );
+
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|state| state.size = Some(client.size));
+            toplevel.send_pending_configure();
+        }
+        self.space.map_element(window.clone(), client.loc, false);
     }
 
     /// Move and resize a window for real, gliding it there from where it was.

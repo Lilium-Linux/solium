@@ -8,6 +8,8 @@ a demo into a regression test.
 |---|---|
 | `SOLIUM_CAPTURE=<path>` | Write one rendered frame to `<path>` as a binary PPM. |
 | `SOLIUM_CAPTURE_AT=<ms>` | Capture at this moment instead of "once a window has settled". Naming a moment is what makes capturing an *animation* possible. |
+| `SOLIUM_CAPTURE_FRAMES=<n>` | Capture a burst of `n` frames, numbered `frame-000.ppm`, `frame-001.ppm`, … One frame shows a pose; a burst shows whether the motion is smooth. |
+| `SOLIUM_CAPTURE_INTERVAL=<ms>` | Time between frames of a burst (default 16). |
 | `SOLIUM_TRIGGER_AT=` | Fire key bindings, as `<ms>:<combo>` separated by commas — e.g. `5200:super+space,6200:super+space`. Goes through the same path a keypress does. |
 | `SOLIUM_CLICK_AT=` | Fire pointer presses, as `<ms>:<x>,<y>` separated by semicolons. |
 | `SOLIUM_LUA_INIT=<path>` | Load this configuration instead of `~/.config/solium/init.lua` or the bundled one. |
@@ -155,6 +157,29 @@ wrong otherwise, and both were hit:
   On a 260 Hz display, 55 fps puts a dragged window four frames behind the
   cursor, which is exactly what it looks like.
 
+## Checking an animation frame by frame
+
+```sh
+SOLIUM_TRIGGER_AT=9000:super+t SOLIUM_CAPTURE=/tmp/tile.ppm \
+  SOLIUM_CAPTURE_AT=9000 SOLIUM_CAPTURE_FRAMES=16 SOLIUM_CAPTURE_INTERVAL=20 \
+  dev/run-nested.sh
+```
+
+The bounding box of what is drawn, per frame, is the animation's curve. A good
+one moves most on the first frame and less on each one after, never jumps, and
+reaches zero at the end. Measured across the modes:
+
+| Mode | Per-frame movement (px) |
+|---|---|
+| window opens | 16, 12, 8, 4, 4, 0 |
+| overview enters | 108, 84, 76, 56, 44, 32, 20, 16, 4, 4, 4, 0 |
+| tiling arranges | 120, 92, 84, 56, 48, 32, 24, 16, 8, 4, 4, 4, 4, 4, 0 |
+| scrolling arranges | 224, 100, 72, 64, 44, 32, 20, 16, 8, 4, 4, 4, 4, 4, 0 |
+
+Monotonically decreasing and settling is what an ease-out looks like from the
+outside. A jump mid-sequence means a layout wrote geometry without animating it;
+a stall means something is being recomputed per frame that should not be.
+
 ## Where it runs
 
 `dev/run-nested.sh` runs Solium **in the build container**, not on the host. It
@@ -171,6 +196,9 @@ read them.
 | `Super` + `Return` | Open a terminal (`SOLIUM_TERMINAL` picks which) |
 | `Super` + `Q` | Close the focused window |
 | `Super` + `T` | Tiling on/off (`lua/tiling.lua`) |
+| `Super` + `S` | Scrolling on/off (`lua/scrolling.lua`) |
+| `Super` + `[` / `]` | Scroll the viewport to the previous/next column |
+| Drag a window edge | Resize |
 | `Super` + `Space` | Overview on/off (bound in `lua/overview.lua`, not in Rust) |
 | `Escape` | Leave overview |
 | `Super` + drag | Move a window from anywhere in it |
