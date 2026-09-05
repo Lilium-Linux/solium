@@ -1,11 +1,11 @@
 //! Build the animation preview page.
 //!
-//! Embeds the engine — compiled to WebAssembly — and the list of curve names
-//! into `preview/index.html`, and writes the result. The page then calls the
-//! engine directly, so the curve tuned in a browser is the one that will move
-//! real windows. A reimplementation in JavaScript would drift the first time
-//! either side changed, and the drift would be invisible because the page would
-//! still animate plausibly.
+//! Embeds two engines — the animation curves and the window arrangements, both
+//! compiled to WebAssembly — into `preview/index.html`, and writes the result.
+//! The page calls them directly, so what is tuned in a browser is the code that
+//! moves and arranges real windows. A reimplementation in JavaScript would
+//! drift the first time either side changed, and the drift would be invisible
+//! because the page would still look plausible.
 //!
 //! Driven by `dev/preview`, which builds the wasm first.
 //!
@@ -18,19 +18,22 @@ use std::{io::Write as _, path::PathBuf};
 use solium_animation::Curve;
 
 fn main() {
-    let Some(wasm) = std::env::args_os().nth(1).map(PathBuf::from) else {
-        eprintln!("usage: preview <engine.wasm>");
-        eprintln!("       run dev/preview instead, which builds it first");
+    let mut args = std::env::args_os().skip(1).map(PathBuf::from);
+    let (Some(animation), Some(layout)) = (args.next(), args.next()) else {
+        eprintln!("usage: preview <animation.wasm> <layout.wasm>");
+        eprintln!("       run dev/preview instead, which builds them first");
         std::process::exit(2);
     };
 
-    let bytes = match std::fs::read(&wasm) {
+    let read = |path: &PathBuf| match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) => {
-            eprintln!("error: could not read {}: {err}", wasm.display());
+            eprintln!("error: could not read {}: {err}", path.display());
             std::process::exit(1);
         }
     };
+    let bytes = read(&animation);
+    let layout_bytes = read(&layout);
 
     let names: Vec<String> = Curve::all()
         .into_iter()
@@ -40,7 +43,8 @@ fn main() {
     const PAGE: &str = include_str!("../../preview/index.html");
     let page = PAGE
         .replace("/*CURVES*/ null", &format!("[{}]", names.join(", ")))
-        .replace("/*WASM*/ \"\"", &format!("{:?}", base64(&bytes)));
+        .replace("/*WASM*/ \"\"", &format!("{:?}", base64(&bytes)))
+        .replace("/*LAYOUT*/ \"\"", &format!("{:?}", base64(&layout_bytes)));
 
     let mut stdout = std::io::stdout().lock();
     if let Err(err) = stdout.write_all(page.as_bytes()) {

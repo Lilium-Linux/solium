@@ -28,10 +28,6 @@ local function ordered()
     return out
 end
 
-local function column_width(area)
-    return math.floor(area.w * COLUMN)
-end
-
 function scrolling.apply(animation)
     if not scrolling.active then
         return
@@ -42,16 +38,14 @@ function scrolling.apply(animation)
     end
 
     local area = sol.monitor()
-    local width = column_width(area)
+    area.gap = GAP
+    area.column = COLUMN
+    area.offset = scrolling.offset
 
+    local slots = sol.layout.scrolling(#windows, area)
     sol.animate(animation or SETTLE)
     for i, window in ipairs(windows) do
-        sol.place(window.id, {
-            x = area.x + GAP + (i - 1) * (width + GAP) - scrolling.offset,
-            y = area.y + GAP,
-            w = width,
-            h = area.h - GAP * 2,
-        })
+        sol.place(windows[i].id, slots[i])
     end
 end
 
@@ -65,17 +59,13 @@ function scrolling.focus(index)
     index = math.max(1, math.min(index, #windows))
     scrolling.focused = index
 
+    -- Only scrolls far enough to reveal it; a column already on screen stays
+    -- put rather than being centred for no reason.
     local area = sol.monitor()
-    local width = column_width(area)
-    local left = (index - 1) * (width + GAP)
-
-    -- Only scroll far enough to reveal it; a column already on screen stays
-    -- where it is rather than being centred for no reason.
-    if left < scrolling.offset then
-        scrolling.offset = left
-    elseif left + width > scrolling.offset + area.w - GAP * 2 then
-        scrolling.offset = left + width - (area.w - GAP * 2)
-    end
+    area.gap = GAP
+    area.column = COLUMN
+    area.offset = scrolling.offset
+    scrolling.offset = sol.layout.scroll_to(index, #windows, area)
 
     scrolling.apply(SNAP)
     sol.focus(windows[index].id)

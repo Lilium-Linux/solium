@@ -316,6 +316,102 @@ impl Scripts {
     }
 }
 
+/// The `sol.layout` table.
+fn layouts(lua: &Lua) -> mlua::Result<Table> {
+    use solium_layout::{Rect as Slot, Settings};
+
+    fn area(options: &Table) -> mlua::Result<Slot> {
+        Ok(Slot::new(
+            options.get("x")?,
+            options.get("y")?,
+            options.get("w")?,
+            options.get("h")?,
+        ))
+    }
+
+    fn tuning(options: &Table) -> mlua::Result<Settings> {
+        let defaults = Settings::default();
+        Ok(Settings {
+            gap: options.get::<Option<f64>>("gap")?.unwrap_or(defaults.gap),
+            ratio: options
+                .get::<Option<f64>>("ratio")?
+                .unwrap_or(defaults.ratio),
+            column: options
+                .get::<Option<f64>>("column")?
+                .unwrap_or(defaults.column),
+            padding: options
+                .get::<Option<f64>>("padding")?
+                .unwrap_or(defaults.padding),
+        })
+    }
+
+    fn to_lua(lua: &Lua, slots: &[Slot]) -> mlua::Result<Table> {
+        let list = lua.create_table()?;
+        for (index, slot) in slots.iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("x", slot.x)?;
+            entry.set("y", slot.y)?;
+            entry.set("w", slot.w)?;
+            entry.set("h", slot.h)?;
+            list.set(index + 1, entry)?;
+        }
+        Ok(list)
+    }
+
+    let layout = lua.create_table()?;
+
+    layout.set(
+        "master_stack",
+        lua.create_function(|lua, (count, options): (usize, Table)| {
+            let slots = solium_layout::master_stack(count, area(&options)?, tuning(&options)?);
+            to_lua(lua, &slots)
+        })?,
+    )?;
+
+    layout.set(
+        "scrolling",
+        lua.create_function(|lua, (count, options): (usize, Table)| {
+            let offset = options.get::<Option<f64>>("offset")?.unwrap_or_default();
+            let slots = solium_layout::scrolling(count, area(&options)?, tuning(&options)?, offset);
+            to_lua(lua, &slots)
+        })?,
+    )?;
+
+    layout.set(
+        "scroll_to",
+        lua.create_function(|_, (index, count, options): (usize, usize, Table)| {
+            let offset = options.get::<Option<f64>>("offset")?.unwrap_or_default();
+            Ok(solium_layout::scroll_to(
+                index.saturating_sub(1),
+                count,
+                area(&options)?,
+                tuning(&options)?,
+                offset,
+            ))
+        })?,
+    )?;
+
+    layout.set(
+        "grid",
+        lua.create_function(|lua, (sizes, options): (Table, Table)| {
+            let mut windows = Vec::new();
+            for size in sizes.sequence_values::<Table>() {
+                let size = size?;
+                windows.push(Slot::new(
+                    size.get("x")?,
+                    size.get("y")?,
+                    size.get("w")?,
+                    size.get("h")?,
+                ));
+            }
+            let slots = solium_layout::grid(&windows, area(&options)?, tuning(&options)?);
+            to_lua(lua, &slots)
+        })?,
+    )?;
+
+    Ok(layout)
+}
+
 /// Run every listener registered for an event.
 ///
 /// One failing listener is logged and the rest still run: a broken script must
@@ -578,6 +674,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             Ok(())
         })?,
     )?;
+
+    // The standard arrangements, from the same crate the preview calls. A
+    // script picks which and when — and may compute its own rectangles instead,
+    // which is why these are offered rather than imposed.
+    sol.set("layout", layouts(lua)?)?;
 
     sol.set(
         "log",

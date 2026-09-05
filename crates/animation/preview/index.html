@@ -51,6 +51,9 @@
   #plot { display:block; width:100%; height:80px;
           border:1px solid var(--line); border-radius:3px; }
   #status { color:var(--dim); min-height:1.5em; }
+  #config { width:100%; background:#0a0b0e; color:var(--text); resize:vertical;
+            border:1px solid var(--line); border-radius:3px; padding:8px;
+            font:11px/1.5 monospace; }
   hr { border:0; border-top:1px solid var(--line); margin:2px 0; }
 </style>
 
@@ -58,6 +61,9 @@
 
 <aside>
   <div class="field"><label for="scenario">scenario</label><select id="scenario"></select></div>
+  <div class="field"><label for="count">windows</label>
+    <input type="range" id="count" min="1" max="8" step="1" value="3">
+    <output id="countOut"></output></div>
   <div class="field"><label for="curve">curve</label><select id="curve"></select></div>
   <div class="field"><label for="duration">duration</label>
     <input type="range" id="duration" min="60" max="1200" step="10" value="260">
@@ -65,6 +71,21 @@
   <div class="field"><label for="speed">speed</label>
     <input type="range" id="speed" min="10" max="100" step="5" value="100">
     <output id="speedOut"></output></div>
+
+  <hr>
+
+  <div class="field"><label for="gap">gap</label>
+    <input type="range" id="gap" min="0" max="40" step="1" value="12">
+    <output id="gapOut"></output></div>
+  <div class="field"><label for="ratio">master</label>
+    <input type="range" id="ratio" min="20" max="80" step="1" value="60">
+    <output id="ratioOut"></output></div>
+  <div class="field"><label for="column">column</label>
+    <input type="range" id="column" min="20" max="90" step="1" value="44">
+    <output id="columnOut"></output></div>
+  <div class="field"><label for="offset">scroll</label>
+    <input type="range" id="offset" min="0" max="2000" step="10" value="0">
+    <output id="offsetOut"></output></div>
 
   <hr>
 
@@ -83,6 +104,8 @@
   <div class="row"><button id="play">Play</button><button id="loop">Loop</button></div>
   <div id="status"></div>
   <canvas id="plot"></canvas>
+  <textarea id="config" readonly rows="7" spellcheck="false"
+            title="paste into ~/.config/solium/init.lua"></textarea>
 </aside>
 
 <script>
@@ -91,6 +114,7 @@
 // Injected by dev/preview.
 const CURVES = /*CURVES*/ null;
 const WASM_BASE64 = /*WASM*/ "";
+const LAYOUT_BASE64 = /*LAYOUT*/ "";
 
 // Solium's own coordinates, so a scenario reads the way the compositor sees it.
 const OUTPUT = { w: 1600, h: 900 };
@@ -98,7 +122,37 @@ const BAR = 34, PADDING = 24, SCALE = 800 / OUTPUT.w;
 
 const el = id => document.getElementById(id);
 const lerp = (a, b, t) => a + (b - a) * t;
-let engine = null, springIndex = -1;
+let engine = null, layout = null, springIndex = -1;
+
+/* ---------- the layout engine ---------- */
+
+// Arrangements are read out of the layout module's own memory: it writes them
+// into a fixed buffer and returns how many, so nothing is allocated on either
+// side of the boundary.
+function slots(written) {
+  const base = layout.solium_layout_scratch();
+  const view = new Float64Array(layout.memory.buffer, base, written * 4);
+  const out = [];
+  for (let i = 0; i < written; i++) {
+    out.push({ x: view[i*4], y: view[i*4+1], w: view[i*4+2], h: view[i*4+3] });
+  }
+  return out;
+}
+
+function writeSizes(sizes) {
+  const base = layout.solium_layout_scratch();
+  const view = new Float64Array(layout.memory.buffer, base, sizes.length * 4);
+  sizes.forEach((s, i) => {
+    view[i*4] = s.x; view[i*4+1] = s.y; view[i*4+2] = s.w; view[i*4+3] = s.h;
+  });
+}
+
+const tuning = () => ({
+  gap: +el("gap").value,
+  ratio: +el("ratio").value / 100,
+  column: +el("column").value / 100,
+  offset: +el("offset").value,
+});
 
 /* ---------- scenarios: geometry only, never timing ---------- */
 
@@ -123,43 +177,86 @@ function cell(index, count) {
 const shrink = w => ({ x: w.x + w.w * 0.06, y: w.y + w.h * 0.06,
                        w: w.w * 0.88, h: w.h * 0.88 });
 
-const THREE = [win(120, 120, 820, 560), win(360, 240, 900, 600), win(600, 180, 780, 620)];
+// Windows at plausible floating positions, which is where a layout starts from.
+function floating(count) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    out.push(win(120 + i * 150, 110 + (i % 3) * 90, 760 + (i % 2) * 120, 520 + (i % 3) * 60));
+  }
+  return out;
+}
 
+const WORK = { x: 0, y: BAR, w: OUTPUT.w, h: OUTPUT.h - BAR };
+
+// Every arrangement here is computed by the layout engine, not reimplemented.
+// The page owns only *which* arrangement and what starts where.
 const SCENARIOS = {
-  "open": () => {
+  "tiling": () => {
+    const from = floating(+el("count").value);
+    const t = tuning();
+    const to = slots(layout.solium_layout_master_stack(
+      from.length, WORK.x, WORK.y, WORK.w, WORK.h, t.gap, t.ratio));
+    return from.map((w, i) => ({ from: { ...w, opacity: 1 },
+                                 to: { ...to[i], opacity: 1 } }));
+  },
+
+  "scrolling": () => {
+    const from = floating(+el("count").value);
+    const t = tuning();
+    const to = slots(layout.solium_layout_scrolling(
+      from.length, WORK.x, WORK.y, WORK.w, WORK.h, t.gap, t.column, t.offset));
+    return from.map((w, i) => ({ from: { ...w, opacity: 1 },
+                                 to: { ...to[i], opacity: 1 } }));
+  },
+
+  "overview: enter": () => {
+    const from = floating(+el("count").value);
+    writeSizes(from);
+    const t = tuning();
+    const to = slots(layout.solium_layout_grid(
+      from.length, WORK.x, WORK.y, WORK.w, WORK.h, 24));
+    return from.map((w, i) => ({ from: { ...w, opacity: 1 },
+                                 to: { ...to[i], opacity: 1 } }));
+  },
+
+  "overview: leave": () => SCENARIOS["overview: enter"]()
+    .map(t => ({ from: t.to, to: t.from })),
+
+  "window opens": () => {
     const w = win(430, 220, 740, 520);
     return [{ from: { ...shrink(w), opacity: 0 }, to: { ...w, opacity: 1 } }];
   },
-  "close": () => {
+
+  "window closes": () => {
     const w = win(430, 220, 740, 520);
     return [{ from: { ...w, opacity: 1 }, to: { ...shrink(w), opacity: 0 } }];
   },
-  "overview: enter": () => THREE.map((w, i) => ({
-    from: { ...w, opacity: 1 },
-    to: { ...fit(w, cell(i, THREE.length)), opacity: 1 },
-  })),
-  "overview: leave": () => SCENARIOS["overview: enter"]()
-    .map(t => ({ from: t.to, to: t.from })),
-  "switcher": () => {
-    const windows = [...THREE, win(660, 160, 820, 560)];
-    const slot = (OUTPUT.w - PADDING * 5) / 4;
-    return windows.map((w, i) => ({
-      from: { ...w, opacity: 1 },
-      to: { ...fit(w, { x: PADDING + i * (slot + PADDING), y: OUTPUT.h / 2 - 170,
-                        w: slot, h: 340 }), opacity: 1 },
-    }));
-  },
-  "move": () => {
-    const w = win(90, 90, 700, 480);
-    return [{ from: { ...w, opacity: 1 },
-              to: { ...w, x: OUTPUT.w - w.w - 90, y: OUTPUT.h - w.h - 60, opacity: 1 } }];
-  },
-  "maximise": () => {
-    const w = win(420, 260, 620, 400);
-    return [{ from: { ...w, opacity: 1 },
-              to: { x: 0, y: BAR, w: OUTPUT.w, h: OUTPUT.h - BAR, opacity: 1 } }];
-  },
 };
+
+/* ---------- config, ready to paste ---------- */
+
+function configLines() {
+  const t = tuning();
+  const curve = CURVES[+el("curve").value];
+  const duration = Math.round(durationMs());
+  const spring = isSpring()
+    ? `\n-- spring: stiffness ${el("stiffness").value}, damping ${el("damping").value}` +
+      `, throw ${el("velocity").value} (settles in ${duration}ms)`
+    : "";
+
+  return `-- ~/.config/solium/init.lua${spring}
+local ANIMATION = { duration = ${duration}, easing = "${curve}" }
+
+local GAP = ${t.gap}
+local MASTER = ${t.ratio.toFixed(2)}    -- share of the width for the master window
+local COLUMN = ${t.column.toFixed(2)}    -- share of the width for a scrolling column
+
+-- master and stack
+local area = sol.monitor()
+area.gap, area.ratio = GAP, MASTER
+local slots = sol.layout.master_stack(#sol.windows(), area)
+sol.animate(ANIMATION)`;
+}
 
 /* ---------- the engine: everything about *when* ---------- */
 
@@ -275,6 +372,11 @@ function boot() {
   el("curve").value = String(Math.max(0, CURVES.indexOf("outCubic")));
 
   const refresh = () => {
+    el("countOut").textContent = el("count").value;
+    el("gapOut").textContent = el("gap").value;
+    el("ratioOut").textContent = el("ratio").value + "%";
+    el("columnOut").textContent = el("column").value + "%";
+    el("offsetOut").textContent = el("offset").value;
     el("durationOut").textContent = el("duration").value + "ms";
     el("speedOut").textContent = (+el("speed").value / 100).toFixed(2) + "x";
     for (const id of ["stiffness", "damping", "velocity"]) {
@@ -282,6 +384,7 @@ function boot() {
     }
     el("duration").disabled = isSpring();
     plot();
+    el("config").value = configLines();
   };
 
   el("scenario").onchange = () => { build(); refresh(); };
@@ -291,6 +394,12 @@ function boot() {
   window.addEventListener("resize", plot);
   for (const id of ["duration", "speed", "stiffness", "damping", "velocity"]) {
     el(id).oninput = refresh;
+  }
+  // A layout parameter changes the arrangement, so the boxes are rebuilt and
+  // the change is played rather than jumping — which is the point of tuning a
+  // layout here instead of reading numbers.
+  for (const id of ["count", "gap", "ratio", "column", "offset"]) {
+    el(id).oninput = () => { build(); refresh(); place(1); };
   }
   el("play").onclick = () => { place(0); play(); };
   el("loop").onclick = () => {

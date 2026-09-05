@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/animation", "crates/solium"]
+members = ["crates/animation", "crates/layout", "crates/solium"]
 resolver = "3"
 
 [workspace.package]

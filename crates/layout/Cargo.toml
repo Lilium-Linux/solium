@@ -1,0 +1,18 @@
+[package]
+name = "solium-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Solium's window arrangements: master-stack, scrolling strip, grid. No compositor attached."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Deliberately empty, like the animation crate. A layout is arithmetic on
+# rectangles; the moment it needs a compositor it stops being testable and stops
+# being previewable, which are the two reasons it lives here.
+[dependencies]
