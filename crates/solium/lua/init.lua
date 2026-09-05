@@ -6,6 +6,7 @@
 
 require("open")
 require("overview")
+require("workspaces")
 require("tiling")
 require("scrolling")
 

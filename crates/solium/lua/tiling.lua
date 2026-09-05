@@ -11,10 +11,13 @@
 -- the rest in a column beside it. Scrolling and the phone and tablet layouts
 -- are further scripts beside this one, not modes inside it.
 
-local tiling = { active = false, ratio = 0.6, order = {} }
+local config = require("config")
+local workspaces = require("workspaces")
 
-local GAP = 12
-local SETTLE = { duration = 240, easing = "outCubic" }
+local tiling = { active = false, ratio = config.tiling.ratio, order = {} }
+
+local GAP = config.gap
+local SETTLE = config.tiling.motion
 
 -- The tiled order, kept by the script rather than derived from stacking.
 --
@@ -23,7 +26,9 @@ local SETTLE = { duration = 240, easing = "outCubic" }
 -- have gone are dropped and new ones are appended, so opening a window never
 -- reshuffles the ones already placed.
 function tiling.reconcile()
-    local windows = sol.windows()
+    -- Only the workspace in view is arranged. Windows elsewhere are drawn a
+    -- screen away and must not take a slot in this one.
+    local windows = workspaces.visible()
     local by_id = {}
     for _, window in ipairs(windows) do
         by_id[window.id] = window

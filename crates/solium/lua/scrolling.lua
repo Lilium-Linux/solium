@@ -12,15 +12,18 @@
 
 local scrolling = { active = false, offset = 0, focused = 1 }
 
-local GAP = 12
-local COLUMN = 0.44 -- of the work area's width
-local SETTLE = { duration = 260, easing = "outCubic" }
-local SNAP = { duration = 200, easing = "outCubic" }
+local config = require("config")
+local workspaces = require("workspaces")
+
+local GAP = config.gap
+local COLUMN = config.scrolling.column -- of the work area's width
+local SETTLE = config.scrolling.motion
+local SNAP = config.scrolling.snap
 
 -- Oldest first, so the strip has a stable order and does not reshuffle when
 -- focus moves.
 local function ordered()
-    local windows = sol.windows()
+    local windows = workspaces.visible()
     local out = {}
     for i = #windows, 1, -1 do
         out[#out + 1] = windows[i]
