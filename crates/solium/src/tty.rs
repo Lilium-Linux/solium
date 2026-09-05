@@ -19,7 +19,11 @@
 //! a black screen on return, which is the failure this file most needs to not
 //! have.
 
-use std::{os::fd::OwnedFd, path::PathBuf, time::Duration};
+use std::{
+    os::fd::{AsFd, BorrowedFd},
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, anyhow};
 use smithay::{
@@ -76,22 +80,18 @@ pub(crate) fn probe() -> Result<()> {
     println!("seat        {seat}");
     println!("primary gpu {}", primary.display());
 
-    let file =
-        std::fs::File::open(&primary).with_context(|| format!("opening {}", primary.display()))?;
-    let device = DrmDevice::new(DrmDeviceFd::new(DeviceFd::from(OwnedFd::from(file))), false)
-        .map(|(device, _)| device);
-    let device = match device {
-        Ok(device) => device,
-        Err(err) => {
-            println!("\ncould not open it for modesetting: {err}");
-            println!("that is expected while another compositor holds the display.");
-            return Ok(());
-        }
-    };
+    // Deliberately *not* Smithay's `DrmDevice`: constructing one asks to become
+    // DRM master, and on drop tries to restore modesetting state it never owned
+    // — which prints a permission error that reads like a failure and is not.
+    // Enumerating connectors needs neither, so the probe stays what it claims to
+    // be: a read-only question, quiet inside a running session.
+    let card = Card(
+        std::fs::File::open(&primary).with_context(|| format!("opening {}", primary.display()))?,
+    );
 
-    let resources = device.resource_handles().context("reading DRM resources")?;
+    let resources = card.resource_handles().context("reading DRM resources")?;
     for handle in resources.connectors() {
-        let Ok(connector) = device.get_connector(*handle, false) else {
+        let Ok(connector) = card.get_connector(*handle, false) else {
             continue;
         };
         let name = format!(
@@ -121,6 +121,20 @@ pub(crate) fn probe() -> Result<()> {
     }
     Ok(())
 }
+
+/// A DRM device opened only to be asked questions.
+///
+/// The `drm` traits are blanket-implemented for anything that can lend a file
+/// descriptor, so this is the whole of what the probe needs.
+struct Card(std::fs::File);
+
+impl AsFd for Card {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+impl smithay::reexports::drm::Device for Card {}
+impl smithay::reexports::drm::control::Device for Card {}
 
 /// The best mode a connector offers.
 ///
