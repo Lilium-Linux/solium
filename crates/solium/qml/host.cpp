@@ -322,14 +322,6 @@ extern "C" int solium_qml_scene_get_bool(const SoliumQmlScene *scene, const char
     return scene->root->property(name).toBool() ? 1 : 0;
 }
 
-extern "C" void solium_qml_scene_set_real(SoliumQmlScene *scene, const char *name, double value)
-{
-    if (scene == nullptr || scene->root == nullptr) {
-        return;
-    }
-    scene->root->setProperty(name, QVariant(value));
-}
-
 extern "C" void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed)
 {
     if (scene == nullptr || scene->window == nullptr) {

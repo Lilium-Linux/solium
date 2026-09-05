@@ -60,11 +60,6 @@ mod ffi {
             value: c_int,
         );
         pub(super) fn solium_qml_scene_get_bool(scene: *const Scene, name: *const c_char) -> c_int;
-        pub(super) fn solium_qml_scene_set_real(
-            scene: *mut Scene,
-            name: *const c_char,
-            value: c_double,
-        );
         pub(super) fn solium_qml_scene_pointer(
             scene: *mut Scene,
             x: c_double,
@@ -243,16 +238,6 @@ impl Scene {
         };
         // SAFETY: `name` outlives the call.
         unsafe { ffi::solium_qml_scene_get_bool(self.scene, name.as_ptr()) != 0 }
-    }
-
-    #[expect(unsafe_code, reason = "calling into the Qt host")]
-    pub(crate) fn set_real(&mut self, name: &str, value: f64) {
-        let Ok(name) = CString::new(name) else {
-            tracing::warn!(name, "property name contains a NUL byte");
-            return;
-        };
-        // SAFETY: `name` outlives the call.
-        unsafe { ffi::solium_qml_scene_set_real(self.scene, name.as_ptr(), value) }
     }
 
     /// Pointer input in scene coordinates. `None` is motion.

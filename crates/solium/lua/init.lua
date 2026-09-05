@@ -4,6 +4,7 @@
 -- file when it exists. Modes live in their own scripts and register their own
 -- bindings, so adding one is a `require` and removing one is deleting a line.
 
+require("open")
 require("overview")
 
 -- Programs. `sol.spawn` starts them as clients of this compositor, whatever

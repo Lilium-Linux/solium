@@ -12,11 +12,11 @@ mod capture;
 mod decoration;
 mod dev;
 mod input;
+mod layer;
 mod present;
 mod qml;
 mod render;
 mod script;
-mod shell;
 mod state;
 mod winit;
 

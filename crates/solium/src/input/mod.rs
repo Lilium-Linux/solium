@@ -143,19 +143,9 @@ fn pointer_motion(
     };
     let location = absolute_location(output, &event);
 
-    // The bar is offered the event first and swallows it when the pointer is
-    // over it. It reserves its height, so nothing below it is under the cursor
-    // there — forwarding to a client as well would send it a hover it cannot
-    // see the reason for.
-    if let Some(bar) = state.bar.as_mut()
-        && bar.pointer(location.x, location.y, None)
-    {
-        return;
-    }
-
     // Frames see the pointer before clients do, so buttons light up on hover.
-    // Motion is *also* forwarded to the client, because the pointer leaving a
-    // window has to reach it or it keeps a stale hover state.
+    // Motion is *also* forwarded below, because the pointer leaving a window
+    // has to reach it or the window keeps a stale hover state.
     if let Some((window, local)) = state.frame_under(location)
         && let Some(id) = state.toplevel_id(&window)
         && let Some(decoration) = state.decorations.get_mut(&id)
@@ -185,16 +175,6 @@ fn pointer_button(state: &mut Solium, event: impl PointerButtonEvent<WinitInput>
     let button = event.button_code();
     let button_state = event.state();
     let location = pointer.current_location();
-
-    if let Some(bar) = state.bar.as_mut()
-        && bar.pointer(
-            location.x,
-            location.y,
-            Some(button_state == ButtonState::Pressed),
-        )
-    {
-        return;
-    }
 
     // While a mode owns input, every press is the mode's: it decides what a
     // click on a thumbnail means, and nothing underneath should see it.

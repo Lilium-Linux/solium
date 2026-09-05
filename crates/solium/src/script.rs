@@ -109,6 +109,13 @@ pub(crate) enum Command {
         id: u64,
         animation: AnimationSpec,
     },
+    /// Draw the window at `rect` and animate it to where it lives.
+    PresentFrom {
+        id: u64,
+        rect: Rect,
+        opacity: Option<f32>,
+        animation: AnimationSpec,
+    },
     Focus {
         id: u64,
     },
@@ -251,6 +258,24 @@ impl Scripts {
         })
     }
 
+    /// Tell scripts a window has appeared, so one of them can decide how.
+    ///
+    /// Returns whether any script took it. Nothing happening is a valid answer:
+    /// the compositor then uses its own plain animation rather than leaving a
+    /// window to pop into existence.
+    pub(crate) fn opened(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| {
+            let handlers: Table = sol.get("_handlers")?;
+            match handlers.get::<Value>("open")? {
+                Value::Function(function) => {
+                    function.call::<()>(id)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        })
+    }
+
     /// Run the handler for a pointer press, while a mode owns input.
     pub(crate) fn click(&mut self, x: f64, y: f64, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |sol| {
@@ -378,6 +403,30 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 pending.commands.push(Command::Present {
+                    id,
+                    rect,
+                    opacity,
+                    animation,
+                });
+            })
+        })?,
+    )?;
+
+    // The other direction from `present`: this says where a window comes *from*
+    // and lets it land where it belongs. A dock icon's rectangle here is the
+    // macOS-style genie, and the compositor needs no idea that is what it is.
+    sol.set(
+        "present_from",
+        lua.create_function(|lua, (id, options): (u64, Table)| {
+            let Some(rect) = rect_from(&options)? else {
+                return Err(mlua::Error::runtime(
+                    "sol.present_from needs a rect to come from",
+                ));
+            };
+            let opacity = options.get::<Option<f32>>("opacity")?;
+            with_pending(lua, |pending| {
+                let animation = pending.animation;
+                pending.commands.push(Command::PresentFrom {
                     id,
                     rect,
                     opacity,
