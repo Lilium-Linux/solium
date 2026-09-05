@@ -14,6 +14,10 @@ workspace = true
 # without a compositor. See crates/animation/preview.
 solium-animation = { path = "../animation" }
 
+# The window arrangements, as a crate so the same code that arranges real
+# windows arranges the boxes in the preview. See crates/layout.
+solium-layout = { path = "../layout" }
+
 # Wayland plumbing, input and backends. Rendering goes through Smithay's
 # renderer traits (GLES2 for now) -- see docs/spikes/2026-08-27-vulkan-on-smithay.md
 # for why, and why the transform layer must not reach past those traits.

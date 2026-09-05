@@ -16,46 +16,6 @@ local tiling = { active = false, ratio = 0.6 }
 local GAP = 12
 local SETTLE = { duration = 240, easing = "outCubic" }
 
-local function inset(area)
-    return {
-        x = area.x + GAP,
-        y = area.y + GAP,
-        w = area.w - GAP * 2,
-        h = area.h - GAP * 2,
-    }
-end
-
--- Returns a rectangle per window, in the order given.
-local function arrange(windows, area)
-    local slots = {}
-    local count = #windows
-    if count == 0 then
-        return slots
-    end
-
-    area = inset(area)
-
-    if count == 1 then
-        slots[1] = area
-        return slots
-    end
-
-    local master = math.floor(area.w * tiling.ratio) - GAP / 2
-    slots[1] = { x = area.x, y = area.y, w = master, h = area.h }
-
-    local stack = count - 1
-    local height = (area.h - GAP * (stack - 1)) / stack
-    for i = 2, count do
-        slots[i] = {
-            x = area.x + master + GAP,
-            y = area.y + (i - 2) * (height + GAP),
-            w = area.w - master - GAP,
-            h = height,
-        }
-    end
-    return slots
-end
-
 function tiling.apply()
     if not tiling.active then
         return
@@ -72,7 +32,15 @@ function tiling.apply()
         ordered[#ordered + 1] = windows[i]
     end
 
-    local slots = arrange(ordered, sol.monitor())
+    -- The arrangement itself comes from `sol.layout`, which is the same code
+    -- the preview page calls. A script that wanted a different one would
+    -- compute its own rectangles here instead; that is the difference between
+    -- offering an arrangement and imposing one.
+    local area = sol.monitor()
+    area.gap = GAP
+    area.ratio = tiling.ratio
+    local slots = sol.layout.master_stack(#ordered, area)
+
     sol.animate(SETTLE)
     for i, window in ipairs(ordered) do
         sol.place(window.id, slots[i])

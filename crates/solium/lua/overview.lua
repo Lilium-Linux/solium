@@ -15,42 +15,6 @@ local PADDING = 24
 local ENTER = { duration = 260, easing = "outCubic" }
 local LEAVE = { duration = 200, easing = "outCubic" }
 
--- A grid that stays close to square, so windows end up as large as they can be.
-local function shape(count)
-    local columns = math.max(1, math.ceil(math.sqrt(count)))
-    return columns, math.ceil(count / columns)
-end
-
--- The area one window gets, before its aspect ratio is taken into account.
-local function cell(monitor, columns, rows, index)
-    local width = monitor.w / columns
-    local height = monitor.h / rows
-    local column = index % columns
-    local row = math.floor(index / columns)
-    return {
-        x = monitor.x + column * width + PADDING,
-        y = monitor.y + row * height + PADDING,
-        w = math.max(1, width - PADDING * 2),
-        h = math.max(1, height - PADDING * 2),
-    }
-end
-
--- Fit a window into a cell, keeping its aspect ratio and never enlarging it: a
--- small window blown up to fill a cell reads as a different window.
-local function fit(window, box)
-    if window.w <= 0 or window.h <= 0 then
-        return box
-    end
-    local scale = math.min(box.w / window.w, box.h / window.h, 1.0)
-    local width, height = window.w * scale, window.h * scale
-    return {
-        x = box.x + (box.w - width) / 2,
-        y = box.y + (box.h - height) / 2,
-        w = width,
-        h = height,
-    }
-end
-
 function overview.enter()
     -- Idempotent: entering twice must not stack a second grab.
     if overview.active then
@@ -65,12 +29,15 @@ function overview.enter()
         return
     end
 
-    local monitor = sol.monitor()
-    local columns, rows = shape(#windows)
+    -- The grid comes from `sol.layout`, the same arrangement the preview page
+    -- draws, so what is tuned there is what happens here.
+    local area = sol.monitor()
+    area.padding = PADDING
+    local slots = sol.layout.grid(windows, area)
 
     sol.animate(ENTER)
     for index, window in ipairs(windows) do
-        sol.present(window.id, fit(window, cell(monitor, columns, rows, index - 1)))
+        sol.present(window.id, slots[index])
     end
 
     sol.grab_input(true)
