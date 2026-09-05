@@ -190,6 +190,7 @@ pub(crate) fn run() -> Result<()> {
         renderer: None,
         compositor: None,
         output: None,
+        input: None,
         input_devices: 0,
         drm: None,
         signal: event_loop.get_signal(),
@@ -197,7 +198,7 @@ pub(crate) fn run() -> Result<()> {
     };
 
     let drm_events = state.open_gpu(&seat_name)?;
-    start_input(&mut event_loop, &state.session, &seat_name)?;
+    state.input = Some(start_input(&mut event_loop, &state.session, &seat_name)?);
 
     // The vblank is what paces rendering: a frame is drawn when the last one
     // has actually reached the screen, rather than on a timer that has no idea.
@@ -223,19 +224,42 @@ pub(crate) fn run() -> Result<()> {
         .handle()
         .insert_source(notifier, move |event, (), state| match event {
             SessionEvent::PauseSession => {
-                // Stop drawing. The devices are released by libseat itself;
-                // what matters here is not touching them until it says so.
                 tracing::info!("session paused");
                 state.active = false;
+                // Every device has to be handed back, and each one has to be
+                // handed back by us. libinput keeps polling fds the kernel has
+                // revoked otherwise, and the DRM device keeps a master lock
+                // that the compositor taking over the screen now needs.
+                if let Some(input) = state.input.as_mut() {
+                    input.suspend();
+                }
+                if let Some(drm) = state.drm.as_mut() {
+                    drm.pause();
+                }
             }
             SessionEvent::ActivateSession => {
                 tracing::info!("session resumed");
-                state.active = true;
+                // And taken back in the same order, before anything tries to
+                // use them. Skipping either half is what turns a VT switch into
+                // a session with a dead screen and dead input -- and with input
+                // dead, the key that would switch away again does not work
+                // either, so there is no way out but the power button.
+                if let Some(input) = state.input.as_mut()
+                    && input.resume().is_err()
+                {
+                    tracing::error!("libinput did not resume: input is gone");
+                }
+                if let Some(drm) = state.drm.as_mut()
+                    && let Err(err) = drm.activate(true)
+                {
+                    tracing::error!(?err, "the GPU did not come back");
+                }
                 if let Some(compositor) = state.compositor.as_mut()
                     && let Err(err) = compositor.reset_state()
                 {
                     tracing::warn!(?err, "could not reset the display after resuming");
                 }
+                state.active = true;
                 state.render();
             }
         })
@@ -298,6 +322,12 @@ struct State {
     renderer: Option<GlesRenderer>,
     compositor: Option<Compositor>,
     output: Option<Output>,
+    /// The libinput context, kept so it can be suspended and resumed.
+    ///
+    /// A VT switch revokes every device fd. libinput has to be told, or it
+    /// comes back holding fds the kernel has already taken away — which is a
+    /// session with a display and no way to talk to it.
+    input: Option<Libinput>,
     /// How many input devices libinput has handed us.
     ///
     /// Zero is not a slow start, it is a session nobody can talk to — see the
@@ -503,11 +533,14 @@ fn start_input(
     event_loop: &mut EventLoop<State>,
     session: &LibSeatSession,
     seat: &str,
-) -> Result<()> {
+) -> Result<Libinput> {
     let mut context = Libinput::new_with_udev(LibinputSessionInterface::from(session.clone()));
     context
         .udev_assign_seat(seat)
         .map_err(|()| anyhow!("libinput could not take seat {seat}"))?;
+    // Cloned rather than moved: the context is refcounted, and suspending and
+    // resuming it across a VT switch is the caller's job, not the backend's.
+    let handle = context.clone();
 
     event_loop
         .handle()
@@ -518,7 +551,7 @@ fn start_input(
             handle_input(state, &output, event);
         })
         .map_err(|err| anyhow!("watching input devices: {err}"))?;
-    Ok(())
+    Ok(handle)
 }
 
 /// Route a libinput event through the same profile the nested backend uses.

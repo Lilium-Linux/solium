@@ -24,9 +24,46 @@ local function words(text)
     return parts
 end
 
-local TERMINAL = words(os.getenv("SOLIUM_TERMINAL") or "foot")
+-- `SOLIUM_TERMINAL` wins; otherwise the first of these that is actually
+-- installed. A compositor cannot assume any particular terminal exists, and
+-- picking one that does not is indistinguishable, from the keyboard, from the
+-- binding being broken -- which is how the first hardware session went.
+local CANDIDATES = {
+    "foot",
+    -- konsole hands off to an already-running instance and exits without
+    -- these, which looks exactly like the spawn having failed.
+    "konsole --separate --nofork",
+    "alacritty",
+    "kitty",
+    "wezterm",
+    "xterm",
+}
+
+local function first_installed(candidates)
+    for _, candidate in ipairs(candidates) do
+        local parts = words(candidate)
+        if sol.which(parts[1]) then
+            return parts
+        end
+    end
+    return nil
+end
+
+local TERMINAL = words(os.getenv("SOLIUM_TERMINAL") or "")
+if #TERMINAL == 0 then
+    TERMINAL = first_installed(CANDIDATES)
+end
+if TERMINAL then
+    sol.log("terminal: " .. table.concat(TERMINAL, " "))
+else
+    sol.log("no terminal found -- set SOLIUM_TERMINAL to one you have")
+end
 
 sol.bind("super+return", function()
+    if not TERMINAL then
+        sol.log("super+return: no terminal is installed")
+        return
+    end
     sol.spawn(table.unpack(TERMINAL))
 end)
 

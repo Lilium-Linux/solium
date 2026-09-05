@@ -227,6 +227,22 @@ terminal is underneath the compositor and cannot be read while it runs. It is
 appended to, so the log of a run that went wrong survives the run that was meant
 to fix it — and, being under `state`, it survives a reboot.
 
+**Terminals.** `SOLIUM_TERMINAL` picks one; otherwise `lua/init.lua` takes the
+first that is actually installed. That fallback exists because naming a
+terminal that is not installed looks, from the keyboard, exactly like the
+binding being broken — which is how the first hardware session went.
+
+Prefer a plain Wayland terminal (foot, alacritty, kitty) over a KDE one. A KDE
+app started under Solium sits for around twenty seconds before its window
+appears, which is close enough to the D-Bus activation timeout to be worth
+naming: KDE apps ask for portal and session services that are not running here,
+and wait for them to time out. `vkcube` maps instantly, so this is the app
+waiting, not the compositor failing to map it. `foot` has no such dependency:
+
+```sh
+sudo dnf install foot
+```
+
 **What is not there yet.** One output: it drives the first connected connector
 and ignores the rest. Several places take the first output rather than the right
 one — `work_area`, the snapshot handed to scripts, the layer map — and those are
