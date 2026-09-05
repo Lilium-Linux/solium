@@ -922,6 +922,18 @@ impl Solium {
     }
 
     /// Offer a newly shown window to whatever script wants to animate it in.
+    /// Tell scripts a window has gone, so a layout can forget it.
+    pub(crate) fn trigger_close(&mut self, window: &Window) {
+        let id = window_id(window);
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.closed(id, snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
     /// Tell scripts a drag finished, so a layout can put the window back.
     pub(crate) fn trigger_drop(&mut self, window: &Window, x: f64, y: f64) {
         let id = window_id(window);
@@ -1087,6 +1099,19 @@ impl XdgShellHandler for Solium {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        // Told before the window is forgotten, so a script can still ask which
+        // one it was.
+        // Bound before the call, so the borrow of `space` ends here rather
+        // than lasting across it.
+        let going = self
+            .space
+            .elements()
+            .find(|window| window.toplevel().is_some_and(|top| *top == surface))
+            .cloned();
+        if let Some(window) = going {
+            self.trigger_close(&window);
+        }
+
         // The frame is dropped with the window it belongs to. Keyed by surface
         // id rather than kept on the window so that this is the only place it
         // has to happen.

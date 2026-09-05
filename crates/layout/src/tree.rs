@@ -111,9 +111,16 @@ impl Tiling {
         // The target's *current* box decides the axis, so the split follows the
         // shape of the space being divided rather than the shape of the screen.
         let boxes = self.layout(area, settings);
+        // Named target, else the window under the pointer, else the window
+        // *nearest* it. The last step matters more than it looks: falling back
+        // to the root instead means splitting the whole screen, and every new
+        // window then lands as another full-height column — which is not
+        // dwindle at all, and is exactly what this did before. Hyprland calls
+        // this `getClosestNode`.
         let target = target
             .and_then(|id| self.leaf(id))
             .or_else(|| self.leaf_at(at, &boxes))
+            .or_else(|| self.closest_leaf(at, &boxes))
             .unwrap_or(root);
 
         let box_of = self
@@ -244,6 +251,29 @@ impl Tiling {
         boxes
             .iter()
             .find(|(_, rect)| rect.contains(x, y))
+            .and_then(|(id, _)| self.leaf(*id))
+    }
+
+    /// The window nearest a point, by distance from its centre.
+    ///
+    /// Used when the pointer is over no window at all — off the edge, or on a
+    /// gap. There is always a window to split; the question is only which.
+    fn closest_leaf(&self, at: Option<(f64, f64)>, boxes: &[(u64, Rect)]) -> Option<usize> {
+        let (x, y) = at.unwrap_or_else(|| {
+            boxes
+                .first()
+                .map_or((0.0, 0.0), |(_, rect)| (rect.x, rect.y))
+        });
+        boxes
+            .iter()
+            .min_by(|(_, a), (_, b)| {
+                let distance = |rect: &Rect| {
+                    let dx = rect.x + rect.w / 2.0 - x;
+                    let dy = rect.y + rect.h / 2.0 - y;
+                    dx.mul_add(dx, dy * dy)
+                };
+                distance(a).total_cmp(&distance(b))
+            })
             .and_then(|(id, _)| self.leaf(*id))
     }
 
@@ -481,5 +511,41 @@ mod tests {
     #[test]
     fn axes_are_named_for_how_the_children_sit() {
         assert_ne!(Axis::Vertical, Axis::Horizontal);
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::Tiling;
+    use crate::{Rect, Settings};
+
+    fn area() -> Rect {
+        Rect::new(0.0, 0.0, 1000.0, 600.0)
+    }
+    fn settings() -> Settings {
+        Settings {
+            gap: 0.0,
+            split: 0.5,
+            ..Settings::default()
+        }
+    }
+
+    /// With the pointer nowhere near a window, the split must still land on a
+    /// *window*. Falling back to the root splits the whole screen instead, and
+    /// every window after the first then becomes another full-height column —
+    /// three terminals in a row rather than a dwindle.
+    #[test]
+    fn a_pointer_off_the_edge_still_divides_a_window_not_the_screen() {
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area(), settings());
+        tiling.insert(2, None, Some((-500.0, -500.0)), area(), settings());
+        tiling.insert(3, None, Some((-500.0, -500.0)), area(), settings());
+
+        let boxes = tiling.layout(area(), settings());
+        let full_height = boxes.iter().filter(|(_, r)| r.h > 599.0).count();
+        assert!(
+            full_height < 3,
+            "all three are full-height columns, so the screen was split each time: {boxes:?}"
+        );
     }
 }

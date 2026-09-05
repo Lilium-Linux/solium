@@ -1,127 +1,145 @@
--- Tiling, as a script.
+-- Tiling: dwindle, as Hyprland does it.
 --
--- A layout decides where windows *live*, which is different from what a mode
--- does: overview moves where windows are drawn and puts them back, while this
--- changes the geometry everything else reads. `sol.place` is that authority,
--- and the compositor glides each window from where it was to where it now is —
--- so switching layouts is animated for free and cannot disagree with a mode
--- about where a window is going.
+-- Not master-and-stack, and not a formula. A new window splits *a particular
+-- existing window* — the one under the pointer — and the split runs across
+-- whichever axis that window's own box is longer on. Which window you were
+-- pointing at when you opened a terminal changes the result, and no function
+-- of "how many windows are there" can recover that afterwards.
 --
--- Master and stack, the arrangement worth having first: one large window with
--- the rest in a column beside it. Scrolling and the phone and tablet layouts
--- are further scripts beside this one, not modes inside it.
+-- So the arrangement is a tree, and the tree lives here, in the script that
+-- owns the layout. `sol.layout.tree()` builds one; the compositor holds no
+-- opinion about tiling at all.
+--
+-- Reimplemented from Hyprland's `CDwindleAlgorithm::addTarget`
+-- (src/layout/algorithm/tiled/dwindle/, BSD-3-Clause), not copied: that is
+-- C++ against its own window types. The behaviour is the specification.
 
 local config = require("config")
 local workspaces = require("workspaces")
 
-local tiling = { active = false, ratio = config.tiling.ratio, order = {} }
+local tiling = { active = false, trees = {} }
 
-local GAP = config.gap
-local SETTLE = config.tiling.motion
-
--- The tiled order, kept by the script rather than derived from stacking.
---
--- Derived order cannot survive a swap: the moment two windows trade places the
--- arrangement has to remember that, and stacking order does not. Windows that
--- have gone are dropped and new ones are appended, so opening a window never
--- reshuffles the ones already placed.
-function tiling.reconcile()
-    -- Only the workspace in view is arranged. Windows elsewhere are drawn a
-    -- screen away and must not take a slot in this one.
-    local windows = workspaces.visible()
-    local by_id = {}
-    for _, window in ipairs(windows) do
-        by_id[window.id] = window
+-- One tree per workspace. A window closing on workspace 2 must not disturb
+-- the arrangement on workspace 1, and a shared tree cannot promise that.
+local function tree_for(index)
+    if not tiling.trees[index] then
+        tiling.trees[index] = sol.layout.tree()
     end
-
-    local kept, seen = {}, {}
-    for _, id in ipairs(tiling.order) do
-        if by_id[id] then
-            kept[#kept + 1] = id
-            seen[id] = true
-        end
-    end
-    -- Oldest first, so the master is the window that has been there longest
-    -- rather than whichever was clicked last.
-    for i = #windows, 1, -1 do
-        local id = windows[i].id
-        if not seen[id] then
-            kept[#kept + 1] = id
-            seen[id] = true
-        end
-    end
-
-    tiling.order = kept
-    local ordered = {}
-    for _, id in ipairs(kept) do
-        ordered[#ordered + 1] = by_id[id]
-    end
-    return ordered
+    return tiling.trees[index]
 end
 
-function tiling.apply()
+local function options()
+    local area = sol.monitor()
+    area.gap = config.gap
+    area.split = config.tiling.split
+    return area
+end
+
+function tiling.apply(animation)
     if not tiling.active then
         return
     end
-    local ordered = tiling.reconcile()
-    if #ordered == 0 then
+    local tree = tree_for(workspaces.active)
+    local slots = tree:layout(options())
+    if #slots == 0 then
         return
     end
 
-    -- The arrangement itself comes from `sol.layout`, which is the same code
-    -- the preview page calls. A script that wanted a different one would
-    -- compute its own rectangles here instead; that is the difference between
-    -- offering an arrangement and imposing one.
-    local area = sol.monitor()
-    area.gap = GAP
-    area.ratio = tiling.ratio
-    local slots = sol.layout.master_stack(#ordered, area)
+    sol.animate(animation or config.tiling.motion)
+    for _, slot in ipairs(slots) do
+        sol.place(slot.id, slot)
+    end
+end
 
-    sol.animate(SETTLE)
-    for i, window in ipairs(ordered) do
-        sol.place(window.id, slots[i])
+-- Bring the tree in line with what is actually on screen. Used when tiling is
+-- switched on, and as a backstop: events are the normal path, this is what
+-- makes a missed one recoverable rather than permanent.
+function tiling.adopt()
+    local tree = tree_for(workspaces.active)
+    local present = {}
+    for _, window in ipairs(workspaces.visible()) do
+        present[window.id] = true
+        if not tree:contains(window.id) then
+            tree:insert(window.id, nil, nil, nil, options())
+        end
+    end
+    for _, id in ipairs(tree:windows()) do
+        if not present[id] then
+            tree:remove(id)
+        end
     end
 end
 
 function tiling.toggle()
     tiling.active = not tiling.active
     if tiling.active then
+        tiling.adopt()
         sol.status("tiling")
         tiling.apply()
     else
-        -- Windows stay where the tiling left them. Restoring their floating
-        -- positions would mean remembering geometry across a layout change,
-        -- which is a second authority over where a window lives.
         sol.status("")
     end
 end
 
--- A window let go in a tiled layout does not stay where it was dropped: that
--- is the whole point of tiling. Dropped onto another window the two trade
--- places; dropped anywhere else it slides back to its own slot.
-sol.on("drop", function(id, x, y)
-    if not tiling.active then
-        return
-    end
-    -- `sol.window_at` answers with an id, not a window.
-    local target = sol.window_at(x, y)
-    if target and target ~= id then
-        local from, to
-        for index, known in ipairs(tiling.order) do
-            if known == id then from = index end
-            if known == target then to = index end
-        end
-        if from and to then
-            tiling.order[from], tiling.order[to] = tiling.order[to], tiling.order[from]
-        end
+-- A new window splits whatever the pointer is over. This is the whole of
+-- "the window opens where the cursor is".
+sol.on("open", function(id)
+    local tree = tree_for(workspaces.active)
+    local cursor = sol.cursor()
+    tree:insert(id, sol.window_at(cursor.x, cursor.y), cursor.x, cursor.y, options())
+    tiling.apply()
+end)
+
+-- ...and a window leaving hands its space to its neighbour, rather than
+-- re-tiling the screen around the hole.
+sol.on("close", function(id)
+    for _, tree in pairs(tiling.trees) do
+        tree:remove(id)
     end
     tiling.apply()
 end)
 
+-- Dropped onto another window, the two trade places in the tree; dropped
+-- anywhere else, the window slides back to its own slot.
+sol.on("drop", function(id, x, y)
+    if not tiling.active then
+        return
+    end
+    local target = sol.window_at(x, y)
+    local tree = tree_for(workspaces.active)
+    if target and target ~= id then
+        -- Re-inserting where it was dropped is the swap: out of its old seam,
+        -- into the one under the pointer.
+        tree:remove(id)
+        tree:insert(id, target, x, y, options())
+    end
+    tiling.apply(config.tiling.snap)
+end)
+
 sol.bind("super+t", tiling.toggle)
 
--- A window appearing or leaving changes the arrangement, so the layout runs
--- again. Appended rather than replacing the open animation — both listen.
-sol.on("open", tiling.apply)
+-- Move the seam this window sits on. Everything on the far side stays put,
+-- which is the property a tree has and a recomputed arrangement does not.
+sol.bind("super+minus", function()
+    local focused = nil
+    for _, window in ipairs(sol.windows()) do
+        if window.focused then focused = window.id end
+    end
+    if focused then
+        tree_for(workspaces.active):resize(focused, -0.05)
+        tiling.apply(config.tiling.snap)
+    end
+end)
+
+sol.bind("super+equal", function()
+    local focused = nil
+    for _, window in ipairs(sol.windows()) do
+        if window.focused then focused = window.id end
+    end
+    if focused then
+        tree_for(workspaces.active):resize(focused, 0.05)
+        tiling.apply(config.tiling.snap)
+    end
+end)
 
 return tiling

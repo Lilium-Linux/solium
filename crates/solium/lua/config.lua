@@ -9,9 +9,12 @@ return {
     gap = 12,
 
     tiling = {
-        -- How much of the width the master column takes, 0..1.
-        ratio = 0.6,
+        -- Where a split falls, as a share of the window being divided.
+        -- Hyprland calls this dwindle:default_split_ratio.
+        split = 0.5,
         motion = { duration = 240, easing = "outCubic" },
+        -- The shorter feel for a window snapping back after a drag.
+        snap = { duration = 180, easing = "outCubic" },
     },
 
     scrolling = {
