@@ -35,6 +35,8 @@
 
 #include "host.h"
 
+#include "compat.h"
+
 #include <QtCore/QAbstractAnimation>
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
@@ -135,6 +137,10 @@ extern "C" int solium_qml_start(const char *import_path)
 
     g_driver = new CompositorAnimationDriver();
     g_driver->install();
+
+    // Shell types the compositor provides, registered before any scene can
+    // ask for them.
+    solium_qml_register_compat();
 
     g_engine = new QQmlEngine();
     if (import_path != nullptr) {
