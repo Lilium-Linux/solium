@@ -18,6 +18,7 @@ mod qml;
 mod render;
 mod script;
 mod state;
+mod tty;
 mod winit;
 
 use std::io::IsTerminal;
@@ -35,5 +36,18 @@ fn main() -> Result<()> {
         .init();
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting solium");
-    winit::run()
+
+    // Nested when there is a compositor to nest in, on the hardware otherwise.
+    // `--probe` reports what the hardware offers without taking it, which is
+    // the only one of the three that is safe to run inside another session.
+    match std::env::args().nth(1).as_deref() {
+        Some("--probe") => tty::probe(),
+        Some("--tty") => tty::run(),
+        _ if std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var_os("DISPLAY").is_some() =>
+        {
+            winit::run()
+        }
+        _ => tty::run(),
+    }
 }

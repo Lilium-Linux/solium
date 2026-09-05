@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Solium
+Comment=The compositor of Lilium DE
+Exec=solium --tty
+Type=Application
+DesktopNames=Lilium

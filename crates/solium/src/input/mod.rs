@@ -1,8 +1,13 @@
 //! Input routing.
 //!
-//! One entry point, [`handle`], for every device. What differs between form
-//! factors lives in [`profile`], not in the branches here — see that module for
-//! why. Compositor key bindings are intercepted before the focused client sees
+//! One entry point, [`handle`], for every device *and every backend*. It is
+//! generic over `InputBackend`, so the nested winit backend and libinput on the
+//! hardware feed the same code — a binding, a profile or a grab cannot behave
+//! differently depending on which one is underneath, because there is only one
+//! of them.
+//!
+//! What differs between form factors lives in [`profile`], not in the branches
+//! here. Compositor key bindings are intercepted before the focused client sees
 //! them; everything else is forwarded.
 
 pub(crate) mod grab;
@@ -10,13 +15,10 @@ pub(crate) mod profile;
 pub(crate) mod resize;
 
 use smithay::{
-    backend::{
-        input::{
-            AbsolutePositionEvent, Axis, AxisSource, ButtonState, InputEvent, KeyState,
-            KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, TouchDownEvent,
-            TouchMotionEvent as TouchMotionEventTrait, TouchUpEvent,
-        },
-        winit::WinitInput,
+    backend::input::{
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, InputBackend, InputEvent, KeyState,
+        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, TouchDownEvent,
+        TouchMotionEvent as TouchMotionEventTrait, TouchUpEvent,
     },
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, xkb},
@@ -40,7 +42,7 @@ use grab::MoveGrab;
 struct Bound(String);
 
 /// Route one backend event to the seat.
-pub(crate) fn handle(state: &mut Solium, output: &Output, event: InputEvent<WinitInput>) {
+pub(crate) fn handle<B: InputBackend>(state: &mut Solium, output: &Output, event: InputEvent<B>) {
     match event {
         InputEvent::Keyboard { event } => keyboard(state, event),
         InputEvent::PointerMotionAbsolute { event } => pointer_motion(state, output, event),
@@ -63,7 +65,7 @@ pub(crate) fn handle(state: &mut Solium, output: &Output, event: InputEvent<Wini
     }
 }
 
-fn keyboard(state: &mut Solium, event: impl KeyboardKeyEvent<WinitInput>) {
+fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>) {
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };
@@ -134,10 +136,10 @@ fn combo_for(modifiers: &ModifiersState, keysym: Keysym) -> String {
     script::normalise_combo(&combo)
 }
 
-fn pointer_motion(
+fn pointer_motion<B: InputBackend>(
     state: &mut Solium,
     output: &Output,
-    event: impl AbsolutePositionEvent<WinitInput>,
+    event: impl AbsolutePositionEvent<B>,
 ) {
     let Some(pointer) = state.seat.get_pointer() else {
         return;
@@ -168,7 +170,7 @@ fn pointer_motion(
     pointer.frame(state);
 }
 
-fn pointer_button(state: &mut Solium, event: impl PointerButtonEvent<WinitInput>) {
+fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButtonEvent<B>) {
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
@@ -290,7 +292,7 @@ fn pointer_button(state: &mut Solium, event: impl PointerButtonEvent<WinitInput>
     pointer.frame(state);
 }
 
-fn pointer_axis(state: &mut Solium, event: impl PointerAxisEvent<WinitInput>) {
+fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEvent<B>) {
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
@@ -324,7 +326,7 @@ fn pointer_axis(state: &mut Solium, event: impl PointerAxisEvent<WinitInput>) {
     pointer.frame(state);
 }
 
-fn touch_down(state: &mut Solium, output: &Output, event: impl TouchDownEvent<WinitInput>) {
+fn touch_down<B: InputBackend>(state: &mut Solium, output: &Output, event: impl TouchDownEvent<B>) {
     let Some(touch) = state.seat.get_touch() else {
         return;
     };
@@ -350,10 +352,10 @@ fn touch_down(state: &mut Solium, output: &Output, event: impl TouchDownEvent<Wi
     );
 }
 
-fn touch_motion(
+fn touch_motion<B: InputBackend>(
     state: &mut Solium,
     output: &Output,
-    event: impl TouchMotionEventTrait<WinitInput>,
+    event: impl TouchMotionEventTrait<B>,
 ) {
     let Some(touch) = state.seat.get_touch() else {
         return;
@@ -372,7 +374,7 @@ fn touch_motion(
     );
 }
 
-fn touch_up(state: &mut Solium, event: impl TouchUpEvent<WinitInput>) {
+fn touch_up<B: InputBackend>(state: &mut Solium, event: impl TouchUpEvent<B>) {
     let Some(touch) = state.seat.get_touch() else {
         return;
     };
@@ -390,9 +392,9 @@ fn touch_up(state: &mut Solium, event: impl TouchUpEvent<WinitInput>) {
 ///
 /// The winit backend reports positions normalised to its window, so they are
 /// scaled by the output mode rather than used directly.
-fn absolute_location(
+fn absolute_location<B: InputBackend>(
     output: &Output,
-    event: &impl AbsolutePositionEvent<WinitInput>,
+    event: &impl AbsolutePositionEvent<B>,
 ) -> Point<f64, Logical> {
     let size = output
         .current_mode()

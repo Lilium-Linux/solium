@@ -22,7 +22,15 @@ solium-layout = { path = "../layout" }
 # renderer traits (GLES2 for now) -- see docs/spikes/2026-08-27-vulkan-on-smithay.md
 # for why, and why the transform layer must not reach past those traits.
 smithay = { version = "0.7", default-features = false, features = [
+    # Nested, for development.
     "backend_winit",
+    # On the hardware: DRM for output, libinput for devices, libseat for the
+    # session so none of it needs root.
+    "backend_drm",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_session_libseat",
+    "backend_udev",
     "backend_egl",
     "renderer_gl",
     "wayland_frontend",

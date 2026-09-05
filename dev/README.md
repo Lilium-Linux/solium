@@ -180,6 +180,44 @@ Monotonically decreasing and settling is what an ease-out looks like from the
 outside. A jump mid-sequence means a layout wrote geometry without animating it;
 a stall means something is being recomputed per frame that should not be.
 
+## Running it on a TTY, as a real session
+
+The compositor picks its backend from the environment: nested when there is a
+compositor to nest in, on the hardware otherwise.
+
+**First, from your desktop, check what the hardware offers.** This opens the
+card read-only and takes no DRM master, so it is safe to run inside a running
+session:
+
+```sh
+target/debug/solium --probe
+```
+
+It should name the GPU and list the connected outputs with the mode it would
+choose. If it says it could not open the card for modesetting, that is expected
+while another compositor holds the display.
+
+**Then, on a free TTY.** `Ctrl`+`Alt`+`F3` (or any free one), log in, and:
+
+```sh
+cd ~/personal_projects/solium
+SOLIUM_TERMINAL=konsole ./target/debug/solium --tty
+```
+
+No `sudo`: the session, the GPU and the input devices are all opened through
+libseat, and a compositor that needs root is one nobody should get used to
+running.
+
+**Getting back.** `Ctrl`+`Alt`+`F1` or `F2` returns to your desktop session;
+Solium keeps running on its own VT until you switch back and stop it. If it ever
+leaves a TTY in a bad state, switching to another VT and running `pkill -x
+solium` from there clears it — which is worth knowing *before* you need it.
+
+**What is not there yet.** One output: it drives the first connected connector
+and ignores the rest. Several places take the first output rather than the right
+one — `work_area`, the snapshot handed to scripts, the layer map — and those are
+the lines multi-output has to fix.
+
 ## Where it runs
 
 `dev/run-nested.sh` runs Solium **in the build container**, not on the host. It
