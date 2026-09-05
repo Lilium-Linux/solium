@@ -60,6 +60,9 @@ fn settings(gap: f64, ratio: f64, column: f64, padding: f64) -> Settings {
         ratio,
         column,
         padding,
+        // The preview drives the arrangements it has controls for; dwindle
+        // takes its split from the default until the page grows a slider.
+        ..Settings::default()
     }
 }
 

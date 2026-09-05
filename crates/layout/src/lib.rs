@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 //! Solium's window arrangements.
 //!
 //! Where each window goes, given how many there are and how much room. Nothing
@@ -13,6 +14,8 @@
 // symbols and to hand the preview a buffer to read, and says so at each use.
 pub mod ffi;
 
+pub mod tree;
+
 /// A rectangle, in whatever coordinates the caller is using.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -26,6 +29,12 @@ impl Rect {
     #[must_use]
     pub fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
         Self { x, y, w, h }
+    }
+
+    /// Whether a point falls inside, top-left inclusive.
+    #[must_use]
+    pub fn contains(self, x: f64, y: f64) -> bool {
+        x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
     }
 
     /// Shrunk by `amount` on every side.
@@ -71,6 +80,8 @@ pub struct Settings {
     pub column: f64,
     /// Space around each thumbnail in the grid.
     pub padding: f64,
+    /// Where a dwindle split falls, as a share of the space being divided.
+    pub split: f64,
 }
 
 impl Default for Settings {
@@ -78,10 +89,97 @@ impl Default for Settings {
         Self {
             gap: 12.0,
             ratio: 0.6,
-            column: 0.44,
+            column: 0.5,
             padding: 24.0,
+            split: 0.5,
         }
     }
+}
+
+/// A column of the scrolling strip: how wide, and how many windows share it.
+#[derive(Clone, Copy, Debug)]
+pub struct Column {
+    /// Width as a share of the viewport. Not of the strip — the strip has no
+    /// width, which is the point of it.
+    pub width: f64,
+    /// Windows stacked in this column, sharing its height.
+    pub windows: usize,
+}
+
+/// The scrolling strip, as niri means it: columns, not windows.
+///
+/// The difference matters and is the whole design. A row of single windows is
+/// a list you pan across; a row of *columns*, each holding a stack, is a
+/// workspace you never run out of. A window keeps the width its column was
+/// given no matter how many others exist, so opening a tenth window does not
+/// make the first nine thinner — the strip gets longer and the view moves.
+///
+/// `offset` moves the viewport. Nothing here moves the strip, and no window is
+/// ever resized to make room; that is the property that makes this usable on a
+/// laptop and a 49-inch display without changing anything.
+#[must_use]
+pub fn strip(columns: &[Column], area: Rect, settings: Settings, offset: f64) -> Vec<Rect> {
+    let area = area.inset(settings.gap);
+    let mut slots = Vec::new();
+    let mut x = area.x - offset;
+
+    for column in columns {
+        let width = (area.w * column.width.clamp(0.1, 1.0)).max(1.0);
+        let count = column.windows.max(1);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a column holds a handful of windows"
+        )]
+        let rows = count as f64;
+        let height = ((area.h - settings.gap * (rows - 1.0)) / rows).max(1.0);
+
+        for row in 0..column.windows {
+            #[expect(clippy::cast_precision_loss, reason = "as above")]
+            let row = row as f64;
+            slots.push(Rect::new(
+                x,
+                area.y + row * (height + settings.gap),
+                width,
+                height,
+            ));
+        }
+        x += width + settings.gap;
+    }
+    slots
+}
+
+/// The viewport offset that brings a column fully into view, moving least.
+///
+/// Least is the point. A scroller that recentres on every focus change makes
+/// the whole screen move when nothing needed to; one that only moves when the
+/// target is actually off the edge keeps the rest of the strip where the eye
+/// left it.
+#[must_use]
+pub fn strip_scroll_to(
+    index: usize,
+    columns: &[Column],
+    area: Rect,
+    settings: Settings,
+    offset: f64,
+) -> f64 {
+    let area = area.inset(settings.gap);
+    let mut left = 0.0;
+
+    for (position, column) in columns.iter().enumerate() {
+        let width = (area.w * column.width.clamp(0.1, 1.0)).max(1.0);
+        if position == index {
+            let right = left + width;
+            if left < offset {
+                return left;
+            }
+            if right > offset + area.w {
+                return right - area.w;
+            }
+            return offset;
+        }
+        left += width + settings.gap;
+    }
+    offset
 }
 
 /// One large window, the rest stacked beside it.
@@ -327,5 +425,87 @@ mod tests {
         assert!(scrolling(0, AREA, Settings::default(), 0.0).is_empty());
         assert!(grid(&[], AREA, Settings::default()).is_empty());
         assert!((scroll_to(0, 0, AREA, Settings::default(), 0.0) - 0.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod dwindle_and_strip_tests {
+    use super::{Column, Rect, Settings, strip, strip_scroll_to};
+
+    fn area() -> Rect {
+        Rect::new(0.0, 0.0, 1000.0, 600.0)
+    }
+
+    fn settings() -> Settings {
+        Settings {
+            gap: 0.0,
+            ..Settings::default()
+        }
+    }
+
+    fn columns(widths: &[f64], windows: usize) -> Vec<Column> {
+        widths
+            .iter()
+            .map(|width| Column {
+                width: *width,
+                windows,
+            })
+            .collect()
+    }
+
+    /// The property that makes a scroller a scroller: a column's width does
+    /// not depend on how many other columns exist. Opening a tenth window must
+    /// not make the first nine thinner.
+    #[test]
+    fn a_column_keeps_its_width_however_many_there_are() {
+        let two = strip(&columns(&[0.5, 0.5], 1), area(), settings(), 0.0);
+        let ten = strip(&columns(&[0.5; 10], 1), area(), settings(), 0.0);
+        assert!((two[0].w - ten[0].w).abs() < f64::EPSILON);
+        assert!((two[1].w - ten[1].w).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn windows_in_a_column_share_its_height_and_its_width() {
+        let slots = strip(&columns(&[0.5], 3), area(), settings(), 0.0);
+        assert_eq!(slots.len(), 3);
+        for slot in &slots {
+            assert!((slot.w - 500.0).abs() < 1.0);
+            assert!((slot.h - 200.0).abs() < 1.0);
+        }
+        assert!(slots[0].y < slots[1].y && slots[1].y < slots[2].y);
+    }
+
+    #[test]
+    fn the_offset_moves_the_view_not_the_strip() {
+        let still = strip(&columns(&[0.5, 0.5], 1), area(), settings(), 0.0);
+        let moved = strip(&columns(&[0.5, 0.5], 1), area(), settings(), 200.0);
+        assert!((still[0].x - moved[0].x - 200.0).abs() < f64::EPSILON);
+        assert!((still[1].x - moved[1].x - 200.0).abs() < f64::EPSILON);
+    }
+
+    /// A column already fully in view does not move the world to celebrate.
+    #[test]
+    fn scrolling_to_a_visible_column_changes_nothing() {
+        let columns = columns(&[0.5, 0.5], 1);
+        let offset = strip_scroll_to(1, &columns, area(), settings(), 0.0);
+        assert!((offset - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn scrolling_right_moves_only_as_far_as_it_must() {
+        let columns = columns(&[0.5, 0.5, 0.5], 1);
+        // Third column spans 1000..1500 in strip space; the view is 1000 wide.
+        let offset = strip_scroll_to(2, &columns, area(), settings(), 0.0);
+        assert!(
+            (offset - 500.0).abs() < 1.0,
+            "just enough, not centred: {offset}"
+        );
+    }
+
+    #[test]
+    fn scrolling_left_brings_the_column_to_the_edge() {
+        let columns = columns(&[0.5, 0.5, 0.5], 1);
+        let offset = strip_scroll_to(0, &columns, area(), settings(), 500.0);
+        assert!((offset - 0.0).abs() < f64::EPSILON);
     }
 }
