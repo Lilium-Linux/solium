@@ -2,8 +2,27 @@
 --
 -- Copy to ~/.config/solium/init.lua to change it; the compositor prefers that
 -- file when it exists. Modes live in their own scripts and register their own
--- bindings, so adding one is a `require`, and removing one is deleting a line.
+-- bindings, so adding one is a `require` and removing one is deleting a line.
 
 require("overview")
+
+-- Programs. `sol.spawn` starts them as clients of this compositor, whatever
+-- session the compositor itself happens to be nested in.
+local TERMINAL = os.getenv("SOLIUM_TERMINAL") or "foot"
+
+sol.bind("super+return", function()
+    sol.spawn(TERMINAL)
+end)
+
+-- Close the focused window. A request, not a kill -- the client decides whether
+-- it can go.
+sol.bind("super+q", function()
+    for _, window in ipairs(sol.windows()) do
+        if window.focused then
+            sol.close(window.id)
+            return
+        end
+    end
+end)
 
 sol.log("solium configuration loaded")

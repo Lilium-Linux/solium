@@ -112,6 +112,15 @@ pub(crate) enum Command {
     Focus {
         id: u64,
     },
+    /// Ask a window to close. A request, not a kill: the client decides.
+    Close {
+        id: u64,
+    },
+    /// Start a program, connected to this compositor.
+    Spawn {
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 /// The result of one dispatch.
@@ -283,10 +292,7 @@ impl Scripts {
             }
         };
 
-        let pending = self
-            .lua
-            .remove_app_data::<Pending>()
-            .unwrap_or_default();
+        let pending = self.lua.remove_app_data::<Pending>().unwrap_or_default();
 
         Outcome {
             handled,
@@ -418,6 +424,30 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         "focus",
         lua.create_function(|lua, id: u64| {
             with_pending(lua, |pending| pending.commands.push(Command::Focus { id }))
+        })?,
+    )?;
+
+    sol.set(
+        "close",
+        lua.create_function(|lua, id: u64| {
+            with_pending(lua, |pending| pending.commands.push(Command::Close { id }))
+        })?,
+    )?;
+
+    // `sol.spawn("foot", "-e", "htop")`. Variadic rather than a table because
+    // the common case is one program and no arguments, and that should read
+    // like one.
+    sol.set(
+        "spawn",
+        lua.create_function(|lua, mut args: mlua::Variadic<String>| {
+            if args.is_empty() {
+                return Err(mlua::Error::runtime("sol.spawn needs a program to run"));
+            }
+            let program = args.remove(0);
+            let args = args.into_iter().collect();
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Spawn { program, args });
+            })
         })?,
     )?;
 

@@ -127,6 +127,10 @@ pub(crate) struct Solium {
     /// script rather than to clients.
     pub(crate) script_grab: bool,
 
+    /// The socket clients connect on. Held so that a program started from a
+    /// script finds *this* compositor rather than the session it is nested in.
+    pub(crate) socket_name: String,
+
     /// The QML top bar. `None` if it failed to load — a compositor with no bar
     /// is worse but usable, one that will not start because a QML file has a
     /// typo in it is not.
@@ -165,6 +169,7 @@ impl Solium {
             scripts: None,
             status: String::new(),
             script_grab: false,
+            socket_name: String::new(),
             bar: None,
             decorations: Decorations::default(),
             display_handle,
@@ -407,7 +412,43 @@ impl Solium {
                         self.focus_window(&window, SERIAL_COUNTER.next_serial());
                     }
                 }
+                Command::Close { id } => {
+                    if let Some(toplevel) = self
+                        .window_by_id(id)
+                        .and_then(|window| window.toplevel().cloned())
+                    {
+                        toplevel.send_close();
+                    }
+                }
+                Command::Spawn { program, args } => self.spawn(&program, &args),
             }
+        }
+    }
+
+    /// Start a program as a client of this compositor.
+    fn spawn(&self, program: &str, args: &[String]) {
+        use std::process::{Command as Process, Stdio};
+
+        let mut process = Process::new(program);
+        process
+            .args(args)
+            // Without this the child inherits the *host* display and opens its
+            // window next to the compositor rather than inside it.
+            .env("WAYLAND_DISPLAY", &self.socket_name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        match process.spawn() {
+            Ok(mut child) => {
+                tracing::info!(program, socket = self.socket_name, "spawned");
+                // Waited on elsewhere so the child is reaped: a compositor that
+                // leaves zombies is one that eventually cannot fork at all.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(err) => tracing::warn!(?err, program, "could not spawn"),
         }
     }
 
