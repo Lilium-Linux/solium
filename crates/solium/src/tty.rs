@@ -37,7 +37,7 @@ use smithay::{
         egl::{EGLContext, EGLDisplay},
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
-        renderer::{ImportEgl as _, gles::GlesRenderer},
+        renderer::gles::GlesRenderer,
         session::{Event as SessionEvent, Session as _, libseat::LibSeatSession},
         udev,
     },
@@ -373,12 +373,27 @@ impl State {
         let egl = unsafe { EGLDisplay::new(gbm.clone()) }.context("creating the EGL display")?;
         let context = EGLContext::new(&egl).context("creating the EGL context")?;
         #[expect(unsafe_code, reason = "GlesRenderer::new is unsafe by contract")]
-        let mut renderer =
-            unsafe { GlesRenderer::new(context) }.context("creating the renderer")?;
-        if let Err(err) = renderer.bind_wl_display(&self.solium.display_handle) {
-            // Not fatal: clients fall back to shared memory, more slowly.
-            tracing::warn!(?err, "no hardware buffer sharing for clients");
-        }
+        let renderer = unsafe { GlesRenderer::new(context) }.context("creating the renderer")?;
+        // Hardware buffer sharing, through `zwp_linux_dmabuf_v1` and not
+        // through `wl_drm`.
+        //
+        // `bind_wl_display` used to be here, and it was worse than having
+        // nothing: it advertises the legacy `wl_drm` global, GL clients take
+        // it in preference to shared memory, and every buffer they send comes
+        // back `NotManaged` from the import — kitty rendered nothing and then
+        // segfaulted. Reproduced by adding that one call to the nested backend,
+        // which had never had it and had never had the problem.
+        let formats: Vec<_> = renderer
+            .egl_context()
+            .dmabuf_texture_formats()
+            .iter()
+            .copied()
+            .collect();
+        self.solium.dmabuf_global = Some(
+            self.solium
+                .dmabuf_state
+                .create_global::<Solium>(&self.solium.display_handle, formats),
+        );
 
         let (connector, crtc, mode) = first_output(&device)?;
         let name = format!(
