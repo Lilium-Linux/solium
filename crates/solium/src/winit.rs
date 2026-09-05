@@ -29,6 +29,7 @@ use crate::{
     capture, dev, layer, present, render,
     script::Scripts,
     state::{ClientState, Solium},
+    synth,
 };
 
 /// A capture's path with a frame number in it: `frame.ppm` -> `frame-003.ppm`.
@@ -189,6 +190,7 @@ pub(crate) fn run() -> Result<()> {
     let mut capture_index = 0_usize;
     let mut triggers = dev::triggers();
     let mut clicks = dev::clicks();
+    let mut drags = dev::drags();
     triggers.reverse();
     clicks.reverse();
 
@@ -234,6 +236,15 @@ pub(crate) fn run() -> Result<()> {
             break;
         }
 
+        // The same request the hardware backend honours. Nested it means
+        // closing the window rather than handing back a VT, but a binding that
+        // works on one backend and silently does nothing on the other is worse
+        // than not having it.
+        if matches!(state.request.take(), Some(crate::state::Request::Quit)) {
+            tracing::info!("asked to stop");
+            break;
+        }
+
         if !monitor_reported && let Some(monitor) = backend.window().current_monitor() {
             let position = monitor.position();
             tracing::info!(
@@ -256,6 +267,12 @@ pub(crate) fn run() -> Result<()> {
             if let Some((_, combo)) = triggers.pop() {
                 tracing::info!(combo, "scripted trigger");
                 state.trigger(&combo);
+            }
+        }
+        while drags.last().is_some_and(|(at, _, _)| now >= *at) {
+            if let Some((_, from, to)) = drags.pop() {
+                tracing::info!(?from, ?to, "scripted drag");
+                synth::drag(&mut state, &output, from.into(), to.into(), 12);
             }
         }
         while clicks.last().is_some_and(|(at, _)| now >= *at) {

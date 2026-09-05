@@ -89,4 +89,10 @@ sol.bind("super+q", function()
     end
 end)
 
+-- Ending the session. Ctrl+Alt+Backspace does this too and cannot be rebound,
+-- because the way out has to work even when this file does not.
+sol.bind("super+shift+q", function()
+    sol.quit()
+end)
+
 sol.log("solium configuration loaded")

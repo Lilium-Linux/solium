@@ -63,6 +63,33 @@ pub(crate) fn clicks() -> Vec<(Duration, (f64, f64))> {
     })
 }
 
+/// A drag: when to start it, where from, and where to.
+pub(crate) type Drag = (Duration, (f64, f64), (f64, f64));
+
+/// Drags to perform, as `<ms>:<x1>,<y1>><x2>,<y2>` separated by semicolons.
+///
+/// ```sh
+/// SOLIUM_DRAG_AT="4000:300,200>1200,600"
+/// ```
+///
+/// A drag is the interaction that could not be tested without a hand on a
+/// mouse, and it is where the last two bugs in this compositor were — one of
+/// them a deadlock that froze the machine. It runs through the real grab and
+/// the real layout scripts; see `synth`.
+pub(crate) fn drags() -> Vec<Drag> {
+    parse_list_with("SOLIUM_DRAG_AT", ';', |value| {
+        let (from, to) = value.split_once('>')?;
+        let point = |raw: &str| -> Option<(f64, f64)> {
+            let (x, y) = raw.split_once(',')?;
+            Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+        };
+        Some((point(from)?, point(to)?))
+    })
+    .into_iter()
+    .map(|(at, (from, to))| (at, from, to))
+    .collect()
+}
+
 fn millis(name: &str) -> Option<Duration> {
     let raw = std::env::var(name).ok()?;
     match raw.trim().parse::<u64>() {

@@ -103,12 +103,13 @@ sol.on("drop", function(id, x, y)
     if not tiling.active then
         return
     end
+    -- `sol.window_at` answers with an id, not a window.
     local target = sol.window_at(x, y)
-    if target and target.id ~= id then
+    if target and target ~= id then
         local from, to
         for index, known in ipairs(tiling.order) do
             if known == id then from = index end
-            if known == target.id then to = index end
+            if known == target then to = index end
         end
         if from and to then
             tiling.order[from], tiling.order[to] = tiling.order[to], tiling.order[from]
