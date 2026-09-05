@@ -195,7 +195,88 @@ impl Tiling {
         self.nodes[parent] = None;
     }
 
-    /// Move one seam. Everything on the far side of the tree stays put.
+    /// Drag the seam a window sits against, to where the pointer is.
+    ///
+    /// Two things this does that adding a delta to the nearest parent cannot.
+    ///
+    /// It finds the right seam. A window's immediate parent may have been cut
+    /// the other way — in a two-by-two, dragging a side edge has to move a
+    /// seam two levels up — so this walks towards the root until it finds a
+    /// branch cut along the axis being dragged. Adjusting only the parent is
+    /// why width could be dragged in some arrangements and not others.
+    ///
+    /// And it is idempotent. The ratio comes from where the pointer *is*, not
+    /// from how far it moved, so dragging to the same place twice gives the
+    /// same layout. Accumulating deltas fed the layout's own response back in
+    /// as the next input, and the windows shook themselves apart for as long
+    /// as the button was held.
+    pub fn drag_seam(
+        &mut self,
+        id: u64,
+        axis: Axis,
+        at: (f64, f64),
+        area: Rect,
+        settings: Settings,
+    ) {
+        let Some(leaf) = self.leaf(id) else {
+            return;
+        };
+
+        let mut node = leaf;
+        let mut seam = None;
+        while let Some(parent) = self.parent(node) {
+            if matches!(self.nodes[parent], Some(Node::Split { axis: cut, .. }) if cut == axis) {
+                seam = Some(parent);
+                break;
+            }
+            node = parent;
+        }
+        let Some(seam) = seam else {
+            return;
+        };
+
+        let Some(rect) = self.node_box(seam, area, settings) else {
+            return;
+        };
+        let ratio = match axis {
+            Axis::Vertical => (at.0 - rect.x) / rect.w.max(1.0),
+            Axis::Horizontal => (at.1 - rect.y) / rect.h.max(1.0),
+        };
+        if let Some(Node::Split { ratio: current, .. }) = self.nodes[seam].as_mut() {
+            *current = ratio.clamp(0.05, 0.95);
+        }
+    }
+
+    /// The rectangle a node occupies, branches included.
+    fn node_box(&self, wanted: usize, area: Rect, settings: Settings) -> Option<Rect> {
+        fn find(
+            tree: &Tiling,
+            index: usize,
+            rect: Rect,
+            wanted: usize,
+            settings: Settings,
+        ) -> Option<Rect> {
+            if index == wanted {
+                return Some(rect);
+            }
+            match tree.nodes.get(index).copied().flatten() {
+                Some(Node::Split {
+                    axis,
+                    ratio,
+                    children,
+                }) => {
+                    let (first, second) = cut(rect, axis, ratio, settings.gap);
+                    find(tree, children[0], first, wanted, settings)
+                        .or_else(|| find(tree, children[1], second, wanted, settings))
+                }
+                _ => None,
+            }
+        }
+        let root = self.root?;
+        find(self, root, area.inset(settings.gap), wanted, settings)
+    }
+
+    /// Move one seam by a fraction. Everything on the far side stays put.
     pub fn resize(&mut self, id: u64, by: f64) {
         let Some(leaf) = self.leaf(id) else {
             return;
@@ -624,5 +705,87 @@ mod self_target {
         for (id, rect) in tiling.layout(area(), settings()) {
             assert!(rect.w >= 1.0 && rect.h >= 1.0, "window {id} collapsed");
         }
+    }
+}
+
+#[cfg(test)]
+mod seam_tests {
+    use super::{Axis, Tiling};
+    use crate::{Rect, Settings};
+
+    fn area() -> Rect {
+        Rect::new(0.0, 0.0, 1000.0, 600.0)
+    }
+    fn settings() -> Settings {
+        Settings {
+            gap: 0.0,
+            split: 0.5,
+            ..Settings::default()
+        }
+    }
+    fn rect_of(tiling: &Tiling, id: u64) -> Rect {
+        tiling
+            .layout(area(), settings())
+            .into_iter()
+            .find(|(other, _)| *other == id)
+            .expect("in the tree")
+            .1
+    }
+
+    /// A two-by-two: every window's immediate parent is a horizontal split, so
+    /// dragging a side edge has to reach a seam two levels up. Adjusting only
+    /// the parent does nothing at all, which is why width could be dragged in
+    /// some arrangements and not this one.
+    fn quad() -> Tiling {
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area(), settings());
+        tiling.insert(2, Some(1), None, area(), settings());
+        tiling.insert(3, Some(1), None, area(), settings());
+        tiling.insert(4, Some(2), None, area(), settings());
+        tiling
+    }
+
+    #[test]
+    fn a_two_by_two_can_have_its_width_dragged() {
+        let mut tiling = quad();
+        let before = rect_of(&tiling, 1).w;
+        assert!((before - 500.0).abs() < 1.0, "starts halved: {before}");
+
+        tiling.drag_seam(1, Axis::Vertical, (700.0, 300.0), area(), settings());
+        let after = rect_of(&tiling, 1).w;
+        assert!(
+            (after - 700.0).abs() < 2.0,
+            "seam followed the pointer: {after}"
+        );
+    }
+
+    /// Dragging to the same place twice gives the same layout. Deltas fed the
+    /// layout's own response back in and the windows shook themselves apart.
+    #[test]
+    fn dragging_to_the_same_place_twice_is_the_same_layout() {
+        let mut tiling = quad();
+        tiling.drag_seam(1, Axis::Vertical, (650.0, 300.0), area(), settings());
+        let once = rect_of(&tiling, 1).w;
+        for _ in 0..20 {
+            tiling.drag_seam(1, Axis::Vertical, (650.0, 300.0), area(), settings());
+        }
+        let many = rect_of(&tiling, 1).w;
+        assert!((once - many).abs() < f64::EPSILON, "{once} then {many}");
+    }
+
+    #[test]
+    fn height_drags_find_the_horizontal_seam() {
+        let mut tiling = quad();
+        tiling.drag_seam(1, Axis::Horizontal, (250.0, 400.0), area(), settings());
+        let one = rect_of(&tiling, 1);
+        assert!((one.h - 400.0).abs() < 2.0, "followed the pointer: {one:?}");
+    }
+
+    #[test]
+    fn a_lone_window_has_no_seam_to_drag() {
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area(), settings());
+        tiling.drag_seam(1, Axis::Vertical, (700.0, 300.0), area(), settings());
+        assert!((rect_of(&tiling, 1).w - 1000.0).abs() < 1.0, "unchanged");
     }
 }

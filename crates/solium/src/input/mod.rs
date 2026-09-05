@@ -37,6 +37,9 @@ use crate::{
 
 use grab::MoveGrab;
 
+/// The right mouse button, as the kernel numbers it.
+const BTN_RIGHT: u32 = 0x111;
+
 /// Something the compositor itself will do with a key press.
 ///
 /// Carried out of the keyboard filter rather than acted on inside it: the
@@ -281,19 +284,11 @@ fn confine(output: &Output, location: Point<f64, Logical>) -> Point<f64, Logical
 /// directly, which is what keeps a tiled window from growing over its
 /// neighbour instead of moving the seam between them.
 fn settle_resize(state: &mut Solium) {
-    let Some((window, wanted)) = state.pending_resize.take() else {
+    let Some(request) = state.pending_resize.take() else {
         return;
     };
-    let Some(current) = state.outer_geometry(&window) else {
-        return;
-    };
-    let dx = f64::from(wanted.size.w - current.size.w);
-    let dy = f64::from(wanted.size.h - current.size.h);
-    if dx == 0.0 && dy == 0.0 {
-        return;
-    }
-    if !state.trigger_resize(&window, dx, dy) {
-        state.resize_to(&window, wanted);
+    if !state.trigger_resize(&request) {
+        state.resize_to(&request.window, request.wanted);
     }
 }
 
@@ -412,6 +407,35 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             .get_keyboard()
             .map(|keyboard| keyboard.modifier_state());
         let dragging = modifiers.is_some_and(|modifiers| state.profile.drag_held(&modifiers));
+
+        // The modifier and the right button resize from wherever the pointer
+        // is, rather than from an eight-pixel border. Which corner is being
+        // pulled comes from which quarter of the window the pointer is in, so
+        // there is no edge to find and no direction that cannot be reached.
+        if dragging
+            && button == BTN_RIGHT
+            && let Some((window, _)) = state.window_under(location)
+            && let Some(outer) = state.outer_geometry(&window)
+        {
+            state.focus_window(&window, serial);
+            let start_data = GrabStartData {
+                focus: None,
+                button,
+                location,
+            };
+            pointer.set_grab(
+                state,
+                resize::ResizeGrab::new(
+                    start_data,
+                    window,
+                    resize::quadrant(outer, location),
+                    outer,
+                ),
+                serial,
+                Focus::Clear,
+            );
+            return;
+        }
 
         if let Some((window, geometry)) = state.window_under(location) {
             if dragging {

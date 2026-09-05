@@ -15,6 +15,7 @@
 
 local config = require("config")
 local workspaces = require("workspaces")
+local modes = require("modes")
 
 local scrolling = { active = false, views = {} }
 
@@ -72,16 +73,16 @@ function scrolling.adopt()
     end
 end
 
-function scrolling.toggle()
-    scrolling.active = not scrolling.active
-    if scrolling.active then
-        scrolling.adopt()
-        sol.status("scrolling")
-        settle()
-    else
-        sol.status("")
-    end
+function scrolling.started()
+    scrolling.adopt()
+    settle()
 end
+
+function scrolling.toggle()
+    modes.use("scrolling")
+end
+
+modes.register("scrolling", scrolling)
 
 -- A new window opens in its own column beside the active one, and the view
 -- follows it.
@@ -97,10 +98,19 @@ sol.on("close", function(id)
     scrolling.apply(config.scrolling.snap)
 end)
 
-sol.on("drop", function(_, _, _)
-    if scrolling.active then
-        scrolling.apply(config.scrolling.snap)
+-- Dropping a window on another column moves it there; dropped anywhere else
+-- it slides back. Without this a drag in a scrolling layout could not move a
+-- window at all, only pick it up and put it down again.
+sol.on("drop", function(id, x, y)
+    if not scrolling.active then
+        return
     end
+    local view = view_for(workspaces.active)
+    local target = sol.window_at(x, y, id)
+    if target and view:contains(target) and view:contains(id) then
+        view:move_to_column_of(id, target, options())
+    end
+    settle(config.scrolling.snap)
 end)
 
 -- Clicking or hovering a column that is only half on screen brings it fully

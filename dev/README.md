@@ -301,8 +301,8 @@ the right enters from the right, because that is where it is.
 |---|---|
 | `Super` + `Return` | Open a terminal (`SOLIUM_TERMINAL` picks which) |
 | `Super` + `Q` | Close the focused window |
-| `Super` + `T` | Tiling on/off (`lua/tiling.lua`) |
-| `Super` + `S` | Scrolling on/off (`lua/scrolling.lua`) |
+| `Super` + `T` | Tiling (`lua/tiling.lua`) — pressing it again returns to floating |
+| `Super` + `S` | Scrolling (`lua/scrolling.lua`) — one layout at a time, see `lua/modes.lua` |
 | `Super` + `[` / `]` | Focus the column left / right |
 | `Super`+`Ctrl` + `[` / `]` | Move the column left / right |
 | `Super`+`Shift` + `[` / `]` | Focus up / down within a column |
@@ -310,6 +310,7 @@ the right enters from the right, because that is where it is.
 | `Super` + `R` | Cycle the column through the preset widths |
 | `Super` + `-` / `=` | Move the seam a tiled window sits on |
 | Drag a window edge | Tiled: moves the seam. Scrolling: widens the column. Floating: resizes |
+| `Super` + right-drag | Resize from anywhere in the window, in any direction |
 | `Super` + `Space` | Overview on/off (bound in `lua/overview.lua`, not in Rust) |
 | `Super` + `1`…`9` | Go to that workspace |
 | `Super`+`Shift` + `1`…`9` | Send the focused window there |
