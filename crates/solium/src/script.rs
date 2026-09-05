@@ -281,6 +281,16 @@ impl Scripts {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "click", (x, y)))
     }
 
+    /// A window went away.
+    ///
+    /// Needed by any layout that keeps state of its own: a tree cannot drop a
+    /// node it is never told about, and diffing the window list on every pass
+    /// — which is what the layouts did instead — cannot tell "closed" from
+    /// "moved to another workspace".
+    pub(crate) fn closed(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "close", id))
+    }
+
     /// A window was dragged and let go.
     ///
     /// The event a layout needs and could not have: without it a drag in a
@@ -336,38 +346,39 @@ impl Scripts {
     }
 }
 
+use solium_layout::{Rect as Slot, Settings};
+
+/// The work area a layout call was given.
+fn area(options: &Table) -> mlua::Result<Slot> {
+    Ok(Slot::new(
+        options.get("x")?,
+        options.get("y")?,
+        options.get("w")?,
+        options.get("h")?,
+    ))
+}
+
+fn tuning(options: &Table) -> mlua::Result<Settings> {
+    let defaults = Settings::default();
+    Ok(Settings {
+        gap: options.get::<Option<f64>>("gap")?.unwrap_or(defaults.gap),
+        ratio: options
+            .get::<Option<f64>>("ratio")?
+            .unwrap_or(defaults.ratio),
+        column: options
+            .get::<Option<f64>>("column")?
+            .unwrap_or(defaults.column),
+        padding: options
+            .get::<Option<f64>>("padding")?
+            .unwrap_or(defaults.padding),
+        split: options
+            .get::<Option<f64>>("split")?
+            .unwrap_or(defaults.split),
+    })
+}
+
 /// The `sol.layout` table.
 fn layouts(lua: &Lua) -> mlua::Result<Table> {
-    use solium_layout::{Rect as Slot, Settings};
-
-    fn area(options: &Table) -> mlua::Result<Slot> {
-        Ok(Slot::new(
-            options.get("x")?,
-            options.get("y")?,
-            options.get("w")?,
-            options.get("h")?,
-        ))
-    }
-
-    fn tuning(options: &Table) -> mlua::Result<Settings> {
-        let defaults = Settings::default();
-        Ok(Settings {
-            gap: options.get::<Option<f64>>("gap")?.unwrap_or(defaults.gap),
-            ratio: options
-                .get::<Option<f64>>("ratio")?
-                .unwrap_or(defaults.ratio),
-            column: options
-                .get::<Option<f64>>("column")?
-                .unwrap_or(defaults.column),
-            padding: options
-                .get::<Option<f64>>("padding")?
-                .unwrap_or(defaults.padding),
-            split: options
-                .get::<Option<f64>>("split")?
-                .unwrap_or(defaults.split),
-        })
-    }
-
     fn to_lua(lua: &Lua, slots: &[Slot]) -> mlua::Result<Table> {
         let list = lua.create_table()?;
         for (index, slot) in slots.iter().enumerate() {
@@ -389,6 +400,16 @@ fn layouts(lua: &Lua) -> mlua::Result<Table> {
             let slots = solium_layout::master_stack(count, area(&options)?, tuning(&options)?);
             to_lua(lua, &slots)
         })?,
+    )?;
+
+    // A dwindle tree, held by the script that made it.
+    //
+    // Stateful on purpose, because the arrangement is: where a window lands
+    // depends on which window was split and where the pointer was, and no
+    // function of the window list can recover that after the fact.
+    layout.set(
+        "tree",
+        lua.create_function(|_, ()| Ok(TilingTree::default()))?,
     )?;
 
     layout.set(
@@ -809,6 +830,68 @@ fn parse_easing(name: &str) -> Option<Curve> {
         tracing::warn!(easing = name, "unknown easing, keeping the default");
         None
     })
+}
+
+/// A dwindle tree, as scripts hold it.
+#[derive(Debug, Default)]
+struct TilingTree(solium_layout::tree::Tiling);
+
+impl mlua::UserData for TilingTree {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // `target` is the window to split and `x`/`y` are where the pointer
+        // was; both may be nil, and then the pointer alone decides — which is
+        // how Hyprland picks what to divide.
+        methods.add_method_mut(
+            "insert",
+            |_, this, (id, target, x, y, options): (u64, Option<u64>, Option<f64>, Option<f64>, Table)| {
+                let at = x.zip(y);
+                this.0
+                    .insert(id, target, at, area(&options)?, tuning(&options)?);
+                Ok(())
+            },
+        );
+
+        methods.add_method_mut("remove", |_, this, id: u64| {
+            this.0.remove(id);
+            Ok(())
+        });
+
+        methods.add_method_mut("resize", |_, this, (id, by): (u64, f64)| {
+            this.0.resize(id, by);
+            Ok(())
+        });
+
+        methods.add_method("contains", |_, this, id: u64| Ok(this.0.contains(id)));
+
+        methods.add_method("windows", |lua, this, ()| {
+            let out = lua.create_table()?;
+            for (index, id) in this.0.windows().into_iter().enumerate() {
+                out.set(index + 1, id)?;
+            }
+            Ok(out)
+        });
+
+        // Rects come back tagged with the window they belong to, because tree
+        // order is not the order the script knows its windows in.
+        methods.add_method("layout", |lua, this, options: Table| {
+            let out = lua.create_table()?;
+            for (index, (id, rect)) in this
+                .0
+                .layout(area(&options)?, tuning(&options)?)
+                .into_iter()
+                .enumerate()
+            {
+                let entry = lua.create_table()?;
+                entry.set("id", id)?;
+                entry.set("x", rect.x)?;
+                entry.set("y", rect.y)?;
+                entry.set("w", rect.w)?;
+                entry.set("h", rect.h)?;
+                out.set(index + 1, entry)?;
+            }
+            Ok(out)
+        });
+    }
 }
 
 /// Read a list of columns out of a Lua table.
