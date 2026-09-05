@@ -53,6 +53,11 @@ pub(crate) struct Bar {
     /// Tracked here because `MemoryRenderBuffer` does not report its own size.
     buffer_size: (i32, i32),
     shown: BarState,
+    /// The last second handed to QML. Pushing a fresh float every frame marks
+    /// the scene dirty every frame, which re-rasterises the bar, damages the
+    /// output and keeps the whole compositor awake to redraw a clock that reads
+    /// the same. An idle desktop should cost nothing.
+    shown_second: u64,
 }
 
 impl Bar {
@@ -66,6 +71,7 @@ impl Bar {
             buffer: None,
             buffer_size: (0, 0),
             shown: BarState::default(),
+            shown_second: u64::MAX,
         })
     }
 
@@ -104,7 +110,15 @@ impl Bar {
                 status: state.status.clone(),
             };
         }
-        self.scene.set_real("clockSeconds", now.as_secs_f64());
+        if now.as_secs() != self.shown_second {
+            self.shown_second = now.as_secs();
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "an uptime large enough to lose precision is not reachable"
+            )]
+            self.scene
+                .set_real("clockSeconds", self.shown_second as f64);
+        }
 
         self.scene.advance(now);
         let rendered = match self.scene.render() {

@@ -1,0 +1,26 @@
+# The build environment for Solium.
+#
+# Fedora, matching the host, and that is the entire point of the choice. A
+# vendored C dependency (Lua) is compiled by whatever toolchain builds the
+# project, so a container with a *newer* C library produces a binary the host
+# cannot start. Worse, working around that by running the compositor inside the
+# container costs hardware acceleration: the container has Mesa but no GPU
+# driver, so everything falls back to llvmpipe and renders at ~55 fps.
+#
+# Matching the host means the binary runs on the host, on the real driver.
+#
+#   podman build -t solium-build:fc44 -f dev/Containerfile dev/
+ARG FEDORA_VERSION=44
+FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION}
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        gcc gcc-c++ make pkgconf-pkg-config \
+        wayland-devel libinput-devel systemd-devel libseat-devel \
+        libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
+        libdrm-devel libdisplay-info-devel \
+        qt6-qtbase-devel qt6-qtdeclarative-devel \
+        foot \
+    && dnf clean all
+
+# Rust comes from the user's own rustup install, mounted in with $HOME.
+ENV PATH=/root/.cargo/bin:$PATH

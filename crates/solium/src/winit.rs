@@ -4,6 +4,8 @@
 //! compositor can be run and tested nested, without touching the developer's
 //! live session.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use smithay::{
     backend::{
@@ -97,10 +99,16 @@ pub(crate) fn run() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("initialising the winit backend: {e}"))?;
 
     let size = backend.window_size();
-    let mode = Mode {
-        size,
-        refresh: 60_000,
-    };
+    // The host's actual refresh, not an assumed 60: a client pacing itself to
+    // the wrong number is a client that misses frames on purpose.
+    let refresh = backend
+        .window()
+        .current_monitor()
+        .and_then(|monitor| monitor.refresh_rate_millihertz())
+        .and_then(|rate| i32::try_from(rate).ok())
+        .unwrap_or(60_000);
+    let mode = Mode { size, refresh };
+    tracing::info!(refresh, "output mode");
     let output = Output::new(
         "winit".to_string(),
         PhysicalProperties {
@@ -160,6 +168,12 @@ pub(crate) fn run() -> Result<()> {
     let mut clicks = dev::clicks();
     triggers.reverse();
     clicks.reverse();
+
+    // Frame pacing, reported periodically. Latency is the thing this
+    // compositor will be judged on, and "it feels laggy" is not something that
+    // can be acted on without a number.
+    let mut frames = 0_u32;
+    let mut window_started = Duration::ZERO;
 
     // Which host monitor the nested window landed on cannot be asked for at
     // startup: a Wayland client learns its output only when the host sends
@@ -231,6 +245,13 @@ pub(crate) fn run() -> Result<()> {
         let size = backend.window_size();
         let damage = Rectangle::from_size(size);
 
+        // How many frames ago this buffer was last drawn, which is what lets
+        // the damage tracker work out what is stale in it. Passing 0 means
+        // "contents unknown", and the tracker then redraws everything every
+        // frame and reports damage every frame — an idle compositor that never
+        // stops rendering, which is exactly what it was doing.
+        let age = backend.buffer_age().unwrap_or(0);
+
         // The renderer borrow must end before submit(), so rendering happens in
         // its own scope and only two flags escape.
         let (rendered, captured) = match backend.bind() {
@@ -256,13 +277,14 @@ pub(crate) fn run() -> Result<()> {
                 let result = damage_tracker.render_output(
                     renderer,
                     &mut framebuffer,
-                    0,
+                    age,
                     &elements,
                     [0.05, 0.05, 0.06, 1.0],
                 );
                 if let Err(err) = &result {
                     tracing::warn!(?err, "render failed");
                 }
+                let damaged = result.as_ref().is_ok_and(|output| output.damage.is_some());
 
                 let mut captured = false;
                 let due = match capture_at {
@@ -285,7 +307,7 @@ pub(crate) fn run() -> Result<()> {
                     }
                 }
 
-                (result.is_ok(), captured)
+                (result.is_ok() && damaged, captured)
             }
         };
 
@@ -324,16 +346,33 @@ pub(crate) fn run() -> Result<()> {
             present::settle(window, now);
         }
 
+        frames += 1;
+        if now.saturating_sub(window_started) >= Duration::from_secs(2) {
+            let elapsed = now.saturating_sub(window_started).as_secs_f64();
+            let fps = f64::from(frames) / elapsed;
+            tracing::debug!(fps = format!("{fps:.1}"), "frame pacing");
+            frames = 0;
+            window_started = now;
+        }
+
         state.space.refresh();
         state.popups.cleanup();
         if let Err(err) = state.display_handle.flush_clients() {
             tracing::warn!(?err, "flushing clients failed");
         }
 
-        if event_loop
-            .dispatch(Some(std::time::Duration::from_millis(16)), &mut state)
-            .is_err()
-        {
+        // How long to wait for the next event, and the reason the drag used to
+        // trail the cursor. A flat 16 ms caps the compositor at ~60 fps however
+        // fast the display runs; on a 260 Hz screen the window lands four
+        // frames behind the pointer. While anything is moving the wait is
+        // short and `submit` above paces us against the host's vblank instead;
+        // when nothing is moving there is nothing to be quick for.
+        let timeout = if rendered {
+            Duration::from_millis(1)
+        } else {
+            Duration::from_millis(16)
+        };
+        if event_loop.dispatch(Some(timeout), &mut state).is_err() {
             break;
         }
     }

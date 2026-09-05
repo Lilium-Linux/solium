@@ -92,6 +92,12 @@ fn keyboard(state: &mut Solium, event: impl KeyboardKeyEvent<WinitInput>) {
                 .as_ref()
                 .is_some_and(|scripts| scripts.has_binding(&combo));
 
+            // Logged for every press, because "my binding does nothing" has two
+            // very different causes and they are indistinguishable without it:
+            // either the key never arrived — the host compositor kept it — or it
+            // arrived under a name no script bound.
+            tracing::debug!(combo, claimed, "key");
+
             if claimed {
                 FilterResult::Intercept(Some(Bound(combo)))
             } else if state.script_grab {
