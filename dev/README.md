@@ -232,16 +232,14 @@ first that is actually installed. That fallback exists because naming a
 terminal that is not installed looks, from the keyboard, exactly like the
 binding being broken — which is how the first hardware session went.
 
-Prefer a plain Wayland terminal (foot, alacritty, kitty) over a KDE one. A KDE
-app started under Solium sits for around twenty seconds before its window
-appears, which is close enough to the D-Bus activation timeout to be worth
-naming: KDE apps ask for portal and session services that are not running here,
-and wait for them to time out. `vkcube` maps instantly, so this is the app
-waiting, not the compositor failing to map it. `foot` has no such dependency:
-
-```sh
-sudo dnf install foot
-```
+The order is deliberate: plain Wayland terminals (kitty, alacritty, wezterm,
+foot) come before konsole. A KDE app started under Solium sits for around
+twenty seconds before its window appears — close enough to the D-Bus
+activation timeout to be worth naming, since KDE apps ask for portal and
+session services that are not running here and wait for them to time out.
+`vkcube` and kitty both map in a second or two, so this is the app waiting,
+not the compositor failing to map it. konsole stays on the list as a fallback
+for a machine that has nothing else, never as a preference.
 
 **What is not there yet.** One output: it drives the first connected connector
 and ignores the rest. Several places take the first output rather than the right

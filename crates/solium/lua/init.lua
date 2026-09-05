@@ -29,13 +29,16 @@ end
 -- picking one that does not is indistinguishable, from the keyboard, from the
 -- binding being broken -- which is how the first hardware session went.
 local CANDIDATES = {
-    "foot",
-    -- konsole hands off to an already-running instance and exits without
-    -- these, which looks exactly like the spawn having failed.
-    "konsole --separate --nofork",
-    "alacritty",
+    -- Plain Wayland terminals first: they open immediately. A KDE terminal
+    -- waits on portal and session services that are not running under Solium
+    -- and takes about twenty seconds to show a window, which reads as the
+    -- binding being broken rather than as the app being slow -- so konsole is
+    -- a fallback, not a preference, even on a KDE machine.
     "kitty",
+    "alacritty",
     "wezterm",
+    "foot",
+    "konsole --separate --nofork",
     "xterm",
 }
 
