@@ -4,6 +4,8 @@
 //! owns both. Layout and presentation deliberately do not live here — see
 //! `docs/architecture.md`.
 
+use std::time::Duration;
+
 use smithay::output::Output;
 use smithay::reexports::wayland_server::{Resource, backend::ObjectId};
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
@@ -57,7 +59,7 @@ use crate::{
     input::{grab::MoveGrab, profile::Profile},
     layer,
     present::{self, Clock, Frame},
-    script::{Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
+    script::{AnimationSpec, Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
 };
 
 /// A window's script-facing identity.
@@ -419,6 +421,11 @@ impl Solium {
                         self.focus_window(&window, SERIAL_COUNTER.next_serial());
                     }
                 }
+                Command::Place {
+                    id,
+                    rect,
+                    animation,
+                } => self.place(id, rect, animation, now),
                 Command::Close { id } => {
                     if let Some(toplevel) = self
                         .window_by_id(id)
@@ -430,6 +437,60 @@ impl Solium {
                 Command::Spawn { program, args } => self.spawn(&program, &args),
             }
         }
+    }
+
+    /// Move and resize a window for real, gliding it there from where it was.
+    ///
+    /// This is the layout's authority: it changes the geometry everything else
+    /// reads. The animation is a *transform* on top — the window is drawn from
+    /// its old rectangle and lands on the new one — so a layout change and a
+    /// mode use the same machinery and cannot disagree about where a window is
+    /// going.
+    fn place(&mut self, id: u64, rect: Rect, animation: AnimationSpec, now: Duration) {
+        let Some(window) = self.window_by_id(id) else {
+            return;
+        };
+        // Captured before anything moves: this is where the animation starts.
+        let Some(was) = self.outer_geometry(&window) else {
+            return;
+        };
+
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a rect from a script is screen-sized"
+        )]
+        let outer = Rectangle::new(
+            (rect.x.round() as i32, rect.y.round() as i32).into(),
+            (
+                (rect.w.round() as i32).max(1),
+                (rect.h.round() as i32).max(1),
+            )
+                .into(),
+        );
+
+        // The frame's share comes off the top; what is left is the client's.
+        let inset = self.frame_inset(&window);
+        let client = Rectangle::new(
+            (outer.loc.x, outer.loc.y + inset).into(),
+            (outer.size.w, (outer.size.h - inset).max(1)).into(),
+        );
+
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|state| state.size = Some(client.size));
+            toplevel.send_pending_configure();
+        }
+        // `false`: laying out must not restack. A tiling arrangement that
+        // reordered windows every time it ran would fight the user's focus.
+        self.space.map_element(window.clone(), client.loc, false);
+
+        present::from(
+            &window,
+            outer,
+            present::Frame::real(was),
+            now,
+            animation.duration,
+            animation.easing,
+        );
     }
 
     /// Start a program as a client of this compositor.
