@@ -20,9 +20,9 @@
 //! assert_eq!(move_window.progress(Duration::from_millis(200)), 1.0);
 //! ```
 
-#![forbid(unsafe_code)]
-
 use std::time::Duration;
+
+pub mod ffi;
 
 /// A damped spring.
 ///

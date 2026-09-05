@@ -9,6 +9,12 @@ description = "Solium's animation engine: curves, springs and timing, with no co
 [lints]
 workspace = true
 
+# cdylib so the engine can be built for the browser and drive the preview
+# *live*, rather than the preview replaying samples. Pre-sampling means the
+# parameters cannot be changed without a rebuild, and tuning is the whole point.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 # Deliberately empty. This crate must stay runnable outside the compositor —
 # that is the entire point of it being a crate — so it may not grow a dependency
 # on Wayland, on a renderer, or on Solium itself.
