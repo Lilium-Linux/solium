@@ -10,9 +10,9 @@ use smithay::output::Output;
 use smithay::reexports::wayland_server::{Resource, backend::ObjectId};
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
 use smithay::{
-    backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
-    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    backend::{allocator::dmabuf::Dmabuf, renderer::utils::on_commit_buffer_handler},
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_layer_shell,
+    delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{LayerSurface, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
     input::{
         Seat, SeatHandler, SeatState,
@@ -34,6 +34,7 @@ use smithay::{
             CompositorClientState, CompositorHandler, CompositorState, get_parent,
             is_sync_subsurface, with_states,
         },
+        dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::{OutputHandler, OutputManagerState},
         selection::SelectionHandler,
         selection::data_device::{
@@ -155,6 +156,14 @@ pub(crate) struct Solium {
     /// whoever is sitting there, from input being broken.
     pub(crate) pointer: crate::cursor::Pointer,
 
+    /// Hardware buffer sharing: `zwp_linux_dmabuf_v1`.
+    ///
+    /// The global itself is created by whichever backend has a renderer, since
+    /// only it knows which formats the GPU can actually scan out. Held here so
+    /// dropping it — which would withdraw the global — happens with the rest.
+    pub(crate) dmabuf_state: DmabufState,
+    pub(crate) dmabuf_global: Option<DmabufGlobal>,
+
     /// Something only a backend can carry out: switching VT, or stopping.
     ///
     /// The input layer must not do either itself. It runs inside the keyboard
@@ -209,6 +218,8 @@ impl Solium {
             socket_name: String::new(),
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
+            dmabuf_state: DmabufState::new(),
+            dmabuf_global: None,
             request: None,
             display_handle,
         }
@@ -1228,6 +1239,34 @@ impl SeatHandler for Solium {
     }
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
 }
+
+impl DmabufHandler for Solium {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    /// A client has built a buffer out of GPU memory and wants to know whether
+    /// it is usable.
+    ///
+    /// Accepted on the strength of the format list the global was created with
+    /// — the renderer's own — rather than by importing here, because the
+    /// renderer belongs to the backend and this does not. The real import
+    /// happens when the buffer is committed, and says so in the log if it
+    /// fails. The honest cost: a client whose buffer we cannot import is told
+    /// "yes" and then shows nothing, instead of being told "no" and falling
+    /// back to shared memory.
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        _dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        if let Err(err) = notifier.successful::<Self>() {
+            tracing::warn!(?err, "could not accept a client's dmabuf");
+        }
+    }
+}
+delegate_dmabuf!(Solium);
 
 impl SelectionHandler for Solium {
     type SelectionUserData = ();

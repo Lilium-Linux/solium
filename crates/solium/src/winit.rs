@@ -107,6 +107,25 @@ pub(crate) fn run() -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("initialising the winit backend: {e}"))?;
 
+    // The same hardware buffer sharing the hardware backend offers, so that a
+    // client taking the fast path is exercised here rather than first
+    // discovered on a TTY where nothing can be read.
+    {
+        let formats: Vec<_> = backend
+            .renderer()
+            .egl_context()
+            .dmabuf_texture_formats()
+            .iter()
+            .copied()
+            .collect();
+        tracing::info!(count = formats.len(), "advertising dmabuf formats");
+        state.dmabuf_global = Some(
+            state
+                .dmabuf_state
+                .create_global::<Solium>(&display_handle, formats),
+        );
+    }
+
     let size = backend.window_size();
     // The host's actual refresh, not an assumed 60: a client pacing itself to
     // the wrong number is a client that misses frames on purpose.
