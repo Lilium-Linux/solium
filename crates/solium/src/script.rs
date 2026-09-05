@@ -362,6 +362,9 @@ fn layouts(lua: &Lua) -> mlua::Result<Table> {
             padding: options
                 .get::<Option<f64>>("padding")?
                 .unwrap_or(defaults.padding),
+            split: options
+                .get::<Option<f64>>("split")?
+                .unwrap_or(defaults.split),
         })
     }
 
@@ -385,6 +388,31 @@ fn layouts(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, (count, options): (usize, Table)| {
             let slots = solium_layout::master_stack(count, area(&options)?, tuning(&options)?);
             to_lua(lua, &slots)
+        })?,
+    )?;
+
+    layout.set(
+        "strip",
+        lua.create_function(|lua, (columns, options): (Table, Table)| {
+            let columns = columns_from(&columns)?;
+            let offset = options.get::<Option<f64>>("offset")?.unwrap_or_default();
+            let slots = solium_layout::strip(&columns, area(&options)?, tuning(&options)?, offset);
+            to_lua(lua, &slots)
+        })?,
+    )?;
+
+    layout.set(
+        "strip_scroll_to",
+        lua.create_function(|_, (index, columns, options): (usize, Table, Table)| {
+            let columns = columns_from(&columns)?;
+            let offset = options.get::<Option<f64>>("offset")?.unwrap_or_default();
+            Ok(solium_layout::strip_scroll_to(
+                index.saturating_sub(1),
+                &columns,
+                area(&options)?,
+                tuning(&options)?,
+                offset,
+            ))
         })?,
     )?;
 
@@ -781,6 +809,19 @@ fn parse_easing(name: &str) -> Option<Curve> {
         tracing::warn!(easing = name, "unknown easing, keeping the default");
         None
     })
+}
+
+/// Read a list of columns out of a Lua table.
+fn columns_from(columns: &Table) -> mlua::Result<Vec<solium_layout::Column>> {
+    let mut out = Vec::new();
+    for column in columns.sequence_values::<Table>() {
+        let column = column?;
+        out.push(solium_layout::Column {
+            width: column.get::<Option<f64>>("width")?.unwrap_or(0.5),
+            windows: column.get::<Option<usize>>("windows")?.unwrap_or(1),
+        });
+    }
+    Ok(out)
 }
 
 /// Whether a program can be found on `PATH`.

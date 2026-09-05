@@ -400,6 +400,20 @@ impl Solium {
 
     /// Apply what a script asked for.
     fn apply(&mut self, outcome: Outcome) {
+        // Anything a script asked for changes what is on screen, and almost
+        // all of it starts an animation. Damage-driven rendering only draws
+        // when something says it must, and a transform created here says
+        // nothing on its own — so without this the animation does not advance
+        // until some *unrelated* damage happens to wake the loop, at which
+        // point it jumps straight to wherever the clock says it should be.
+        //
+        // That is the whole of "sometimes the animation is instant, sometimes
+        // too fast, sometimes right": it was running at the mercy of whatever
+        // else happened to be redrawing.
+        if !outcome.commands.is_empty() {
+            self.redraw = true;
+        }
+
         if let Some(grab) = outcome.grab
             && grab != self.script_grab
         {
