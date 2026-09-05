@@ -209,6 +209,7 @@ fn pointer_motion<B: InputBackend>(
     // Motion is *also* forwarded below, because the pointer leaving a window
     // has to reach it or the window keeps a stale hover state.
     hover_frame(state, location);
+    follow_pointer(state, location, pointer.is_grabbed());
 
     let under = state.surface_under(location);
 
@@ -243,6 +244,7 @@ fn pointer_relative<B: InputBackend>(
     let under = state.surface_under(location);
 
     hover_frame(state, location);
+    follow_pointer(state, location, pointer.is_grabbed());
     pointer.motion(
         state,
         under,
@@ -270,6 +272,24 @@ fn confine(output: &Output, location: Point<f64, Logical>) -> Point<f64, Logical
         location.y.clamp(0.0, last(size.h)),
     )
         .into()
+}
+
+/// Focus whatever the pointer is over, if the profile says so.
+///
+/// Skipped while a grab is running: a window being dragged is under the
+/// cursor the whole time, and windows sliding past underneath it are not a
+/// request to focus each of them in turn.
+fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
+    if !state.profile.focus_follows_mouse || grabbed || state.script_grab {
+        return;
+    }
+    let Some((window, _)) = state.window_under(location) else {
+        return;
+    };
+    if state.is_focused(&window) {
+        return;
+    }
+    state.focus_window(&window, SERIAL_COUNTER.next_serial());
 }
 
 /// Let a window frame see the pointer, so its buttons light up on hover.
