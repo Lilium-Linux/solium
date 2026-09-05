@@ -1,0 +1,117 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Solium animation curves</title>
+<style>
+  :root { color-scheme: dark; --bg:#0d0f14; --panel:#151922; --line:#242a36;
+          --text:#e6e9ef; --dim:#7f8798; --accent:#7aa2f7; }
+  body { margin:0; padding:28px; background:var(--bg); color:var(--text);
+         font:14px/1.5 system-ui, sans-serif; }
+  h1 { font-size:17px; margin:0 0 4px; }
+  p.lead { color:var(--dim); margin:0 0 22px; max-width:70ch; }
+  .row { display:flex; gap:18px; align-items:center; margin-bottom:14px;
+         background:var(--panel); border:1px solid var(--line);
+         border-radius:10px; padding:12px 14px; }
+  .name { width:130px; font-weight:600; }
+  .meta { width:70px; color:var(--dim); font-variant-numeric:tabular-nums; }
+  canvas { background:#0a0c10; border-radius:6px; }
+  .track { position:relative; flex:1; height:34px; background:#0a0c10;
+           border-radius:6px; overflow:hidden; }
+  .box { position:absolute; top:5px; left:0; width:24px; height:24px;
+         border-radius:5px; background:var(--accent); }
+  button { background:var(--accent); color:#0d0f14; border:0; border-radius:7px;
+           padding:8px 16px; font-weight:600; cursor:pointer; }
+  code { background:var(--panel); padding:1px 5px; border-radius:4px; }
+</style>
+
+<h1>Solium animation curves</h1>
+<p class="lead">
+  Sampled from the compositor's own animation engine, not reimplemented here —
+  regenerate with
+  <code>cargo run -p solium-animation --bin preview &gt; preview/curves.json</code>.
+  What moves below is what a window will do.
+</p>
+<button id="play">Play</button>
+<div id="curves" style="margin-top:20px"></div>
+
+<script>
+const WIDTH = 260, HEIGHT = 70;
+
+function plot(values) {
+  const canvas = document.createElement("canvas");
+  canvas.width = WIDTH; canvas.height = HEIGHT;
+  const ctx = canvas.getContext("2d");
+  const lo = Math.min(0, ...values), hi = Math.max(1, ...values);
+  const y = v => HEIGHT - 6 - ((v - lo) / (hi - lo)) * (HEIGHT - 12);
+
+  ctx.strokeStyle = "#242a36";
+  ctx.beginPath(); ctx.moveTo(0, y(0)); ctx.lineTo(WIDTH, y(0));
+  ctx.moveTo(0, y(1)); ctx.lineTo(WIDTH, y(1)); ctx.stroke();
+
+  ctx.strokeStyle = "#7aa2f7"; ctx.lineWidth = 2; ctx.beginPath();
+  values.forEach((v, i) => {
+    const x = (i / (values.length - 1)) * WIDTH;
+    i ? ctx.lineTo(x, y(v)) : ctx.moveTo(x, y(v));
+  });
+  ctx.stroke();
+  return canvas;
+}
+
+let tracks = [];
+
+// Filled in by the preview binary, so the page opens straight from disk —
+// fetching a sibling file is blocked under file://, and needing a web server to
+// look at an animation curve is exactly the friction this tool exists to remove.
+const EMBEDDED = /*CURVES*/ null;
+
+function render(data) {
+  const host = document.getElementById("curves");
+  for (const curve of data.curves) {
+    const row = document.createElement("div");
+    row.className = "row";
+
+    const name = document.createElement("div");
+    name.className = "name"; name.textContent = curve.name;
+
+    const meta = document.createElement("div");
+    meta.className = "meta"; meta.textContent = curve.duration_ms + "ms";
+
+    const track = document.createElement("div");
+    track.className = "track";
+    const box = document.createElement("div");
+    box.className = "box";
+    track.appendChild(box);
+
+    row.append(name, meta, plot(curve.values), track);
+    host.appendChild(row);
+    tracks.push({ curve, box, track });
+  }
+}
+
+if (EMBEDDED) {
+  render(EMBEDDED);
+} else {
+  fetch("curves.json").then(r => r.json()).then(render).catch(err => {
+    document.getElementById("curves").textContent =
+      "no curve data — generate it: cargo run -p solium-animation --bin preview > preview/curves.html (" + err + ")";
+  });
+}
+
+document.getElementById("play").onclick = () => {
+  const started = performance.now();
+  function frame(now) {
+    let running = false;
+    for (const { curve, box, track } of tracks) {
+      const elapsed = now - started;
+      const t = Math.min(1, elapsed / curve.duration_ms);
+      if (t < 1) running = true;
+      // Read the sampled value rather than easing here: the engine already
+      // decided what this curve does.
+      const value = curve.values[Math.round(t * (curve.values.length - 1))];
+      const span = track.clientWidth - box.clientWidth;
+      box.style.left = (value * span) + "px";
+    }
+    if (running) requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+};
+</script>

@@ -1,0 +1,15 @@
+[package]
+name = "solium-animation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Solium's animation engine: curves, springs and timing, with no compositor attached."
+
+[lints]
+workspace = true
+
+# Deliberately empty. This crate must stay runnable outside the compositor —
+# that is the entire point of it being a crate — so it may not grow a dependency
+# on Wayland, on a renderer, or on Solium itself.
+[dependencies]

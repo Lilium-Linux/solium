@@ -29,7 +29,7 @@ use std::{path::Path, time::Duration};
 use anyhow::{Context, Result, anyhow};
 use mlua::{Lua, Table, Value};
 
-use crate::present::Easing;
+use crate::present::Curve;
 
 /// A rectangle as a script sees it: plain numbers, no coordinate-space types.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -84,14 +84,14 @@ pub(crate) struct Snapshot {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AnimationSpec {
     pub(crate) duration: Duration,
-    pub(crate) easing: Easing,
+    pub(crate) easing: Curve,
 }
 
 impl Default for AnimationSpec {
     fn default() -> Self {
         Self {
             duration: Duration::from_millis(220),
-            easing: Easing::OutCubic,
+            easing: Curve::OutCubic,
         }
     }
 }
@@ -536,15 +536,16 @@ fn rect_from(options: &Table) -> mlua::Result<Option<Rect>> {
     }
 }
 
-fn parse_easing(name: &str) -> Option<Easing> {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "outcubic" | "out_cubic" => Some(Easing::OutCubic),
-        "outback" | "out_back" => Some(Easing::OutBack),
-        other => {
-            tracing::warn!(easing = other, "unknown easing, keeping the default");
-            None
-        }
-    }
+/// Look up a curve by the name a script used.
+///
+/// The names come from the animation engine rather than a list kept here, so a
+/// curve added there is immediately available to scripts — including springs,
+/// which is why this is a lookup and not a match.
+fn parse_easing(name: &str) -> Option<Curve> {
+    Curve::from_name(name).or_else(|| {
+        tracing::warn!(easing = name, "unknown easing, keeping the default");
+        None
+    })
 }
 
 /// Put a key combination into one canonical form.
@@ -686,7 +687,7 @@ mod tests {
                 assert_eq!(rect.map(|rect| rect.w), Some(100.0));
                 // `animate` applied to the batch queued after it.
                 assert_eq!(animation.duration, Duration::from_millis(300));
-                assert_eq!(animation.easing, Easing::OutBack);
+                assert_eq!(animation.easing, Curve::OutBack);
             }
             other => panic!("expected a present command, got {other:?}"),
         }
