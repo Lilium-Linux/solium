@@ -255,6 +255,17 @@ start on the host at all. Building and running in one place removes the skew
 rather than papering over it. `/tmp` is shared so captures land where you can
 read them.
 
+## Settings
+
+`crates/solium/lua/config.lua` holds everything tunable — gaps, the master
+ratio, column width, animation durations and easings, and how workspaces are
+arranged. Editing it needs no rebuild.
+
+Workspaces come in three arrangements, and the arrangement is the only
+difference between them: `horizontal` puts them in a row that slides sideways,
+`vertical` in a column, `grid` in both with `columns` × `rows`. A workspace to
+the right enters from the right, because that is where it is.
+
 ## Bindings
 
 | Input | Effect |
@@ -266,6 +277,11 @@ read them.
 | `Super` + `[` / `]` | Scroll the viewport to the previous/next column |
 | Drag a window edge | Resize |
 | `Super` + `Space` | Overview on/off (bound in `lua/overview.lua`, not in Rust) |
+| `Super` + `1`…`9` | Go to that workspace |
+| `Super`+`Shift` + `1`…`9` | Send the focused window there |
+| `Super`+`Ctrl` + arrows | Step to the next workspace in that direction |
+| `Super` + wheel | Scroll the viewport (scrolling layout) |
+| Drag a window | In a tiled or scrolling layout, swaps or snaps back |
 | `Ctrl`+`Alt`+`F1`…`F12` | Switch virtual terminal (hardware session only) |
 | `Ctrl`+`Alt`+`Backspace` | Stop the compositor |
 
