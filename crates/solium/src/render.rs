@@ -60,6 +60,16 @@ where
     // it is a session where the mouse appears not to work.
     elements.extend(cursor(state, renderer, output_scale, scale, now));
 
+    // The shell's own surfaces, above the windows it sits over. Drawn from the
+    // same QML engine as the window frames, which is what lets an icon here and
+    // a window there be interpolated between.
+    if let Some(area) = state.dock_area()
+        && let Some(dock) = state.dock.as_mut()
+        && let Some(element) = dock.element(renderer, area, now)
+    {
+        elements.push(Element::Chrome(element));
+    }
+
     // Anchored surfaces above the windows: panels, notifications, an overlay.
     // Collected first because the frame is built topmost-first.
     let output = state.space.outputs().next().cloned();

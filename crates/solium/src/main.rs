@@ -18,6 +18,7 @@ mod present;
 mod qml;
 mod render;
 mod script;
+mod shell;
 mod state;
 mod synth;
 mod tty;

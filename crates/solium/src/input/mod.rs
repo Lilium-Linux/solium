@@ -212,6 +212,7 @@ fn pointer_motion<B: InputBackend>(
     // Motion is *also* forwarded below, because the pointer leaving a window
     // has to reach it or the window keeps a stale hover state.
     hover_frame(state, location);
+    hover_dock(state, location);
     follow_pointer(state, location, pointer.is_grabbed());
 
     let under = state.surface_under(location);
@@ -247,6 +248,7 @@ fn pointer_relative<B: InputBackend>(
     let under = state.surface_under(location);
 
     hover_frame(state, location);
+    hover_dock(state, location);
     follow_pointer(state, location, pointer.is_grabbed());
     pointer.motion(
         state,
@@ -310,6 +312,21 @@ fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bo
     state.focus_window(&window, SERIAL_COUNTER.next_serial());
 }
 
+/// Whether a button event is a press.
+fn pressed_now(state: ButtonState) -> bool {
+    state == ButtonState::Pressed
+}
+
+/// Let the dock see the pointer, so its icons light up on hover.
+fn hover_dock(state: &mut Solium, location: Point<f64, Logical>) {
+    let Some(area) = state.dock_area() else {
+        return;
+    };
+    if let Some(dock) = state.dock.as_mut() {
+        dock.pointer(area, location.x, location.y, None);
+    }
+}
+
 /// Let a window frame see the pointer, so its buttons light up on hover.
 fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
     if let Some((window, local)) = state.frame_under(location)
@@ -328,6 +345,28 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     let button = event.button_code();
     let button_state = event.state();
     let location = pointer.current_location();
+
+    // The dock first, and only when nothing is being dragged. It is drawn
+    // above the windows, so a press that lands on it is its own.
+    if !pointer.is_grabbed()
+        && let Some(area) = state.dock_area()
+        && state.dock.as_mut().is_some_and(|dock| {
+            dock.pointer(
+                area,
+                location.x,
+                location.y,
+                Some(pressed_now(button_state)),
+            )
+        })
+    {
+        // Read out after the pointer call, not from inside it: a script that
+        // spawns and animates must not run while the seat holds its lock.
+        let pressed = state.dock.as_mut().and_then(|dock| dock.pressed.take());
+        if let Some(index) = pressed {
+            state.trigger_dock(index);
+        }
+        return;
+    }
 
     // While a mode owns input, every press is the mode's: it decides what a
     // click on a thumbnail means, and nothing underneath should see it.

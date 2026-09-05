@@ -190,13 +190,13 @@ pub(crate) fn run() -> Result<()> {
     solium.socket_name = start_socket(&mut event_loop, display)?;
 
     let config = Scripts::config_path();
-    solium.scripts = match Scripts::load(&config) {
+    solium.start_scripts(match Scripts::load(&config) {
         Ok(scripts) => Some(scripts),
         Err(err) => {
             tracing::error!(?err, config = %config.display(), "no scripts loaded");
             None
         }
-    };
+    });
 
     let mut state = State {
         solium,
