@@ -110,7 +110,7 @@ pub(crate) fn run() -> Result<()> {
     // The same hardware buffer sharing the hardware backend offers, so that a
     // client taking the fast path is exercised here rather than first
     // discovered on a TTY where nothing can be read.
-    {
+    if std::env::var_os("SOLIUM_NO_DMABUF").is_none() {
         let formats: Vec<_> = backend
             .renderer()
             .egl_context()
@@ -354,7 +354,10 @@ pub(crate) fn run() -> Result<()> {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default(),
-                Some(std::time::Duration::ZERO),
+                // Throttled to the output's refresh, not to nothing: see the
+                // note on `send_frames` in tty.rs. Zero here means every client
+                // redraws as fast as it can for as long as it is open.
+                Some(frame_interval(&output)),
                 |_, _| Some(output.clone()),
             );
         });
@@ -404,4 +407,16 @@ pub(crate) fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// How long one frame of an output lasts. Refresh is in millihertz.
+fn frame_interval(output: &smithay::output::Output) -> std::time::Duration {
+    let refresh = output
+        .current_mode()
+        .map(|mode| mode.refresh)
+        .filter(|refresh| *refresh > 0)
+        .unwrap_or(60_000);
+    std::time::Duration::from_nanos(
+        1_000_000_000_000_u64 / u64::try_from(refresh).unwrap_or(60_000),
+    )
 }
