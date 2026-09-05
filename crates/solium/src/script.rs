@@ -412,6 +412,14 @@ fn layouts(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|_, ()| Ok(TilingTree::default()))?,
     )?;
 
+    // A scrolling workspace, held by the script that made it. Stateful for the
+    // same reason the tree is: which column is active and where the view sits
+    // relative to it are not recoverable from a list of windows.
+    layout.set(
+        "scroller",
+        lua.create_function(|_, ()| Ok(Scrolling::default()))?,
+    )?;
+
     layout.set(
         "strip",
         lua.create_function(|lua, (columns, options): (Table, Table)| {
@@ -830,6 +838,92 @@ fn parse_easing(name: &str) -> Option<Curve> {
         tracing::warn!(easing = name, "unknown easing, keeping the default");
         None
     })
+}
+
+/// A scrolling workspace, as scripts hold it.
+#[derive(Debug, Default)]
+struct Scrolling(solium_layout::scroller::Scroller);
+
+impl mlua::UserData for Scrolling {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("insert", |_, this, (id, options): (u64, Table)| {
+            this.0.insert(id, area(&options)?, tuning(&options)?);
+            Ok(())
+        });
+
+        methods.add_method_mut(
+            "insert_into_column",
+            |_, this, (id, options): (u64, Table)| {
+                this.0
+                    .insert_into_active(id, area(&options)?, tuning(&options)?);
+                Ok(())
+            },
+        );
+
+        methods.add_method_mut("remove", |_, this, id: u64| {
+            this.0.remove(id);
+            Ok(())
+        });
+
+        methods.add_method_mut("focus_sideways", |_, this, (by, options): (i32, Table)| {
+            this.0
+                .focus_sideways(by as isize, area(&options)?, tuning(&options)?);
+            Ok(())
+        });
+
+        methods.add_method_mut("focus_vertically", |_, this, by: i32| {
+            this.0.focus_vertically(by as isize);
+            Ok(())
+        });
+
+        methods.add_method_mut("move_column", |_, this, (by, options): (i32, Table)| {
+            this.0
+                .move_column(by as isize, area(&options)?, tuning(&options)?);
+            Ok(())
+        });
+
+        methods.add_method_mut("consume", |_, this, ()| {
+            this.0.consume();
+            Ok(())
+        });
+
+        methods.add_method_mut("expel", |_, this, options: Table| {
+            this.0.expel(area(&options)?, tuning(&options)?);
+            Ok(())
+        });
+
+        methods.add_method_mut("cycle_width", |_, this, options: Table| {
+            this.0.cycle_width(area(&options)?, tuning(&options)?);
+            Ok(())
+        });
+
+        methods.add_method_mut("scroll_by", |_, this, delta: f64| {
+            this.0.scroll_by(delta);
+            Ok(())
+        });
+
+        methods.add_method("focused", |_, this, ()| Ok(this.0.focused()));
+        methods.add_method("contains", |_, this, id: u64| Ok(this.0.contains(id)));
+
+        methods.add_method("layout", |lua, this, options: Table| {
+            let out = lua.create_table()?;
+            for (index, (id, rect)) in this
+                .0
+                .layout(area(&options)?, tuning(&options)?)
+                .into_iter()
+                .enumerate()
+            {
+                let entry = lua.create_table()?;
+                entry.set("id", id)?;
+                entry.set("x", rect.x)?;
+                entry.set("y", rect.y)?;
+                entry.set("w", rect.w)?;
+                entry.set("h", rect.h)?;
+                out.set(index + 1, entry)?;
+            }
+            Ok(out)
+        });
+    }
 }
 
 /// A dwindle tree, as scripts hold it.
