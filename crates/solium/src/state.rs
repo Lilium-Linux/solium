@@ -435,17 +435,37 @@ impl Solium {
             // Without this the child inherits the *host* display and opens its
             // window next to the compositor rather than inside it.
             .env("WAYLAND_DISPLAY", &self.socket_name)
+            // This compositor has no X server, so a child must not believe it
+            // has one. Inheriting DISPLAY is worse than it sounds: a Qt or GTK
+            // program prefers X11 when it is set, connects to the *host's*
+            // XWayland, and opens its window on the host desktop. The spawn
+            // logs success, nothing errors, and no window ever appears here.
+            .env_remove("DISPLAY")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // Errors are inherited, not discarded. A program that refuses to
+            // start says why on stderr, and swallowing that leaves "the
+            // binding does nothing" as the only symptom of a dozen different
+            // causes.
+            .stderr(Stdio::inherit());
 
         match process.spawn() {
             Ok(mut child) => {
                 tracing::info!(program, socket = self.socket_name, "spawned");
-                // Waited on elsewhere so the child is reaped: a compositor that
-                // leaves zombies is one that eventually cannot fork at all.
-                std::thread::spawn(move || {
-                    let _ = child.wait();
+                // Waited on so the child is reaped — a compositor that leaves
+                // zombies eventually cannot fork at all — and so that an early
+                // exit is *reported*. A program that starts and immediately
+                // quits is indistinguishable from one that never drew, and
+                // that is the hard version of this to debug.
+                let name = program.to_owned();
+                std::thread::spawn(move || match child.wait() {
+                    Ok(status) if status.success() => {
+                        tracing::debug!(program = name, "a spawned program exited cleanly");
+                    }
+                    Ok(status) => {
+                        tracing::warn!(program = name, %status, "a spawned program exited");
+                    }
+                    Err(err) => tracing::warn!(program = name, ?err, "could not wait for a child"),
                 });
             }
             Err(err) => tracing::warn!(?err, program, "could not spawn"),

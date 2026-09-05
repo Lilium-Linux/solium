@@ -10,6 +10,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The animation engine, as a crate so that curves can be tested and previewed
+# without a compositor. See crates/animation/preview.
+solium-animation = { path = "../animation" }
+
 # Wayland plumbing, input and backends. Rendering goes through Smithay's
 # renderer traits (GLES2 for now) -- see docs/spikes/2026-08-27-vulkan-on-smithay.md
 # for why, and why the transform layer must not reach past those traits.

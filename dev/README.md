@@ -51,6 +51,22 @@ exactly:
 SOLIUM_TRIGGER_AT="5200:super+space,6200:super+space"   SOLIUM_CAPTURE=/tmp/after.ppm SOLIUM_CAPTURE_AT=7400 dev/run-nested.sh
 ```
 
+## Looking at animations without running the compositor
+
+```sh
+cargo run -p solium-animation --bin preview > crates/animation/preview/curves.html
+xdg-open crates/animation/preview/curves.html
+```
+
+Plots every curve and spring and moves a box along each one. The samples come
+from the engine, so what the page shows is what a window will do — and the page
+is self-contained, because needing a web server to look at an easing curve is
+the friction the tool exists to remove.
+
+Curves live in `crates/animation`, which depends on nothing. Add one there and
+it is available to scripts by name (`sol.animate{ easing = "spring" }`) and to
+the preview at once.
+
 ## Running programs inside Solium
 
 `Super`+`Return` starts one, and `sol.spawn` binds any other:
@@ -68,17 +84,25 @@ Because Solium runs in the build container, anything `sol.spawn` starts runs
 there too, and only what is installed there can be started that way — which is
 `foot` and not much else.
 
-**The easy route is the host's own applications.** Solium's socket lives in
-`$XDG_RUNTIME_DIR`, which is the host's directory, so any installed program can
-be pointed at it. The launcher prints the socket name:
+**Do not test with KDE's own applications.** They are launched through DBus
+activation, so the process that actually opens the window inherits the
+*session's* environment and connects to the session's compositor. The spawn
+succeeds, the program keeps running, its window appears on the host desktop,
+and nothing is logged anywhere — the most confusing failure available.
+
+`dev/foot` is the way round it: a terminal from the build image, connected to
+whichever compositor invoked it.
 
 ```sh
-WAYLAND_DISPLAY=wayland-1 konsole --separate --nofork
-WAYLAND_DISPLAY=wayland-1 QT_QPA_PLATFORM=wayland kate
+SOLIUM_TERMINAL=$PWD/dev/foot dev/run-nested.sh
 ```
 
-They arrive as ordinary clients and get a compositor-drawn frame like anything
-else.
+Anything that is not DBus-activated can be pointed at the socket directly — the
+launcher prints its name:
+
+```sh
+WAYLAND_DISPLAY=wayland-1 <program>
+```
 
 To add programs to the container instead, install and commit — a `--rm`
 container throws the installation away with itself:

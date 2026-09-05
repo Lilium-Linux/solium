@@ -14,6 +14,11 @@
 //! * **There is one clock**, ticked once per frame by the render loop. Not one
 //!   per window, per subsystem or per script — separate clocks are how modes
 //!   end up animating at subtly different speeds.
+//!
+//! The *timing* lives in `solium-animation`, a crate with no compositor in it,
+//! so curves and springs can be tested and previewed without launching this.
+//! What stays here is the part that needs a compositor: which rectangle a
+//! window is travelling between.
 
 use std::{cell::RefCell, time::Duration};
 
@@ -21,6 +26,8 @@ use smithay::{
     desktop::Window,
     utils::{Logical, Point, Rectangle},
 };
+pub(crate) use solium_animation::Curve;
+use solium_animation::{Animation, lerp};
 
 /// A monotonic clock, sampled once per frame.
 ///
@@ -53,33 +60,6 @@ impl Clock {
 impl Default for Clock {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Easing curves. Named after what they do, not after their polynomial.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Easing {
-    /// Fast start, soft landing. The default because it reads as "responsive"
-    /// without looking mechanical.
-    #[default]
-    OutCubic,
-    /// Overshoots slightly and settles back — for things appearing.
-    OutBack,
-}
-
-impl Easing {
-    fn apply(self, t: f32) -> f32 {
-        match self {
-            Self::OutCubic => {
-                let inv = 1.0 - t;
-                1.0 - inv * inv * inv
-            }
-            Self::OutBack => {
-                const OVERSHOOT: f32 = 1.70158;
-                let inv = t - 1.0;
-                1.0 + (OVERSHOOT + 1.0) * inv * inv * inv + OVERSHOOT * inv * inv
-            }
-        }
     }
 }
 
@@ -127,8 +107,8 @@ impl Frame {
         self
     }
 
-    fn blend(self, other: Self, t: f32) -> Self {
-        let mix = |a: f64, b: f64| a + (b - a) * f64::from(t);
+    fn blend(self, other: Self, progress: f64) -> Self {
+        let mix = |a: f64, b: f64| lerp(a, b, progress);
         Self {
             rect: logical(
                 (
@@ -140,40 +120,35 @@ impl Frame {
                     mix(self.rect.size.h, other.rect.size.h),
                 ),
             ),
-            opacity: self.opacity + (other.opacity - self.opacity) * t,
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "opacity is a small float either way"
+            )]
+            opacity: lerp(f64::from(self.opacity), f64::from(other.opacity), progress) as f32,
         }
     }
 }
 
 /// An in-flight transform: where the window was, where it is going, and when.
+///
+/// The when is `solium-animation`'s problem; this only knows the two ends.
 #[derive(Clone, Copy, Debug)]
 struct Transform {
     from: Frame,
     to: Frame,
-    started: Duration,
-    duration: Duration,
-    easing: Easing,
+    animation: Animation,
     /// Drop the transform when it lands, so the window goes back to being drawn
     /// at real geometry with no per-frame cost. Set when leaving a mode.
     release: bool,
 }
 
 impl Transform {
-    fn progress(&self, now: Duration) -> f32 {
-        if self.duration.is_zero() {
-            return 1.0;
-        }
-        let elapsed = now.saturating_sub(self.started).as_secs_f32();
-        (elapsed / self.duration.as_secs_f32()).clamp(0.0, 1.0)
-    }
-
     fn frame(&self, now: Duration) -> Frame {
-        self.from
-            .blend(self.to, self.easing.apply(self.progress(now)))
+        self.from.blend(self.to, self.animation.progress(now))
     }
 
     fn finished(&self, now: Duration) -> bool {
-        self.progress(now) >= 1.0
+        self.animation.done(now)
     }
 }
 
@@ -206,16 +181,14 @@ pub(crate) fn present(
     to: Frame,
     now: Duration,
     duration: Duration,
-    easing: Easing,
+    easing: Curve,
 ) {
     let from = frame(window, real, now);
     with_slot(window, |slot| {
         *slot = Some(Transform {
             from,
             to,
-            started: now,
-            duration,
-            easing,
+            animation: Animation::new(now, duration, easing),
             release: false,
         });
     });
@@ -227,16 +200,14 @@ pub(crate) fn clear(
     real: Rectangle<i32, Logical>,
     now: Duration,
     duration: Duration,
-    easing: Easing,
+    easing: Curve,
 ) {
     let from = frame(window, real, now);
     with_slot(window, |slot| {
         *slot = Some(Transform {
             from,
             to: Frame::real(real),
-            started: now,
-            duration,
-            easing,
+            animation: Animation::new(now, duration, easing),
             release: true,
         });
     });
@@ -291,9 +262,7 @@ pub(crate) fn open(window: &Window, real: Rectangle<i32, Logical>, now: Duration
         *slot = Some(Transform {
             from: target.scaled(0.88).with_opacity(0.0),
             to: target,
-            started: now,
-            duration: Duration::from_millis(220),
-            easing: Easing::OutBack,
+            animation: Animation::new(now, Duration::from_millis(220), Curve::OutBack),
             release: true,
         });
     });
@@ -340,9 +309,11 @@ mod tests {
         let transform = Transform {
             from,
             to,
-            started: Duration::from_millis(1000),
-            duration: Duration::from_millis(200),
-            easing: Easing::OutCubic,
+            animation: Animation::new(
+                Duration::from_millis(1000),
+                Duration::from_millis(200),
+                Curve::OutCubic,
+            ),
             release: false,
         };
 
@@ -360,9 +331,7 @@ mod tests {
         let transform = Transform {
             from: Frame::real(rect(0, 0, 100, 100)),
             to,
-            started: Duration::from_millis(500),
-            duration: Duration::ZERO,
-            easing: Easing::OutCubic,
+            animation: Animation::new(Duration::from_millis(500), Duration::ZERO, Curve::OutCubic),
             release: false,
         };
         assert_eq!(transform.frame(Duration::from_millis(500)), to);
@@ -374,17 +343,6 @@ mod tests {
         assert_eq!(frame.rect.loc.x, 25.0);
         assert_eq!(frame.rect.loc.y, 25.0);
         assert_eq!(frame.rect.size.w, 50.0);
-    }
-
-    #[test]
-    fn easing_starts_at_zero_and_ends_at_one() {
-        for easing in [Easing::OutCubic, Easing::OutBack] {
-            assert!(easing.apply(0.0).abs() < 1e-6, "{easing:?} must start at 0");
-            assert!(
-                (easing.apply(1.0) - 1.0).abs() < 1e-6,
-                "{easing:?} must land on 1"
-            );
-        }
     }
 
     #[test]

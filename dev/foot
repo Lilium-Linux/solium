@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#
+# foot, from the build image, connected to whatever compositor invoked this.
+#
+# Exists because the host has no Wayland terminal installed, and because KDE's
+# own applications are the wrong thing to test a nested compositor with: they
+# are launched through DBus activation, so the process that actually opens the
+# window inherits the *session's* environment and connects to the session's
+# compositor. It starts, it stays running, and its window appears on the host
+# desktop instead of inside Solium — with nothing logged anywhere.
+#
+#   SOLIUM_TERMINAL=$PWD/dev/foot dev/run-nested.sh
+exec podman run --rm --userns=keep-id --security-opt label=disable \
+    -v "$HOME:$HOME" -v "$XDG_RUNTIME_DIR:$XDG_RUNTIME_DIR" \
+    -e "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" \
+    -e "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:?no compositor to connect to}" \
+    localhost/solium-build:fc44 foot "$@"

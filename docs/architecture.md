@@ -51,6 +51,26 @@ Rules:
 - **One animation clock**, ticked from the render loop. Not per window, not per
   subsystem, not per script.
 
+### The animation engine is a separate crate
+
+`crates/animation` holds the curves, the springs and the timing, and depends on
+nothing — no Wayland, no renderer, no Solium. That is not tidiness:
+
+> **An animation you can only judge by launching a compositor is an animation
+> nobody tunes.**
+
+There will be many animations and many settings for them, so the engine has to
+be usable outside the thing it animates. `cargo run -p solium-animation --bin
+preview` writes a self-contained page that plots every curve and moves a box
+along it, sampled from the engine itself rather than reimplemented in
+JavaScript — a second implementation would drift, and the drift would be
+invisible because the page would still look plausible.
+
+The compositor keeps only the part that needs a compositor: which rectangle a
+window is travelling between. `Curve::from_name` is what scripts bind to, so a
+curve added to the engine is immediately available to every mode and to the
+preview without touching the renderer.
+
 **Backend independence.** The transform layer talks to Smithay's `Renderer` and
 `Frame` traits, never to GLES directly. Scaling and cross-fading textures is
 unremarkable work that GLES2 does well; the reasons to want Vulkan later are
