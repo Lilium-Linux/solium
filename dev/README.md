@@ -293,7 +293,12 @@ the right enters from the right, because that is where it is.
 | `Super` + `Q` | Close the focused window |
 | `Super` + `T` | Tiling on/off (`lua/tiling.lua`) |
 | `Super` + `S` | Scrolling on/off (`lua/scrolling.lua`) |
-| `Super` + `[` / `]` | Scroll the viewport to the previous/next column |
+| `Super` + `[` / `]` | Focus the column left / right |
+| `Super`+`Ctrl` + `[` / `]` | Move the column left / right |
+| `Super`+`Shift` + `[` / `]` | Focus up / down within a column |
+| `Super` + `,` / `.` | Pull a window into this column / push it back out |
+| `Super` + `R` | Cycle the column through the preset widths |
+| `Super` + `-` / `=` | Move the seam a tiled window sits on |
 | Drag a window edge | Resize |
 | `Super` + `Space` | Overview on/off (bound in `lua/overview.lua`, not in Rust) |
 | `Super` + `1`…`9` | Go to that workspace |

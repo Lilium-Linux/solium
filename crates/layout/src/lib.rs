@@ -14,6 +14,7 @@
 // symbols and to hand the preview a buffer to read, and says so at each use.
 pub mod ffi;
 
+pub mod scroller;
 pub mod tree;
 
 /// A rectangle, in whatever coordinates the caller is using.

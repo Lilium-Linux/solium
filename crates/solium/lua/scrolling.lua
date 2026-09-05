@@ -1,133 +1,143 @@
--- Scrolling: an endless strip of windows, with the screen as a viewport.
+-- Scrolling: columns and a moving view, as niri does it.
 --
--- The arrangement niri and PaperWM use, and the one that makes small screens
--- work: windows keep their width and sit in a row that runs off both edges of
--- the display. Nothing is ever squeezed to fit; the view moves instead.
+-- Reimplemented from niri's src/layout/scrolling.rs (GPL-3.0-or-later, which
+-- this project's GPL-3.0-only can use); the behaviour is the specification.
 --
--- It is a script for the same reason tiling is. `sol.place` says where a window
--- lives, the compositor glides it there, and scrolling the viewport is nothing
--- more than placing every window again with a different offset — so the strip
--- slides rather than jumping, and no new compositor code was needed to make
--- that true.
-
-local scrolling = { active = false, offset = 0, focused = 1 }
+-- The unit is a column, not a window. A column holds a stack sharing its
+-- width, and that width is a share of the *view* — so opening a tenth window
+-- never makes the first nine thinner. The strip simply gets longer and the
+-- view moves. That is the difference between a scroller and a row of windows
+-- squeezed to fit, and it is why this works the same on a laptop and an
+-- ultrawide.
+--
+-- The view is measured from the active column rather than from the left end
+-- of the strip, so focus and view cannot drift apart.
 
 local config = require("config")
 local workspaces = require("workspaces")
 
-local GAP = config.gap
-local COLUMN = config.scrolling.column -- of the work area's width
-local SETTLE = config.scrolling.motion
-local SNAP = config.scrolling.snap
+local scrolling = { active = false, views = {} }
 
--- Oldest first, so the strip has a stable order and does not reshuffle when
--- focus moves.
-local function ordered()
-    local windows = workspaces.visible()
-    local out = {}
-    for i = #windows, 1, -1 do
-        out[#out + 1] = windows[i]
+-- One strip per workspace: scrolling on one must not move another.
+local function view_for(index)
+    if not scrolling.views[index] then
+        scrolling.views[index] = sol.layout.scroller()
     end
-    return out
+    return scrolling.views[index]
+end
+
+local function options()
+    local area = sol.monitor()
+    area.gap = config.gap
+    return area
 end
 
 function scrolling.apply(animation)
     if not scrolling.active then
         return
     end
-    local windows = ordered()
-    if #windows == 0 then
+    local slots = view_for(workspaces.active):layout(options())
+    if #slots == 0 then
         return
     end
-
-    local area = sol.monitor()
-    area.gap = GAP
-    area.column = COLUMN
-    area.offset = scrolling.offset
-
-    local slots = sol.layout.scrolling(#windows, area)
-    sol.animate(animation or SETTLE)
-    for i, window in ipairs(windows) do
-        sol.place(windows[i].id, slots[i])
+    sol.animate(animation or config.scrolling.motion)
+    for _, slot in ipairs(slots) do
+        sol.place(slot.id, slot)
     end
 end
 
--- Bring a column fully into view. The viewport moves, never the strip's own
--- order — a window that slid out of sight is still in the same place.
-function scrolling.focus(index)
-    local windows = ordered()
-    if #windows == 0 then
-        return
+-- Follow the strip's own idea of focus, so the keyboard goes where the view
+-- went.
+local function settle(animation)
+    scrolling.apply(animation)
+    local focused = view_for(workspaces.active):focused()
+    if focused then
+        sol.focus(focused)
     end
-    index = math.max(1, math.min(index, #windows))
-    scrolling.focused = index
+end
 
-    -- Only scrolls far enough to reveal it; a column already on screen stays
-    -- put rather than being centred for no reason.
-    local area = sol.monitor()
-    area.gap = GAP
-    area.column = COLUMN
-    area.offset = scrolling.offset
-    scrolling.offset = sol.layout.scroll_to(index, #windows, area)
-
-    scrolling.apply(SNAP)
-    sol.focus(windows[index].id)
+function scrolling.adopt()
+    local view = view_for(workspaces.active)
+    local present = {}
+    for _, window in ipairs(workspaces.visible()) do
+        present[window.id] = true
+        if not view:contains(window.id) then
+            view:insert(window.id, options())
+        end
+    end
+    for _, window in ipairs(sol.windows()) do
+        if not present[window.id] and view:contains(window.id) then
+            view:remove(window.id)
+        end
+    end
 end
 
 function scrolling.toggle()
     scrolling.active = not scrolling.active
     if scrolling.active then
+        scrolling.adopt()
         sol.status("scrolling")
-        scrolling.offset = 0
-        scrolling.apply()
+        settle()
     else
         sol.status("")
     end
 end
 
--- Super plus the wheel moves the viewport. Unmodified the wheel still belongs
--- to whatever is under the cursor, because a strip of terminals you cannot
--- scroll inside is not an improvement on one you cannot scroll between.
+-- A new window opens in its own column beside the active one, and the view
+-- follows it.
+sol.on("open", function(id)
+    view_for(workspaces.active):insert(id, options())
+    settle(config.scrolling.snap)
+end)
+
+sol.on("close", function(id)
+    for _, view in pairs(scrolling.views) do
+        view:remove(id)
+    end
+    scrolling.apply(config.scrolling.snap)
+end)
+
+sol.on("drop", function(_, _, _)
+    if scrolling.active then
+        scrolling.apply(config.scrolling.snap)
+    end
+end)
+
+-- Super plus the wheel moves the view. Unmodified, the wheel still belongs to
+-- whatever is under the cursor.
 sol.on("scroll", function(_, dy)
     if not scrolling.active or dy == 0 then
         return
     end
-    scrolling.focus(scrolling.focused + (dy > 0 and 1 or -1))
+    view_for(workspaces.active):focus_sideways(dy > 0 and 1 or -1, options())
+    settle(config.scrolling.snap)
 end)
 
--- Dropped windows rejoin the strip rather than sitting where the cursor left
--- them; dropped onto another column, the two trade places.
-sol.on("drop", function(id, x, y)
-    if not scrolling.active then
-        return
-    end
-    local windows = ordered()
-    -- `sol.window_at` answers with an id, not a window.
-    local target = sol.window_at(x, y)
-    if target and target ~= id then
-        local from, to
-        for index, window in ipairs(windows) do
-            if window.id == id then from = index end
-            if window.id == target then to = index end
+local function bind(combo, action)
+    sol.bind(combo, function()
+        if not scrolling.active then
+            return
         end
-        if from and to then
-            scrolling.focus(to)
-        end
-    end
-    scrolling.apply(SNAP)
-end)
+        action(view_for(workspaces.active))
+        settle(config.scrolling.snap)
+    end)
+end
 
 sol.bind("super+s", scrolling.toggle)
-sol.bind("super+bracketright", function() scrolling.focus(scrolling.focused + 1) end)
-sol.bind("super+bracketleft", function() scrolling.focus(scrolling.focused - 1) end)
 
--- A new window joins the end of the strip and is scrolled to, which is what
--- makes the layout usable without reaching for the mouse.
-sol.on("open", function()
-    if not scrolling.active then
-        return
-    end
-    scrolling.focus(#ordered())
-end)
+-- Move between columns, and within one.
+bind("super+bracketleft", function(view) view:focus_sideways(-1, options()) end)
+bind("super+bracketright", function(view) view:focus_sideways(1, options()) end)
+bind("super+ctrl+bracketleft", function(view) view:move_column(-1, options()) end)
+bind("super+ctrl+bracketright", function(view) view:move_column(1, options()) end)
+bind("super+shift+bracketleft", function(view) view:focus_vertically(-1) end)
+bind("super+shift+bracketright", function(view) view:focus_vertically(1) end)
+
+-- Stack a window into this column, or push it back out into its own.
+bind("super+comma", function(view) view:consume() end)
+bind("super+period", function(view) view:expel(options()) end)
+
+-- Cycle the column through the preset widths.
+bind("super+r", function(view) view:cycle_width(options()) end)
 
 return scrolling
