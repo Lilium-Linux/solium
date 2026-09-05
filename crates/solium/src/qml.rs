@@ -77,6 +77,7 @@ mod ffi {
 #[expect(unsafe_code, reason = "calling into the Qt host")]
 pub(crate) fn start() -> Result<()> {
     let path = import_path();
+    let path = std::path::PathBuf::from(path);
     let path = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| anyhow!("the QML import path contains a NUL byte"))?;
 
@@ -89,13 +90,17 @@ pub(crate) fn start() -> Result<()> {
 
 /// Where QML modules are found, `Solium` among them.
 ///
-/// Overridable so a whole design system can be swapped without rebuilding,
-/// which is most of the point of it being QML.
-fn import_path() -> std::path::PathBuf {
+/// Colon-separated, like a `PATH`, because shell code brought in from
+/// elsewhere needs its own modules and a compatibility layer on the search
+/// path beside the compositor's. Overridable so a whole design system can be
+/// swapped without rebuilding, which is most of the point of it being QML.
+fn import_path() -> std::ffi::OsString {
     if let Some(path) = std::env::var_os("SOLIUM_QML_PATH") {
-        return std::path::PathBuf::from(path);
+        return path;
     }
-    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml"))
+    let own = concat!(env!("CARGO_MANIFEST_DIR"), "/qml");
+    let shim = concat!(env!("CARGO_MANIFEST_DIR"), "/qml/compat");
+    std::ffi::OsString::from(format!("{own}:{shim}"))
 }
 
 /// Matches `SOLIUM_QML_UNCHANGED` in `qml/host.h`.

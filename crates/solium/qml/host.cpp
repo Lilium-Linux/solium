@@ -138,8 +138,15 @@ extern "C" int solium_qml_start(const char *import_path)
 
     g_engine = new QQmlEngine();
     if (import_path != nullptr) {
-        // So a scene can `import Solium` and reach the theme.
-        g_engine->addImportPath(QString::fromUtf8(import_path));
+        // Colon-separated, like a PATH. One entry is the compositor's own
+        // module, so a scene can `import Solium` and reach the theme; the rest
+        // are for shell code being brought in from elsewhere, which needs its
+        // own modules and a compatibility layer on the search path beside them.
+        const auto paths = QString::fromUtf8(import_path).split(QLatin1Char(':'),
+                                                                Qt::SkipEmptyParts);
+        for (const auto &path : paths) {
+            g_engine->addImportPath(path);
+        }
     }
     return 1;
 }
