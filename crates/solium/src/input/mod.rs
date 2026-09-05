@@ -117,7 +117,19 @@ fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>
             // very different causes and they are indistinguishable without it:
             // either the key never arrived — the host compositor kept it — or it
             // arrived under a name no script bound.
-            tracing::debug!(combo, claimed, "key");
+            //
+            // An *unclaimed* Super combination is logged louder than the rest.
+            // Super is the compositor's own modifier, so pressing one and
+            // getting nothing is never ordinary typing: it is someone using a
+            // binding that is not there, under a name they cannot see. That is
+            // worth one line at info, and it is the line that would have
+            // answered this question on the first hardware run instead of the
+            // fourth.
+            if !claimed && modifiers.logo {
+                tracing::info!(combo, "no script has bound this");
+            } else {
+                tracing::debug!(combo, claimed, "key");
+            }
 
             if claimed {
                 FilterResult::Intercept(Some(Action::Bound(combo)))
@@ -505,7 +517,7 @@ fn absolute_location<B: InputBackend>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Request, confine, escape};
+    use super::{Request, combo_for, confine, escape};
     use smithay::{
         input::keyboard::{Keysym, ModifiersState},
         output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -555,6 +567,21 @@ mod tests {
             escape(&modifiers(true, false), Keysym::XF86_Switch_VT_2),
             None
         );
+    }
+
+    /// The spelling a real key press produces must be the spelling scripts
+    /// bind. This is not obvious: xkb names `Return` with a capital and
+    /// `space` without, and the two have to come out the same shape.
+    #[test]
+    fn key_presses_are_spelled_the_way_scripts_bind_them() {
+        let sup = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+        assert_eq!(combo_for(&sup, Keysym::Return), "super+return");
+        assert_eq!(combo_for(&sup, Keysym::space), "super+space");
+        assert_eq!(combo_for(&sup, Keysym::q), "super+q");
+        assert_eq!(combo_for(&sup, Keysym::KP_Enter), "super+kp_enter");
     }
 
     #[test]

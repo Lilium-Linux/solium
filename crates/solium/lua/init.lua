@@ -62,13 +62,20 @@ else
     sol.log("no terminal found -- set SOLIUM_TERMINAL to one you have")
 end
 
-sol.bind("super+return", function()
+local function open_terminal()
     if not TERMINAL then
-        sol.log("super+return: no terminal is installed")
+        sol.log("no terminal is installed -- set SOLIUM_TERMINAL")
         return
     end
     sol.spawn(table.unpack(TERMINAL))
-end)
+end
+
+-- Both Enters. The keypad one is a different keysym (`kp_enter`), so binding
+-- only `return` leaves whoever reaches for the near one pressing a key that
+-- does nothing -- and nothing on screen says why. Bound separately rather than
+-- folded together in the compositor, so a script can still tell them apart.
+sol.bind("super+return", open_terminal)
+sol.bind("super+kp_enter", open_terminal)
 
 -- Close the focused window. A request, not a kill -- the client decides whether
 -- it can go.
