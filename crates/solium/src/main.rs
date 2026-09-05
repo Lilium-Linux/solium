@@ -43,9 +43,20 @@ fn open_log() -> Option<std::sync::Arc<std::fs::File>> {
 
     // Appended, so the log of the run that went wrong is still there after the
     // run that was meant to fix it.
+    //
+    // Written synchronously, which is not the usual trade. This log exists for
+    // the case where the compositor has taken the screen and stopped
+    // responding, and the only way out is the power button -- and a hard reset
+    // takes the page cache with it. A log that loses its last seconds loses
+    // exactly the seconds worth reading. At a few lines a session that costs
+    // nothing; under `RUST_LOG=debug` it is slow, and worth it anyway.
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let synchronous =
+        i32::try_from(smithay::reexports::rustix::fs::OFlags::DSYNC.bits()).unwrap_or(0);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .custom_flags(synchronous)
         .open(&path)
         .ok()?;
     eprintln!("logging to {}", path.display());
@@ -71,6 +82,23 @@ fn start_logging(log: Option<std::sync::Arc<std::fs::File>>) {
     }
 }
 
+/// Send panics through the log as well as to stderr.
+///
+/// A panic prints to stderr, and on a hardware session stderr is the terminal
+/// *underneath* the compositor: nobody can read it, and it never reaches the
+/// log file either. That is how a crash comes to look identical to a freeze.
+fn log_panics() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(
+            location = info.location().map(ToString::to_string),
+            "panic: {}",
+            info
+        );
+        previous(info);
+    }));
+}
+
 fn main() -> Result<()> {
     let backend = std::env::args().nth(1);
     // On the hardware the screen belongs to the compositor, so anything printed
@@ -84,6 +112,7 @@ fn main() -> Result<()> {
         .flatten();
     start_logging(log);
 
+    log_panics();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting solium");
 
     // Nested when there is a compositor to nest in, on the hardware otherwise.

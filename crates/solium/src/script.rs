@@ -629,6 +629,15 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // Whether a program exists to be run. A desktop cannot assume any
+    // particular terminal, editor or browser is installed, and a script that
+    // picks the first one that *is* there beats one that fails silently on a
+    // machine set up differently from the author's.
+    sol.set(
+        "which",
+        lua.create_function(|_, program: String| Ok(which(&program)))?,
+    )?;
+
     sol.set(
         "grab_input",
         lua.create_function(|lua, grabbed: bool| {
@@ -741,6 +750,23 @@ fn parse_easing(name: &str) -> Option<Curve> {
         tracing::warn!(easing = name, "unknown easing, keeping the default");
         None
     })
+}
+
+/// Whether a program can be found on `PATH`.
+///
+/// A plain lookup rather than a spawn: asking costs nothing, and finding out by
+/// running it means finding out *after* something has already failed. A desktop
+/// cannot assume any particular terminal or editor is installed, and a script
+/// that picks the first one that *is* beats one that silently does nothing on a
+/// machine set up differently from the author's.
+fn which(program: &str) -> bool {
+    if program.contains('/') {
+        return std::path::Path::new(program).is_file();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
 }
 
 /// Put a key combination into one canonical form.
