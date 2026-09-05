@@ -121,6 +121,29 @@ sol.on("drop", function(id, x, y)
     tiling.apply(config.tiling.snap)
 end)
 
+-- Dragging an edge moves the seam this window shares with its neighbour,
+-- rather than giving the window a size of its own. In a tiled arrangement a
+-- window does not have one: the space is divided, and dragging an edge moves
+-- where the division falls. Returning a command tells the compositor we took
+-- it, so it does not also resize the window directly.
+sol.on("resize", function(id, dx, dy)
+    if not tiling.active then
+        return
+    end
+    local area = sol.monitor()
+    local tree = tree_for(workspaces.active)
+    -- Whichever axis moved more is the one the seam runs along; the tree knows
+    -- which way its own branch was cut.
+    local by
+    if math.abs(dx) >= math.abs(dy) then
+        by = dx / math.max(area.w, 1)
+    else
+        by = dy / math.max(area.h, 1)
+    end
+    tree:resize(id, by)
+    tiling.apply({ duration = 0 })
+end)
+
 sol.bind("super+t", tiling.toggle)
 
 -- Move the seam this window sits on. Everything on the far side stays put,

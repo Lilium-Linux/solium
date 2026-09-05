@@ -173,6 +173,16 @@ impl Scripts {
     ///
     /// The user's own file wins, and the bundled one is the fallback rather
     /// than a default that has to be copied before anything works.
+    /// Where a user's own scripts live, whether or not they have any.
+    pub(crate) fn user_config_dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+            })
+            .map(|base| base.join("solium"))
+    }
+
     pub(crate) fn config_path() -> std::path::PathBuf {
         if let Some(path) = std::env::var_os("SOLIUM_LUA_INIT") {
             return std::path::PathBuf::from(path);
@@ -212,8 +222,16 @@ impl Scripts {
                 .get("package")
                 .map_err(failed("reading `package`"))?;
             let path: String = package.get("path").unwrap_or_default();
+            // The user's directory first, then the config's own, then Lua's.
+            // Ordered this way so dropping a single `config.lua` into
+            // ~/.config/solium overrides just that file — copying the whole
+            // set to change one number is not configurability.
+            let mut search = format!("{directory}/?.lua;{path}");
+            if let Some(user) = Self::user_config_dir() {
+                search = format!("{}/?.lua;{search}", user.display());
+            }
             package
-                .set("path", format!("{directory}/?.lua;{path}"))
+                .set("path", search)
                 .map_err(failed("extending package.path"))?;
         }
 
@@ -279,6 +297,21 @@ impl Scripts {
     /// Run the handler for a pointer press, while a mode owns input.
     pub(crate) fn click(&mut self, x: f64, y: f64, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "click", (x, y)))
+    }
+
+    /// Focus moved to a window.
+    pub(crate) fn focused(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "focus", id))
+    }
+
+    /// An edge was dragged.
+    ///
+    /// Offered to layouts before the compositor resizes anything, so a tiled
+    /// window can move its seam instead of growing over its neighbour.
+    pub(crate) fn resized(&mut self, id: u64, dx: f64, dy: f64, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| {
+            call_listeners(sol, "resize", (id, dx, dy))
+        })
     }
 
     /// A window went away.
@@ -870,6 +903,11 @@ impl mlua::UserData for Scrolling {
             Ok(())
         });
 
+        methods.add_method_mut("focus_window", |_, this, (id, options): (u64, Table)| {
+            this.0.focus_window(id, area(&options)?, tuning(&options)?);
+            Ok(())
+        });
+
         methods.add_method_mut("focus_sideways", |_, this, (by, options): (i32, Table)| {
             this.0
                 .focus_sideways(by as isize, area(&options)?, tuning(&options)?);
@@ -894,6 +932,11 @@ impl mlua::UserData for Scrolling {
 
         methods.add_method_mut("expel", |_, this, options: Table| {
             this.0.expel(area(&options)?, tuning(&options)?);
+            Ok(())
+        });
+
+        methods.add_method_mut("widen", |_, this, (id, by, options): (u64, f64, Table)| {
+            this.0.widen(id, by, area(&options)?, tuning(&options)?);
             Ok(())
         });
 

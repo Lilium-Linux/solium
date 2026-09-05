@@ -276,6 +276,16 @@ the fix was confirmed to be a fix rather than a rearrangement.
 
 ## Settings
 
+Every mode is a Lua script, not a compiled-in mode: `lua/tiling.lua`,
+`lua/scrolling.lua`, `lua/workspaces.lua`, `lua/overview.lua`. The compositor
+holds no opinion about any of them — it offers events and a layout engine, and
+the scripts decide what a layout *is*.
+
+Your own copies win. `~/.config/solium/` is searched before the bundled
+scripts, so dropping a single `config.lua` there overrides just that file, and
+a `tiling.lua` there replaces the whole layout without touching anything else.
+Copying the entire set to change one number is not configurability.
+
 `crates/solium/lua/config.lua` holds everything tunable — gaps, the master
 ratio, column width, animation durations and easings, and how workspaces are
 arranged. Editing it needs no rebuild.
@@ -299,7 +309,7 @@ the right enters from the right, because that is where it is.
 | `Super` + `,` / `.` | Pull a window into this column / push it back out |
 | `Super` + `R` | Cycle the column through the preset widths |
 | `Super` + `-` / `=` | Move the seam a tiled window sits on |
-| Drag a window edge | Resize |
+| Drag a window edge | Tiled: moves the seam. Scrolling: widens the column. Floating: resizes |
 | `Super` + `Space` | Overview on/off (bound in `lua/overview.lua`, not in Rust) |
 | `Super` + `1`…`9` | Go to that workspace |
 | `Super`+`Shift` + `1`…`9` | Send the focused window there |

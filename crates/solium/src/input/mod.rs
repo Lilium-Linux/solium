@@ -255,6 +255,7 @@ fn pointer_relative<B: InputBackend>(
         },
     );
     pointer.frame(state);
+    settle_resize(state);
 }
 
 /// Keep the pointer on the screen.
@@ -272,6 +273,28 @@ fn confine(output: &Output, location: Point<f64, Logical>) -> Point<f64, Logical
         location.y.clamp(0.0, last(size.h)),
     )
         .into()
+}
+
+/// Act on a resize an edge drag asked for, now the pointer's lock is free.
+///
+/// Offered to layouts first. Only a window that no layout claims is resized
+/// directly, which is what keeps a tiled window from growing over its
+/// neighbour instead of moving the seam between them.
+fn settle_resize(state: &mut Solium) {
+    let Some((window, wanted)) = state.pending_resize.take() else {
+        return;
+    };
+    let Some(current) = state.outer_geometry(&window) else {
+        return;
+    };
+    let dx = f64::from(wanted.size.w - current.size.w);
+    let dy = f64::from(wanted.size.h - current.size.h);
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    if !state.trigger_resize(&window, dx, dy) {
+        state.resize_to(&window, wanted);
+    }
 }
 
 /// Focus whatever the pointer is over, if the profile says so.

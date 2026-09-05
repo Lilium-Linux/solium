@@ -168,7 +168,11 @@ impl PointerGrab<Solium> for ResizeGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
-        data.resize_to(&self.window, self.resized(event.location));
+        // Recorded, not applied. A layout may want this to move a seam rather
+        // than change one window's size, and asking it from in here would call
+        // a script while the seat holds the pointer's lock — the deadlock the
+        // move grab already taught us about.
+        data.pending_resize = Some((self.window.clone(), self.resized(event.location)));
     }
 
     fn relative_motion(

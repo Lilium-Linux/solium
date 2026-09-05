@@ -103,6 +103,34 @@ sol.on("drop", function(_, _, _)
     end
 end)
 
+-- Clicking or hovering a column that is only half on screen brings it fully
+-- into view. Without this a column can hold focus while hanging off the edge,
+-- which is the state that makes a scroller feel like it is fighting you.
+sol.on("focus", function(id)
+    if not scrolling.active then
+        return
+    end
+    local view = view_for(workspaces.active)
+    if view:contains(id) then
+        view:focus_window(id, options())
+        scrolling.apply(config.scrolling.snap)
+    end
+end)
+
+-- An edge drag changes the column's width rather than one window's size:
+-- every window in a column shares its width, so there is nothing else it
+-- could mean.
+sol.on("resize", function(id, dx, _)
+    if not scrolling.active or dx == 0 then
+        return
+    end
+    local view = view_for(workspaces.active)
+    if view:contains(id) then
+        view:widen(id, dx / math.max(sol.monitor().w, 1), options())
+        scrolling.apply({ duration = 0 })
+    end
+end)
+
 -- Super plus the wheel moves the view. Unmodified, the wheel still belongs to
 -- whatever is under the cursor.
 sol.on("scroll", function(_, dy)
