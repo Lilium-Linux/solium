@@ -53,6 +53,7 @@ use smithay::{
         wayland_server::Display,
     },
     utils::{DeviceFd, Transform},
+    wayland::dmabuf::DmabufFeedbackBuilder,
 };
 
 use crate::{
@@ -125,6 +126,19 @@ pub(crate) fn probe() -> Result<()> {
     Ok(())
 }
 
+/// How long one frame of an output lasts.
+///
+/// The refresh rate is in millihertz, so this is a period in nanoseconds, with
+/// 60 Hz as the fallback for an output that does not say.
+fn frame_interval(output: &Output) -> Duration {
+    let refresh = output
+        .current_mode()
+        .map(|mode| mode.refresh)
+        .filter(|refresh| *refresh > 0)
+        .unwrap_or(60_000);
+    Duration::from_nanos(1_000_000_000_000_u64 / u64::try_from(refresh).unwrap_or(60_000))
+}
+
 /// A DRM device opened only to be asked questions.
 ///
 /// The `drm` traits are blanket-implemented for anything that can lend a file
@@ -192,6 +206,7 @@ pub(crate) fn run() -> Result<()> {
         output: None,
         input: None,
         animating: false,
+        pending: false,
         input_devices: 0,
         drm: None,
         signal: event_loop.get_signal(),
@@ -212,7 +227,13 @@ pub(crate) fn run() -> Result<()> {
                 {
                     tracing::warn!(?err, "the frame that just flipped was not accepted");
                 }
-                state.render();
+                // The frame is on the screen: the pipeline is free, and clients
+                // may draw the next one.
+                state.pending = false;
+                state.send_frames();
+                if state.solium.redraw || state.animating {
+                    state.render();
+                }
             }
             DrmEvent::Error(err) => tracing::error!(?err, "DRM error"),
         })
@@ -237,6 +258,9 @@ pub(crate) fn run() -> Result<()> {
                 if let Some(drm) = state.drm.as_mut() {
                     drm.pause();
                 }
+                // No vblank is coming while the session is away, so a frame
+                // left marked in-flight would block every render on return.
+                state.pending = false;
             }
             SessionEvent::ActivateSession => {
                 tracing::info!("session resumed");
@@ -330,6 +354,13 @@ struct State {
     input: Option<Libinput>,
     /// Whether any window was still moving at the last frame.
     animating: bool,
+    /// A frame has been queued and has not reached the screen yet.
+    ///
+    /// Building another before this one flips is work that can only be thrown
+    /// away, and it is how a compositor ends up rendering faster than the
+    /// display can show — which costs the GPU everything and the viewer
+    /// nothing.
+    pending: bool,
     /// How many input devices libinput has handed us.
     ///
     /// Zero is not a slow start, it is a session nobody can talk to — see the
@@ -380,22 +411,51 @@ impl State {
         // through `wl_drm`.
         //
         // `bind_wl_display` used to be here, and it was worse than having
-        // nothing: it advertises the legacy `wl_drm` global, GL clients take
-        // it in preference to shared memory, and every buffer they send comes
-        // back `NotManaged` from the import — kitty rendered nothing and then
-        // segfaulted. Reproduced by adding that one call to the nested backend,
-        // which had never had it and had never had the problem.
-        let formats: Vec<_> = renderer
-            .egl_context()
-            .dmabuf_texture_formats()
-            .iter()
-            .copied()
-            .collect();
-        self.solium.dmabuf_global = Some(
-            self.solium
-                .dmabuf_state
-                .create_global::<Solium>(&self.solium.display_handle, formats),
-        );
+        // nothing: it advertises the legacy `wl_drm` global, GL clients take it
+        // in preference to shared memory, and every buffer they sent came back
+        // `NotManaged` from the import.
+        //
+        // The global carries *feedback*, which is the part that matters and the
+        // part that was missing. Feedback names the device a client should
+        // allocate on. Without it a client is handed a list of formats and left
+        // to guess which GPU they belong to; kitty guessed, and died calling a
+        // null entry point — twelve times in seven seconds, in the kernel log,
+        // while this compositor sat there having spawned it exactly once.
+        if std::env::var_os("SOLIUM_NO_DMABUF").is_some() {
+            tracing::warn!("SOLIUM_NO_DMABUF is set: clients will use shared memory");
+        } else {
+            let formats: Vec<_> = renderer
+                .egl_context()
+                .dmabuf_texture_formats()
+                .iter()
+                .copied()
+                .collect();
+            // The render node, not the primary one: that is the device a client
+            // can actually open and allocate against.
+            let render = node
+                .node_with_type(NodeType::Render)
+                .and_then(Result::ok)
+                .unwrap_or(node);
+            match DmabufFeedbackBuilder::new(render.dev_id(), formats).build() {
+                Ok(feedback) => {
+                    tracing::info!(node = %render, "advertising dmabuf with feedback");
+                    self.solium.dmabuf_global = Some(
+                        self.solium
+                            .dmabuf_state
+                            .create_global_with_default_feedback::<Solium>(
+                                &self.solium.display_handle,
+                                &feedback,
+                            ),
+                    );
+                }
+                Err(err) => {
+                    // Shared memory still works. Advertising a fast path we
+                    // cannot describe is what caused the crash in the first
+                    // place, so not advertising one is the safe failure.
+                    tracing::error!(?err, "no dmabuf feedback: clients will use shared memory");
+                }
+            }
+        }
 
         let (connector, crtc, mode) = first_output(&device)?;
         let name = format!(
@@ -472,14 +532,11 @@ impl State {
 
     /// Draw a frame and queue it for the next vblank.
     fn render(&mut self) {
-        if !self.active {
+        if !self.active || self.pending {
             return;
         }
-        let (Some(renderer), Some(compositor), Some(output)) = (
-            self.renderer.as_mut(),
-            self.compositor.as_mut(),
-            self.output.as_ref(),
-        ) else {
+        let (Some(renderer), Some(compositor)) = (self.renderer.as_mut(), self.compositor.as_mut())
+        else {
             return;
         };
 
@@ -497,27 +554,40 @@ impl State {
             [0.05, 0.05, 0.06, 1.0],
             FrameFlags::DEFAULT,
         ) {
-            Ok(result) if !result.is_empty => {
-                if let Err(err) = compositor.queue_frame(()) {
-                    tracing::warn!(?err, "could not queue a frame");
-                }
-            }
+            Ok(result) if !result.is_empty => match compositor.queue_frame(()) {
+                Ok(()) => self.pending = true,
+                Err(err) => tracing::warn!(?err, "could not queue a frame"),
+            },
             Ok(_) => {}
             Err(err) => tracing::warn!(?err, "rendering failed"),
         }
 
         for window in self.solium.space.elements() {
-            window.send_frame(
-                output,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default(),
-                Some(Duration::ZERO),
-                |_, _| Some(output.clone()),
-            );
             animating |= present::settle(window, now);
         }
         self.animating = animating;
+    }
+
+    /// Tell clients the frame reached the screen and they may draw the next.
+    ///
+    /// Sent on the page flip rather than on every render, and throttled to the
+    /// output's own refresh rather than to nothing at all. `Duration::ZERO`
+    /// means "draw again immediately", and sending that on every pass through
+    /// the loop is an invitation a client will accept: an idle kitty sat at
+    /// better than thirty percent of a core answering it. A client should be
+    /// paced by the display, which is the only thing that can actually show
+    /// its work.
+    fn send_frames(&mut self) {
+        let Some(output) = self.output.as_ref() else {
+            return;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let throttle = frame_interval(output);
+        for window in self.solium.space.elements() {
+            window.send_frame(output, now, Some(throttle), |_, _| Some(output.clone()));
+        }
     }
 }
 
