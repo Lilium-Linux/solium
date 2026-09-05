@@ -294,21 +294,42 @@ pub(crate) fn run() -> Result<()> {
     // holds the display, and there is no key anyone can press to get it back —
     // not even the VT switch, which is itself a key. Better to give the screen
     // back and say why than to sit there looking like a crash.
+    //
+    // The deadline is generous on purpose, and it is measured rather than
+    // guessed. libinput takes between three and four and a quarter seconds to
+    // report the first device on the machine this was written on; the first
+    // version of this waited five, lost the race, and shut down a session that
+    // was working — which reads exactly like an instant crash from the other
+    // side of the screen. A watchdog that fires early is worse than none,
+    // because it breaks the thing it is guarding.
+    //
+    // Checked repeatedly rather than once, so the wait is visible in the log
+    // instead of being a silent gap before a shutdown.
+    let deadline = Duration::from_secs(20);
+    let interval = Duration::from_secs(2);
+    let mut waited = Duration::ZERO;
     event_loop
         .handle()
-        .insert_source(
-            Timer::from_duration(Duration::from_secs(5)),
-            |_, (), state| {
-                if state.input_devices == 0 {
-                    tracing::error!(
-                        "no input devices after 5s -- stopping rather than holding the display \
-                     with no way to escape. check that this user is on an active seat."
-                    );
-                    state.signal.stop();
-                }
-                TimeoutAction::Drop
-            },
-        )
+        .insert_source(Timer::from_duration(interval), move |_, (), state| {
+            if state.input_devices > 0 {
+                return TimeoutAction::Drop;
+            }
+            waited += interval;
+            if waited < deadline {
+                tracing::warn!(
+                    seconds = waited.as_secs(),
+                    "still no input devices, waiting"
+                );
+                return TimeoutAction::ToDuration(interval);
+            }
+            tracing::error!(
+                seconds = deadline.as_secs(),
+                "no input devices -- stopping rather than holding the display \
+                 with no way to escape. check that this user is on an active seat."
+            );
+            state.signal.stop();
+            TimeoutAction::Drop
+        })
         .map_err(|err| anyhow!("arming the input watchdog: {err}"))?;
 
     tracing::info!(
