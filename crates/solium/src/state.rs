@@ -164,6 +164,17 @@ pub(crate) struct Solium {
     pub(crate) dmabuf_state: DmabufState,
     pub(crate) dmabuf_global: Option<DmabufGlobal>,
 
+    /// A drag that has finished and not yet been reported to scripts.
+    ///
+    /// Recorded inside the pointer grab and acted on after it, for exactly the
+    /// reason the keyboard filter carries its bindings out rather than running
+    /// them: a grab callback runs while the seat holds the pointer's lock, and
+    /// anything that asks the seat where the pointer is — `snapshot` does —
+    /// takes that lock again and never gets it. A deadlock here freezes a
+    /// compositor holding DRM master, which from the other side of the screen
+    /// is indistinguishable from the machine dying.
+    pub(crate) pending_drop: Option<(Window, f64, f64)>,
+
     /// Set when anything on screen has changed and not yet been drawn.
     ///
     /// The render loop used to ask "is any window non-empty", which is true of
@@ -226,6 +237,7 @@ impl Solium {
             socket_name: String::new(),
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
+            pending_drop: None,
             redraw: true,
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
