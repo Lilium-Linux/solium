@@ -569,11 +569,16 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // script from reimplementing the transform to find out.
     sol.set(
         "window_at",
-        lua.create_function(|lua, (x, y): (f64, f64)| {
+        lua.create_function(|lua, (x, y, skip): (f64, f64, Option<u64>)| {
+            // `skip` is what makes this usable while dragging. A dragged
+            // window follows the cursor, so it is always the topmost thing
+            // under it — ask without skipping and the answer is always the
+            // window in your hand, which is why dropping one onto another
+            // never swapped anything.
             Ok(snapshot(lua)?
                 .windows
                 .iter()
-                .find(|window| window.drawn.contains(x, y))
+                .find(|window| Some(window.id) != skip && window.drawn.contains(x, y))
                 .map(|window| window.id))
         })?,
     )?;

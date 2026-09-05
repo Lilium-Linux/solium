@@ -86,7 +86,9 @@ end
 sol.on("open", function(id)
     local tree = tree_for(workspaces.active)
     local cursor = sol.cursor()
-    tree:insert(id, sol.window_at(cursor.x, cursor.y), cursor.x, cursor.y, options())
+    -- Skip the window being opened: it is already mapped and under the
+    -- pointer, so asking without skipping names it as its own split target.
+    tree:insert(id, sol.window_at(cursor.x, cursor.y, id), cursor.x, cursor.y, options())
     tiling.apply()
 end)
 
@@ -105,7 +107,10 @@ sol.on("drop", function(id, x, y)
     if not tiling.active then
         return
     end
-    local target = sol.window_at(x, y)
+    -- Skip the window being dragged: it follows the cursor, so it is always
+    -- the topmost thing under it, and asking without skipping just names the
+    -- window in your hand.
+    local target = sol.window_at(x, y, id)
     local tree = tree_for(workspaces.active)
     if target and target ~= id then
         -- Re-inserting where it was dropped is the swap: out of its old seam,

@@ -305,7 +305,8 @@ the right enters from the right, because that is where it is.
 | `Super`+`Shift` + `1`…`9` | Send the focused window there |
 | `Super`+`Ctrl` + arrows | Step to the next workspace in that direction |
 | `Super` + wheel | Scroll the viewport (scrolling layout) |
-| Drag a window | In a tiled or scrolling layout, swaps or snaps back |
+| Drag a window | In a tiled layout, drops it where you let go |
+| Hover a window | Focuses it (focus follows the pointer) |
 | `Ctrl`+`Alt`+`F1`…`F12` | Switch virtual terminal (hardware session only) |
 | `Super`+`Shift`+`Q` | Stop the compositor (`sol.quit`, rebindable) |
 | `Ctrl`+`Alt`+`Backspace` | Stop the compositor (built in, cannot be rebound) |

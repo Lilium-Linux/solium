@@ -75,6 +75,14 @@ pub(crate) struct Profile {
     /// underneath it.
     pub(crate) touch_to_focus: bool,
 
+    /// Moving the pointer over a window focuses it.
+    ///
+    /// The default on a desktop, and what every tiling compositor people
+    /// arrive from does. Without it, focus has to be clicked for — which in a
+    /// layout where windows are never on top of each other is a click that
+    /// achieves nothing except focus.
+    pub(crate) focus_follows_mouse: bool,
+
     /// Held to drag a window from anywhere in it.
     pub(crate) drag_modifier: DragModifier,
 
@@ -90,6 +98,7 @@ impl Profile {
                 form_factor,
                 click_to_focus: true,
                 touch_to_focus: true,
+                focus_follows_mouse: true,
                 drag_modifier: DragModifier::Logo,
                 natural_scroll: false,
             },
@@ -97,6 +106,7 @@ impl Profile {
                 form_factor,
                 click_to_focus: true,
                 touch_to_focus: true,
+                focus_follows_mouse: true,
                 drag_modifier: DragModifier::Logo,
                 // Trackpads are gesture surfaces, and every other trackpad on
                 // this planet scrolls the content.
@@ -107,6 +117,8 @@ impl Profile {
                 click_to_focus: true,
                 // A tap in a mode belongs to the mode, not to what is below it.
                 touch_to_focus: false,
+                // There is no pointer to follow.
+                focus_follows_mouse: false,
                 drag_modifier: DragModifier::Logo,
                 natural_scroll: true,
             },

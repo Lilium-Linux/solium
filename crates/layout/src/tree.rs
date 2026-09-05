@@ -117,8 +117,19 @@ impl Tiling {
         // window then lands as another full-height column — which is not
         // dwindle at all, and is exactly what this did before. Hyprland calls
         // this `getClosestNode`.
+        // A window cannot be split by itself. The caller can easily name it —
+        // a new window is mapped and under the pointer before this runs, so
+        // hit-testing the cursor answers with the very window being inserted —
+        // and `leaf` would then find the node pushed a moment ago. The branch
+        // would take that node as both children and hang from nothing, and the
+        // window would vanish from the tree without any error at all.
+        //
+        // Hyprland guards the same case in `addTarget`, calling it a fail-safe
+        // and picking a different node. This is that guard.
         let target = target
+            .filter(|named| *named != id)
             .and_then(|id| self.leaf(id))
+            .filter(|found| *found != fresh)
             .or_else(|| self.leaf_at(at, &boxes))
             .or_else(|| self.closest_leaf(at, &boxes))
             .unwrap_or(root);
@@ -547,5 +558,71 @@ mod fallback_tests {
             full_height < 3,
             "all three are full-height columns, so the screen was split each time: {boxes:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod insert_sequence {
+    use super::Tiling;
+    use crate::{Rect, Settings};
+
+    /// The exact sequence the tiling script performs: a work area with a gap,
+    /// a pointer that is outside every window, and no named target — so the
+    /// closest-leaf fallback chooses. Three windows opened this way must all
+    /// be in the tree.
+    #[test]
+    fn opening_three_windows_at_the_origin_keeps_all_three() {
+        let area = Rect::new(0.0, 0.0, 1600.0, 900.0);
+        let settings = Settings {
+            gap: 12.0,
+            split: 0.5,
+            ..Settings::default()
+        };
+        let mut tiling = Tiling::new();
+        for id in 1..=3 {
+            tiling.insert(id, None, Some((0.0, 0.0)), area, settings);
+            println!("after {id}: {:?}", tiling.windows());
+        }
+        assert_eq!(tiling.windows().len(), 3, "got {:?}", tiling.windows());
+    }
+}
+
+#[cfg(test)]
+mod self_target {
+    use super::Tiling;
+    use crate::{Rect, Settings};
+
+    fn area() -> Rect {
+        Rect::new(0.0, 0.0, 1600.0, 900.0)
+    }
+    fn settings() -> Settings {
+        Settings {
+            gap: 12.0,
+            split: 0.5,
+            ..Settings::default()
+        }
+    }
+
+    /// Naming the window being inserted as its own split target must not lose
+    /// it. The tiling script does exactly this by accident: a new window is
+    /// mapped and under the pointer before the layout runs, so hit-testing the
+    /// cursor answers with the window being opened. Every window after the
+    /// first was silently dropped — the tree kept one, and three terminals
+    /// showed one.
+    #[test]
+    fn a_window_named_as_its_own_target_is_still_added() {
+        let mut tiling = Tiling::new();
+        for id in 1..=4 {
+            tiling.insert(id, Some(id), Some((0.0, 0.0)), area(), settings());
+        }
+        assert_eq!(
+            tiling.windows().len(),
+            4,
+            "windows were dropped: {:?}",
+            tiling.windows()
+        );
+        for (id, rect) in tiling.layout(area(), settings()) {
+            assert!(rect.w >= 1.0 && rect.h >= 1.0, "window {id} collapsed");
+        }
     }
 }
