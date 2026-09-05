@@ -64,18 +64,29 @@ Programs start as clients of *this* compositor — `sol.spawn` overrides
 `WAYLAND_DISPLAY` in the child, or it would inherit the host's and open its
 window next to the nested compositor rather than inside it.
 
-Because Solium runs in the build container, spawned programs run there too and
-must be installed there. To add some:
+Because Solium runs in the build container, anything `sol.spawn` starts runs
+there too, and only what is installed there can be started that way — which is
+`foot` and not much else.
+
+**The easy route is the host's own applications.** Solium's socket lives in
+`$XDG_RUNTIME_DIR`, which is the host's directory, so any installed program can
+be pointed at it. The launcher prints the socket name:
 
 ```sh
-podman run --rm -it localhost/lilium-base:v1 pacman -S weston
+WAYLAND_DISPLAY=wayland-1 konsole --separate --nofork
+WAYLAND_DISPLAY=wayland-1 QT_QPA_PLATFORM=wayland kate
 ```
 
-Anything already running elsewhere can be pointed at the socket instead — the
-launcher prints it:
+They arrive as ordinary clients and get a compositor-drawn frame like anything
+else.
+
+To add programs to the container instead, install and commit — a `--rm`
+container throws the installation away with itself:
 
 ```sh
-WAYLAND_DISPLAY=wayland-1 foot
+podman run --name lilium-add localhost/lilium-base:v1 pacman -Sy --noconfirm weston
+podman commit lilium-add localhost/lilium-base:v1
+podman rm lilium-add
 ```
 
 ## Where it runs
