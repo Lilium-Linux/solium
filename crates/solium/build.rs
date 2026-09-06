@@ -23,6 +23,11 @@ fn main() {
         .file("qml/compat.cpp");
 
     // Qt6Quick pulls in Core, Gui and Qml transitively.
+    // Network too: the compat layer's Socket is a QLocalSocket, and Qt6Quick
+    // does not pull it in.
+    let _ = pkg_config::Config::new()
+        .atleast_version("6.5")
+        .probe("Qt6Network");
     let qt = match pkg_config::Config::new()
         .atleast_version("6.5")
         .probe("Qt6Quick")

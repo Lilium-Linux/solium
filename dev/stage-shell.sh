@@ -47,7 +47,11 @@ find "$source_root" -type d -not -path '*/.git*' -not -path '*/build*' | while r
             else
                 echo "$name 1.0 $name.qml"
             fi
-            ln -sfn "$file" "$target/$name.qml"
+            # Copied, not linked. Qt canonicalises paths, so a symlinked file
+            # resolves its own `import qs.config` relative to where it really
+            # lives -- back in the shell's tree, where there is no qmldir and
+            # every type is therefore unavailable.
+            cp -f "$file" "$target/$name.qml"
         done
     } > "$target/qmldir"
 done

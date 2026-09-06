@@ -21,6 +21,7 @@
 #include <QtCore/QStringList>
 #include <QtCore/QTimer>
 #include <QtCore/QVariantMap>
+#include <QtNetwork/QLocalSocket>
 
 /*
  * `stdout` and `stderr` are macros in glibc, and Quickshell names two of
@@ -173,6 +174,40 @@ private:
     bool m_watch = false;
     bool m_printErrors = true;
     bool m_loaded = false;
+};
+
+/* A unix socket. */
+class Socket : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(QString path READ path WRITE setPath NOTIFY pathChanged)
+    Q_PROPERTY(bool connected READ connected WRITE setConnected NOTIFY connectedChanged)
+    Q_PROPERTY(QObject *parser READ parser WRITE setParser NOTIFY parserChanged)
+
+public:
+    explicit Socket(QObject *parent = nullptr);
+
+    QString path() const { return m_path; }
+    void setPath(const QString &path);
+    bool connected() const;
+    void setConnected(bool connected);
+    QObject *parser() const { return m_parser; }
+    void setParser(QObject *parser);
+
+    Q_INVOKABLE void write(const QString &data);
+    Q_INVOKABLE void flush();
+
+Q_SIGNALS:
+    void pathChanged();
+    void connectedChanged();
+    void parserChanged();
+    void connectionStateChanged();
+    void error(const QString &message);
+
+private:
+    QLocalSocket *m_socket;
+    QString m_path;
+    QObject *m_parser = nullptr;
 };
 
 /* Quickshell's root singleton: the parts the shell calls. */
