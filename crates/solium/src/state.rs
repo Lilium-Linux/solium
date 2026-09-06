@@ -67,27 +67,10 @@ use crate::{
     decoration::{Action, Decorations, Insets, TITLEBAR_HEIGHT},
     input::{grab::MoveGrab, profile::Profile, resize},
     layer,
+    pane::Pane,
     present::{self, Clock, Frame},
     script::{AnimationSpec, Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
 };
-
-/// A window's script-facing identity.
-///
-/// Stable for the window's lifetime and never reused, so a script that holds an
-/// id across frames can only ever address the window it meant — an index into
-/// the window list would silently come to mean a different window.
-#[derive(Debug)]
-struct WindowId(u64);
-
-pub(crate) fn window_id(window: &Window) -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-
-    window
-        .user_data()
-        .insert_if_missing(|| WindowId(NEXT.fetch_add(1, Ordering::Relaxed)));
-    window.user_data().get::<WindowId>().map_or(0, |id| id.0)
-}
 
 fn to_rect(rectangle: Rectangle<i32, Logical>) -> Rect {
     Rect {
@@ -128,6 +111,15 @@ pub(crate) struct Solium {
     pub(crate) layer_shell_state: WlrLayerShellState,
 
     pub(crate) space: Space<Window>,
+
+    /// What the compositor thinks its windows are. See `pane.rs`.
+    ///
+    /// `space` is still underneath and still the authority on stacking and
+    /// damage for a mapped client. This is the view everything else asks:
+    /// which window a script means, what is drawn, what the pointer is over.
+    /// `sync_panes` is the one place the two are reconciled.
+    pub(crate) panes: crate::pane::Panes,
+
     pub(crate) popups: PopupManager,
     pub(crate) seat: Seat<Self>,
 
@@ -480,6 +472,7 @@ impl Solium {
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
             seat_state,
             space: Space::default(),
+            panes: crate::pane::Panes::default(),
             popups: PopupManager::default(),
             seat,
             clock: Clock::new(),
@@ -609,6 +602,46 @@ impl Solium {
         self.focused_window().as_ref() == Some(window)
     }
 
+    /// A window's script-facing identity: the id of the pane it is inside.
+    ///
+    /// It belongs to the pane rather than to the surface, which is what lets it
+    /// exist before the surface does — a script told about a window while its
+    /// application was still starting is still talking about the same window
+    /// once the application arrives, because nothing was replaced.
+    ///
+    /// Zero means a window the compositor is not tracking. Every window it maps
+    /// gets a pane on the same line, so in practice this is a window Smithay
+    /// put in the space behind our back, and a script can do nothing with it
+    /// anyway.
+    pub(crate) fn window_id(&self, window: &Window) -> u64 {
+        self.panes.id_of(window).map_or(0, crate::pane::PaneId::get)
+    }
+
+    /// Give a newly mapped client a pane, and answer with its id.
+    ///
+    /// Where a window enters the compositor. `sync_panes` would notice it at
+    /// the next refresh anyway; doing it here is what makes the id exist for
+    /// the script that is about to be told the window opened.
+    pub(crate) fn take_pane(&mut self, window: Window) -> u64 {
+        let slot = self.real_geometry(&window).unwrap_or_default();
+        self.panes.mapped(window, slot, self.clock.now()).get()
+    }
+
+    /// Bring the compositor's own view of its windows back in line with the
+    /// space, and say whether the set of windows changed.
+    ///
+    /// Called where the space is refreshed, which is once per frame. That is
+    /// also the moment Smithay drops elements whose client has died — the only
+    /// notice we get for a window that went away without telling anyone.
+    pub(crate) fn sync_panes(&mut self) -> bool {
+        let stack: Vec<(Window, Rectangle<i32, Logical>)> = self
+            .space
+            .elements()
+            .filter_map(|window| Some((window.clone(), self.real_geometry(window)?)))
+            .collect();
+        self.panes.sync(&stack, self.clock.now())
+    }
+
     /// What the compositor looks like right now, as a script sees it.
     ///
     /// Built fresh per dispatch and handed over by value: a script holding a
@@ -624,15 +657,20 @@ impl Solium {
             .unwrap_or_default();
 
         // Topmost first, which is the order a hit test wants.
+        //
+        // Built from panes, not from the space: this is the list scripts place,
+        // so a window that exists but has no client yet has to be in it or the
+        // layout will never give it anywhere to be.
         let windows = self
-            .space
-            .elements()
+            .panes
+            .iter()
             .rev()
-            .filter_map(|window| {
+            .filter_map(|pane| {
+                let window = pane.client()?;
                 let outer = self.outer_geometry(window)?;
                 let drawn = present::frame(window, outer, now);
                 Some(WindowInfo {
-                    id: window_id(window),
+                    id: pane.id().get(),
                     rect: to_rect(outer),
                     drawn: Rect {
                         x: drawn.rect.loc.x,
@@ -1015,10 +1053,7 @@ impl Solium {
     /// Ids that no longer exist are simply not found — a window closing while a
     /// mode holds its id is ordinary, not an error.
     fn window_by_id(&self, id: u64) -> Option<Window> {
-        self.space
-            .elements()
-            .find(|window| window_id(window) == id)
-            .cloned()
+        self.panes.get(id).and_then(Pane::client).cloned()
     }
 
     /// The window drawn at a point, topmost first, with its real geometry.
@@ -1756,8 +1791,11 @@ impl Solium {
         let focused = self.focused_window();
         let mut windows = String::from("{\"windows\":[");
         let mut active = String::from("null");
-        for (index, window) in self.space.elements().rev().enumerate() {
-            let id = window_id(window);
+        for (index, pane) in self.panes.iter().rev().enumerate() {
+            let Some(window) = pane.client() else {
+                continue;
+            };
+            let id = pane.id().get();
             let title = self.window_title(window).replace('"', "'");
             let app_id = self.window_app_id(window).replace('"', "'");
             let is_active = focused.as_ref() == Some(window);
@@ -1784,7 +1822,7 @@ impl Solium {
 
     /// Tell scripts focus moved.
     fn trigger_focus(&mut self, window: &Window) {
-        let id = window_id(window);
+        let id = self.window_id(window);
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return;
@@ -1800,7 +1838,7 @@ impl Solium {
     /// act on; the absolute rectangle would only be useful to something that
     /// already agreed the window has its own size.
     pub(crate) fn trigger_resize(&mut self, request: &ResizeRequest) -> bool {
-        let id = window_id(&request.window);
+        let id = self.window_id(&request.window);
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return false;
@@ -1830,7 +1868,7 @@ impl Solium {
     }
 
     pub(crate) fn trigger_close(&mut self, window: &Window) {
-        let id = window_id(window);
+        let id = self.window_id(window);
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return;
@@ -1842,7 +1880,7 @@ impl Solium {
 
     /// Tell scripts a drag finished, so a layout can put the window back.
     pub(crate) fn trigger_drop(&mut self, window: &Window, x: f64, y: f64) {
-        let id = window_id(window);
+        let id = self.window_id(window);
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return;
@@ -1866,7 +1904,7 @@ impl Solium {
     }
 
     fn trigger_open(&mut self, window: &Window) -> bool {
-        let id = window_id(window);
+        let id = self.window_id(window);
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return false;
@@ -1993,7 +2031,10 @@ impl XdgShellHandler for Solium {
         surface.send_configure();
 
         let window = Window::new_wayland_window(surface.clone());
-        self.space.map_element(window, (0, 0), true);
+        self.space.map_element(window.clone(), (0, 0), true);
+        // On the same line as the map, so nothing can observe a mapped window
+        // that has no pane -- `trigger_open` is about to ask for its id.
+        self.take_pane(window);
 
         // Focus follows the newest window. #12 turns this into a policy.
         if let Some(keyboard) = self.seat.get_keyboard() {

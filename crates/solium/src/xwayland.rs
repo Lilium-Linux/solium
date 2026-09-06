@@ -134,7 +134,8 @@ impl XwmHandler for Solium {
             return;
         }
         let element = Window::new_x11_window(window);
-        self.space.map_element(element, (0, 0), true);
+        self.space.map_element(element.clone(), (0, 0), true);
+        self.take_pane(element);
     }
 
     /// A window that manages its own placement: menus, tooltips, drag icons.
@@ -143,8 +144,12 @@ impl XwmHandler for Solium {
     /// where it asked and never laid out.
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
         let location = window.geometry().loc;
-        self.space
-            .map_element(Window::new_x11_window(window), location, true);
+        let element = Window::new_x11_window(window);
+        self.space.map_element(element.clone(), location, true);
+        // A pane even for these. They are never laid out, but they are on
+        // screen and under the pointer, and every path that asks what is on
+        // screen now asks for panes.
+        self.take_pane(element);
     }
 
     fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {
