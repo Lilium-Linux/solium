@@ -13,7 +13,6 @@ use std::sync::Mutex;
 
 use smithay::{
     backend::renderer::{
-        Renderer,
         element::{
             AsRenderElements, Id, Kind,
             memory::MemoryRenderBufferRenderElement,
@@ -21,8 +20,8 @@ use smithay::{
             surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
             utils::RescaleRenderElement,
         },
-        gles::{GlesRenderer, GlesTexture},
-        utils::{CommitCounter, with_renderer_surface_state},
+        gles::GlesRenderer,
+        utils::CommitCounter,
     },
     desktop::{PopupManager, Window, layer_map_for_output},
     input::pointer::{CursorImageAttributes, CursorImageStatus},
@@ -47,6 +46,9 @@ render_elements! {
     Window = RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
     Chrome = MemoryRenderBufferRenderElement<GlesRenderer>,
     Warped = crate::warp::Warp,
+    /// A surface drawn straight, with no rescale wrapper: the offscreen pass
+    /// draws at real size, so there is nothing to scale.
+    Window2 = WaylandSurfaceRenderElement<GlesRenderer>,
 }
 
 /// Everything to draw this frame, topmost first.
@@ -119,6 +121,25 @@ pub(crate) fn elements(
         let frame = present::frame(&window, outer, now);
         let inset = f64::from(state.frame_inset(&window)) * ratio(frame.rect.size.h, outer.size.h);
 
+        // A transform that is not identity cannot be drawn as a rectangle. The
+        // window is rendered flat into a texture first — frame and popups
+        // included — and that texture is bent, so the whole window deforms as
+        // one thing instead of the client tilting away from its own titlebar.
+        if !frame.matrix.is_identity()
+            && let Some(corners) = crate::warp::project_quad(frame.rect, frame.matrix, scale)
+            && let Some((texture, _size)) =
+                crate::offscreen::capture(state, renderer, &window, now, scale)
+        {
+            elements.push(Element::Warped(crate::warp::Warp::new(
+                Id::new(),
+                CommitCounter::default(),
+                texture,
+                corners,
+                frame.opacity,
+            )));
+            continue;
+        }
+
         if inset >= 1.0 {
             let title = state.window_title(&window);
             let focused = state.is_focused(&window);
@@ -171,32 +192,6 @@ pub(crate) fn elements(
                     Element::Window(RescaleRenderElement::from_element(element, origin, factor))
                 }));
             }
-        }
-
-        // A transform that is not identity cannot be drawn as a rectangle, so
-        // the window goes through `warp` instead: its texture, through four
-        // projected corners. Only the toplevel's own surface for now —
-        // subsurfaces and popups would need the window rendered offscreen
-        // first, which is step 4 of the spike. A window with neither is the
-        // common case and the one worth showing first.
-        if !frame.matrix.is_identity()
-            && let Some(corners) = crate::warp::project_quad(frame.rect, frame.matrix, scale)
-            && let Some(surface) = window
-                .toplevel()
-                .map(|toplevel| toplevel.wl_surface().clone())
-            && let Some(texture) = with_renderer_surface_state(&surface, |state| {
-                state.texture::<GlesTexture>(renderer.context_id()).cloned()
-            })
-            .flatten()
-        {
-            elements.push(Element::Warped(crate::warp::Warp::new(
-                Id::from_wayland_resource(&surface),
-                CommitCounter::default(),
-                texture,
-                corners,
-                frame.opacity,
-            )));
-            continue;
         }
 
         // A surface's top-left is not the window's. A client that draws its own
@@ -300,6 +295,74 @@ fn cursor(
             .into_iter()
             .collect(),
     }
+}
+
+/// One window's elements, flat, at the origin and its real size.
+///
+/// The offscreen pass draws these into a texture so a deformed window is
+/// deformed as one thing. Built at the origin because the texture *is* the
+/// window's own space; where it lands on screen is the warp's business.
+pub(crate) fn flat_window_elements(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    now: std::time::Duration,
+    scale: f64,
+) -> Vec<Element> {
+    let mut elements = Vec::new();
+    let (Some(real), Some(outer)) = (state.real_geometry(window), state.outer_geometry(window))
+    else {
+        return elements;
+    };
+    let inset = f64::from(state.frame_inset(window));
+    let output_scale = Scale::from(scale);
+
+    // The frame, at the top of the texture.
+    if inset >= 1.0 {
+        let title = state.window_title(window);
+        let focused = state.is_focused(window);
+        let bar = present::logical((0.0, 0.0), (f64::from(outer.size.w), inset));
+        if let Some(id) = state.toplevel_id(window)
+            && let Some(decoration) = state.decorations.get_mut(&id)
+            && let Some(element) =
+                decoration.frame(renderer, bar, real.size.w, &title, focused, now)
+        {
+            elements.push(Element::Chrome(element));
+        }
+    }
+
+    // The client below it.
+    let origin = present::logical(
+        (0.0, inset),
+        (f64::from(real.size.w), f64::from(real.size.h)),
+    )
+    .loc
+    .to_physical_precise_round(scale);
+
+    if let Some(surface) = window
+        .toplevel()
+        .map(|toplevel| toplevel.wl_surface().clone())
+    {
+        for (popup, offset) in PopupManager::popups_for_surface(&surface) {
+            let popup_origin =
+                origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
+            let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                render_elements_from_surface_tree(
+                    renderer,
+                    popup.wl_surface(),
+                    popup_origin,
+                    output_scale,
+                    1.0,
+                    Kind::Unspecified,
+                );
+            elements.extend(popup_elements.into_iter().map(Element::Window2));
+        }
+    }
+
+    let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+        window.render_elements(renderer, origin, output_scale, 1.0);
+    elements.extend(window_elements.into_iter().map(Element::Window2));
+    elements
 }
 
 /// Drawn size over real size, guarding the degenerate case.
