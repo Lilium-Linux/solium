@@ -146,3 +146,15 @@ fn parse_list_with<T>(
 pub(crate) fn memory_diagnostics() -> bool {
     std::env::var_os("SOLIUM_MEMDIAG").is_some()
 }
+
+/// Whether to show the Developer Tweaks panel.
+///
+/// `--debug-mode` anywhere in the arguments, so it composes with the backend
+/// selection: `solium --tty --debug-mode`. Deliberately a flag rather than
+/// something in the configuration -- it is a thing you turn on for a session
+/// to try effects out, and it is meant to be removed when it stops earning
+/// its place.
+pub(crate) fn debug_mode() -> bool {
+    std::env::args().any(|argument| argument == "--debug-mode")
+        || std::env::var_os("SOLIUM_DEBUG_MODE").is_some()
+}

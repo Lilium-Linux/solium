@@ -156,6 +156,15 @@ pub(crate) fn elements(
         }
     }
 
+    // The Developer Tweaks panel, above everything: it is a tool for looking
+    // at what the compositor is doing, so nothing should be able to cover it.
+    if let Some(area) = state.tweaks_area()
+        && let Some(panel) = state.tweaks_panel()
+        && let Some(element) = panel.element(renderer, area, now)
+    {
+        elements.push(Element::Chrome(element));
+    }
+
     // Collected first because the loop needs `&mut state` to render frames.
     // `Window` is a handle, so this is a few pointer copies.
     let windows: Vec<Window> = state.space.elements().rev().cloned().collect();

@@ -320,8 +320,34 @@ fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bo
     state.focus_window(&window, SERIAL_COUNTER.next_serial());
 }
 
+/// Offer the pointer to the Developer Tweaks panel.
+///
+/// Returns whether the panel took it: it is drawn above everything, so a
+/// press inside it is not also a press on whatever is underneath.
+fn tweaks_pointer(
+    state: &mut Solium,
+    location: Point<f64, Logical>,
+    pressed: Option<bool>,
+) -> bool {
+    let Some(area) = state.tweaks_area() else {
+        return false;
+    };
+    if !area.to_f64().contains(location) {
+        return false;
+    }
+    let Some(panel) = state.tweaks_panel() else {
+        return false;
+    };
+    panel.pointer(area, location.x, location.y, pressed);
+    state.redraw = true;
+    true
+}
+
 /// Let a window frame see the pointer, so its buttons light up on hover.
 fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
+    if tweaks_pointer(state, location, None) {
+        return;
+    }
     // The whole window, not just the frame band: a decoration that reacts to
     // the cursor wants to know where it is while it crosses the client too.
     let under = state
@@ -380,6 +406,15 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             state.trigger_click(location.x, location.y);
         }
         return;
+    }
+
+    // A press in the tweaks panel is the panel's, and nothing else's.
+    if !pointer.is_grabbed() {
+        let pressed = button_state == ButtonState::Pressed;
+        if tweaks_pointer(state, location, Some(pressed)) {
+            state.settle_tweaks();
+            return;
+        }
     }
 
     // A press on a frame belongs to the frame: it either hits a button or

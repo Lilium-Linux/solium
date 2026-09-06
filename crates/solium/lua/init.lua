@@ -10,6 +10,11 @@ local config = require("config")
 -- everything else. Both take effect immediately when reloaded.
 sol.decoration(config.decoration)
 
+-- Only reachable when the compositor was started with --debug-mode, but the
+-- entries are declared either way: what costs nothing to declare should not
+-- need a conditional.
+require("tweaks")
+
 require("modes")
 require("open")
 require("overview")

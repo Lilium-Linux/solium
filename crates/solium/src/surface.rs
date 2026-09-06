@@ -96,6 +96,14 @@ impl ShellSurface {
         true
     }
 
+    /// Take whatever the scene asked for, clearing it.
+    ///
+    /// The same one-way channel the window frames use: QML sets `action`, the
+    /// compositor takes it and clears it, so a press is acted on once.
+    pub(crate) fn taken_action(&mut self) -> Option<String> {
+        self.scene.take_string("action").filter(|it| !it.is_empty())
+    }
+
     /// Rebuild the scene if the QML changed on disk.
     ///
     /// The whole scene, because QML cannot apply an edit to a live object

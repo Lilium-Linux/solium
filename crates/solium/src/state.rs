@@ -151,6 +151,8 @@ pub(crate) struct Solium {
     /// The socket clients connect on. Held so that a program started from a
     /// script finds *this* compositor rather than the session it is nested in.
     pub(crate) socket_name: String,
+    /// The Developer Tweaks panel, when `--debug-mode` asked for one.
+    pub(crate) tweaks: Option<crate::surface::ShellSurface>,
     /// Which frame the pointer was last over, so the one it leaves can be
     /// told. QML hover is positional: a frame never told the pointer left
     /// stays lit forever.
@@ -325,6 +327,7 @@ impl Solium {
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
+            tweaks: None,
             hovered_frame: None,
             closing: HashMap::new(),
             reported_at: std::time::Duration::ZERO,
@@ -1339,6 +1342,62 @@ impl Solium {
             }
         }
         self.shell.as_mut()
+    }
+
+    /// The Developer Tweaks panel, built on first use.
+    ///
+    /// A second shell surface rather than anything new: it is QML hosted in
+    /// the compositor, which is a thing that already exists here. What it
+    /// offers comes from the scripts, so the panel is a list of whatever
+    /// `tweaks.lua` declares.
+    pub(crate) fn tweaks_panel(&mut self) -> Option<&mut crate::surface::ShellSurface> {
+        if !crate::dev::debug_mode() {
+            return None;
+        }
+        if self.tweaks.is_none() {
+            let entries = self
+                .scripts
+                .as_ref()
+                .and_then(super::script::Scripts::tweaks)
+                .unwrap_or_else(|| "[]".to_owned());
+            let source =
+                std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/tweaks.qml"));
+            let properties = format!("{{\"entries\":{entries}}}");
+            match crate::surface::ShellSurface::new(source, &properties) {
+                Ok(panel) => self.tweaks = Some(panel),
+                Err(err) => {
+                    tracing::error!(?err, "the Developer Tweaks panel would not load");
+                    return None;
+                }
+            }
+        }
+        self.tweaks.as_mut()
+    }
+
+    /// Where the panel sits: down the right-hand edge, out of the way.
+    pub(crate) fn tweaks_area(&self) -> Option<Rectangle<i32, Logical>> {
+        let area = self.work_area()?;
+        let width = 320.min((area.size.w / 3).max(200));
+        Some(Rectangle::new(
+            (area.loc.x + area.size.w - width, area.loc.y).into(),
+            (width, area.size.h).into(),
+        ))
+    }
+
+    /// Act on whatever the panel was pressed for.
+    pub(crate) fn settle_tweaks(&mut self) {
+        let Some(panel) = self.tweaks.as_mut() else {
+            return;
+        };
+        let Some(id) = panel.taken_action() else {
+            return;
+        };
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.tweak(&id, self.snapshot());
+        self.scripts = Some(scripts);
+        self.apply(outcome);
     }
 
     /// Tell the shell what windows exist.
