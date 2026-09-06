@@ -590,6 +590,9 @@ impl State {
         for window in self.solium.space.elements() {
             animating |= present::settle(window, now);
         }
+        // A window that has finished leaving is told to close; until then the
+        // session counts as animating so the frames keep coming.
+        animating |= self.solium.settle_closing(now);
         self.animating = animating;
     }
 
