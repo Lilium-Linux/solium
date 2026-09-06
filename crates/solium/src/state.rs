@@ -529,6 +529,21 @@ impl Solium {
         ))
     }
 
+    /// Every pane with something on screen, topmost first.
+    ///
+    /// Collected rather than borrowed because drawing a frame needs `&mut`
+    /// state; `Window` is a handle, so this is a few pointer copies. The pane's
+    /// id comes with it so nothing downstream has to look it up again — and so
+    /// that when a pane can be drawn without a client, this is the signature
+    /// that already carries the one thing both cases share.
+    pub(crate) fn on_screen(&self) -> Vec<(crate::pane::PaneId, Window)> {
+        self.panes
+            .iter()
+            .rev()
+            .filter_map(|pane| Some((pane.id(), pane.client()?.clone())))
+            .collect()
+    }
+
     /// Whether the compositor draws this window's frame.
     pub(crate) fn is_decorated(&self, window: &Window) -> bool {
         self.panes
@@ -891,7 +906,8 @@ impl Solium {
     ) -> Option<(Window, ResizeEdge, Rectangle<i32, Logical>)> {
         let now = self.clock.now();
 
-        self.space.elements().rev().find_map(|window| {
+        self.panes.iter().rev().find_map(|pane| {
+            let window = pane.client()?;
             let outer = self.outer_geometry(window)?;
             // Against where the window is *drawn*: a window in a mode should be
             // resized by its thumbnail's edge or not at all, never by an edge
@@ -1070,7 +1086,8 @@ impl Solium {
         location: Point<f64, Logical>,
     ) -> Option<(Window, Rectangle<i32, Logical>)> {
         let now = self.clock.now();
-        self.space.elements().rev().find_map(|window| {
+        self.panes.iter().rev().find_map(|pane| {
+            let window = pane.client()?;
             let outer = self.outer_geometry(window)?;
             if !present::frame(window, outer, now).rect.contains(location) {
                 return None;
@@ -1100,7 +1117,10 @@ impl Solium {
 
         let now = self.clock.now();
 
-        for window in self.space.elements().rev() {
+        for pane in self.panes.iter().rev() {
+            let Some(window) = pane.client() else {
+                continue;
+            };
             let Some(outer) = self.outer_geometry(window) else {
                 continue;
             };
@@ -1138,13 +1158,14 @@ impl Solium {
     pub(crate) fn frame_under(
         &self,
         location: Point<f64, Logical>,
-    ) -> Option<(Window, Point<f64, Logical>)> {
+    ) -> Option<(crate::pane::PaneId, Window, Point<f64, Logical>)> {
         let now = self.clock.now();
 
-        self.space.elements().rev().find_map(|window| {
-            if !self.is_decorated(window) {
+        self.panes.iter().rev().find_map(|pane| {
+            if !self.decorations.contains(pane.id()) {
                 return None;
             }
+            let window = pane.client()?;
             let outer = self.outer_geometry(window)?;
             let drawn = present::frame(window, outer, now);
             if !drawn.rect.contains(location) {
@@ -1152,7 +1173,7 @@ impl Solium {
             }
 
             let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
-            let insets = self.frame_insets(window);
+            let insets = self.insets_of(pane.id());
             // The frame is the band between the outer rect and the client: a
             // point inside the client is the client's, wherever the frame put
             // its bar. A decoration that reserves nothing owns no band at all,
@@ -1168,7 +1189,7 @@ impl Solium {
             if client.contains(in_outer) {
                 return None;
             }
-            Some((window.clone(), in_outer))
+            Some((pane.id(), window.clone(), in_outer))
         })
     }
 
@@ -1304,14 +1325,18 @@ impl Solium {
         // default bar height so its first layout is not visibly wrong.
         self.panes
             .id_of(window)
-            .and_then(|id| self.decorations.get(id))
-            .map_or(
-                Insets {
-                    top: TITLEBAR_HEIGHT,
-                    ..Insets::NONE
-                },
-                super::decoration::Decoration::insets,
-            )
+            .map_or(Insets::NONE, |id| self.insets_of(id))
+    }
+
+    /// The same, for a caller that already knows which pane it means.
+    pub(crate) fn insets_of(&self, id: crate::pane::PaneId) -> Insets {
+        self.decorations.get(id).map_or(
+            Insets {
+                top: TITLEBAR_HEIGHT,
+                ..Insets::NONE
+            },
+            super::decoration::Decoration::insets,
+        )
     }
 
     /// Raise a window and give it the keyboard.
@@ -1352,7 +1377,7 @@ impl Solium {
         tracing::info!(
             pointer = format!("{pointer_at:?}"),
             focused_inside = format!("{focused_inside:?}"),
-            windows = self.space.elements().count(),
+            windows = self.panes.len(),
             decorations = self.decorations.len(),
             lua_kb = self
                 .scripts
@@ -1373,19 +1398,20 @@ impl Solium {
     pub(crate) fn decorated_under(
         &self,
         location: Point<f64, Logical>,
-    ) -> Option<(Window, Point<f64, Logical>)> {
+    ) -> Option<(crate::pane::PaneId, Point<f64, Logical>)> {
         let now = self.clock.now();
-        self.space.elements().rev().find_map(|window| {
-            if !self.is_decorated(window) {
+        self.panes.iter().rev().find_map(|pane| {
+            if !self.decorations.contains(pane.id()) {
                 return None;
             }
+            let window = pane.client()?;
             let outer = self.outer_geometry(window)?;
             let drawn = present::frame(window, outer, now);
             if !drawn.rect.contains(location) {
                 return None;
             }
             let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
-            Some((window.clone(), in_outer))
+            Some((pane.id(), in_outer))
         })
     }
 
@@ -1938,7 +1964,7 @@ impl Solium {
             clippy::cast_possible_wrap,
             reason = "the index is taken modulo a small constant"
         )]
-        let step = CASCADE * (self.space.elements().count() % WRAP) as i32;
+        let step = CASCADE * (self.panes.len() % WRAP) as i32;
 
         // The frame is above the client, so the client's own top edge starts
         // that far down: the pair has to fit in the work area, not just the
