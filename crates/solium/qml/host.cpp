@@ -147,6 +147,7 @@ extern "C" int solium_qml_start(const char *import_path)
     solium_qml_register_compat();
 
     g_engine = new QQmlEngine();
+    solium_qml_install_icons(g_engine);
     if (import_path != nullptr) {
         // Colon-separated, like a PATH. One entry is the compositor's own
         // module, so a scene can `import Solium` and reach the theme; the rest

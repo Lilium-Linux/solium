@@ -16,6 +16,7 @@
 #include <QtCore/QJsonParseError>
 #include <QtGui/QIcon>
 #include <QtQml/QQmlEngine>
+#include <QtQuick/QQuickImageProvider>
 #include <QtQml/qqml.h>
 
 #include <csignal>
@@ -412,13 +413,12 @@ void QuickshellGlobal::execDetached(const QVariant &command)
 
 QString QuickshellGlobal::iconPath(const QString &name, const QVariant &check)
 {
-    const QIcon icon = QIcon::fromTheme(name);
-    if (icon.isNull()) {
-        // The checking form answers with nothing rather than a broken path, so
-        // callers can fall back.
-        return check.toBool() ? QString() : name;
+    if (QIcon::hasThemeIcon(name)) {
+        return QStringLiteral("image://theme/") + name;
     }
-    return QStringLiteral("image://theme/") + name;
+    // The checking form answers with nothing rather than a broken path, so
+    // callers can fall back to something they know exists.
+    return check.toBool() ? QString() : QStringLiteral("image://theme/") + name;
 }
 
 QString QuickshellGlobal::env(const QString &name) const
@@ -511,6 +511,36 @@ extern "C" void solium_qml_set_windows(const char *json)
     if (json != nullptr) {
         Toplevels::update(QByteArray(json));
     }
+}
+
+/* Serves icons from the icon theme to QML, so `image://theme/firefox` works.
+ *
+ * `iconPath` answers with such a URL, and without a provider behind it every
+ * icon in the shell is a broken image. */
+class ThemeIconProvider : public QQuickImageProvider
+{
+public:
+    ThemeIconProvider() : QQuickImageProvider(QQuickImageProvider::Pixmap) {}
+
+    QPixmap requestPixmap(const QString &id, QSize *size, const QSize &requested) override
+    {
+        const int width = requested.width() > 0 ? requested.width() : 64;
+        const int height = requested.height() > 0 ? requested.height() : 64;
+        QIcon icon = QIcon::fromTheme(id);
+        if (icon.isNull()) {
+            icon = QIcon::fromTheme(QStringLiteral("application-x-executable"));
+        }
+        QPixmap pixmap = icon.pixmap(QSize(width, height));
+        if (size != nullptr) {
+            *size = pixmap.size();
+        }
+        return pixmap;
+    }
+};
+
+void solium_qml_install_icons(QQmlEngine *engine)
+{
+    engine->addImageProvider(QStringLiteral("theme"), new ThemeIconProvider());
 }
 
 void solium_qml_register_compat()
