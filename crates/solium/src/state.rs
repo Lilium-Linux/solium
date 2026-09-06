@@ -350,7 +350,9 @@ impl Solium {
         let Some(dock) = self.dock.as_ref().filter(|dock| !dock.is_empty()) else {
             return area;
         };
-        let taken = area.size.h - (dock.rect(area).loc.y - area.loc.y);
+        // The plate, not the surface: the surface covers the output, so
+        // measuring the reservation from it reserves the whole screen.
+        let taken = area.size.h - (dock.plate(area).loc.y - area.loc.y);
         Rectangle::new(area.loc, (area.size.w, (area.size.h - taken).max(1)).into())
     }
 

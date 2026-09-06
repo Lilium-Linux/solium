@@ -101,7 +101,7 @@ impl Dock {
     }
 
     /// Where the compositor's own placeholder dock draws, for the genie.
-    fn plate(&self, area: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+    pub(crate) fn plate(&self, area: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
         let count = i32::try_from(self.items.len()).unwrap_or(0).max(1);
         let width = PADDING * 2 + count * ICON + (count - 1) * GAP;
         let x = area.loc.x + (area.size.w - width) / 2;
