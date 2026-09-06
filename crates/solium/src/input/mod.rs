@@ -322,8 +322,26 @@ fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bo
 
 /// Let a window frame see the pointer, so its buttons light up on hover.
 fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
-    if let Some((window, local)) = state.frame_under(location)
-        && let Some(id) = state.toplevel_id(&window)
+    // The whole window, not just the frame band: a decoration that reacts to
+    // the cursor wants to know where it is while it crosses the client too.
+    let under = state
+        .decorated_under(location)
+        .and_then(|(window, local)| state.toplevel_id(&window).map(|id| (id, local)));
+
+    // Whatever we were over and are no longer has to be told, or it stays
+    // hovered for as long as the window lives.
+    let left = match (&state.hovered_frame, &under) {
+        (Some(previous), Some((now, _))) if previous == now => None,
+        (previous, _) => previous.clone(),
+    };
+    if let Some(id) = left
+        && let Some(decoration) = state.decorations.get_mut(&id)
+    {
+        decoration.pointer_left();
+    }
+
+    state.hovered_frame = under.as_ref().map(|(id, _)| id.clone());
+    if let Some((id, local)) = under
         && let Some(decoration) = state.decorations.get_mut(&id)
     {
         decoration.pointer(local.x, local.y, None);

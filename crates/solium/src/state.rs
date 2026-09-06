@@ -62,7 +62,7 @@ use smithay::{
 use zxdg_toplevel_decoration_v1::Mode;
 
 use crate::{
-    decoration::{Action, Decorations, TITLEBAR_HEIGHT},
+    decoration::{Action, Decorations, Insets, TITLEBAR_HEIGHT},
     input::{grab::MoveGrab, profile::Profile, resize},
     layer,
     present::{self, Clock, Frame},
@@ -149,6 +149,10 @@ pub(crate) struct Solium {
     /// The socket clients connect on. Held so that a program started from a
     /// script finds *this* compositor rather than the session it is nested in.
     pub(crate) socket_name: String,
+    /// Which frame the pointer was last over, so the one it leaves can be
+    /// told. QML hover is positional: a frame never told the pointer left
+    /// stays lit forever.
+    pub(crate) hovered_frame: Option<ObjectId>,
     /// When the last memory report went out; see `memory_report`.
     pub(crate) reported_at: std::time::Duration,
     /// XWayland's window manager, once XWayland has started. `None` means no
@@ -262,6 +266,18 @@ pub(crate) enum Request {
     Quit,
 }
 
+/// The client's rect inside an outer one, once the frame has taken its share.
+fn inner(outer: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logical> {
+    Rectangle::new(
+        (outer.loc.x + insets.left, outer.loc.y + insets.top).into(),
+        (
+            (outer.size.w - insets.horizontal()).max(1),
+            (outer.size.h - insets.vertical()).max(1),
+        )
+            .into(),
+    )
+}
+
 /// Tell a window how big it is, in whichever protocol it speaks.
 ///
 /// An xdg toplevel is asked and answers on its own schedule; an X11 window is
@@ -299,6 +315,7 @@ impl Solium {
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
+            hovered_frame: None,
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
@@ -352,12 +369,17 @@ impl Solium {
     /// beside it — in overview a thumbnail carries its own titlebar.
     pub(crate) fn outer_geometry(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
         let real = self.real_geometry(window)?;
-        if !self.is_decorated(window) {
+        let insets = self.frame_insets(window);
+        if !insets.any() {
             return Some(real);
         }
         Some(Rectangle::new(
-            (real.loc.x, real.loc.y - TITLEBAR_HEIGHT).into(),
-            (real.size.w, real.size.h + TITLEBAR_HEIGHT).into(),
+            (real.loc.x - insets.left, real.loc.y - insets.top).into(),
+            (
+                real.size.w + insets.horizontal(),
+                real.size.h + insets.vertical(),
+            )
+                .into(),
         ))
     }
 
@@ -689,11 +711,7 @@ impl Solium {
     /// pointer's corner *now*, so this deliberately does not go through the
     /// transform the way `place` does.
     pub(crate) fn resize_to(&mut self, window: &Window, outer: Rectangle<i32, Logical>) {
-        let inset = self.frame_inset(window);
-        let client = Rectangle::new(
-            (outer.loc.x, outer.loc.y + inset).into(),
-            (outer.size.w, (outer.size.h - inset).max(1)).into(),
-        );
+        let client = inner(outer, self.frame_insets(window));
 
         size_window(window, client);
         self.space.map_element(window.clone(), client.loc, false);
@@ -728,12 +746,9 @@ impl Solium {
                 .into(),
         );
 
-        // The frame's share comes off the top; what is left is the client's.
-        let inset = self.frame_inset(&window);
-        let client = Rectangle::new(
-            (outer.loc.x, outer.loc.y + inset).into(),
-            (outer.size.w, (outer.size.h - inset).max(1)).into(),
-        );
+        // The frame's share comes off whichever sides it reserved; what is
+        // left is the client's.
+        let client = inner(outer, self.frame_insets(&window));
 
         size_window(&window, client);
         // `false`: laying out must not restack. A tiling arrangement that
@@ -864,7 +879,8 @@ impl Solium {
             // own space. A point in the titlebar lands above the client and
             // finds no surface, which is what should happen: the frame is the
             // compositor's, not the client's.
-            let inset: Point<f64, Logical> = (0.0, f64::from(self.frame_inset(window))).into();
+            let insets = self.frame_insets(window);
+            let inset: Point<f64, Logical> = (f64::from(insets.left), f64::from(insets.top)).into();
             let in_outer = present::to_window_space(frame, outer, location);
             let in_window = in_outer - outer.loc.to_f64() - inset;
 
@@ -902,8 +918,20 @@ impl Solium {
             }
 
             let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
-            if in_outer.y >= f64::from(TITLEBAR_HEIGHT) {
-                // Below the frame: the client's, not ours.
+            let insets = self.frame_insets(window);
+            // The frame is the band between the outer rect and the client: a
+            // point inside the client is the client's, wherever the frame put
+            // its bar. A decoration that reserves nothing owns no band at all,
+            // and its clicks belong to the window under it.
+            let client = Rectangle::new(
+                (f64::from(insets.left), f64::from(insets.top)).into(),
+                (
+                    f64::from(outer.size.w - insets.horizontal()),
+                    f64::from(outer.size.h - insets.vertical()),
+                )
+                    .into(),
+            );
+            if client.contains(in_outer) {
                 return None;
             }
             Some((window.clone(), in_outer))
@@ -943,7 +971,7 @@ impl Solium {
             return;
         };
 
-        let inset = self.frame_inset(window);
+        let insets = self.frame_insets(window);
         let restore = self
             .decorations
             .get_mut(&id)
@@ -954,8 +982,12 @@ impl Solium {
             // stored rather than recomputed.
             Some(Some(previous)) => (previous.loc, previous.size, false),
             _ => (
-                (work_area.loc.x, work_area.loc.y + inset).into(),
-                (work_area.size.w, (work_area.size.h - inset).max(1)).into(),
+                (work_area.loc.x + insets.left, work_area.loc.y + insets.top).into(),
+                (
+                    (work_area.size.w - insets.horizontal()).max(1),
+                    (work_area.size.h - insets.vertical()).max(1),
+                )
+                    .into(),
                 true,
             ),
         };
@@ -978,12 +1010,22 @@ impl Solium {
     }
 
     /// How far the client sits below its window's top edge.
-    pub(crate) fn frame_inset(&self, window: &Window) -> i32 {
-        if self.is_decorated(window) {
-            TITLEBAR_HEIGHT
-        } else {
-            0
+    pub(crate) fn frame_insets(&self, window: &Window) -> Insets {
+        if !self.is_decorated(window) {
+            return Insets::NONE;
         }
+        // What the decoration asked for, since the decoration is what draws
+        // it. A window whose frame has not been built yet falls back to the
+        // default bar height so its first layout is not visibly wrong.
+        self.toplevel_id(window)
+            .and_then(|id| self.decorations.get(&id))
+            .map_or(
+                Insets {
+                    top: TITLEBAR_HEIGHT,
+                    ..Insets::NONE
+                },
+                super::decoration::Decoration::insets,
+            )
     }
 
     /// Raise a window and give it the keyboard.
@@ -1014,7 +1056,16 @@ impl Solium {
             })
             .map_or(0, |pages| pages * 4);
 
+        let pointer_at = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location());
+        let focused_inside = self
+            .focused_window()
+            .map(|window| self.pointer_inside(&window));
         tracing::info!(
+            pointer = format!("{pointer_at:?}"),
+            focused_inside = format!("{focused_inside:?}"),
             windows = self.space.elements().count(),
             decorations = self.decorations.len(),
             lua_kb = self
@@ -1024,6 +1075,47 @@ impl Solium {
             rss_kb,
             "MEMDIAG"
         );
+    }
+
+    /// The decorated window under `location`, frame or client, and where the
+    /// pointer lands in its frame's own space.
+    ///
+    /// Wider than `frame_under` on purpose: a decoration that glows where the
+    /// cursor is has to be told about the cursor while it is over the client,
+    /// which is the client's surface and reports nothing to us. Ownership of
+    /// clicks is still decided by `frame_under`; this is only for looking.
+    pub(crate) fn decorated_under(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(Window, Point<f64, Logical>)> {
+        let now = self.clock.now();
+        self.space.elements().rev().find_map(|window| {
+            if !self.is_decorated(window) {
+                return None;
+            }
+            let outer = self.outer_geometry(window)?;
+            let drawn = present::frame(window, outer, now);
+            if !drawn.rect.contains(location) {
+                return None;
+            }
+            let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
+            Some((window.clone(), in_outer))
+        })
+    }
+
+    /// Whether the pointer is anywhere over this window, frame included.
+    ///
+    /// A decoration that lights up as the pointer approaches needs this even
+    /// while the pointer is over the client area, which is the client's
+    /// surface and sends us nothing.
+    pub(crate) fn pointer_inside(&self, window: &Window) -> bool {
+        let Some(outer) = self.outer_geometry(window) else {
+            return false;
+        };
+        let Some(pointer) = self.seat.get_pointer() else {
+            return false;
+        };
+        outer.to_f64().contains(pointer.current_location())
     }
 
     /// Point the seat's selections at whoever holds focus.
@@ -1293,19 +1385,20 @@ impl Solium {
         // The frame is above the client, so the client's own top edge starts
         // that far down: the pair has to fit in the work area, not just the
         // client.
-        let inset = self.frame_inset(window);
-        let outer_height = size.h + inset;
+        let insets = self.frame_insets(window);
+        let outer_height = size.h + insets.vertical();
+        let outer_width = size.w + insets.horizontal();
 
         let centred = |available: i32, window: i32| (available - window) / 2;
-        let x = output.loc.x + centred(output.size.w, size.w).max(0) + step;
-        let y = output.loc.y + centred(output.size.h, outer_height).max(0) + step + inset;
+        let x = output.loc.x + centred(output.size.w, outer_width).max(0) + step + insets.left;
+        let y = output.loc.y + centred(output.size.h, outer_height).max(0) + step + insets.top;
 
         // Kept on the output even if the cascade would walk a large window off
         // the bottom right.
         (
             x.min(output.loc.x + (output.size.w - size.w).max(0)),
-            y.max(output.loc.y + inset)
-                .min(output.loc.y + (output.size.h - outer_height).max(0) + inset),
+            y.max(output.loc.y + insets.top)
+                .min(output.loc.y + (output.size.h - outer_height).max(0) + insets.top),
         )
             .into()
     }
@@ -1587,11 +1680,12 @@ impl Solium {
         });
 
         if server_side {
-            let width = self
+            let real = self
                 .window_for(toplevel.wl_surface())
-                .and_then(|window| self.real_geometry(&window))
-                .map_or(TITLEBAR_HEIGHT * 20, |real| real.size.w);
-            self.decorations.insert(id, width);
+                .and_then(|window| self.real_geometry(&window));
+            let width = real.map_or(TITLEBAR_HEIGHT * 20, |real| real.size.w);
+            let height = real.map_or(TITLEBAR_HEIGHT * 15, |real| real.size.h);
+            self.decorations.insert(id, width, height);
         } else {
             self.decorations.remove(&id);
         }

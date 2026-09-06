@@ -57,6 +57,12 @@ mod ffi {
             name: *const c_char,
             value: *const c_char,
         );
+        pub(super) fn solium_qml_scene_set_int(
+            scene: *mut Scene,
+            name: *const c_char,
+            value: c_int,
+        );
+        pub(super) fn solium_qml_scene_get_int(scene: *mut Scene, name: *const c_char) -> c_int;
         pub(super) fn solium_qml_scene_set_bool(
             scene: *mut Scene,
             name: *const c_char,
@@ -293,6 +299,27 @@ impl Scene {
         };
         // SAFETY: both strings outlive the call.
         unsafe { ffi::solium_qml_scene_set_string(self.scene, name.as_ptr(), value.as_ptr()) }
+    }
+
+    /// Set a whole-number property on the scene's root.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn set_int(&mut self, name: &str, value: i32) {
+        let Ok(name) = std::ffi::CString::new(name) else {
+            return;
+        };
+        // SAFETY: the scene is live for as long as `self`, and the name is a
+        // NUL-terminated string that outlives the call.
+        unsafe { ffi::solium_qml_scene_set_int(self.scene, name.as_ptr(), value) }
+    }
+
+    /// Read a whole-number property from the scene's root.
+    #[expect(unsafe_code, reason = "as above")]
+    pub(crate) fn get_int(&mut self, name: &str) -> i32 {
+        let Ok(name) = std::ffi::CString::new(name) else {
+            return 0;
+        };
+        // SAFETY: as above.
+        unsafe { ffi::solium_qml_scene_get_int(self.scene, name.as_ptr()) }
     }
 
     #[expect(unsafe_code, reason = "calling into the Qt host")]

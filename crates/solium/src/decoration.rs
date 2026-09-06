@@ -36,6 +36,13 @@ use crate::qml;
 /// client area.
 pub(crate) const TITLEBAR_HEIGHT: i32 = 32;
 
+/// Identical renders in a row before a frame is left alone.
+///
+/// Small enough that an idle window costs almost nothing, large enough that an
+/// animation which has been started but has not yet moved a pixel is not
+/// mistaken for one that has finished.
+const SETTLED: u8 = 4;
+
 /// What a frame button asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -56,24 +63,88 @@ impl Action {
     }
 }
 
+/// How much of a window's slot the frame takes, on each side.
+///
+/// The decoration decides this, not the compositor: a bar along the left, a
+/// bar underneath and a plain border are the same mechanism with different
+/// numbers, and hardcoding "32 pixels at the top" is what stops them being
+/// writable as ordinary QML.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Insets {
+    pub(crate) top: i32,
+    pub(crate) right: i32,
+    pub(crate) bottom: i32,
+    pub(crate) left: i32,
+}
+
+impl Insets {
+    /// No frame at all: an undecorated window, or one whose decoration draws
+    /// only inside the window's own bounds.
+    pub(crate) const NONE: Self = Self {
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
+    };
+
+    /// Width taken from the client.
+    pub(crate) const fn horizontal(self) -> i32 {
+        self.left + self.right
+    }
+
+    /// Height taken from the client.
+    pub(crate) const fn vertical(self) -> i32 {
+        self.top + self.bottom
+    }
+
+    /// Whether there is any frame to draw.
+    pub(crate) const fn any(self) -> bool {
+        self.top != 0 || self.right != 0 || self.bottom != 0 || self.left != 0
+    }
+}
+
+/// What a frame is told about the window it belongs to.
+///
+/// One argument rather than three: they are set together, compared together,
+/// and a decoration that grows a fourth thing to know should not change every
+/// call site.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Look<'a> {
+    pub(crate) title: &'a str,
+    pub(crate) focused: bool,
+    /// Whether the pointer is anywhere over the window, frame or client.
+    pub(crate) pointer_inside: bool,
+}
+
 /// What a frame shows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Shown {
     title: String,
     focused: bool,
+    /// Whether the pointer is anywhere over the window, frame or client. A
+    /// border that lights up when you approach the window needs to know this
+    /// even while the pointer is over the client, which is not ours.
+    pointer_inside: bool,
 }
 
 /// One window's frame.
 #[derive(Debug)]
 pub(crate) struct Decoration {
     scene: qml::Scene,
+    /// What the QML asked to reserve, read once when it was built.
+    insets: Insets,
     buffer: Option<MemoryRenderBuffer>,
     buffer_size: (i32, i32),
     shown: Shown,
-    /// The scene has reported no further change, and nothing has been set on
-    /// it since. Re-rendering it would produce the same pixels, so it is not
-    /// re-rendered until something asks it to.
-    quiet: bool,
+    /// How many consecutive renders have produced nothing new.
+    ///
+    /// Not a flag, and the difference matters: the frame after a property is
+    /// set looks exactly like the frame before it, because an animation
+    /// started by that property has not moved yet. Stopping on the first
+    /// unchanged render therefore freezes every transition at its starting
+    /// value -- a border that never lights, a bar that never slides out. It
+    /// takes a few identical frames in a row to mean "settled".
+    still: u8,
     /// Pixels rendered but not yet copied into the buffer, because the buffer
     /// is created after the render: stride and rows, as the scene gave them.
     pending: Option<(usize, Vec<u8>)>,
@@ -83,15 +154,30 @@ pub(crate) struct Decoration {
 }
 
 impl Decoration {
-    fn new(width: i32) -> Result<Self> {
+    fn new(width: i32, height: i32) -> Result<Self> {
         qml::start()?;
-        let scene = qml::Scene::new(&qml_path(), width.max(1), TITLEBAR_HEIGHT)?;
+        // Built at the client's size first, because what it reserves is a
+        // property of the scene and there is no scene to ask until it exists.
+        let mut scene = qml::Scene::new(&qml_path(), width.max(1), height.max(1))?;
+        let insets = Insets {
+            top: scene.get_int("insetTop").max(0),
+            right: scene.get_int("insetRight").max(0),
+            bottom: scene.get_int("insetBottom").max(0),
+            left: scene.get_int("insetLeft").max(0),
+        };
+        // ...and then grown to the whole outer rect, which is what it draws:
+        // the client area within it is simply left transparent.
+        scene.resize(
+            (width + insets.horizontal()).max(1),
+            (height + insets.vertical()).max(1),
+        );
         Ok(Self {
             scene,
+            insets,
             buffer: None,
             buffer_size: (0, 0),
             shown: Shown::default(),
-            quiet: false,
+            still: 0,
             pending: None,
             restore: None,
         })
@@ -103,52 +189,94 @@ impl Decoration {
     /// window lives; the scene is always rasterised at its unscaled size and
     /// the element scales it, so a thumbnail's titlebar costs no more than a
     /// full-size one.
+    /// Whether the frame's own animations still have somewhere to go.
+    ///
+    /// A decoration animates on its own clock -- a border easing to a new
+    /// colour, a bar sliding out, a sheen crossing a titlebar -- and the
+    /// compositor only draws when something has damaged the screen. Nothing
+    /// the client did damaged it, so unless the frame says it is still moving,
+    /// rendering stops and the animation freezes wherever it happened to be.
+    pub(crate) fn animating(&self) -> bool {
+        self.still < SETTLED
+    }
+
+    /// What this frame reserves around its client.
+    pub(crate) fn insets(&self) -> Insets {
+        self.insets
+    }
+
+    /// Draw the frame over the whole of `rect`, at `outer` pixels.
+    ///
+    /// `rect` is where the window is drawn, which a presentation transform may
+    /// have scaled; `outer` is its unscaled size, which is what the scene is
+    /// rasterised at. Keeping them apart is what lets a frame scale with its
+    /// window in overview without the text being re-laid out every frame.
     pub(crate) fn frame<R>(
         &mut self,
         renderer: &mut R,
         rect: Rectangle<f64, Logical>,
-        width: i32,
-        title: &str,
-        focused: bool,
+        outer: Size<i32, Logical>,
+        look: &Look<'_>,
         now: Duration,
     ) -> Option<MemoryRenderBufferRenderElement<R>>
     where
         R: Renderer + ImportMem,
         R::TextureId: Send + Clone + 'static,
     {
-        let width = width.max(1);
-        self.scene.resize(width, TITLEBAR_HEIGHT);
+        let width = outer.w.max(1);
+        let height = outer.h.max(1);
+        self.scene.resize(width, height);
 
         // Compared field by field rather than by building a `Shown`: this runs
         // for every window of every frame, and the title is the one thing here
         // that allocates.
-        if self.shown.title != title || self.shown.focused != focused {
+        let Look {
+            title,
+            focused,
+            pointer_inside,
+        } = *look;
+        if self.shown.title != title
+            || self.shown.focused != focused
+            || self.shown.pointer_inside != pointer_inside
+        {
             self.scene.set_string("title", title);
             self.scene.set_bool("focused", focused);
+            self.scene.set_bool("pointerInside", pointer_inside);
+            // The client's own size, so a decoration can place things against
+            // the window rather than against itself.
+            self.scene
+                .set_int("contentWidth", width - self.insets.horizontal());
+            self.scene
+                .set_int("contentHeight", height - self.insets.vertical());
             self.shown.title.clear();
             self.shown.title.push_str(title);
             self.shown.focused = focused;
-            self.quiet = false;
+            self.shown.pointer_inside = pointer_inside;
+            self.still = 0;
         }
 
-        let size = (width, TITLEBAR_HEIGHT);
+        let size = (width, height);
         let resized = self.buffer_size != size;
         if resized {
-            self.quiet = false;
+            self.still = 0;
         }
 
-        // A titlebar is animating only just after it was told something --
-        // focus fading in, mostly. Once the scene says it has settled, driving
-        // Qt's scene graph every frame buys identical pixels, so it stops
-        // until the next thing is set on it.
-        if !self.quiet {
+        // Driving Qt's scene graph every frame for a screen full of idle
+        // windows buys identical pixels, so a frame that has stopped moving
+        // stops being driven -- but only after several identical frames in a
+        // row, for the reason `still` explains.
+        if self.animating() {
             self.scene.advance(now);
             match self.scene.render() {
                 Ok(rendered) => {
                     if rendered.changed || resized {
                         self.pending = Some((rendered.stride, rendered.pixels.to_vec()));
                     }
-                    self.quiet = !rendered.changed;
+                    self.still = if rendered.changed {
+                        0
+                    } else {
+                        self.still.saturating_add(1)
+                    };
                 }
                 Err(err) => {
                     tracing::warn!(?err, "a window frame did not render");
@@ -204,7 +332,7 @@ impl Decoration {
         // of scaling it — at full size the two are equal and it looks correct,
         // and it only shows up once a mode scales the frame down: the title
         // slides right and the buttons vanish off the edge.
-        let source = Rectangle::from_size((f64::from(width), f64::from(TITLEBAR_HEIGHT)).into());
+        let source = Rectangle::from_size((f64::from(width), f64::from(height)).into());
 
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
@@ -217,6 +345,18 @@ impl Decoration {
         )
         .inspect_err(|err| tracing::warn!(?err, "could not upload a window frame"))
         .ok()
+    }
+
+    /// Tell the frame the pointer has left the window altogether.
+    ///
+    /// Sent as a position rather than a flag as well, because QML's hover
+    /// handling is positional: a `MouseArea` that never sees the pointer leave
+    /// stays hovered forever, and a border lit by proximity stays lit.
+    pub(crate) fn pointer_left(&mut self) {
+        self.scene.pointer(-1.0, -1.0, None);
+        self.scene.set_bool("pointerInside", false);
+        self.shown.pointer_inside = false;
+        self.still = 0;
     }
 
     /// Pointer input in frame-local coordinates.
@@ -255,11 +395,11 @@ pub(crate) struct Decorations {
 
 impl Decorations {
     /// Start decorating a window, if it is not decorated already.
-    pub(crate) fn insert(&mut self, id: ObjectId, width: i32) {
+    pub(crate) fn insert(&mut self, id: ObjectId, width: i32, height: i32) {
         if self.frames.contains_key(&id) {
             return;
         }
-        match Decoration::new(width) {
+        match Decoration::new(width, height) {
             Ok(decoration) => {
                 self.frames.insert(id, decoration);
             }
@@ -275,6 +415,10 @@ impl Decorations {
         if self.frames.remove(id).is_some() {
             tracing::debug!("dropped a window frame");
         }
+    }
+
+    pub(crate) fn get(&self, id: &ObjectId) -> Option<&Decoration> {
+        self.frames.get(id)
     }
 
     pub(crate) fn get_mut(&mut self, id: &ObjectId) -> Option<&mut Decoration> {
@@ -296,11 +440,41 @@ impl Decorations {
 ///
 /// Overridable so a frame can be restyled and reloaded without a rebuild,
 /// which is most of the point of authoring it in QML.
+/// Which QML file draws window frames.
+///
+/// A name picks one of the decorations that ship with the compositor; a path
+/// picks anyone else's. Writing a decoration is writing a QML file and setting
+/// this -- there is nothing else to build, and no compositor code to touch.
+///
+/// ```sh
+/// SOLIUM_DECORATION=left          # qml/decorations/left.qml
+/// SOLIUM_DECORATION=~/mine.qml    # anywhere
+/// ```
 fn qml_path() -> PathBuf {
+    // The old name still works: it was a path to a titlebar, and it is a path
+    // to a decoration now.
     if let Some(path) = std::env::var_os("SOLIUM_QML_TITLEBAR") {
         return PathBuf::from(path);
     }
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/titlebar.qml"))
+    let shipped = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/decorations"));
+    match std::env::var("SOLIUM_DECORATION") {
+        Ok(name) if name.contains('/') || name.ends_with(".qml") => {
+            PathBuf::from(shellexpand(&name))
+        }
+        Ok(name) => shipped.join(format!("{name}.qml")),
+        Err(_) => shipped.join("top.qml"),
+    }
+}
+
+/// Expand a leading `~`, since this is read from an environment variable and
+/// nothing else will have done it.
+fn shellexpand(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) => {
+            std::env::var("HOME").map_or_else(|_| path.to_owned(), |home| format!("{home}/{rest}"))
+        }
+        None => path.to_owned(),
+    }
 }
 
 #[cfg(test)]
