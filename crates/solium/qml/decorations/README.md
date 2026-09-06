@@ -40,6 +40,16 @@ the client is placed inside what is left:
 Reserve nothing and the decoration becomes an overlay: it draws on top of the
 client and never moves it.
 
+If you reserve space **and** paint outside it, say so:
+
+    property bool overlay: true
+
+A frame that stays inside its own bands has only those bands copied and
+uploaded when it changes -- a titlebar is about 4% of a window, and copying the
+other 96% every frame is most of what an animating decoration costs. Declaring
+`overlay` opts out of that, so declare it only if you need it; the alternative
+is usually to reserve the couple of pixels you were painting over.
+
 Set by the compositor, every frame:
 
 | property | |
@@ -55,6 +65,16 @@ Read by the compositor:
 |---|---|
 | `action` | set to `"close"` or `"maximize"` to ask for it; cleared once taken |
 | `hovered` | the name of the button under the pointer, or `""` |
+| `animating` | set true while a loop is running; see below |
+
+A frame stops being driven a few identical renders after it stops changing, so
+an idle window costs a comparison rather than a rasterisation. A transition
+animates fine under that rule -- it changes pixels every frame, so it keeps
+itself alive. A **loop with a pause in it does not**: while it waits it
+produces identical frames, which is indistinguishable from having finished.
+Set `animating: true` while such a loop runs — `pulse.qml` uses
+`animating: focused` — and bear in mind that a frame which never stops
+animating never stops costing anything.
 
 `hovered` decides whether a press starts a window drag, so a decoration whose
 buttons do not set it will have its buttons dragging the window instead.

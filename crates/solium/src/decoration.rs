@@ -27,7 +27,7 @@ use smithay::{
         },
     },
     reexports::wayland_server::backend::ObjectId,
-    utils::{Logical, Rectangle, Size, Transform},
+    utils::{Buffer as BufferCoords, Logical, Rectangle, Size, Transform},
 };
 
 use crate::qml;
@@ -42,6 +42,14 @@ pub(crate) const TITLEBAR_HEIGHT: i32 = 32;
 /// animation which has been started but has not yet moved a pixel is not
 /// mistaken for one that has finished.
 const SETTLED: u8 = 4;
+
+/// How often a frame's own animation is advanced.
+///
+/// Chrome, not content: a sheen crossing a titlebar reads the same at 60 as at
+/// 260, and the scene is rasterised on the CPU, so the difference is most of
+/// what an animating decoration costs. Anything *set* on a frame still renders
+/// at once -- what is rate-limited is time passing, not the user acting.
+const ANIMATION_INTERVAL: Duration = Duration::from_micros(16_666);
 
 /// What a frame button asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +105,30 @@ impl Insets {
         self.top + self.bottom
     }
 
+    /// The frame's own area, as up to four rectangles around a client of
+    /// `width` by `height` including the insets.
+    ///
+    /// Corners belong to the top and bottom bands, so the sides do not overlap
+    /// them: a region copied twice is a region copied twice.
+    pub(crate) fn bands(self, width: i32, height: i32) -> Vec<Rectangle<i32, BufferCoords>> {
+        let middle = (height - self.vertical()).max(0);
+        [
+            Rectangle::new((0, 0).into(), (width, self.top).into()),
+            Rectangle::new(
+                (0, height - self.bottom).into(),
+                (width, self.bottom).into(),
+            ),
+            Rectangle::new((0, self.top).into(), (self.left, middle).into()),
+            Rectangle::new(
+                (width - self.right, self.top).into(),
+                (self.right, middle).into(),
+            ),
+        ]
+        .into_iter()
+        .filter(|band| band.size.w > 0 && band.size.h > 0)
+        .collect()
+    }
+
     /// Whether there is any frame to draw.
     pub(crate) const fn any(self) -> bool {
         self.top != 0 || self.right != 0 || self.bottom != 0 || self.left != 0
@@ -133,6 +165,13 @@ pub(crate) struct Decoration {
     scene: qml::Scene,
     /// What the QML asked to reserve, read once when it was built.
     insets: Insets,
+    /// Whether the frame paints outside the space it reserved.
+    ///
+    /// A frame that stays inside its own bands only has to have those bands
+    /// copied and uploaded each time it changes; one that draws over the
+    /// client -- a bar floating above the window, a glow across it -- has to
+    /// have all of it copied, because anything in it may have moved.
+    overlay: bool,
     buffer: Option<MemoryRenderBuffer>,
     buffer_size: (i32, i32),
     shown: Shown,
@@ -148,6 +187,8 @@ pub(crate) struct Decoration {
     /// Pixels rendered but not yet copied into the buffer, because the buffer
     /// is created after the render: stride and rows, as the scene gave them.
     pending: Option<(usize, Vec<u8>)>,
+    /// When the scene was last driven, for `ANIMATION_INTERVAL`.
+    advanced_at: Duration,
     /// Where the window was before it was maximised. `Some` means maximised —
     /// one field rather than a flag and a rect that can disagree.
     pub(crate) restore: Option<Rectangle<i32, Logical>>,
@@ -165,6 +206,9 @@ impl Decoration {
             bottom: scene.get_int("insetBottom").max(0),
             left: scene.get_int("insetLeft").max(0),
         };
+        // A frame with nothing reserved has nowhere else to paint but over
+        // the client, so it is an overlay whether it says so or not.
+        let overlay = scene.get_bool("overlay") || !insets.any();
         // ...and then grown to the whole outer rect, which is what it draws:
         // the client area within it is simply left transparent.
         scene.resize(
@@ -174,11 +218,13 @@ impl Decoration {
         Ok(Self {
             scene,
             insets,
+            overlay,
             buffer: None,
             buffer_size: (0, 0),
             shown: Shown::default(),
             still: 0,
             pending: None,
+            advanced_at: Duration::ZERO,
             restore: None,
         })
     }
@@ -243,6 +289,10 @@ impl Decoration {
             focused,
             pointer_inside,
         } = *look;
+        // Whether anything was set on the frame this time round. What the user
+        // did is drawn immediately; what the clock did can wait for the next
+        // interval.
+        let mut told = false;
         if self.shown.title != title
             || self.shown.focused != focused
             || self.shown.pointer_inside != pointer_inside
@@ -261,6 +311,7 @@ impl Decoration {
             self.shown.focused = focused;
             self.shown.pointer_inside = pointer_inside;
             self.still = 0;
+            told = true;
         }
 
         let size = (width, height);
@@ -273,7 +324,9 @@ impl Decoration {
         // windows buys identical pixels, so a frame that has stopped moving
         // stops being driven -- but only after several identical frames in a
         // row, for the reason `still` explains.
-        if self.animating() {
+        let due = now.saturating_sub(self.advanced_at) >= ANIMATION_INTERVAL;
+        if self.animating() && (told || resized || due) {
+            self.advanced_at = now;
             self.scene.advance(now);
             match self.scene.render() {
                 Ok(rendered) => {
@@ -291,6 +344,14 @@ impl Decoration {
                     return None;
                 }
             }
+            // A loop with a pause in it produces identical frames while it
+            // waits, which is indistinguishable from having finished -- so a
+            // decoration that keeps going says so, and is kept driven. Read
+            // after rendering because it is a binding: it can only answer once
+            // the scene has been evaluated.
+            if self.scene.get_bool("animating") {
+                self.still = 0;
+            }
         }
 
         if self.buffer.is_none() || resized {
@@ -306,17 +367,36 @@ impl Decoration {
         let buffer = self.buffer.as_mut()?;
 
         if let Some((stride, pixels)) = self.pending.take() {
+            // Only the parts of the frame that can have changed. A titlebar on
+            // a 1150x850 window is 4% of it; copying and uploading the other
+            // 96% every frame is what an animating decoration used to cost,
+            // and it costs the same whether anything happened there or not.
+            let regions = if self.overlay || resized {
+                vec![Rectangle::from_size(size.into())]
+            } else {
+                self.insets.bands(size.0, size.1)
+            };
             let mut context = buffer.render();
             let copy = context.draw(|target| {
                 let row_bytes = usize::try_from(size.0.max(0)).unwrap_or_default() * 4;
-                for (row, destination) in target.chunks_exact_mut(row_bytes).enumerate() {
-                    let start = row * stride;
-                    let Some(source) = pixels.get(start..start + row_bytes) else {
-                        return Err(());
-                    };
-                    destination.copy_from_slice(source);
+                for region in &regions {
+                    let (x, y) = (region.loc.x.max(0), region.loc.y.max(0));
+                    let width = usize::try_from(region.size.w.max(0)).unwrap_or_default() * 4;
+                    let left = usize::try_from(x).unwrap_or_default() * 4;
+                    for row in y..y.saturating_add(region.size.h.max(0)) {
+                        let row = usize::try_from(row).unwrap_or_default();
+                        let from = row * stride + left;
+                        let into = row * row_bytes + left;
+                        let (Some(source), Some(destination)) = (
+                            pixels.get(from..from + width),
+                            target.get_mut(into..into + width),
+                        ) else {
+                            return Err(());
+                        };
+                        destination.copy_from_slice(source);
+                    }
                 }
-                Ok(vec![Rectangle::from_size(size.into())])
+                Ok(regions.clone())
             });
             if copy.is_err() {
                 tracing::warn!("a frame image was smaller than its buffer");
@@ -504,12 +584,15 @@ fn qml_path(style: Option<&str>) -> PathBuf {
     if let Some(path) = std::env::var_os("SOLIUM_QML_TITLEBAR") {
         return PathBuf::from(path);
     }
-    // A script's choice wins over the environment, which wins over the
-    // default: the environment is for trying one out, the script is the
-    // configuration.
-    let chosen = style
-        .map(ToOwned::to_owned)
-        .or_else(|| std::env::var("SOLIUM_DECORATION").ok());
+    // The environment wins over the configuration, not the other way round.
+    // The configuration always names something -- the shipped one says "top"
+    // -- so a script's choice losing to nothing would be one thing, but a
+    // script's choice *winning* leaves `SOLIUM_DECORATION` with no effect at
+    // all. It is set by whoever started this particular run, to try one
+    // decoration for one session, and that is the more specific intent.
+    let chosen = std::env::var("SOLIUM_DECORATION")
+        .ok()
+        .or_else(|| style.map(ToOwned::to_owned));
     let Some(name) = chosen else {
         return shipped_decoration("top");
     };

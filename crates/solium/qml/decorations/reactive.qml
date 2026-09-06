@@ -25,6 +25,10 @@ Item {
     property string action: ""
     property string hovered: ""
 
+    // Painted outside the insets -- the glow crosses the client area -- so the whole frame is copied when
+    // it changes rather than just its bands.
+    property bool overlay: true
+
     // Only for reading the position: clicks are the compositor's business, and
     // it decides on its own whether a press belongs to the frame.
     MouseArea {
