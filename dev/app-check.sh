@@ -60,14 +60,30 @@ for _ in $(seq 1 150); do
 done
 [[ -n "$socket" ]] || { echo "$name: FAIL — solium never reported a socket"; exit 1; }
 
+# XWayland comes up a moment after the socket, so an X11 client is given a
+# moment to find it. Without DISPLAY an X11 client does not fail interestingly
+# -- it says "couldn't open display" and tells you nothing about the compositor.
+x_display=""
+for _ in $(seq 1 40); do
+    number="$(grep -oE 'XWayland is up display=[0-9]+' "$comp_log" | tail -1 | cut -d= -f2)"
+    [[ -n "$number" ]] && { x_display=":$number"; break; }
+    sleep 0.1
+done
+[[ -n "$x_display" ]] || echo "  (no XWayland; X11 clients will not run)"
+
 # A sandboxed client gets no environment from us, so the socket has to go in
 # its own argument list: write @SOCKET@ where it belongs and it is substituted.
 #   dev/app-check.sh flatpak run --env=WAYLAND_DISPLAY=@SOCKET@ com.slack.Slack
 args=()
 for arg in "$@"; do args+=("${arg//@SOCKET@/$socket}"); done
 
-env -u DISPLAY WAYLAND_DISPLAY="$socket" QT_QPA_PLATFORM=wayland GDK_BACKEND=wayland \
-    "${args[@]}" >"$app_log" 2>&1 &
+if [[ -n "$x_display" ]]; then
+    env DISPLAY="$x_display" WAYLAND_DISPLAY="$socket" \
+        "${args[@]}" >"$app_log" 2>&1 &
+else
+    env -u DISPLAY WAYLAND_DISPLAY="$socket" QT_QPA_PLATFORM=wayland GDK_BACKEND=wayland \
+        "${args[@]}" >"$app_log" 2>&1 &
+fi
 client=$!
 
 deadline=$(( $(date +%s%3N) + settle + 3000 ))

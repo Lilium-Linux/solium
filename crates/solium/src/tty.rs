@@ -189,6 +189,8 @@ pub(crate) fn run() -> Result<()> {
     let mut solium = Solium::new(display_handle.clone());
     solium.socket_name = start_socket(&mut event_loop, display)?;
 
+    crate::xwayland::start(&event_loop.handle(), &display_handle);
+
     let config = Scripts::config_path();
     solium.start_scripts(match Scripts::load(&config) {
         Ok(scripts) => Some(scripts),
@@ -361,8 +363,8 @@ pub(crate) fn run() -> Result<()> {
 }
 
 /// Everything the hardware backend holds, plus the compositor itself.
-struct State {
-    solium: Solium,
+pub(crate) struct State {
+    pub(crate) solium: Solium,
     session: LibSeatSession,
     renderer: Option<GlesRenderer>,
     compositor: Option<Compositor>,
