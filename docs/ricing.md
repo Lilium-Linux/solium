@@ -1,0 +1,123 @@
+# Ricing Solium
+
+Everything below is a file you write. Nothing here needs the compositor
+rebuilt, and nothing needs you to copy the files that ship in order to change
+one thing in them.
+
+Two commands are worth knowing first:
+
+    solium --check          # would my configuration run? which bindings survived?
+    super+shift+r           # read it again, in the running session
+
+`--check` is the one that saves afternoons. A configuration that fails to load
+is reported with the file and the line, and the running session keeps whatever
+it already had — so a typo costs a line of output rather than your windows.
+
+## The thirty-second version
+
+Write `~/.config/solium/user.lua` with only what you want changed:
+
+```lua
+return {
+    gap = 4,
+    decoration = "reactive",
+    tiling = { split = 0.618 },
+}
+```
+
+It is merged over the defaults, key by key, through nested tables — so
+`tiling = { split = ... }` keeps the animations underneath it. Lists are
+replaced whole, because a list of column widths with one entry changed is a
+different list, not a longer one.
+
+`crates/solium/lua/config.lua` is the list of everything you can put in there.
+
+## Where things live
+
+| what | where |
+|---|---|
+| your settings | `~/.config/solium/user.lua` |
+| your bindings and layout | `~/.config/solium/init.lua` |
+| one module, replaced | `~/.config/solium/tiling.lua`, `scrolling.lua`, … |
+| your decorations | `~/.config/solium/qml/decorations/*.qml` |
+| your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml` |
+
+Your directory is searched first in every case. A file you write shadows the
+one that ships, and everything you did not write still comes from the shipped
+set — including its later improvements.
+
+## Recipes
+
+### A different frame
+
+```lua
+return { decoration = "left" }
+```
+
+`top`, `left`, `bottom`, `border`, `reactive`, `proximity`, `reveal`, `pulse`.
+Reload and every open window is re-framed.
+
+### Your own frame
+
+Copy one you like into `~/.config/solium/qml/decorations/` and edit it. A file
+named `top.qml` there shadows the shipped `top.qml`, so you can keep using
+`decoration = "top"` and mean yours. `crates/solium/qml/decorations/README.md`
+is the contract: what a frame is told, what it can ask for, and what it
+reserves.
+
+### Your own colours
+
+Copy `Solium/Theme.qml` into `~/.config/solium/qml/Solium/` and change it.
+Every frame and every shell surface reads it, so one file restyles the desktop
+rather than the titlebars.
+
+### Your own animation feel
+
+Named curves — `linear`, `outCubic`, `outBack`, `inOutQuad`, `spring` — or four
+numbers, which are a cubic bezier's control points:
+
+```lua
+return {
+    tiling = { motion = { duration = 220, easing = { 0.34, 1.56, 0.64, 1 } } },
+}
+```
+
+Those are the same four numbers CSS calls `cubic-bezier` and every easing
+generator on the internet hands out, so a feel you found elsewhere transfers
+directly. y may leave 0..1 — that is what overshoot is.
+
+### Your own bindings
+
+`~/.config/solium/init.lua` replaces the entry point. It can still `require`
+everything that ships, so starting from the shipped one and adding to it is
+three lines:
+
+```lua
+require("modes")
+require("tiling")
+
+sol.bind("super+return", function() sol.spawn("kitty") end)
+```
+
+`solium --check` prints every binding it registered, which is how you find out
+that an edit dropped one.
+
+### Your own mode
+
+A mode is a Lua module that reacts to events — `open`, `close`, `focus`,
+`drop`, `resize`, `scroll` — and asks for placements. `tiling.lua` is Hyprland's
+dwindle in about a hundred lines; `scrolling.lua` is niri's model. Copy either
+into your own directory and it takes over.
+
+## Worth knowing
+
+A decoration is rasterised in software, over the window's whole outer rect.
+Bars and borders are cheap because most of that rect is untouched, but a frame
+that paints across the entire window every frame will cost you — the animation
+only runs while the scene is actually changing, so favour transitions that
+settle over ones that loop forever.
+
+Frames stop being driven a few identical renders after they stop moving, so an
+idle window costs a comparison rather than a rasterisation. A decoration that
+animates continuously (`pulse` does, while focused) opts out of that for as
+long as it animates.

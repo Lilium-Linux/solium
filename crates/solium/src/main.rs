@@ -106,6 +106,35 @@ fn log_panics() {
 }
 
 /// Load one QML file and report the outcome.
+/// Load the configuration, report what it would do, and exit.
+///
+/// Reports the bindings it registered as well as any error, because "it
+/// parsed" is not the question a ricer is asking -- "did my binding survive
+/// the edit" is.
+fn check_config() -> anyhow::Result<()> {
+    let path = script::Scripts::config_path();
+    println!("checking {}", path.display());
+    match script::Scripts::load(&path) {
+        Ok(scripts) => {
+            let bindings = scripts.binding_names();
+            println!("  ok: {} binding(s)", bindings.len());
+            for binding in bindings {
+                println!("    {binding}");
+            }
+            Ok(())
+        }
+        Err(err) => {
+            // Printed rather than only returned: this is a command someone
+            // runs to read the answer, and the chain is where the answer is.
+            println!("  failed:");
+            for (depth, cause) in err.chain().enumerate() {
+                println!("    {:indent$}{cause}", "", indent = depth * 2);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
 fn check_qml(path: Option<String>) -> Result<()> {
     let Some(path) = path else {
         anyhow::bail!("usage: solium --check-qml <file.qml>");
@@ -156,6 +185,10 @@ fn main() -> Result<()> {
         // unavailable" errors, and doing that through a real session costs ten
         // seconds a link.
         Some("--check-qml") => check_qml(std::env::args().nth(2)),
+        // Loads the configuration and says whether it would run, without
+        // touching a session. A typo found here costs a line of output; the
+        // same typo found by reloading costs whatever you were doing.
+        Some("--check") => check_config(),
         Some("--probe") => tty::probe(),
         Some("--tty") => tty::run(),
         _ if std::env::var_os("WAYLAND_DISPLAY").is_some()

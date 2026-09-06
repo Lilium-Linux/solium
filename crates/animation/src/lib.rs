@@ -146,6 +146,71 @@ pub enum Curve {
     /// Slow at both ends. For things that move rather than appear.
     InOutQuad,
     Spring(Spring),
+    /// Any curve at all, as the two control points of a cubic bezier from
+    /// (0,0) to (1,1) -- the same four numbers CSS calls `cubic-bezier` and
+    /// every easing site on the internet hands out.
+    ///
+    /// The named curves above are the ones worth having a name; this is so a
+    /// feel nobody anticipated does not need a compositor release.
+    Bezier {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+    },
+}
+
+/// A cubic bezier from (0,0) to (1,1), evaluated at `t` along the *x* axis.
+///
+/// The curve is parametric, so a y for a given x needs the parameter that
+/// puts x there. Newton's method converges in a couple of steps for the
+/// well-behaved curves easings are, and bisection finishes the rest -- the
+/// same approach browsers take, for the same reason.
+fn bezier(t: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+    /// Close enough that a further step would move the result by less than a
+    /// pixel on any real screen.
+    const EPSILON: f64 = 1e-6;
+    const NEWTON_STEPS: u8 = 8;
+
+    let curve = |a: f64, b: f64, u: f64| {
+        // The Bernstein form, with the two ends pinned at 0 and 1.
+        let inverse = 1.0 - u;
+        3.0 * inverse * inverse * u * a + 3.0 * inverse * u * u * b + u * u * u
+    };
+    let slope = |a: f64, b: f64, u: f64| {
+        let inverse = 1.0 - u;
+        3.0 * inverse * inverse * a + 6.0 * inverse * u * (b - a) + 3.0 * u * u * (1.0 - b)
+    };
+
+    let mut guess = t;
+    for _ in 0..NEWTON_STEPS {
+        let error = curve(x1, x2, guess) - t;
+        if error.abs() < EPSILON {
+            return curve(y1, y2, guess);
+        }
+        let gradient = slope(x1, x2, guess);
+        // A flat stretch cannot be stepped along; bisection below handles it.
+        if gradient.abs() < EPSILON {
+            break;
+        }
+        guess -= error / gradient;
+    }
+
+    let (mut low, mut high) = (0.0, 1.0);
+    let mut guess = t.clamp(0.0, 1.0);
+    for _ in 0..32 {
+        let x = curve(x1, x2, guess);
+        if (x - t).abs() < EPSILON {
+            break;
+        }
+        if x < t {
+            low = guess;
+        } else {
+            high = guess;
+        }
+        guess = f64::midpoint(low, high);
+    }
+    curve(y1, y2, guess)
 }
 
 impl Curve {
@@ -168,6 +233,7 @@ impl Curve {
                 1.0 + (OVERSHOOT + 1.0) * inverse * inverse * inverse
                     + OVERSHOOT * inverse * inverse
             }
+            Self::Bezier { x1, y1, x2, y2 } => bezier(t, x1, y1, x2, y2),
             Self::InOutQuad => {
                 if t < 0.5 {
                     2.0 * t * t
@@ -214,6 +280,7 @@ impl Curve {
             Self::OutBack => "outBack",
             Self::InOutQuad => "inOutQuad",
             Self::Spring(_) => "spring",
+            Self::Bezier { .. } => "bezier",
         }
     }
 }
@@ -285,6 +352,39 @@ pub fn lerp(from: f64, to: f64, progress: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_bezier_hits_both_ends_and_stays_monotonic() {
+        // ease-in-out, as CSS spells it.
+        let curve = Curve::Bezier {
+            x1: 0.42,
+            y1: 0.0,
+            x2: 0.58,
+            y2: 1.0,
+        };
+        assert!(curve.at(0.0).abs() < 1e-6);
+        assert!((curve.at(1.0) - 1.0).abs() < 1e-6);
+        // Slow at the start, fast in the middle: half way through the time is
+        // half way along the distance, and the quarter point is behind it.
+        assert!((curve.at(0.5) - 0.5).abs() < 1e-6);
+        assert!(curve.at(0.25) < 0.25);
+        assert!(curve.at(0.75) > 0.75);
+    }
+
+    #[test]
+    fn a_bezier_can_overshoot() {
+        // The four numbers every "ease-out-back" generator produces.
+        let curve = Curve::Bezier {
+            x1: 0.34,
+            y1: 1.56,
+            x2: 0.64,
+            y2: 1.0,
+        };
+        let peak = (0..=100)
+            .map(|step| curve.at(f64::from(step) / 100.0))
+            .fold(f64::MIN, f64::max);
+        assert!(peak > 1.0, "an overshoot that does not exceed 1 is not one");
+    }
+
     use super::*;
 
     #[test]
