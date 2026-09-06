@@ -102,6 +102,31 @@ sol.log("solium configuration loaded")
 -- a rectangle. `rotate_y` turns it about its own vertical axis and
 -- `perspective` is the viewer distance in pixels, which is what makes the far
 -- edge recede instead of merely narrowing.
+-- Dev: the genie. `genie` names the slot the window is pulled into -- a dock
+-- icon's rectangle, once there is a dock -- and the compositor bends the
+-- window into it: the rows nearest the slot go first, so it folds like a sheet
+-- through a letterbox instead of shrinking. `spread` is how much of it is in
+-- motion at once. Composes with a transform: add `rotate_y` here and the
+-- window tilts while it is sucked in.
+sol.bind("super+m", function()
+    local area = sol.monitor()
+    for _, window in ipairs(sol.windows()) do
+        if window.focused then
+            sol.animate({ duration = 520, easing = "inOutCubic" })
+            sol.present(window.id, {
+                genie = {
+                    x = area.x + area.w / 2 - 60,
+                    y = area.y + area.h - 24,
+                    width = 120,
+                    height = 24,
+                    spread = 1.4,
+                },
+            })
+            return
+        end
+    end
+end)
+
 sol.bind("super+g", function()
     for _, window in ipairs(sol.windows()) do
         if window.focused then
