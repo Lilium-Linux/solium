@@ -196,9 +196,15 @@ pub(crate) fn run() -> Result<()> {
     let mut clicks = dev::clicks();
     let mut drags = dev::drags();
     let mut loadings = dev::loading_at();
+    // Reversed so `last` is the *earliest*, which is what the `while ... pop`
+    // below wants. `drags` was the one list that missed this, so with more than
+    // one drag none fired until the latest was due and then they all fired at
+    // once, newest first. A single drag is the same list either way, which is
+    // why it went unnoticed through a dozen tests.
     triggers.reverse();
     clicks.reverse();
     loadings.reverse();
+    drags.reverse();
 
     // Frame pacing, reported periodically. Latency is the thing this
     // compositor will be judged on, and "it feels laggy" is not something that

@@ -9,6 +9,10 @@ use std::time::Duration;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
+use smithay::wayland::pointer_constraints::{
+    PointerConstraintsHandler, PointerConstraintsState, with_pointer_constraint,
+};
+use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use std::collections::HashMap;
 
 use smithay::{
@@ -187,6 +191,33 @@ pub(crate) struct Solium {
     /// The X display number XWayland took, for `DISPLAY` in children.
     pub(crate) x11_display: Option<u32>,
     pub(crate) xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
+    /// Raw pointer motion, for anything that reads movement rather than
+    /// position.
+    ///
+    /// A game reading the mouse to turn a camera cannot use `wl_pointer`: that
+    /// reports where the pointer *is*, and the pointer stops at the edge of the
+    /// screen. Without this a first-person game does not turn badly, it does
+    /// not turn at all.
+    #[expect(
+        dead_code,
+        reason = "registers zwp_relative_pointer_v1; dropping it would remove the global"
+    )]
+    pub(crate) relative_pointer_state: RelativePointerManagerState,
+    /// Locking and confining the pointer to a surface.
+    ///
+    /// The other half of the same problem. Reading raw movement is no use while
+    /// the pointer is still crossing the screen and leaving the window — a game
+    /// wants it held still, a drawing application wants it kept inside a
+    /// region.
+    #[expect(
+        dead_code,
+        reason = "registers zwp_pointer_constraints_v1; dropping it would remove the global"
+    )]
+    pub(crate) pointer_constraints_state: PointerConstraintsState,
+    /// Where a locked pointer's client would like the cursor left when the
+    /// lock ends. Advice, taken at unlock. See `cursor_position_hint`.
+    pub(crate) constraint_hint: Option<Point<f64, Logical>>,
+
     /// The middle-click clipboard. A separate selection with its own protocol,
     /// and its absence is not subtle: a terminal that pastes on middle click
     /// pastes nothing at all.
@@ -407,6 +438,9 @@ impl Solium {
                 &display_handle,
             ),
             primary_selection_state: PrimarySelectionState::new::<Self>(&display_handle),
+            relative_pointer_state: RelativePointerManagerState::new::<Self>(&display_handle),
+            pointer_constraints_state: PointerConstraintsState::new::<Self>(&display_handle),
+            constraint_hint: None,
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
             seat_state,
@@ -2342,7 +2376,7 @@ impl Solium {
     }
 
     /// The window owning a surface, if any.
-    fn window_for(&self, surface: &WlSurface) -> Option<Window> {
+    pub(crate) fn window_for(&self, surface: &WlSurface) -> Option<Window> {
         self.space
             .elements()
             .find(|window| window.wl_surface().as_deref() == Some(surface))
@@ -2654,6 +2688,66 @@ impl Solium {
         tracing::debug!(server_side, "decoration mode agreed");
     }
 }
+
+impl PointerConstraintsHandler for Solium {
+    /// A client has asked for the pointer to be held still or kept inside a
+    /// region.
+    ///
+    /// Granted straight away when the surface already has the pointer. A
+    /// constraint is a request from a window that believes it is being used —
+    /// a game entering mouse-look — and the honest test of that is whether the
+    /// pointer is over it. One that is not is left inactive; the protocol
+    /// expects it to be activated later, and the pointer arriving is when.
+    fn new_constraint(
+        &mut self,
+        _surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        _pointer: &smithay::input::pointer::PointerHandle<Self>,
+    ) {
+        // Deliberately not activated here.
+        //
+        // This runs inside the client's own `lock_pointer` request, and
+        // activating sends `locked()` straight back down the same dispatch --
+        // before the client has finished setting up. Firefox creates its
+        // relative pointer six microseconds after asking for the lock and
+        // attaches its handlers after that; `locked()` arriving in between was
+        // discarded, and a lock the client never saw confirmed is a lock it
+        // does not act on. The relative motion was delivered perfectly and the
+        // page ignored every event of it.
+        //
+        // So it is activated on the next pointer motion instead, in `held`,
+        // which is both a later dispatch and the first moment the answer
+        // actually matters.
+        tracing::debug!("a window asked for the pointer");
+    }
+
+    /// A locked pointer's client saying where it would like the cursor left.
+    ///
+    /// Taken as advice and acted on when the lock ends, which is what the hint
+    /// is for: a game that locked the pointer in the middle of its window wants
+    /// it back in the middle, not wherever it happened to be when the lock was
+    /// taken.
+    fn cursor_position_hint(
+        &mut self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        pointer: &smithay::input::pointer::PointerHandle<Self>,
+        location: Point<f64, Logical>,
+    ) {
+        let active = with_pointer_constraint(surface, pointer, |constraint| {
+            constraint.is_some_and(|constraint| constraint.is_active())
+        });
+        if !active {
+            return;
+        }
+        if let Some(origin) = self
+            .window_for(surface)
+            .and_then(|window| self.real_geometry(&window))
+        {
+            self.constraint_hint = Some(origin.loc.to_f64() + location);
+        }
+    }
+}
+smithay::delegate_pointer_constraints!(Solium);
+smithay::delegate_relative_pointer!(Solium);
 
 impl SeatHandler for Solium {
     type KeyboardFocus = WlSurface;

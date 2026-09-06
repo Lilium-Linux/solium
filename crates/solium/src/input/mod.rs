@@ -23,11 +23,15 @@ use smithay::{
     input::pointer::CursorImageStatus,
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, xkb},
-        pointer::{AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent},
+        pointer::{
+            AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, PointerHandle,
+            RelativeMotionEvent,
+        },
         touch::{DownEvent, MotionEvent as TouchMotionEvent, UpEvent},
     },
     output::Output,
     utils::{Logical, Point, SERIAL_COUNTER},
+    wayland::pointer_constraints::{PointerConstraint, with_pointer_constraint},
 };
 
 use crate::{
@@ -263,29 +267,59 @@ fn pointer_relative<B: InputBackend>(
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
-    let location = confine(output, pointer.current_location() + event.delta());
+    let was = pointer.current_location();
+    let (location, locked) = held(state, &pointer, confine(output, was + event.delta()), was);
     let under = state.surface_under(location);
-    // As in `pointer_motion`: over nothing of a client's, the cursor is the
-    // compositor's again. This is the path a real mouse takes, so leaving it
-    // out is leaving it broken on the hardware and fixed nested.
-    if under.is_none() {
-        state.pointer.status = CursorImageStatus::default_named();
+    // A locked pointer does not move, and the protocol is explicit that it is
+    // not merely held in place: the compositor sends no motion at all. Sending
+    // it with the same coordinates over and over is not the same thing, and a
+    // client that reads motion events to decide what the raw deltas mean will
+    // make nothing of them.
+    //
+    // Everything positional is skipped with it. Hover, focus-follows-mouse and
+    // the shell all answer the question "where is the pointer now", and while
+    // it is locked the answer has not changed.
+    if !locked {
+        // As in `pointer_motion`: over nothing of a client's, the cursor is the
+        // compositor's again. This is the path a real mouse takes, so leaving
+        // it out is leaving it broken on the hardware and fixed nested.
+        if under.is_none() {
+            state.pointer.status = CursorImageStatus::default_named();
+        }
+
+        hover_frame(state, location);
+        if let Some(area) = state.work_area()
+            && let Some(shell) = state.shell()
+        {
+            shell.pointer(area, location.x, location.y, None);
+        }
+        follow_pointer(state, location, pointer.is_grabbed());
+        pointer.motion(
+            state,
+            under.clone(),
+            &MotionEvent {
+                location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time: event.time_msec(),
+            },
+        );
     }
 
-    hover_frame(state, location);
-    if let Some(area) = state.work_area()
-        && let Some(shell) = state.shell()
-    {
-        shell.pointer(area, location.x, location.y, None);
-    }
-    follow_pointer(state, location, pointer.is_grabbed());
-    pointer.motion(
+    // Raw movement, delivered whatever the pointer's position did.
+    //
+    // This is the event a game reads to turn a camera, and it is *not* the
+    // same information as where the pointer is: with the pointer locked the
+    // position does not change at all, and with it free the position stops at
+    // the edge of the screen while the mouse keeps going. Sent after the
+    // motion, so a client that reads both sees them in the order they
+    // happened.
+    pointer.relative_motion(
         state,
         under,
-        &MotionEvent {
-            location,
-            serial: SERIAL_COUNTER.next_serial(),
-            time: event.time_msec(),
+        &RelativeMotionEvent {
+            delta: event.delta(),
+            delta_unaccel: event.delta_unaccel(),
+            utime: event.time(),
         },
     );
     pointer.frame(state);
@@ -293,6 +327,90 @@ fn pointer_relative<B: InputBackend>(
     // changing. Without this the pointer only moved when something else
     // happened to want a frame -- which on a still screen is never.
     state.redraw = true;
+}
+
+/// Where the pointer may go, once the window under it has had its say.
+///
+/// A window can ask for the pointer to be *locked* — held exactly where it is,
+/// however far the mouse moves — or *confined* to a region of itself. Both are
+/// how a game stops the cursor wandering off the window it is being played in,
+/// and both are meaningless without relative motion, which is why they arrive
+/// together.
+///
+/// Only an active constraint counts. One exists from the moment a client asks
+/// for it and is activated when the compositor agrees, which is the compositor
+/// deciding that the window really is the one being used.
+fn held(
+    state: &mut Solium,
+    pointer: &PointerHandle<Solium>,
+    wanted: Point<f64, Logical>,
+    was: Point<f64, Logical>,
+) -> (Point<f64, Logical>, bool) {
+    let Some(surface) = pointer.current_focus() else {
+        return (wanted, false);
+    };
+    // The surface's own origin, to read a region against: a constraint's region
+    // is in the surface's coordinates and the pointer is in the screen's.
+    let origin = state
+        .window_for(&surface)
+        .and_then(|window| state.real_geometry(&window))
+        .map(|real| real.loc.to_f64());
+
+    let holding = with_pointer_constraint(&surface, pointer, |constraint| {
+        let constraint = constraint?;
+        // Granted here rather than when it was asked for. A constraint exists
+        // from the moment a client requests it; agreeing to it is the
+        // compositor's decision, and the honest test is that the pointer is
+        // over the window asking -- which is exactly what being here means,
+        // since this runs for the surface the pointer is focused on.
+        //
+        // Later than the request on purpose: see `new_constraint`.
+        if !constraint.is_active() {
+            constraint.activate();
+            tracing::debug!("a window took the pointer");
+        }
+        match &*constraint {
+            PointerConstraint::Locked(_) => Some(Held::Still),
+            PointerConstraint::Confined(_) => {
+                Some(Held::Inside(constraint.region().map(|region| {
+                    let inside = wanted - origin.unwrap_or_default();
+                    #[expect(clippy::cast_possible_truncation, reason = "a point on this screen")]
+                    region.contains((inside.x.round() as i32, inside.y.round() as i32))
+                })))
+            }
+        }
+    });
+
+    match holding {
+        // Held still. The mouse still moves and the client still hears about it
+        // through `relative_motion`; what does not move is the cursor, which is
+        // the entire point.
+        Some(Held::Still) => (was, true),
+        // Confined to the whole surface, or to one we could not place: staying
+        // put beats escaping.
+        Some(Held::Inside(None)) => (wanted, false),
+        // Stops at the edge rather than sliding along it. Cruder than clamping
+        // to the region's nearest point, and honest: an arbitrary region has no
+        // single nearest point, and a pointer that stops is one a client can
+        // still reason about.
+        Some(Held::Inside(Some(true))) => (wanted, false),
+        Some(Held::Inside(Some(false))) => (was, false),
+        // Nothing holds it now. If a client asked, while it *was* holding it,
+        // for the cursor to be left somewhere in particular, this is the moment
+        // that was about: a game unlocking the pointer wants it back in the
+        // middle of its window rather than wherever the lock happened to catch
+        // it. Taken once.
+        None => (state.constraint_hint.take().unwrap_or(wanted), false),
+    }
+}
+
+/// What the window under the pointer is doing to it.
+enum Held {
+    /// Locked: the pointer does not move at all.
+    Still,
+    /// Confined to a region. `Some(false)` means this step would leave it;
+    /// `None` means there is no region to test and anywhere is allowed.
+    Inside(Option<bool>),
 }
 
 /// Keep the pointer on the screen.
