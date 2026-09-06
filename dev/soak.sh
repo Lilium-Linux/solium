@@ -124,6 +124,19 @@ while (( $(date +%s) < deadline )); do
     done
 
     solium_row="$(sample "$solium")"
+    # A stall is not idleness. Nested, the compositor blocks inside
+    # eglSwapBuffers waiting on the host, and if the host stops servicing the
+    # window -- a screen lock, a blank, an occluded surface -- it waits
+    # forever, burning no CPU at all. Sampling that quietly produces a
+    # beautiful flat memory graph of a compositor that is not running.
+    cpu_now="$(echo "$solium_row" | cut -d, -f4)"
+    if [[ "$cpu_now" == "${cpu_prev:-}" ]]; then
+        stalls=$(( ${stalls:-0} + 1 ))
+        (( stalls >= 2 )) && echo "STALLED: no CPU consumed by $(( $(date +%s) - start ))s" >>"$out/failures.log"
+    else
+        stalls=0
+    fi
+    cpu_prev="$cpu_now"
     kwin_row=",,,"
     [[ -n "$kwin" ]] && kwin_row="$(sample "$kwin")"
     kwin_rss="$(echo "$kwin_row" | cut -d, -f1)"
