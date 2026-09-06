@@ -36,7 +36,7 @@ restager=$!
 trap 'kill "$restager" 2>/dev/null' EXIT
 
 SOLIUM_QML_PATH="$root/crates/solium/qml:$root/crates/solium/qml/compat:$staged" \
-SOLIUM_QML_DOCK="$scene" \
+SOLIUM_SHELL_SCENE="$scene" \
 SOLIUM_SHELL_WATCH="$shell" \
 SOLIUM_SHELL_DIR="$shell" \
     exec "$root/dev/run-nested.sh"

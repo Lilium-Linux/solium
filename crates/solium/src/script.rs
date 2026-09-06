@@ -150,8 +150,6 @@ pub(crate) struct Outcome {
     pub(crate) grab: Option<bool>,
     /// What the compositor should show as the active mode, if it changed.
     pub(crate) status: Option<String>,
-    /// What the dock should hold, if a script said.
-    pub(crate) dock: Option<Vec<String>>,
 }
 
 /// The queue a script writes into. Lives in Lua's app data for the length of a
@@ -162,8 +160,6 @@ struct Pending {
     animation: AnimationSpec,
     grab: Option<bool>,
     status: Option<String>,
-    /// What the dock should hold, if a script said.
-    dock: Option<Vec<String>>,
 }
 
 /// The Lua runtime and the scripts loaded into it.
@@ -322,16 +318,7 @@ impl Scripts {
             commands: pending.commands,
             grab: pending.grab,
             status: pending.status,
-            dock: pending.dock,
         }
-    }
-
-    /// A dock icon was pressed, and where it is.
-    pub(crate) fn dock_pressed(&mut self, label: &str, rect: Rect, snapshot: Snapshot) -> Outcome {
-        let label = label.to_owned();
-        self.dispatch(snapshot, move |sol| {
-            call_listeners(sol, "dock", (label, rect.x, rect.y, rect.w, rect.h))
-        })
     }
 
     /// Focus moved to a window.
@@ -416,7 +403,6 @@ impl Scripts {
             commands: pending.commands,
             grab: pending.grab,
             status: pending.status,
-            dock: pending.dock,
         }
     }
 }
@@ -803,19 +789,6 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         "quit",
         lua.create_function(|lua, ()| {
             with_pending(lua, |pending| pending.commands.push(Command::Quit))
-        })?,
-    )?;
-
-    // What the dock holds. Which programs belong on a dock is not the
-    // compositor's opinion, so it is told.
-    sol.set(
-        "dock",
-        lua.create_function(|lua, items: Table| {
-            let mut out = Vec::new();
-            for item in items.sequence_values::<String>() {
-                out.push(item?);
-            }
-            with_pending(lua, |pending| pending.dock = Some(out))
         })?,
     )?;
 

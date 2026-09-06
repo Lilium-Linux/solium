@@ -63,12 +63,11 @@ where
     // The shell reads the window list; it changes only when windows do.
     state.publish_windows();
 
-    // The shell's own surfaces, above the windows it sits over. Drawn from the
-    // same QML engine as the window frames, which is what lets an icon here and
-    // a window there be interpolated between.
-    if let Some(area) = state.dock_area()
-        && let Some(dock) = state.dock.as_mut()
-        && let Some(element) = dock.element(renderer, area, now)
+    // The shell, when one is hosted: above the windows, below the pointer.
+    state.publish_windows();
+    if let Some(area) = state.work_area()
+        && let Some(shell) = state.shell()
+        && let Some(element) = shell.element(renderer, area, now)
     {
         elements.push(Element::Chrome(element));
     }
