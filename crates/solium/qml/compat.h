@@ -293,3 +293,7 @@ private:
 
 /* Registers all of the above. Called once, before any scene is loaded. */
 void solium_qml_register_compat();
+
+/* Serves `image://theme/<name>` from the icon theme. Needs the engine. */
+class QQmlEngine;
+void solium_qml_install_icons(QQmlEngine *engine);

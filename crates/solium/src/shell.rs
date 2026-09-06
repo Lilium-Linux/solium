@@ -88,8 +88,20 @@ impl Dock {
         self.items.is_empty()
     }
 
-    /// Where the dock sits within a work area.
+    /// Where the surface sits: the whole output.
+    ///
+    /// A shell surface covers the screen and decides for itself what part of
+    /// it to paint. The dock is the clear case — it hides against the bottom
+    /// edge and reveals when the pointer arrives, so it needs to *see* the
+    /// pointer well before it is over anything drawn. Sizing the surface to
+    /// the painted part instead means the pointer only ever arrives once the
+    /// dock is already out, which it never is.
     pub(crate) fn rect(&self, area: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+        area
+    }
+
+    /// Where the compositor's own placeholder dock draws, for the genie.
+    fn plate(&self, area: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
         let count = i32::try_from(self.items.len()).unwrap_or(0).max(1);
         let width = PADDING * 2 + count * ICON + (count - 1) * GAP;
         let x = area.loc.x + (area.size.w - width) / 2;
@@ -111,7 +123,7 @@ impl Dock {
         if index >= self.items.len() {
             return None;
         }
-        let dock = self.rect(area);
+        let dock = self.plate(area);
         let step = ICON + GAP;
         let x = dock.loc.x + PADDING + i32::try_from(index).unwrap_or(0) * step;
         let y = dock.loc.y + (HEIGHT - ICON) / 2;
@@ -135,14 +147,14 @@ impl Dock {
         y: f64,
         pressed: Option<bool>,
     ) -> bool {
-        let dock = self.rect(area).to_f64();
-        if !dock.contains((x, y)) {
-            if self.hovered != -1 {
-                self.hovered = -1;
-                self.scene.set_string("hovered", "-1");
-            }
+        let surface = self.rect(area).to_f64();
+        if !surface.contains((x, y)) {
             return false;
         }
+        // Everything reaches the scene, because a surface that hides itself
+        // has to watch the whole screen to know when to stop.
+        self.scene
+            .pointer(x - surface.loc.x, y - surface.loc.y, pressed);
 
         let over = self.icon_at(area, x, y);
         let index = over.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1);
@@ -150,7 +162,6 @@ impl Dock {
             self.hovered = index;
             self.scene.set_string("hovered", &index.to_string());
         }
-        self.scene.pointer(x - dock.loc.x, y - dock.loc.y, pressed);
 
         // Acted on release, so a press that lands on the wrong icon can be
         // dragged off it and abandoned.
@@ -171,9 +182,6 @@ impl Dock {
         R: Renderer + ImportMem,
         R::TextureId: Send + Clone + 'static,
     {
-        if self.items.is_empty() {
-            return None;
-        }
         let rect = self.rect(area);
         let size = (rect.size.w.max(1), rect.size.h.max(1));
         self.scene.resize(size.0, size.1);

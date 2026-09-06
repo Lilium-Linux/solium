@@ -22,6 +22,16 @@ Item {
 
     readonly property var entries: items.length > 0 ? items.split("\t") : []
 
+    // The surface is the whole screen now, so the plate places itself on it.
+    Item {
+        id: plate
+        visible: root.entries.length > 0
+        width: row.implicitWidth + 24
+        height: 72
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 12
+
     Rectangle {
         anchors.fill: parent
         radius: Theme.radius * 2
@@ -32,6 +42,7 @@ Item {
     }
 
     Row {
+        id: row
         anchors.centerIn: parent
         spacing: Theme.gap
 
@@ -62,5 +73,6 @@ Item {
                 }
             }
         }
+    }
     }
 }
