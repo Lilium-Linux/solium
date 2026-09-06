@@ -14,6 +14,7 @@ mod decoration;
 mod dev;
 mod input;
 mod layer;
+mod mat4;
 mod present;
 mod qml;
 mod render;
