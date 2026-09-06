@@ -295,6 +295,9 @@ pub(crate) struct Launch {
     pub(crate) rect: Rectangle<i32, Logical>,
     pub(crate) program: String,
     pub(crate) started: std::time::Duration,
+    /// The process spawned for it, once it exists. A window claims the card
+    /// belonging to *its* process rather than whichever card is oldest.
+    pub(crate) pid: Option<u32>,
 }
 
 impl std::fmt::Debug for Launch {
@@ -311,6 +314,44 @@ impl std::fmt::Debug for Launch {
 /// Long enough for a cold start on a slow disk, short enough that a program
 /// which is never going to appear does not leave a card on screen forever.
 const LAUNCH_PATIENCE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// A process and the processes that started it, up to a few generations.
+///
+/// The program the compositor spawns is not always the one that connects: a
+/// flatpak, a shell wrapper or a launcher forks and the client is a
+/// grandchild. Walking up from the client finds the launch that started it
+/// anyway. Bounded because this runs when a window appears and `/proc` is not
+/// free, and because a chain longer than this is not a launch we started.
+fn ancestry(pid: u32) -> Vec<u32> {
+    const GENERATIONS: usize = 8;
+    let mut family = Vec::with_capacity(GENERATIONS);
+    let mut current = pid;
+    for _ in 0..GENERATIONS {
+        family.push(current);
+        // Field 4 of /proc/<pid>/stat is the parent. The command name in
+        // field 2 may contain spaces and parentheses, so the tail is taken
+        // from the last ')' rather than by splitting the whole line.
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{current}/stat")) else {
+            break;
+        };
+        let Some(tail) = stat.rsplit_once(')') else {
+            break;
+        };
+        let Some(parent) = tail
+            .1
+            .split_whitespace()
+            .nth(1)
+            .and_then(|field| field.parse::<u32>().ok())
+        else {
+            break;
+        };
+        if parent <= 1 {
+            break;
+        }
+        current = parent;
+    }
+    family
+}
 
 /// The client's rect inside an outer one, once the frame has taken its share.
 fn inner(outer: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logical> {
@@ -875,6 +916,12 @@ impl Solium {
         match process.spawn() {
             Ok(mut child) => {
                 tracing::info!(program, socket = self.socket_name, "spawned");
+                // The card was put up before the fork, so the pointer position
+                // it used is the one from when the key was pressed. It learns
+                // whose process it is here.
+                if let Some(launch) = self.launches.last_mut() {
+                    launch.pid = Some(child.id());
+                }
                 // Waited on so the child is reaped — a compositor that leaves
                 // zombies eventually cannot fork at all — and so that an early
                 // exit is *reported*. A program that starts and immediately
@@ -891,7 +938,13 @@ impl Solium {
                     Err(err) => tracing::warn!(program = name, ?err, "could not wait for a child"),
                 });
             }
-            Err(err) => tracing::warn!(?err, program, "could not spawn"),
+            Err(err) => {
+                // Nothing is coming, so the card goes now rather than sitting
+                // there for eight seconds promising otherwise.
+                self.launches.pop();
+                self.redraw = true;
+                tracing::warn!(?err, program, "could not spawn");
+            }
         }
     }
 
@@ -1270,6 +1323,7 @@ impl Solium {
                     rect,
                     program: name.to_owned(),
                     started: self.clock.now(),
+                    pid: None,
                 });
                 self.redraw = true;
             }
@@ -1277,17 +1331,39 @@ impl Solium {
         }
     }
 
-    /// Hand the oldest stand-in over to a window that has just appeared.
+    /// Hand a window the stand-in that was put up for *its* process.
     ///
-    /// Returns where it was, so the window can grow out of it rather than
-    /// appearing somewhere else while the card vanishes here.
-    pub(crate) fn claim_launch(&mut self) -> Option<Rectangle<i32, Logical>> {
+    /// Matched on the client's process and its ancestors, not on which card is
+    /// oldest: two applications started at once would otherwise hand the first
+    /// window to draw whichever card had been waiting longer, and the two
+    /// would swap places on screen. A window with no matching card gets none
+    /// and simply opens -- a dialog from an application that was already
+    /// running is not a launch, and should not consume one.
+    pub(crate) fn claim_launch(&mut self, window: &Window) -> Option<Rectangle<i32, Logical>> {
         if self.launches.is_empty() {
             return None;
         }
-        let launch = self.launches.remove(0);
+        let family = ancestry(self.client_pid(window)?);
+        let index = self
+            .launches
+            .iter()
+            .position(|launch| launch.pid.is_some_and(|pid| family.contains(&pid)))?;
+        let launch = self.launches.remove(index);
+        tracing::debug!(
+            program = launch.program,
+            pid = launch.pid,
+            "a window claimed its card"
+        );
         self.redraw = true;
         Some(launch.rect)
+    }
+
+    /// The process a window's client belongs to.
+    fn client_pid(&self, window: &Window) -> Option<u32> {
+        let surface = window.wl_surface()?;
+        let client = surface.client()?;
+        let credentials = client.get_credentials(&self.display_handle).ok()?;
+        u32::try_from(credentials.pid).ok()
     }
 
     /// Drop stand-ins whose application never arrived, and keep the rest
@@ -1297,6 +1373,10 @@ impl Solium {
         self.launches
             .retain(|launch| now.saturating_sub(launch.started) < LAUNCH_PATIENCE);
         if self.launches.len() != before {
+            tracing::debug!(
+                gave_up = before - self.launches.len(),
+                "a launch never arrived"
+            );
             self.redraw = true;
         }
         !self.launches.is_empty()
@@ -1403,7 +1483,7 @@ impl Solium {
         // its place: it grows out of the card rather than appearing elsewhere
         // while the card disappears here. The two are one movement, which is
         // the whole point of having shown something early.
-        let from = self.claim_launch();
+        let from = self.claim_launch(window);
 
         // How a window appears is a script's decision — that is what makes the
         // dock-icon genie a script rather than a feature. The built-in is only
