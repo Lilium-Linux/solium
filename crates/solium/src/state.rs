@@ -1435,6 +1435,37 @@ impl Solium {
         animating
     }
 
+    /// Act on a resize an edge drag asked for.
+    ///
+    /// Offered to layouts first. Only a window no layout claims is resized
+    /// directly, which is what keeps a tiled window from growing over its
+    /// neighbour instead of moving the seam between them.
+    ///
+    /// Once a frame, not once per pointer event, and the difference is the
+    /// whole reason this is here rather than in the motion handler. A mouse
+    /// reports movement up to a thousand times a second; each report was
+    /// dispatching to Lua, laying out every window, and sending a configure to
+    /// every client. Clients cannot answer at that rate and do not try — they
+    /// fall behind, and the window being dragged stutters against the pointer
+    /// instead of following it.
+    ///
+    /// `pending_resize` is one slot, so the last position before the frame is
+    /// the one that counts. That is exactly the coalescing this wants: the
+    /// pointer is wherever it is now, and the positions it passed through since
+    /// the last frame are of no interest to anyone.
+    ///
+    /// Returns whether anything was resized.
+    pub(crate) fn settle_resize(&mut self) -> bool {
+        let Some(request) = self.pending_resize.take() else {
+            return false;
+        };
+        if !self.trigger_resize(&request) {
+            self.resize_to(&request.window, request.wanted);
+        }
+        self.redraw = true;
+        true
+    }
+
     /// Give the keyboard to something, if a window went and left it nowhere.
     ///
     /// Focus is a Wayland concept and belongs to a surface, so when the focused

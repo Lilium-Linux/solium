@@ -352,6 +352,10 @@ pub(crate) fn run() -> Result<()> {
             // Client damage arrives as an event, so the loop is already awake
             // when it matters; the timeout only governs how long it sleeps when
             // nothing at all is happening.
+            // Before the frame is decided: a drag that moved since the last
+            // one is applied once, here, however many times the mouse
+            // reported it. See `settle_resize`.
+            state.solium.settle_resize();
             if state.solium.redraw || state.animating {
                 state.render();
             }

@@ -293,7 +293,6 @@ fn pointer_relative<B: InputBackend>(
     // changing. Without this the pointer only moved when something else
     // happened to want a frame -- which on a still screen is never.
     state.redraw = true;
-    settle_resize(state);
 }
 
 /// Keep the pointer on the screen.
@@ -311,20 +310,6 @@ fn confine(output: &Output, location: Point<f64, Logical>) -> Point<f64, Logical
         location.y.clamp(0.0, last(size.h)),
     )
         .into()
-}
-
-/// Act on a resize an edge drag asked for, now the pointer's lock is free.
-///
-/// Offered to layouts first. Only a window that no layout claims is resized
-/// directly, which is what keeps a tiled window from growing over its
-/// neighbour instead of moving the seam between them.
-fn settle_resize(state: &mut Solium) {
-    let Some(request) = state.pending_resize.take() else {
-        return;
-    };
-    if !state.trigger_resize(&request) {
-        state.resize_to(&request.window, request.wanted);
-    }
 }
 
 /// Focus whatever the pointer is over, if the profile says so.
