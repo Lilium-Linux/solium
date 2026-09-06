@@ -26,11 +26,6 @@ Item {
     property string action: ""
     property string hovered: ""
 
-    // This frame loops, and a loop with a pause in it looks finished while it
-    // waits. Saying so keeps the compositor driving the scene; drop it and the
-    // sheen crosses once and stops.
-    property bool animating: focused
-
     Rectangle {
         id: bar
 

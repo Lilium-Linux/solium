@@ -65,16 +65,13 @@ Read by the compositor:
 |---|---|
 | `action` | set to `"close"` or `"maximize"` to ask for it; cleared once taken |
 | `hovered` | the name of the button under the pointer, or `""` |
-| `animating` | set true while a loop is running; see below |
 
-A frame stops being driven a few identical renders after it stops changing, so
-an idle window costs a comparison rather than a rasterisation. A transition
-animates fine under that rule -- it changes pixels every frame, so it keeps
-itself alive. A **loop with a pause in it does not**: while it waits it
-produces identical frames, which is indistinguishable from having finished.
-Set `animating: true` while such a loop runs — `pulse.qml` uses
-`animating: focused` — and bear in mind that a frame which never stops
-animating never stops costing anything.
+Animations need nothing declared. Qt is asked each frame whether the scene has
+anything new to draw, and the compositor draws only then -- so an idle frame
+costs a flag read, a transition runs at the screen's refresh rate, and a loop
+with a pause in it survives the pause. Bear in mind only that a frame which
+never stops animating never stops costing anything: it is rasterised on the
+CPU, so a full-width gradient moving at 260Hz is about a tenth of a core.
 
 `hovered` decides whether a press starts a window drag, so a decoration whose
 buttons do not set it will have its buttons dragging the window instead.

@@ -44,7 +44,7 @@ mod ffi {
         ) -> *mut Scene;
         pub(super) fn solium_qml_scene_free(scene: *mut Scene);
         pub(super) fn solium_qml_scene_resize(scene: *mut Scene, width: c_int, height: c_int);
-        pub(super) fn solium_qml_scene_advance(scene: *mut Scene, elapsed_ms: c_longlong);
+        pub(super) fn solium_qml_tick(elapsed_ms: c_longlong);
         pub(super) fn solium_qml_scene_render(scene: *mut Scene) -> c_int;
         pub(super) fn solium_qml_scene_pixels(scene: *const Scene, stride: *mut c_int)
         -> *const u8;
@@ -69,6 +69,7 @@ mod ffi {
             value: c_int,
         );
         pub(super) fn solium_qml_scene_get_bool(scene: *const Scene, name: *const c_char) -> c_int;
+        pub(super) fn solium_qml_scene_dirty(scene: *const Scene) -> c_int;
         pub(super) fn solium_qml_scene_pointer(
             scene: *mut Scene,
             x: c_double,
@@ -148,6 +149,21 @@ pub(crate) fn user_qml_dir() -> Option<std::path::PathBuf> {
         })?;
     let path = home.join("solium").join("qml");
     path.is_dir().then_some(path)
+}
+
+/// Advance every animation in the process, once per compositor frame.
+///
+/// Separate from rendering on purpose. The clock has to keep running even for
+/// scenes that look settled -- an animation that is not advanced never
+/// changes, so it never asks to be drawn, so it never gets advanced again, and
+/// a loop with a pause in it dies at its first pause. Ticking is cheap and
+/// unconditional; rendering waits to be asked.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn tick(elapsed: Duration) {
+    let millis = c_longlong::try_from(elapsed.as_millis()).unwrap_or(c_longlong::MAX);
+    // SAFETY: the host is started before any scene exists, and this touches
+    // only process-global state.
+    unsafe { ffi::solium_qml_tick(millis) }
 }
 
 /// Matches `SOLIUM_QML_UNCHANGED` in `qml/host.h`.
@@ -244,10 +260,13 @@ impl Scene {
     /// Not Qt's clock: there is one clock here, and a QML animation running on
     /// a second one would drift against every transform beside it.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
-    pub(crate) fn advance(&mut self, elapsed: Duration) {
-        let millis = c_longlong::try_from(elapsed.as_millis()).unwrap_or(c_longlong::MAX);
+    /// Whether Qt has anything new to draw for this scene.
+    ///
+    /// Qt reports it through `renderRequested` and `sceneChanged`; asking is a
+    /// flag read, so a screen of idle frames costs a comparison each.
+    pub(crate) fn needs_render(&self) -> bool {
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
-        unsafe { ffi::solium_qml_scene_advance(self.scene, millis) }
+        unsafe { ffi::solium_qml_scene_dirty(self.scene) != 0 }
     }
 
     /// Render the scene if it has changed, then hand back its pixels.

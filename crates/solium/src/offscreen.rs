@@ -10,8 +10,6 @@
 //! and a texture per deformed window, which is why only deformed windows pay
 //! it.
 
-use std::time::Duration;
-
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -35,7 +33,6 @@ pub(crate) fn capture(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     window: &Window,
-    now: Duration,
     scale: f64,
 ) -> Option<(GlesTexture, Size<i32, Physical>)> {
     let outer = state.outer_geometry(window)?;
@@ -48,7 +45,7 @@ pub(crate) fn capture(
     // Built at the origin rather than at the window's position: the texture is
     // the window's own space, and where it ends up on screen is the warp's
     // business.
-    let elements = crate::render::flat_window_elements(state, renderer, window, now, scale);
+    let elements = crate::render::flat_window_elements(state, renderer, window, scale);
     if elements.is_empty() {
         tracing::warn!("a warped window had nothing to draw offscreen");
         return None;

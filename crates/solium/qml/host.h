@@ -51,7 +51,7 @@ void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int height);
  * clock in this compositor, and a QML animation running off a second one would
  * drift against every transform around it.
  */
-void solium_qml_scene_advance(SoliumQmlScene *scene, long long elapsed_ms);
+void solium_qml_tick(long long elapsed_ms);
 
 /* Returned by a render that was skipped because nothing had changed. */
 #define SOLIUM_QML_UNCHANGED 2
@@ -63,6 +63,7 @@ void solium_qml_scene_advance(SoliumQmlScene *scene, long long elapsed_ms);
  * up to date (the previous pixels are still valid), 0 on failure.
  */
 int solium_qml_scene_render(SoliumQmlScene *scene);
+int solium_qml_scene_dirty(const SoliumQmlScene *scene);
 
 /*
  * The pixels of the last render: premultiplied ARGB32, `*stride` bytes per row.

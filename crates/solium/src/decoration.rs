@@ -12,7 +12,7 @@
 //! window therefore scale, move and animate as one object — in overview a
 //! thumbnail carries its own titlebar — and the client area is never covered.
 
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::Result;
 use smithay::{
@@ -35,21 +35,6 @@ use crate::qml;
 /// How tall a window frame is, and so how much of a window's slot is not
 /// client area.
 pub(crate) const TITLEBAR_HEIGHT: i32 = 32;
-
-/// Identical renders in a row before a frame is left alone.
-///
-/// Small enough that an idle window costs almost nothing, large enough that an
-/// animation which has been started but has not yet moved a pixel is not
-/// mistaken for one that has finished.
-const SETTLED: u8 = 4;
-
-/// How often a frame's own animation is advanced.
-///
-/// Chrome, not content: a sheen crossing a titlebar reads the same at 60 as at
-/// 260, and the scene is rasterised on the CPU, so the difference is most of
-/// what an animating decoration costs. Anything *set* on a frame still renders
-/// at once -- what is rate-limited is time passing, not the user acting.
-const ANIMATION_INTERVAL: Duration = Duration::from_micros(16_666);
 
 /// What a frame button asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,20 +160,6 @@ pub(crate) struct Decoration {
     buffer: Option<MemoryRenderBuffer>,
     buffer_size: (i32, i32),
     shown: Shown,
-    /// How many consecutive renders have produced nothing new.
-    ///
-    /// Not a flag, and the difference matters: the frame after a property is
-    /// set looks exactly like the frame before it, because an animation
-    /// started by that property has not moved yet. Stopping on the first
-    /// unchanged render therefore freezes every transition at its starting
-    /// value -- a border that never lights, a bar that never slides out. It
-    /// takes a few identical frames in a row to mean "settled".
-    still: u8,
-    /// Pixels rendered but not yet copied into the buffer, because the buffer
-    /// is created after the render: stride and rows, as the scene gave them.
-    pending: Option<(usize, Vec<u8>)>,
-    /// When the scene was last driven, for `ANIMATION_INTERVAL`.
-    advanced_at: Duration,
     /// Where the window was before it was maximised. `Some` means maximised —
     /// one field rather than a flag and a rect that can disagree.
     pub(crate) restore: Option<Rectangle<i32, Logical>>,
@@ -222,9 +193,6 @@ impl Decoration {
             buffer: None,
             buffer_size: (0, 0),
             shown: Shown::default(),
-            still: 0,
-            pending: None,
-            advanced_at: Duration::ZERO,
             restore: None,
         })
     }
@@ -251,7 +219,7 @@ impl Decoration {
     /// the client did damaged it, so unless the frame says it is still moving,
     /// rendering stops and the animation freezes wherever it happened to be.
     pub(crate) fn animating(&self) -> bool {
-        self.still < SETTLED
+        self.scene.needs_render()
     }
 
     /// What this frame reserves around its client.
@@ -263,7 +231,8 @@ impl Decoration {
     ///
     /// `rect` is where the window is drawn, which a presentation transform may
     /// have scaled; `outer` is its unscaled size, which is what the scene is
-    /// rasterised at. Keeping them apart is what lets a frame scale with its
+    /// rasterised at. No time is passed: the clock belongs to the process, and
+    /// `qml::tick` advances it once for the whole frame. Keeping them apart is what lets a frame scale with its
     /// window in overview without the text being re-laid out every frame.
     pub(crate) fn frame<R>(
         &mut self,
@@ -271,7 +240,6 @@ impl Decoration {
         rect: Rectangle<f64, Logical>,
         outer: Size<i32, Logical>,
         look: &Look<'_>,
-        now: Duration,
     ) -> Option<MemoryRenderBufferRenderElement<R>>
     where
         R: Renderer + ImportMem,
@@ -289,10 +257,6 @@ impl Decoration {
             focused,
             pointer_inside,
         } = *look;
-        // Whether anything was set on the frame this time round. What the user
-        // did is drawn immediately; what the clock did can wait for the next
-        // interval.
-        let mut told = false;
         if self.shown.title != title
             || self.shown.focused != focused
             || self.shown.pointer_inside != pointer_inside
@@ -310,50 +274,16 @@ impl Decoration {
             self.shown.title.push_str(title);
             self.shown.focused = focused;
             self.shown.pointer_inside = pointer_inside;
-            self.still = 0;
-            told = true;
         }
 
         let size = (width, height);
         let resized = self.buffer_size != size;
-        if resized {
-            self.still = 0;
-        }
 
-        // Driving Qt's scene graph every frame for a screen full of idle
-        // windows buys identical pixels, so a frame that has stopped moving
-        // stops being driven -- but only after several identical frames in a
-        // row, for the reason `still` explains.
-        let due = now.saturating_sub(self.advanced_at) >= ANIMATION_INTERVAL;
-        if self.animating() && (told || resized || due) {
-            self.advanced_at = now;
-            self.scene.advance(now);
-            match self.scene.render() {
-                Ok(rendered) => {
-                    if rendered.changed || resized {
-                        self.pending = Some((rendered.stride, rendered.pixels.to_vec()));
-                    }
-                    self.still = if rendered.changed {
-                        0
-                    } else {
-                        self.still.saturating_add(1)
-                    };
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "a window frame did not render");
-                    return None;
-                }
-            }
-            // A loop with a pause in it produces identical frames while it
-            // waits, which is indistinguishable from having finished -- so a
-            // decoration that keeps going says so, and is kept driven. Read
-            // after rendering because it is a binding: it can only answer once
-            // the scene has been evaluated.
-            if self.scene.get_bool("animating") {
-                self.still = 0;
-            }
-        }
-
+        // The buffer is made *before* the scene is rendered, so the render can
+        // be copied straight into it. It used to be the other way round, which
+        // meant staging the whole image in a Vec first: a window-sized
+        // allocation and copy every frame, 3.9MB of it on an ordinary window,
+        // which dwarfed everything else this function does.
         if self.buffer.is_none() || resized {
             self.buffer = Some(MemoryRenderBuffer::new(
                 Fourcc::Argb8888,
@@ -364,45 +294,59 @@ impl Decoration {
             ));
             self.buffer_size = size;
         }
-        let buffer = self.buffer.as_mut()?;
 
-        if let Some((stride, pixels)) = self.pending.take() {
+        if self.scene.needs_render() || resized {
             // Only the parts of the frame that can have changed. A titlebar on
-            // a 1150x850 window is 4% of it; copying and uploading the other
-            // 96% every frame is what an animating decoration used to cost,
-            // and it costs the same whether anything happened there or not.
+            // a 1150x850 window is 4% of it, and the other 96% has nothing in
+            // it to copy or upload.
             let regions = if self.overlay || resized {
                 vec![Rectangle::from_size(size.into())]
             } else {
                 self.insets.bands(size.0, size.1)
             };
-            let mut context = buffer.render();
-            let copy = context.draw(|target| {
-                let row_bytes = usize::try_from(size.0.max(0)).unwrap_or_default() * 4;
-                for region in &regions {
-                    let (x, y) = (region.loc.x.max(0), region.loc.y.max(0));
-                    let width = usize::try_from(region.size.w.max(0)).unwrap_or_default() * 4;
-                    let left = usize::try_from(x).unwrap_or_default() * 4;
-                    for row in y..y.saturating_add(region.size.h.max(0)) {
-                        let row = usize::try_from(row).unwrap_or_default();
-                        let from = row * stride + left;
-                        let into = row * row_bytes + left;
-                        let (Some(source), Some(destination)) = (
-                            pixels.get(from..from + width),
-                            target.get_mut(into..into + width),
-                        ) else {
-                            return Err(());
-                        };
-                        destination.copy_from_slice(source);
-                    }
+            // Split so the scene and the buffer can be borrowed at once: they
+            // are two fields, and the copy needs both.
+            let Self { scene, buffer, .. } = self;
+            let rendered = match scene.render() {
+                Ok(rendered) => rendered,
+                Err(err) => {
+                    tracing::warn!(?err, "a window frame did not render");
+                    return None;
                 }
-                Ok(regions.clone())
-            });
-            if copy.is_err() {
-                tracing::warn!("a frame image was smaller than its buffer");
-                return None;
+            };
+            if rendered.changed || resized {
+                let buffer = buffer.as_mut()?;
+                let stride = rendered.stride;
+                let pixels = rendered.pixels;
+                let mut context = buffer.render();
+                let copy = context.draw(|target| {
+                    let row_bytes = usize::try_from(size.0.max(0)).unwrap_or_default() * 4;
+                    for region in &regions {
+                        let width = usize::try_from(region.size.w.max(0)).unwrap_or_default() * 4;
+                        let left = usize::try_from(region.loc.x.max(0)).unwrap_or_default() * 4;
+                        let top = region.loc.y.max(0);
+                        for row in top..top.saturating_add(region.size.h.max(0)) {
+                            let row = usize::try_from(row).unwrap_or_default();
+                            let from = row * stride + left;
+                            let into = row * row_bytes + left;
+                            let (Some(source), Some(destination)) = (
+                                pixels.get(from..from + width),
+                                target.get_mut(into..into + width),
+                            ) else {
+                                return Err(());
+                            };
+                            destination.copy_from_slice(source);
+                        }
+                    }
+                    Ok(regions.clone())
+                });
+                if copy.is_err() {
+                    tracing::warn!("a frame image was smaller than its buffer");
+                    return None;
+                }
             }
         }
+        let buffer = self.buffer.as_mut()?;
 
         // The drawn size scales the frame with the window it belongs to.
         #[expect(
@@ -444,7 +388,6 @@ impl Decoration {
         self.scene.pointer(-1.0, -1.0, None);
         self.scene.set_bool("pointerInside", false);
         self.shown.pointer_inside = false;
-        self.still = 0;
     }
 
     /// Pointer input in frame-local coordinates.
