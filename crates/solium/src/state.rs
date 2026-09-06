@@ -151,6 +151,8 @@ pub(crate) struct Solium {
     /// The socket clients connect on. Held so that a program started from a
     /// script finds *this* compositor rather than the session it is nested in.
     pub(crate) socket_name: String,
+    /// Applications asked for but not yet on screen. See `Launch`.
+    pub(crate) launches: Vec<Launch>,
     /// The Developer Tweaks panel, when `--debug-mode` asked for one.
     pub(crate) tweaks: Option<crate::surface::ShellSurface>,
     /// Whether it is on screen. Hiding keeps the scene alive, so showing it
@@ -281,6 +283,35 @@ pub(crate) enum Request {
     Reload,
 }
 
+/// An application that has been asked for and has not drawn yet.
+///
+/// The compositor spawns the process, so it knows about the launch a full
+/// second before any Wayland client exists -- and it knows where the pointer
+/// was when it was asked. Nothing about that has to wait for the client.
+pub(crate) struct Launch {
+    /// The stand-in, drawn until the window arrives.
+    pub(crate) surface: crate::surface::ShellSurface,
+    /// Where it sits, and where the real window will grow from.
+    pub(crate) rect: Rectangle<i32, Logical>,
+    pub(crate) program: String,
+    pub(crate) started: std::time::Duration,
+}
+
+impl std::fmt::Debug for Launch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Launch")
+            .field("program", &self.program)
+            .field("rect", &self.rect)
+            .finish()
+    }
+}
+
+/// How long a stand-in waits before giving up on its application.
+///
+/// Long enough for a cold start on a slow disk, short enough that a program
+/// which is never going to appear does not leave a card on screen forever.
+const LAUNCH_PATIENCE: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// The client's rect inside an outer one, once the frame has taken its share.
 fn inner(outer: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logical> {
     Rectangle::new(
@@ -330,6 +361,7 @@ impl Solium {
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
+            launches: Vec::new(),
             tweaks: None,
             tweaks_shown: true,
             hovered_frame: None,
@@ -811,7 +843,7 @@ impl Solium {
     }
 
     /// Start a program as a client of this compositor.
-    fn spawn(&self, program: &str, args: &[String]) {
+    fn spawn(&mut self, program: &str, args: &[String]) {
         use std::process::{Command as Process, Stdio};
 
         let mut process = Process::new(program);
@@ -837,6 +869,8 @@ impl Solium {
             Some(number) => process.env("DISPLAY", format!(":{number}")),
             None => process.env_remove("DISPLAY"),
         };
+
+        self.begin_launch(program);
 
         match process.spawn() {
             Ok(mut child) => {
@@ -1203,6 +1237,71 @@ impl Solium {
         })
     }
 
+    /// Put a stand-in on screen for an application that was just asked for.
+    ///
+    /// At the pointer, because that is where the asking happened and where the
+    /// eye already is. It is not where the window will end up -- the layout
+    /// decides that when the window exists -- but the window grows out of this
+    /// rect when it arrives, so the movement is continuous either way.
+    pub(crate) fn begin_launch(&mut self, program: &str) {
+        let at = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location())
+            .unwrap_or_default();
+        let size = (260, 150);
+        let rect = Rectangle::new(
+            ((at.x as i32) - size.0 / 2, (at.y as i32) - size.1 / 2).into(),
+            size.into(),
+        );
+        let name = std::path::Path::new(program)
+            .file_name()
+            .map_or(program, |name| name.to_str().unwrap_or(program));
+        let properties = format!(
+            "{{\"program\":\"{}\",\"waited\":0}}",
+            name.replace('"', "'")
+        );
+        let source =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/launch.qml"));
+        match crate::surface::ShellSurface::new(source, &properties) {
+            Ok(surface) => {
+                self.launches.push(Launch {
+                    surface,
+                    rect,
+                    program: name.to_owned(),
+                    started: self.clock.now(),
+                });
+                self.redraw = true;
+            }
+            Err(err) => tracing::warn!(?err, "no stand-in for a launching application"),
+        }
+    }
+
+    /// Hand the oldest stand-in over to a window that has just appeared.
+    ///
+    /// Returns where it was, so the window can grow out of it rather than
+    /// appearing somewhere else while the card vanishes here.
+    pub(crate) fn claim_launch(&mut self) -> Option<Rectangle<i32, Logical>> {
+        if self.launches.is_empty() {
+            return None;
+        }
+        let launch = self.launches.remove(0);
+        self.redraw = true;
+        Some(launch.rect)
+    }
+
+    /// Drop stand-ins whose application never arrived, and keep the rest
+    /// animating.
+    pub(crate) fn settle_launches(&mut self, now: std::time::Duration) -> bool {
+        let before = self.launches.len();
+        self.launches
+            .retain(|launch| now.saturating_sub(launch.started) < LAUNCH_PATIENCE);
+        if self.launches.len() != before {
+            self.redraw = true;
+        }
+        !self.launches.is_empty()
+    }
+
     /// Whether this window still has anything of its own to show.
     ///
     /// A client that is closing tears its surface down before the compositor
@@ -1300,6 +1399,12 @@ impl Solium {
         let location = self.initial_placement(window);
         self.space.map_element(window.clone(), location, true);
 
+        // If a stand-in has been sitting on screen for this, the window takes
+        // its place: it grows out of the card rather than appearing elsewhere
+        // while the card disappears here. The two are one movement, which is
+        // the whole point of having shown something early.
+        let from = self.claim_launch();
+
         // How a window appears is a script's decision — that is what makes the
         // dock-icon genie a script rather than a feature. The built-in is only
         // a fallback for when nothing has an opinion; a window popping into
@@ -1307,7 +1412,17 @@ impl Solium {
         if !self.trigger_open(window)
             && let Some(outer) = self.outer_geometry(window)
         {
-            present::open(window, outer, self.clock.now());
+            match from {
+                Some(card) => present::from(
+                    window,
+                    outer,
+                    present::Frame::real(card).with_opacity(0.0),
+                    self.clock.now(),
+                    std::time::Duration::from_millis(240),
+                    solium_animation::Curve::OutCubic,
+                ),
+                None => present::open(window, outer, self.clock.now()),
+            }
         }
     }
 

@@ -96,6 +96,11 @@ impl ShellSurface {
         true
     }
 
+    /// Set a whole-number property on the scene.
+    pub(crate) fn set_int(&mut self, name: &str, value: i32) {
+        self.scene.set_int(name, value);
+    }
+
     /// Take whatever the scene asked for, clearing it.
     ///
     /// The same one-way channel the window frames use: QML sets `action`, the

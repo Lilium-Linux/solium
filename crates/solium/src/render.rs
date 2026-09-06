@@ -156,6 +156,41 @@ pub(crate) fn elements(
         }
     }
 
+    // Stand-ins for applications that have been asked for and have not drawn
+    // yet. Above the windows, because the one thing they must not do is appear
+    // behind something and leave the launch looking like it did nothing.
+    let launching: Vec<(
+        usize,
+        smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+        u32,
+    )> = state
+        .launches
+        .iter()
+        .enumerate()
+        .map(|(index, launch)| {
+            let waited = now.saturating_sub(launch.started).as_millis();
+            (
+                index,
+                launch.rect,
+                u32::try_from(waited).unwrap_or(u32::MAX),
+            )
+        })
+        .collect();
+    for (index, rect, waited) in launching {
+        let Some(launch) = state.launches.get_mut(index) else {
+            continue;
+        };
+        launch
+            .surface
+            .set_int("waited", i32::try_from(waited).unwrap_or(i32::MAX));
+        if let Some(element) = launch.surface.element(renderer, rect, now) {
+            elements.push(Element::Chrome(element));
+        }
+    }
+    if state.settle_launches(now) {
+        state.redraw = true;
+    }
+
     // The Developer Tweaks panel, above everything: it is a tool for looking
     // at what the compositor is doing, so nothing should be able to cover it.
     if let Some(area) = state.tweaks_area()
