@@ -90,6 +90,23 @@ pub(crate) fn drags() -> Vec<Drag> {
     .collect()
 }
 
+/// Windows to open for an application that will never arrive, as
+/// `<ms>:<program>` separated by commas.
+///
+/// ```sh
+/// SOLIUM_LOADING_AT="3000:firefox,5000:slack"
+/// ```
+///
+/// A window whose life has begun and whose application has not connected is
+/// the one state that cannot be reached by using the compositor normally --
+/// every real program connects, and fast. This makes one on demand, so the
+/// layout reserving its place, the patience running out, and closing it
+/// mid-load can all be exercised without waiting on a slow application to be
+/// slow at the right moment.
+pub(crate) fn loading_at() -> Vec<(Duration, String)> {
+    parse_list("SOLIUM_LOADING_AT", |value| Some(value.trim().to_owned()))
+}
+
 fn millis(name: &str) -> Option<Duration> {
     let raw = std::env::var(name).ok()?;
     match raw.trim().parse::<u64>() {

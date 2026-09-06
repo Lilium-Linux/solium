@@ -159,7 +159,9 @@ impl XwmHandler for Solium {
             .find(|element| element.x11_surface() == Some(&window))
             .cloned();
         if let Some(element) = going {
-            self.trigger_close(&element);
+            if let Some(pane) = self.panes.id_of(&element) {
+                self.trigger_close(pane);
+            }
             if let Some(id) = self.panes.id_of(&element) {
                 self.decorations.remove(id);
             }
