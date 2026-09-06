@@ -97,6 +97,11 @@ impl ShellSurface {
     }
 
     /// Set a whole-number property on the scene.
+    #[expect(
+        dead_code,
+        reason = "step 5 feeds the loading scene how long it has waited; the \
+                  stand-in that used to do it is gone"
+    )]
     pub(crate) fn set_int(&mut self, name: &str, value: i32) {
         self.scene.set_int(name, value);
     }
