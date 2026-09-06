@@ -23,6 +23,7 @@ mod state;
 mod surface;
 mod synth;
 mod tty;
+mod warp;
 mod winit;
 
 use std::{io::IsTerminal, path::PathBuf};

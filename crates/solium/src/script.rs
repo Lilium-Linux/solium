@@ -103,6 +103,9 @@ pub(crate) enum Command {
         id: u64,
         rect: Option<Rect>,
         opacity: Option<f32>,
+        /// A 3D transform about the drawn rect's centre, when the script asked
+        /// for one. `None` keeps the window flat and on the cheap path.
+        matrix: Option<Mat4>,
         animation: AnimationSpec,
     },
     Clear {
@@ -407,6 +410,7 @@ impl Scripts {
     }
 }
 
+use crate::mat4::Mat4;
 use solium_layout::{Rect as Slot, Settings};
 
 /// The work area a layout call was given.
@@ -647,9 +651,13 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "present",
         lua.create_function(|lua, (id, options): (u64, Option<Table>)| {
-            let (rect, opacity) = match options {
-                Some(options) => (rect_from(&options)?, options.get::<Option<f32>>("opacity")?),
-                None => (None, None),
+            let (rect, opacity, matrix) = match options {
+                Some(options) => (
+                    rect_from(&options)?,
+                    options.get::<Option<f32>>("opacity")?,
+                    transform_from(&options)?,
+                ),
+                None => (None, None, None),
             };
             with_pending(lua, |pending| {
                 let animation = pending.animation;
@@ -657,6 +665,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     id,
                     rect,
                     opacity,
+                    matrix,
                     animation,
                 });
             })
@@ -1086,6 +1095,38 @@ impl mlua::UserData for TilingTree {
             Ok(out)
         });
     }
+}
+
+/// Read a 3D transform out of a script's options.
+///
+/// Degrees, because a configuration file written in radians is a
+/// configuration file nobody edits twice. `perspective` is the viewer
+/// distance in pixels — smaller is a wider lens and a harsher
+/// foreshortening; without it the rotation is orthographic and a card turned
+/// edge-on simply gets thinner instead of receding.
+///
+/// Returns `None` when nothing was asked for, so a window with no transform
+/// stays on the renderer's cheap path.
+fn transform_from(options: &Table) -> mlua::Result<Option<Mat4>> {
+    let degrees = |name: &str| -> mlua::Result<Option<f32>> { options.get::<Option<f32>>(name) };
+    let (rx, ry, rz) = (
+        degrees("rotate_x")?,
+        degrees("rotate_y")?,
+        degrees("rotate_z")?,
+    );
+    let perspective = degrees("perspective")?;
+    if rx.is_none() && ry.is_none() && rz.is_none() && perspective.is_none() {
+        return Ok(None);
+    }
+
+    let radians = |value: Option<f32>| value.unwrap_or(0.0).to_radians();
+    let mut matrix = Mat4::rotate_x(radians(rx))
+        .then(Mat4::rotate_y(radians(ry)))
+        .then(Mat4::rotate_z(radians(rz)));
+    if let Some(distance) = perspective {
+        matrix = matrix.then(Mat4::perspective(distance));
+    }
+    Ok(Some(matrix))
 }
 
 /// Read a list of columns out of a Lua table.

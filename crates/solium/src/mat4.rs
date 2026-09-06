@@ -24,10 +24,6 @@ impl Default for Mat4 {
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "the renderer's mesh path is next; see the 3d-presentation spike"
-)]
 impl Mat4 {
     pub(crate) const IDENTITY: Self = Self([
         1.0, 0.0, 0.0, 0.0, //
@@ -49,6 +45,15 @@ impl Mat4 {
             .all(|(a, b)| (a - b).abs() < 1e-6)
     }
 
+    // Used by the tests, so the exemption applies only outside them.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "part of the vocabulary; nothing composes a translation \
+                      or a scale into a window transform yet"
+        )
+    )]
     pub(crate) fn translate(x: f32, y: f32, z: f32) -> Self {
         let mut m = Self::IDENTITY;
         m.0[12] = x;
@@ -57,6 +62,15 @@ impl Mat4 {
         m
     }
 
+    // Used by the tests, so the exemption applies only outside them.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "part of the vocabulary; nothing composes a translation \
+                      or a scale into a window transform yet"
+        )
+    )]
     pub(crate) fn scale(x: f32, y: f32, z: f32) -> Self {
         let mut m = Self::IDENTITY;
         m.0[0] = x;
@@ -146,11 +160,36 @@ impl Mat4 {
         Self(out)
     }
 
+    /// Project a point, keeping `w`.
+    ///
+    /// The divided form is what a caller wants for a position; `w` is what a
+    /// shader needs to interpolate a texture across a projected quad without
+    /// creasing along the diagonal.
+    pub(crate) fn project_with_w(&self, x: f32, y: f32, z: f32) -> Option<(f32, f32, f32)> {
+        let m = &self.0;
+        let out_x = m[0] * x + m[4] * y + m[8] * z + m[12];
+        let out_y = m[1] * x + m[5] * y + m[9] * z + m[13];
+        let out_w = m[3] * x + m[7] * y + m[11] * z + m[15];
+        if out_w <= 1e-6 {
+            return None;
+        }
+        Some((out_x / out_w, out_y / out_w, out_w))
+    }
+
     /// Project a point, dividing through by `w`.
     ///
     /// Returns `None` when the point lands at or behind the viewer, where the
     /// divide is meaningless — a caller that drew it anyway would get a corner
     /// flipped to the far side of the screen.
+    // Used by the tests, so the exemption applies only outside them.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "part of the vocabulary; nothing composes a translation \
+                      or a scale into a window transform yet"
+        )
+    )]
     pub(crate) fn project(&self, x: f32, y: f32, z: f32) -> Option<(f32, f32)> {
         let m = &self.0;
         let out_x = m[0] * x + m[4] * y + m[8] * z + m[12];

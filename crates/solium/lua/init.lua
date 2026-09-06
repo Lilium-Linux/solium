@@ -97,3 +97,17 @@ sol.bind("super+shift+q", function()
 end)
 
 sol.log("solium configuration loaded")
+
+-- A tilted window, to see the compositor draw one as geometry rather than as
+-- a rectangle. `rotate_y` turns it about its own vertical axis and
+-- `perspective` is the viewer distance in pixels, which is what makes the far
+-- edge recede instead of merely narrowing.
+sol.bind("super+g", function()
+    for _, window in ipairs(sol.windows()) do
+        if window.focused then
+            sol.animate({ duration = 260, easing = "outCubic" })
+            sol.present(window.id, { rotate_y = 35, perspective = 900 })
+            return
+        end
+    end
+end)
