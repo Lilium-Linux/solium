@@ -322,12 +322,11 @@ fn newest_change(source: &Path) -> Option<SystemTime> {
             let path = entry.path();
             if path.is_dir() {
                 newest_in(&path, best, depth + 1);
-            } else if path.extension().is_some_and(|kind| kind == "qml") {
-                if let Ok(time) = entry.metadata().and_then(|data| data.modified()) {
-                    if best.is_none_or(|current| time > current) {
-                        *best = Some(time);
-                    }
-                }
+            } else if path.extension().is_some_and(|kind| kind == "qml")
+                && let Ok(time) = entry.metadata().and_then(|data| data.modified())
+                && best.is_none_or(|current| time > current)
+            {
+                *best = Some(time);
             }
         }
     }
