@@ -683,6 +683,10 @@ impl Solium {
                             self.resize_to(&window, outer);
                         }
                         self.redraw = true;
+                        // Resizing each window in place keeps a floating
+                        // arrangement looking right, but a tiled one is the
+                        // layout's arithmetic and only the layout can redo it.
+                        self.trigger_relayout();
                     }
                 }
                 Command::TweaksToggle => {
@@ -1199,6 +1203,24 @@ impl Solium {
         })
     }
 
+    /// Whether this window still has anything of its own to show.
+    ///
+    /// A client that is closing tears its surface down before the compositor
+    /// hears the toplevel is gone, so for a few frames the window is still in
+    /// the space with nothing in it -- and the frame, which is *ours* and
+    /// perfectly valid, goes on being drawn around an empty rectangle. A
+    /// titlebar hanging in the air after the window has gone reads as a bug in
+    /// closing, which is the moment the user is least willing to forgive one.
+    pub(crate) fn has_content(&self, window: &Window) -> bool {
+        let Some(surface) = window.wl_surface() else {
+            return false;
+        };
+        smithay::backend::renderer::utils::with_renderer_surface_state(&surface, |state| {
+            state.buffer().is_some()
+        })
+        .unwrap_or(false)
+    }
+
     /// Whether the pointer is anywhere over this window, frame included.
     ///
     /// A decoration that lights up as the pointer approaches needs this even
@@ -1493,6 +1515,17 @@ impl Solium {
     }
 
     /// Tell scripts a window has gone, so a layout can forget it.
+    /// Tell the layout the space windows get has changed.
+    pub(crate) fn trigger_relayout(&mut self) {
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.relayout(snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
     pub(crate) fn trigger_close(&mut self, window: &Window) {
         let id = window_id(window);
         let snapshot = self.snapshot();

@@ -86,6 +86,13 @@ modes.register("scrolling", scrolling)
 
 -- A new window opens in its own column beside the active one, and the view
 -- follows it.
+-- The compositor changed how much room windows get -- a decoration that
+-- reserves a different amount, most likely. The slots are unchanged; what
+-- fits inside them is not, so the arithmetic is redone.
+sol.on("layout", function()
+    scrolling.apply()
+end)
+
 sol.on("open", function(id)
     view_for(workspaces.active):insert(id, options())
     settle(config.scrolling.snap)

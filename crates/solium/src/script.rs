@@ -435,6 +435,15 @@ impl Scripts {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "close", id))
     }
 
+    /// Something the compositor owns changed the space windows get.
+    ///
+    /// A decoration reserving a different amount is the case that needs it:
+    /// the slots are the same but what fits in them is not, and a layout that
+    /// is never told goes on believing its own last arithmetic.
+    pub(crate) fn relayout(&mut self, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "layout", ()))
+    }
+
     /// A window was dragged and let go.
     ///
     /// The event a layout needs and could not have: without it a drag in a
@@ -1056,11 +1065,21 @@ fn parse_easing(name: &str) -> Option<Curve> {
 /// hands out. Named curves stay for the handful worth naming; this is so a
 /// feel nobody anticipated does not need a compositor release.
 fn easing_from(options: &Table) -> mlua::Result<Option<Curve>> {
-    if let Some(name) = options.get::<Option<String>>("easing")? {
-        return Ok(parse_easing(&name));
-    }
-    let Some(points) = options.get::<Option<Table>>("easing")? else {
-        return Ok(None);
+    // Read as a value and matched, not asked for as a String and then as a
+    // Table: asking a table for a String does not answer "no", it *fails*, and
+    // the failure takes down the whole call it was made from. Which is how
+    // every curve given as four numbers silently did nothing.
+    let points = match options.get::<Value>("easing")? {
+        Value::Nil => return Ok(None),
+        Value::String(name) => return Ok(parse_easing(&name.to_string_lossy())),
+        Value::Table(points) => points,
+        other => {
+            tracing::warn!(
+                kind = other.type_name(),
+                "an easing is a name or four numbers; keeping the default"
+            );
+            return Ok(None);
+        }
     };
     let numbers: Vec<f64> = points.sequence_values::<f64>().collect::<Result<_, _>>()?;
     let [x1, y1, x2, y2] = numbers.as_slice() else {

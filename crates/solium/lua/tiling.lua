@@ -84,6 +84,13 @@ modes.register("tiling", tiling)
 
 -- A new window splits whatever the pointer is over. This is the whole of
 -- "the window opens where the cursor is".
+-- The compositor changed how much room windows get -- a decoration that
+-- reserves a different amount, most likely. The slots are unchanged; what
+-- fits inside them is not, so the arithmetic is redone.
+sol.on("layout", function()
+    tiling.apply()
+end)
+
 sol.on("open", function(id)
     local tree = tree_for(workspaces.active)
     local cursor = sol.cursor()
