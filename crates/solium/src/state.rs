@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use smithay::output::Output;
-use smithay::reexports::wayland_server::{Resource, backend::ObjectId};
+use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
 use std::collections::HashMap;
 
@@ -153,10 +153,10 @@ pub(crate) struct Solium {
     /// Which frame the pointer was last over, so the one it leaves can be
     /// told. QML hover is positional: a frame never told the pointer left
     /// stays lit forever.
-    pub(crate) hovered_frame: Option<ObjectId>,
+    pub(crate) hovered_frame: Option<crate::pane::PaneId>,
     /// Windows on their way out, and when to tell them so. See
     /// `close_window`.
-    closing: HashMap<ObjectId, std::time::Duration>,
+    closing: HashMap<crate::pane::PaneId, std::time::Duration>,
     /// When the last memory report went out; see `memory_report`.
     pub(crate) reported_at: std::time::Duration,
     /// XWayland's window manager, once XWayland has started. `None` means no
@@ -531,16 +531,9 @@ impl Solium {
 
     /// Whether the compositor draws this window's frame.
     pub(crate) fn is_decorated(&self, window: &Window) -> bool {
-        self.toplevel_id(window)
-            .is_some_and(|id| self.decorations.contains(&id))
-    }
-
-    /// A window's toplevel surface id, the key frames are stored under.
-    pub(crate) fn toplevel_id(&self, window: &Window) -> Option<ObjectId> {
-        // The window's own surface rather than its xdg role: an X11 window has
-        // no role object, and everything keyed by this -- decorations, most of
-        // all -- applies to it just the same.
-        window.wl_surface().map(|surface| surface.id())
+        self.panes
+            .id_of(window)
+            .is_some_and(|id| self.decorations.contains(id))
     }
 
     /// The output area windows may use.
@@ -639,7 +632,19 @@ impl Solium {
             .elements()
             .filter_map(|window| Some((window.clone(), self.real_geometry(window)?)))
             .collect();
-        self.panes.sync(&stack, self.clock.now())
+        if !self.panes.sync(&stack, self.clock.now()) {
+            return false;
+        }
+
+        // Everything keyed by a pane goes when the pane does. Keyed by surface
+        // this could not have happened here, because nothing knew the set of
+        // live windows -- so it was done where a window was seen leaving
+        // tidily, and a client that crashed left its frame behind forever.
+        let live: std::collections::HashSet<crate::pane::PaneId> =
+            self.panes.iter().map(Pane::id).collect();
+        self.decorations.retain(|id| live.contains(&id));
+        self.closing.retain(|id, _| live.contains(id));
+        true
     }
 
     /// What the compositor looks like right now, as a script sees it.
@@ -1053,7 +1058,7 @@ impl Solium {
     /// Ids that no longer exist are simply not found — a window closing while a
     /// mode holds its id is ordinary, not an error.
     fn window_by_id(&self, id: u64) -> Option<Window> {
-        self.panes.get(id).and_then(Pane::client).cloned()
+        self.panes.by_script_id(id).and_then(Pane::client).cloned()
     }
 
     /// The window drawn at a point, topmost first, with its real geometry.
@@ -1182,7 +1187,7 @@ impl Solium {
     /// animating it would mean holding a snapshot of every window on the
     /// chance that it might be the next to leave.
     pub(crate) fn close_window(&mut self, window: &Window) {
-        let Some(id) = self.toplevel_id(window) else {
+        let Some(id) = self.panes.id_of(window) else {
             return;
         };
         if self.closing.contains_key(&id) {
@@ -1205,19 +1210,15 @@ impl Solium {
         if self.closing.is_empty() {
             return false;
         }
-        let due: Vec<ObjectId> = self
+        let due: Vec<crate::pane::PaneId> = self
             .closing
             .iter()
             .filter(|(_, at)| now >= **at)
-            .map(|(id, _)| id.clone())
+            .map(|(id, _)| *id)
             .collect();
         for id in due {
             self.closing.remove(&id);
-            if let Some(window) = self
-                .space
-                .elements()
-                .find(|window| self.toplevel_id(window).as_ref() == Some(&id))
-                .cloned()
+            if let Some(window) = self.panes.get(id).and_then(Pane::client).cloned()
                 && let Some(toplevel) = window.toplevel()
             {
                 // A request, not a kill: the client decides whether it can
@@ -1242,7 +1243,7 @@ impl Solium {
     /// arithmetic as placement: a maximised window and its frame together fill
     /// the work area exactly.
     fn toggle_maximize(&mut self, window: &Window) {
-        let Some(id) = self.toplevel_id(window) else {
+        let Some(id) = self.panes.id_of(window) else {
             return;
         };
         let Some(toplevel) = window.toplevel().cloned() else {
@@ -1258,7 +1259,7 @@ impl Solium {
         let insets = self.frame_insets(window);
         let restore = self
             .decorations
-            .get_mut(&id)
+            .get_mut(id)
             .map(|decoration| decoration.restore.take());
 
         let (location, size, maximized) = match restore {
@@ -1276,7 +1277,7 @@ impl Solium {
             ),
         };
 
-        if maximized && let Some(decoration) = self.decorations.get_mut(&id) {
+        if maximized && let Some(decoration) = self.decorations.get_mut(id) {
             decoration.restore = Some(current);
         }
 
@@ -1301,8 +1302,9 @@ impl Solium {
         // What the decoration asked for, since the decoration is what draws
         // it. A window whose frame has not been built yet falls back to the
         // default bar height so its first layout is not visibly wrong.
-        self.toplevel_id(window)
-            .and_then(|id| self.decorations.get(&id))
+        self.panes
+            .id_of(window)
+            .and_then(|id| self.decorations.get(id))
             .map_or(
                 Insets {
                     top: TITLEBAR_HEIGHT,
@@ -2046,9 +2048,8 @@ impl XdgShellHandler for Solium {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         // Told before the window is forgotten, so a script can still ask which
-        // one it was.
-        // Bound before the call, so the borrow of `space` ends here rather
-        // than lasting across it.
+        // one it was. Bound before the call, so the borrow of `space` ends
+        // here rather than lasting across it.
         let going = self
             .space
             .elements()
@@ -2058,11 +2059,10 @@ impl XdgShellHandler for Solium {
             self.trigger_close(&window);
         }
 
-        // The frame is dropped with the window it belongs to. Keyed by surface
-        // id rather than kept on the window so that this is the only place it
-        // has to happen.
-        self.closing.remove(&surface.wl_surface().id());
-        self.decorations.remove(&surface.wl_surface().id());
+        // Nothing to tidy up here. The frame and the pending close belong to
+        // the pane, and the pane is retired in `sync_panes` -- which is also
+        // the only notice we get for a client that died without destroying
+        // anything, so the tidying has to live there or happen twice.
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
@@ -2229,7 +2229,6 @@ impl Solium {
     /// Agree a decoration mode with a client and act on it.
     fn decorate(&mut self, toplevel: &ToplevelSurface, mode: Mode) {
         let server_side = mode != Mode::ClientSide;
-        let id = toplevel.wl_surface().id();
 
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(if server_side {
@@ -2239,15 +2238,24 @@ impl Solium {
             });
         });
 
+        // The frame belongs to the pane, so a client with no pane gets none.
+        // It has still been told its mode, which is the part it is waiting on.
+        let window = self.window_for(toplevel.wl_surface());
+        let Some(id) = window.as_ref().and_then(|window| self.panes.id_of(window)) else {
+            tracing::debug!(server_side, "decoration agreed for a window with no pane");
+            if toplevel.is_initial_configure_sent() {
+                toplevel.send_pending_configure();
+            }
+            return;
+        };
+
         if server_side {
-            let real = self
-                .window_for(toplevel.wl_surface())
-                .and_then(|window| self.real_geometry(&window));
+            let real = window.and_then(|window| self.real_geometry(&window));
             let width = real.map_or(TITLEBAR_HEIGHT * 20, |real| real.size.w);
             let height = real.map_or(TITLEBAR_HEIGHT * 15, |real| real.size.h);
             self.decorations.insert(id, width, height);
         } else {
-            self.decorations.remove(&id);
+            self.decorations.remove(id);
         }
 
         // The client has to learn its mode before it draws, or it decides for
