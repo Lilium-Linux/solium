@@ -85,3 +85,45 @@ everything; steps 3 to 5 are where the behaviour people asked for appears.
   pane has nothing to give it to. The pane holds focus in our model and hands
   it to the surface at adoption; until then keys reach bindings and nothing
   else, which is what a loading window should do anyway.
+
+## Where this got to
+
+**Done:** step 1. `crates/solium/src/pane.rs` holds `Pane`, `PaneId` and
+`Content`, with tests for the properties the design rests on, and
+`loading_source` making the loading scene configurable the way decorations
+are. Wired to nothing. `main` is untouched and carries everything else.
+
+**Next:** step 2, the space becoming panes. What reading the code turned up,
+so the next session does not have to find it again:
+
+* `Solium::snapshot()` in `state.rs` is the seam that matters most. It builds
+  `WindowInfo` by iterating `space.elements().rev()` and asking
+  `outer_geometry`, `present::frame`, `window_title` and `focused_window` for
+  each. Build it from `panes` instead and step 3 — a loading pane getting a
+  real slot from the layout — costs almost nothing extra, because scripts
+  already place whatever the snapshot contains.
+* The other `space.elements()` callers are `render::elements` and
+  `render::prepare` (drawing), `frame_under` / `decorated_under` /
+  `surface_under` (input), `settle_closing` and `Command::Decoration`
+  (lifetime and relayout), and `publish_windows` (the shell's window list).
+  Each wants a pane rather than a `Window`; none of them wants `Space` gone,
+  which is why `Space` stays underneath for mapped content.
+* Windows enter through `new_toplevel` and `show_if_new`, and leave through
+  `toplevel_destroyed`. Those three are where panes are created, adopted and
+  retired.
+* `window_id(window)` currently derives a script-visible id from the surface.
+  That becomes `PaneId::get()`, which is what lets an id outlive the arrival
+  of a surface — and it is the reason a script that learned about a window
+  while it was loading is still talking about the same window afterwards.
+* Decorations are keyed by `toplevel_id` (a surface id). Re-keying them by
+  `PaneId` is what makes a frame survive adoption with its animation intact.
+
+**Order inside step 2**, each ending with the compositor working: panes
+tracked alongside the space and kept in sync; `snapshot()` built from them;
+`window_id` becoming `PaneId`; decorations re-keyed; then the render and input
+paths taking a pane.
+
+**Still true and easy to forget:** everything above has to stay configurable.
+The loading scene already is. When a loading pane gets a slot in step 3, how
+long it waits and whether it takes a slot at all belong in `config.lua`, not in
+constants.
