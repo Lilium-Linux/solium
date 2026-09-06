@@ -29,7 +29,7 @@ use smithay::{
     wayland::compositor::with_states,
 };
 
-use crate::{layer, present, state::Solium};
+use crate::{layer, pane::Pane, present, state::Solium};
 
 render_elements! {
     /// Everything Solium can draw.
@@ -80,6 +80,9 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f6
     let mut warps = Vec::new();
 
     for (pane, window) in state.on_screen() {
+        let Some(window) = window else {
+            continue;
+        };
         let Some(outer) = state.outer_geometry(&window) else {
             continue;
         };
@@ -100,6 +103,44 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f6
 /// Topmost first is what the damage tracker expects; getting it backwards
 /// composites the stack upside down, which looks like a stacking bug rather
 /// than an ordering one.
+/// The frame around a pane, whatever is inside it.
+///
+/// Drawn whenever there is a decoration at all, not only when it reserved
+/// space: a frame that takes nothing and floats over the window — a bar that
+/// appears on hover, a border that does not push the client around — is a
+/// decoration too. And it covers the whole window rather than a strip of it,
+/// which is what lets one put its bar on any side, or draw a border, or both.
+fn chrome(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    elements: &mut Vec<Element>,
+    pane: crate::pane::PaneId,
+    frame: present::Frame,
+    outer: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+) {
+    let title = state.pane_title(pane);
+    let look = crate::decoration::Look {
+        title: &title,
+        focused: state
+            .focused_window()
+            .is_some_and(|window| state.panes.id_of(&window) == Some(pane)),
+        pointer_inside: state.pointer_over(pane),
+    };
+    let mut animating = false;
+    if let Some(decoration) = state.decorations.get_mut(pane) {
+        if let Some(element) = decoration.frame(renderer, frame.rect, outer.size, &look) {
+            elements.push(Element::Chrome(element));
+        }
+        animating = decoration.animating();
+    }
+    // Ask for another frame while the decoration is still moving. The client
+    // has not damaged anything, so without this the next frame never comes and
+    // the animation stops where it stood.
+    if animating {
+        state.redraw = true;
+    }
+}
+
 pub(crate) fn elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
@@ -164,13 +205,13 @@ pub(crate) fn elements(
     }
 
     for (pane, window) in state.on_screen() {
-        let (Some(real), Some(outer)) =
-            (state.real_geometry(&window), state.outer_geometry(&window))
-        else {
+        let Some(outer) = state.pane_outer_of(pane) else {
             continue;
         };
         // Nothing of the client's left to draw: do not draw our half either.
-        if !state.has_content(&window) {
+        if let Some(window) = window.as_ref()
+            && !state.has_content(window)
+        {
             continue;
         }
 
@@ -180,7 +221,7 @@ pub(crate) fn elements(
         let frame = state.drawn(pane, outer);
         // The frame's share, in drawn pixels: a transform that scaled the
         // window scaled its frame with it.
-        let insets = state.frame_insets(&window);
+        let insets = state.insets_of(pane);
         let across = ratio(frame.rect.size.w, outer.size.w);
         let down = ratio(frame.rect.size.h, outer.size.h);
         let (left, top) = (
@@ -191,6 +232,49 @@ pub(crate) fn elements(
             f64::from(insets.horizontal()) * across,
             f64::from(insets.vertical()) * down,
         );
+
+        // A window whose application has not arrived draws the scene the
+        // compositor chose for it, across exactly the rectangle the client
+        // will occupy — because it *is* that window, and the client will
+        // appear inside it rather than replacing it. Its frame is drawn below
+        // by the same code as everyone else's, which is why the frame survives
+        // the application arriving with whatever animation is running in it.
+        let Some(window) = window else {
+            chrome(state, renderer, &mut elements, pane, frame, outer);
+            let client = present::logical(
+                (frame.rect.loc.x + left, frame.rect.loc.y + top),
+                (
+                    (frame.rect.size.w - taken_x).max(1.0),
+                    (frame.rect.size.h - taken_y).max(1.0),
+                ),
+            );
+            let waited = state.panes.get(pane).map_or(0, |held| {
+                i32::try_from(held.waited(now).as_millis()).unwrap_or(i32::MAX)
+            });
+            #[expect(clippy::cast_possible_truncation, reason = "a rect on this screen")]
+            let area = smithay::utils::Rectangle::new(
+                (client.loc.x.round() as i32, client.loc.y.round() as i32).into(),
+                (
+                    (client.size.w.round() as i32).max(1),
+                    (client.size.h.round() as i32).max(1),
+                )
+                    .into(),
+            );
+            if let Some(scene) = state.panes.get_mut(pane).and_then(Pane::scene_mut) {
+                scene.set_int("waited", waited);
+                if let Some(element) = scene.element(renderer, area, now) {
+                    elements.push(Element::Chrome(element));
+                }
+            }
+            // The bar in the scene keeps filling while nothing else changes,
+            // so the next frame has to be asked for or it stops where it is.
+            state.redraw = true;
+            continue;
+        };
+
+        let Some(real) = state.real_geometry(&window) else {
+            continue;
+        };
 
         // A transform that is not identity cannot be drawn as a rectangle. The
         // window is rendered flat into a texture first — frame and popups
@@ -217,27 +301,7 @@ pub(crate) fn elements(
         // reserved space: a frame that takes nothing and floats over the
         // window -- a bar that appears on hover, a border that does not push
         // the client around -- is a decoration too.
-        {
-            let title = state.window_title(&window);
-            let look = crate::decoration::Look {
-                title: &title,
-                focused: state.is_focused(&window),
-                pointer_inside: state.pointer_inside(&window),
-            };
-            let mut animating = false;
-            if let Some(decoration) = state.decorations.get_mut(pane) {
-                if let Some(element) = decoration.frame(renderer, frame.rect, outer.size, &look) {
-                    elements.push(Element::Chrome(element));
-                }
-                animating = decoration.animating();
-            }
-            // Ask for another frame while the decoration is still moving. The
-            // client has not damaged anything, so without this the next frame
-            // never comes and the animation stops where it stood.
-            if animating {
-                state.redraw = true;
-            }
-        }
+        chrome(state, renderer, &mut elements, pane, frame, outer);
 
         // What is left of the drawn rect once the frame has taken its share is
         // the client's.

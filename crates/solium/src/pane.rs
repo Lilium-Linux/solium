@@ -75,6 +75,10 @@ pub(crate) enum Content {
         /// Which QML draws it. Resolved once, so a reload changing the setting
         /// does not change what a pane already on screen looks like halfway.
         source: PathBuf,
+        /// The scene itself, hosted by us. `None` if it would not load: a
+        /// window with nothing in it is worse than one with a scene, and much
+        /// better than no window at all.
+        scene: Option<Box<crate::surface::ShellSurface>>,
     },
     /// A client's window, mapped and drawing for itself.
     Client(Window),
@@ -109,6 +113,7 @@ impl Pane {
         pid: Option<u32>,
         slot: Rectangle<i32, Logical>,
         source: PathBuf,
+        scene: Option<crate::surface::ShellSurface>,
         now: Duration,
     ) -> Self {
         Self {
@@ -118,6 +123,7 @@ impl Pane {
                 program: program.to_owned(),
                 pid,
                 source,
+                scene: scene.map(Box::new),
             },
             opened: now,
             adopted: false,
@@ -215,6 +221,19 @@ impl Pane {
         self.is_loading() && now.saturating_sub(self.opened) >= patience
     }
 
+    /// The scene drawing this pane, while it has no client to draw itself.
+    pub(crate) fn scene_mut(&mut self) -> Option<&mut crate::surface::ShellSurface> {
+        match &mut self.content {
+            Content::Loading { scene, .. } => scene.as_deref_mut(),
+            _ => None,
+        }
+    }
+
+    /// How long this pane has been waiting for its application.
+    pub(crate) fn waited(&self, now: Duration) -> Duration {
+        now.saturating_sub(self.opened)
+    }
+
     /// What to call it, before a client has an opinion.
     pub(crate) fn program(&self) -> Option<&str> {
         match &self.content {
@@ -236,6 +255,14 @@ impl Pane {
 #[derive(Debug, Default)]
 pub(crate) struct Panes {
     panes: Vec<Pane>,
+    /// Set when the list changed by some route other than `sync` — a pane
+    /// opened, or one removed because its application never came.
+    ///
+    /// `sync` reports a change by comparing the list it starts with against
+    /// the one it ends with, and everything keyed by a pane is tidied on that
+    /// report. A change that happened before it started is invisible to that
+    /// comparison, and a frame whose pane went that way would be kept forever.
+    changed: bool,
 }
 
 impl Panes {
@@ -287,6 +314,7 @@ impl Panes {
     pub(crate) fn open(&mut self, pane: Pane) -> PaneId {
         let id = pane.id;
         self.panes.push(pane);
+        self.changed = true;
         id
     }
 
@@ -294,7 +322,9 @@ impl Panes {
     pub(crate) fn remove(&mut self, id: PaneId) -> bool {
         let before = self.panes.len();
         self.panes.retain(|pane| pane.id != id);
-        before != self.panes.len()
+        let removed = before != self.panes.len();
+        self.changed |= removed;
+        removed
     }
 
     /// Take a pane for a client that arrived without being asked for, on top.
@@ -376,7 +406,7 @@ impl Panes {
         self.panes = ordered;
 
         let after: Vec<PaneId> = self.panes.iter().map(|pane| pane.id).collect();
-        before != after
+        std::mem::take(&mut self.changed) || before != after
     }
 }
 
@@ -439,8 +469,8 @@ mod tests {
 
     #[test]
     fn identities_are_never_reused() {
-        let first = Pane::loading("kitty", None, slot(), PathBuf::new(), Duration::ZERO);
-        let second = Pane::loading("kitty", None, slot(), PathBuf::new(), Duration::ZERO);
+        let first = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
+        let second = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
         assert_ne!(first.id(), second.id());
     }
 
@@ -451,7 +481,14 @@ mod tests {
         // `Window`, so this asserts what can be asserted without one --
         // that adopting changes neither of the two things everything else
         // addresses a pane by.
-        let mut pane = Pane::loading("kitty", Some(42), slot(), PathBuf::new(), Duration::ZERO);
+        let mut pane = Pane::loading(
+            "kitty",
+            Some(42),
+            slot(),
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
         let (id, where_it_was) = (pane.id(), pane.slot());
         assert!(pane.is_loading());
         assert!(pane.awaits(&[7, 42, 1]));
@@ -466,11 +503,25 @@ mod tests {
     #[test]
     fn only_a_loading_pane_gives_up() {
         let patience = Duration::from_secs(8);
-        let pane = Pane::loading("slow", Some(9), slot(), PathBuf::new(), Duration::ZERO);
+        let pane = Pane::loading(
+            "slow",
+            Some(9),
+            slot(),
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
         assert!(!pane.expired(Duration::from_secs(7), patience));
         assert!(pane.expired(Duration::from_secs(8), patience));
 
-        let mut left = Pane::loading("slow", Some(9), slot(), PathBuf::new(), Duration::ZERO);
+        let mut left = Pane::loading(
+            "slow",
+            Some(9),
+            slot(),
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
         left.leave(Duration::from_secs(1));
         assert!(
             !left.expired(Duration::from_secs(60), patience),
@@ -506,14 +557,17 @@ mod tests {
         let mut panes = Panes::default();
         let mut ids = Vec::new();
         for name in ["kitty", "firefox"] {
-            let pane = Pane::loading(name, Some(1), slot(), PathBuf::new(), Duration::ZERO);
-            ids.push(pane.id());
-            panes.panes.push(pane);
+            let pane = Pane::loading(name, Some(1), slot(), PathBuf::new(), None, Duration::ZERO);
+            ids.push(panes.open(pane));
         }
 
         assert!(
-            !panes.sync(&[], Duration::from_secs(1)),
-            "nothing came and nothing went"
+            panes.sync(&[], Duration::from_secs(1)),
+            "opening them is a change, and it is reported once"
+        );
+        assert!(
+            !panes.sync(&[], Duration::from_secs(2)),
+            "and then nothing came and nothing went"
         );
         assert_eq!(panes.len(), 2);
         assert_eq!(
@@ -526,9 +580,14 @@ mod tests {
     #[test]
     fn a_script_addresses_a_pane_by_its_id() {
         let mut panes = Panes::default();
-        let pane = Pane::loading("kitty", None, slot(), PathBuf::new(), Duration::ZERO);
-        let id = pane.id();
-        panes.panes.push(pane);
+        let id = panes.open(Pane::loading(
+            "kitty",
+            None,
+            slot(),
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        ));
 
         assert_eq!(panes.by_script_id(id.get()).map(Pane::id), Some(id));
         assert!(
@@ -539,7 +598,14 @@ mod tests {
 
     #[test]
     fn a_pane_with_no_process_adopts_nothing() {
-        let pane = Pane::loading("mystery", None, slot(), PathBuf::new(), Duration::ZERO);
+        let pane = Pane::loading(
+            "mystery",
+            None,
+            slot(),
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
         assert!(!pane.awaits(&[1, 2, 3]));
     }
 }

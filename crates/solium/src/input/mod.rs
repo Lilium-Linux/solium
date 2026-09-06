@@ -453,7 +453,11 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             state.frame_action(id, action);
         }
 
-        if pressed {
+        // Focus and dragging need a window. A frame around one that is still
+        // loading has neither, and its buttons work anyway -- which is the
+        // point of giving it a frame: an application that is not coming can be
+        // dismissed before it arrives.
+        if pressed && let Some(window) = window {
             state.focus_window(&window, serial);
             if !on_button && let Some(geometry) = state.real_geometry(&window) {
                 let start_data = GrabStartData {

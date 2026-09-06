@@ -170,6 +170,11 @@ pub(crate) struct Loading {
     /// Whether it takes a place in the layout before its application connects.
     /// Off, and the other windows only move aside once it is really there.
     pub(crate) reserves_a_slot: bool,
+    /// Whether it gets a frame while it waits — which is what gives it a name
+    /// and a close button before there is anything to close. Off is quieter,
+    /// and avoids a frame appearing and going again for an application that
+    /// turns out to draw its own.
+    pub(crate) decorated: bool,
 }
 
 impl Default for Loading {
@@ -178,6 +183,7 @@ impl Default for Loading {
             scene: None,
             patience: std::time::Duration::from_secs(8),
             reserves_a_slot: true,
+            decorated: true,
         }
     }
 }
@@ -888,6 +894,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             if let Some(reserves) = options.get::<Option<bool>>("reserves_a_slot")? {
                 loading.reserves_a_slot = reserves;
+            }
+            if let Some(decorated) = options.get::<Option<bool>>("decorated")? {
+                loading.decorated = decorated;
             }
             if let Ok(Value::String(scene)) = options.get::<Value>("scene")
                 && let Ok(scene) = scene.to_str()

@@ -53,6 +53,11 @@ local defaults = {
         -- off, the other windows only move aside once the application is
         -- really there -- less eager, and some people will prefer it.
         reserves_a_slot = true,
+        -- Whether it wears a frame while it waits. That is what gives it a
+        -- name and a close button before there is anything to close. Off is
+        -- quieter: an application that draws its own decorations would
+        -- otherwise show ours for a moment and then lose it.
+        decorated = true,
     },
 
     tiling = {
