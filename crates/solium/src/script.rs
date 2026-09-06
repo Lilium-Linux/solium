@@ -124,8 +124,14 @@ pub(crate) enum Command {
     Focus {
         id: u64,
     },
+    /// Frame every window with a named decoration.
+    Decoration {
+        name: Option<String>,
+    },
     /// End the session.
     Quit,
+    /// Read the configuration again.
+    Reload,
     /// Move and resize a window for real — the layout's authority, not a
     /// transform. The compositor animates it there from where it was.
     Place {
@@ -703,6 +709,27 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     opacity,
                     animation,
                 });
+            })
+        })?,
+    )?;
+
+    // Which QML file frames every window. A name is one of the decorations
+    // that ship, or one of the user's own in ~/.config/solium/qml/decorations;
+    // a path is anyone's. Takes effect immediately -- every frame is rebuilt.
+    // Read the configuration again, in place. Bound to a key, this is the
+    // difference between trying an idea and committing to it.
+    sol.set(
+        "reload",
+        lua.create_function(|lua, ()| {
+            with_pending(lua, |pending| pending.commands.push(Command::Reload))
+        })?,
+    )?;
+
+    sol.set(
+        "decoration",
+        lua.create_function(|lua, name: Option<String>| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Decoration { name });
             })
         })?,
     )?;

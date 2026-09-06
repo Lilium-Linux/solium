@@ -1,11 +1,26 @@
 # Decorations
 
 A window frame is a QML file. There is nothing to compile and no compositor
-code to touch: write a file, point `SOLIUM_DECORATION` at it, and it draws
-every window.
+code to touch: write a file, name it in your configuration, and it draws every
+window.
 
-    SOLIUM_DECORATION=left          # one of the files here
-    SOLIUM_DECORATION=~/mine.qml    # anywhere else
+    -- ~/.config/solium/user.lua
+    return { decoration = "left" }
+
+A name is one of the files here, or one of your own in
+`~/.config/solium/qml/decorations/` -- yours shadows a shipped one of the same
+name. A path is anywhere. `SOLIUM_DECORATION=left` does the same thing for one
+run, which is the quicker way to try one.
+
+Press **super+shift+r** and the running session picks up the change: the
+configuration is read again, the QML cache is dropped, and every frame is
+rebuilt. Windows keep their slots, and each client is resized to whatever the
+new decoration left it.
+
+Everything the frames draw with -- colours, fonts, spacing -- comes from
+`Solium.Theme`. Drop your own `Solium/Theme.qml` into `~/.config/solium/qml/`
+and every frame and every shell surface follows it, without touching anything
+that ships.
 
 ## The contract
 

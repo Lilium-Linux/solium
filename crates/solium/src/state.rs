@@ -269,6 +269,11 @@ pub(crate) enum Request {
     Vt(i32),
     /// Stop the compositor and give the session back.
     Quit,
+    /// Read the configuration again, without ending the session.
+    ///
+    /// Configuration you have to restart to try is configuration people stop
+    /// changing, so this exists for the same reason the shell reloads on edit.
+    Reload,
 }
 
 /// The client's rect inside an outer one, once the frame has taken its share.
@@ -652,7 +657,29 @@ impl Solium {
                         self.close_window(&window);
                     }
                 }
+                Command::Decoration { name } => {
+                    // The slots windows occupy are kept; what changes is how
+                    // much of each slot the frame takes, so every client is
+                    // resized to whatever the new decoration left it.
+                    let slots: Vec<(Window, Rectangle<i32, Logical>)> = self
+                        .space
+                        .elements()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .filter_map(|window| {
+                            self.outer_geometry(&window).map(|outer| (window, outer))
+                        })
+                        .collect();
+                    if self.decorations.set_style(name) {
+                        for (window, outer) in slots {
+                            self.resize_to(&window, outer);
+                        }
+                        self.redraw = true;
+                    }
+                }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
+                Command::Reload => self.request = Some(Request::Reload),
                 Command::Quit => {
                     tracing::info!("a script asked to stop");
                     self.request = Some(Request::Quit);
@@ -1252,6 +1279,30 @@ impl Solium {
     }
 
     /// Offer a newly shown window to whatever script wants to animate it in.
+    /// Read the configuration again and swap it in.
+    ///
+    /// The QML cache is cleared and every frame rebuilt too, so editing a
+    /// decoration is the same one keystroke as editing a binding. A file that
+    /// fails to load leaves the running configuration alone: a typo should
+    /// cost a log line, not the session.
+    pub(crate) fn reload(&mut self) {
+        let path = Scripts::config_path();
+        match Scripts::load(&path) {
+            Ok(scripts) => {
+                crate::qml::clear_cache();
+                let style = self.decorations.style().map(ToOwned::to_owned);
+                self.decorations.set_style(None);
+                self.decorations.set_style(style);
+                self.start_scripts(Some(scripts));
+                self.redraw = true;
+                tracing::info!(config = %path.display(), "configuration reloaded");
+            }
+            Err(err) => {
+                tracing::error!(?err, config = %path.display(), "reload failed, keeping what was running");
+            }
+        }
+    }
+
     /// Take the scripts, and act on whatever they asked for while loading.
     pub(crate) fn start_scripts(&mut self, scripts: Option<Scripts>) {
         let Some(mut scripts) = scripts else {

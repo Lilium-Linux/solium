@@ -699,6 +699,7 @@ fn handle_input(state: &mut State, output: &Output, event: InputEvent<LibinputIn
                 tracing::info!("stopping: asked to by a key");
                 state.signal.stop();
             }
+            Request::Reload => state.solium.reload(),
         }
     }
 

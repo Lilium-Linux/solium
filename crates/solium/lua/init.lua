@@ -4,6 +4,12 @@
 -- file when it exists. Modes live in their own scripts and register their own
 -- bindings, so adding one is a `require` and removing one is deleting a line.
 
+local config = require("config")
+
+-- Settings the compositor itself holds, applied from the same file as
+-- everything else. Both take effect immediately when reloaded.
+sol.decoration(config.decoration)
+
 require("modes")
 require("open")
 require("overview")
@@ -108,6 +114,12 @@ sol.log("solium configuration loaded")
 -- through a letterbox instead of shrinking. `spread` is how much of it is in
 -- motion at once. Composes with a transform: add `rotate_y` here and the
 -- window tilts while it is sucked in.
+-- Read this file again, without ending the session. Edit anything -- a
+-- binding, a gap, a decoration, a whole layout mode -- and press it.
+sol.bind("super+shift+r", function()
+    sol.reload()
+end)
+
 sol.bind("super+m", function()
     local area = sol.monitor()
     for _, window in ipairs(sol.windows()) do

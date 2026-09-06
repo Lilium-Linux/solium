@@ -154,11 +154,11 @@ pub(crate) struct Decoration {
 }
 
 impl Decoration {
-    fn new(width: i32, height: i32) -> Result<Self> {
+    fn new(path: &std::path::Path, width: i32, height: i32) -> Result<Self> {
         qml::start()?;
         // Built at the client's size first, because what it reserves is a
         // property of the scene and there is no scene to ask until it exists.
-        let mut scene = qml::Scene::new(&qml_path(), width.max(1), height.max(1))?;
+        let mut scene = qml::Scene::new(path, width.max(1), height.max(1))?;
         let insets = Insets {
             top: scene.get_int("insetTop").max(0),
             right: scene.get_int("insetRight").max(0),
@@ -189,6 +189,14 @@ impl Decoration {
     /// window lives; the scene is always rasterised at its unscaled size and
     /// the element scales it, so a thumbnail's titlebar costs no more than a
     /// full-size one.
+    /// The client's size, inside whatever this frame reserves.
+    fn client_size(&self) -> (i32, i32) {
+        (
+            (self.buffer_size.0 - self.insets.horizontal()).max(1),
+            (self.buffer_size.1 - self.insets.vertical()).max(1),
+        )
+    }
+
     /// Whether the frame's own animations still have somewhere to go.
     ///
     /// A decoration animates on its own clock -- a border easing to a new
@@ -391,15 +399,50 @@ impl Decoration {
 #[derive(Debug, Default)]
 pub(crate) struct Decorations {
     frames: HashMap<ObjectId, Decoration>,
+    /// Which decoration to build, as a script named it. `None` is whatever
+    /// the environment or the default says.
+    style: Option<String>,
 }
 
 impl Decorations {
     /// Start decorating a window, if it is not decorated already.
+    /// Choose the decoration every window is framed with.
+    ///
+    /// Existing frames are rebuilt from the new file rather than dropped:
+    /// nothing re-creates a frame on its own -- they are made when a client
+    /// negotiates its decoration mode, once -- so dropping them would leave
+    /// every open window bare until it was reopened. Rebuilding is what makes
+    /// this a live setting a script can change and watch happen.
+    pub(crate) fn set_style(&mut self, style: Option<String>) -> bool {
+        if self.style == style {
+            return false;
+        }
+        self.style = style;
+        let path = qml_path(self.style.as_deref());
+        let existing: Vec<(ObjectId, (i32, i32))> = self
+            .frames
+            .iter()
+            .map(|(id, frame)| (id.clone(), frame.client_size()))
+            .collect();
+        for (id, (width, height)) in existing {
+            match Decoration::new(&path, width, height) {
+                Ok(fresh) => {
+                    self.frames.insert(id, fresh);
+                }
+                Err(err) => {
+                    tracing::error!(?err, "could not load the new decoration, leaving it bare");
+                    self.frames.remove(&id);
+                }
+            }
+        }
+        true
+    }
+
     pub(crate) fn insert(&mut self, id: ObjectId, width: i32, height: i32) {
         if self.frames.contains_key(&id) {
             return;
         }
-        match Decoration::new(width, height) {
+        match Decoration::new(&qml_path(self.style.as_deref()), width, height) {
             Ok(decoration) => {
                 self.frames.insert(id, decoration);
             }
@@ -415,6 +458,11 @@ impl Decorations {
         if self.frames.remove(id).is_some() {
             tracing::debug!("dropped a window frame");
         }
+    }
+
+    /// Which decoration is in use, if a script chose one.
+    pub(crate) fn style(&self) -> Option<&str> {
+        self.style.as_deref()
     }
 
     pub(crate) fn get(&self, id: &ObjectId) -> Option<&Decoration> {
@@ -450,20 +498,39 @@ impl Decorations {
 /// SOLIUM_DECORATION=left          # qml/decorations/left.qml
 /// SOLIUM_DECORATION=~/mine.qml    # anywhere
 /// ```
-fn qml_path() -> PathBuf {
+fn qml_path(style: Option<&str>) -> PathBuf {
     // The old name still works: it was a path to a titlebar, and it is a path
     // to a decoration now.
     if let Some(path) = std::env::var_os("SOLIUM_QML_TITLEBAR") {
         return PathBuf::from(path);
     }
-    let shipped = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/decorations"));
-    match std::env::var("SOLIUM_DECORATION") {
-        Ok(name) if name.contains('/') || name.ends_with(".qml") => {
-            PathBuf::from(shellexpand(&name))
-        }
-        Ok(name) => shipped.join(format!("{name}.qml")),
-        Err(_) => shipped.join("top.qml"),
+    // A script's choice wins over the environment, which wins over the
+    // default: the environment is for trying one out, the script is the
+    // configuration.
+    let chosen = style
+        .map(ToOwned::to_owned)
+        .or_else(|| std::env::var("SOLIUM_DECORATION").ok());
+    let Some(name) = chosen else {
+        return shipped_decoration("top");
+    };
+    if name.contains('/') || name.ends_with(".qml") {
+        return PathBuf::from(shellexpand(&name));
     }
+    // A file of the same name in the user's own directory shadows the one that
+    // ships, so `decoration = "top"` can mean the user's idea of a top bar.
+    if let Some(user) = qml::user_qml_dir() {
+        let theirs = user.join("decorations").join(format!("{name}.qml"));
+        if theirs.is_file() {
+            return theirs;
+        }
+    }
+    shipped_decoration(&name)
+}
+
+/// One of the decorations that ship with the compositor, by name.
+fn shipped_decoration(name: &str) -> PathBuf {
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/decorations"))
+        .join(format!("{name}.qml"))
 }
 
 /// Expand a leading `~`, since this is read from an environment variable and

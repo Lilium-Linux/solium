@@ -244,6 +244,10 @@ pub(crate) fn run() -> Result<()> {
         // closing the window rather than handing back a VT, but a binding that
         // works on one backend and silently does nothing on the other is worse
         // than not having it.
+        if matches!(state.request, Some(crate::state::Request::Reload)) {
+            state.request = None;
+            state.reload();
+        }
         if matches!(state.request.take(), Some(crate::state::Request::Quit)) {
             tracing::info!("asked to stop");
             break;
