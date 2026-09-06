@@ -13,7 +13,10 @@
 //! frames. An object lifted from the dock into a titlebar keeps its colours
 //! because it never left the design system.
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
 
 use anyhow::Result;
 use smithay::{
@@ -52,7 +55,20 @@ pub(crate) struct Dock {
     /// is released — the same shape the window grabs use, and for the same
     /// reason.
     pub(crate) pressed: Option<usize>,
+
+    /// What the scene was built from, so it can be built again.
+    source: PathBuf,
+    screen: String,
+    /// The newest modification time seen in the QML, and when that was last
+    /// checked. Shell work is edit-look-edit, and restarting a compositor to
+    /// see a colour change is enough friction to stop anyone tuning anything.
+    newest: Option<SystemTime>,
+    checked: Duration,
 }
+
+/// How often the QML is checked for edits. Twice a second is well under what
+/// anyone notices and well over what a directory scan costs.
+const RELOAD_INTERVAL: Duration = Duration::from_millis(500);
 
 impl Dock {
     pub(crate) fn new(screen: &str) -> Result<Self> {
@@ -60,9 +76,15 @@ impl Dock {
         // The shell's own dock declares `required property var screenInfo`,
         // and a required property must be supplied before the component is
         // built — afterwards is too late and it never exists at all.
-        let scene = qml::Scene::with_properties(&qml_path(), 1, HEIGHT, Some(screen))?;
+        let source = qml_path();
+        let scene = qml::Scene::with_properties(&source, 1, HEIGHT, Some(screen))?;
+        let newest = newest_change(&source);
         Ok(Self {
             scene,
+            source,
+            screen: screen.to_owned(),
+            newest,
+            checked: Duration::ZERO,
             buffer: None,
             size: (0, 0),
             items: Vec::new(),
@@ -171,6 +193,47 @@ impl Dock {
         true
     }
 
+    /// Rebuild the scene if the QML changed on disk.
+    ///
+    /// The whole scene, not a patch of it: QML has no way to apply an edit to
+    /// a live object tree, and a rebuilt scene is indistinguishable from a
+    /// fresh one anyway. State the shell holds is lost, which is the honest
+    /// cost of reloading and the reason this is not on by default in a
+    /// session anyone is using.
+    fn reload_if_changed(&mut self, now: Duration) {
+        if now.saturating_sub(self.checked) < RELOAD_INTERVAL {
+            return;
+        }
+        self.checked = now;
+
+        let newest = newest_change(&self.source);
+        if newest == self.newest {
+            return;
+        }
+        self.newest = newest;
+
+        // Without this the engine hands back what it compiled last time.
+        qml::clear_cache();
+
+        match qml::Scene::with_properties(&self.source, 1, HEIGHT, Some(&self.screen)) {
+            Ok(scene) => {
+                self.scene = scene;
+                // The buffer is thrown away with the scene: the new one may
+                // want a different size, and a stale buffer would be drawn
+                // once at the old one.
+                self.buffer = None;
+                self.size = (0, 0);
+                if !self.items.is_empty() {
+                    self.scene.set_string("items", &self.items.join("\t"));
+                }
+                tracing::info!("shell reloaded");
+            }
+            // The old scene keeps drawing. An edit that does not parse should
+            // leave the screen as it was, not blank it.
+            Err(err) => tracing::warn!(?err, "reload failed, keeping the last scene"),
+        }
+    }
+
     /// Draw the dock.
     pub(crate) fn element<R>(
         &mut self,
@@ -182,6 +245,8 @@ impl Dock {
         R: Renderer + ImportMem,
         R::TextureId: Send + Clone + 'static,
     {
+        self.reload_if_changed(now);
+
         let rect = self.rect(area);
         let size = (rect.size.w.max(1), rect.size.h.max(1));
         self.scene.resize(size.0, size.1);
@@ -239,6 +304,43 @@ impl Dock {
         .inspect_err(|err| tracing::warn!(?err, "could not upload the dock"))
         .ok()
     }
+}
+
+/// The newest modification time anywhere the shell's QML lives.
+///
+/// The file itself, and the tree it was loaded from when one was named —
+/// editing a widget three directories away is still editing the shell.
+fn newest_change(source: &Path) -> Option<SystemTime> {
+    fn newest_in(directory: &Path, best: &mut Option<SystemTime>, depth: usize) {
+        if depth > 4 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                newest_in(&path, best, depth + 1);
+            } else if path.extension().is_some_and(|kind| kind == "qml") {
+                if let Ok(time) = entry.metadata().and_then(|data| data.modified()) {
+                    if best.is_none_or(|current| time > current) {
+                        *best = Some(time);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut newest = std::fs::metadata(source)
+        .and_then(|data| data.modified())
+        .ok();
+    if let Some(root) = std::env::var_os("SOLIUM_SHELL_WATCH") {
+        newest_in(Path::new(&root), &mut newest, 0);
+    } else if let Some(parent) = source.parent() {
+        newest_in(parent, &mut newest, 0);
+    }
+    newest
 }
 
 fn qml_path() -> PathBuf {
