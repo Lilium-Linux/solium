@@ -40,6 +40,10 @@ use smithay::{
         selection::SelectionHandler,
         selection::data_device::{
             ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+            set_data_device_focus,
+        },
+        selection::primary_selection::{
+            PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
         },
         shell::{
             wlr_layer::{
@@ -151,6 +155,10 @@ pub(crate) struct Solium {
     /// The X display number XWayland took, for `DISPLAY` in children.
     pub(crate) x11_display: Option<u32>,
     pub(crate) xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
+    /// The middle-click clipboard. A separate selection with its own protocol,
+    /// and its absence is not subtle: a terminal that pastes on middle click
+    /// pastes nothing at all.
+    pub(crate) primary_selection_state: PrimarySelectionState,
 
     /// Every decorated window's frame, drawn by us from QML.
     pub(crate) decorations: Decorations,
@@ -294,6 +302,7 @@ impl Solium {
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
                 &display_handle,
             ),
+            primary_selection_state: PrimarySelectionState::new::<Self>(&display_handle),
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
             seat_state,
@@ -975,6 +984,19 @@ impl Solium {
     }
 
     /// Raise a window and give it the keyboard.
+    /// Point the seat's selections at whoever holds focus.
+    ///
+    /// A client may only read a selection while it holds the seat's data
+    /// device focus, and that is a separate thing from keyboard focus. Set one
+    /// and not the other and every paste hangs forever: the client asks for
+    /// the selection and no offer ever arrives, which presents as a broken
+    /// clipboard in the *pasting* application.
+    fn focus_selection(&mut self, surface: Option<&WlSurface>) {
+        let client = surface.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
+        set_data_device_focus(&self.display_handle, &self.seat, client.clone());
+        set_primary_focus(&self.display_handle, &self.seat, client);
+    }
+
     pub(crate) fn focus_window(&mut self, window: &Window, serial: Serial) {
         let Some(location) = self.space.element_location(window) else {
             return;
@@ -987,6 +1009,7 @@ impl Solium {
             // well as an xdg one.
             let surface = window.wl_surface().map(|surface| surface.into_owned());
             keyboard.set_focus(self, surface.clone(), serial);
+            self.focus_selection(surface.as_ref());
             // X11 wants telling separately, in its own terms: a window that
             // has keyboard focus but was never activated draws itself
             // unfocused however much typing goes into it.
@@ -1321,11 +1344,9 @@ impl XdgShellHandler for Solium {
 
         // Focus follows the newest window. #12 turns this into a policy.
         if let Some(keyboard) = self.seat.get_keyboard() {
-            keyboard.set_focus(
-                self,
-                Some(surface.wl_surface().clone()),
-                SERIAL_COUNTER.next_serial(),
-            );
+            let focused = surface.wl_surface().clone();
+            keyboard.set_focus(self, Some(focused.clone()), SERIAL_COUNTER.next_serial());
+            self.focus_selection(Some(&focused));
         }
     }
 
@@ -1599,6 +1620,12 @@ impl DataDeviceHandler for Solium {
         &self.data_device_state
     }
 }
+impl PrimarySelectionHandler for Solium {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+
 impl ClientDndGrabHandler for Solium {}
 impl ServerDndGrabHandler for Solium {}
 
@@ -1610,4 +1637,5 @@ delegate_layer_shell!(Solium);
 delegate_seat!(Solium);
 delegate_output!(Solium);
 delegate_data_device!(Solium);
+smithay::delegate_primary_selection!(Solium);
 smithay::delegate_xwayland_shell!(Solium);
