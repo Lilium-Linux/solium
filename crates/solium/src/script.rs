@@ -174,6 +174,13 @@ pub(crate) struct Scripts {
 }
 
 impl Scripts {
+    /// Bytes Lua is holding. Its allocator does not hand memory back to the
+    /// system, so this rising while everything else is flat says the growth is
+    /// script-side rather than a compositor leak.
+    pub(crate) fn used_memory(&self) -> usize {
+        self.lua.used_memory()
+    }
+
     /// Where the configuration is, in the order it is looked for.
     ///
     /// The user's own file wins, and the bundled one is the fallback rather

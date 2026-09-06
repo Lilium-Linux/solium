@@ -281,6 +281,12 @@ impl Decorations {
         self.frames.get_mut(id)
     }
 
+    /// How many frames are being kept. For leak diagnostics: this should
+    /// return to what it was once every window is closed.
+    pub(crate) fn len(&self) -> usize {
+        self.frames.len()
+    }
+
     pub(crate) fn contains(&self, id: &ObjectId) -> bool {
         self.frames.contains_key(id)
     }

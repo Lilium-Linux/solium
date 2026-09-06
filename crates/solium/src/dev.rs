@@ -137,3 +137,12 @@ fn parse_list_with<T>(
     parsed.sort_by_key(|(at, _)| *at);
     parsed
 }
+
+/// Whether to report what the compositor is holding, once a second.
+///
+/// ```sh
+/// SOLIUM_MEMDIAG=1
+/// ```
+pub(crate) fn memory_diagnostics() -> bool {
+    std::env::var_os("SOLIUM_MEMDIAG").is_some()
+}
