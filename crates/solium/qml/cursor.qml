@@ -6,8 +6,16 @@
 // window frames, because there is only one of it.
 //
 // Rendered once into a buffer and reused — it is the same picture every frame.
+//
+// Drawn with `Shape` and *not* with `Canvas`. A Canvas paints on a signal, and
+// nothing here delivers that signal: the scene is driven by hand through
+// `QQuickRenderControl`, so `onPaint` never ran and the cursor was a fully
+// transparent 24x24 buffer for the life of the session. That is not a subtle
+// failure — it is an invisible pointer, which from the other side of the screen
+// is indistinguishable from input being dead.
 
 import QtQuick
+import QtQuick.Shapes
 import Solium
 
 Item {
@@ -18,37 +26,29 @@ Item {
     // The hotspot is the tip, at (0, 0). `cursor.rs` positions the buffer by
     // subtracting it, so a pointer that reports (x, y) has its point exactly
     // there and not a few pixels down and to the right.
-    Canvas {
+    Shape {
         anchors.fill: parent
-        renderStrategy: Canvas.Immediate
-        renderTarget: Canvas.Image
+        preferredRendererType: Shape.CurveRenderer
 
-        onPaint: {
-            const ctx = getContext("2d");
-            ctx.reset();
+        // The classic arrow: a tall thin wedge with a tail, as one closed path
+        // so the outline is continuous. Outlined in the dark surface colour and
+        // filled with the text colour, so it stays legible over a light window
+        // and a dark one alike — a cursor that vanishes over half the screen is
+        // worse than one that does not match.
+        ShapePath {
+            fillColor: Theme.text
+            strokeColor: Theme.surfaceSunken
+            strokeWidth: 1.6
+            joinStyle: ShapePath.RoundJoin
 
-            // The classic arrow: a tall thin wedge with a tail. Drawn as one
-            // path so the outline is continuous.
-            ctx.beginPath();
-            ctx.moveTo(1, 1);
-            ctx.lineTo(1, 16.5);
-            ctx.lineTo(5.2, 12.7);
-            ctx.lineTo(8.1, 19.3);
-            ctx.lineTo(11.2, 17.9);
-            ctx.lineTo(8.4, 11.5);
-            ctx.lineTo(13.9, 11.1);
-            ctx.closePath();
-
-            // Outlined in the dark surface colour and filled with the text
-            // colour, so it stays legible over a light window and a dark one
-            // alike — a cursor that vanishes over half the screen is worse
-            // than one that does not match.
-            ctx.fillStyle = Theme.text;
-            ctx.strokeStyle = Theme.surfaceSunken;
-            ctx.lineWidth = 1.6;
-            ctx.lineJoin = "round";
-            ctx.stroke();
-            ctx.fill();
+            startX: 1; startY: 1
+            PathLine { x: 1;    y: 16.5 }
+            PathLine { x: 5.2;  y: 12.7 }
+            PathLine { x: 8.1;  y: 19.3 }
+            PathLine { x: 11.2; y: 17.9 }
+            PathLine { x: 8.4;  y: 11.5 }
+            PathLine { x: 13.9; y: 11.1 }
+            PathLine { x: 1;    y: 1 }
         }
     }
 }
