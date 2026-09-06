@@ -342,64 +342,71 @@ pub(crate) fn run() -> Result<()> {
             render::Prepared::default()
         };
 
-        let (rendered, captured) = match backend.bind() {
-            _ if !wanted => (false, false),
-            Err(err) => {
-                tracing::warn!(?err, "could not bind the backend buffer, skipping frame");
-                (false, false)
-            }
-            Ok((renderer, mut framebuffer)) => {
-                // Every window reaches the screen through the presentation
-                // transform, so a mode cannot animate differently from the
-                // layout -- they are the same code path.
-                let elements = render::elements(&mut state, renderer, 1.0, &mut prepared);
-
-                let result = damage_tracker.render_output(
-                    renderer,
-                    &mut framebuffer,
-                    age,
-                    &elements,
-                    [0.05, 0.05, 0.06, 1.0],
-                );
-                if let Err(err) = &result {
-                    tracing::warn!(?err, "render failed");
+        // Not `match backend.bind() { _ if !wanted => ... }`: the scrutinee runs
+        // before the guard, so that acquired a buffer on every idle frame and
+        // threw it away without ever submitting it. The host's EGL surface ends
+        // up in a state it complains about at sixty errors a second.
+        let (rendered, captured) = if !wanted {
+            (false, false)
+        } else {
+            match backend.bind() {
+                Err(err) => {
+                    tracing::warn!(?err, "could not bind the backend buffer, skipping frame");
+                    (false, false)
                 }
-                let damaged = result.as_ref().is_ok_and(|output| output.damage.is_some());
+                Ok((renderer, mut framebuffer)) => {
+                    // Every window reaches the screen through the presentation
+                    // transform, so a mode cannot animate differently from the
+                    // layout -- they are the same code path.
+                    let elements = render::elements(&mut state, renderer, 1.0, &mut prepared);
 
-                let mut captured = false;
-                let due = match capture_due {
-                    Some(at) => now >= at,
-                    None => settled > CAPTURE_SETTLE_FRAMES,
-                };
-                if result.is_ok()
-                    && due
-                    && capture_remaining > 0
-                    && let Some(path) = capture.as_ref()
-                {
-                    captured = true;
-                    // Numbered only when there is a sequence, so a single
-                    // capture keeps the name it was given.
-                    let path = if dev::capture_frames() > 1 {
-                        numbered(path, capture_index)
-                    } else {
-                        path.clone()
+                    let result = damage_tracker.render_output(
+                        renderer,
+                        &mut framebuffer,
+                        age,
+                        &elements,
+                        [0.05, 0.05, 0.06, 1.0],
+                    );
+                    if let Err(err) = &result {
+                        tracing::warn!(?err, "render failed");
+                    }
+                    let damaged = result.as_ref().is_ok_and(|output| output.damage.is_some());
+
+                    let mut captured = false;
+                    let due = match capture_due {
+                        Some(at) => now >= at,
+                        None => settled > CAPTURE_SETTLE_FRAMES,
                     };
-                    match capture::take_frame(renderer, &framebuffer, size.w, size.h, &path) {
-                        Ok(()) => tracing::debug!(path = %path.display(), "captured a frame"),
-                        Err(err) => tracing::warn!(?err, "capturing a frame failed"),
+                    if result.is_ok()
+                        && due
+                        && capture_remaining > 0
+                        && let Some(path) = capture.as_ref()
+                    {
+                        captured = true;
+                        // Numbered only when there is a sequence, so a single
+                        // capture keeps the name it was given.
+                        let path = if dev::capture_frames() > 1 {
+                            numbered(path, capture_index)
+                        } else {
+                            path.clone()
+                        };
+                        match capture::take_frame(renderer, &framebuffer, size.w, size.h, &path) {
+                            Ok(()) => tracing::debug!(path = %path.display(), "captured a frame"),
+                            Err(err) => tracing::warn!(?err, "capturing a frame failed"),
+                        }
+
+                        capture_index += 1;
+                        capture_remaining -= 1;
+                        capture_due = if capture_remaining > 0 {
+                            Some(now + capture_interval)
+                        } else {
+                            capture.take();
+                            None
+                        };
                     }
 
-                    capture_index += 1;
-                    capture_remaining -= 1;
-                    capture_due = if capture_remaining > 0 {
-                        Some(now + capture_interval)
-                    } else {
-                        capture.take();
-                        None
-                    };
+                    (result.is_ok() && damaged, captured)
                 }
-
-                (result.is_ok() && damaged, captured)
             }
         };
 
