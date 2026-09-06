@@ -449,10 +449,30 @@ impl Solium {
     /// mapped window. A pane without one answers from its own slot — the
     /// layout's answer for it, and the only one there is.
     pub(crate) fn pane_geometry(&self, pane: &Pane) -> Option<Rectangle<i32, Logical>> {
-        match pane.client() {
-            Some(window) => self.real_geometry(window),
-            None => Some(pane.slot()),
+        let Some(window) = pane.client() else {
+            return Some(pane.slot());
+        };
+        // A client that has mapped and not yet answered the size it was asked
+        // for has a window of no size at all. Taking the space's word for that
+        // collapses the pane to nothing for as long as it lasts -- which is
+        // most of the moment an application is starting, and is exactly the
+        // blank gap between the scene and the client. The slot is what the
+        // layout said, and it is still the truth. Same rule as `Panes::sync`.
+        match self.real_geometry(window) {
+            Some(real) if real.size.w > 0 && real.size.h > 0 => Some(real),
+            _ => Some(pane.slot()),
         }
+    }
+
+    /// Whether a client has anything worth showing yet.
+    ///
+    /// Both halves matter. A client with no buffer has painted nothing; a
+    /// client with a buffer and no size has a window of no size, and drawing
+    /// it draws nothing. Until both are true the compositor is still the one
+    /// with something to show.
+    pub(crate) fn client_ready(&self, window: &Window) -> bool {
+        let size = window.geometry().size;
+        size.w > 0 && size.h > 0 && self.has_content(window)
     }
 
     /// A pane as drawn, frame included. Every presentation transform is
@@ -488,6 +508,11 @@ impl Solium {
             .rev()
             .map(|pane| (pane.id(), pane.client().cloned()))
             .collect()
+    }
+
+    /// Whether the compositor is drawing this pane itself.
+    pub(crate) fn pane_has_scene(&self, id: crate::pane::PaneId) -> bool {
+        self.panes.get(id).is_some_and(Pane::has_scene)
     }
 
     /// What to write on a pane's frame.
@@ -643,7 +668,18 @@ impl Solium {
             return self.take_pane(window);
         };
         pane.adopt(window);
+        let slot = pane.slot();
         tracing::debug!(pane = id.get(), "an application arrived in its window");
+
+        // Told its size straight away, rather than on its first commit. A
+        // client that learns its size only after it has drawn paints one frame
+        // at a size it chose for itself, and that frame is visible -- so the
+        // window that has been standing there at the right size all along
+        // flickers to the wrong one and back at the exact moment it fills.
+        if let Some(window) = self.panes.get(id).and_then(Pane::client).cloned() {
+            size_window(&window, slot);
+            self.space.map_element(window, slot.loc, false);
+        }
         id.get()
     }
 
@@ -654,6 +690,30 @@ impl Solium {
     /// also the moment Smithay drops elements whose client has died — the only
     /// notice we get for a window that went away without telling anyone.
     pub(crate) fn sync_panes(&mut self) -> bool {
+        // A scene whose application has painted has been replaced, and can go.
+        //
+        // Here rather than where a client is first shown, because that is not
+        // the only way to arrive: an X11 window takes a different path, and a
+        // client adopted after its first commit takes none at all. Asking the
+        // question once a frame, about every pane, cannot miss one -- and a
+        // scene kept past its moment is a window that never shows its
+        // application.
+        let filled: Vec<crate::pane::PaneId> = self
+            .panes
+            .iter()
+            .filter(|pane| pane.has_scene())
+            .filter(|pane| {
+                pane.client()
+                    .is_some_and(|window| self.client_ready(window))
+            })
+            .map(Pane::id)
+            .collect();
+        for id in filled {
+            if self.panes.get_mut(id).is_some_and(Pane::filled) {
+                tracing::debug!(pane = id.get(), "an application filled its window");
+            }
+        }
+
         let stack: Vec<(Window, Rectangle<i32, Logical>)> = self
             .space
             .elements()
@@ -1724,9 +1784,11 @@ impl Solium {
             let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
                 return;
             };
+            // Sized again: adoption already asked for this, and a client that
+            // negotiated its decorations in between has a different amount of
+            // room than it was first told.
             size_window(window, slot);
             self.space.map_element(window.clone(), slot.loc, false);
-            tracing::debug!(pane = pane.get(), "an application filled its window");
             return;
         }
 
