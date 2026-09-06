@@ -242,10 +242,15 @@ thread_local! {
 }
 
 const VERTEX: &str = r"
+precision highp float;
 uniform mat3 projection;
 attribute vec2 position;
 attribute vec3 uvq;
-varying vec3 v_uvq;
+// Explicitly highp on both sides: a varying whose precision differs between
+// the two stages is a link error the driver is free to resolve by handing the
+// fragment stage zeroes, which looks exactly like an attribute that was never
+// uploaded.
+varying highp vec3 v_uvq;
 void main() {
     vec3 clip = projection * vec3(position, 1.0);
     gl_Position = vec4(clip.xy, 0.0, 1.0);
@@ -254,10 +259,10 @@ void main() {
 ";
 
 const FRAGMENT: &str = r"
-precision mediump float;
+precision highp float;
 uniform sampler2D tex;
 uniform float alpha;
-varying vec3 v_uvq;
+varying highp vec3 v_uvq;
 void main() {
     // The divide is the perspective correction: without it the texture is
     // interpolated affinely across each triangle and creases along the
@@ -315,6 +320,16 @@ impl Program {
                 uvq: gl.GetAttribLocation(id, c"uvq".as_ptr().cast()) as u32,
                 buffer,
             })
+            .inspect(|program| {
+                tracing::debug!(
+                    position = program.position,
+                    uvq = program.uvq,
+                    projection = program.projection,
+                    tex = program.tex,
+                    alpha = program.alpha,
+                    "warp program linked"
+                );
+            })
         }
     }
 
@@ -360,6 +375,21 @@ impl Program {
                 ffi::TEXTURE_WRAP_T,
                 i32::try_from(ffi::CLAMP_TO_EDGE).unwrap_or_default(),
             );
+            // Linear, and explicitly: a texture whose min filter still wants
+            // mipmaps -- the GL default, and what `create_buffer` hands back --
+            // is incomplete, and an incomplete texture samples as opaque
+            // black. That reads as "the capture drew nothing" and sends you
+            // looking in entirely the wrong place.
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_MIN_FILTER,
+                i32::try_from(ffi::LINEAR).unwrap_or_default(),
+            );
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_MAG_FILTER,
+                i32::try_from(ffi::LINEAR).unwrap_or_default(),
+            );
             gl.Uniform1i(self.tex, 0);
 
             gl.Enable(ffi::BLEND);
@@ -392,6 +422,16 @@ impl Program {
                 stride,
                 (2 * std::mem::size_of::<f32>()) as *const _,
             );
+
+            // Per vertex, not per instance. The divisor is state on the
+            // attribute *index*, not on the program, and Smithay draws its own
+            // elements instanced with a divisor of 1 on index 1 -- which is
+            // where `uvq` happens to land. Inherit that and every vertex reads
+            // corner 0's texture coordinate, so the whole quad samples one
+            // texel: the window renders as a single flat colour, geometry
+            // perfectly correct, which is a memorably confusing way to fail.
+            gl.VertexAttribDivisor(self.position, 0);
+            gl.VertexAttribDivisor(self.uvq, 0);
 
             gl.DrawArrays(ffi::TRIANGLES, 0, 6);
 
@@ -439,4 +479,21 @@ unsafe fn compile_stage(
 pub(crate) fn texture_size(texture: &GlesTexture) -> Size<i32, BufferCoords> {
     let _ = Transform::Normal;
     texture.size()
+}
+
+/// Point GL back at the window system's framebuffer.
+///
+/// An offscreen pass binds a framebuffer object of its own. On a backend that
+/// renders into an EGL surface rather than an FBO -- winit is one -- nothing
+/// ever binds FBO 0 again, so that object stays current and every later frame
+/// is drawn into a texture nobody shows. The compositor looks frozen while
+/// happily reporting successful frames. So whoever binds an FBO puts this
+/// back.
+pub(crate) fn release_framebuffer(renderer: &mut GlesRenderer) {
+    // SAFETY: `with_context` makes the renderer's context current for the
+    // call, and 0 is always a valid framebuffer name.
+    let restored = unsafe { renderer.with_context(|gl| gl.BindFramebuffer(ffi::FRAMEBUFFER, 0)) };
+    if let Err(err) = restored {
+        tracing::warn!(?err, "could not release the offscreen framebuffer");
+    }
 }

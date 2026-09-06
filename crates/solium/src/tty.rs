@@ -568,7 +568,9 @@ impl State {
         self.solium.redraw = false;
         let mut animating = false;
 
-        let elements = render::elements(&mut self.solium, renderer, 1.0);
+        // Offscreen captures first, for the reason `render::Prepared` gives.
+        let mut prepared = render::prepare(&mut self.solium, renderer, 1.0);
+        let elements = render::elements(&mut self.solium, renderer, 1.0, &mut prepared);
         match compositor.render_frame(
             renderer,
             &elements,

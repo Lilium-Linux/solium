@@ -294,6 +294,11 @@ pub(crate) fn run() -> Result<()> {
 
         // The renderer borrow must end before submit(), so rendering happens in
         // its own scope and only two flags escape.
+        // Before the output buffer is bound: this pass binds framebuffers of
+        // its own, and doing that underneath a bound output redirects the
+        // whole frame into a texture. See `render::Prepared`.
+        let mut prepared = render::prepare(&mut state, backend.renderer(), 1.0);
+
         let (rendered, captured) = match backend.bind() {
             Err(err) => {
                 tracing::warn!(?err, "could not bind the backend buffer, skipping frame");
@@ -303,7 +308,7 @@ pub(crate) fn run() -> Result<()> {
                 // Every window reaches the screen through the presentation
                 // transform, so a mode cannot animate differently from the
                 // layout -- they are the same code path.
-                let elements = render::elements(&mut state, renderer, 1.0);
+                let elements = render::elements(&mut state, renderer, 1.0, &mut prepared);
 
                 let result = damage_tracker.render_output(
                     renderer,

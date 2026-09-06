@@ -70,55 +70,65 @@ pub(crate) fn capture(
         }
     };
 
-    {
+    // The pass is its own scope so the framebuffer is dropped -- and then
+    // released, below -- on every path out of it, drawn or not.
+    let drawn = {
         let mut framebuffer = match renderer.bind(&mut texture) {
             Ok(framebuffer) => framebuffer,
             Err(err) => {
                 tracing::warn!(?err, "could not bind the offscreen buffer");
+                crate::warp::release_framebuffer(renderer);
                 return None;
             }
         };
-        let mut frame = match renderer.render(&mut framebuffer, size, Transform::Normal) {
-            Ok(frame) => frame,
+        // The renderer stays borrowed for as long as the frame lives, so the
+        // release cannot happen in here; the frame's own scope ends first.
+        match renderer.render(&mut framebuffer, size, Transform::Normal) {
             Err(err) => {
                 tracing::warn!(?err, "could not render into the offscreen buffer");
-                return None;
+                false
             }
-        };
+            Ok(mut frame) => {
+                // Transparent, not black: the window's own corners are rounded and
+                // anything opaque here would draw a square behind them.
+                frame
+                    .clear(Color32F::TRANSPARENT, &[Rectangle::from_size(size)])
+                    .unwrap_or_else(|err| {
+                        tracing::warn!(?err, "clearing the offscreen buffer failed")
+                    });
 
-        // Transparent, not black: the window's own corners are rounded and
-        // anything opaque here would draw a square behind them.
-        frame
-            .clear(Color32F::TRANSPARENT, &[Rectangle::from_size(size)])
-            .ok()?;
+                let whole = [Rectangle::from_size(size)];
+                for element in &elements {
+                    let source = element.src();
+                    let destination = element.geometry(Scale::from(scale));
+                    // Damage is the whole texture: it was just created, so nothing in
+                    // it is worth preserving.
+                    if let Err(err) = element.draw(&mut frame, source, destination, &whole, &[]) {
+                        tracing::warn!(?err, "a window did not render offscreen");
+                    }
+                }
 
-        let whole = [Rectangle::from_size(size)];
-        for element in &elements {
-            let source = element.src();
-            let destination = element.geometry(Scale::from(scale));
-            // Damage is the whole texture: it was just created, so nothing in
-            // it is worth preserving.
-            if let Err(err) = element.draw(&mut frame, source, destination, &whole, &[]) {
-                tracing::warn!(?err, "a window did not render offscreen");
-            }
-        }
-        // Waited on, not dropped. The fence says when the GPU has actually
-        // finished drawing into this texture; sampling it before then is a
-        // race that shows up as a window full of garbage, intermittently,
-        // which is the worst kind of rendering bug to be handed.
-        match frame.finish() {
-            Ok(sync) => {
-                if let Err(err) = sync.wait() {
-                    tracing::warn!(?err, "waiting for the offscreen draw failed");
-                    return None;
+                // Waited on, not dropped. The fence says when the GPU has actually
+                // finished drawing into this texture; sampling it before then is a
+                // race that shows up as a window full of garbage, intermittently,
+                // which is the worst kind of rendering bug to be handed.
+                match frame.finish() {
+                    Ok(sync) => match sync.wait() {
+                        Ok(()) => true,
+                        Err(err) => {
+                            tracing::warn!(?err, "waiting for the offscreen draw failed");
+                            false
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!(?err, "the offscreen draw did not finish");
+                        false
+                    }
                 }
             }
-            Err(err) => {
-                tracing::warn!(?err, "the offscreen draw did not finish");
-                return None;
-            }
         }
-    }
+    };
 
-    Some((texture, size))
+    crate::warp::release_framebuffer(renderer);
+    drawn.then_some((texture, size))
 }
