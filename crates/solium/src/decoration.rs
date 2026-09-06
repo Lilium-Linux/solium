@@ -70,6 +70,13 @@ pub(crate) struct Decoration {
     buffer: Option<MemoryRenderBuffer>,
     buffer_size: (i32, i32),
     shown: Shown,
+    /// The scene has reported no further change, and nothing has been set on
+    /// it since. Re-rendering it would produce the same pixels, so it is not
+    /// re-rendered until something asks it to.
+    quiet: bool,
+    /// Pixels rendered but not yet copied into the buffer, because the buffer
+    /// is created after the render: stride and rows, as the scene gave them.
+    pending: Option<(usize, Vec<u8>)>,
     /// Where the window was before it was maximised. `Some` means maximised —
     /// one field rather than a flag and a rect that can disagree.
     pub(crate) restore: Option<Rectangle<i32, Logical>>,
@@ -84,6 +91,8 @@ impl Decoration {
             buffer: None,
             buffer_size: (0, 0),
             shown: Shown::default(),
+            quiet: false,
+            pending: None,
             restore: None,
         })
     }
@@ -110,27 +119,44 @@ impl Decoration {
         let width = width.max(1);
         self.scene.resize(width, TITLEBAR_HEIGHT);
 
-        let wanted = Shown {
-            title: title.to_owned(),
-            focused,
-        };
-        if wanted != self.shown {
-            self.scene.set_string("title", &wanted.title);
-            self.scene.set_bool("focused", wanted.focused);
-            self.shown = wanted;
+        // Compared field by field rather than by building a `Shown`: this runs
+        // for every window of every frame, and the title is the one thing here
+        // that allocates.
+        if self.shown.title != title || self.shown.focused != focused {
+            self.scene.set_string("title", title);
+            self.scene.set_bool("focused", focused);
+            self.shown.title.clear();
+            self.shown.title.push_str(title);
+            self.shown.focused = focused;
+            self.quiet = false;
         }
-
-        self.scene.advance(now);
-        let rendered = match self.scene.render() {
-            Ok(rendered) => rendered,
-            Err(err) => {
-                tracing::warn!(?err, "a window frame did not render");
-                return None;
-            }
-        };
 
         let size = (width, TITLEBAR_HEIGHT);
         let resized = self.buffer_size != size;
+        if resized {
+            self.quiet = false;
+        }
+
+        // A titlebar is animating only just after it was told something --
+        // focus fading in, mostly. Once the scene says it has settled, driving
+        // Qt's scene graph every frame buys identical pixels, so it stops
+        // until the next thing is set on it.
+        if !self.quiet {
+            self.scene.advance(now);
+            match self.scene.render() {
+                Ok(rendered) => {
+                    if rendered.changed || resized {
+                        self.pending = Some((rendered.stride, rendered.pixels.to_vec()));
+                    }
+                    self.quiet = !rendered.changed;
+                }
+                Err(err) => {
+                    tracing::warn!(?err, "a window frame did not render");
+                    return None;
+                }
+            }
+        }
+
         if self.buffer.is_none() || resized {
             self.buffer = Some(MemoryRenderBuffer::new(
                 Fourcc::Argb8888,
@@ -143,13 +169,13 @@ impl Decoration {
         }
         let buffer = self.buffer.as_mut()?;
 
-        if rendered.changed || resized {
+        if let Some((stride, pixels)) = self.pending.take() {
             let mut context = buffer.render();
             let copy = context.draw(|target| {
                 let row_bytes = usize::try_from(size.0.max(0)).unwrap_or_default() * 4;
                 for (row, destination) in target.chunks_exact_mut(row_bytes).enumerate() {
-                    let start = row * rendered.stride;
-                    let Some(source) = rendered.pixels.get(start..start + row_bytes) else {
+                    let start = row * stride;
+                    let Some(source) = pixels.get(start..start + row_bytes) else {
                         return Err(());
                     };
                     destination.copy_from_slice(source);

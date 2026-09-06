@@ -1046,6 +1046,14 @@ impl Solium {
     /// on it, and a bar that re-evaluates sixty times a second because nothing
     /// happened is a bar that costs something to look at.
     pub(crate) fn publish_windows(&mut self) {
+        // Nobody to tell, nothing to say. The window list is serialised for the
+        // shell, and building it walks every window, asks each for its title
+        // and app id, and allocates a string per window -- every frame, once
+        // something is animating. With no shell hosted that is pure waste, and
+        // the ordinary case is no shell hosted.
+        if self.shell.is_none() {
+            return;
+        }
         let focused = self.focused_window();
         let mut windows = String::from("{\"windows\":[");
         let mut active = String::from("null");
