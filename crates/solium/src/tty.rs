@@ -356,6 +356,13 @@ pub(crate) fn run() -> Result<()> {
                 state.render();
             }
             state.solium.space.refresh();
+            // A window that appeared or went away is a different screen, whatever
+            // route it took there. Smithay drops a dead client's element during
+            // `refresh` and tells nobody, so without this the last frame it was
+            // in can sit there until something unrelated causes damage.
+            if state.solium.sync_panes() {
+                state.solium.redraw = true;
+            }
             state.solium.popups.cleanup();
             let _ = state.solium.display_handle.flush_clients();
         })

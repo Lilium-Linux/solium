@@ -18,11 +18,22 @@
 //! window, a placeholder for an application that died, and a surface the
 //! compositor draws for its own reasons one mechanism instead of three.
 //!
-//! Wired to nothing yet: see `docs/spikes/2026-09-06-window-provider.md` for
-//! the order the migration goes in and why it goes in that order.
+//! `Space` has not gone away and is not going to. It stays underneath as the
+//! authority on stacking and damage for mapped clients, because that
+//! bookkeeping is worth keeping and not worth rewriting. `Panes` is the
+//! compositor's own view *over* it: everything the compositor decides — which
+//! window a script means, what is drawn, what the pointer is over — asks here,
+//! and only the mapped case asks `Space` anything.
+//!
+//! See `docs/spikes/2026-09-06-window-provider.md` for the order the migration
+//! goes in and why it goes in that order.
 #![expect(
     dead_code,
-    reason = "step 1 of the migration: the type, before anything uses it"
+    reason = "steps 4 and 5 of the migration bring the loading half into use: \
+              adopting a client by its process, drawing a pane that has none \
+              yet, and keeping one on screen while it leaves. Per-item is not \
+              an option -- dead_code reports a whole impl block at one span, \
+              so an expect on one method cannot match it."
 )]
 
 use std::{path::PathBuf, time::Duration};
@@ -135,7 +146,6 @@ impl Pane {
             _ => None,
         }
     }
-
     pub(crate) const fn is_loading(&self) -> bool {
         matches!(self.content, Content::Loading { .. })
     }
@@ -177,6 +187,123 @@ impl Pane {
             Content::Loading { program, .. } => Some(program),
             _ => None,
         }
+    }
+}
+
+/// Every pane, bottom to top.
+///
+/// The same order `Space` stacks its elements in, because it is the order both
+/// a hit test and a window list want — reversed, you are looking at what is on
+/// top first, which is what "which window is this click for" means.
+///
+/// This is the compositor's own view. `Space` is still underneath and still the
+/// authority on where a mapped client is and what damage it did; `sync` is the
+/// one place the two are reconciled, so they cannot drift apart anywhere else.
+#[derive(Debug, Default)]
+pub(crate) struct Panes {
+    panes: Vec<Pane>,
+}
+
+impl Panes {
+    /// Bottom to top. `.rev()` for a hit test.
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &Pane> {
+        self.panes.iter()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.panes.len()
+    }
+    pub(crate) fn get_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
+        self.panes.iter_mut().find(|pane| pane.id == id)
+    }
+
+    /// The pane a script means by an id.
+    pub(crate) fn get(&self, id: u64) -> Option<&Pane> {
+        self.panes.iter().find(|pane| pane.id.get() == id)
+    }
+
+    /// The pane a client's window is the content of.
+    pub(crate) fn of(&self, window: &Window) -> Option<&Pane> {
+        self.panes.iter().find(|pane| pane.client() == Some(window))
+    }
+
+    pub(crate) fn id_of(&self, window: &Window) -> Option<PaneId> {
+        self.of(window).map(Pane::id)
+    }
+
+    /// Take a pane for a client that arrived without being asked for, on top.
+    ///
+    /// Called where the window is mapped, so that nothing can observe a mapped
+    /// window that has no pane. `sync` would create one at the next refresh
+    /// anyway; this is what makes the id available *now*, to the script that is
+    /// about to be told the window opened.
+    pub(crate) fn mapped(
+        &mut self,
+        window: Window,
+        slot: Rectangle<i32, Logical>,
+        now: Duration,
+    ) -> PaneId {
+        if let Some(existing) = self.id_of(&window) {
+            return existing;
+        }
+        let pane = Pane::mapped(window, slot, now);
+        let id = pane.id;
+        self.panes.push(pane);
+        id
+    }
+
+    /// Reconcile against the space, given its elements bottom to top with the
+    /// slot each one occupies.
+    ///
+    /// Three things happen here and nowhere else: a pane whose client has gone
+    /// is retired, a client with no pane gets one, and the order is brought
+    /// back in line with the stacking `Space` keeps. Doing it in one pass over
+    /// one input is the only reason the two views can be trusted to agree —
+    /// the alternative is remembering to do it at every site that maps or
+    /// unmaps, which is the same discipline written down six times.
+    ///
+    /// Returns whether anything changed, so a caller can skip work that only
+    /// matters when the window list is different.
+    pub(crate) fn sync(
+        &mut self,
+        stack: &[(Window, Rectangle<i32, Logical>)],
+        now: Duration,
+    ) -> bool {
+        let before: Vec<PaneId> = self.panes.iter().map(|pane| pane.id).collect();
+
+        // Taken out one at a time and put back in the space's order. Whatever
+        // is still here at the end has no client in the space.
+        let mut held: Vec<Option<Pane>> = self.panes.drain(..).map(Some).collect();
+
+        let mut ordered: Vec<Pane> = Vec::with_capacity(stack.len());
+        for (window, slot) in stack {
+            let mine = held
+                .iter_mut()
+                .find(|held| {
+                    held.as_ref()
+                        .is_some_and(|pane| pane.client() == Some(window))
+                })
+                .and_then(Option::take);
+            // The space is the authority on where a mapped client is, and this
+            // is the one place a pane is told so. A loading pane's slot is its
+            // own, which is why the two cannot be the same assignment.
+            let mut pane = mine.unwrap_or_else(|| Pane::mapped(window.clone(), *slot, now));
+            pane.set_slot(*slot);
+            ordered.push(pane);
+        }
+
+        // A pane still waiting for a client stays, and rides on top, where a
+        // window just asked for belongs. One whose client has gone is retired
+        // here; step 5 is where it lingers to animate out instead of vanishing.
+        ordered.extend(
+            held.into_iter()
+                .flatten()
+                .filter(|pane| pane.client().is_none()),
+        );
+        self.panes = ordered;
+
+        let after: Vec<PaneId> = self.panes.iter().map(|pane| pane.id).collect();
+        before != after
     }
 }
 
@@ -294,6 +421,47 @@ mod tests {
                 PathBuf::from("/tmp/mine.qml")
             );
         }
+    }
+
+    #[test]
+    fn syncing_against_an_empty_space_keeps_what_is_still_waiting() {
+        // Nothing here can build a real `Window`, so what is testable is the
+        // half that matters most anyway: a pane whose application has not
+        // arrived must survive a reconcile that finds no client for it. Get
+        // this wrong and a loading window is retired the frame after it
+        // appears -- which looks exactly like the feature not working.
+        let mut panes = Panes::default();
+        let mut ids = Vec::new();
+        for name in ["kitty", "firefox"] {
+            let pane = Pane::loading(name, Some(1), slot(), PathBuf::new(), Duration::ZERO);
+            ids.push(pane.id());
+            panes.panes.push(pane);
+        }
+
+        assert!(
+            !panes.sync(&[], Duration::from_secs(1)),
+            "nothing came and nothing went"
+        );
+        assert_eq!(panes.len(), 2);
+        assert_eq!(
+            panes.iter().map(Pane::id).collect::<Vec<_>>(),
+            ids,
+            "and they kept their order"
+        );
+    }
+
+    #[test]
+    fn a_script_addresses_a_pane_by_its_id() {
+        let mut panes = Panes::default();
+        let pane = Pane::loading("kitty", None, slot(), PathBuf::new(), Duration::ZERO);
+        let id = pane.id();
+        panes.panes.push(pane);
+
+        assert_eq!(panes.get(id.get()).map(Pane::id), Some(id));
+        assert!(
+            panes.get(id.get() + 1000).is_none(),
+            "an id that no longer exists is not found, not a panic"
+        );
     }
 
     #[test]
