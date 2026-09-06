@@ -203,7 +203,7 @@ extern "C" SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width,
     if (scene->root == nullptr) {
         delete created;
         solium_qml_scene_free(scene);
-        return fail("the QML root is not an Item");
+        return fail("the QML root is not an Item, or the component could not be created — a required property left unset will do this");
     }
 
     scene->root->setParentItem(scene->window->contentItem());

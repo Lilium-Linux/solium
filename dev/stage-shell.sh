@@ -34,9 +34,19 @@ find "$source_root" -type d -not -path '*/.git*' -not -path '*/build*' | while r
     shopt -u nullglob
     [[ ${#files[@]} -eq 0 ]] && continue
 
-    module="qs${relative:+.${relative//\//.}}"
+    # Deliberately no `module` line.
+    #
+    # A qmldir that declares a module turns the directory into one, and QML's
+    # implicit directory import — where a file sees its siblings without
+    # importing anything — is switched off for it. The shell's files rely on
+    # that: none of the twenty configuration files imports `qs.config`, they
+    # just name each other. Declaring the module made every one of them unable
+    # to see the next, which reads as a dependency chain and is nothing of the
+    # kind.
+    #
+    # Without the line the directory still answers to `import qs.config`,
+    # because that resolves by path, and siblings resolve as they always did.
     {
-        echo "module $module"
         for file in "${files[@]}"; do
             name="$(basename "$file" .qml)"
             # A type name must start with a capital; anything else is a plain
