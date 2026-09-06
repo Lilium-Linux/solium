@@ -88,42 +88,68 @@ everything; steps 3 to 5 are where the behaviour people asked for appears.
 
 ## Where this got to
 
-**Done:** step 1. `crates/solium/src/pane.rs` holds `Pane`, `PaneId` and
-`Content`, with tests for the properties the design rests on, and
+**Done:** steps 1 and 2.
+
+Step 1 is `crates/solium/src/pane.rs`: `Pane`, `PaneId`, `Content`, and
 `loading_source` making the loading scene configurable the way decorations
-are. Wired to nothing. `main` is untouched and carries everything else.
+are.
 
-**Next:** step 2, the space becoming panes. What reading the code turned up,
-so the next session does not have to find it again:
+Step 2 put it underneath everything. `Panes` is a list of panes, bottom to
+top, and it is now what the compositor means by "its windows":
 
-* `Solium::snapshot()` in `state.rs` is the seam that matters most. It builds
-  `WindowInfo` by iterating `space.elements().rev()` and asking
-  `outer_geometry`, `present::frame`, `window_title` and `focused_window` for
-  each. Build it from `panes` instead and step 3 — a loading pane getting a
-  real slot from the layout — costs almost nothing extra, because scripts
-  already place whatever the snapshot contains.
-* The other `space.elements()` callers are `render::elements` and
-  `render::prepare` (drawing), `frame_under` / `decorated_under` /
-  `surface_under` (input), `settle_closing` and `Command::Decoration`
-  (lifetime and relayout), and `publish_windows` (the shell's window list).
-  Each wants a pane rather than a `Window`; none of them wants `Space` gone,
-  which is why `Space` stays underneath for mapped content.
-* Windows enter through `new_toplevel` and `show_if_new`, and leave through
-  `toplevel_destroyed`. Those three are where panes are created, adopted and
-  retired.
-* `window_id(window)` currently derives a script-visible id from the surface.
-  That becomes `PaneId::get()`, which is what lets an id outlive the arrival
-  of a surface — and it is the reason a script that learned about a window
-  while it was loading is still talking about the same window afterwards.
-* Decorations are keyed by `toplevel_id` (a surface id). Re-keying them by
-  `PaneId` is what makes a frame survive adoption with its animation intact.
+* `snapshot()` — the list scripts place — is built from panes.
+* `window_id` is the pane's id, not the surface's. That is the whole point:
+  it can exist before the surface does, so a script told about a window
+  while its application is starting is talking about the same window
+  afterwards, because nothing was replaced.
+* `Decorations` is keyed by `PaneId`, so a frame survives adoption with its
+  animation still running rather than being rebuilt.
+* Drawing (`on_screen`), hit-testing (`window_under`, `surface_under`,
+  `frame_under`, `decorated_under`, `resize_target`) and the window counts
+  all walk panes. `frame_under` and `decorated_under` answer *with* a pane.
+* `sync_panes` is the single place the pane list and the space are
+  reconciled — a client with no pane gets one, a pane whose client has gone
+  is retired, and the order is brought back in line with the stacking
+  `Space` keeps. It is called where the space is refreshed, once per frame.
 
-**Order inside step 2**, each ending with the compositor working: panes
-tracked alongside the space and kept in sync; `snapshot()` built from them;
-`window_id` becoming `PaneId`; decorations re-keyed; then the render and input
-paths taking a pane.
+`Space` did not go away and is not going to. It is still the authority on
+where a mapped client is, what damage it did, and which surface is under a
+point *within* a window. What changed is that nothing above that level asks
+it what windows exist.
 
-**Still true and easy to forget:** everything above has to stay configurable.
-The loading scene already is. When a loading pane gets a slot in step 3, how
-long it waits and whether it takes a slot at all belong in `config.lua`, not in
-constants.
+Two things fell out of the re-keying rather than being aimed at:
+
+* A frame is dropped in `sync_panes`, with its pane. Keyed by surface that
+  could not happen there, because nothing knew the set of live windows — so
+  it was done where a window was seen leaving tidily, and a client that
+  crashed left its frame behind. Same for a pending close.
+* `sync_panes` reports whether the window set changed, and both backends
+  redraw when it did. A window that vanished by any route is a different
+  screen; without this the last frame it was in could sit there until
+  something unrelated caused damage.
+
+**Next:** step 3, layout and snapshot — a loading pane getting a real slot,
+and the tiling arithmetic running on a count that includes it. Most of the
+cost was paid in step 2: `snapshot()` already returns whatever the pane list
+holds, so the work is letting a pane with no client through the `client()?`
+filter in `snapshot`, `on_screen` and the hit tests, and giving it geometry
+of its own instead of asking the space.
+
+What is worth knowing before starting it:
+
+* A pane's `slot` is authoritative only for a pane with no client. For a
+  mapped one, `sync_panes` overwrites it from the space every frame, because
+  the space is the authority there. A loading pane's slot has to be written
+  by the layout and left alone — so the two assignments cannot become one.
+* Panes with no client currently sort to the top of the list, which is where
+  a window just asked for belongs. If step 5 ever wants a loading pane to
+  hold a position among the others, `Panes::sync` is the one place that
+  decides it.
+* `window_under` and friends return a `Window`. Every one of them will need
+  to answer for a pane that has none; `frame_under` and `decorated_under`
+  already answer with the pane, and are the shape the rest should take.
+
+**Still true and easy to forget:** everything above has to stay
+configurable. The loading scene already is. When a loading pane gets a slot,
+how long it waits and whether it takes a slot at all belong in `config.lua`,
+not in constants.
