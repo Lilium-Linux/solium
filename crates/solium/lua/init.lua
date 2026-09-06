@@ -119,6 +119,11 @@ sol.log("solium configuration loaded")
 -- through a letterbox instead of shrinking. `spread` is how much of it is in
 -- motion at once. Composes with a transform: add `rotate_y` here and the
 -- window tilts while it is sucked in.
+-- Show or hide the Developer Tweaks panel. Nothing without --debug-mode.
+sol.bind("super+shift+d", function()
+    sol.tweaks_toggle()
+end)
+
 -- Read this file again, without ending the session. Edit anything -- a
 -- binding, a gap, a decoration, a whole layout mode -- and press it.
 sol.bind("super+shift+r", function()
