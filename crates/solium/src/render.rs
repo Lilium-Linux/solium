@@ -169,7 +169,19 @@ pub(crate) fn elements(
         // including its frame — so the frame scales and moves with the window
         // rather than beside it.
         let frame = present::frame(&window, outer, now);
-        let inset = f64::from(state.frame_inset(&window)) * ratio(frame.rect.size.h, outer.size.h);
+        // The frame's share, in drawn pixels: a transform that scaled the
+        // window scaled its frame with it.
+        let insets = state.frame_insets(&window);
+        let across = ratio(frame.rect.size.w, outer.size.w);
+        let down = ratio(frame.rect.size.h, outer.size.h);
+        let (left, top) = (
+            f64::from(insets.left) * across,
+            f64::from(insets.top) * down,
+        );
+        let (taken_x, taken_y) = (
+            f64::from(insets.horizontal()) * across,
+            f64::from(insets.vertical()) * down,
+        );
 
         // A transform that is not identity cannot be drawn as a rectangle. The
         // window is rendered flat into a texture first — frame and popups
@@ -189,27 +201,47 @@ pub(crate) fn elements(
             continue;
         }
 
-        if inset >= 1.0 {
+        // The frame covers the whole window, not a strip of it: whatever it
+        // does not draw on is left transparent, and that is what lets a
+        // decoration put its bar on any side, or draw a border, or both.
+        // Drawn whenever there is a decoration at all, not only when it
+        // reserved space: a frame that takes nothing and floats over the
+        // window -- a bar that appears on hover, a border that does not push
+        // the client around -- is a decoration too.
+        {
             let title = state.window_title(&window);
-            let focused = state.is_focused(&window);
-            let bar = present::logical(
-                (frame.rect.loc.x, frame.rect.loc.y),
-                (frame.rect.size.w, inset),
-            );
+            let look = crate::decoration::Look {
+                title: &title,
+                focused: state.is_focused(&window),
+                pointer_inside: state.pointer_inside(&window),
+            };
+            let mut animating = false;
             if let Some(id) = state.toplevel_id(&window)
                 && let Some(decoration) = state.decorations.get_mut(&id)
-                && let Some(element) =
-                    decoration.frame(renderer, bar, real.size.w, &title, focused, now)
             {
-                elements.push(Element::Chrome(element));
+                if let Some(element) =
+                    decoration.frame(renderer, frame.rect, outer.size, &look, now)
+                {
+                    elements.push(Element::Chrome(element));
+                }
+                animating = decoration.animating();
+            }
+            // Ask for another frame while the decoration is still moving. The
+            // client has not damaged anything, so without this the next frame
+            // never comes and the animation stops where it stood.
+            if animating {
+                state.redraw = true;
             }
         }
 
         // What is left of the drawn rect once the frame has taken its share is
-        // the client's, which is what "the frame reserves its height" means.
+        // the client's.
         let client = present::logical(
-            (frame.rect.loc.x, frame.rect.loc.y + inset),
-            (frame.rect.size.w, (frame.rect.size.h - inset).max(1.0)),
+            (frame.rect.loc.x + left, frame.rect.loc.y + top),
+            (
+                (frame.rect.size.w - taken_x).max(1.0),
+                (frame.rect.size.h - taken_y).max(1.0),
+            ),
         );
 
         // The surface tree is built as if at its real size and then scaled,
@@ -363,26 +395,32 @@ pub(crate) fn flat_window_elements(
     else {
         return elements;
     };
-    let inset = f64::from(state.frame_inset(window));
+    let insets = state.frame_insets(window);
     let output_scale = Scale::from(scale);
 
-    // The frame, at the top of the texture.
-    if inset >= 1.0 {
+    // The frame, over the whole texture.
+    {
         let title = state.window_title(window);
-        let focused = state.is_focused(window);
-        let bar = present::logical((0.0, 0.0), (f64::from(outer.size.w), inset));
+        let look = crate::decoration::Look {
+            title: &title,
+            focused: state.is_focused(window),
+            pointer_inside: state.pointer_inside(window),
+        };
+        let whole = present::logical(
+            (0.0, 0.0),
+            (f64::from(outer.size.w), f64::from(outer.size.h)),
+        );
         if let Some(id) = state.toplevel_id(window)
             && let Some(decoration) = state.decorations.get_mut(&id)
-            && let Some(element) =
-                decoration.frame(renderer, bar, real.size.w, &title, focused, now)
+            && let Some(element) = decoration.frame(renderer, whole, outer.size, &look, now)
         {
             elements.push(Element::Chrome(element));
         }
     }
 
-    // The client below it.
+    // The client within it.
     let origin = present::logical(
-        (0.0, inset),
+        (f64::from(insets.left), f64::from(insets.top)),
         (f64::from(real.size.w), f64::from(real.size.h)),
     )
     .loc

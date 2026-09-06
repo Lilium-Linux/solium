@@ -84,6 +84,8 @@ const char *solium_qml_scene_take_string(SoliumQmlScene *scene, const char *name
 
 void solium_qml_scene_set_string(SoliumQmlScene *scene, const char *name, const char *value);
 void solium_qml_scene_set_bool(SoliumQmlScene *scene, const char *name, int value);
+void solium_qml_scene_set_int(SoliumQmlScene *scene, const char *name, int value);
+int solium_qml_scene_get_int(const SoliumQmlScene *scene, const char *name);
 
 /* Read a bool property. Non-clearing: this is state QML owns and we observe. */
 int solium_qml_scene_get_bool(const SoliumQmlScene *scene, const char *name);

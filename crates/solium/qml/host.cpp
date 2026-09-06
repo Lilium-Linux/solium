@@ -381,6 +381,24 @@ extern "C" void solium_qml_scene_set_bool(SoliumQmlScene *scene, const char *nam
     scene->root->setProperty(name, QVariant(value != 0));
 }
 
+extern "C" void solium_qml_scene_set_int(SoliumQmlScene *scene, const char *name, int value)
+{
+    if (scene == nullptr || scene->root == nullptr) {
+        return;
+    }
+    scene->root->setProperty(name, QVariant(value));
+}
+
+/* How much of the window a decoration reserves is the decoration's decision,
+ * so it is read back from QML rather than configured beside it. */
+extern "C" int solium_qml_scene_get_int(const SoliumQmlScene *scene, const char *name)
+{
+    if (scene == nullptr || scene->root == nullptr) {
+        return 0;
+    }
+    return scene->root->property(name).toInt();
+}
+
 extern "C" int solium_qml_scene_get_bool(const SoliumQmlScene *scene, const char *name)
 {
     if (scene == nullptr || scene->root == nullptr) {

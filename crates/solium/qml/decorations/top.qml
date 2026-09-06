@@ -18,8 +18,22 @@ import Solium
 Item {
     id: frame
 
+    // How much of the window this frame reserves. Read once, when the frame is
+    // built, and everything else follows from it: the client is placed inside
+    // what is left, and this Item covers the whole outer rect.
+    property int insetTop: 32
+    property int insetRight: 0
+    property int insetBottom: 0
+    property int insetLeft: 0
+
+    // Set by the compositor.
     property string title: ""
     property bool focused: false
+    property bool pointerInside: false
+    property int contentWidth: 0
+    property int contentHeight: 0
+
+    // Read by the compositor.
     property string action: ""
 
     // Which button the pointer is over, or empty. Read by the compositor to
@@ -68,8 +82,13 @@ Item {
         }
     }
 
+    // The bar itself. The rest of this Item is over the client and stays
+    // transparent, which is what "the frame covers the whole window" means.
     Rectangle {
-        anchors.fill: parent
+        id: bar
+
+        anchors { left: parent.left; right: parent.right; top: parent.top }
+        height: frame.insetTop
         color: frame.focused ? Theme.surface : Theme.surfaceInactive
         Behavior on color { ColorAnimation { duration: Theme.normal } }
 
@@ -83,7 +102,7 @@ Item {
     }
 
     Text {
-        anchors.centerIn: parent
+        anchors.centerIn: bar
         width: Math.min(implicitWidth, Math.max(frame.width - 150, 0))
         text: frame.title
         elide: Text.ElideRight
@@ -96,9 +115,9 @@ Item {
 
     Row {
         anchors {
-            right: parent.right
+            right: bar.right
             rightMargin: Theme.margin
-            verticalCenter: parent.verticalCenter
+            verticalCenter: bar.verticalCenter
         }
         spacing: Theme.gap
 
