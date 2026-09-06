@@ -88,68 +88,65 @@ everything; steps 3 to 5 are where the behaviour people asked for appears.
 
 ## Where this got to
 
-**Done:** steps 1 and 2.
+**Done:** steps 1, 2 and 3.
 
-Step 1 is `crates/solium/src/pane.rs`: `Pane`, `PaneId`, `Content`, and
-`loading_source` making the loading scene configurable the way decorations
-are.
+Step 1 is `crates/solium/src/pane.rs`: `Pane`, `PaneId`, `Content`, `Panes`.
 
-Step 2 put it underneath everything. `Panes` is a list of panes, bottom to
-top, and it is now what the compositor means by "its windows":
+Step 2 put panes underneath everything — `snapshot()`, `window_id`,
+decorations (re-keyed by `PaneId`), drawing, every hit test. `sync_panes` is
+the single place the pane list and the space are reconciled. `Space` did not
+go away and is not going to: it is still the authority on where a mapped
+client is, what damage it did, and which surface is under a point *within* a
+window. What changed is that nothing above that level asks it what windows
+exist.
 
-* `snapshot()` — the list scripts place — is built from panes.
-* `window_id` is the pane's id, not the surface's. That is the whole point:
-  it can exist before the surface does, so a script told about a window
-  while its application is starting is talking about the same window
-  afterwards, because nothing was replaced.
-* `Decorations` is keyed by `PaneId`, so a frame survives adoption with its
-  animation still running rather than being rebuilt.
-* Drawing (`on_screen`), hit-testing (`window_under`, `surface_under`,
-  `frame_under`, `decorated_under`, `resize_target`) and the window counts
-  all walk panes. `frame_under` and `decorated_under` answer *with* a pane.
-* `sync_panes` is the single place the pane list and the space are
-  reconciled — a client with no pane gets one, a pane whose client has gone
-  is retired, and the order is brought back in line with the stacking
-  `Space` keeps. It is called where the space is refreshed, once per frame.
+Step 3 made a pane with no client a real window to the layout:
 
-`Space` did not go away and is not going to. It is still the authority on
-where a mapped client is, what damage it did, and which surface is under a
-point *within* a window. What changed is that nothing above that level asks
-it what windows exist.
+* Presentation state — the in-flight transform, and whether a window has ever
+  been on screen — moved from `Window::user_data()` onto `Pane`. It had to:
+  there was nowhere else to keep it for a pane with no window, and it has to
+  survive adoption untouched or a window would snap the instant its
+  application arrived.
+* `pane_geometry` answers for a pane the space knows nothing about. A client's
+  window asks the space; a pane without one answers from its own slot.
+* `place` moves a pane whether or not there is a window inside it to resize,
+  and `Present`, `PresentFrom`, `Clear` and `Close` all act on a pane.
+* `begin_loading` opens a window for an application that has been asked for,
+  and tells scripts it **opened**. That is the half that matters: a layout
+  keeps its own arrangement and adds to it on an open event, so a relayout
+  alone would never put the new window in the tree.
+* `settle_loading` gives up on applications that never arrive, so a window
+  cannot hold a slot forever.
 
-Two things fell out of the re-keying rather than being aimed at:
+Everything about it is in `config.lua` under `loading`: `scene`, `patience`,
+`reserves_a_slot`. `reserves_a_slot` gates the open event rather than only
+the snapshot, because a layout told a window opened keeps placing it however
+the snapshot is filtered afterwards.
 
-* A frame is dropped in `sync_panes`, with its pane. Keyed by surface that
-  could not happen there, because nothing knew the set of live windows — so
-  it was done where a window was seen leaving tidily, and a client that
-  crashed left its frame behind. Same for a pending close.
-* `sync_panes` reports whether the window set changed, and both backends
-  redraw when it did. A window that vanished by any route is a different
-  screen; without this the last frame it was in could sit there until
-  something unrelated caused damage.
+`SOLIUM_LOADING_AT="3000:firefox"` opens one on demand — the state cannot be
+reached by using the compositor normally, because every real program connects
+and connects fast. It is scaffolding for steps 4 and 5, and it goes when
+`spawn` starts doing this for real.
 
-**Next:** step 3, layout and snapshot — a loading pane getting a real slot,
-and the tiling arithmetic running on a count that includes it. Most of the
-cost was paid in step 2: `snapshot()` already returns whatever the pane list
-holds, so the work is letting a pane with no client through the `client()?`
-filter in `snapshot`, `on_screen` and the hit tests, and giving it geometry
-of its own instead of asking the space.
+**Next:** step 4, adoption. `new_toplevel` matches the connecting client's
+process against loading panes before creating anything, and the pane takes
+the window as its content — same id, same slot, same frame, same animation.
 
 What is worth knowing before starting it:
 
-* A pane's `slot` is authoritative only for a pane with no client. For a
-  mapped one, `sync_panes` overwrites it from the space every frame, because
-  the space is the authority there. A loading pane's slot has to be written
-  by the layout and left alone — so the two assignments cannot become one.
-* Panes with no client currently sort to the top of the list, which is where
-  a window just asked for belongs. If step 5 ever wants a loading pane to
-  hold a position among the others, `Panes::sync` is the one place that
-  decides it.
-* `window_under` and friends return a `Window`. Every one of them will need
-  to answer for a pane that has none; `frame_under` and `decorated_under`
-  already answer with the pane, and are the shape the rest should take.
+* `Pane::awaits(&[pid])` and `Pane::adopt(window)` already exist, tested, and
+  are two of the things the module-level `dead_code` expect is covering.
+  `Solium::ancestry(pid)` on `main` is the process walk to match against.
+* `begin_loading` takes a `pid` and nothing passes one yet. `spawn` is where
+  it comes from, and `spawn` is also where `begin_loading` has to replace
+  `begin_launch` — which is what makes the whole thing reachable without the
+  dev hook.
+* A missed adoption must open a window the old way, never lose one. Likewise
+  a client whose pane was closed while it was still starting.
+* `sync_panes` will create a *second* pane for an adopted window if adoption
+  runs after it, so adoption has to happen in `new_toplevel`, where the
+  window is mapped, and not later.
 
-**Still true and easy to forget:** everything above has to stay
-configurable. The loading scene already is. When a loading pane gets a slot,
-how long it waits and whether it takes a slot at all belong in `config.lua`,
-not in constants.
+**Still true and easy to forget:** everything stays configurable. When step 5
+draws the loading scene, what it shows and how it animates in belong to QML
+and `config.lua`, not to constants in Rust.
