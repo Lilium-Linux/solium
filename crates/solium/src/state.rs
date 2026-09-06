@@ -72,6 +72,21 @@ use crate::{
     script::{AnimationSpec, Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
 };
 
+/// A rectangle grown outward by the frame drawn around it.
+fn grown(real: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logical> {
+    if !insets.any() {
+        return real;
+    }
+    Rectangle::new(
+        (real.loc.x - insets.left, real.loc.y - insets.top).into(),
+        (
+            real.size.w + insets.horizontal(),
+            real.size.h + insets.vertical(),
+        )
+            .into(),
+    )
+}
+
 fn to_rect(rectangle: Rectangle<i32, Logical>) -> Rect {
     Rect {
         x: f64::from(rectangle.loc.x),
@@ -514,19 +529,37 @@ impl Solium {
     /// what makes a frame move, scale and animate with its window instead of
     /// beside it — in overview a thumbnail carries its own titlebar.
     pub(crate) fn outer_geometry(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
-        let real = self.real_geometry(window)?;
-        let insets = self.frame_insets(window);
-        if !insets.any() {
-            return Some(real);
-        }
-        Some(Rectangle::new(
-            (real.loc.x - insets.left, real.loc.y - insets.top).into(),
-            (
-                real.size.w + insets.horizontal(),
-                real.size.h + insets.vertical(),
-            )
-                .into(),
+        Some(grown(
+            self.real_geometry(window)?,
+            self.frame_insets(window),
         ))
+    }
+
+    /// Where a pane lives, as opposed to where it is drawn.
+    ///
+    /// A pane with a client asks the space, which is the authority for a
+    /// mapped window. A pane without one answers from its own slot — the
+    /// layout's answer for it, and the only one there is.
+    pub(crate) fn pane_geometry(&self, pane: &Pane) -> Option<Rectangle<i32, Logical>> {
+        match pane.client() {
+            Some(window) => self.real_geometry(window),
+            None => Some(pane.slot()),
+        }
+    }
+
+    /// A pane as drawn, frame included. Every presentation transform is
+    /// expressed against this.
+    pub(crate) fn pane_outer(&self, pane: &Pane) -> Option<Rectangle<i32, Logical>> {
+        Some(grown(self.pane_geometry(pane)?, self.insets_of(pane.id())))
+    }
+
+    /// How a pane is being drawn right now. Real geometry unless something is
+    /// animating it, and real geometry for a pane that has gone.
+    pub(crate) fn drawn(&self, id: crate::pane::PaneId, real: Rectangle<i32, Logical>) -> Frame {
+        self.panes.get(id).map_or_else(
+            || Frame::real(real),
+            |pane| present::frame(pane, real, self.clock.now()),
+        )
     }
 
     /// Every pane with something on screen, topmost first.
@@ -687,8 +720,8 @@ impl Solium {
             .rev()
             .filter_map(|pane| {
                 let window = pane.client()?;
-                let outer = self.outer_geometry(window)?;
-                let drawn = present::frame(window, outer, now);
+                let outer = self.pane_outer(pane)?;
+                let drawn = present::frame(pane, outer, now);
                 Some(WindowInfo {
                     id: pane.id().get(),
                     rect: to_rect(outer),
@@ -781,10 +814,10 @@ impl Solium {
                     deform,
                     animation,
                 } => {
-                    let Some(window) = self.window_by_id(id) else {
+                    let Some(pane) = self.panes.by_script_id(id) else {
                         continue;
                     };
-                    let Some(outer) = self.outer_geometry(&window) else {
+                    let Some(outer) = self.pane_outer(pane) else {
                         continue;
                     };
                     let target = Frame {
@@ -797,7 +830,7 @@ impl Solium {
                         deform,
                     };
                     present::present(
-                        &window,
+                        pane,
                         outer,
                         target,
                         now,
@@ -811,10 +844,10 @@ impl Solium {
                     opacity,
                     animation,
                 } => {
-                    let Some(window) = self.window_by_id(id) else {
+                    let Some(pane) = self.panes.by_script_id(id) else {
                         continue;
                     };
-                    let Some(outer) = self.outer_geometry(&window) else {
+                    let Some(outer) = self.pane_outer(pane) else {
                         continue;
                     };
                     let start = Frame {
@@ -824,7 +857,7 @@ impl Solium {
                         deform: None,
                     };
                     present::from(
-                        &window,
+                        pane,
                         outer,
                         start,
                         now,
@@ -833,13 +866,13 @@ impl Solium {
                     );
                 }
                 Command::Clear { id, animation } => {
-                    let Some(window) = self.window_by_id(id) else {
+                    let Some(pane) = self.panes.by_script_id(id) else {
                         continue;
                     };
-                    let Some(outer) = self.outer_geometry(&window) else {
+                    let Some(outer) = self.pane_outer(pane) else {
                         continue;
                     };
-                    present::clear(&window, outer, now, animation.duration, animation.easing);
+                    present::clear(pane, outer, now, animation.duration, animation.easing);
                 }
                 Command::Focus { id } => {
                     if let Some(window) = self.window_by_id(id) {
@@ -853,8 +886,8 @@ impl Solium {
                     animation,
                 } => self.place(id, rect, animation, now),
                 Command::Close { id } => {
-                    if let Some(window) = self.window_by_id(id) {
-                        self.close_window(&window);
+                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
+                        self.close_pane(pane);
                     }
                 }
                 Command::Decoration { name } => {
@@ -912,7 +945,7 @@ impl Solium {
             // Against where the window is *drawn*: a window in a mode should be
             // resized by its thumbnail's edge or not at all, never by an edge
             // that is somewhere else on screen.
-            let drawn = present::frame(window, outer, now).rect;
+            let drawn = present::frame(pane, outer, now).rect;
             let grown = Rectangle::new(
                 (
                     drawn.loc.x.round() as i32 - resize::RESIZE_BORDER,
@@ -964,11 +997,11 @@ impl Solium {
     /// mode use the same machinery and cannot disagree about where a window is
     /// going.
     fn place(&mut self, id: u64, rect: Rect, animation: AnimationSpec, now: Duration) {
-        let Some(window) = self.window_by_id(id) else {
+        let Some(pane) = self.panes.by_script_id(id).map(Pane::id) else {
             return;
         };
         // Captured before anything moves: this is where the animation starts.
-        let Some(was) = self.outer_geometry(&window) else {
+        let Some(was) = self.panes.get(pane).and_then(|held| self.pane_outer(held)) else {
             return;
         };
 
@@ -987,21 +1020,34 @@ impl Solium {
 
         // The frame's share comes off whichever sides it reserved; what is
         // left is the client's.
-        let client = inner(outer, self.frame_insets(&window));
+        let client = inner(outer, self.insets_of(pane));
 
-        size_window(&window, client);
-        // `false`: laying out must not restack. A tiling arrangement that
-        // reordered windows every time it ran would fight the user's focus.
-        self.space.map_element(window.clone(), client.loc, false);
+        // A client is moved and resized for real, and the space is told,
+        // because the space is the authority for a mapped window.
+        if let Some(window) = self.panes.get(pane).and_then(Pane::client).cloned() {
+            size_window(&window, client);
+            // `false`: laying out must not restack. A tiling arrangement that
+            // reordered windows every time it ran would fight the user's focus.
+            self.space.map_element(window, client.loc, false);
+        }
+        // And the pane is told either way. For a mapped window this is what
+        // `sync_panes` would write next frame anyway; for a pane whose
+        // application has not arrived it is the whole of the move, because
+        // there is nothing else holding its geometry.
+        if let Some(held) = self.panes.get_mut(pane) {
+            held.set_slot(client);
+        }
 
-        present::from(
-            &window,
-            outer,
-            present::Frame::real(was),
-            now,
-            animation.duration,
-            animation.easing,
-        );
+        if let Some(held) = self.panes.get(pane) {
+            present::from(
+                held,
+                outer,
+                present::Frame::real(was),
+                now,
+                animation.duration,
+                animation.easing,
+            );
+        }
     }
 
     /// Start a program as a client of this compositor.
@@ -1089,7 +1135,7 @@ impl Solium {
         self.panes.iter().rev().find_map(|pane| {
             let window = pane.client()?;
             let outer = self.outer_geometry(window)?;
-            if !present::frame(window, outer, now).rect.contains(location) {
+            if !present::frame(pane, outer, now).rect.contains(location) {
                 return None;
             }
             Some((window.clone(), self.real_geometry(window)?))
@@ -1124,7 +1170,7 @@ impl Solium {
             let Some(outer) = self.outer_geometry(window) else {
                 continue;
             };
-            let frame = present::frame(window, outer, now);
+            let frame = present::frame(pane, outer, now);
             if !frame.rect.contains(location) {
                 continue;
             }
@@ -1167,7 +1213,7 @@ impl Solium {
             }
             let window = pane.client()?;
             let outer = self.outer_geometry(window)?;
-            let drawn = present::frame(window, outer, now);
+            let drawn = present::frame(pane, outer, now);
             if !drawn.rect.contains(location) {
                 return None;
             }
@@ -1207,18 +1253,18 @@ impl Solium {
     /// instantly: by the time we hear about it its surface is gone, and
     /// animating it would mean holding a snapshot of every window on the
     /// chance that it might be the next to leave.
-    pub(crate) fn close_window(&mut self, window: &Window) {
-        let Some(id) = self.panes.id_of(window) else {
-            return;
-        };
+    pub(crate) fn close_pane(&mut self, id: crate::pane::PaneId) {
         if self.closing.contains_key(&id) {
             return;
         }
-        let Some(outer) = self.outer_geometry(window) else {
+        let Some(pane) = self.panes.get(id) else {
+            return;
+        };
+        let Some(outer) = self.pane_outer(pane) else {
             return;
         };
         let now = self.clock.now();
-        present::close(window, outer, now);
+        present::close(pane, outer, now);
         self.closing.insert(id, now + present::CLOSING);
         self.redraw = true;
     }
@@ -1251,10 +1297,14 @@ impl Solium {
     }
 
     /// Act on a frame button.
-    pub(crate) fn frame_action(&mut self, window: &Window, action: Action) {
+    pub(crate) fn frame_action(&mut self, pane: crate::pane::PaneId, action: Action) {
         match action {
-            Action::Close => self.close_window(window),
-            Action::ToggleMaximize => self.toggle_maximize(window),
+            Action::Close => self.close_pane(pane),
+            Action::ToggleMaximize => {
+                if let Some(window) = self.panes.get(pane).and_then(Pane::client).cloned() {
+                    self.toggle_maximize(&window);
+                }
+            }
         }
     }
 
@@ -1406,7 +1456,7 @@ impl Solium {
             }
             let window = pane.client()?;
             let outer = self.outer_geometry(window)?;
-            let drawn = present::frame(window, outer, now);
+            let drawn = present::frame(pane, outer, now);
             if !drawn.rect.contains(location) {
                 return None;
             }
@@ -1640,7 +1690,10 @@ impl Solium {
             return;
         }
 
-        if !present::mark_shown(window) {
+        let Some(pane) = self.panes.id_of(window) else {
+            return;
+        };
+        if !self.panes.get(pane).is_some_and(present::mark_shown) {
             return;
         }
 
@@ -1659,20 +1712,21 @@ impl Solium {
         // existence with no animation at all is worse than a plain one.
         if !self.trigger_open(window)
             && let Some(outer) = self.outer_geometry(window)
+            && let Some(pane) = self.panes.get(pane)
         {
             match from {
                 // The stand-in is already sitting exactly here and fading off
                 // it, so the window fades *up* in place. Growing it as well
                 // would be two things moving where the eye expects one.
                 Some(_) => present::from(
-                    window,
+                    pane,
                     outer,
                     present::Frame::real(outer).with_opacity(0.0),
                     self.clock.now(),
                     std::time::Duration::from_millis(180),
                     solium_animation::Curve::OutCubic,
                 ),
-                None => present::open(window, outer, self.clock.now()),
+                None => present::open(pane, outer, self.clock.now()),
             }
         }
     }

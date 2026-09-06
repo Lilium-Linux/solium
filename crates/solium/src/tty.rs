@@ -594,8 +594,8 @@ impl State {
             Err(err) => tracing::warn!(?err, "rendering failed"),
         }
 
-        for window in self.solium.space.elements() {
-            animating |= present::settle(window, now);
+        for pane in self.solium.panes.iter() {
+            animating |= present::settle(pane, now);
         }
         // A window that has finished leaving is told to close; until then the
         // session counts as animating so the frames keep coming.

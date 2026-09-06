@@ -401,8 +401,8 @@ pub(crate) fn run() -> Result<()> {
         // Retire transforms that have landed, so a settled window costs nothing
         // to draw. Every window is visited deliberately: a short-circuiting
         // check would leave later windows transformed forever.
-        for window in state.space.elements() {
-            present::settle(window, now);
+        for pane in state.panes.iter() {
+            present::settle(pane, now);
         }
         // A window that has finished leaving is told to close, and the loop
         // keeps drawing while any of them is still on its way out.

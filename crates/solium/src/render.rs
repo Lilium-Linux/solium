@@ -77,14 +77,13 @@ impl Prepared {
 ///
 /// Must run before the backend binds its own buffer; see [`Prepared`].
 pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f64) -> Prepared {
-    let now = state.clock.now();
     let mut warps = Vec::new();
 
-    for (_, window) in state.on_screen() {
+    for (pane, window) in state.on_screen() {
         let Some(outer) = state.outer_geometry(&window) else {
             continue;
         };
-        let frame = present::frame(&window, outer, now);
+        let frame = state.drawn(pane, outer);
         if frame.matrix.is_identity() && frame.deform.is_none() {
             continue;
         }
@@ -213,7 +212,7 @@ pub(crate) fn elements(
         // The transform is expressed against the *outer* rect — the window
         // including its frame — so the frame scales and moves with the window
         // rather than beside it.
-        let frame = present::frame(&window, outer, now);
+        let frame = state.drawn(pane, outer);
         // The frame's share, in drawn pixels: a transform that scaled the
         // window scaled its frame with it.
         let insets = state.frame_insets(&window);
