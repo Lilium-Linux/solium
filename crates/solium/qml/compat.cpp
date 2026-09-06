@@ -294,6 +294,81 @@ void FileView::setText(const QString &text)
     file.write(text.toUtf8());
 }
 
+Socket::Socket(QObject *parent) : QObject(parent), m_socket(new QLocalSocket(this))
+{
+    QObject::connect(m_socket, &QLocalSocket::connected, this, [this]() {
+        Q_EMIT connectedChanged();
+        Q_EMIT connectionStateChanged();
+    });
+    QObject::connect(m_socket, &QLocalSocket::disconnected, this, [this]() {
+        Q_EMIT connectedChanged();
+        Q_EMIT connectionStateChanged();
+    });
+    QObject::connect(m_socket, &QLocalSocket::readyRead, this, [this]() {
+        if (m_parser == nullptr) {
+            m_socket->readAll();
+            return;
+        }
+        const QString chunk = QString::fromUtf8(m_socket->readAll());
+        if (auto *collector = qobject_cast<StdioCollector *>(m_parser)) {
+            collector->append(chunk);
+        } else if (auto *parser = qobject_cast<SplitParser *>(m_parser)) {
+            parser->append(chunk);
+        }
+    });
+}
+
+void Socket::setPath(const QString &path)
+{
+    if (path == m_path) {
+        return;
+    }
+    m_path = path;
+    Q_EMIT pathChanged();
+}
+
+bool Socket::connected() const
+{
+    return m_socket->state() == QLocalSocket::ConnectedState;
+}
+
+void Socket::setConnected(bool connected)
+{
+    if (connected == this->connected()) {
+        return;
+    }
+    if (connected) {
+        if (m_path.isEmpty()) {
+            Q_EMIT error(QStringLiteral("no path"));
+            return;
+        }
+        m_socket->connectToServer(m_path);
+    } else {
+        m_socket->disconnectFromServer();
+    }
+}
+
+void Socket::setParser(QObject *parser)
+{
+    if (parser == m_parser) {
+        return;
+    }
+    m_parser = parser;
+    Q_EMIT parserChanged();
+}
+
+void Socket::write(const QString &data)
+{
+    if (connected()) {
+        m_socket->write(data.toUtf8());
+    }
+}
+
+void Socket::flush()
+{
+    m_socket->flush();
+}
+
 QString QuickshellGlobal::configDir() const
 {
     const QByteArray fromEnv = qgetenv("SOLIUM_SHELL_DIR");
@@ -347,12 +422,14 @@ void solium_qml_register_compat()
     qmlRegisterType<StdioCollector>("Quickshell.Io", 1, 0, "StdioCollector");
     qmlRegisterType<SplitParser>("Quickshell.Io", 1, 0, "SplitParser");
     qmlRegisterType<FileView>("Quickshell.Io", 1, 0, "FileView");
+    qmlRegisterType<Socket>("Quickshell.Io", 1, 0, "Socket");
 
     // The shell reaches these through the root module too.
     qmlRegisterType<Process>("Quickshell", 1, 0, "Process");
     qmlRegisterType<StdioCollector>("Quickshell", 1, 0, "StdioCollector");
     qmlRegisterType<SplitParser>("Quickshell", 1, 0, "SplitParser");
     qmlRegisterType<FileView>("Quickshell", 1, 0, "FileView");
+    qmlRegisterType<Socket>("Quickshell", 1, 0, "Socket");
 
     qmlRegisterSingletonType<QuickshellGlobal>(
         "Quickshell", 1, 0, "Quickshell",

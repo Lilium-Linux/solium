@@ -101,6 +101,32 @@ fn log_panics() {
     }));
 }
 
+/// Load one QML file and report the outcome.
+fn check_qml(path: Option<String>) -> Result<()> {
+    let Some(path) = path else {
+        anyhow::bail!("usage: solium --check-qml <file.qml>");
+    };
+    qml::start()?;
+    match qml::Scene::new(std::path::Path::new(&path), 400, 200) {
+        Ok(_) => {
+            println!("ok");
+            Ok(())
+        }
+        Err(err) => {
+            let message = err.to_string();
+            // A `pragma Singleton` file cannot be built as a component, so Qt
+            // answers with nothing rather than a reason. Say so, instead of
+            // printing a blank line that reads like success.
+            if message.trim().is_empty() || message.trim().ends_with(':') {
+                println!("(no component: a singleton, or an empty error)");
+            } else {
+                println!("{message}");
+            }
+            Ok(())
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let backend = std::env::args().nth(1);
     // On the hardware the screen belongs to the compositor, so anything printed
@@ -121,6 +147,11 @@ fn main() -> Result<()> {
     // `--probe` reports what the hardware offers without taking it, which is
     // the only one of the three that is safe to run inside another session.
     match backend.as_deref() {
+        // Loads one QML file and says what went wrong, without starting a
+        // compositor. Porting a shell means walking a chain of "type X
+        // unavailable" errors, and doing that through a real session costs ten
+        // seconds a link.
+        Some("--check-qml") => check_qml(std::env::args().nth(2)),
         Some("--probe") => tty::probe(),
         Some("--tty") => tty::run(),
         _ if std::env::var_os("WAYLAND_DISPLAY").is_some()
