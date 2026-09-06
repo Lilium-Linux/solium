@@ -12,7 +12,7 @@ import Solium
 Item {
     id: frame
 
-    property int insetTop: 36
+    property int insetTop: 38
     property int insetRight: 0
     property int insetBottom: 0
     property int insetLeft: 0
@@ -26,11 +26,16 @@ Item {
     property string action: ""
     property string hovered: ""
 
+    // This frame loops, and a loop with a pause in it looks finished while it
+    // waits. Saying so keeps the compositor driving the scene; drop it and the
+    // sheen crosses once and stops.
+    property bool animating: focused
+
     Rectangle {
         id: bar
 
         anchors { left: parent.left; right: parent.right; top: parent.top }
-        height: frame.insetTop
+        height: frame.insetTop - 2
         color: frame.focused ? Theme.surface : Theme.surfaceInactive
         clip: true
 
@@ -108,10 +113,13 @@ Item {
         }
     }
 
-    // The breathing line where the frame meets the client.
+    // The breathing line where the frame meets the client. Inside the
+    // reserved height rather than below it: a frame that stays within its own
+    // insets only has those copied when it changes, and this one changes on
+    // every frame.
     Rectangle {
         anchors { left: parent.left; right: parent.right; top: bar.bottom }
-        height: 2
+        height: frame.insetTop - bar.height
         color: Theme.accent
         opacity: frame.focused ? 0.9 : 0.2
 

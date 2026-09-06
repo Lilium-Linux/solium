@@ -27,6 +27,10 @@ Item {
     property string action: ""
     property string hovered: ""
 
+    // Painted outside the insets -- the bar floats over the window and reserves nothing -- so the whole frame is copied when
+    // it changes rather than just its bands.
+    property bool overlay: true
+
     readonly property int barHeight: 34
 
     Rectangle {
