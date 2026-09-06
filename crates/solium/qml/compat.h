@@ -253,5 +253,43 @@ private:
     QVariantList m_screens;
 };
 
+/* The compositor's windows, as the shell reads them.
+ *
+ * Backs both `ToplevelManager` (Quickshell.Wayland) and `Hyprland`, because
+ * they are two names for the same question and Solium answers both from one
+ * window list. Filled from Rust through `solium_qml_set_windows`.
+ */
+class Toplevels : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(QVariant toplevels READ toplevels NOTIFY changed)
+    Q_PROPERTY(QVariant activeToplevel READ activeToplevel NOTIFY changed)
+    Q_PROPERTY(QVariant monitors READ monitors NOTIFY changed)
+    Q_PROPERTY(QVariant workspaces READ workspaces NOTIFY changed)
+
+public:
+    explicit Toplevels(QObject *parent = nullptr);
+    ~Toplevels() override;
+
+    QVariant toplevels() const;
+    QVariant activeToplevel() const;
+    QVariant monitors() const;
+    QVariant workspaces() const;
+
+    Q_INVOKABLE QVariant monitorFor(const QVariant &screen) const;
+    Q_INVOKABLE void dispatch(const QString &command);
+    Q_INVOKABLE void refreshToplevels() {}
+
+    /* Called from the compositor when the window list changes. */
+    static void update(const QByteArray &json);
+
+Q_SIGNALS:
+    void changed();
+
+private:
+    static QVariantList s_windows;
+    static QVariant s_active;
+};
+
 /* Registers all of the above. Called once, before any scene is loaded. */
 void solium_qml_register_compat();

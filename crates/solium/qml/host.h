@@ -29,6 +29,11 @@ int solium_qml_start(const char *import_path);
  *
  * Returns NULL on failure, with `error` set to a description.
  */
+/* Like solium_qml_scene_new, but supplies properties the component requires
+ * before it is built. `initial_json` is a JSON object, or null. */
+SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int width, int height,
+                                          const char *initial_json, const char **error);
+
 SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width, int height,
                                      const char **error);
 

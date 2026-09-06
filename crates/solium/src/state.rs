@@ -170,6 +170,10 @@ pub(crate) struct Solium {
     /// run, without a dock, rather than fail to start at all.
     pub(crate) dock: Option<crate::shell::Dock>,
 
+    /// The last window list handed to the shell, so it is only sent again
+    /// when it differs.
+    published_windows: String,
+
     /// Set while a focus change is being reported to scripts.
     ///
     /// A script handling `focus` will often ask for focus itself — a scroller
@@ -275,6 +279,7 @@ impl Solium {
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
             dock: None,
+            published_windows: String::new(),
             focusing: false,
             pending_drop: None,
             pending_resize: None,
@@ -347,6 +352,26 @@ impl Solium {
         };
         let taken = area.size.h - (dock.rect(area).loc.y - area.loc.y);
         Rectangle::new(area.loc, (area.size.w, (area.size.h - taken).max(1)).into())
+    }
+
+    /// A window's application id, as the client set it.
+    ///
+    /// The shell tells its own surfaces from application windows by this, so
+    /// an empty answer is better than a wrong one.
+    pub(crate) fn window_app_id(&self, window: &Window) -> String {
+        window
+            .toplevel()
+            .map(ToplevelSurface::wl_surface)
+            .and_then(|surface| {
+                with_states(surface, |states| {
+                    states
+                        .data_map
+                        .get::<XdgToplevelSurfaceData>()
+                        .and_then(|data| data.lock().ok())
+                        .and_then(|attributes| attributes.app_id.clone())
+                })
+            })
+            .unwrap_or_default()
     }
 
     /// A window's title, as the client set it.
@@ -1008,10 +1033,63 @@ impl Solium {
         Some(layer::work_area(self.space.outputs().next()?))
     }
 
+    /// The output the shell is drawing on, as it expects to be told.
+    fn screen_info(&self) -> String {
+        let area = self
+            .dock_area()
+            .unwrap_or_else(|| Rectangle::from_size((1920, 1080).into()));
+        let name = self
+            .space
+            .outputs()
+            .next()
+            .map(smithay::output::Output::name)
+            .unwrap_or_default();
+        format!(
+            "{{\"screenInfo\":{{\"name\":\"{name}\",\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"scale\":1}}}}",
+            area.loc.x, area.loc.y, area.size.w, area.size.h
+        )
+    }
+
+    /// Tell the shell what windows exist.
+    ///
+    /// Sent when the list changes rather than every frame: the shell rebinds
+    /// on it, and a bar that re-evaluates sixty times a second because nothing
+    /// happened is a bar that costs something to look at.
+    pub(crate) fn publish_windows(&mut self) {
+        let focused = self.focused_window();
+        let mut windows = String::from("{\"windows\":[");
+        let mut active = String::from("null");
+        for (index, window) in self.space.elements().rev().enumerate() {
+            let id = window_id(window);
+            let title = self.window_title(window).replace('"', "'");
+            let app_id = self.window_app_id(window).replace('"', "'");
+            let is_active = focused.as_ref() == Some(window);
+            let entry = format!(
+                "{{\"id\":{id},\"title\":\"{title}\",\"appId\":\"{app_id}\",\"activated\":{is_active}}}"
+            );
+            if index > 0 {
+                windows.push(',');
+            }
+            windows.push_str(&entry);
+            if is_active {
+                active = entry;
+            }
+        }
+        windows.push_str("],\"active\":");
+        windows.push_str(&active);
+        windows.push('}');
+
+        if windows != self.published_windows {
+            crate::qml::set_windows(&windows);
+            self.published_windows = windows;
+        }
+    }
+
     /// The dock, made on first use.
     pub(crate) fn dock(&mut self) -> Option<&mut crate::shell::Dock> {
         if self.dock.is_none() {
-            match crate::shell::Dock::new() {
+            let screen = self.screen_info();
+            match crate::shell::Dock::new(&screen) {
                 Ok(dock) => self.dock = Some(dock),
                 Err(err) => {
                     tracing::error!(?err, "no dock: QML would not start");

@@ -2,4 +2,3 @@ module Quickshell.Wayland
 PanelWindow 1.0 PanelWindow.qml
 WlrLayershell 1.0 PanelWindow.qml
 Toplevel 1.0 Toplevel.qml
-singleton ToplevelManager 1.0 ToplevelManager.qml
