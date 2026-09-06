@@ -170,10 +170,12 @@ pub(crate) struct Loading {
     /// Whether it takes a place in the layout before its application connects.
     /// Off, and the other windows only move aside once it is really there.
     pub(crate) reserves_a_slot: bool,
-    /// Whether it gets a frame while it waits — which is what gives it a name
-    /// and a close button before there is anything to close. Off is quieter,
-    /// and avoids a frame appearing and going again for an application that
-    /// turns out to draw its own.
+    /// Whether it wears a frame while it waits.
+    ///
+    /// Off by default. A frame is what gives it a close button before there is
+    /// anything to close, which is worth having — but it also names the window
+    /// twice, and it appears and goes again for any application that draws its
+    /// own decorations. The scene already says which application it is.
     pub(crate) decorated: bool,
 }
 
@@ -183,7 +185,7 @@ impl Default for Loading {
             scene: None,
             patience: std::time::Duration::from_secs(8),
             reserves_a_slot: true,
-            decorated: true,
+            decorated: false,
         }
     }
 }

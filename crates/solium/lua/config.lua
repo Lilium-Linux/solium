@@ -53,11 +53,12 @@ local defaults = {
         -- off, the other windows only move aside once the application is
         -- really there -- less eager, and some people will prefer it.
         reserves_a_slot = true,
-        -- Whether it wears a frame while it waits. That is what gives it a
-        -- name and a close button before there is anything to close. Off is
-        -- quieter: an application that draws its own decorations would
-        -- otherwise show ours for a moment and then lose it.
-        decorated = true,
+        -- Whether it wears a frame while it waits. Turn it on and a window
+        -- that is still loading gets a titlebar, which means a close button
+        -- for an application that is not coming. Off by default: the scene
+        -- already says which application it is, and a frame appears and goes
+        -- again for anything that draws its own decorations.
+        decorated = false,
     },
 
     tiling = {

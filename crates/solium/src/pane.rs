@@ -81,7 +81,18 @@ pub(crate) enum Content {
         scene: Option<Box<crate::surface::ShellSurface>>,
     },
     /// A client's window, mapped and drawing for itself.
-    Client(Window),
+    Client {
+        window: Window,
+        /// The scene this window was showing before its application arrived,
+        /// kept until the application has actually drawn something.
+        ///
+        /// A client maps a good while before it paints. Dropping the scene the
+        /// moment it maps leaves the window empty for exactly that long, which
+        /// is the blank flash between the two that this whole design exists to
+        /// remove. The two are never both absent: the scene goes when there is
+        /// something to replace it with.
+        scene: Option<Box<crate::surface::ShellSurface>>,
+    },
     /// A client that has gone, still on screen while it leaves.
     Leaving { since: Duration },
 }
@@ -137,7 +148,10 @@ impl Pane {
         Self {
             id: PaneId::next(),
             slot,
-            content: Content::Client(window),
+            content: Content::Client {
+                window,
+                scene: None,
+            },
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -168,7 +182,7 @@ impl Pane {
     /// The client's window, if one has arrived.
     pub(crate) const fn client(&self) -> Option<&Window> {
         match &self.content {
-            Content::Client(window) => Some(window),
+            Content::Client { window, .. } => Some(window),
             _ => None,
         }
     }
@@ -191,8 +205,34 @@ impl Pane {
     /// downstream learns that the content used to be something else, and a
     /// decoration keyed by pane id carries its animation straight through.
     pub(crate) fn adopt(&mut self, window: Window) {
-        self.content = Content::Client(window);
+        // The scene comes across with it. See `Content::Client::scene`: the
+        // client has mapped and has not painted, and letting go of what is on
+        // screen now would leave a hole for however long that takes.
+        let scene = match &mut self.content {
+            Content::Loading { scene, .. } => scene.take(),
+            Content::Client { scene, .. } => scene.take(),
+            Content::Leaving { .. } => None,
+        };
+        self.content = Content::Client { window, scene };
         self.adopted = true;
+    }
+
+    /// The application has painted: let go of the scene standing in for it.
+    ///
+    /// Returns whether there was one, so the handover can be reported once.
+    pub(crate) fn filled(&mut self) -> bool {
+        match &mut self.content {
+            Content::Client { scene, .. } => scene.take().is_some(),
+            _ => false,
+        }
+    }
+
+    /// Whether anything of ours is drawing this pane.
+    pub(crate) const fn has_scene(&self) -> bool {
+        match &self.content {
+            Content::Loading { scene, .. } | Content::Client { scene, .. } => scene.is_some(),
+            Content::Leaving { .. } => false,
+        }
     }
 
     /// Whether a client mapped into this pane rather than creating it.
@@ -224,8 +264,8 @@ impl Pane {
     /// The scene drawing this pane, while it has no client to draw itself.
     pub(crate) fn scene_mut(&mut self) -> Option<&mut crate::surface::ShellSurface> {
         match &mut self.content {
-            Content::Loading { scene, .. } => scene.as_deref_mut(),
-            _ => None,
+            Content::Loading { scene, .. } | Content::Client { scene, .. } => scene.as_deref_mut(),
+            Content::Leaving { .. } => None,
         }
     }
 

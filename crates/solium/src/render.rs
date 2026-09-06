@@ -208,10 +208,18 @@ pub(crate) fn elements(
         let Some(outer) = state.pane_outer_of(pane) else {
             continue;
         };
-        // Nothing of the client's left to draw: do not draw our half either.
-        if let Some(window) = window.as_ref()
-            && !state.has_content(window)
-        {
+        // Whether what is drawn here is ours or the client's. A window whose
+        // application has not arrived is obviously ours; so is one whose
+        // client has mapped and is not ready to be seen, which is most of the
+        // moment after an application starts. The scene covers both, and
+        // covering the second is what makes the handover a handover rather
+        // than a gap with a window either side of it.
+        let ours = !window
+            .as_ref()
+            .is_some_and(|window| state.client_ready(window));
+        // Nothing of the client's left to draw and nothing of ours either:
+        // this is a window on its way out. Do not draw half of it.
+        if ours && !state.pane_has_scene(pane) {
             continue;
         }
 
@@ -233,13 +241,12 @@ pub(crate) fn elements(
             f64::from(insets.vertical()) * down,
         );
 
-        // A window whose application has not arrived draws the scene the
-        // compositor chose for it, across exactly the rectangle the client
-        // will occupy — because it *is* that window, and the client will
-        // appear inside it rather than replacing it. Its frame is drawn below
-        // by the same code as everyone else's, which is why the frame survives
-        // the application arriving with whatever animation is running in it.
-        let Some(window) = window else {
+        // The compositor's own scene, across exactly the rectangle the client
+        // will occupy — because it *is* that window, and the application will
+        // appear inside it rather than replacing it. The frame is drawn by the
+        // same code as everyone else's, which is why it survives the
+        // application arriving with whatever animation is running in it.
+        if ours {
             chrome(state, renderer, &mut elements, pane, frame, outer);
             let client = present::logical(
                 (frame.rect.loc.x + left, frame.rect.loc.y + top),
@@ -266,9 +273,13 @@ pub(crate) fn elements(
                     elements.push(Element::Chrome(element));
                 }
             }
-            // The bar in the scene keeps filling while nothing else changes,
-            // so the next frame has to be asked for or it stops where it is.
+            // A scene animates on its own clock and damages nothing, so the
+            // next frame has to be asked for or it stops where it stands.
             state.redraw = true;
+            continue;
+        }
+
+        let Some(window) = window else {
             continue;
         };
 
