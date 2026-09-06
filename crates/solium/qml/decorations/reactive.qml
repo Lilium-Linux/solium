@@ -60,21 +60,22 @@ Item {
         Item {
             id: glow
 
+            // On the cursor, not chasing it. The 90ms ease that used to be
+            // here was meant to read as a light with weight; on real hardware
+            // it reads as the compositor being slow, because a pointer is the
+            // one thing on screen the eye already knows the position of.
             x: tracker.mouseX
             y: tracker.mouseY
 
-            // Follows rather than snaps, which is the difference between a
-            // light and a cursor-shaped sticker.
-            Behavior on x { NumberAnimation { duration: 90; easing.type: Easing.OutQuad } }
-            Behavior on y { NumberAnimation { duration: 90; easing.type: Easing.OutQuad } }
-
+            // Eight rings rather than twelve: each is a full alpha-blended
+            // circle rasterised on the CPU, and the falloff is indisguishable.
             Repeater {
-                model: 12
+                model: 8
 
                 Rectangle {
                     required property int index
 
-                    readonly property real step: (index + 1) / 12
+                    readonly property real step: (index + 1) / 8
 
                     // Radii bunched towards the centre and a constant alpha
                     // per disc: what makes the middle bright is how many discs
@@ -85,7 +86,7 @@ Item {
                     x: -width / 2
                     y: -height / 2
                     color: Theme.accent
-                    opacity: 0.085
+                    opacity: 0.12
                 }
             }
         }
