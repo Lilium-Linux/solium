@@ -11,7 +11,7 @@
 //! indistinguishable from input being dead, which is exactly how it was
 //! reported the first time this ran on a real screen.
 
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use smithay::{
@@ -68,13 +68,11 @@ impl Cursor {
         &mut self,
         renderer: &mut R,
         location: Point<f64, Logical>,
-        now: Duration,
     ) -> Option<MemoryRenderBufferRenderElement<R>>
     where
         R: Renderer + ImportMem,
         R::TextureId: Send + Clone + 'static,
     {
-        self.scene.advance(now);
         let rendered = match self.scene.render() {
             Ok(rendered) => rendered,
             Err(err) => {

@@ -89,9 +89,7 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f6
         if frame.matrix.is_identity() && frame.deform.is_none() {
             continue;
         }
-        if let Some((texture, _size)) =
-            crate::offscreen::capture(state, renderer, &window, now, scale)
-        {
+        if let Some((texture, _size)) = crate::offscreen::capture(state, renderer, &window, scale) {
             warps.push((window, texture));
         }
     }
@@ -112,13 +110,17 @@ pub(crate) fn elements(
 ) -> Vec<Element> {
     state.memory_report();
     let now = state.clock.now();
+    // Every QML animation in the process, advanced once for this frame --
+    // decorations, the cursor, the shell. Whether any scene then has
+    // something new to draw is each scene's own answer.
+    crate::qml::tick(now);
     let output_scale = Scale::from(scale);
     let mut elements = Vec::new();
 
     // The pointer, above everything — including anything a shell anchors on
     // top. Nothing else draws it, so leaving it out is not a missing detail:
     // it is a session where the mouse appears not to work.
-    elements.extend(cursor(state, renderer, output_scale, scale, now));
+    elements.extend(cursor(state, renderer, output_scale, scale));
 
     // The shell reads the window list; it changes only when windows do.
     state.publish_windows();
@@ -219,9 +221,7 @@ pub(crate) fn elements(
             if let Some(id) = state.toplevel_id(&window)
                 && let Some(decoration) = state.decorations.get_mut(&id)
             {
-                if let Some(element) =
-                    decoration.frame(renderer, frame.rect, outer.size, &look, now)
-                {
+                if let Some(element) = decoration.frame(renderer, frame.rect, outer.size, &look) {
                     elements.push(Element::Chrome(element));
                 }
                 animating = decoration.animating();
@@ -325,7 +325,6 @@ fn cursor(
     renderer: &mut GlesRenderer,
     output_scale: Scale<f64>,
     scale: f64,
-    now: std::time::Duration,
 ) -> Vec<Element> {
     let Some(pointer) = state.seat.get_pointer() else {
         return Vec::new();
@@ -371,7 +370,7 @@ fn cursor(
         CursorImageStatus::Named(_) => state
             .pointer
             .art()
-            .and_then(|cursor| cursor.element(renderer, location, now))
+            .and_then(|cursor| cursor.element(renderer, location))
             .map(Element::Chrome)
             .into_iter()
             .collect(),
@@ -387,7 +386,6 @@ pub(crate) fn flat_window_elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     window: &Window,
-    now: std::time::Duration,
     scale: f64,
 ) -> Vec<Element> {
     let mut elements = Vec::new();
@@ -412,7 +410,7 @@ pub(crate) fn flat_window_elements(
         );
         if let Some(id) = state.toplevel_id(window)
             && let Some(decoration) = state.decorations.get_mut(&id)
-            && let Some(element) = decoration.frame(renderer, whole, outer.size, &look, now)
+            && let Some(element) = decoration.frame(renderer, whole, outer.size, &look)
         {
             elements.push(Element::Chrome(element));
         }

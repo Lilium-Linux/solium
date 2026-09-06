@@ -145,7 +145,6 @@ impl ShellSurface {
 
         let size = (area.size.w.max(1), area.size.h.max(1));
         self.scene.resize(size.0, size.1);
-        self.scene.advance(now);
 
         let rendered = match self.scene.render() {
             Ok(rendered) => rendered,

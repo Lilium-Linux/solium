@@ -294,20 +294,51 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
     }
     scene->image = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
     scene->image.fill(Qt::transparent);
+    // Set with the image rather than before every render: it is a property of
+    // where the scene draws, and that only changes when the image does.
+    scene->window->setRenderTarget(QQuickRenderTarget::fromPaintDevice(&scene->image));
     scene->dirty = true;
 }
 
-extern "C" void solium_qml_scene_advance(SoliumQmlScene *scene, long long elapsed_ms)
+/* Advance every animation in the process, once for the whole frame.
+ *
+ * The driver and the event loop are one per process, not one per scene, so
+ * doing this per scene did the same global work once per decorated window.
+ * More importantly it used to be skipped when a scene looked settled -- and an
+ * animation that is not advanced never changes, never marks itself dirty, and
+ * never gets advanced again. Ticking is unconditional and cheap; *rendering*
+ * is what waits to be asked. */
+extern "C" void solium_qml_tick(long long elapsed_ms)
 {
-    (void)scene;
+    /* Two different jobs, at two different rates.
+     *
+     * Advancing the animations has to happen every frame, or an animation
+     * that is not ticked never changes, never asks to be drawn, and never
+     * gets ticked again -- which is how a loop with a pause in it dies at its
+     * first pause. With nothing registered it costs almost nothing, so it is
+     * unconditional.
+     *
+     * Draining Qt's event queue is the expensive half, and none of what is in
+     * there is frame-critical: component completion, deleteLater, queued
+     * notifications. Property changes are delivered synchronously and do not
+     * wait for this. So it runs at 60Hz however fast the screen is, which on
+     * a 260Hz monitor is a quarter of the work for the same behaviour. */
     if (g_driver != nullptr) {
         g_driver->advanceTo(static_cast<qint64>(elapsed_ms));
     }
-    // Nothing runs Qt's event loop, so queued work — component completion,
-    // property change notifications, deleteLater — is serviced here or never.
     if (g_app != nullptr) {
-        QCoreApplication::processEvents();
+        static long long drained_at = 0;
+        if (elapsed_ms - drained_at >= 16 || elapsed_ms < drained_at) {
+            drained_at = elapsed_ms;
+            QCoreApplication::processEvents();
+        }
     }
+}
+
+/* Whether Qt has asked for this scene to be drawn again. */
+extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
+{
+    return (scene != nullptr && scene->dirty) ? 1 : 0;
 }
 
 extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)
@@ -325,8 +356,6 @@ extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)
     // animate. That looked exactly like a broken upload path: a bar with one
     // moving dot on it and nothing else. The image is cleared once, when it is
     // created or resized, and Qt owns it after that.
-    scene->window->setRenderTarget(QQuickRenderTarget::fromPaintDevice(&scene->image));
-
     // polish, sync, render — and *not* beginFrame/endFrame. Those bracket a
     // frame on the RHI, which the software adaptation does not have; calling
     // them logs "QQuickRenderControl: No QRhi in beginFrame()" twice per frame
