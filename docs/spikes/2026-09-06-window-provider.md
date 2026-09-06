@@ -88,65 +88,48 @@ everything; steps 3 to 5 are where the behaviour people asked for appears.
 
 ## Where this got to
 
-**Done:** steps 1, 2 and 3.
+**Done:** steps 1 through 4. The behaviour the design was for now works; what
+is left is what it looks like.
 
-Step 1 is `crates/solium/src/pane.rs`: `Pane`, `PaneId`, `Content`, `Panes`.
+* **1** — `pane.rs`: `Pane`, `PaneId`, `Content`, `Panes`.
+* **2** — panes underneath everything: `snapshot()`, `window_id`, decorations
+  (keyed by `PaneId`), drawing, every hit test. `sync_panes` is the single
+  place the pane list and the space are reconciled. `Space` stays as the
+  authority on where a mapped client is and what damage it did.
+* **3** — a pane with no client is a real window to the layout. Presentation
+  state moved onto `Pane`; `place` moves a pane with or without a window
+  inside it; `begin_loading` tells scripts the window **opened**, which is
+  what puts it in a layout's tree. `config.lua` gained `loading`.
+* **4** — adoption. A client whose process a window is waiting for becomes
+  that window's content, in `new_toplevel`, where it is mapped. The old
+  stand-in (`Launch` and everything around it) is gone.
 
-Step 2 put panes underneath everything — `snapshot()`, `window_id`,
-decorations (re-keyed by `PaneId`), drawing, every hit test. `sync_panes` is
-the single place the pane list and the space are reconciled. `Space` did not
-go away and is not going to: it is still the authority on where a mapped
-client is, what damage it did, and which surface is under a point *within* a
-window. What changed is that nothing above that level asks it what windows
-exist.
-
-Step 3 made a pane with no client a real window to the layout:
-
-* Presentation state — the in-flight transform, and whether a window has ever
-  been on screen — moved from `Window::user_data()` onto `Pane`. It had to:
-  there was nowhere else to keep it for a pane with no window, and it has to
-  survive adoption untouched or a window would snap the instant its
-  application arrived.
-* `pane_geometry` answers for a pane the space knows nothing about. A client's
-  window asks the space; a pane without one answers from its own slot.
-* `place` moves a pane whether or not there is a window inside it to resize,
-  and `Present`, `PresentFrom`, `Clear` and `Close` all act on a pane.
-* `begin_loading` opens a window for an application that has been asked for,
-  and tells scripts it **opened**. That is the half that matters: a layout
-  keeps its own arrangement and adds to it on an open event, so a relayout
-  alone would never put the new window in the tree.
-* `settle_loading` gives up on applications that never arrive, so a window
-  cannot hold a slot forever.
-
-Everything about it is in `config.lua` under `loading`: `scene`, `patience`,
-`reserves_a_slot`. `reserves_a_slot` gates the open event rather than only
-the snapshot, because a layout told a window opened keeps placing it however
-the snapshot is filtered afterwards.
-
-`SOLIUM_LOADING_AT="3000:firefox"` opens one on demand — the state cannot be
-reached by using the compositor normally, because every real program connects
-and connects fast. It is scaffolding for steps 4 and 5, and it goes when
-`spawn` starts doing this for real.
-
-**Next:** step 4, adoption. `new_toplevel` matches the connecting client's
-process against loading panes before creating anything, and the pane takes
-the window as its content — same id, same slot, same frame, same animation.
+**Next:** step 5, the loading pane's own content — the QML scene, drawn as the
+pane rather than beside it, and a frame so it can be closed while it waits.
 
 What is worth knowing before starting it:
 
-* `Pane::awaits(&[pid])` and `Pane::adopt(window)` already exist, tested, and
-  are two of the things the module-level `dead_code` expect is covering.
-  `Solium::ancestry(pid)` on `main` is the process walk to match against.
-* `begin_loading` takes a `pid` and nothing passes one yet. `spawn` is where
-  it comes from, and `spawn` is also where `begin_loading` has to replace
-  `begin_launch` — which is what makes the whole thing reachable without the
-  dev hook.
-* A missed adoption must open a window the old way, never lose one. Likewise
-  a client whose pane was closed while it was still starting.
-* `sync_panes` will create a *second* pane for an adopted window if adoption
-  runs after it, so adoption has to happen in `new_toplevel`, where the
-  window is mapped, and not later.
+* `qml/loading/window.qml` is unwired but intact, and `pane::loading_source`
+  already resolves which scene by name or path with the user's directory
+  shadowing the shipped one. `Content::Loading` carries the resolved `source`.
+* `surface::ShellSurface` is how QML is drawn in-process; the old stand-in
+  used it and `set_int("waited", …)` is kept alive by an `expect` for exactly
+  this. A `ShellSurface` will want to live in `Content::Loading` beside the
+  path.
+* `on_screen()` yields `(PaneId, Window)` and skips a pane with no client.
+  Widening it is the change: `render::elements` is where a loading pane draws.
+* The hit tests skip a client-less pane too. `surface_under` skipping one is
+  wrong once it is visible — a click would fall through to a window behind it.
+* A loading pane has no frame, because `decorate` runs when a *client*
+  negotiates. Giving one a frame is what makes it closable while it waits, and
+  it is the payoff of keying decorations by pane in step 2: the frame it gets
+  is the frame it keeps after adoption, with its animation intact. Watch for
+  the flicker case — a client that then chooses client-side decorations, whose
+  frame has to go.
+* Closing a pane mid-load already works in the code (`close_pane` and
+  `settle_closing` both handle a pane with no client) but could not be tested,
+  because nothing can reach a loading pane to close it. A frame with a close
+  button is what makes that testable.
 
-**Still true and easy to forget:** everything stays configurable. When step 5
-draws the loading scene, what it shows and how it animates in belong to QML
-and `config.lua`, not to constants in Rust.
+**Still true and easy to forget:** what the loading scene shows and how it
+animates in belong to QML and `config.lua`, not to constants in Rust.
