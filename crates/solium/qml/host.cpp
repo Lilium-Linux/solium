@@ -162,6 +162,17 @@ extern "C" int solium_qml_start(const char *import_path)
     return 1;
 }
 
+extern "C" void solium_qml_clear_cache()
+{
+    // QQmlEngine caches compiled QML by URL, so building a scene from a file
+    // that has just been edited hands back the *old* compilation. Reloading
+    // without this looks exactly like reloading working — the scene is rebuilt,
+    // nothing throws, and the screen does not change.
+    if (g_engine != nullptr) {
+        g_engine->clearComponentCache();
+    }
+}
+
 extern "C" SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width, int height,
                                                 const char **error)
 {

@@ -31,6 +31,9 @@ int solium_qml_start(const char *import_path);
  */
 /* Like solium_qml_scene_new, but supplies properties the component requires
  * before it is built. `initial_json` is a JSON object, or null. */
+/* Forget compiled QML, so the next scene is read from disk. */
+void solium_qml_clear_cache(void);
+
 SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int width, int height,
                                           const char *initial_json, const char **error);
 

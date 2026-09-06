@@ -34,6 +34,7 @@ mod ffi {
     unsafe extern "C" {
         pub(super) fn solium_qml_start(import_path: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_windows(json: *const c_char);
+        pub(super) fn solium_qml_clear_cache();
         pub(super) fn solium_qml_scene_new_with(
             qml_path: *const c_char,
             width: c_int,
@@ -88,6 +89,13 @@ pub(crate) fn start() -> Result<()> {
         return Err(anyhow!("could not start Qt"));
     }
     Ok(())
+}
+
+/// Forget compiled QML, so the next scene is read from disk.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn clear_cache() {
+    // SAFETY: the host checks that it has an engine.
+    unsafe { ffi::solium_qml_clear_cache() }
 }
 
 /// Hand the shell the compositor's window list.
