@@ -1380,8 +1380,10 @@ impl Solium {
             "{{\"program\":\"{}\",\"waited\":0}}",
             name.replace('"', "'")
         );
-        let source =
-            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/launch.qml"));
+        let source = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/qml/loading/window.qml"
+        ));
         match crate::surface::ShellSurface::new(source, &properties) {
             Ok(surface) => {
                 self.launches.push(Launch {
