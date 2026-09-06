@@ -602,6 +602,8 @@ impl State {
         animating |= self.solium.settle_closing(now);
         // And a window whose application never turned up gives up its slot.
         self.solium.settle_loading(now);
+        // A window asked to close that is still here is brought back.
+        animating |= self.solium.settle_refused(now);
         self.animating = animating;
     }
 

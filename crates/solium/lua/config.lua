@@ -53,12 +53,16 @@ local defaults = {
         -- off, the other windows only move aside once the application is
         -- really there -- less eager, and some people will prefer it.
         reserves_a_slot = true,
-        -- Whether it wears a frame while it waits. Turn it on and a window
-        -- that is still loading gets a titlebar, which means a close button
-        -- for an application that is not coming. Off by default: the scene
-        -- already says which application it is, and a frame appears and goes
-        -- again for anything that draws its own decorations.
+        -- Whether the frame is *drawn* while it waits. The room it takes is
+        -- reserved either way, so the window does not change shape when the
+        -- application arrives; this only decides whether the bar is on screen
+        -- meanwhile. On, and you get a close button for an application that is
+        -- not coming. Off, and the scene has the whole window.
         decorated = false,
+        -- How long the scene takes to fade off the application that replaced
+        -- it, in milliseconds. It is drawn *over* the window, so what is
+        -- underneath is already the application. 0 cuts straight to it.
+        fade = 180,
     },
 
     tiling = {

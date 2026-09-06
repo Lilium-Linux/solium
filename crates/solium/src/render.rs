@@ -141,6 +141,51 @@ fn chrome(
     }
 }
 
+/// The compositor's own scene for a pane, across the whole window.
+///
+/// The whole window and not the client's share of it, on purpose: while this is
+/// what you are looking at there is no bar over it, and once there is, this is
+/// drawn *over* the bar as it fades. Either way it covers the window, which is
+/// what makes it the window rather than something sitting in one.
+fn scene(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    elements: &mut Vec<Element>,
+    pane: crate::pane::PaneId,
+    rect: smithay::utils::Rectangle<f64, smithay::utils::Logical>,
+    now: std::time::Duration,
+) {
+    let waited = state.panes.get(pane).map_or(0, |held| {
+        i32::try_from(held.waited(now).as_millis()).unwrap_or(i32::MAX)
+    });
+    // Solid while this is what you are looking at; fading once the application
+    // is on screen underneath it.
+    let fade = state.loading.fade;
+    let alpha = state
+        .panes
+        .get(pane)
+        .map_or(1.0, |held| held.scene_alpha(now, fade));
+    #[expect(clippy::cast_possible_truncation, reason = "a rect on this screen")]
+    let area = smithay::utils::Rectangle::new(
+        (rect.loc.x.round() as i32, rect.loc.y.round() as i32).into(),
+        (
+            (rect.size.w.round() as i32).max(1),
+            (rect.size.h.round() as i32).max(1),
+        )
+            .into(),
+    );
+    let Some(held) = state.panes.get_mut(pane).and_then(Pane::scene_mut) else {
+        return;
+    };
+    held.set_int("waited", waited);
+    if let Some(element) = held.element(renderer, area, now, alpha) {
+        elements.push(Element::Chrome(element));
+    }
+    // A scene animates on its own clock and damages nothing, so the next frame
+    // has to be asked for or it stops where it stands -- mid-fade, most of all.
+    state.redraw = true;
+}
+
 pub(crate) fn elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
@@ -168,7 +213,7 @@ pub(crate) fn elements(
     state.publish_windows();
     if let Some(area) = state.work_area()
         && let Some(shell) = state.shell()
-        && let Some(element) = shell.element(renderer, area, now)
+        && let Some(element) = shell.element(renderer, area, now, 1.0)
     {
         elements.push(Element::Chrome(element));
     }
@@ -199,7 +244,7 @@ pub(crate) fn elements(
     // at what the compositor is doing, so nothing should be able to cover it.
     if let Some(area) = state.tweaks_area()
         && let Some(panel) = state.tweaks_panel()
-        && let Some(element) = panel.element(renderer, area, now)
+        && let Some(element) = panel.element(renderer, area, now, 1.0)
     {
         elements.push(Element::Chrome(element));
     }
@@ -241,47 +286,31 @@ pub(crate) fn elements(
             f64::from(insets.vertical()) * down,
         );
 
-        // The compositor's own scene, across exactly the rectangle the client
-        // will occupy — because it *is* that window, and the application will
-        // appear inside it rather than replacing it. The frame is drawn by the
-        // same code as everyone else's, which is why it survives the
-        // application arriving with whatever animation is running in it.
+        // Nothing of the application to draw yet, so this window is entirely
+        // ours and the scene has all of it, bar included. The frame is built
+        // and its room reserved — which is why the window does not change shape
+        // when the application arrives — but drawing a bar over a surface that
+        // already carries the name says it twice, so that is a setting and it
+        // is off.
         if ours {
-            chrome(state, renderer, &mut elements, pane, frame, outer);
-            let client = present::logical(
-                (frame.rect.loc.x + left, frame.rect.loc.y + top),
-                (
-                    (frame.rect.size.w - taken_x).max(1.0),
-                    (frame.rect.size.h - taken_y).max(1.0),
-                ),
-            );
-            let waited = state.panes.get(pane).map_or(0, |held| {
-                i32::try_from(held.waited(now).as_millis()).unwrap_or(i32::MAX)
-            });
-            #[expect(clippy::cast_possible_truncation, reason = "a rect on this screen")]
-            let area = smithay::utils::Rectangle::new(
-                (client.loc.x.round() as i32, client.loc.y.round() as i32).into(),
-                (
-                    (client.size.w.round() as i32).max(1),
-                    (client.size.h.round() as i32).max(1),
-                )
-                    .into(),
-            );
-            if let Some(scene) = state.panes.get_mut(pane).and_then(Pane::scene_mut) {
-                scene.set_int("waited", waited);
-                if let Some(element) = scene.element(renderer, area, now) {
-                    elements.push(Element::Chrome(element));
-                }
+            if state.loading.decorated {
+                chrome(state, renderer, &mut elements, pane, frame, outer);
             }
-            // A scene animates on its own clock and damages nothing, so the
-            // next frame has to be asked for or it stops where it stands.
-            state.redraw = true;
+            scene(state, renderer, &mut elements, pane, frame.rect, now);
             continue;
         }
 
         let Some(window) = window else {
             continue;
         };
+
+        // The application has painted and the scene is fading off it. Pushed
+        // before the frame and before the client, so it is above both: what is
+        // underneath is already the window, and this dissolves to reveal it
+        // rather than being swapped for it.
+        if state.pane_has_scene(pane) {
+            scene(state, renderer, &mut elements, pane, frame.rect, now);
+        }
 
         let Some(real) = state.real_geometry(&window) else {
             continue;

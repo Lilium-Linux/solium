@@ -419,6 +419,10 @@ pub(crate) fn run() -> Result<()> {
         }
         // And a window whose application never turned up gives up its slot.
         state.settle_loading(now);
+        // A window asked to close that is still here is brought back.
+        if state.settle_refused(now) {
+            state.redraw = true;
+        }
 
         frames += 1;
         if now.saturating_sub(window_started) >= Duration::from_secs(2) {
