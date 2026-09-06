@@ -110,13 +110,21 @@ end
 
 -- `require` searches the user's directory first, so this finds
 -- ~/.config/solium/user.lua when there is one and nothing when there is not.
--- A broken user file is reported and ignored rather than taking the session
--- down with it.
+--
+-- Having no user file and having a broken one both make `require` fail, and
+-- they must not be treated alike: a typo that silently changes nothing is the
+-- worst way to lose an afternoon. Only "no such module" is quiet; anything
+-- else is raised, so `solium --check` reports it and a reload keeps whatever
+-- was already running.
 local found, user = pcall(require, "user")
-if found and type(user) == "table" then
-    merge(defaults, user)
-elseif found then
-    sol.log("user.lua did not return a table; ignoring it")
+if found then
+    if type(user) == "table" then
+        merge(defaults, user)
+    else
+        error("user.lua must return a table, got " .. type(user), 0)
+    end
+elseif not tostring(user):match("module 'user' not found") then
+    error(tostring(user), 0)
 end
 
 return defaults

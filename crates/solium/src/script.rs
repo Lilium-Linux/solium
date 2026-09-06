@@ -201,6 +201,25 @@ impl Scripts {
             .map(|base| base.join("solium"))
     }
 
+    /// Every binding the configuration registered, as it spelled them.
+    ///
+    /// Sorted, because this is read by a person comparing one run to the next.
+    pub(crate) fn binding_names(&self) -> Vec<String> {
+        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
+            return Vec::new();
+        };
+        let Ok(bindings) = sol.get::<Table>("_bindings") else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = bindings
+            .pairs::<String, Value>()
+            .filter_map(Result::ok)
+            .map(|(combo, _)| combo)
+            .collect();
+        names.sort();
+        names
+    }
+
     pub(crate) fn config_path() -> std::path::PathBuf {
         if let Some(path) = std::env::var_os("SOLIUM_LUA_INIT") {
             return std::path::PathBuf::from(path);
@@ -753,9 +772,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             let duration = options
                 .get::<Option<u64>>("duration")?
                 .map(Duration::from_millis);
-            let easing = options
-                .get::<Option<String>>("easing")?
-                .and_then(|name| parse_easing(&name));
+            let easing = easing_from(&options)?;
             with_pending(lua, |pending| {
                 if let Some(duration) = duration {
                     pending.animation.duration = duration;
@@ -951,6 +968,42 @@ fn parse_easing(name: &str) -> Option<Curve> {
         tracing::warn!(easing = name, "unknown easing, keeping the default");
         None
     })
+}
+
+/// Read an easing from an options table: a name, or a curve of your own.
+///
+/// ```lua
+/// sol.animate({ duration = 240, easing = "outBack" })
+/// sol.animate({ duration = 240, easing = { 0.34, 1.56, 0.64, 1 } })
+/// ```
+///
+/// The four numbers are the control points of a cubic bezier -- what CSS
+/// calls `cubic-bezier`, and what every easing generator on the internet
+/// hands out. Named curves stay for the handful worth naming; this is so a
+/// feel nobody anticipated does not need a compositor release.
+fn easing_from(options: &Table) -> mlua::Result<Option<Curve>> {
+    if let Some(name) = options.get::<Option<String>>("easing")? {
+        return Ok(parse_easing(&name));
+    }
+    let Some(points) = options.get::<Option<Table>>("easing")? else {
+        return Ok(None);
+    };
+    let numbers: Vec<f64> = points.sequence_values::<f64>().collect::<Result<_, _>>()?;
+    let [x1, y1, x2, y2] = numbers.as_slice() else {
+        tracing::warn!(
+            found = numbers.len(),
+            "an easing curve is four numbers; keeping the default"
+        );
+        return Ok(None);
+    };
+    // x outside 0..1 is not a curve a clock can walk along: time would have to
+    // run backwards to reach it.
+    Ok(Some(Curve::Bezier {
+        x1: x1.clamp(0.0, 1.0),
+        y1: *y1,
+        x2: x2.clamp(0.0, 1.0),
+        y2: *y2,
+    }))
 }
 
 /// A scrolling workspace, as scripts hold it.
