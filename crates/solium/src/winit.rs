@@ -400,6 +400,11 @@ pub(crate) fn run() -> Result<()> {
         for window in state.space.elements() {
             present::settle(window, now);
         }
+        // A window that has finished leaving is told to close, and the loop
+        // keeps drawing while any of them is still on its way out.
+        if state.settle_closing(now) {
+            state.redraw = true;
+        }
 
         frames += 1;
         if now.saturating_sub(window_started) >= Duration::from_secs(2) {

@@ -9,6 +9,8 @@ use std::time::Duration;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::{Resource, backend::ObjectId};
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
+use std::collections::HashMap;
+
 use smithay::{
     backend::{allocator::dmabuf::Dmabuf, renderer::utils::on_commit_buffer_handler},
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_layer_shell,
@@ -153,6 +155,9 @@ pub(crate) struct Solium {
     /// told. QML hover is positional: a frame never told the pointer left
     /// stays lit forever.
     pub(crate) hovered_frame: Option<ObjectId>,
+    /// Windows on their way out, and when to tell them so. See
+    /// `close_window`.
+    closing: HashMap<ObjectId, std::time::Duration>,
     /// When the last memory report went out; see `memory_report`.
     pub(crate) reported_at: std::time::Duration,
     /// XWayland's window manager, once XWayland has started. `None` means no
@@ -316,6 +321,7 @@ impl Solium {
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
             hovered_frame: None,
+            closing: HashMap::new(),
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
@@ -642,11 +648,8 @@ impl Solium {
                     animation,
                 } => self.place(id, rect, animation, now),
                 Command::Close { id } => {
-                    if let Some(toplevel) = self
-                        .window_by_id(id)
-                        .and_then(|window| window.toplevel().cloned())
-                    {
-                        toplevel.send_close();
+                    if let Some(window) = self.window_by_id(id) {
+                        self.close_window(&window);
                     }
                 }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
@@ -938,16 +941,71 @@ impl Solium {
         })
     }
 
+    /// Ask a window to close, once it has finished leaving.
+    ///
+    /// A close is a request the client may refuse, so the compositor cannot
+    /// simply animate the window away and drop it. What it can do is animate
+    /// first and ask afterwards: the window shrinks and fades while it is
+    /// still alive, and the request goes out when that lands. A client that
+    /// refuses is left with a window that is drawn away -- so the transform is
+    /// cleared in that case too, and the window comes back.
+    ///
+    /// This covers closes the compositor asks for -- a frame button, a
+    /// binding, a script. A client that exits on its own still vanishes
+    /// instantly: by the time we hear about it its surface is gone, and
+    /// animating it would mean holding a snapshot of every window on the
+    /// chance that it might be the next to leave.
+    pub(crate) fn close_window(&mut self, window: &Window) {
+        let Some(id) = self.toplevel_id(window) else {
+            return;
+        };
+        if self.closing.contains_key(&id) {
+            return;
+        }
+        let Some(outer) = self.outer_geometry(window) else {
+            return;
+        };
+        let now = self.clock.now();
+        present::close(window, outer, now);
+        self.closing.insert(id, now + present::CLOSING);
+        self.redraw = true;
+    }
+
+    /// Send the close to every window whose leaving animation has landed.
+    ///
+    /// Returns whether any window is still on its way out, so the backend
+    /// keeps drawing until they are gone.
+    pub(crate) fn settle_closing(&mut self, now: std::time::Duration) -> bool {
+        if self.closing.is_empty() {
+            return false;
+        }
+        let due: Vec<ObjectId> = self
+            .closing
+            .iter()
+            .filter(|(_, at)| now >= **at)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            self.closing.remove(&id);
+            if let Some(window) = self
+                .space
+                .elements()
+                .find(|window| self.toplevel_id(window).as_ref() == Some(&id))
+                .cloned()
+                && let Some(toplevel) = window.toplevel()
+            {
+                // A request, not a kill: the client decides whether it can
+                // close, and the window goes away when it does.
+                toplevel.send_close();
+            }
+        }
+        !self.closing.is_empty()
+    }
+
     /// Act on a frame button.
     pub(crate) fn frame_action(&mut self, window: &Window, action: Action) {
         match action {
-            Action::Close => {
-                if let Some(toplevel) = window.toplevel() {
-                    // A request, not a kill: the client decides whether it can
-                    // close, and the window goes away when it does.
-                    toplevel.send_close();
-                }
-            }
+            Action::Close => self.close_window(window),
             Action::ToggleMaximize => self.toggle_maximize(window),
         }
     }
@@ -1502,6 +1560,7 @@ impl XdgShellHandler for Solium {
         // The frame is dropped with the window it belongs to. Keyed by surface
         // id rather than kept on the window so that this is the only place it
         // has to happen.
+        self.closing.remove(&surface.wl_surface().id());
         self.decorations.remove(&surface.wl_surface().id());
     }
 

@@ -463,6 +463,29 @@ pub(crate) fn open(window: &Window, real: Rectangle<i32, Logical>, now: Duration
     });
 }
 
+/// How long a window takes to leave. The compositor waits this out before
+/// telling the client to close, so the animation runs on a window that is
+/// still alive and still able to paint.
+pub(crate) const CLOSING: Duration = Duration::from_millis(190);
+
+/// Animate a window out: away from the viewer, and gone.
+///
+/// The reverse of `open`, and deliberately not released when it lands -- the
+/// window has to stay invisible for the moment between the animation ending
+/// and the client acting on the close it is about to be sent, or it would
+/// reappear at full size for a frame or two.
+pub(crate) fn close(window: &Window, real: Rectangle<i32, Logical>, now: Duration) {
+    let from = frame(window, real, now);
+    with_slot(window, |slot| {
+        *slot = Some(Transform {
+            from,
+            to: from.scaled(0.86).with_opacity(0.0),
+            animation: Animation::new(now, CLOSING, Curve::InOutQuad),
+            release: false,
+        });
+    });
+}
+
 /// Map a point in drawn space into a window's own coordinates.
 ///
 /// The inverse of the transform, and the reason hit-testing keeps working in a
