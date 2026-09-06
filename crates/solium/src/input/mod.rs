@@ -20,6 +20,7 @@ use smithay::{
         KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, TouchDownEvent,
         TouchMotionEvent as TouchMotionEventTrait, TouchUpEvent,
     },
+    input::pointer::CursorImageStatus,
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, xkb},
         pointer::{AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent},
@@ -221,6 +222,16 @@ fn pointer_motion<B: InputBackend>(
 
     let under = state.surface_under(location);
 
+    // Over nothing of a client's, the cursor is the compositor's again. The
+    // status is whatever the last client set it to, and a client only sets it
+    // while the pointer is over its surface -- so without this the pointer
+    // keeps a cursor belonging to a window it has left, and once that surface
+    // is gone there is nothing to draw at all: an invisible pointer over the
+    // desktop, which is exactly where you need to see it.
+    if under.is_none() {
+        state.pointer.status = CursorImageStatus::default_named();
+    }
+
     pointer.motion(
         state,
         under,
@@ -250,6 +261,12 @@ fn pointer_relative<B: InputBackend>(
     };
     let location = confine(output, pointer.current_location() + event.delta());
     let under = state.surface_under(location);
+    // As in `pointer_motion`: over nothing of a client's, the cursor is the
+    // compositor's again. This is the path a real mouse takes, so leaving it
+    // out is leaving it broken on the hardware and fixed nested.
+    if under.is_none() {
+        state.pointer.status = CursorImageStatus::default_named();
+    }
 
     hover_frame(state, location);
     if let Some(area) = state.work_area()

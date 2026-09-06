@@ -175,6 +175,10 @@ pub(crate) fn elements(
         else {
             continue;
         };
+        // Nothing of the client's left to draw: do not draw our half either.
+        if !state.has_content(&window) {
+            continue;
+        }
 
         // The transform is expressed against the *outer* rect — the window
         // including its frame — so the frame scales and moves with the window
