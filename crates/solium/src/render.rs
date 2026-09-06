@@ -13,14 +13,16 @@ use std::sync::Mutex;
 
 use smithay::{
     backend::renderer::{
-        ImportAll, ImportMem, Renderer,
+        Renderer,
         element::{
-            AsRenderElements, Kind,
+            AsRenderElements, Id, Kind,
             memory::MemoryRenderBufferRenderElement,
             render_elements,
             surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
             utils::RescaleRenderElement,
         },
+        gles::{GlesRenderer, GlesTexture},
+        utils::{CommitCounter, with_renderer_surface_state},
     },
     desktop::{PopupManager, Window, layer_map_for_output},
     input::pointer::{CursorImageAttributes, CursorImageStatus},
@@ -35,10 +37,16 @@ render_elements! {
     ///
     /// `Window` is a client's surface, placed wherever its presentation says.
     /// `Chrome` is a texture the compositor rendered itself: window frames,
-    /// drawn from QML.
-    pub(crate) Element<R> where R: ImportAll + ImportMem;
-    Window = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
-    Chrome = MemoryRenderBufferRenderElement<R>,
+    /// drawn from QML. `Warped` is a texture through four arbitrary corners,
+    /// which is how anything that is not a rectangle reaches the screen.
+    ///
+    /// Concrete on `GlesRenderer` rather than generic, because `Warped` can
+    /// only be GLES — see `warp.rs`. The cost is recorded in the spike: a
+    /// Vulkan backend needs its own element set, not just its own warp.
+    pub(crate) Element<=GlesRenderer>;
+    Window = RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
+    Chrome = MemoryRenderBufferRenderElement<GlesRenderer>,
+    Warped = crate::warp::Warp,
 }
 
 /// Everything to draw this frame, topmost first.
@@ -46,11 +54,11 @@ render_elements! {
 /// Topmost first is what the damage tracker expects; getting it backwards
 /// composites the stack upside down, which looks like a stacking bug rather
 /// than an ordering one.
-pub(crate) fn elements<R>(state: &mut Solium, renderer: &mut R, scale: f64) -> Vec<Element<R>>
-where
-    R: Renderer + ImportAll + ImportMem,
-    R::TextureId: Send + Clone + 'static,
-{
+pub(crate) fn elements(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    scale: f64,
+) -> Vec<Element> {
     let now = state.clock.now();
     let output_scale = Scale::from(scale);
     let mut elements = Vec::new();
@@ -82,7 +90,7 @@ where
                 continue;
             };
             let origin = geometry.loc.to_physical_precise_round(scale);
-            let layer_elements: Vec<WaylandSurfaceRenderElement<R>> =
+            let layer_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 surface.render_elements(renderer, origin, output_scale, 1.0);
             elements.extend(layer_elements.into_iter().map(|element| {
                 Element::Window(RescaleRenderElement::from_element(
@@ -150,7 +158,7 @@ where
             for (popup, offset) in PopupManager::popups_for_surface(&surface) {
                 let popup_origin =
                     origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
-                let popup_elements: Vec<WaylandSurfaceRenderElement<R>> =
+                let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                     render_elements_from_surface_tree(
                         renderer,
                         popup.wl_surface(),
@@ -165,6 +173,32 @@ where
             }
         }
 
+        // A transform that is not identity cannot be drawn as a rectangle, so
+        // the window goes through `warp` instead: its texture, through four
+        // projected corners. Only the toplevel's own surface for now —
+        // subsurfaces and popups would need the window rendered offscreen
+        // first, which is step 4 of the spike. A window with neither is the
+        // common case and the one worth showing first.
+        if !frame.matrix.is_identity()
+            && let Some(corners) = crate::warp::project_quad(frame.rect, frame.matrix, scale)
+            && let Some(surface) = window
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface().clone())
+            && let Some(texture) = with_renderer_surface_state(&surface, |state| {
+                state.texture::<GlesTexture>(renderer.context_id()).cloned()
+            })
+            .flatten()
+        {
+            elements.push(Element::Warped(crate::warp::Warp::new(
+                Id::from_wayland_resource(&surface),
+                CommitCounter::default(),
+                texture,
+                corners,
+                frame.opacity,
+            )));
+            continue;
+        }
+
         // A surface's top-left is not the window's. A client that draws its own
         // decorations puts its drop shadow *outside* the window geometry and
         // tells us so through `set_window_geometry`; drawing the surface at the
@@ -173,7 +207,7 @@ where
         // That is what made Firefox look both misplaced and shadowed. Popups
         // already did this; toplevels did not.
         let surface_origin = origin - window.geometry().loc.to_physical_precise_round(scale);
-        let window_elements: Vec<WaylandSurfaceRenderElement<R>> =
+        let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             window.render_elements(renderer, surface_origin, output_scale, frame.opacity);
         elements.extend(window_elements.into_iter().map(|element| {
             Element::Window(RescaleRenderElement::from_element(element, origin, factor))
@@ -189,7 +223,7 @@ where
                 continue;
             };
             let origin = geometry.loc.to_physical_precise_round(scale);
-            let layer_elements: Vec<WaylandSurfaceRenderElement<R>> =
+            let layer_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 surface.render_elements(renderer, origin, output_scale, 1.0);
             elements.extend(layer_elements.into_iter().map(|element| {
                 Element::Window(RescaleRenderElement::from_element(
@@ -210,17 +244,13 @@ where
 /// else gets ours. `Hidden` draws nothing, which is a request clients make
 /// deliberately — a video player going fullscreen, a game grabbing the pointer
 /// — and not a failure.
-fn cursor<R>(
+fn cursor(
     state: &mut Solium,
-    renderer: &mut R,
+    renderer: &mut GlesRenderer,
     output_scale: Scale<f64>,
     scale: f64,
     now: std::time::Duration,
-) -> Vec<Element<R>>
-where
-    R: Renderer + ImportAll + ImportMem,
-    R::TextureId: Send + Clone + 'static,
-{
+) -> Vec<Element> {
     let Some(pointer) = state.seat.get_pointer() else {
         return Vec::new();
     };
@@ -242,7 +272,7 @@ where
                     .unwrap_or_default()
             });
             let origin = (location.to_i32_round() - hotspot).to_physical_precise_round(scale);
-            let surface_elements: Vec<WaylandSurfaceRenderElement<R>> =
+            let surface_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
                     renderer,
                     &surface,

@@ -112,11 +112,10 @@ impl Frame {
 
     /// The same frame, drawn through `matrix` about its own centre.
     ///
-    /// Nothing calls this yet: the renderer draws a rectangle, so a matrix set
-    /// here would be silently ignored. Wired when `warp.rs` lands.
     #[expect(
         dead_code,
-        reason = "the renderer's mesh path is next; see the 3d-presentation spike"
+        reason = "scripts set a transform through sol.present; this is the \
+                  builder for whatever sets one in Rust"
     )]
     pub(crate) fn with_matrix(mut self, matrix: Mat4) -> Self {
         self.matrix = matrix;

@@ -499,6 +499,7 @@ impl Solium {
                     id,
                     rect,
                     opacity,
+                    matrix,
                     animation,
                 } => {
                     let Some(window) = self.window_by_id(id) else {
@@ -508,7 +509,7 @@ impl Solium {
                         continue;
                     };
                     let target = Frame {
-                        matrix: crate::mat4::Mat4::IDENTITY,
+                        matrix: matrix.unwrap_or(crate::mat4::Mat4::IDENTITY),
                         rect: rect.map_or_else(
                             || outer.to_f64(),
                             |rect| present::logical((rect.x, rect.y), (rect.w, rect.h)),
