@@ -141,7 +141,6 @@ pub(crate) struct Scene {
 // would put Qt's scene graph on a thread with no current context.
 impl Scene {
     /// Load a QML file into a scene of the given size.
-    #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn new(qml_path: &Path, width: i32, height: i32) -> Result<Self> {
         Self::with_properties(qml_path, width, height, None)
     }
