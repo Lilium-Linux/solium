@@ -21,6 +21,22 @@
 set -uo pipefail
 
 minutes="${1:-48}"
+
+# Attach mode: soak a compositor that is already running, rather than starting
+# a nested one.
+#
+#   dev/soak.sh 60 --attach wayland-1
+#
+# This exists because a nested soak cannot run unattended on this machine. The
+# winit backend blocks inside eglSwapBuffers waiting on the host compositor,
+# and a host whose display has gone to sleep stops servicing the surface --
+# so the compositor sits there consuming no CPU, and an hour of sampling
+# measures nothing at all. A session on a TTY has no host to wait for. Start
+# Solium on a VT, leave the machine, and point this at its socket.
+attach=""
+if [[ "${2:-}" == "--attach" ]]; then
+    attach="${3:?--attach needs the compositor socket, e.g. wayland-1}"
+fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$root/target/debug/solium"
 out="${SOLIUM_SOAK_DIR:-/tmp/solium-soak}"
@@ -47,20 +63,30 @@ while (( at < minutes * 60000 )); do
 done
 triggers="${triggers%,}"
 
-SOLIUM_TRIGGER_AT="$triggers" nice -n 5 "$binary" >"$log" 2>&1 &
-solium=$!
+if [[ -n "$attach" ]]; then
+    solium="$(pgrep -x solium | head -1)"
+    [[ -n "$solium" ]] || { echo "nothing named solium is running" >&2; exit 1; }
+    # Its own log is wherever it was started; this one only needs the socket.
+    log="/dev/null"
+    echo "attached to pid $solium on $attach"
+else
+    SOLIUM_TRIGGER_AT="$triggers" nice -n 5 "$binary" >"$log" 2>&1 &
+    solium=$!
+fi
 
 clients=()
 cleanup() {
     for pid in "${clients[@]:-}"; do [[ -n "$pid" ]] && kill "$pid" 2>/dev/null; done
-    kill "$solium" 2>/dev/null
+    # An attached compositor is the user's session: it is sampled, not killed.
+    [[ -z "$attach" ]] && kill "$solium" 2>/dev/null
     pkill -x glxgears 2>/dev/null
     wait "$solium" 2>/dev/null
 }
 trap cleanup EXIT
 
-socket=""
+socket="$attach"
 for _ in $(seq 1 150); do
+    [[ -n "$socket" ]] && break
     kill -0 "$solium" 2>/dev/null || { echo "solium exited early" >&2; tail -5 "$log" >&2; exit 1; }
     socket="$(grep -oE 'socket=wayland-[0-9]+' "$log" | tail -1 | cut -d= -f2)"
     [[ -n "$socket" ]] && break
