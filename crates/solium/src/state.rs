@@ -153,6 +153,9 @@ pub(crate) struct Solium {
     pub(crate) socket_name: String,
     /// The Developer Tweaks panel, when `--debug-mode` asked for one.
     pub(crate) tweaks: Option<crate::surface::ShellSurface>,
+    /// Whether it is on screen. Hiding keeps the scene alive, so showing it
+    /// again is a flag rather than a rebuild.
+    pub(crate) tweaks_shown: bool,
     /// Which frame the pointer was last over, so the one it leaves can be
     /// told. QML hover is positional: a frame never told the pointer left
     /// stays lit forever.
@@ -328,6 +331,7 @@ impl Solium {
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
             tweaks: None,
+            tweaks_shown: true,
             hovered_frame: None,
             closing: HashMap::new(),
             reported_at: std::time::Duration::ZERO,
@@ -680,6 +684,10 @@ impl Solium {
                         }
                         self.redraw = true;
                     }
+                }
+                Command::TweaksToggle => {
+                    self.tweaks_shown = !self.tweaks_shown;
+                    self.redraw = true;
                 }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
                 Command::Reload => self.request = Some(Request::Reload),
@@ -1374,8 +1382,14 @@ impl Solium {
         self.tweaks.as_mut()
     }
 
-    /// Where the panel sits: down the right-hand edge, out of the way.
+    /// Where the panel sits, or `None` when there is not one to show.
+    ///
+    /// The single gate: drawing and input both ask for the area, so hidden is
+    /// hidden for both without either of them knowing why.
     pub(crate) fn tweaks_area(&self) -> Option<Rectangle<i32, Logical>> {
+        if !self.tweaks_shown || !crate::dev::debug_mode() {
+            return None;
+        }
         let area = self.work_area()?;
         let width = 320.min((area.size.w / 3).max(200));
         Some(Rectangle::new(

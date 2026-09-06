@@ -132,6 +132,8 @@ pub(crate) enum Command {
     Quit,
     /// Read the configuration again.
     Reload,
+    /// Show or hide the Developer Tweaks panel.
+    TweaksToggle,
     /// Move and resize a window for real — the layout's authority, not a
     /// transform. The compositor animates it there from where it was.
     Place {
@@ -789,6 +791,15 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, entries: Table| {
             let sol: Table = lua.globals().get("sol")?;
             sol.set("_tweaks", entries)
+        })?,
+    )?;
+
+    // Show or hide the panel. Does nothing without `--debug-mode`, so the
+    // binding can live in the ordinary configuration.
+    sol.set(
+        "tweaks_toggle",
+        lua.create_function(|lua, ()| {
+            with_pending(lua, |pending| pending.commands.push(Command::TweaksToggle))
         })?,
     )?;
 
