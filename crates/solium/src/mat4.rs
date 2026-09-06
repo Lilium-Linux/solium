@@ -10,6 +10,11 @@
 //! `docs/spikes/2026-09-06-3d-presentation.md`.
 
 /// A 4x4 transform, column-major.
+///
+/// Unused until the renderer can draw a window as geometry — the mesh path in
+/// `warp.rs`, step 2 of `docs/spikes/2026-09-06-3d-presentation.md`. Landed
+/// ahead of it, with its tests, rather than written in the same commit as the
+/// GLES: the maths is checkable on its own and the drawing is not.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Mat4(pub(crate) [f32; 16]);
 
@@ -19,6 +24,10 @@ impl Default for Mat4 {
     }
 }
 
+#[expect(
+    dead_code,
+    reason = "the renderer's mesh path is next; see the 3d-presentation spike"
+)]
 impl Mat4 {
     pub(crate) const IDENTITY: Self = Self([
         1.0, 0.0, 0.0, 0.0, //
@@ -117,6 +126,26 @@ impl Mat4 {
         Self(out)
     }
 
+    /// Element-wise blend toward `other`.
+    ///
+    /// Correct for what the compositor animates — identity into a transform,
+    /// or one of a kind into another of the same kind. Blending two unrelated
+    /// rotations this way passes through a squashed middle rather than turning
+    /// through the shorter arc, which is a real limitation and the reason a
+    /// script wanting that should animate the angle and rebuild the matrix.
+    pub(crate) fn blend(self, other: Self, progress: f64) -> Self {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "matrix elements are small floats either way"
+        )]
+        let t = progress.clamp(0.0, 1.0) as f32;
+        let mut out = [0.0_f32; 16];
+        for (index, slot) in out.iter_mut().enumerate() {
+            *slot = self.0[index] + (other.0[index] - self.0[index]) * t;
+        }
+        Self(out)
+    }
+
     /// Project a point, dividing through by `w`.
     ///
     /// Returns `None` when the point lands at or behind the viewer, where the
@@ -209,6 +238,15 @@ mod tests {
 
     /// Behind the viewer there is no answer, and inventing one flips a corner
     /// to the far side of the screen.
+    #[test]
+    fn blending_from_identity_lands_on_both_ends() {
+        let target = Mat4::scale(3.0, 3.0, 1.0);
+        assert!(Mat4::IDENTITY.blend(target, 0.0).is_identity());
+        assert_eq!(Mat4::IDENTITY.blend(target, 1.0), target);
+        let half = Mat4::IDENTITY.blend(target, 0.5);
+        assert_eq!(half.project(1.0, 0.0, 0.0), Some((2.0, 0.0)));
+    }
+
     #[test]
     fn a_point_behind_the_viewer_has_no_projection() {
         let m = Mat4::perspective(100.0);

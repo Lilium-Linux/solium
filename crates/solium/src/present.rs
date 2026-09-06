@@ -22,6 +22,8 @@
 
 use std::{cell::RefCell, time::Duration};
 
+use crate::mat4::Mat4;
+
 use smithay::{
     desktop::Window,
     utils::{Logical, Point, Rectangle},
@@ -77,6 +79,10 @@ pub(crate) fn logical(loc: (f64, f64), size: (f64, f64)) -> Rectangle<f64, Logic
 pub(crate) struct Frame {
     pub(crate) rect: Rectangle<f64, Logical>,
     pub(crate) opacity: f32,
+    /// A 4x4 applied about the rect's centre. Identity means flat, and flat
+    /// stays on the cheap path — see
+    /// `docs/spikes/2026-09-06-3d-presentation.md`.
+    pub(crate) matrix: Mat4,
 }
 
 impl Frame {
@@ -85,6 +91,7 @@ impl Frame {
         Self {
             rect: geometry.to_f64(),
             opacity: 1.0,
+            matrix: Mat4::IDENTITY,
         }
     }
 
@@ -99,7 +106,21 @@ impl Frame {
         Self {
             rect: logical(loc, size),
             opacity: self.opacity,
+            matrix: self.matrix,
         }
+    }
+
+    /// The same frame, drawn through `matrix` about its own centre.
+    ///
+    /// Nothing calls this yet: the renderer draws a rectangle, so a matrix set
+    /// here would be silently ignored. Wired when `warp.rs` lands.
+    #[expect(
+        dead_code,
+        reason = "the renderer's mesh path is next; see the 3d-presentation spike"
+    )]
+    pub(crate) fn with_matrix(mut self, matrix: Mat4) -> Self {
+        self.matrix = matrix;
+        self
     }
 
     pub(crate) fn with_opacity(mut self, opacity: f32) -> Self {
@@ -125,6 +146,14 @@ impl Frame {
                 reason = "opacity is a small float either way"
             )]
             opacity: lerp(f64::from(self.opacity), f64::from(other.opacity), progress) as f32,
+            // Element-wise, which is not how one rotates halfway between two
+            // rotations — that needs the rotation pulled apart and blended as
+            // an angle. It is right for the cases the compositor animates:
+            // from identity into a transform, or between two of the same kind.
+            // A script animating between two unrelated rotations gets
+            // something that passes through a squashed middle, and should
+            // animate the angle instead and rebuild the matrix per frame.
+            matrix: self.matrix.blend(other.matrix, progress),
         }
     }
 }
@@ -381,6 +410,7 @@ mod tests {
         let drawn = Frame {
             rect: logical((500.0, 100.0), (200.0, 150.0)),
             opacity: 1.0,
+            matrix: Mat4::IDENTITY,
         };
         // The centre of the thumbnail is the centre of the window.
         let mapped = to_window_space(drawn, real, Point::from((600.0, 175.0)));

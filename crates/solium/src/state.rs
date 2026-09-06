@@ -508,6 +508,7 @@ impl Solium {
                         continue;
                     };
                     let target = Frame {
+                        matrix: crate::mat4::Mat4::IDENTITY,
                         rect: rect.map_or_else(
                             || outer.to_f64(),
                             |rect| present::logical((rect.x, rect.y), (rect.w, rect.h)),
@@ -536,6 +537,7 @@ impl Solium {
                         continue;
                     };
                     let start = Frame {
+                        matrix: crate::mat4::Mat4::IDENTITY,
                         rect: present::logical((rect.x, rect.y), (rect.w, rect.h)),
                         opacity: opacity.unwrap_or(1.0),
                     };
