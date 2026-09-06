@@ -461,6 +461,11 @@ impl Solium {
         Some(grown(self.pane_geometry(pane)?, self.insets_of(pane.id())))
     }
 
+    /// The same, for a caller that holds only the pane's id.
+    pub(crate) fn pane_outer_of(&self, id: crate::pane::PaneId) -> Option<Rectangle<i32, Logical>> {
+        self.pane_outer(self.panes.get(id)?)
+    }
+
     /// How a pane is being drawn right now. Real geometry unless something is
     /// animating it, and real geometry for a pane that has gone.
     pub(crate) fn drawn(&self, id: crate::pane::PaneId, real: Rectangle<i32, Logical>) -> Frame {
@@ -470,19 +475,40 @@ impl Solium {
         )
     }
 
-    /// Every pane with something on screen, topmost first.
+    /// Every pane on screen, topmost first, with its client if it has one.
     ///
-    /// Collected rather than borrowed because drawing a frame needs `&mut`
-    /// state; `Window` is a handle, so this is a few pointer copies. The pane's
-    /// id comes with it so nothing downstream has to look it up again — and so
-    /// that when a pane can be drawn without a client, this is the signature
-    /// that already carries the one thing both cases share.
-    pub(crate) fn on_screen(&self) -> Vec<(crate::pane::PaneId, Window)> {
+    /// Collected rather than borrowed because drawing needs `&mut` state;
+    /// `Window` is a handle, so this is a few pointer copies. The pane's id
+    /// comes with it because that is the one thing both kinds of pane share —
+    /// a window still waiting for its application is in this list too, and
+    /// draws its own scene instead of a client's surface.
+    pub(crate) fn on_screen(&self) -> Vec<(crate::pane::PaneId, Option<Window>)> {
         self.panes
             .iter()
             .rev()
-            .filter_map(|pane| Some((pane.id(), pane.client()?.clone())))
+            .map(|pane| (pane.id(), pane.client().cloned()))
             .collect()
+    }
+
+    /// What to write on a pane's frame.
+    pub(crate) fn pane_title(&self, id: crate::pane::PaneId) -> String {
+        self.panes.get(id).map_or_else(String::new, |pane| {
+            pane.client().map_or_else(
+                || pane.program().unwrap_or_default().to_owned(),
+                |window| self.window_title(window),
+            )
+        })
+    }
+
+    /// Whether the pointer is over a pane, frame included.
+    pub(crate) fn pointer_over(&self, id: crate::pane::PaneId) -> bool {
+        let Some(outer) = self.panes.get(id).and_then(|pane| self.pane_outer(pane)) else {
+            return false;
+        };
+        let Some(pointer) = self.seat.get_pointer() else {
+            return false;
+        };
+        outer.to_f64().contains(pointer.current_location())
     }
 
     /// Whether the compositor draws this window's frame.
@@ -1138,16 +1164,18 @@ impl Solium {
         let now = self.clock.now();
 
         for pane in self.panes.iter().rev() {
-            let Some(window) = pane.client() else {
-                continue;
-            };
-            let Some(outer) = self.outer_geometry(window) else {
+            let Some(outer) = self.pane_outer(pane) else {
                 continue;
             };
             let frame = present::frame(pane, outer, now);
             if !frame.rect.contains(location) {
                 continue;
             }
+            // A window whose application has not arrived has no surface to
+            // give the pointer -- but it is on screen and it is under the
+            // cursor, so nothing behind it may have the click either. Falling
+            // through would type into whatever the window is covering.
+            let window = pane.client()?;
 
             // Mapped through the *outer* rect, then offset into the client's
             // own space. A point in the titlebar lands above the client and
@@ -1178,15 +1206,14 @@ impl Solium {
     pub(crate) fn frame_under(
         &self,
         location: Point<f64, Logical>,
-    ) -> Option<(crate::pane::PaneId, Window, Point<f64, Logical>)> {
+    ) -> Option<(crate::pane::PaneId, Option<Window>, Point<f64, Logical>)> {
         let now = self.clock.now();
 
         self.panes.iter().rev().find_map(|pane| {
             if !self.decorations.contains(pane.id()) {
                 return None;
             }
-            let window = pane.client()?;
-            let outer = self.outer_geometry(window)?;
+            let outer = self.pane_outer(pane)?;
             let drawn = present::frame(pane, outer, now);
             if !drawn.rect.contains(location) {
                 return None;
@@ -1209,7 +1236,7 @@ impl Solium {
             if client.contains(in_outer) {
                 return None;
             }
-            Some((pane.id(), window.clone(), in_outer))
+            Some((pane.id(), pane.client().cloned(), in_outer))
         })
     }
 
@@ -1435,8 +1462,7 @@ impl Solium {
             if !self.decorations.contains(pane.id()) {
                 return None;
             }
-            let window = pane.client()?;
-            let outer = self.outer_geometry(window)?;
+            let outer = self.pane_outer(pane)?;
             let drawn = present::frame(pane, outer, now);
             if !drawn.rect.contains(location) {
                 return None;
@@ -1464,25 +1490,64 @@ impl Solium {
     /// point: the arrangement settles before the application has done
     /// anything at all.
     pub(crate) fn begin_loading(&mut self, program: &str, pid: Option<u32>) -> crate::pane::PaneId {
-        let at = self
-            .seat
-            .get_pointer()
-            .map(|pointer| pointer.current_location())
-            .unwrap_or_default();
-        #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
-        let slot = Rectangle::new(
-            ((at.x as i32) - 40, (at.y as i32) - 24).into(),
-            (80, 48).into(),
-        );
         let name = std::path::Path::new(program)
             .file_name()
             .map_or(program, |name| name.to_str().unwrap_or(program));
         // Resolved now, so reloading the configuration mid-wait does not
         // change what a window already on screen looks like halfway through.
         let source = crate::pane::loading_source(self.loading.scene.as_deref());
-        let id = self
-            .panes
-            .open(Pane::loading(name, pid, slot, source, self.clock.now()));
+        // Built here rather than at the first draw: the scene is what the
+        // window *is* until its application arrives, and a window that is
+        // empty for its first frame is a window that flickers.
+        let properties = format!(
+            "{{\"program\":\"{}\",\"waited\":0}}",
+            name.replace('"', "'")
+        );
+        let scene = match crate::surface::ShellSurface::new(source.clone(), &properties) {
+            Ok(scene) => Some(scene),
+            Err(err) => {
+                // The window still opens. It takes its slot, it can be closed,
+                // and its application will still arrive in it -- it just has
+                // nothing to show meanwhile, which beats not opening.
+                tracing::warn!(
+                    ?err,
+                    program = name,
+                    "no scene for a window that is loading"
+                );
+                None
+            }
+        };
+
+        // A window's worth of screen from the very first frame, before anyone
+        // is asked where it should go. A layout usually moves it in the same
+        // breath, but this is what it falls back to -- and the fallback has to
+        // be the shape of the window that is coming, because for a floating
+        // arrangement this *is* where the window ends up. Getting this wrong
+        // is not subtle: the application arrives sized to whatever is here.
+        let area = self.launch_slot();
+        let id = self.panes.open(Pane::loading(
+            name,
+            pid,
+            area,
+            source,
+            scene,
+            self.clock.now(),
+        ));
+
+        // A frame, so it is a window rather than a rectangle: something to
+        // name it and something to press when an application is not coming.
+        // Keyed by pane, so this is the same frame -- with whatever animation
+        // is running in it -- once the client arrives.
+        if self.loading.decorated {
+            self.decorations.insert(id, area.size.w, area.size.h);
+        }
+        // And the frame's share comes off the slot, exactly as it does for a
+        // window the layout placed, so the client is sized to the same rect
+        // either way.
+        let client = inner(area, self.insets_of(id));
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.set_slot(client);
+        }
         tracing::debug!(program = name, ?pid, "a window opened for an application");
 
         // Told as an *open*, not as a relayout. A layout keeps its own
@@ -1495,16 +1560,8 @@ impl Solium {
         // and not only the snapshot: a layout that has been told a window
         // opened keeps it in its own arrangement, and would go on placing it
         // however the snapshot were filtered afterwards.
-        let placed = self.loading.reserves_a_slot && self.trigger_open(id);
-        if !placed {
-            // Either nothing had an opinion -- floating, or no scripts at all
-            // -- or it is deliberately staying out of the layout until its
-            // application is really there. It still has to be somewhere, and
-            // this is where a launching window goes.
-            let slot = self.launch_slot();
-            if let Some(pane) = self.panes.get_mut(id) {
-                pane.set_slot(slot);
-            }
+        if self.loading.reserves_a_slot {
+            self.trigger_open(id);
         }
         self.redraw = true;
         id
