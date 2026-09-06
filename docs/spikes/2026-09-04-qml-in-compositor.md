@@ -40,6 +40,17 @@ by the QPA platform plugin, not by Qt Gui.** Measured here, Qt 6.11.2:
 With no plugin to adopt the context, Qt renders on a context of its own and the
 texture it produces is not one we can sample — the two contexts share nothing.
 
+**Re-tested 2026-09-06**, after the DRM backend landed, with `dev/qtprobe` —
+which exists so the third person to ask does not have to write it again:
+
+| Platform plugin | `fromNative` |
+|---|---|
+| `offscreen` | returns null |
+| `eglfs` | returns null |
+
+Unchanged. This is a property of the installed Qt, not of anything here, so the
+probe is the thing to re-run after a Qt update.
+
 Worse, and worth knowing: **`QQuickRenderControl::initialize()` makes a GL
 context current on the calling thread on its way to failing.** After that, the
 compositor's own `eglMakeCurrent` fails with `BAD_ACCESS` — "another window API
@@ -83,6 +94,25 @@ without changing the adaptation. Getting it wrong fails later, in
    how two processes would do it anyway — but it needs both sides on the same
    GPU and correct format/modifier negotiation, which is exactly where this
    kind of work stalls on NVIDIA.
+
+   What it involves, now that it is the only route left:
+
+   * Allocate the target through GBM, which the DRM backend already has.
+   * In *Qt's* context, make an `EGLImage` from that dmabuf and bind it to a
+     texture, then hand Qt `QQuickRenderTarget::fromOpenGLTexture`.
+   * In *our* context, import the same dmabuf with `import_dmabuf` — which the
+     compositor already does for every client buffer.
+   * Fence between the two. `EGL_ANDROID_native_fence_sync` is present on this
+     driver; without a fence this is a race that shows as intermittent garbage,
+     which is the worst way to find out.
+   * Keep two contexts on one thread and restore ours after every Qt render.
+     `QQuickRenderControl::initialize()` makes its own context current on the
+     calling thread, and the compositor's `eglMakeCurrent` fails with
+     `BAD_ACCESS` afterwards unless it is put back — see above.
+
+   The risk is concentrated in the last two: NVIDIA's driver is where dmabuf
+   round-trips and cross-context fences are least forgiving, and a wrong fence
+   fails intermittently rather than loudly.
 
 Neither is on the critical path. Chrome is small, and the upload only happens
 when it changes.
