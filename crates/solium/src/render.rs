@@ -105,6 +105,13 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f6
 /// than an ordering one.
 /// The frame around a pane, whatever is inside it.
 ///
+/// Takes the pane's whole `Frame` rather than a rect and an alpha, and that is
+/// deliberate: every piece of a window — the client's surface, its popups, its
+/// frame, the scene standing in for it — is drawn from the *pane's* transform,
+/// so none of them can be given the wrong one or miss one of its parts. The
+/// frame did miss the opacity, and a window closing faded away underneath a
+/// titlebar that stayed perfectly solid.
+///
 /// Drawn whenever there is a decoration at all, not only when it reserved
 /// space: a frame that takes nothing and floats over the window — a bar that
 /// appears on hover, a border that does not push the client around — is a
@@ -128,7 +135,9 @@ fn chrome(
     };
     let mut animating = false;
     if let Some(decoration) = state.decorations.get_mut(pane) {
-        if let Some(element) = decoration.frame(renderer, frame.rect, outer.size, &look) {
+        if let Some(element) =
+            decoration.frame(renderer, frame.rect, outer.size, &look, frame.opacity)
+        {
             elements.push(Element::Chrome(element));
         }
         animating = decoration.animating();
@@ -152,19 +161,23 @@ fn scene(
     renderer: &mut GlesRenderer,
     elements: &mut Vec<Element>,
     pane: crate::pane::PaneId,
-    rect: smithay::utils::Rectangle<f64, smithay::utils::Logical>,
+    frame: present::Frame,
     now: std::time::Duration,
 ) {
+    let rect = frame.rect;
     let waited = state.panes.get(pane).map_or(0, |held| {
         i32::try_from(held.waited(now).as_millis()).unwrap_or(i32::MAX)
     });
-    // Solid while this is what you are looking at; fading once the application
-    // is on screen underneath it.
+    // Two fades, and they multiply. The scene's own, as the application it was
+    // standing in for appears underneath it; and the pane's, because a window
+    // being closed or animated by a script takes everything inside it along --
+    // the scene is part of the window, not something laid over it.
     let fade = state.loading.fade;
-    let alpha = state
-        .panes
-        .get(pane)
-        .map_or(1.0, |held| held.scene_alpha(now, fade));
+    let alpha = frame.opacity
+        * state
+            .panes
+            .get(pane)
+            .map_or(1.0, |held| held.scene_alpha(now, fade));
     #[expect(clippy::cast_possible_truncation, reason = "a rect on this screen")]
     let area = smithay::utils::Rectangle::new(
         (rect.loc.x.round() as i32, rect.loc.y.round() as i32).into(),
@@ -296,7 +309,7 @@ pub(crate) fn elements(
             if state.loading.decorated {
                 chrome(state, renderer, &mut elements, pane, frame, outer);
             }
-            scene(state, renderer, &mut elements, pane, frame.rect, now);
+            scene(state, renderer, &mut elements, pane, frame, now);
             continue;
         }
 
@@ -309,7 +322,7 @@ pub(crate) fn elements(
         // underneath is already the window, and this dissolves to reveal it
         // rather than being swapped for it.
         if state.pane_has_scene(pane) {
-            scene(state, renderer, &mut elements, pane, frame.rect, now);
+            scene(state, renderer, &mut elements, pane, frame, now);
         }
 
         let Some(real) = state.real_geometry(&window) else {
@@ -519,7 +532,11 @@ pub(crate) fn flat_window_elements(
         );
         if let Some(id) = state.panes.id_of(window)
             && let Some(decoration) = state.decorations.get_mut(id)
-            && let Some(element) = decoration.frame(renderer, whole, outer.size, &look)
+            // Fully opaque here: this pass draws the window flat into a
+            // texture at its real size, and the warp applies the transform's
+            // opacity to the whole texture afterwards. Applying it twice would
+            // fade the frame squared.
+            && let Some(element) = decoration.frame(renderer, whole, outer.size, &look, 1.0)
         {
             elements.push(Element::Chrome(element));
         }

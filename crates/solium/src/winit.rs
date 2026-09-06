@@ -266,9 +266,8 @@ pub(crate) fn run() -> Result<()> {
             monitor_reported = true;
         }
 
-        // One clock, sampled once, before anything reads it. Two samples in a
-        // frame would let two windows animate from different instants.
-        state.clock.tick();
+        // Read once for the whole iteration, so everything animating in this
+        // frame agrees about when "now" is.
         let now = state.clock.now();
 
         // Scripted input, fired through the same paths a keypress and a click

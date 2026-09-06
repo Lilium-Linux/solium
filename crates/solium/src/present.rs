@@ -36,24 +36,35 @@ use solium_animation::{Animation, lerp};
 #[derive(Debug)]
 pub(crate) struct Clock {
     start: std::time::Instant,
-    now: Duration,
 }
-
 impl Clock {
     pub(crate) fn new() -> Self {
         Self {
             start: std::time::Instant::now(),
-            now: Duration::ZERO,
         }
     }
 
-    /// Sample the clock. Called once per frame, before anything reads it.
-    pub(crate) fn tick(&mut self) {
-        self.now = self.start.elapsed();
-    }
-
+    /// The time now.
+    ///
+    /// Read through, not sampled and cached. It used to be cached and refreshed
+    /// once per frame, so that everything animating in one frame agreed about
+    /// when "now" was — which is a real property, and it is kept where it
+    /// matters by reading this once into a local at the top of a frame and
+    /// passing that around.
+    ///
+    /// What a cached clock cannot survive is a compositor that only draws when
+    /// something changed. On a still screen no frame is drawn, so the sample
+    /// goes stale for exactly as long as the screen has been still, and a
+    /// binding pressed then starts its animation at a time minutes in the past.
+    /// The first frame that draws it evaluates it long past its end: no
+    /// animation, just the result. It depended on how long you had left the
+    /// screen alone, which is not a thing anyone would think to test.
+    ///
+    /// It could be fixed by sampling in every event source instead. That is the
+    /// same discipline written down six times, and the seventh source added
+    /// later would not know about it.
     pub(crate) fn now(&self) -> Duration {
-        self.now
+        self.start.elapsed()
     }
 }
 
@@ -517,6 +528,27 @@ pub(crate) fn to_window_space(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clock_advances_without_being_asked() {
+        // It was a sample, refreshed once per *drawn* frame. Drawing waits for
+        // something to have changed, so on a still screen no frame is drawn and
+        // the sample freezes for as long as the screen is left alone. An
+        // animation started against a frozen clock begins minutes in the past
+        // and is already finished the first time anything evaluates it: the
+        // window arrives at its destination with no animation at all.
+        //
+        // Which made it look intermittent -- it worked if you had been doing
+        // something, and did nothing if you had not.
+        let clock = Clock::new();
+        let first = clock.now();
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(
+            clock.now() > first,
+            "the clock must advance on its own, or an animation started \
+             between two frames begins at the wrong instant"
+        );
+    }
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
         Rectangle::new((x, y).into(), (w, h).into())

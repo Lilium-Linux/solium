@@ -235,12 +235,22 @@ impl Decoration {
     /// rasterised at. No time is passed: the clock belongs to the process, and
     /// `qml::tick` advances it once for the whole frame. Keeping them apart is what lets a frame scale with its
     /// window in overview without the text being re-laid out every frame.
+    /// The frame, drawn across `rect`, at `alpha`.
+    ///
+    /// The alpha is the window's, not the frame's. Every other part of a window
+    /// is drawn through the presentation transform's opacity — the client's
+    /// surface, its popups, the warped texture — and the frame was the one
+    /// thing that was not. So a window closing faded away underneath a titlebar
+    /// that stayed perfectly solid until the pane was retired, which is a bar
+    /// hanging in the air with nothing under it at the exact moment the user is
+    /// least willing to forgive one.
     pub(crate) fn frame<R>(
         &mut self,
         renderer: &mut R,
         rect: Rectangle<f64, Logical>,
         outer: Size<i32, Logical>,
         look: &Look<'_>,
+        alpha: f32,
     ) -> Option<MemoryRenderBufferRenderElement<R>>
     where
         R: Renderer + ImportMem,
@@ -371,7 +381,7 @@ impl Decoration {
             renderer,
             (rect.loc.x, rect.loc.y),
             buffer,
-            None,
+            Some(alpha),
             Some(source),
             Some(drawn),
             Kind::Unspecified,
