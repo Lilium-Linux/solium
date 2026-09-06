@@ -158,8 +158,6 @@ pub(crate) struct Solium {
     /// The socket clients connect on. Held so that a program started from a
     /// script finds *this* compositor rather than the session it is nested in.
     pub(crate) socket_name: String,
-    /// Applications asked for but not yet on screen. See `Launch`.
-    pub(crate) launches: Vec<Launch>,
     /// What a window does between being asked for and its application
     /// arriving — what draws it, how long it waits, whether it takes a place
     /// in the layout. A script's, not the compositor's. See `Command::Loading`.
@@ -294,100 +292,6 @@ pub(crate) enum Request {
     Reload,
 }
 
-/// An application that has been asked for and has not drawn yet.
-///
-/// The compositor spawns the process, so it knows about the launch a full
-/// second before any Wayland client exists -- and it knows where the pointer
-/// was when it was asked. Nothing about that has to wait for the client.
-pub(crate) struct Launch {
-    /// The stand-in, drawn until the window arrives.
-    pub(crate) surface: crate::surface::ShellSurface,
-    /// Where it started: the pointer, where the asking happened.
-    pub(crate) from: Rectangle<i32, Logical>,
-    /// Where it is going: a window's worth of screen. It grows into this
-    /// immediately, so what is on screen while the application loads is the
-    /// shape and size of the window that is coming -- not a notice about it.
-    pub(crate) to: Rectangle<i32, Logical>,
-    pub(crate) program: String,
-    pub(crate) started: std::time::Duration,
-    /// The process spawned for it, once it exists. A window claims the card
-    /// belonging to *its* process rather than whichever card is oldest.
-    pub(crate) pid: Option<u32>,
-    /// When the window arrived and the stand-in began to leave. The window is
-    /// drawn underneath from that moment, fading up as this fades off it, so
-    /// the two are never both solid and never both absent.
-    pub(crate) handover: Option<std::time::Duration>,
-}
-
-/// How long the stand-in takes to reach window size.
-const LAUNCH_GROW: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// How long it takes to hand over to the window underneath.
-const LAUNCH_HANDOVER: std::time::Duration = std::time::Duration::from_millis(180);
-
-impl Launch {
-    /// Where the stand-in is drawn now.
-    pub(crate) fn rect(&self, now: std::time::Duration) -> Rectangle<i32, Logical> {
-        // Once the window exists this sits exactly on it: the content appears
-        // inside the same rectangle rather than beside a card that is still
-        // sliding somewhere.
-        if self.handover.is_some() {
-            return self.to;
-        }
-        let elapsed = now.saturating_sub(self.started);
-        let progress = if LAUNCH_GROW.is_zero() {
-            1.0
-        } else {
-            (elapsed.as_secs_f64() / LAUNCH_GROW.as_secs_f64()).clamp(0.0, 1.0)
-        };
-        let eased = solium_animation::Curve::OutCubic.at(progress);
-        let mix = |a: i32, b: i32| {
-            #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
-            {
-                (f64::from(a) + (f64::from(b) - f64::from(a)) * eased).round() as i32
-            }
-        };
-        Rectangle::new(
-            (
-                mix(self.from.loc.x, self.to.loc.x),
-                mix(self.from.loc.y, self.to.loc.y),
-            )
-                .into(),
-            (
-                mix(self.from.size.w, self.to.size.w),
-                mix(self.from.size.h, self.to.size.h),
-            )
-                .into(),
-        )
-    }
-
-    /// How far through leaving it is, 0 until the window arrives.
-    pub(crate) fn leaving(&self, now: std::time::Duration) -> f64 {
-        let Some(began) = self.handover else {
-            return 0.0;
-        };
-        if LAUNCH_HANDOVER.is_zero() {
-            return 1.0;
-        }
-        (now.saturating_sub(began).as_secs_f64() / LAUNCH_HANDOVER.as_secs_f64()).clamp(0.0, 1.0)
-    }
-}
-
-impl std::fmt::Debug for Launch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Launch")
-            .field("program", &self.program)
-            .field("to", &self.to)
-            .finish()
-    }
-}
-
-/// How long a stand-in waits before giving up on its application.
-///
-/// Long enough for a cold start on a slow disk, short enough that a program
-/// which is never going to appear does not leave a card on screen forever.
-const LAUNCH_PATIENCE: std::time::Duration = std::time::Duration::from_secs(8);
-
 /// A process and the processes that started it, up to a few generations.
 ///
 /// The program the compositor spawns is not always the one that connects: a
@@ -475,7 +379,6 @@ impl Solium {
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
-            launches: Vec::new(),
             loading: crate::script::Loading::default(),
             tweaks: None,
             tweaks_shown: true,
@@ -671,6 +574,51 @@ impl Solium {
     pub(crate) fn take_pane(&mut self, window: Window) -> u64 {
         let slot = self.real_geometry(&window).unwrap_or_default();
         self.panes.mapped(window, slot, self.clock.now()).get()
+    }
+
+    /// Which process a client belongs to, as the kernel reports it.
+    ///
+    /// The compositor's own view of who is on the other end of the socket, not
+    /// anything the client said about itself.
+    fn client_pid(&self, window: &Window) -> Option<u32> {
+        let surface = window.wl_surface()?;
+        let client = surface.client()?;
+        let credentials = client.get_credentials(&self.display_handle).ok()?;
+        u32::try_from(credentials.pid).ok()
+    }
+
+    /// Give a mapped client to the window that was opened for it, or open a
+    /// new one.
+    ///
+    /// The whole point of the refactor arrives here. A client whose process is
+    /// the one a window has been waiting for becomes that window's content:
+    /// same id, same slot, same frame with the same animation still running in
+    /// it. Nothing is created and nothing is replaced, so nothing downstream
+    /// ever learns that the window used to be empty.
+    ///
+    /// Everything that can go wrong ends in an ordinary window. A client that
+    /// re-execs or forks past the ancestor walk, one whose window was closed
+    /// while it was still starting, one nobody asked for — each of them opens
+    /// the old way. A missed adoption is a window that appears normally; it is
+    /// never a window that is lost.
+    ///
+    /// Must happen where the window is mapped rather than later: `sync_panes`
+    /// gives any client it finds without a pane one of its own, and by then
+    /// there would be two windows for one application.
+    fn adopt_or_open(&mut self, window: Window) -> u64 {
+        let waiting = match self.client_pid(&window) {
+            Some(pid) => self.panes.awaiting(&ancestry(pid)),
+            None => None,
+        };
+        let Some(id) = waiting else {
+            return self.take_pane(window);
+        };
+        let Some(pane) = self.panes.get_mut(id) else {
+            return self.take_pane(window);
+        };
+        pane.adopt(window);
+        tracing::debug!(pane = id.get(), "an application arrived in its window");
+        id.get()
     }
 
     /// Bring the compositor's own view of its windows back in line with the
@@ -1100,16 +1048,17 @@ impl Solium {
             None => process.env_remove("DISPLAY"),
         };
 
-        self.begin_launch(program);
+        // Before the fork, so the window is on screen and the other windows
+        // have moved aside by the time the program has been asked to start.
+        let pane = self.begin_loading(program, None);
 
         match process.spawn() {
             Ok(mut child) => {
                 tracing::info!(program, socket = self.socket_name, "spawned");
-                // The card was put up before the fork, so the pointer position
-                // it used is the one from when the key was pressed. It learns
-                // whose process it is here.
-                if let Some(launch) = self.launches.last_mut() {
-                    launch.pid = Some(child.id());
+                // And it learns whose process to wait for here, because there
+                // was no process to name a moment ago.
+                if let Some(pane) = self.panes.get_mut(pane) {
+                    pane.expect(child.id());
                 }
                 // Waited on so the child is reaped — a compositor that leaves
                 // zombies eventually cannot fork at all — and so that an early
@@ -1128,9 +1077,12 @@ impl Solium {
                 });
             }
             Err(err) => {
-                // Nothing is coming, so the card goes now rather than sitting
-                // there for eight seconds promising otherwise.
-                self.launches.pop();
+                // Nothing is coming, so the window goes now rather than
+                // sitting there for the whole of `patience` promising
+                // otherwise. The layout is told, and closes the gap.
+                if self.panes.remove(pane) {
+                    self.trigger_close(pane);
+                }
                 self.redraw = true;
                 tracing::warn!(?err, program, "could not spawn");
             }
@@ -1589,54 +1541,12 @@ impl Solium {
         true
     }
 
-    pub(crate) fn begin_launch(&mut self, program: &str) {
-        let at = self
-            .seat
-            .get_pointer()
-            .map(|pointer| pointer.current_location())
-            .unwrap_or_default();
-        // Starts small under the pointer and grows into a window's worth of
-        // screen. What the eye follows is one rectangle, from the press to the
-        // application being usable inside it.
-        #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
-        let from = Rectangle::new(
-            ((at.x as i32) - 40, (at.y as i32) - 24).into(),
-            (80, 48).into(),
-        );
-        let to = self.launch_slot();
-        let name = std::path::Path::new(program)
-            .file_name()
-            .map_or(program, |name| name.to_str().unwrap_or(program));
-        let properties = format!(
-            "{{\"program\":\"{}\",\"waited\":0}}",
-            name.replace('"', "'")
-        );
-        let source = std::path::PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/qml/loading/window.qml"
-        ));
-        match crate::surface::ShellSurface::new(source, &properties) {
-            Ok(surface) => {
-                self.launches.push(Launch {
-                    surface,
-                    from,
-                    to,
-                    program: name.to_owned(),
-                    started: self.clock.now(),
-                    pid: None,
-                    handover: None,
-                });
-                self.redraw = true;
-            }
-            Err(err) => tracing::warn!(?err, "no stand-in for a launching application"),
-        }
-    }
-
-    /// A window's worth of screen: what a new window would be given.
+    /// Where a window goes when nothing else has an opinion about it.
     ///
-    /// A guess, and it does not have to be right. When the real window arrives
-    /// the stand-in moves onto whatever the layout actually decided and fades
-    /// off it there, so being wrong costs a short slide rather than a jump.
+    /// A window's worth of screen, inset from the work area. Used for a window
+    /// opened for an application when no layout placed it — floating, or no
+    /// scripts at all — so that what is on screen while the application starts
+    /// is the shape and size of the window that is coming.
     fn launch_slot(&self) -> Rectangle<i32, Logical> {
         let area = self
             .work_area()
@@ -1650,72 +1560,6 @@ impl Solium {
             )
                 .into(),
         )
-    }
-
-    /// Hand a window the stand-in that was put up for *its* process.
-    ///
-    /// Matched on the client's process and its ancestors, not on which card is
-    /// oldest: two applications started at once would otherwise hand the first
-    /// window to draw whichever card had been waiting longer, and the two
-    /// would swap places on screen. A window with no matching card gets none
-    /// and simply opens -- a dialog from an application that was already
-    /// running is not a launch, and should not consume one.
-    pub(crate) fn claim_launch(&mut self, window: &Window) -> Option<Rectangle<i32, Logical>> {
-        if self.launches.is_empty() {
-            return None;
-        }
-        let family = ancestry(self.client_pid(window)?);
-        let index = self
-            .launches
-            .iter()
-            .position(|launch| launch.pid.is_some_and(|pid| family.contains(&pid)))?;
-        let now = self.clock.now();
-        let outer = self.outer_geometry(window);
-        let launch = self.launches.get_mut(index)?;
-        // Not removed: it moves onto the window and fades off it, so the
-        // application's own content appears inside the same rectangle that has
-        // been standing there since the press.
-        if let Some(outer) = outer {
-            launch.to = outer;
-        }
-        launch.handover = Some(now);
-        launch.surface.set_int("leaving", 1);
-        tracing::debug!(
-            program = launch.program,
-            pid = launch.pid,
-            "a window claimed its card"
-        );
-        self.redraw = true;
-        Some(launch.to)
-    }
-
-    /// The process a window's client belongs to.
-    fn client_pid(&self, window: &Window) -> Option<u32> {
-        let surface = window.wl_surface()?;
-        let client = surface.client()?;
-        let credentials = client.get_credentials(&self.display_handle).ok()?;
-        u32::try_from(credentials.pid).ok()
-    }
-
-    /// Drop stand-ins whose application never arrived, and keep the rest
-    /// animating.
-    pub(crate) fn settle_launches(&mut self, now: std::time::Duration) -> bool {
-        let before = self.launches.len();
-        self.launches.retain(|launch| {
-            if launch.handover.is_some() {
-                // Gone once it has finished fading off the window.
-                return launch.leaving(now) < 1.0;
-            }
-            now.saturating_sub(launch.started) < LAUNCH_PATIENCE
-        });
-        if self.launches.len() != before {
-            tracing::debug!(
-                gave_up = before - self.launches.len(),
-                "a launch never arrived"
-            );
-            self.redraw = true;
-        }
-        !self.launches.is_empty()
     }
 
     /// Whether this window still has anything of its own to show.
@@ -1815,14 +1659,22 @@ impl Solium {
             return;
         }
 
+        // A client that mapped into a window which was already open takes
+        // that window's shape. The layout placed it before the application
+        // existed and was told it opened then; doing either again would move a
+        // window that is already where it belongs and announce it twice.
+        if self.panes.get(pane).is_some_and(Pane::adopted) {
+            let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
+                return;
+            };
+            size_window(window, slot);
+            self.space.map_element(window.clone(), slot.loc, false);
+            tracing::debug!(pane = pane.get(), "an application filled its window");
+            return;
+        }
+
         let location = self.initial_placement(window);
         self.space.map_element(window.clone(), location, true);
-
-        // If a stand-in has been sitting on screen for this, the window takes
-        // its place: it grows out of the card rather than appearing elsewhere
-        // while the card disappears here. The two are one movement, which is
-        // the whole point of having shown something early.
-        let from = self.claim_launch(window);
 
         // How a window appears is a script's decision — that is what makes the
         // dock-icon genie a script rather than a feature. The built-in is only
@@ -1832,20 +1684,7 @@ impl Solium {
             && let Some(outer) = self.outer_geometry(window)
             && let Some(pane) = self.panes.get(pane)
         {
-            match from {
-                // The stand-in is already sitting exactly here and fading off
-                // it, so the window fades *up* in place. Growing it as well
-                // would be two things moving where the eye expects one.
-                Some(_) => present::from(
-                    pane,
-                    outer,
-                    present::Frame::real(outer).with_opacity(0.0),
-                    self.clock.now(),
-                    std::time::Duration::from_millis(180),
-                    solium_animation::Curve::OutCubic,
-                ),
-                None => present::open(pane, outer, self.clock.now()),
-            }
+            present::open(pane, outer, self.clock.now());
         }
     }
 
@@ -2234,7 +2073,7 @@ impl XdgShellHandler for Solium {
         self.space.map_element(window.clone(), (0, 0), true);
         // On the same line as the map, so nothing can observe a mapped window
         // that has no pane -- `trigger_open` is about to ask for its id.
-        self.take_pane(window);
+        self.adopt_or_open(window);
 
         // Focus follows the newest window. #12 turns this into a policy.
         if let Some(keyboard) = self.seat.get_keyboard() {

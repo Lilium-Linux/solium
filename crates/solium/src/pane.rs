@@ -89,6 +89,12 @@ pub(crate) struct Pane {
     slot: Rectangle<i32, Logical>,
     content: Content,
     opened: Duration,
+    /// Whether a client mapped *into* this pane rather than creating it.
+    ///
+    /// The difference matters exactly once, on that client's first commit: an
+    /// adopted pane already has a slot the layout gave it and a layout that
+    /// was told it opened, so neither must happen a second time.
+    adopted: bool,
     /// Where this pane is *drawn*, when that is not where it lives, and
     /// whether it has ever been on screen. See `present::Slot` — it is here
     /// rather than on the client's window so that it can exist before the
@@ -114,6 +120,7 @@ impl Pane {
                 source,
             },
             opened: now,
+            adopted: false,
             drawn: crate::present::Slot::default(),
         }
     }
@@ -126,6 +133,7 @@ impl Pane {
             slot,
             content: Content::Client(window),
             opened: now,
+            adopted: false,
             drawn: crate::present::Slot::default(),
         }
     }
@@ -178,6 +186,20 @@ impl Pane {
     /// decoration keyed by pane id carries its animation straight through.
     pub(crate) fn adopt(&mut self, window: Window) {
         self.content = Content::Client(window);
+        self.adopted = true;
+    }
+
+    /// Whether a client mapped into this pane rather than creating it.
+    pub(crate) const fn adopted(&self) -> bool {
+        self.adopted
+    }
+
+    /// Whose process to wait for. Set after the fork, because the window went
+    /// up before it — which is the point of the whole exercise.
+    pub(crate) fn expect(&mut self, pid: u32) {
+        if let Content::Loading { pid: waiting, .. } = &mut self.content {
+            *waiting = Some(pid);
+        }
     }
 
     /// The client has gone; keep the pane while it animates away.
@@ -247,6 +269,18 @@ impl Panes {
 
     pub(crate) fn id_of(&self, window: &Window) -> Option<PaneId> {
         self.of(window).map(Pane::id)
+    }
+
+    /// The pane waiting for a client from this process family, if any.
+    ///
+    /// Topmost first, so the most recently asked-for window wins when someone
+    /// has asked for the same program twice.
+    pub(crate) fn awaiting(&self, family: &[u32]) -> Option<PaneId> {
+        self.panes
+            .iter()
+            .rev()
+            .find(|pane| pane.awaits(family))
+            .map(Pane::id)
     }
 
     /// Open a pane, on top. The window's life begins here.
@@ -320,7 +354,14 @@ impl Panes {
             // is the one place a pane is told so. A loading pane's slot is its
             // own, which is why the two cannot be the same assignment.
             let mut pane = mine.unwrap_or_else(|| Pane::mapped(window.clone(), *slot, now));
-            pane.set_slot(*slot);
+            // A window with no size has told us nothing: it has been mapped
+            // and has not committed a buffer yet. Writing that over the slot
+            // the layout gave the pane would throw the layout's answer away --
+            // which is exactly the window between a client mapping into a pane
+            // and its first commit.
+            if slot.size.w > 0 && slot.size.h > 0 {
+                pane.set_slot(*slot);
+            }
             ordered.push(pane);
         }
 
