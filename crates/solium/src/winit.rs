@@ -307,6 +307,11 @@ pub(crate) fn run() -> Result<()> {
         // stops rendering, which is exactly what it was doing.
         let age = backend.buffer_age().unwrap_or(0);
 
+        // Before the frame is decided: a drag that moved since the last one is
+        // applied once, here, however many times the mouse reported it. See
+        // `settle_resize`.
+        state.settle_resize();
+
         // A capture that is due needs a frame to be captured *from*. Asked for
         // rather than assumed: with drawing gated on damage a still screen
         // draws nothing, and a capture of a still screen is exactly what most
