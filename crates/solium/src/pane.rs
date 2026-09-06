@@ -213,12 +213,18 @@ impl Panes {
     pub(crate) fn len(&self) -> usize {
         self.panes.len()
     }
+
+    pub(crate) fn get(&self, id: PaneId) -> Option<&Pane> {
+        self.panes.iter().find(|pane| pane.id == id)
+    }
+
     pub(crate) fn get_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
         self.panes.iter_mut().find(|pane| pane.id == id)
     }
 
-    /// The pane a script means by an id.
-    pub(crate) fn get(&self, id: u64) -> Option<&Pane> {
+    /// The pane a script means by an id. Scripts hold the number rather than
+    /// the type, because they got it through Lua.
+    pub(crate) fn by_script_id(&self, id: u64) -> Option<&Pane> {
         self.panes.iter().find(|pane| pane.id.get() == id)
     }
 
@@ -457,9 +463,9 @@ mod tests {
         let id = pane.id();
         panes.panes.push(pane);
 
-        assert_eq!(panes.get(id.get()).map(Pane::id), Some(id));
+        assert_eq!(panes.by_script_id(id.get()).map(Pane::id), Some(id));
         assert!(
-            panes.get(id.get() + 1000).is_none(),
+            panes.by_script_id(id.get() + 1000).is_none(),
             "an id that no longer exists is not found, not a panic"
         );
     }

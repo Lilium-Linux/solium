@@ -266,8 +266,8 @@ pub(crate) fn elements(
                 pointer_inside: state.pointer_inside(&window),
             };
             let mut animating = false;
-            if let Some(id) = state.toplevel_id(&window)
-                && let Some(decoration) = state.decorations.get_mut(&id)
+            if let Some(id) = state.panes.id_of(&window)
+                && let Some(decoration) = state.decorations.get_mut(id)
             {
                 if let Some(element) = decoration.frame(renderer, frame.rect, outer.size, &look) {
                     elements.push(Element::Chrome(element));
@@ -456,8 +456,8 @@ pub(crate) fn flat_window_elements(
             (0.0, 0.0),
             (f64::from(outer.size.w), f64::from(outer.size.h)),
         );
-        if let Some(id) = state.toplevel_id(window)
-            && let Some(decoration) = state.decorations.get_mut(&id)
+        if let Some(id) = state.panes.id_of(window)
+            && let Some(decoration) = state.decorations.get_mut(id)
             && let Some(element) = decoration.frame(renderer, whole, outer.size, &look)
         {
             elements.push(Element::Chrome(element));

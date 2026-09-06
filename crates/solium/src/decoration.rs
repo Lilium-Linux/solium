@@ -14,6 +14,8 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
+use crate::pane::PaneId;
+
 use anyhow::Result;
 use smithay::{
     backend::{
@@ -26,7 +28,6 @@ use smithay::{
             },
         },
     },
-    reexports::wayland_server::backend::ObjectId,
     utils::{Buffer as BufferCoords, Logical, Rectangle, Size, Transform},
 };
 
@@ -415,13 +416,18 @@ impl Decoration {
 
 /// Every decorated window's frame.
 ///
-/// Keyed by the toplevel's surface id, and *presence means decorated*: a client
+/// Keyed by *pane*, not by surface, and *presence means decorated*: a client
 /// that negotiated client-side decorations has no entry, so it draws its own
 /// frame and the compositor draws none. Two frames on one window is what
 /// happens when this is a flag instead of a lookup.
+///
+/// The key is the pane because a pane outlives the arrival of its surface. A
+/// frame drawn around a window whose application is still starting is the same
+/// frame, with the same animation still running in it, the moment the client
+/// maps — nothing is rebuilt, so nothing restarts or flickers.
 #[derive(Debug, Default)]
 pub(crate) struct Decorations {
-    frames: HashMap<ObjectId, Decoration>,
+    frames: HashMap<PaneId, Decoration>,
     /// Which decoration to build, as a script named it. `None` is whatever
     /// the environment or the default says.
     style: Option<String>,
@@ -442,10 +448,10 @@ impl Decorations {
         }
         self.style = style;
         let path = qml_path(self.style.as_deref());
-        let existing: Vec<(ObjectId, (i32, i32))> = self
+        let existing: Vec<(PaneId, (i32, i32))> = self
             .frames
             .iter()
-            .map(|(id, frame)| (id.clone(), frame.client_size()))
+            .map(|(id, frame)| (*id, frame.client_size()))
             .collect();
         for (id, (width, height)) in existing {
             match Decoration::new(&path, width, height) {
@@ -461,7 +467,7 @@ impl Decorations {
         true
     }
 
-    pub(crate) fn insert(&mut self, id: ObjectId, width: i32, height: i32) {
+    pub(crate) fn insert(&mut self, id: PaneId, width: i32, height: i32) {
         if self.frames.contains_key(&id) {
             return;
         }
@@ -477,8 +483,18 @@ impl Decorations {
         }
     }
 
-    pub(crate) fn remove(&mut self, id: &ObjectId) {
-        if self.frames.remove(id).is_some() {
+    /// Drop every frame whose pane has gone.
+    pub(crate) fn retain(&mut self, keep: impl Fn(PaneId) -> bool) {
+        let before = self.frames.len();
+        self.frames.retain(|id, _| keep(*id));
+        let dropped = before - self.frames.len();
+        if dropped > 0 {
+            tracing::debug!(dropped, "dropped window frames with their panes");
+        }
+    }
+
+    pub(crate) fn remove(&mut self, id: PaneId) {
+        if self.frames.remove(&id).is_some() {
             tracing::debug!("dropped a window frame");
         }
     }
@@ -488,12 +504,12 @@ impl Decorations {
         self.style.as_deref()
     }
 
-    pub(crate) fn get(&self, id: &ObjectId) -> Option<&Decoration> {
-        self.frames.get(id)
+    pub(crate) fn get(&self, id: PaneId) -> Option<&Decoration> {
+        self.frames.get(&id)
     }
 
-    pub(crate) fn get_mut(&mut self, id: &ObjectId) -> Option<&mut Decoration> {
-        self.frames.get_mut(id)
+    pub(crate) fn get_mut(&mut self, id: PaneId) -> Option<&mut Decoration> {
+        self.frames.get_mut(&id)
     }
 
     /// How many frames are being kept. For leak diagnostics: this should
@@ -502,8 +518,8 @@ impl Decorations {
         self.frames.len()
     }
 
-    pub(crate) fn contains(&self, id: &ObjectId) -> bool {
-        self.frames.contains_key(id)
+    pub(crate) fn contains(&self, id: PaneId) -> bool {
+        self.frames.contains_key(&id)
     }
 }
 

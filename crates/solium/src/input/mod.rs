@@ -369,23 +369,23 @@ fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
     // the cursor wants to know where it is while it crosses the client too.
     let under = state
         .decorated_under(location)
-        .and_then(|(window, local)| state.toplevel_id(&window).map(|id| (id, local)));
+        .and_then(|(window, local)| state.panes.id_of(&window).map(|id| (id, local)));
 
     // Whatever we were over and are no longer has to be told, or it stays
     // hovered for as long as the window lives.
-    let left = match (&state.hovered_frame, &under) {
-        (Some(previous), Some((now, _))) if previous == now => None,
-        (previous, _) => previous.clone(),
+    let left = match (state.hovered_frame, &under) {
+        (Some(previous), Some((now, _))) if previous == *now => None,
+        (previous, _) => previous,
     };
     if let Some(id) = left
-        && let Some(decoration) = state.decorations.get_mut(&id)
+        && let Some(decoration) = state.decorations.get_mut(id)
     {
         decoration.pointer_left();
     }
 
-    state.hovered_frame = under.as_ref().map(|(id, _)| id.clone());
+    state.hovered_frame = under.as_ref().map(|(id, _)| *id);
     if let Some((id, local)) = under
-        && let Some(decoration) = state.decorations.get_mut(&id)
+        && let Some(decoration) = state.decorations.get_mut(id)
     {
         decoration.pointer(local.x, local.y, None);
     }
@@ -438,10 +438,10 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // starts a drag, and either way no client should see it.
     if !pointer.is_grabbed()
         && let Some((window, local)) = state.frame_under(location)
-        && let Some(id) = state.toplevel_id(&window)
+        && let Some(id) = state.panes.id_of(&window)
     {
         let pressed = button_state == ButtonState::Pressed;
-        let on_button = state.decorations.get_mut(&id).is_some_and(|decoration| {
+        let on_button = state.decorations.get_mut(id).is_some_and(|decoration| {
             decoration.pointer(local.x, local.y, Some(pressed));
             decoration.on_button()
         });
@@ -450,7 +450,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         // dragged off it and abandoned.
         if let Some(action) = state
             .decorations
-            .get_mut(&id)
+            .get_mut(id)
             .and_then(Decoration::take_action)
         {
             state.frame_action(&window, action);

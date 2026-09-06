@@ -18,7 +18,7 @@ use smithay::{
     desktop::Window,
     reexports::{
         calloop::LoopHandle,
-        wayland_server::{DisplayHandle, Resource as _, protocol::wl_surface::WlSurface},
+        wayland_server::{DisplayHandle, protocol::wl_surface::WlSurface},
     },
     utils::{Logical, Rectangle, SERIAL_COUNTER},
     wayland::{
@@ -160,10 +160,10 @@ impl XwmHandler for Solium {
             .cloned();
         if let Some(element) = going {
             self.trigger_close(&element);
-            self.space.unmap_elem(&element);
-            if let Some(surface) = element.wl_surface() {
-                self.decorations.remove(&surface.id());
+            if let Some(id) = self.panes.id_of(&element) {
+                self.decorations.remove(id);
             }
+            self.space.unmap_elem(&element);
         }
         if !window.is_override_redirect()
             && let Err(err) = window.set_mapped(false)
