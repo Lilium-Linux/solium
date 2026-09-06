@@ -570,7 +570,8 @@ impl State {
             return;
         };
 
-        self.solium.clock.tick();
+        // Read once for the whole frame, so everything animating in it agrees
+        // about when "now" is.
         let now = self.solium.clock.now();
         // Cleared before drawing, not after: a client that commits while we
         // are rendering has damaged the *next* frame, not this one.
