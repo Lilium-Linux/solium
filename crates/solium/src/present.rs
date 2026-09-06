@@ -74,6 +74,138 @@ pub(crate) fn logical(loc: (f64, f64), size: (f64, f64)) -> Rectangle<f64, Logic
     Rectangle::new(loc.into(), size.into())
 }
 
+/// A deformation a rectangle cannot express.
+///
+/// A small enum rather than a callback: a deform has to be blended between two
+/// frames, compared for equality, and named by a script, and a closure does
+/// none of those. Each kind says where a point of the window's unit square
+/// ends up and how finely it needs cutting; everything else -- capture,
+/// projection, damage -- is the same code for all of them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Deform {
+    /// Pulled into a slot like a sheet through a letterbox: the minimise.
+    ///
+    /// `progress` 0 draws the window where it is, 1 has all of it inside
+    /// `slot`. The rows nearest the slot go first, and that lag is the whole
+    /// effect: it bends the sheet instead of shrinking a rectangle. `spread`
+    /// is how much of the window is in motion at once -- 0 pulls it in
+    /// rigidly, larger values draw the tail out behind it.
+    Genie {
+        slot: Rectangle<f64, Logical>,
+        progress: f32,
+        spread: f32,
+    },
+}
+
+impl Deform {
+    /// Where the point at `(u, v)` of the window's unit square is drawn, in
+    /// logical coordinates. `(0, 0)` is its top left corner.
+    pub(crate) fn place(self, rect: Rectangle<f64, Logical>, u: f64, v: f64) -> (f64, f64) {
+        match self {
+            Self::Genie {
+                slot,
+                progress,
+                spread,
+            } => {
+                let spread = f64::from(spread).max(0.0);
+                // Each row runs its own copy of the animation, the rows
+                // furthest from the slot starting last. Smoothstepped per row,
+                // so the sheet arrives at the slot without a crease.
+                let row =
+                    (f64::from(progress) * (1.0 + spread) - (1.0 - v) * spread).clamp(0.0, 1.0);
+                let eased = row * row * (3.0 - 2.0 * row);
+                (
+                    lerp(
+                        rect.loc.x + u * rect.size.w,
+                        slot.loc.x + u * slot.size.w,
+                        eased,
+                    ),
+                    lerp(
+                        rect.loc.y + v * rect.size.h,
+                        slot.loc.y + v * slot.size.h,
+                        eased,
+                    ),
+                )
+            }
+        }
+    }
+
+    /// Columns and rows the mesh needs to look like a curve rather than a
+    /// fan of flat pieces.
+    pub(crate) fn segments(self) -> (u32, u32) {
+        match self {
+            // Across, the taper is linear in `u`, so a handful only matters
+            // when a matrix is in play too. Down is where the bend lives.
+            Self::Genie { .. } => (8, 48),
+        }
+    }
+
+    /// The same deform, doing nothing.
+    fn at_rest(self) -> Self {
+        match self {
+            Self::Genie { slot, spread, .. } => Self::Genie {
+                slot,
+                progress: 0.0,
+                spread,
+            },
+        }
+    }
+
+    /// Blend two deforms, either of which may be absent.
+    ///
+    /// Absent means "not deformed", which for a genie is progress 0 -- so a
+    /// script animating into one does not have to name the starting state, and
+    /// clearing one animates back out of it.
+    fn blend(from: Option<Self>, to: Option<Self>, progress: f64) -> Option<Self> {
+        match (from, to) {
+            (None, None) => None,
+            (Some(one), None) => Some(one.mix(one.at_rest(), progress)),
+            (None, Some(other)) => Some(other.at_rest().mix(other, progress)),
+            (Some(one), Some(other)) => Some(one.mix(other, progress)),
+        }
+    }
+
+    /// Blend towards another deform of the same kind.
+    ///
+    /// Between different kinds there is no meaningful halfway, so the
+    /// destination wins outright; a script wanting a hand-off animates one out
+    /// and the next one in.
+    fn mix(self, other: Self, progress: f64) -> Self {
+        match (self, other) {
+            (
+                Self::Genie {
+                    slot: from_slot,
+                    progress: from_progress,
+                    spread: from_spread,
+                },
+                Self::Genie {
+                    slot: to_slot,
+                    progress: to_progress,
+                    spread: to_spread,
+                },
+            ) => Self::Genie {
+                slot: logical(
+                    (
+                        lerp(from_slot.loc.x, to_slot.loc.x, progress),
+                        lerp(from_slot.loc.y, to_slot.loc.y, progress),
+                    ),
+                    (
+                        lerp(from_slot.size.w, to_slot.size.w, progress),
+                        lerp(from_slot.size.h, to_slot.size.h, progress),
+                    ),
+                ),
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "progress and spread are small floats either way"
+                )]
+                progress: lerp(f64::from(from_progress), f64::from(to_progress), progress) as f32,
+                #[expect(clippy::cast_possible_truncation, reason = "as above")]
+                spread: lerp(f64::from(from_spread), f64::from(to_spread), progress) as f32,
+            },
+        }
+    }
+}
+
 /// How a window is drawn for one frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Frame {
@@ -83,6 +215,9 @@ pub(crate) struct Frame {
     /// stays on the cheap path — see
     /// `docs/spikes/2026-09-06-3d-presentation.md`.
     pub(crate) matrix: Mat4,
+    /// A deformation that no rectangle and no matrix can express, such as a
+    /// genie. `None` is the ordinary case and stays on the cheap path.
+    pub(crate) deform: Option<Deform>,
 }
 
 impl Frame {
@@ -92,6 +227,7 @@ impl Frame {
             rect: geometry.to_f64(),
             opacity: 1.0,
             matrix: Mat4::IDENTITY,
+            deform: None,
         }
     }
 
@@ -107,6 +243,7 @@ impl Frame {
             rect: logical(loc, size),
             opacity: self.opacity,
             matrix: self.matrix,
+            deform: self.deform,
         }
     }
 
@@ -153,6 +290,7 @@ impl Frame {
             // something that passes through a squashed middle, and should
             // animate the angle instead and rebuild the matrix per frame.
             matrix: self.matrix.blend(other.matrix, progress),
+            deform: Deform::blend(self.deform, other.deform, progress),
         }
     }
 }
@@ -410,6 +548,7 @@ mod tests {
             rect: logical((500.0, 100.0), (200.0, 150.0)),
             opacity: 1.0,
             matrix: Mat4::IDENTITY,
+            deform: None,
         };
         // The centre of the thumbnail is the centre of the window.
         let mapped = to_window_space(drawn, real, Point::from((600.0, 175.0)));

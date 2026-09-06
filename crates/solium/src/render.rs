@@ -85,7 +85,8 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f6
         let Some(outer) = state.outer_geometry(&window) else {
             continue;
         };
-        if present::frame(&window, outer, now).matrix.is_identity() {
+        let frame = present::frame(&window, outer, now);
+        if frame.matrix.is_identity() && frame.deform.is_none() {
             continue;
         }
         if let Some((texture, _size)) =
@@ -173,15 +174,15 @@ pub(crate) fn elements(
         // window is rendered flat into a texture first — frame and popups
         // included — and that texture is bent, so the whole window deforms as
         // one thing instead of the client tilting away from its own titlebar.
-        if !frame.matrix.is_identity()
-            && let Some(corners) = crate::warp::project_quad(frame.rect, frame.matrix, scale)
+        if (!frame.matrix.is_identity() || frame.deform.is_some())
+            && let Some(mesh) = crate::warp::mesh(frame.rect, frame.matrix, frame.deform, scale)
             && let Some(texture) = prepared.take(&window)
         {
             elements.push(Element::Warped(crate::warp::Warp::new(
                 Id::new(),
                 CommitCounter::default(),
                 texture,
-                corners,
+                mesh,
                 frame.opacity,
             )));
             continue;

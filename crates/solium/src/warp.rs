@@ -58,39 +58,43 @@ pub(crate) struct Warp {
     id: Id,
     commit: CommitCounter,
     texture: GlesTexture,
-    corners: [Corner; 4],
+    mesh: Mesh,
     bounds: Rectangle<i32, Physical>,
     alpha: f32,
 }
 
 impl Warp {
-    /// Draw `texture` through `corners`, clockwise from the top left.
+    /// Draw `texture` through `mesh`.
     pub(crate) fn new(
         id: Id,
         commit: CommitCounter,
         texture: GlesTexture,
-        corners: [Corner; 4],
+        mesh: Mesh,
         alpha: f32,
     ) -> Self {
         // The bounding box is what the damage tracker reasons about: a warped
         // texture can land anywhere, and claiming a smaller area than it
         // covers leaves the difference undrawn until something else damages it.
-        let xs = corners.map(|corner| corner.x);
-        let ys = corners.map(|corner| corner.y);
-        let left = xs.iter().copied().fold(f32::MAX, f32::min).floor();
-        let right = xs.iter().copied().fold(f32::MIN, f32::max).ceil();
-        let top = ys.iter().copied().fold(f32::MAX, f32::min).floor();
-        let bottom = ys.iter().copied().fold(f32::MIN, f32::max).ceil();
+        let mut left = f32::MAX;
+        let mut right = f32::MIN;
+        let mut top = f32::MAX;
+        let mut bottom = f32::MIN;
+        for corner in &mesh.vertices {
+            left = left.min(corner.x);
+            right = right.max(corner.x);
+            top = top.min(corner.y);
+            bottom = bottom.max(corner.y);
+        }
 
         #[expect(
             clippy::cast_possible_truncation,
             reason = "output coordinates are small integers"
         )]
         let bounds = Rectangle::new(
-            (left as i32, top as i32).into(),
+            (left.floor() as i32, top.floor() as i32).into(),
             (
-                ((right - left) as i32).max(1),
-                ((bottom - top) as i32).max(1),
+                ((right.ceil() - left.floor()) as i32).max(1),
+                ((bottom.ceil() - top.floor()) as i32).max(1),
             )
                 .into(),
         );
@@ -99,60 +103,96 @@ impl Warp {
             id,
             commit,
             texture,
-            corners,
+            mesh,
             bounds,
             alpha,
         }
     }
 }
 
-/// Project a rectangle's corners through a matrix, about its own centre.
+/// A deformed window as triangles, in physical pixels.
 ///
-/// Returns `None` when any corner lands at or behind the viewer: a quad with
-/// one corner projected from behind is not a quad, and drawing it anyway folds
-/// the texture across the screen.
-pub(crate) fn project_quad(
+/// Built per frame: the whole point is that it moves. A flat window never
+/// reaches here -- it stays a rectangle and costs a rectangle.
+#[derive(Clone, Debug)]
+pub(crate) struct Mesh {
+    /// A triangle list, three vertices per triangle.
+    vertices: Vec<Corner>,
+}
+
+/// Cut a rectangle into a mesh and project it, about its own centre.
+///
+/// The deform moves points around inside the window's own space; the matrix
+/// then places that in 3D. Both are optional and they compose, which is what
+/// lets a genie happen to a window that is also tilted.
+///
+/// Returns `None` when any vertex lands at or behind the viewer: a shape with
+/// one vertex projected from behind is not that shape any more, and drawing it
+/// anyway folds the texture across the screen.
+pub(crate) fn mesh(
     rect: Rectangle<f64, smithay::utils::Logical>,
     matrix: Mat4,
+    deform: Option<crate::present::Deform>,
     scale: f64,
-) -> Option<[Corner; 4]> {
-    #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
-    let (half_w, half_h) = ((rect.size.w / 2.0) as f32, (rect.size.h / 2.0) as f32);
-    #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
+) -> Option<Mesh> {
+    // One cell unless a deform asks for more: a matrix alone is exact at the
+    // corners, because a projective map takes straight edges to straight
+    // edges and the per-vertex `q` carries the rest.
+    let (columns, rows) = deform.map_or((1, 1), crate::present::Deform::segments);
     let (centre_x, centre_y) = (
-        ((rect.loc.x + rect.size.w / 2.0) * scale) as f32,
-        ((rect.loc.y + rect.size.h / 2.0) * scale) as f32,
+        rect.loc.x + rect.size.w / 2.0,
+        rect.loc.y + rect.size.h / 2.0,
     );
     #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
-    let scale = scale as f32;
+    let scale32 = scale as f32;
 
-    // Corner offsets from the centre, with their texture coordinates.
-    let plan = [
-        (-half_w, -half_h, 0.0, 0.0),
-        (half_w, -half_h, 1.0, 0.0),
-        (half_w, half_h, 1.0, 1.0),
-        (-half_w, half_h, 0.0, 1.0),
-    ];
-
-    let mut corners = [Corner {
-        x: 0.0,
-        y: 0.0,
-        u: 0.0,
-        v: 0.0,
-        q: 1.0,
-    }; 4];
-
-    for (slot, (dx, dy, u, v)) in corners.iter_mut().zip(plan) {
-        let (x, y, w) = matrix.project_with_w(dx, dy, 0.0)?;
-        *slot = Corner {
-            x: centre_x + x * scale,
-            y: centre_y + y * scale,
-            u,
-            v,
-            q: 1.0 / w,
-        };
+    let mut grid = Vec::with_capacity(((columns + 1) * (rows + 1)) as usize);
+    for row in 0..=rows {
+        let v = f64::from(row) / f64::from(rows);
+        for column in 0..=columns {
+            let u = f64::from(column) / f64::from(columns);
+            let (x, y) = match deform {
+                Some(deform) => deform.place(rect, u, v),
+                None => (rect.loc.x + u * rect.size.w, rect.loc.y + v * rect.size.h),
+            };
+            #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
+            let offset = (((x - centre_x) as f32), ((y - centre_y) as f32));
+            let (projected_x, projected_y, w) = matrix.project_with_w(offset.0, offset.1, 0.0)?;
+            #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
+            let (origin_x, origin_y) = ((centre_x * scale) as f32, (centre_y * scale) as f32);
+            #[expect(clippy::cast_possible_truncation, reason = "unit square floats")]
+            grid.push(Corner {
+                x: origin_x + projected_x * scale32,
+                y: origin_y + projected_y * scale32,
+                u: u as f32,
+                v: v as f32,
+                q: 1.0 / w,
+            });
+        }
     }
-    Some(corners)
+
+    // Two triangles per cell. Indices would save a third of the upload, but
+    // this is a few thousand floats a frame at most and a flat list is one
+    // less thing to get wrong.
+    let at = |column: u32, row: u32| grid.get((row * (columns + 1) + column) as usize).copied();
+    let mut vertices = Vec::with_capacity((columns * rows * 6) as usize);
+    for row in 0..rows {
+        for column in 0..columns {
+            let top_left = at(column, row)?;
+            let top_right = at(column + 1, row)?;
+            let bottom_right = at(column + 1, row + 1)?;
+            let bottom_left = at(column, row + 1)?;
+            vertices.extend_from_slice(&[
+                top_left,
+                top_right,
+                bottom_right,
+                top_left,
+                bottom_right,
+                bottom_left,
+            ]);
+        }
+    }
+    Some(Mesh { vertices })
 }
 
 impl Element for Warp {
@@ -202,7 +242,7 @@ impl RenderElement<GlesRenderer> for Warp {
         }
         let projection = *frame.projection();
         let texture = self.texture.tex_id();
-        let corners = self.corners;
+        let mesh = &self.mesh;
         let alpha = self.alpha;
 
         frame.with_context(|gl| {
@@ -220,7 +260,7 @@ impl RenderElement<GlesRenderer> for Warp {
                 };
                 // SAFETY: as above; every name used was created by `compile`
                 // against this same context.
-                unsafe { program.draw(gl, &projection, texture, &corners, alpha) }
+                unsafe { program.draw(gl, &projection, texture, mesh, alpha) }
             });
         })
     }
@@ -338,15 +378,11 @@ impl Program {
         gl: &ffi::Gles2,
         projection: &[f32; 9],
         texture: ffi::types::GLuint,
-        corners: &[Corner; 4],
+        mesh: &Mesh,
         alpha: f32,
     ) {
-        // Two triangles, as a strip would need the corners reordered and this
-        // is clearer about which four points are which.
-        let order = [0, 1, 2, 0, 2, 3];
-        let mut vertices = Vec::with_capacity(order.len() * 5);
-        for index in order {
-            let corner = corners[index];
+        let mut vertices = Vec::with_capacity(mesh.vertices.len() * 5);
+        for corner in &mesh.vertices {
             vertices.extend_from_slice(&[
                 corner.x,
                 corner.y,
@@ -433,7 +469,12 @@ impl Program {
             gl.VertexAttribDivisor(self.position, 0);
             gl.VertexAttribDivisor(self.uvq, 0);
 
-            gl.DrawArrays(ffi::TRIANGLES, 0, 6);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a mesh is thousands of vertices, not billions"
+            )]
+            let count = mesh.vertices.len() as i32;
+            gl.DrawArrays(ffi::TRIANGLES, 0, count);
 
             // Put back what Smithay expects to find: it does not re-bind
             // everything per element, so leaving our buffer and attributes

@@ -106,6 +106,8 @@ pub(crate) enum Command {
         /// A 3D transform about the drawn rect's centre, when the script asked
         /// for one. `None` keeps the window flat and on the cheap path.
         matrix: Option<Mat4>,
+        /// A deformation the drawn rect cannot express, such as a genie.
+        deform: Option<crate::present::Deform>,
         animation: AnimationSpec,
     },
     Clear {
@@ -651,13 +653,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "present",
         lua.create_function(|lua, (id, options): (u64, Option<Table>)| {
-            let (rect, opacity, matrix) = match options {
+            let (rect, opacity, matrix, deform) = match options {
                 Some(options) => (
                     rect_from(&options)?,
                     options.get::<Option<f32>>("opacity")?,
                     transform_from(&options)?,
+                    deform_from(&options)?,
                 ),
-                None => (None, None, None),
+                None => (None, None, None, None),
             };
             with_pending(lua, |pending| {
                 let animation = pending.animation;
@@ -666,6 +669,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     rect,
                     opacity,
                     matrix,
+                    deform,
                     animation,
                 });
             })
@@ -1127,6 +1131,32 @@ fn transform_from(options: &Table) -> mlua::Result<Option<Mat4>> {
         matrix = matrix.then(Mat4::perspective(distance));
     }
     Ok(Some(matrix))
+}
+
+/// Read a deformation out of a `sol.present` options table.
+///
+/// One key per kind, so a script names the effect rather than describing a
+/// mesh: `genie = { x, y, width, height, progress, spread }`. The rect is the
+/// slot the window is pulled into -- a dock icon's, usually -- and `progress`
+/// defaults to all the way in, since that is what one animates towards.
+fn deform_from(options: &Table) -> mlua::Result<Option<crate::present::Deform>> {
+    let Some(genie) = options.get::<Option<Table>>("genie")? else {
+        return Ok(None);
+    };
+    let number = |name: &str| -> mlua::Result<f64> {
+        genie.get::<Option<f64>>(name).map(|v| v.unwrap_or(0.0))
+    };
+    Ok(Some(crate::present::Deform::Genie {
+        slot: crate::present::logical(
+            (number("x")?, number("y")?),
+            (
+                genie.get::<Option<f64>>("width")?.unwrap_or(1.0),
+                genie.get::<Option<f64>>("height")?.unwrap_or(1.0),
+            ),
+        ),
+        progress: genie.get::<Option<f32>>("progress")?.unwrap_or(1.0),
+        spread: genie.get::<Option<f32>>("spread")?.unwrap_or(1.0),
+    }))
 }
 
 /// Read a list of columns out of a Lua table.

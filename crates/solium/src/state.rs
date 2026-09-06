@@ -500,6 +500,7 @@ impl Solium {
                     rect,
                     opacity,
                     matrix,
+                    deform,
                     animation,
                 } => {
                     let Some(window) = self.window_by_id(id) else {
@@ -515,6 +516,7 @@ impl Solium {
                             |rect| present::logical((rect.x, rect.y), (rect.w, rect.h)),
                         ),
                         opacity: opacity.unwrap_or(1.0),
+                        deform,
                     };
                     present::present(
                         &window,
@@ -541,6 +543,7 @@ impl Solium {
                         matrix: crate::mat4::Mat4::IDENTITY,
                         rect: present::logical((rect.x, rect.y), (rect.w, rect.h)),
                         opacity: opacity.unwrap_or(1.0),
+                        deform: None,
                     };
                     present::from(
                         &window,
