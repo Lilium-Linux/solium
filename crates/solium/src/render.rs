@@ -20,7 +20,7 @@ use smithay::{
             surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
             utils::RescaleRenderElement,
         },
-        gles::GlesRenderer,
+        gles::{GlesRenderer, GlesTexture},
         utils::CommitCounter,
     },
     desktop::{PopupManager, Window, layer_map_for_output},
@@ -51,6 +51,53 @@ render_elements! {
     Window2 = WaylandSurfaceRenderElement<GlesRenderer>,
 }
 
+/// Textures captured for this frame, one per deformed window.
+///
+/// A deformed window is drawn flat into a texture of its own first. That pass
+/// binds a framebuffer, so it cannot happen while the output's buffer is
+/// already bound: it leaves GL pointing at the texture, and the whole frame --
+/// including the deformed window -- lands there instead of on screen, which
+/// looks exactly like a compositor that has frozen. So captures happen in
+/// their own pass, before the backend binds anything, and `elements` only
+/// spends what this collected.
+#[derive(Default)]
+pub(crate) struct Prepared {
+    warps: Vec<(Window, GlesTexture)>,
+}
+
+impl Prepared {
+    /// Hand over the texture captured for `window`, if there is one.
+    fn take(&mut self, window: &Window) -> Option<GlesTexture> {
+        let at = self.warps.iter().position(|(each, _)| each == window)?;
+        Some(self.warps.swap_remove(at).1)
+    }
+}
+
+/// Capture a texture for every window whose transform is not a rectangle.
+///
+/// Must run before the backend binds its own buffer; see [`Prepared`].
+pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f64) -> Prepared {
+    let now = state.clock.now();
+    let windows: Vec<Window> = state.space.elements().rev().cloned().collect();
+    let mut warps = Vec::new();
+
+    for window in windows {
+        let Some(outer) = state.outer_geometry(&window) else {
+            continue;
+        };
+        if present::frame(&window, outer, now).matrix.is_identity() {
+            continue;
+        }
+        if let Some((texture, _size)) =
+            crate::offscreen::capture(state, renderer, &window, now, scale)
+        {
+            warps.push((window, texture));
+        }
+    }
+
+    Prepared { warps }
+}
+
 /// Everything to draw this frame, topmost first.
 ///
 /// Topmost first is what the damage tracker expects; getting it backwards
@@ -60,6 +107,7 @@ pub(crate) fn elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     scale: f64,
+    prepared: &mut Prepared,
 ) -> Vec<Element> {
     let now = state.clock.now();
     let output_scale = Scale::from(scale);
@@ -127,8 +175,7 @@ pub(crate) fn elements(
         // one thing instead of the client tilting away from its own titlebar.
         if !frame.matrix.is_identity()
             && let Some(corners) = crate::warp::project_quad(frame.rect, frame.matrix, scale)
-            && let Some((texture, _size)) =
-                crate::offscreen::capture(state, renderer, &window, now, scale)
+            && let Some(texture) = prepared.take(&window)
         {
             elements.push(Element::Warped(crate::warp::Warp::new(
                 Id::new(),
