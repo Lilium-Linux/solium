@@ -88,48 +88,58 @@ everything; steps 3 to 5 are where the behaviour people asked for appears.
 
 ## Where this got to
 
-**Done:** steps 1 through 4. The behaviour the design was for now works; what
-is left is what it looks like.
+**Done. All five steps.** A window's life begins when the user asks for the
+application. It takes its place in the layout immediately, draws itself while
+it waits, can be closed before anything has connected, and the application
+appears *inside* it — same window, same id, same frame with the same
+animation still running in it.
 
 * **1** — `pane.rs`: `Pane`, `PaneId`, `Content`, `Panes`.
 * **2** — panes underneath everything: `snapshot()`, `window_id`, decorations
   (keyed by `PaneId`), drawing, every hit test. `sync_panes` is the single
-  place the pane list and the space are reconciled. `Space` stays as the
-  authority on where a mapped client is and what damage it did.
+  place the pane list and the space are reconciled.
 * **3** — a pane with no client is a real window to the layout. Presentation
-  state moved onto `Pane`; `place` moves a pane with or without a window
-  inside it; `begin_loading` tells scripts the window **opened**, which is
-  what puts it in a layout's tree. `config.lua` gained `loading`.
-* **4** — adoption. A client whose process a window is waiting for becomes
-  that window's content, in `new_toplevel`, where it is mapped. The old
-  stand-in (`Launch` and everything around it) is gone.
+  state moved onto `Pane`; `begin_loading` tells scripts the window
+  **opened**, which is what puts it in a layout's tree.
+* **4** — adoption, in `new_toplevel`, where the client is mapped. The old
+  two-object stand-in (`Launch` and everything around it) is gone.
+* **5** — the pane draws its own QML, inside its own frame, and answers the
+  pointer.
 
-**Next:** step 5, the loading pane's own content — the QML scene, drawn as the
-pane rather than beside it, and a frame so it can be closed while it waits.
+`Space` did not go away and is not going to. It is still the authority on
+where a mapped client is, what damage it did, and which surface is under a
+point *within* a window. Nothing above that level asks it what windows exist.
 
-What is worth knowing before starting it:
+Configurable, in `config.lua` under `loading`: `scene`, `patience`,
+`reserves_a_slot`, `decorated`.
 
-* `qml/loading/window.qml` is unwired but intact, and `pane::loading_source`
-  already resolves which scene by name or path with the user's directory
-  shadowing the shipped one. `Content::Loading` carries the resolved `source`.
-* `surface::ShellSurface` is how QML is drawn in-process; the old stand-in
-  used it and `set_int("waited", …)` is kept alive by an `expect` for exactly
-  this. A `ShellSurface` will want to live in `Content::Loading` beside the
-  path.
-* `on_screen()` yields `(PaneId, Window)` and skips a pane with no client.
-  Widening it is the change: `render::elements` is where a loading pane draws.
-* The hit tests skip a client-less pane too. `surface_under` skipping one is
-  wrong once it is visible — a click would fall through to a window behind it.
-* A loading pane has no frame, because `decorate` runs when a *client*
-  negotiates. Giving one a frame is what makes it closable while it waits, and
-  it is the payoff of keying decorations by pane in step 2: the frame it gets
-  is the frame it keeps after adoption, with its animation intact. Watch for
-  the flicker case — a client that then chooses client-side decorations, whose
-  frame has to go.
-* Closing a pane mid-load already works in the code (`close_pane` and
-  `settle_closing` both handle a pane with no client) but could not be tested,
-  because nothing can reach a loading pane to close it. A frame with a close
-  button is what makes that testable.
+### What is left, and where it is written down
 
-**Still true and easy to forget:** what the loading scene shows and how it
-animates in belong to QML and `config.lua`, not to constants in Rust.
+* **#35** — an application that forks and exits is not adopted: the ancestry
+  walk cannot follow a chain through init. It degrades correctly (an ordinary
+  window, nothing lost) but the feature does not reach a whole class of
+  programs. The fix is an activation token, which is #25's mechanism, not a
+  private one.
+* **#34** — closing a window leaves keyboard focus nowhere. Pre-existing,
+  found while verifying step 2.
+* `window_under` still answers only for a pane with a client, so clicking the
+  body of a loading window does not raise or focus it. `surface_under` stops
+  there, so the click reaches nothing behind it; it simply does nothing. A
+  loading window cannot hold keyboard focus anyway — that is the last of the
+  four risks this document opened with, and the answer it proposed.
+* `SOLIUM_LOADING_AT` is scaffolding from step 3 and outlived its purpose now
+  that `spawn` does this for real. It is still the only way to reach a window
+  whose application will *never* arrive, which is worth keeping for testing
+  patience and closing mid-wait.
+
+### The risks this document opened with, as they turned out
+
+* *Adoption misses* — happens, exactly as predicted, and opens an ordinary
+  window. Now #35.
+* *The application never arrives* — `settle_loading`, and `patience` is a
+  setting. Verified by cutting it to 60ms.
+* *Closing mid-load* — works; the pane goes, its frame goes with it, the
+  layout heals. Finding this needed a frame on the loading window, which is
+  why step 5 gave it one.
+* *Focus with no surface* — a loading pane never takes keyboard focus, and
+  keys reach bindings only. As proposed, unchanged.
