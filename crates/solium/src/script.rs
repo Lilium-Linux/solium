@@ -308,6 +308,50 @@ impl Scripts {
     }
 
     /// Run the handler bound to a key combination.
+    /// The Developer Tweaks entries, as the scripts declared them.
+    ///
+    /// A JSON array, straight from Lua: the panel is a list of whatever the
+    /// configuration says it is, so adding a tweak is editing `tweaks.lua`
+    /// rather than the compositor.
+    pub(crate) fn tweaks(&self) -> Option<String> {
+        let sol = self.lua.globals().get::<Table>("sol").ok()?;
+        let entries: Table = sol.get("_tweaks").ok()?;
+        // Written out by hand rather than through a serialiser: three known
+        // string fields do not justify a dependency, and this is the same
+        // shape `publish_windows` already hands the shell.
+        let quoted = |value: String| value.replace('\\', "").replace('"', "'");
+        let mut out = String::from("[");
+        for (index, entry) in entries.sequence_values::<Table>().enumerate() {
+            let Ok(entry) = entry else { continue };
+            let id = quoted(entry.get("id").unwrap_or_default());
+            let label = quoted(entry.get("label").unwrap_or_default());
+            let group = quoted(entry.get("group").unwrap_or_default());
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "{{\"id\":\"{id}\",\"label\":\"{label}\",\"group\":\"{group}\"}}"
+            ));
+        }
+        out.push(']');
+        Some(out)
+    }
+
+    /// Run the handler for a tweak the panel asked for.
+    pub(crate) fn tweak(&mut self, id: &str, snapshot: Snapshot) -> Outcome {
+        let id = id.to_owned();
+        self.dispatch(snapshot, move |sol| {
+            let handler: Value = sol.get("_tweak")?;
+            match handler {
+                Value::Function(function) => {
+                    function.call::<()>(id)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        })
+    }
+
     pub(crate) fn key(&mut self, combo: &str, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, |sol| {
             let bindings: Table = sol.get("_bindings")?;
@@ -737,6 +781,25 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // a path is anyone's. Takes effect immediately -- every frame is rebuilt.
     // Read the configuration again, in place. Bound to a key, this is the
     // difference between trying an idea and committing to it.
+    // What the Developer Tweaks panel offers, and what to do when one is
+    // pressed. Both live in Lua so the panel is a list of whatever the
+    // configuration says rather than a menu built into the compositor.
+    sol.set(
+        "tweaks",
+        lua.create_function(|lua, entries: Table| {
+            let sol: Table = lua.globals().get("sol")?;
+            sol.set("_tweaks", entries)
+        })?,
+    )?;
+
+    sol.set(
+        "on_tweak",
+        lua.create_function(|lua, handler: mlua::Function| {
+            let sol: Table = lua.globals().get("sol")?;
+            sol.set("_tweak", handler)
+        })?,
+    )?;
+
     sol.set(
         "reload",
         lua.create_function(|lua, ()| {
