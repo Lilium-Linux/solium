@@ -171,7 +171,7 @@ pub(crate) fn elements(
             let waited = now.saturating_sub(launch.started).as_millis();
             (
                 index,
-                launch.rect,
+                launch.rect(now),
                 u32::try_from(waited).unwrap_or(u32::MAX),
             )
         })

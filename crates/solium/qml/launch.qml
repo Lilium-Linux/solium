@@ -18,35 +18,33 @@ Item {
     // Set by the compositor.
     property string program: ""
     property int waited: 0
+    // The window has arrived underneath and is fading up; this fades off it.
+    property int leaving: 0
 
-    // Grown into place rather than appearing at full size, so the press and
-    // the response read as one movement.
-    scale: 0.0
-    opacity: 0.0
-    Component.onCompleted: {
-        scale = 1.0;
-        opacity = 1.0;
-    }
-    Behavior on scale {
-        NumberAnimation { duration: 200; easing.type: Easing.OutBack; easing.overshoot: 1.1 }
-    }
-    Behavior on opacity { NumberAnimation { duration: 160 } }
+    // The compositor animates the *rectangle* from the pointer to a window's
+    // worth of screen, so this only has to fade: what is on screen is already
+    // the shape and size of the window that is coming.
+    opacity: leaving === 1 ? 0.0 : 1.0
+    Behavior on opacity { NumberAnimation { duration: 170; easing.type: Easing.OutCubic } }
 
+    // A window, not a notice about one: the same rounded rectangle the
+    // application will occupy, in a background it will not clash with, with
+    // its name where the application's own content is about to be.
     Rectangle {
         anchors.fill: parent
-        radius: 14
+        radius: 12
         color: Theme.surface
         border { width: 1; color: Theme.edge }
 
         Column {
             anchors.centerIn: parent
-            spacing: Theme.gap
+            spacing: Theme.gap * 2
 
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: card.program
                 color: Theme.text
-                font { pixelSize: Theme.fontSize + 1; family: Theme.fontFamily }
+                font { pixelSize: Theme.fontSize + 8; family: Theme.fontFamily }
             }
 
             // A bar that fills as the wait goes on, rather than a spinner:

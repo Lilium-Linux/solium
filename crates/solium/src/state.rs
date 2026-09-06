@@ -291,20 +291,82 @@ pub(crate) enum Request {
 pub(crate) struct Launch {
     /// The stand-in, drawn until the window arrives.
     pub(crate) surface: crate::surface::ShellSurface,
-    /// Where it sits, and where the real window will grow from.
-    pub(crate) rect: Rectangle<i32, Logical>,
+    /// Where it started: the pointer, where the asking happened.
+    pub(crate) from: Rectangle<i32, Logical>,
+    /// Where it is going: a window's worth of screen. It grows into this
+    /// immediately, so what is on screen while the application loads is the
+    /// shape and size of the window that is coming -- not a notice about it.
+    pub(crate) to: Rectangle<i32, Logical>,
     pub(crate) program: String,
     pub(crate) started: std::time::Duration,
     /// The process spawned for it, once it exists. A window claims the card
     /// belonging to *its* process rather than whichever card is oldest.
     pub(crate) pid: Option<u32>,
+    /// When the window arrived and the stand-in began to leave. The window is
+    /// drawn underneath from that moment, fading up as this fades off it, so
+    /// the two are never both solid and never both absent.
+    pub(crate) handover: Option<std::time::Duration>,
+}
+
+/// How long the stand-in takes to reach window size.
+const LAUNCH_GROW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long it takes to hand over to the window underneath.
+const LAUNCH_HANDOVER: std::time::Duration = std::time::Duration::from_millis(180);
+
+impl Launch {
+    /// Where the stand-in is drawn now.
+    pub(crate) fn rect(&self, now: std::time::Duration) -> Rectangle<i32, Logical> {
+        // Once the window exists this sits exactly on it: the content appears
+        // inside the same rectangle rather than beside a card that is still
+        // sliding somewhere.
+        if self.handover.is_some() {
+            return self.to;
+        }
+        let elapsed = now.saturating_sub(self.started);
+        let progress = if LAUNCH_GROW.is_zero() {
+            1.0
+        } else {
+            (elapsed.as_secs_f64() / LAUNCH_GROW.as_secs_f64()).clamp(0.0, 1.0)
+        };
+        let eased = solium_animation::Curve::OutCubic.at(progress);
+        let mix = |a: i32, b: i32| {
+            #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
+            {
+                (f64::from(a) + (f64::from(b) - f64::from(a)) * eased).round() as i32
+            }
+        };
+        Rectangle::new(
+            (
+                mix(self.from.loc.x, self.to.loc.x),
+                mix(self.from.loc.y, self.to.loc.y),
+            )
+                .into(),
+            (
+                mix(self.from.size.w, self.to.size.w),
+                mix(self.from.size.h, self.to.size.h),
+            )
+                .into(),
+        )
+    }
+
+    /// How far through leaving it is, 0 until the window arrives.
+    pub(crate) fn leaving(&self, now: std::time::Duration) -> f64 {
+        let Some(began) = self.handover else {
+            return 0.0;
+        };
+        if LAUNCH_HANDOVER.is_zero() {
+            return 1.0;
+        }
+        (now.saturating_sub(began).as_secs_f64() / LAUNCH_HANDOVER.as_secs_f64()).clamp(0.0, 1.0)
+    }
 }
 
 impl std::fmt::Debug for Launch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Launch")
             .field("program", &self.program)
-            .field("rect", &self.rect)
+            .field("to", &self.to)
             .finish()
     }
 }
@@ -1302,11 +1364,15 @@ impl Solium {
             .get_pointer()
             .map(|pointer| pointer.current_location())
             .unwrap_or_default();
-        let size = (260, 150);
-        let rect = Rectangle::new(
-            ((at.x as i32) - size.0 / 2, (at.y as i32) - size.1 / 2).into(),
-            size.into(),
+        // Starts small under the pointer and grows into a window's worth of
+        // screen. What the eye follows is one rectangle, from the press to the
+        // application being usable inside it.
+        #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
+        let from = Rectangle::new(
+            ((at.x as i32) - 40, (at.y as i32) - 24).into(),
+            (80, 48).into(),
         );
+        let to = self.launch_slot();
         let name = std::path::Path::new(program)
             .file_name()
             .map_or(program, |name| name.to_str().unwrap_or(program));
@@ -1320,15 +1386,37 @@ impl Solium {
             Ok(surface) => {
                 self.launches.push(Launch {
                     surface,
-                    rect,
+                    from,
+                    to,
                     program: name.to_owned(),
                     started: self.clock.now(),
                     pid: None,
+                    handover: None,
                 });
                 self.redraw = true;
             }
             Err(err) => tracing::warn!(?err, "no stand-in for a launching application"),
         }
+    }
+
+    /// A window's worth of screen: what a new window would be given.
+    ///
+    /// A guess, and it does not have to be right. When the real window arrives
+    /// the stand-in moves onto whatever the layout actually decided and fades
+    /// off it there, so being wrong costs a short slide rather than a jump.
+    fn launch_slot(&self) -> Rectangle<i32, Logical> {
+        let area = self
+            .work_area()
+            .unwrap_or_else(|| Rectangle::new((0, 0).into(), (1280, 800).into()));
+        let inset = 48;
+        Rectangle::new(
+            (area.loc.x + inset, area.loc.y + inset).into(),
+            (
+                (area.size.w - inset * 2).max(200),
+                (area.size.h - inset * 2).max(150),
+            )
+                .into(),
+        )
     }
 
     /// Hand a window the stand-in that was put up for *its* process.
@@ -1348,14 +1436,24 @@ impl Solium {
             .launches
             .iter()
             .position(|launch| launch.pid.is_some_and(|pid| family.contains(&pid)))?;
-        let launch = self.launches.remove(index);
+        let now = self.clock.now();
+        let outer = self.outer_geometry(window);
+        let launch = self.launches.get_mut(index)?;
+        // Not removed: it moves onto the window and fades off it, so the
+        // application's own content appears inside the same rectangle that has
+        // been standing there since the press.
+        if let Some(outer) = outer {
+            launch.to = outer;
+        }
+        launch.handover = Some(now);
+        launch.surface.set_int("leaving", 1);
         tracing::debug!(
             program = launch.program,
             pid = launch.pid,
             "a window claimed its card"
         );
         self.redraw = true;
-        Some(launch.rect)
+        Some(launch.to)
     }
 
     /// The process a window's client belongs to.
@@ -1370,8 +1468,13 @@ impl Solium {
     /// animating.
     pub(crate) fn settle_launches(&mut self, now: std::time::Duration) -> bool {
         let before = self.launches.len();
-        self.launches
-            .retain(|launch| now.saturating_sub(launch.started) < LAUNCH_PATIENCE);
+        self.launches.retain(|launch| {
+            if launch.handover.is_some() {
+                // Gone once it has finished fading off the window.
+                return launch.leaving(now) < 1.0;
+            }
+            now.saturating_sub(launch.started) < LAUNCH_PATIENCE
+        });
         if self.launches.len() != before {
             tracing::debug!(
                 gave_up = before - self.launches.len(),
@@ -1493,12 +1596,15 @@ impl Solium {
             && let Some(outer) = self.outer_geometry(window)
         {
             match from {
-                Some(card) => present::from(
+                // The stand-in is already sitting exactly here and fading off
+                // it, so the window fades *up* in place. Growing it as well
+                // would be two things moving where the eye expects one.
+                Some(_) => present::from(
                     window,
                     outer,
-                    present::Frame::real(card).with_opacity(0.0),
+                    present::Frame::real(outer).with_opacity(0.0),
                     self.clock.now(),
-                    std::time::Duration::from_millis(240),
+                    std::time::Duration::from_millis(180),
                     solium_animation::Curve::OutCubic,
                 ),
                 None => present::open(window, outer, self.clock.now()),
