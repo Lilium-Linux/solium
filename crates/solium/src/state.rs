@@ -255,6 +255,16 @@ pub(crate) struct Solium {
     /// compositor should cost nothing.
     pub(crate) redraw: bool,
 
+    /// Whether anything is mid-animation and needs the next frame.
+    ///
+    /// Kept here rather than in a backend, because both backends need the same
+    /// answer and the one that did not have it drew every loop iteration
+    /// instead. Two backends with two drawing policies is two compositors: for
+    /// months every animation was verified on the one that redrew
+    /// unconditionally, which is precisely the one where a missing damage
+    /// signal cannot be seen.
+    pub(crate) animating: bool,
+
     /// Something only a backend can carry out: switching VT, or stopping.
     ///
     /// The input layer must not do either itself. It runs inside the keyboard
@@ -418,6 +428,7 @@ impl Solium {
             pending_drop: None,
             pending_resize: None,
             redraw: true,
+            animating: false,
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
             request: None,
@@ -749,6 +760,10 @@ impl Solium {
         self.decorations.retain(|id| live.contains(&id));
         self.closing.retain(|id, _| live.contains(id));
         self.asked.retain(|id, _| live.contains(id));
+
+        // A window appearing or going is exactly when the keyboard can be left
+        // with nowhere to be, and the only moment worth checking.
+        self.settle_focus();
         true
     }
 
@@ -1399,6 +1414,64 @@ impl Solium {
         !self.closing.is_empty()
     }
 
+    /// Retire transforms that have landed, and say whether anything still
+    /// needs the next frame.
+    ///
+    /// Every pane is visited deliberately: a short-circuiting check would leave
+    /// later panes transformed forever.
+    pub(crate) fn settle(&mut self, now: std::time::Duration) -> bool {
+        let mut animating = false;
+        for pane in self.panes.iter() {
+            animating |= present::settle(pane, now);
+        }
+        // A window that has finished leaving is told to close; until then the
+        // session counts as animating so the frames keep coming.
+        animating |= self.settle_closing(now);
+        // A window whose application never turned up gives up its slot.
+        self.settle_loading(now);
+        // And one asked to close that is still here comes back.
+        animating |= self.settle_refused(now);
+        self.animating = animating;
+        animating
+    }
+
+    /// Give the keyboard to something, if a window went and left it nowhere.
+    ///
+    /// Focus is a Wayland concept and belongs to a surface, so when the focused
+    /// window's surface dies the seat is simply left holding nothing. Nothing
+    /// takes it back: focus was only ever set when a window opened or the
+    /// pointer moved. So closing a window meant the keyboard went dead, every
+    /// binding that acts on "the focused window" stopped working, and the only
+    /// way out was to move the mouse over something. From the other side of the
+    /// screen that is a session that broke when you closed a window.
+    ///
+    /// The window under the pointer first, because with focus-follows-mouse
+    /// that is where focus would land the moment you moved; the topmost
+    /// otherwise. Called where a window went, and only when nothing has focus,
+    /// so it cannot argue with a script that has just chosen one.
+    fn settle_focus(&mut self) {
+        if self.focused_window().is_some() {
+            return;
+        }
+        let at = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location());
+        let next = at
+            .and_then(|at| self.window_under(at))
+            .map(|(window, _)| window)
+            .or_else(|| {
+                self.panes
+                    .iter()
+                    .rev()
+                    .find_map(|pane| pane.client().cloned())
+            });
+        if let Some(window) = next {
+            tracing::debug!("a window went and the keyboard had nowhere to be");
+            self.focus_window(&window, SERIAL_COUNTER.next_serial());
+        }
+    }
+
     /// Bring back a window that was asked to close and did not.
     ///
     /// The window is animated away before the request goes out, because
@@ -1817,6 +1890,9 @@ impl Solium {
         let Some(location) = self.space.element_location(window) else {
             return;
         };
+        // Frames are drawn differently focused and unfocused, and restacking
+        // changes what covers what. Both are the screen changing.
+        self.redraw = true;
         // `true` restacks: a clicked window comes to the front.
         self.space.map_element(window.clone(), location, true);
 
@@ -2234,6 +2310,14 @@ impl CompositorHandler for Solium {
         // Without it every surface is silently empty: the window maps, the
         // client draws, and the compositor renders nothing.
         on_commit_buffer_handler::<Self>(surface);
+
+        // A client committing is the screen changing. Nothing else says so --
+        // and on the hardware, where drawing waits to be asked, nothing else
+        // was asking: a terminal's own output only reached the screen when
+        // some unrelated thing happened to want a frame. Which frame it is
+        // and how much of it changed are the damage tracker's business; that
+        // it changed at all is this.
+        self.redraw = true;
 
         // Sub-surfaces commit through their root; only the root needs handling.
         if !is_sync_subsurface(surface) {

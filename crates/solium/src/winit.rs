@@ -26,7 +26,7 @@ use smithay::{
 };
 
 use crate::{
-    capture, dev, layer, present, render,
+    capture, dev, layer, render,
     script::Scripts,
     state::{ClientState, Solium},
     synth,
@@ -308,14 +308,38 @@ pub(crate) fn run() -> Result<()> {
         // stops rendering, which is exactly what it was doing.
         let age = backend.buffer_age().unwrap_or(0);
 
+        // A capture that is due needs a frame to be captured *from*. Asked for
+        // rather than assumed: with drawing gated on damage a still screen
+        // draws nothing, and a capture of a still screen is exactly what most
+        // of these tests want to look at.
+        if capture_due.is_some_and(|at| now >= at) && capture_remaining > 0 {
+            state.redraw = true;
+        }
+
+        // Drawn when something has changed, and not otherwise -- the same test
+        // the hardware backend makes, and deliberately so. This loop used to
+        // draw every iteration, which meant every animation was developed and
+        // verified against a compositor that redrew whatever happened. A
+        // missing damage signal is invisible here and obvious on the hardware,
+        // which is the worst possible way round.
+        let wanted = state.redraw || state.animating;
+        // Cleared before drawing, not after: a client that commits while we are
+        // rendering has damaged the *next* frame, not this one.
+        state.redraw = false;
+
         // The renderer borrow must end before submit(), so rendering happens in
         // its own scope and only two flags escape.
         // Before the output buffer is bound: this pass binds framebuffers of
         // its own, and doing that underneath a bound output redirects the
         // whole frame into a texture. See `render::Prepared`.
-        let mut prepared = render::prepare(&mut state, backend.renderer(), 1.0);
+        let mut prepared = if wanted {
+            render::prepare(&mut state, backend.renderer(), 1.0)
+        } else {
+            render::Prepared::default()
+        };
 
         let (rendered, captured) = match backend.bind() {
+            _ if !wanted => (false, false),
             Err(err) => {
                 tracing::warn!(?err, "could not bind the backend buffer, skipping frame");
                 (false, false)
@@ -407,22 +431,8 @@ pub(crate) fn run() -> Result<()> {
         };
 
         // Retire transforms that have landed, so a settled window costs nothing
-        // to draw. Every window is visited deliberately: a short-circuiting
-        // check would leave later windows transformed forever.
-        for pane in state.panes.iter() {
-            present::settle(pane, now);
-        }
-        // A window that has finished leaving is told to close, and the loop
-        // keeps drawing while any of them is still on its way out.
-        if state.settle_closing(now) {
-            state.redraw = true;
-        }
-        // And a window whose application never turned up gives up its slot.
-        state.settle_loading(now);
-        // A window asked to close that is still here is brought back.
-        if state.settle_refused(now) {
-            state.redraw = true;
-        }
+        // to draw, and learn whether anything still needs the next frame.
+        state.settle(now);
 
         frames += 1;
         if now.saturating_sub(window_started) >= Duration::from_secs(2) {

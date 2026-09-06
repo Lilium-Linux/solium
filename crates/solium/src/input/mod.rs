@@ -242,6 +242,10 @@ fn pointer_motion<B: InputBackend>(
         },
     );
     pointer.frame(state);
+    // The compositor draws the cursor, so the cursor moving is the screen
+    // changing. Without this the pointer only moved when something else
+    // happened to want a frame -- which on a still screen is never.
+    state.redraw = true;
 }
 
 /// Motion from a device that reports movement, not position — a real mouse.
@@ -285,6 +289,10 @@ fn pointer_relative<B: InputBackend>(
         },
     );
     pointer.frame(state);
+    // The compositor draws the cursor, so the cursor moving is the screen
+    // changing. Without this the pointer only moved when something else
+    // happened to want a frame -- which on a still screen is never.
+    state.redraw = true;
     settle_resize(state);
 }
 
@@ -566,6 +574,10 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         },
     );
     pointer.frame(state);
+    // The compositor draws the cursor, so the cursor moving is the screen
+    // changing. Without this the pointer only moved when something else
+    // happened to want a frame -- which on a still screen is never.
+    state.redraw = true;
 
     // Outside the grab now: the pointer's lock is released, so a script may
     // ask where the pointer is without stopping the compositor.
@@ -630,6 +642,10 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
 
     pointer.axis(state, frame);
     pointer.frame(state);
+    // The compositor draws the cursor, so the cursor moving is the screen
+    // changing. Without this the pointer only moved when something else
+    // happened to want a frame -- which on a still screen is never.
+    state.redraw = true;
 }
 
 fn touch_down<B: InputBackend>(state: &mut Solium, output: &Output, event: impl TouchDownEvent<B>) {

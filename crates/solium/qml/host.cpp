@@ -262,6 +262,15 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
     scene->image = QImage(scene->width, scene->height, QImage::Format_ARGB32_Premultiplied);
     scene->image.fill(Qt::transparent);
 
+    // And pointed at, here as well as in resize. A scene that is never resized
+    // otherwise never gets a render target at all: Qt draws into nothing and
+    // the image stays exactly as transparent as it was filled. Every scene the
+    // compositor hosts is resized to its area each frame -- except the cursor,
+    // which is a fixed 24x24 and so was invisible for its whole life. An
+    // invisible pointer is not a cosmetic failure; it is indistinguishable from
+    // input being dead.
+    scene->window->setRenderTarget(QQuickRenderTarget::fromPaintDevice(&scene->image));
+
     return scene;
 }
 

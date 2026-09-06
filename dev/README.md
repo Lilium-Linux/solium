@@ -18,6 +18,18 @@ a demo into a regression test.
 | `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
 | `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |
 
+## Checks
+
+| Script | What it asserts |
+|---|---|
+| `dev/gate.sh` | fmt, clippy, tests, build, and that the Lua configuration loads |
+| `dev/app-check.sh <program>` | a client runs, draws, and provokes no protocol error |
+| `dev/cursor-check.sh` | the pointer is visible over empty desktop |
+
+`cursor-check.sh` exists because the pointer was invisible for the whole life
+of the project and nothing noticed: nested, the host session draws a cursor
+over the top, so the only place the failure shows is the hardware.
+
 ## Capturing a frame
 
 ```sh

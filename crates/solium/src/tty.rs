@@ -57,7 +57,7 @@ use smithay::{
 };
 
 use crate::{
-    layer, present, render,
+    layer, render,
     script::Scripts,
     state::{ClientState, Request, Solium},
 };
@@ -575,7 +575,6 @@ impl State {
         // Cleared before drawing, not after: a client that commits while we
         // are rendering has damaged the *next* frame, not this one.
         self.solium.redraw = false;
-        let mut animating = false;
 
         // Offscreen captures first, for the reason `render::Prepared` gives.
         let mut prepared = render::prepare(&mut self.solium, renderer, 1.0);
@@ -594,17 +593,7 @@ impl State {
             Err(err) => tracing::warn!(?err, "rendering failed"),
         }
 
-        for pane in self.solium.panes.iter() {
-            animating |= present::settle(pane, now);
-        }
-        // A window that has finished leaving is told to close; until then the
-        // session counts as animating so the frames keep coming.
-        animating |= self.solium.settle_closing(now);
-        // And a window whose application never turned up gives up its slot.
-        self.solium.settle_loading(now);
-        // A window asked to close that is still here is brought back.
-        animating |= self.solium.settle_refused(now);
-        self.animating = animating;
+        self.animating = self.solium.settle(now);
     }
 
     /// Tell clients the frame reached the screen and they may draw the next.
