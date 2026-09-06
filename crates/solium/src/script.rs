@@ -170,13 +170,20 @@ pub(crate) struct Loading {
     /// Whether it takes a place in the layout before its application connects.
     /// Off, and the other windows only move aside once it is really there.
     pub(crate) reserves_a_slot: bool,
-    /// Whether it wears a frame while it waits.
+    /// Whether the frame is *drawn* while it waits.
     ///
-    /// Off by default. A frame is what gives it a close button before there is
-    /// anything to close, which is worth having — but it also names the window
-    /// twice, and it appears and goes again for any application that draws its
-    /// own decorations. The scene already says which application it is.
+    /// Off by default. The frame is always built, so the room it takes is
+    /// reserved from the first frame and the window does not change shape when
+    /// the application arrives — this only decides whether the bar is on screen
+    /// meanwhile. Drawn, it gives a close button for an application that is not
+    /// coming; hidden, the scene has the whole window and says the name once
+    /// rather than twice.
     pub(crate) decorated: bool,
+    /// How long the scene takes to fade off the application that replaced it.
+    ///
+    /// Drawn over the window rather than instead of it, so the application is
+    /// already there underneath as it goes. Zero cuts straight to it.
+    pub(crate) fade: std::time::Duration,
 }
 
 impl Default for Loading {
@@ -186,6 +193,7 @@ impl Default for Loading {
             patience: std::time::Duration::from_secs(8),
             reserves_a_slot: true,
             decorated: false,
+            fade: std::time::Duration::from_millis(180),
         }
     }
 }
@@ -899,6 +907,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             if let Some(decorated) = options.get::<Option<bool>>("decorated")? {
                 loading.decorated = decorated;
+            }
+            if let Some(millis) = options.get::<Option<u64>>("fade")? {
+                loading.fade = Duration::from_millis(millis);
             }
             if let Ok(Value::String(scene)) = options.get::<Value>("scene")
                 && let Ok(scene) = scene.to_str()

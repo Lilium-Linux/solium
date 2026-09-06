@@ -143,12 +143,21 @@ impl ShellSurface {
         }
     }
 
-    /// Draw the surface across `area`.
+    /// Draw the surface across `area`, at `alpha`.
+    ///
+    /// The alpha is applied when the buffer reaches the screen, not inside the
+    /// scene. It cannot be done inside: Qt's software renderer repaints only
+    /// what it thinks changed, onto the pixels already there, so a scene fading
+    /// itself out paints each half-transparent frame over its own opaque
+    /// previous one and never fades at all. Whether a surface is see-through is
+    /// the compositor's business anyway — it is a presentation transform, the
+    /// same as where the surface is and how big.
     pub(crate) fn element<R>(
         &mut self,
         renderer: &mut R,
         area: Rectangle<i32, Logical>,
         now: Duration,
+        alpha: f32,
     ) -> Option<MemoryRenderBufferRenderElement<R>>
     where
         R: Renderer + ImportMem,
@@ -203,7 +212,7 @@ impl ShellSurface {
             renderer,
             (f64::from(area.loc.x), f64::from(area.loc.y)),
             buffer,
-            None,
+            Some(alpha),
             None,
             None,
             Kind::Unspecified,

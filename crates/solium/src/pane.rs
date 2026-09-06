@@ -92,6 +92,13 @@ pub(crate) enum Content {
         /// remove. The two are never both absent: the scene goes when there is
         /// something to replace it with.
         scene: Option<Box<crate::surface::ShellSurface>>,
+        /// When the application painted and the scene began to fade off it.
+        ///
+        /// `None` while the application still has nothing to show. The scene
+        /// is drawn *over* the window for as long as this lasts, so the
+        /// application is already there underneath as it goes — a dissolve
+        /// rather than a cut.
+        faded: Option<Duration>,
     },
     /// A client that has gone, still on screen while it leaves.
     Leaving { since: Duration },
@@ -151,6 +158,7 @@ impl Pane {
             content: Content::Client {
                 window,
                 scene: None,
+                faded: None,
             },
             opened: now,
             adopted: false,
@@ -213,8 +221,65 @@ impl Pane {
             Content::Client { scene, .. } => scene.take(),
             Content::Leaving { .. } => None,
         };
-        self.content = Content::Client { window, scene };
+        self.content = Content::Client {
+            window,
+            scene,
+            faded: None,
+        };
         self.adopted = true;
+    }
+
+    /// The application has painted: begin letting go of the scene over it.
+    ///
+    /// Returns whether this call started the fade, so it is set up once.
+    pub(crate) fn fade(&mut self, now: Duration) -> bool {
+        match &mut self.content {
+            Content::Client {
+                scene: Some(_),
+                faded: faded @ None,
+                ..
+            } => {
+                *faded = Some(now);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the scene has been fading for at least `over`.
+    pub(crate) fn faded(&self, now: Duration, over: Duration) -> bool {
+        match &self.content {
+            Content::Client {
+                faded: Some(began), ..
+            } => now.saturating_sub(*began) >= over,
+            _ => false,
+        }
+    }
+
+    /// How much of the scene is still there.
+    ///
+    /// Solid until the application has painted, then away over `over`. Eased
+    /// rather than linear, so it holds for a moment and then goes: a linear
+    /// dissolve spends its whole length looking like a wash over the window,
+    /// which reads as something being wrong with the window.
+    pub(crate) fn scene_alpha(&self, now: Duration, over: Duration) -> f32 {
+        let Content::Client {
+            faded: Some(began), ..
+        } = &self.content
+        else {
+            return 1.0;
+        };
+        if over.is_zero() {
+            return 0.0;
+        }
+        let progress = now.saturating_sub(*began).as_secs_f64() / over.as_secs_f64();
+        let gone = solium_animation::Curve::InOutQuad.at(progress.clamp(0.0, 1.0));
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "an alpha, clamped to 0..=1 before it is narrowed"
+        )]
+        let alpha = (1.0 - gone).clamp(0.0, 1.0) as f32;
+        alpha
     }
 
     /// The application has painted: let go of the scene standing in for it.

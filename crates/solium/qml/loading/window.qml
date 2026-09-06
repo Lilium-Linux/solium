@@ -12,6 +12,12 @@
 // Edit it like any other scene here. `program` and `waited` are set by the
 // compositor every frame; this one uses only the first.
 //
+// Do not try to fade this out yourself when the application arrives — the
+// compositor does it, and a scene cannot: Qt's software renderer repaints only
+// what changed, onto the pixels already there, so each half-transparent frame
+// lands on its own opaque previous one and nothing fades. `loading.fade` is the
+// setting.
+//
 //     SOLIUM_LOADING=mine        ~/.config/solium/qml/loading/mine.qml
 //     SOLIUM_LOADING=~/mine.qml  anywhere
 
@@ -24,7 +30,6 @@ Item {
     // Set by the compositor.
     property string program: ""
     property int waited: 0
-
     Rectangle {
         anchors.fill: parent
         color: Theme.surface

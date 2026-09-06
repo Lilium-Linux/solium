@@ -171,9 +171,14 @@ pub(crate) struct Solium {
     /// told. QML hover is positional: a frame never told the pointer left
     /// stays lit forever.
     pub(crate) hovered_frame: Option<crate::pane::PaneId>,
-    /// Windows on their way out, and when to tell them so. See
-    /// `close_window`.
+    /// Windows on their way out, and when to tell them so. See `close_pane`.
     closing: HashMap<crate::pane::PaneId, std::time::Duration>,
+    /// Windows that have been asked to close, and when they were asked.
+    ///
+    /// A close is a request. A client may put up "are you sure?" and stay, and
+    /// nothing in the protocol says so -- the only evidence is the window
+    /// still being here. See `settle_refused`.
+    asked: HashMap<crate::pane::PaneId, std::time::Duration>,
     /// When the last memory report went out; see `memory_report`.
     pub(crate) reported_at: std::time::Duration,
     /// XWayland's window manager, once XWayland has started. `None` means no
@@ -384,6 +389,7 @@ impl Solium {
             tweaks_shown: true,
             hovered_frame: None,
             closing: HashMap::new(),
+            asked: HashMap::new(),
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
@@ -698,7 +704,9 @@ impl Solium {
         // question once a frame, about every pane, cannot miss one -- and a
         // scene kept past its moment is a window that never shows its
         // application.
-        let filled: Vec<crate::pane::PaneId> = self
+        let now = self.clock.now();
+        let fade = self.loading.fade;
+        let ready: Vec<crate::pane::PaneId> = self
             .panes
             .iter()
             .filter(|pane| pane.has_scene())
@@ -708,9 +716,18 @@ impl Solium {
             })
             .map(Pane::id)
             .collect();
-        for id in filled {
-            if self.panes.get_mut(id).is_some_and(Pane::filled) {
+        for id in ready {
+            // The application has painted. The scene stays on screen over it,
+            // fading, so what appears underneath is already the application
+            // rather than a hole it then fills.
+            if self.panes.get_mut(id).is_some_and(|pane| pane.fade(now)) {
                 tracing::debug!(pane = id.get(), "an application filled its window");
+                self.redraw = true;
+            }
+            if self.panes.get(id).is_some_and(|pane| pane.faded(now, fade))
+                && let Some(pane) = self.panes.get_mut(id)
+            {
+                pane.filled();
             }
         }
 
@@ -731,6 +748,7 @@ impl Solium {
             self.panes.iter().map(Pane::id).collect();
         self.decorations.retain(|id| live.contains(&id));
         self.closing.retain(|id, _| live.contains(id));
+        self.asked.retain(|id, _| live.contains(id));
         true
     }
 
@@ -1355,13 +1373,84 @@ impl Solium {
                 }
                 continue;
             };
+            // A request, not a kill: the client decides whether it can close,
+            // and the window goes away when it does. Either protocol -- an X11
+            // window was previously animated away and then asked *nothing*, so
+            // it never closed and never came back. From the other side of the
+            // screen that is a window that vanished.
+            // A request, not a kill: the client decides whether it can close,
+            // and the window goes away when it does. Either protocol -- an X11
+            // window used to be animated away and then asked *nothing*, so it
+            // never closed and never came back, which from the other side of
+            // the screen is a window that vanished.
             if let Some(toplevel) = window.toplevel() {
-                // A request, not a kill: the client decides whether it can
-                // close, and the window goes away when it does.
                 toplevel.send_close();
+            } else if let Some(x11) = window.x11_surface()
+                && let Err(err) = x11.close()
+            {
+                tracing::warn!(?err, "could not ask an X11 window to close");
             }
+            // Watched either way. Whether the request went out matters less
+            // than whether the window is still here a moment later, and a
+            // window we could not even ask is the one most in need of coming
+            // back.
+            self.asked.insert(id, now);
         }
         !self.closing.is_empty()
+    }
+
+    /// Bring back a window that was asked to close and did not.
+    ///
+    /// The window is animated away before the request goes out, because
+    /// waiting for the client would mean nothing happening for as long as the
+    /// client took. When the client honours it, that is right. When it does
+    /// not -- a terminal asking whether you meant it, an editor with unsaved
+    /// work -- the window is left drawn away and invisible, still holding its
+    /// place in the layout, until something unrelated happens to move it. From
+    /// the other side of the screen that is a window that vanished and a
+    /// session that lost it.
+    ///
+    /// There is no refusal in the protocol, so the only evidence is the window
+    /// still being here a moment later. It comes back.
+    ///
+    /// Returns whether anything is still being waited on.
+    pub(crate) fn settle_refused(&mut self, now: std::time::Duration) -> bool {
+        if self.asked.is_empty() {
+            return false;
+        }
+        /// Long enough that a client which is closing is not interrupted part
+        /// way; short enough that coming back reads as an answer to the press
+        /// rather than as a window reappearing by itself.
+        const GRACE: std::time::Duration = std::time::Duration::from_millis(400);
+
+        let due: Vec<crate::pane::PaneId> = self
+            .asked
+            .iter()
+            .filter(|(_, at)| now.saturating_sub(**at) >= GRACE)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in due {
+            self.asked.remove(&id);
+            let Some(pane) = self.panes.get(id) else {
+                continue;
+            };
+            let Some(outer) = self.pane_outer(pane) else {
+                continue;
+            };
+            tracing::debug!(
+                pane = id.get(),
+                "a window refused to close; bringing it back"
+            );
+            present::clear(
+                pane,
+                outer,
+                now,
+                std::time::Duration::from_millis(150),
+                solium_animation::Curve::OutCubic,
+            );
+            self.redraw = true;
+        }
+        !self.asked.is_empty()
     }
 
     /// Act on a frame button.
@@ -1594,13 +1683,12 @@ impl Solium {
             self.clock.now(),
         ));
 
-        // A frame, so it is a window rather than a rectangle: something to
-        // name it and something to press when an application is not coming.
-        // Keyed by pane, so this is the same frame -- with whatever animation
-        // is running in it -- once the client arrives.
-        if self.loading.decorated {
-            self.decorations.insert(id, area.size.w, area.size.h);
-        }
+        // Built whether or not it will be drawn yet. The room it takes is
+        // reserved from the first frame, so the window is the same shape
+        // before and after its application arrives -- and it is the *same*
+        // frame, keyed by pane, so whatever animation is running in it carries
+        // straight through the handover instead of starting again.
+        self.decorations.insert(id, area.size.w, area.size.h);
         // And the frame's share comes off the slot, exactly as it does for a
         // window the layout placed, so the client is sized to the same rect
         // either way.
