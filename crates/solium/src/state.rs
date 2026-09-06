@@ -149,6 +149,8 @@ pub(crate) struct Solium {
     /// The socket clients connect on. Held so that a program started from a
     /// script finds *this* compositor rather than the session it is nested in.
     pub(crate) socket_name: String,
+    /// When the last memory report went out; see `memory_report`.
+    pub(crate) reported_at: std::time::Duration,
     /// XWayland's window manager, once XWayland has started. `None` means no
     /// X11 support this session, which is a working session with fewer apps.
     pub(crate) xwm: Option<smithay::xwayland::X11Wm>,
@@ -297,6 +299,7 @@ impl Solium {
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
+            reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
@@ -984,6 +987,45 @@ impl Solium {
     }
 
     /// Raise a window and give it the keyboard.
+    /// Report what the compositor is holding, once a second, when asked.
+    ///
+    /// Enabled with `SOLIUM_MEMDIAG=1`. A leak hunt needs to know *which*
+    /// number is growing: resident memory alone cannot tell a forgotten
+    /// decoration from a Lua heap that never shrinks from an allocator that
+    /// simply keeps what it has.
+    pub(crate) fn memory_report(&mut self) {
+        if !crate::dev::memory_diagnostics() {
+            return;
+        }
+        let now = self.clock.now();
+        if now.saturating_sub(self.reported_at) < std::time::Duration::from_secs(1) {
+            return;
+        }
+        self.reported_at = now;
+
+        // statm's second field is resident pages.
+        let rss_kb = std::fs::read_to_string("/proc/self/statm")
+            .ok()
+            .and_then(|statm| {
+                statm
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|pages| pages.parse::<usize>().ok())
+            })
+            .map_or(0, |pages| pages * 4);
+
+        tracing::info!(
+            windows = self.space.elements().count(),
+            decorations = self.decorations.len(),
+            lua_kb = self
+                .scripts
+                .as_ref()
+                .map_or(0, |scripts| scripts.used_memory() / 1024),
+            rss_kb,
+            "MEMDIAG"
+        );
+    }
+
     /// Point the seat's selections at whoever holds focus.
     ///
     /// A client may only read a selection while it holds the seat's data

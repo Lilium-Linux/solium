@@ -110,6 +110,7 @@ pub(crate) fn elements(
     scale: f64,
     prepared: &mut Prepared,
 ) -> Vec<Element> {
+    state.memory_report();
     let now = state.clock.now();
     let output_scale = Scale::from(scale);
     let mut elements = Vec::new();

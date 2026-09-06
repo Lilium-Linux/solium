@@ -25,18 +25,31 @@ gears="$out/$which.gears.log"
 
 [[ -n "${WAYLAND_DISPLAY:-}" ]] || { echo "WAYLAND_DISPLAY is empty" >&2; exit 1; }
 
+# Which socket a compositor ended up on is found by watching for one to
+# appear, rather than by parsing its log: Hyprland does not print it at all,
+# and every compositor spells it differently. A new socket in the runtime
+# directory is unambiguous and needs no per-compositor knowledge.
+sockets_now() { ls "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" 2>/dev/null | grep -E '^wayland-[0-9]+$' | sort; }
+x_sockets_now() { ls /tmp/.X11-unix 2>/dev/null | sort; }
+before_sockets="$(sockets_now)"
+before_x="$(x_sockets_now)"
+
 case "$which" in
     solium)
         nice -n 5 "$root/target/debug/solium" >"$log" 2>&1 &
         comp=$!
-        pattern='socket=wayland-[0-9]+'
         ;;
     sway)
         sway_root="${SWAY_ROOT:?set SWAY_ROOT to the extracted sway tree}"
         LD_LIBRARY_PATH="$sway_root/usr/lib64" WLR_BACKENDS=wayland \
             nice -n 5 "$sway_root/usr/bin/sway" --unsupported-gpu -c "${SWAY_CONFIG:?}" >"$log" 2>&1 &
         comp=$!
-        pattern='WAYLAND_DISPLAY=wayland-[0-9]+'
+        ;;
+    hyprland)
+        hypr_root="${HYPR_ROOT:?set HYPR_ROOT to the extracted hyprland tree}"
+        LD_LIBRARY_PATH="$hypr_root/usr/lib64" \
+            nice -n 5 "$hypr_root/usr/bin/Hyprland" -c "${HYPR_CONFIG:?}" >"$log" 2>&1 &
+        comp=$!
         ;;
     *) echo "unknown compositor: $which" >&2; exit 2 ;;
 esac
@@ -50,34 +63,55 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Asking who listens, rather than which name is new: a compositor killed with
+# a signal leaves its socket file behind, the next one happily reuses the same
+# name, and a name diff then reports that nothing started.
+socket_of() {
+    ss -xlp 2>/dev/null | awk -v pid="$1" '
+        $0 ~ ("pid=" pid ",") {
+            for (i = 1; i <= NF; i++)
+                if ($i ~ /wayland-[0-9]+$/) { n = split($i, parts, "/"); print parts[n]; exit }
+        }'
+}
 socket=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 300); do
     kill -0 "$comp" 2>/dev/null || { echo "$which exited early" >&2; tail -3 "$log" >&2; exit 1; }
-    socket="$(grep -oE "$pattern" "$log" | tail -1 | cut -d= -f2)"
+    socket="$(socket_of "$comp")"
+    [[ -z "$socket" ]] && socket="$(comm -13 <(echo "$before_sockets") <(sockets_now) | head -1)"
     [[ -n "$socket" ]] && break
     sleep 0.1
 done
-[[ -n "$socket" ]] || { echo "$which never reported a socket" >&2; exit 1; }
+[[ -n "$socket" ]] || { echo "$which never opened a socket" >&2; exit 1; }
+# Never the host's own socket. Detection that falls back to the host puts the
+# benchmark's terminals on the developer's real desktop, which is both wrong
+# and hard to notice afterwards.
+if [[ "$socket" == "$WAYLAND_DISPLAY" ]]; then
+    echo "$which: refusing to run -- detection landed on the host socket ($socket)" >&2
+    exit 1
+fi
+echo "  $which on $socket"
 
 # Both compositors start XWayland lazily, so the display number is read the
 # same way from each: by asking, once a client needs it.
-x_display=":$(( 20 + RANDOM % 20 ))"
-for _ in $(seq 1 60); do
-    case "$which" in
-        solium) n="$(grep -oE 'XWayland is up display=[0-9]+' "$log" | tail -1 | cut -d= -f2)";;
-        sway)   n="$(grep -oE 'xwayland.*DISPLAY=:[0-9]+' "$log" | grep -oE ':[0-9]+' | tail -1 | tr -d ':')";;
-    esac
-    [[ -n "${n:-}" ]] && { x_display=":$n"; break; }
+# Same trick for XWayland: a new socket under /tmp/.X11-unix is the display,
+# whoever started it and however they logged it.
+x_display=""
+for _ in $(seq 1 100); do
+    fresh="$(comm -13 <(echo "$before_x") <(x_sockets_now) | head -1)"
+    [[ -n "$fresh" ]] && { x_display=":${fresh#X}"; break; }
     sleep 0.2
 done
+[[ -n "$x_display" ]] || echo "  ($which: no XWayland appeared; the X11 client will be skipped)" >&2
 
 for _ in 1 2; do
     env -u LD_LIBRARY_PATH -u DISPLAY WAYLAND_DISPLAY="$socket" kitty >/dev/null 2>&1 &
     clients+=($!)
     sleep 1
 done
-env -u LD_LIBRARY_PATH DISPLAY="$x_display" WAYLAND_DISPLAY="$socket" glxgears >"$gears" 2>&1 &
-clients+=($!)
+if [[ -n "$x_display" ]]; then
+    env -u LD_LIBRARY_PATH DISPLAY="$x_display" WAYLAND_DISPLAY="$socket" glxgears >"$gears" 2>&1 &
+    clients+=($!)
+fi
 sleep 6
 
 read_cpu() { awk '{print ($14+$15)/'"$(getconf CLK_TCK)"'}' "/proc/$comp/stat" 2>/dev/null; }
