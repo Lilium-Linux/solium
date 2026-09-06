@@ -249,6 +249,20 @@ impl Panes {
         self.of(window).map(Pane::id)
     }
 
+    /// Open a pane, on top. The window's life begins here.
+    pub(crate) fn open(&mut self, pane: Pane) -> PaneId {
+        let id = pane.id;
+        self.panes.push(pane);
+        id
+    }
+
+    /// Forget a pane. Everything keyed by it goes at the next `sync`.
+    pub(crate) fn remove(&mut self, id: PaneId) -> bool {
+        let before = self.panes.len();
+        self.panes.retain(|pane| pane.id != id);
+        before != self.panes.len()
+    }
+
     /// Take a pane for a client that arrived without being asked for, on top.
     ///
     /// Called where the window is mapped, so that nothing can observe a mapped

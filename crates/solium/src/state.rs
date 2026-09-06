@@ -160,6 +160,10 @@ pub(crate) struct Solium {
     pub(crate) socket_name: String,
     /// Applications asked for but not yet on screen. See `Launch`.
     pub(crate) launches: Vec<Launch>,
+    /// What a window does between being asked for and its application
+    /// arriving — what draws it, how long it waits, whether it takes a place
+    /// in the layout. A script's, not the compositor's. See `Command::Loading`.
+    pub(crate) loading: crate::script::Loading,
     /// The Developer Tweaks panel, when `--debug-mode` asked for one.
     pub(crate) tweaks: Option<crate::surface::ShellSurface>,
     /// Whether it is on screen. Hiding keeps the scene alive, so showing it
@@ -472,6 +476,7 @@ impl Solium {
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
             launches: Vec::new(),
+            loading: crate::script::Loading::default(),
             tweaks: None,
             tweaks_shown: true,
             hovered_frame: None,
@@ -719,7 +724,14 @@ impl Solium {
             .iter()
             .rev()
             .filter_map(|pane| {
-                let window = pane.client()?;
+                // A pane whose application has not arrived is in this list --
+                // that is what makes the layout reserve its place before there
+                // is anything to put in it. Unless it was asked not to: a
+                // window that takes no slot until it is really there is a
+                // setting, because which of the two reads better is taste.
+                if pane.client().is_none() && !self.loading.reserves_a_slot {
+                    return None;
+                }
                 let outer = self.pane_outer(pane)?;
                 let drawn = present::frame(pane, outer, now);
                 Some(WindowInfo {
@@ -731,8 +743,12 @@ impl Solium {
                         w: drawn.rect.size.w,
                         h: drawn.rect.size.h,
                     },
-                    title: self.window_title(window),
-                    focused: focused.as_ref() == Some(window),
+                    // What the user asked for, until the client has an opinion.
+                    title: pane.client().map_or_else(
+                        || pane.program().unwrap_or_default().to_owned(),
+                        |window| self.window_title(window),
+                    ),
+                    focused: pane.client().is_some() && focused.as_ref() == pane.client(),
                 })
             })
             .collect();
@@ -888,6 +904,12 @@ impl Solium {
                 Command::Close { id } => {
                     if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
                         self.close_pane(pane);
+                    }
+                }
+                Command::Loading(loading) => {
+                    if self.loading != loading {
+                        tracing::debug!(?loading, "loading behaviour set");
+                        self.loading = loading;
                     }
                 }
                 Command::Decoration { name } => {
@@ -1285,9 +1307,16 @@ impl Solium {
             .collect();
         for id in due {
             self.closing.remove(&id);
-            if let Some(window) = self.panes.get(id).and_then(Pane::client).cloned()
-                && let Some(toplevel) = window.toplevel()
-            {
+            let Some(window) = self.panes.get(id).and_then(Pane::client).cloned() else {
+                // Nothing to ask. A window whose application never arrived is
+                // gone when we say it is, which is the one case where closing
+                // is entirely ours to decide.
+                if self.panes.remove(id) {
+                    self.trigger_close(id);
+                }
+                continue;
+            };
+            if let Some(toplevel) = window.toplevel() {
                 // A request, not a kill: the client decides whether it can
                 // close, and the window goes away when it does.
                 toplevel.send_close();
@@ -1471,6 +1500,95 @@ impl Solium {
     /// eye already is. It is not where the window will end up -- the layout
     /// decides that when the window exists -- but the window grows out of this
     /// rect when it arrives, so the movement is continuous either way.
+    /// Open a window for an application that has been asked for.
+    ///
+    /// The window's life begins here rather than when the client connects: it
+    /// takes a slot, the other windows move aside for it, and it can be closed
+    /// while it waits. What arrives later maps *into* it.
+    ///
+    /// Its first slot is under the pointer, because that is where the asking
+    /// happened and where the eye already is. The layout is told immediately
+    /// and usually moves it somewhere better in the same breath — which is the
+    /// point: the arrangement settles before the application has done
+    /// anything at all.
+    pub(crate) fn begin_loading(&mut self, program: &str, pid: Option<u32>) -> crate::pane::PaneId {
+        let at = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location())
+            .unwrap_or_default();
+        #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
+        let slot = Rectangle::new(
+            ((at.x as i32) - 40, (at.y as i32) - 24).into(),
+            (80, 48).into(),
+        );
+        let name = std::path::Path::new(program)
+            .file_name()
+            .map_or(program, |name| name.to_str().unwrap_or(program));
+        // Resolved now, so reloading the configuration mid-wait does not
+        // change what a window already on screen looks like halfway through.
+        let source = crate::pane::loading_source(self.loading.scene.as_deref());
+        let id = self
+            .panes
+            .open(Pane::loading(name, pid, slot, source, self.clock.now()));
+        tracing::debug!(program = name, ?pid, "a window opened for an application");
+
+        // Told as an *open*, not as a relayout. A layout keeps its own
+        // arrangement and adds to it when it hears a window opened; a relayout
+        // only re-runs what it already holds, so the new window would never
+        // join. This is the whole of "the other windows move aside": the
+        // window opened, and it opened before its application existed.
+        //
+        // Unless it was asked not to. `reserves_a_slot` has to gate the event
+        // and not only the snapshot: a layout that has been told a window
+        // opened keeps it in its own arrangement, and would go on placing it
+        // however the snapshot were filtered afterwards.
+        let placed = self.loading.reserves_a_slot && self.trigger_open(id);
+        if !placed {
+            // Either nothing had an opinion -- floating, or no scripts at all
+            // -- or it is deliberately staying out of the layout until its
+            // application is really there. It still has to be somewhere, and
+            // this is where a launching window goes.
+            let slot = self.launch_slot();
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.set_slot(slot);
+            }
+        }
+        self.redraw = true;
+        id
+    }
+
+    /// Give up on applications that never arrived.
+    ///
+    /// A window that waits forever holds a slot forever. It goes exactly as if
+    /// it had been closed, and the layout is told — so the arrangement heals
+    /// rather than keeping a gap for something that is not coming.
+    ///
+    /// Returns whether anything went, so the backend redraws.
+    pub(crate) fn settle_loading(&mut self, now: std::time::Duration) -> bool {
+        let patience = self.loading.patience;
+        let gone: Vec<(crate::pane::PaneId, String)> = self
+            .panes
+            .iter()
+            .filter(|pane| pane.expired(now, patience))
+            .map(|pane| (pane.id(), pane.program().unwrap_or_default().to_owned()))
+            .collect();
+        if gone.is_empty() {
+            return false;
+        }
+        for (id, program) in gone {
+            tracing::info!(program, "gave up on an application that never arrived");
+            // Forgotten first, then reported: a layout hearing that a window
+            // closed will lay out immediately, and it should not be laying out
+            // around a window that is already gone. Everything else keyed by
+            // the pane goes with it at the next `sync_panes`.
+            self.panes.remove(id);
+            self.trigger_close(id);
+        }
+        self.redraw = true;
+        true
+    }
+
     pub(crate) fn begin_launch(&mut self, program: &str) {
         let at = self
             .seat
@@ -1710,7 +1828,7 @@ impl Solium {
         // dock-icon genie a script rather than a feature. The built-in is only
         // a fallback for when nothing has an opinion; a window popping into
         // existence with no animation at all is worse than a plain one.
-        if !self.trigger_open(window)
+        if !self.trigger_open(pane)
             && let Some(outer) = self.outer_geometry(window)
             && let Some(pane) = self.panes.get(pane)
         {
@@ -1949,8 +2067,8 @@ impl Solium {
         self.apply(outcome);
     }
 
-    pub(crate) fn trigger_close(&mut self, window: &Window) {
-        let id = self.window_id(window);
+    pub(crate) fn trigger_close(&mut self, pane: crate::pane::PaneId) {
+        let id = pane.get();
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return;
@@ -1985,8 +2103,8 @@ impl Solium {
         handled
     }
 
-    fn trigger_open(&mut self, window: &Window) -> bool {
-        let id = self.window_id(window);
+    fn trigger_open(&mut self, pane: crate::pane::PaneId) -> bool {
+        let id = pane.get();
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return false;
@@ -2135,8 +2253,8 @@ impl XdgShellHandler for Solium {
             .elements()
             .find(|window| window.toplevel().is_some_and(|top| *top == surface))
             .cloned();
-        if let Some(window) = going {
-            self.trigger_close(&window);
+        if let Some(pane) = going.as_ref().and_then(|window| self.panes.id_of(window)) {
+            self.trigger_close(pane);
         }
 
         // Nothing to tidy up here. The frame and the pending close belong to

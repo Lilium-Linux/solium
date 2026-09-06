@@ -600,6 +600,8 @@ impl State {
         // A window that has finished leaving is told to close; until then the
         // session counts as animating so the frames keep coming.
         animating |= self.solium.settle_closing(now);
+        // And a window whose application never turned up gives up its slot.
+        self.solium.settle_loading(now);
         self.animating = animating;
     }
 

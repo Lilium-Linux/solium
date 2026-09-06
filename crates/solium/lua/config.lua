@@ -36,6 +36,25 @@ local defaults = {
     --   "pulse"      a bar with an animation running in it
     decoration = "top",
 
+    -- What a window does between being asked for and its application
+    -- arriving. A window's life starts when you ask for it, not when the
+    -- program gets around to connecting -- these decide what that looks like.
+    loading = {
+        -- Which QML draws it. A name is one of the scenes in `qml/loading`,
+        -- or one of your own in ~/.config/solium/qml/loading, which shadows a
+        -- shipped one of the same name. A path is anywhere. SOLIUM_LOADING
+        -- overrides this, because that is set per run.
+        scene = "window",
+        -- How long to keep a window open for an application that never
+        -- arrives, in milliseconds. After that it closes, exactly as if you
+        -- had closed it, and the layout is told.
+        patience = 8000,
+        -- Whether it takes its place in the layout straight away. With this
+        -- off, the other windows only move aside once the application is
+        -- really there -- less eager, and some people will prefer it.
+        reserves_a_slot = true,
+    },
+
     tiling = {
         -- Where a split falls, as a share of the window being divided.
         -- Hyprland calls this dwindle:default_split_ratio.

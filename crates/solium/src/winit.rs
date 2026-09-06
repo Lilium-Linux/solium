@@ -195,8 +195,10 @@ pub(crate) fn run() -> Result<()> {
     let mut triggers = dev::triggers();
     let mut clicks = dev::clicks();
     let mut drags = dev::drags();
+    let mut loadings = dev::loading_at();
     triggers.reverse();
     clicks.reverse();
+    loadings.reverse();
 
     // Frame pacing, reported periodically. Latency is the thing this
     // compositor will be judged on, and "it feels laggy" is not something that
@@ -281,6 +283,12 @@ pub(crate) fn run() -> Result<()> {
             if let Some((_, from, to)) = drags.pop() {
                 tracing::info!(?from, ?to, "scripted drag");
                 synth::drag(&mut state, &output, from.into(), to.into(), 12);
+            }
+        }
+        while loadings.last().is_some_and(|(at, _)| now >= *at) {
+            if let Some((_, program)) = loadings.pop() {
+                tracing::info!(program, "scripted loading window");
+                state.begin_loading(&program, None);
             }
         }
         while clicks.last().is_some_and(|(at, _)| now >= *at) {
@@ -409,6 +417,8 @@ pub(crate) fn run() -> Result<()> {
         if state.settle_closing(now) {
             state.redraw = true;
         }
+        // And a window whose application never turned up gives up its slot.
+        state.settle_loading(now);
 
         frames += 1;
         if now.saturating_sub(window_started) >= Duration::from_secs(2) {

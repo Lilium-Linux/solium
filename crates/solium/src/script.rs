@@ -150,6 +150,36 @@ pub(crate) enum Command {
         program: String,
         args: Vec<String>,
     },
+    /// How a window behaves between being asked for and its application
+    /// arriving. See `Loading`.
+    Loading(Loading),
+}
+
+/// What the compositor does with a window whose application has not connected.
+///
+/// Settings rather than constants because every part of this is a matter of
+/// taste: what it looks like, how long to wait, and whether it takes a place in
+/// the layout at all. Someone who wants a window to appear only when it is
+/// really there should be able to say so without a rebuild.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Loading {
+    /// Which QML draws it — a name, or a path. See `pane::loading_source`.
+    pub(crate) scene: Option<String>,
+    /// How long to hold a window open for an application that never arrives.
+    pub(crate) patience: std::time::Duration,
+    /// Whether it takes a place in the layout before its application connects.
+    /// Off, and the other windows only move aside once it is really there.
+    pub(crate) reserves_a_slot: bool,
+}
+
+impl Default for Loading {
+    fn default() -> Self {
+        Self {
+            scene: None,
+            patience: std::time::Duration::from_secs(8),
+            reserves_a_slot: true,
+        }
+    }
 }
 
 /// The result of one dispatch.
@@ -832,6 +862,40 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, name: Option<String>| {
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Decoration { name });
+            })
+        })?,
+    )?;
+
+    // A table, so adding a setting later does not change the call. Anything
+    // left out keeps its default rather than being reset -- `config.lua` is
+    // merged from the user's own file and may well carry only one key.
+    sol.set(
+        "loading",
+        lua.create_function(|lua, options: mlua::Table| {
+            // Read as `Value` and matched, never `get::<Option<T>>`: on a table
+            // that *errors* rather than answering None, and the `?` would take
+            // the whole handler down with it.
+            let mut loading = Loading::default();
+            // Numbers and booleans read straight through; a missing key is
+            // None, which leaves the default alone. `scene` is read as a
+            // `Value` and matched instead, because asking mlua for an
+            // `Option<String>` errors on anything that is not string-like
+            // rather than answering None -- and `?` here would take the whole
+            // handler down with it, which is how bezier easings once silently
+            // stopped working.
+            if let Some(millis) = options.get::<Option<u64>>("patience")? {
+                loading.patience = Duration::from_millis(millis);
+            }
+            if let Some(reserves) = options.get::<Option<bool>>("reserves_a_slot")? {
+                loading.reserves_a_slot = reserves;
+            }
+            if let Ok(Value::String(scene)) = options.get::<Value>("scene")
+                && let Ok(scene) = scene.to_str()
+            {
+                loading.scene = Some(scene.to_string());
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Loading(loading.clone()));
             })
         })?,
     )?;
