@@ -78,10 +78,9 @@ impl Prepared {
 /// Must run before the backend binds its own buffer; see [`Prepared`].
 pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f64) -> Prepared {
     let now = state.clock.now();
-    let windows: Vec<Window> = state.space.elements().rev().cloned().collect();
     let mut warps = Vec::new();
 
-    for window in windows {
+    for (_, window) in state.on_screen() {
         let Some(outer) = state.outer_geometry(&window) else {
             continue;
         };
@@ -200,11 +199,7 @@ pub(crate) fn elements(
         elements.push(Element::Chrome(element));
     }
 
-    // Collected first because the loop needs `&mut state` to render frames.
-    // `Window` is a handle, so this is a few pointer copies.
-    let windows: Vec<Window> = state.space.elements().rev().cloned().collect();
-
-    for window in windows {
+    for (pane, window) in state.on_screen() {
         let (Some(real), Some(outer)) =
             (state.real_geometry(&window), state.outer_geometry(&window))
         else {
@@ -266,9 +261,7 @@ pub(crate) fn elements(
                 pointer_inside: state.pointer_inside(&window),
             };
             let mut animating = false;
-            if let Some(id) = state.panes.id_of(&window)
-                && let Some(decoration) = state.decorations.get_mut(id)
-            {
+            if let Some(decoration) = state.decorations.get_mut(pane) {
                 if let Some(element) = decoration.frame(renderer, frame.rect, outer.size, &look) {
                     elements.push(Element::Chrome(element));
                 }

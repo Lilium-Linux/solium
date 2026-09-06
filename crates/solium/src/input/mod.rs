@@ -367,9 +367,7 @@ fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
     }
     // The whole window, not just the frame band: a decoration that reacts to
     // the cursor wants to know where it is while it crosses the client too.
-    let under = state
-        .decorated_under(location)
-        .and_then(|(window, local)| state.panes.id_of(&window).map(|id| (id, local)));
+    let under = state.decorated_under(location);
 
     // Whatever we were over and are no longer has to be told, or it stays
     // hovered for as long as the window lives.
@@ -437,8 +435,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // A press on a frame belongs to the frame: it either hits a button or
     // starts a drag, and either way no client should see it.
     if !pointer.is_grabbed()
-        && let Some((window, local)) = state.frame_under(location)
-        && let Some(id) = state.panes.id_of(&window)
+        && let Some((id, window, local)) = state.frame_under(location)
     {
         let pressed = button_state == ButtonState::Pressed;
         let on_button = state.decorations.get_mut(id).is_some_and(|decoration| {
