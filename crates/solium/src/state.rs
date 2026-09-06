@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use smithay::output::Output;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
 use std::collections::HashMap;
 
 use smithay::{
@@ -1987,7 +1987,13 @@ impl Solium {
             return;
         }
 
-        let location = self.initial_placement(window);
+        // Sized to fit before it is placed, because where a window goes
+        // depends on how big it is.
+        let size = self.fitted_size(window);
+        let location = self.initial_placement(window, size);
+        if size != window.geometry().size {
+            size_window(window, Rectangle::new(location, size));
+        }
         self.space.map_element(window.clone(), location, true);
 
         // How a window appears is a script's decision — that is what makes the
@@ -2276,11 +2282,34 @@ impl Solium {
     /// the first. This is *not* a layout engine and is not trying to be one —
     /// E4 replaces it with floating, tiling and scrolling behind one interface.
     /// It exists because "every window at (0, 0)" is not a usable compositor.
-    fn initial_placement(&self, window: &Window) -> Point<i32, Logical> {
+    /// The size a window should open at, which is not always the one it asked
+    /// for.
+    ///
+    /// A client picks its own first size and plenty pick one larger than the
+    /// screen — Firefox and LibreOffice both do on a 1600x900 output. Nothing
+    /// was bringing it down, and placement cannot help: a window wider than the
+    /// display hangs off it wherever you put it. Firefox opened with its tab
+    /// bar visible and everything below the fold past the bottom edge.
+    ///
+    /// A layout that claims the window overrides this a moment later. This is
+    /// for the floating case, where nothing else has an opinion.
+    fn fitted_size(&self, window: &Window) -> Size<i32, Logical> {
+        let size = window.geometry().size;
+        let Some(area) = self.work_area() else {
+            return size;
+        };
+        let insets = self.frame_insets(window);
+        (
+            size.w.min((area.size.w - insets.horizontal()).max(1)),
+            size.h.min((area.size.h - insets.vertical()).max(1)),
+        )
+            .into()
+    }
+
+    fn initial_placement(&self, window: &Window, size: Size<i32, Logical>) -> Point<i32, Logical> {
         let Some(output) = self.work_area() else {
             return (0, 0).into();
         };
-        let size = window.geometry().size;
 
         const CASCADE: i32 = 44;
         const WRAP: usize = 6;
