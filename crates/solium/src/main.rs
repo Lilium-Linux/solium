@@ -16,6 +16,7 @@ mod input;
 mod layer;
 mod mat4;
 mod offscreen;
+mod pane;
 mod present;
 mod qml;
 mod render;
