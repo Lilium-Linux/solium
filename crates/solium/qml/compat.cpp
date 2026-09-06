@@ -289,9 +289,17 @@ void FileView::setText(const QString &text)
         if (m_printErrors) {
             qWarning("FileView could not write %s", qPrintable(m_path));
         }
+        // The reason, not just the fact: the shell shows it to whoever asked
+        // for the save.
+        Q_EMIT saveFailed(file.errorString());
         return;
     }
-    file.write(text.toUtf8());
+    if (file.write(text.toUtf8()) < 0) {
+        Q_EMIT saveFailed(file.errorString());
+        return;
+    }
+    file.close();
+    Q_EMIT saved();
 }
 
 Socket::Socket(QObject *parent) : QObject(parent), m_socket(new QLocalSocket(this))

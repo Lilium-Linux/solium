@@ -147,6 +147,10 @@ class FileView : public QObject
     Q_PROPERTY(QString path READ path WRITE setPath NOTIFY pathChanged)
     Q_PROPERTY(bool watchChanges READ watchChanges WRITE setWatchChanges NOTIFY watchChangesChanged)
     Q_PROPERTY(bool printErrors MEMBER m_printErrors)
+    Q_PROPERTY(bool preload MEMBER m_preload)
+    Q_PROPERTY(bool blockLoading MEMBER m_blockLoading)
+    Q_PROPERTY(bool atomicWrites MEMBER m_atomicWrites)
+    Q_PROPERTY(bool blockWrites MEMBER m_blockWrites)
 
 public:
     explicit FileView(QObject *parent = nullptr) : QObject(parent) {}
@@ -167,12 +171,20 @@ Q_SIGNALS:
     void watchChangesChanged();
     void loaded();
     void loadFailed();
+    /// Carries why, because the shell reports the reason to whoever asked.
+    void saveFailed(const QString &reason);
+    void saved();
+    void fileChanged();
 
 private:
     QString m_path;
     QString m_text;
     bool m_watch = false;
     bool m_printErrors = true;
+    bool m_preload = true;
+    bool m_blockLoading = false;
+    bool m_atomicWrites = false;
+    bool m_blockWrites = false;
     bool m_loaded = false;
 };
 
@@ -217,6 +229,7 @@ class QuickshellGlobal : public QObject
     Q_PROPERTY(QString configDir READ configDir CONSTANT)
     Q_PROPERTY(QString shellDir READ configDir CONSTANT)
     Q_PROPERTY(int processId READ processId CONSTANT)
+    Q_PROPERTY(QString appId READ appId CONSTANT)
     Q_PROPERTY(QVariantList screens READ screens NOTIFY screensChanged)
 
 public:
@@ -225,6 +238,9 @@ public:
     QString configDir() const;
     int processId() const;
     QVariantList screens() const { return m_screens; }
+    /// What the shell calls this compositor's own surfaces, so it can tell
+    /// them apart from application windows.
+    QString appId() const { return QStringLiteral("solium"); }
 
     Q_INVOKABLE void execDetached(const QVariant &command);
     Q_INVOKABLE QString iconPath(const QString &name, const QVariant &check = QVariant());
