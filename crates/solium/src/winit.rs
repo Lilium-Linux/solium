@@ -65,6 +65,10 @@ pub(crate) fn run() -> Result<()> {
     let socket_name = source.socket_name().to_string_lossy().into_owned();
     state.socket_name = socket_name.clone();
 
+    // X11 clients, if XWayland is installed. Started before the socket source
+    // so that a client launched from a script's startup has a display to find.
+    crate::xwayland::start(&event_loop.handle(), &display_handle);
+
     event_loop
         .handle()
         .insert_source(source, |client_stream, _, state| {

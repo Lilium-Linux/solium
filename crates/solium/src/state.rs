@@ -28,6 +28,7 @@ use smithay::{
             protocol::{wl_seat::WlSeat, wl_surface::WlSurface},
         },
     },
+    wayland::seat::WaylandFocus,
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -144,6 +145,12 @@ pub(crate) struct Solium {
     /// The socket clients connect on. Held so that a program started from a
     /// script finds *this* compositor rather than the session it is nested in.
     pub(crate) socket_name: String,
+    /// XWayland's window manager, once XWayland has started. `None` means no
+    /// X11 support this session, which is a working session with fewer apps.
+    pub(crate) xwm: Option<smithay::xwayland::X11Wm>,
+    /// The X display number XWayland took, for `DISPLAY` in children.
+    pub(crate) x11_display: Option<u32>,
+    pub(crate) xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
 
     /// Every decorated window's frame, drawn by us from QML.
     pub(crate) decorations: Decorations,
@@ -245,6 +252,24 @@ pub(crate) enum Request {
     Quit,
 }
 
+/// Tell a window how big it is, in whichever protocol it speaks.
+///
+/// An xdg toplevel is asked and answers on its own schedule; an X11 window is
+/// simply told, position included, because X11 has no separate notion of the
+/// manager's opinion.
+fn size_window(window: &Window, client: Rectangle<i32, Logical>) {
+    if let Some(toplevel) = window.toplevel() {
+        toplevel.with_pending_state(|state| state.size = Some(client.size));
+        toplevel.send_pending_configure();
+        return;
+    }
+    if let Some(x11) = window.x11_surface()
+        && let Err(err) = x11.configure(Some(client))
+    {
+        tracing::warn!(?err, "could not size an X11 window");
+    }
+}
+
 impl Solium {
     pub(crate) fn new(display_handle: DisplayHandle) -> Self {
         let mut seat_state = SeatState::new();
@@ -264,6 +289,11 @@ impl Solium {
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
+            xwm: None,
+            x11_display: None,
+            xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
+                &display_handle,
+            ),
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
             seat_state,
@@ -327,7 +357,10 @@ impl Solium {
 
     /// A window's toplevel surface id, the key frames are stored under.
     pub(crate) fn toplevel_id(&self, window: &Window) -> Option<ObjectId> {
-        window.toplevel().map(|toplevel| toplevel.wl_surface().id())
+        // The window's own surface rather than its xdg role: an X11 window has
+        // no role object, and everything keyed by this -- decorations, most of
+        // all -- applies to it just the same.
+        window.wl_surface().map(|surface| surface.id())
     }
 
     /// The output area windows may use.
@@ -650,10 +683,7 @@ impl Solium {
             (outer.size.w, (outer.size.h - inset).max(1)).into(),
         );
 
-        if let Some(toplevel) = window.toplevel() {
-            toplevel.with_pending_state(|state| state.size = Some(client.size));
-            toplevel.send_pending_configure();
-        }
+        size_window(window, client);
         self.space.map_element(window.clone(), client.loc, false);
     }
 
@@ -693,10 +723,7 @@ impl Solium {
             (outer.size.w, (outer.size.h - inset).max(1)).into(),
         );
 
-        if let Some(toplevel) = window.toplevel() {
-            toplevel.with_pending_state(|state| state.size = Some(client.size));
-            toplevel.send_pending_configure();
-        }
+        size_window(&window, client);
         // `false`: laying out must not restack. A tiling arrangement that
         // reordered windows every time it ran would fight the user's focus.
         self.space.map_element(window.clone(), client.loc, false);
@@ -721,12 +748,6 @@ impl Solium {
             // Without this the child inherits the *host* display and opens its
             // window next to the compositor rather than inside it.
             .env("WAYLAND_DISPLAY", &self.socket_name)
-            // This compositor has no X server, so a child must not believe it
-            // has one. Inheriting DISPLAY is worse than it sounds: a Qt or GTK
-            // program prefers X11 when it is set, connects to the *host's*
-            // XWayland, and opens its window on the host desktop. The spawn
-            // logs success, nothing errors, and no window ever appears here.
-            .env_remove("DISPLAY")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             // Errors are inherited, not discarded. A program that refuses to
@@ -734,6 +755,16 @@ impl Solium {
             // binding does nothing" as the only symptom of a dozen different
             // causes.
             .stderr(Stdio::inherit());
+
+        // Our own X server if we have one, and emphatically not the host's if
+        // we do not. Inheriting DISPLAY is worse than it sounds: a Qt or GTK
+        // program prefers X11 when it is set, connects to the *host's*
+        // XWayland, and opens its window on the host desktop. The spawn logs
+        // success, nothing errors, and no window ever appears here.
+        match self.x11_display {
+            Some(number) => process.env("DISPLAY", format!(":{number}")),
+            None => process.env_remove("DISPLAY"),
+        };
 
         match process.spawn() {
             Ok(mut child) => {
@@ -952,10 +983,14 @@ impl Solium {
         self.space.map_element(window.clone(), location, true);
 
         if let Some(keyboard) = self.seat.get_keyboard() {
-            let surface = window
-                .toplevel()
-                .map(|toplevel| toplevel.wl_surface().clone());
-            keyboard.set_focus(self, surface, serial);
+            // The window's own surface, so this works for an X11 window as
+            // well as an xdg one.
+            let surface = window.wl_surface().map(|surface| surface.into_owned());
+            keyboard.set_focus(self, surface.clone(), serial);
+            // X11 wants telling separately, in its own terms: a window that
+            // has keyboard focus but was never activated draws itself
+            // unfocused however much typing goes into it.
+            crate::xwayland::activate(self, surface.as_ref());
         }
 
         // A layout may want to follow: a scroller brings the focused column
@@ -1214,7 +1249,7 @@ impl Solium {
     fn window_for(&self, surface: &WlSurface) -> Option<Window> {
         self.space
             .elements()
-            .find(|window| window.toplevel().map(ToplevelSurface::wl_surface) == Some(surface))
+            .find(|window| window.wl_surface().as_deref() == Some(surface))
             .cloned()
     }
 }
@@ -1575,3 +1610,4 @@ delegate_layer_shell!(Solium);
 delegate_seat!(Solium);
 delegate_output!(Solium);
 delegate_data_device!(Solium);
+smithay::delegate_xwayland_shell!(Solium);

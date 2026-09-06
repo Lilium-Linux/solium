@@ -26,6 +26,7 @@ mod synth;
 mod tty;
 mod warp;
 mod winit;
+mod xwayland;
 
 use std::{io::IsTerminal, path::PathBuf};
 

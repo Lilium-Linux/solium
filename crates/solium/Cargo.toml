@@ -36,6 +36,9 @@ smithay = { version = "0.7", default-features = false, features = [
     "wayland_frontend",
     "desktop",
     "use_system_lib",
+    # X11 clients, through XWayland. Steam, older toolkits, anything Electron
+    # that has not been told to use Wayland.
+    "xwayland",
 ] }
 
 # Errors are propagated, never unwrapped: panic is denied at the workspace
