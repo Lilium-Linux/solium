@@ -55,9 +55,12 @@ pub(crate) struct Dock {
 }
 
 impl Dock {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new(screen: &str) -> Result<Self> {
         qml::start()?;
-        let scene = qml::Scene::new(&qml_path(), 1, HEIGHT)?;
+        // The shell's own dock declares `required property var screenInfo`,
+        // and a required property must be supplied before the component is
+        // built — afterwards is too late and it never exists at all.
+        let scene = qml::Scene::with_properties(&qml_path(), 1, HEIGHT, Some(screen))?;
         Ok(Self {
             scene,
             buffer: None,

@@ -60,6 +60,9 @@ where
     // it is a session where the mouse appears not to work.
     elements.extend(cursor(state, renderer, output_scale, scale, now));
 
+    // The shell reads the window list; it changes only when windows do.
+    state.publish_windows();
+
     // The shell's own surfaces, above the windows it sits over. Drawn from the
     // same QML engine as the window frames, which is what lets an icon here and
     // a window there be interpolated between.

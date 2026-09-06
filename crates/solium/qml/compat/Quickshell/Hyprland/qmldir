@@ -1,3 +1,2 @@
 module Quickshell.Hyprland
-singleton Hyprland 1.0 Hyprland.qml
 HyprlandToplevel 1.0 HyprlandToplevel.qml

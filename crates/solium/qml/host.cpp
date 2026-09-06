@@ -37,6 +37,10 @@
 
 #include "compat.h"
 
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QJsonParseError>
+
 #include <QtCore/QAbstractAnimation>
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
@@ -160,6 +164,12 @@ extern "C" int solium_qml_start(const char *import_path)
 extern "C" SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width, int height,
                                                 const char **error)
 {
+    return solium_qml_scene_new_with(qml_path, width, height, nullptr, error);
+}
+
+extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int width, int height,
+                                                     const char *initial_json, const char **error)
+{
     const auto fail = [error](const char *message) -> SoliumQmlScene * {
         if (error != nullptr) {
             *error = message;
@@ -198,7 +208,24 @@ extern "C" SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width,
         return fail(reason.constData());
     }
 
-    QObject *created = scene->component->create();
+    // Required properties have to be supplied *at creation*: setting them
+    // afterwards is too late, and the component simply fails to build. The
+    // shell's dock declares `required property var screenInfo`, which is what
+    // made it resolve and still refuse to exist.
+    QVariantMap initial;
+    if (initial_json != nullptr) {
+        QJsonParseError parsed{};
+        const auto document = QJsonDocument::fromJson(QByteArray(initial_json), &parsed);
+        if (parsed.error == QJsonParseError::NoError && document.isObject()) {
+            initial = document.object().toVariantMap();
+        } else {
+            qWarning("initial properties were not an object: %s",
+                     qPrintable(parsed.errorString()));
+        }
+    }
+
+    QObject *created = initial.isEmpty() ? scene->component->create()
+                                         : scene->component->createWithInitialProperties(initial);
     scene->root = qobject_cast<QQuickItem *>(created);
     if (scene->root == nullptr) {
         delete created;

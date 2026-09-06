@@ -33,10 +33,12 @@ mod ffi {
 
     unsafe extern "C" {
         pub(super) fn solium_qml_start(import_path: *const c_char) -> c_int;
-        pub(super) fn solium_qml_scene_new(
+        pub(super) fn solium_qml_set_windows(json: *const c_char);
+        pub(super) fn solium_qml_scene_new_with(
             qml_path: *const c_char,
             width: c_int,
             height: c_int,
+            initial_json: *const c_char,
             error: *mut *const c_char,
         ) -> *mut Scene;
         pub(super) fn solium_qml_scene_free(scene: *mut Scene);
@@ -88,6 +90,20 @@ pub(crate) fn start() -> Result<()> {
     Ok(())
 }
 
+/// Hand the shell the compositor's window list.
+///
+/// The shell reads `ToplevelManager.toplevels` and `Hyprland.activeToplevel`;
+/// both are answered from this. JSON because the boundary is a C string, and a
+/// window list is small enough that its cost is not worth a bespoke encoding.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_windows(json: &str) {
+    let Ok(json) = CString::new(json) else {
+        return;
+    };
+    // SAFETY: the string outlives the call, which copies what it needs.
+    unsafe { ffi::solium_qml_set_windows(json.as_ptr()) }
+}
+
 /// Where QML modules are found, `Solium` among them.
 ///
 /// Colon-separated, like a `PATH`, because shell code brought in from
@@ -127,14 +143,42 @@ impl Scene {
     /// Load a QML file into a scene of the given size.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn new(qml_path: &Path, width: i32, height: i32) -> Result<Self> {
+        Self::with_properties(qml_path, width, height, None)
+    }
+
+    /// Build a scene, supplying properties it declares as required.
+    ///
+    /// Required properties must be given *at creation*: setting them after the
+    /// fact is too late and the component never builds. `initial` is a JSON
+    /// object.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn with_properties(
+        qml_path: &Path,
+        width: i32,
+        height: i32,
+        initial: Option<&str>,
+    ) -> Result<Self> {
         let path = CString::new(qml_path.as_os_str().as_encoded_bytes())
             .map_err(|_| anyhow!("the QML path contains a NUL byte"))?;
+        let initial = initial
+            .map(|json| CString::new(json).map_err(|_| anyhow!("properties contain a NUL byte")))
+            .transpose()?;
+        let initial_ptr = initial
+            .as_ref()
+            .map_or(std::ptr::null(), |value| value.as_ptr());
         let mut error: *const c_char = std::ptr::null();
 
-        // SAFETY: `path` outlives the call; `error` is only read when the
-        // call returns null, which is when the shim has set it.
-        let scene =
-            unsafe { ffi::solium_qml_scene_new(path.as_ptr(), width, height, &raw mut error) };
+        // SAFETY: `path` and `initial` outlive the call; `error` is only read
+        // when the call returns null, which is when the shim has set it.
+        let scene = unsafe {
+            ffi::solium_qml_scene_new_with(
+                path.as_ptr(),
+                width,
+                height,
+                initial_ptr,
+                &raw mut error,
+            )
+        };
 
         if scene.is_null() {
             let reason = if error.is_null() {

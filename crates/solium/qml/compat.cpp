@@ -10,6 +10,10 @@
 #include <QtCore/QFile>
 #include <QtCore/QFileSystemWatcher>
 #include <QtCore/QTextStream>
+#include <QtCore/QJsonArray>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QJsonParseError>
 #include <QtGui/QIcon>
 #include <QtQml/QQmlEngine>
 #include <QtQml/qqml.h>
@@ -422,6 +426,93 @@ QString QuickshellGlobal::env(const QString &name) const
     return QString::fromUtf8(qgetenv(name.toUtf8().constData()));
 }
 
+QVariantList Toplevels::s_windows;
+QVariant Toplevels::s_active;
+
+namespace {
+/* Every live instance, so an update can tell them all. */
+QList<Toplevels *> &liveToplevels()
+{
+    static QList<Toplevels *> instances;
+    return instances;
+}
+} // namespace
+
+Toplevels::Toplevels(QObject *parent) : QObject(parent)
+{
+    liveToplevels().append(this);
+}
+
+Toplevels::~Toplevels()
+{
+    liveToplevels().removeAll(this);
+}
+
+QVariant Toplevels::toplevels() const
+{
+    // The shell reads `toplevels.values`, which is how Quickshell's object
+    // models present themselves.
+    QVariantMap model;
+    model.insert(QStringLiteral("values"), s_windows);
+    return model;
+}
+
+QVariant Toplevels::activeToplevel() const
+{
+    return s_active;
+}
+
+QVariant Toplevels::monitors() const
+{
+    QVariantMap model;
+    model.insert(QStringLiteral("values"), QVariantList());
+    return model;
+}
+
+QVariant Toplevels::workspaces() const
+{
+    QVariantMap model;
+    model.insert(QStringLiteral("values"), QVariantList());
+    return model;
+}
+
+QVariant Toplevels::monitorFor(const QVariant &) const
+{
+    return {};
+}
+
+void Toplevels::dispatch(const QString &command)
+{
+    // Hyprland's dispatchers have Solium equivalents, but they are bindings
+    // rather than a command language. Logged rather than silently dropped, so
+    // a shell action that does nothing says why.
+    qWarning("Hyprland.dispatch(%s) has no Solium mapping yet", qPrintable(command));
+}
+
+void Toplevels::update(const QByteArray &json)
+{
+    QJsonParseError parsed{};
+    const auto document = QJsonDocument::fromJson(json, &parsed);
+    if (parsed.error != QJsonParseError::NoError || !document.isObject()) {
+        return;
+    }
+    const auto object = document.object();
+    s_windows = object.value(QStringLiteral("windows")).toArray().toVariantList();
+    const auto active = object.value(QStringLiteral("active"));
+    s_active = active.isNull() ? QVariant() : active.toObject().toVariantMap();
+
+    for (auto *instance : liveToplevels()) {
+        Q_EMIT instance->changed();
+    }
+}
+
+extern "C" void solium_qml_set_windows(const char *json)
+{
+    if (json != nullptr) {
+        Toplevels::update(QByteArray(json));
+    }
+}
+
 void solium_qml_register_compat()
 {
     // Registered by hand rather than through the CMake type registrar, because
@@ -438,6 +529,13 @@ void solium_qml_register_compat()
     qmlRegisterType<SplitParser>("Quickshell", 1, 0, "SplitParser");
     qmlRegisterType<FileView>("Quickshell", 1, 0, "FileView");
     qmlRegisterType<Socket>("Quickshell", 1, 0, "Socket");
+
+    qmlRegisterSingletonType<Toplevels>(
+        "Quickshell.Wayland", 1, 0, "ToplevelManager",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new Toplevels(); });
+    qmlRegisterSingletonType<Toplevels>(
+        "Quickshell.Hyprland", 1, 0, "Hyprland",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new Toplevels(); });
 
     qmlRegisterSingletonType<QuickshellGlobal>(
         "Quickshell", 1, 0, "Quickshell",
