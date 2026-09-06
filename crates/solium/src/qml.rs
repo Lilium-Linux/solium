@@ -130,7 +130,24 @@ fn import_path() -> std::ffi::OsString {
     }
     let own = concat!(env!("CARGO_MANIFEST_DIR"), "/qml");
     let shim = concat!(env!("CARGO_MANIFEST_DIR"), "/qml/compat");
-    std::ffi::OsString::from(format!("{own}:{shim}"))
+    // The user's directory first, for the same reason the Lua search path puts
+    // it first: dropping `Solium/Theme.qml` into ~/.config/solium/qml should
+    // restyle every frame and every surface, without copying the rest.
+    match user_qml_dir() {
+        Some(user) => std::ffi::OsString::from(format!("{}:{own}:{shim}", user.display())),
+        None => std::ffi::OsString::from(format!("{own}:{shim}")),
+    }
+}
+
+/// `~/.config/solium/qml`, if it exists.
+pub(crate) fn user_qml_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+        })?;
+    let path = home.join("solium").join("qml");
+    path.is_dir().then_some(path)
 }
 
 /// Matches `SOLIUM_QML_UNCHANGED` in `qml/host.h`.
