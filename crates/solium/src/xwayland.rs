@@ -17,7 +17,10 @@
 use smithay::{
     desktop::Window,
     reexports::{
-        calloop::LoopHandle,
+        calloop::{
+            LoopHandle,
+            timer::{TimeoutAction, Timer},
+        },
         wayland_server::{DisplayHandle, protocol::wl_surface::WlSurface},
     },
     utils::{Logical, Rectangle, SERIAL_COUNTER},
@@ -66,7 +69,12 @@ where
         std::iter::empty::<(String, String)>(),
         true,
         std::process::Stdio::null(),
-        std::process::Stdio::null(),
+        // Errors are inherited, not discarded, for the same reason spawning a
+        // client inherits them: a program that refuses to start says why on
+        // stderr, and sending that to /dev/null leaves "X11 does not work"
+        // as the only symptom of every possible cause. This one was worth a
+        // wasted benchmark round before anyone thought to look.
+        std::process::Stdio::inherit(),
         |_| {},
     );
     let (xwayland, client) = match spawned {
@@ -98,6 +106,33 @@ where
     });
     if let Err(err) = inserted {
         tracing::warn!(?err, "could not watch XWayland");
+    }
+
+    // Say so if it never arrives.
+    //
+    // `spawn` succeeding only means the sockets were made and the process was
+    // started; XWayland can still exit before it is ready, and the event that
+    // would tell us is one it never sends. So the log read "spawning XWayland
+    // instance" and then nothing at all, forever, while every X11 client failed
+    // with "couldn't open display" for what looked like an unrelated reason.
+    //
+    // Silence is the worst possible failure here, because X11 support is
+    // optional: there is no crash to notice and nothing on screen is missing
+    // until you happen to start a client that needs it.
+    let timeout = handle.insert_source(
+        Timer::from_duration(std::time::Duration::from_secs(5)),
+        |_, (), data: &mut D| {
+            if data.solium().x11_display.is_none() {
+                tracing::warn!(
+                    "XWayland did not become ready; X11 clients will not run. \
+                     Its own error, if it printed one, is above this line."
+                );
+            }
+            TimeoutAction::Drop
+        },
+    );
+    if let Err(err) = timeout {
+        tracing::warn!(?err, "could not watch for XWayland being slow");
     }
 }
 
