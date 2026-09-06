@@ -450,7 +450,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             .get_mut(id)
             .and_then(Decoration::take_action)
         {
-            state.frame_action(&window, action);
+            state.frame_action(id, action);
         }
 
         if pressed {

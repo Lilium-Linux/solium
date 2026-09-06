@@ -89,6 +89,11 @@ pub(crate) struct Pane {
     slot: Rectangle<i32, Logical>,
     content: Content,
     opened: Duration,
+    /// Where this pane is *drawn*, when that is not where it lives, and
+    /// whether it has ever been on screen. See `present::Slot` — it is here
+    /// rather than on the client's window so that it can exist before the
+    /// window does, and survive the window arriving.
+    drawn: crate::present::Slot,
 }
 
 impl Pane {
@@ -109,6 +114,7 @@ impl Pane {
                 source,
             },
             opened: now,
+            drawn: crate::present::Slot::default(),
         }
     }
 
@@ -120,7 +126,13 @@ impl Pane {
             slot,
             content: Content::Client(window),
             opened: now,
+            drawn: crate::present::Slot::default(),
         }
+    }
+
+    /// How this pane is being drawn. `present` is the only thing that reads it.
+    pub(crate) const fn drawn(&self) -> &crate::present::Slot {
+        &self.drawn
     }
 
     pub(crate) const fn id(&self) -> PaneId {

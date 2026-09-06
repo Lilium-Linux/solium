@@ -24,10 +24,8 @@ use std::{cell::RefCell, time::Duration};
 
 use crate::mat4::Mat4;
 
-use smithay::{
-    desktop::Window,
-    utils::{Logical, Point, Rectangle},
-};
+use crate::pane::Pane;
+use smithay::utils::{Logical, Point, Rectangle};
 pub(crate) use solium_animation::Curve;
 use solium_animation::{Animation, lerp};
 
@@ -318,17 +316,29 @@ impl Transform {
     }
 }
 
-type Slot = RefCell<Option<Transform>>;
+/// A pane's in-flight transform, and whether it has ever been on screen.
+///
+/// This lives on the pane rather than on the client's window for two reasons.
+/// A pane can be on screen before it has a window at all, so there would be
+/// nowhere to keep it; and it has to survive adoption untouched, or a window
+/// would snap the instant its application arrived — which is the seam this
+/// whole refactor exists to remove.
+///
+/// Interior mutability throughout, because every path that draws holds its
+/// pane by shared reference. Opaque: the functions below are the only way in.
+#[derive(Debug, Default)]
+pub(crate) struct Slot {
+    transform: RefCell<Option<Transform>>,
+    shown: std::cell::Cell<bool>,
+}
 
-/// Run `f` against a window's transform slot, creating it on first use.
+/// Run `f` against a pane's transform, if nothing is already inside it.
 ///
 /// `try_borrow_mut` rather than `borrow_mut`: a re-entrant borrow would panic,
 /// and a compositor panic takes the session with it. Losing one frame of an
 /// animation is the better failure.
-fn with_slot<T>(window: &Window, f: impl FnOnce(&mut Option<Transform>) -> T) -> Option<T> {
-    window.user_data().insert_if_missing(Slot::default);
-    let slot = window.user_data().get::<Slot>()?;
-    match slot.try_borrow_mut() {
+fn with_slot<T>(pane: &Pane, f: impl FnOnce(&mut Option<Transform>) -> T) -> Option<T> {
+    match pane.drawn().transform.try_borrow_mut() {
         Ok(mut current) => Some(f(&mut current)),
         Err(_) => {
             tracing::warn!("transform slot was already borrowed, skipping");
@@ -337,20 +347,20 @@ fn with_slot<T>(window: &Window, f: impl FnOnce(&mut Option<Transform>) -> T) ->
     }
 }
 
-/// Draw `window` at `to`, animating from wherever it is being drawn right now.
+/// Draw `pane` at `to`, animating from wherever it is being drawn right now.
 ///
 /// Animating from the *current* frame rather than from real geometry is what
 /// makes re-entering a mode mid-animation continuous instead of a snap.
 pub(crate) fn present(
-    window: &Window,
+    pane: &Pane,
     real: Rectangle<i32, Logical>,
     to: Frame,
     now: Duration,
     duration: Duration,
     easing: Curve,
 ) {
-    let from = frame(window, real, now);
-    with_slot(window, |slot| {
+    let from = frame(pane, real, now);
+    with_slot(pane, |slot| {
         *slot = Some(Transform {
             from,
             to,
@@ -360,16 +370,16 @@ pub(crate) fn present(
     });
 }
 
-/// Animate back to real geometry, then stop transforming this window.
+/// Animate back to real geometry, then stop transforming this pane.
 pub(crate) fn clear(
-    window: &Window,
+    pane: &Pane,
     real: Rectangle<i32, Logical>,
     now: Duration,
     duration: Duration,
     easing: Curve,
 ) {
-    let from = frame(window, real, now);
-    with_slot(window, |slot| {
+    let from = frame(pane, real, now);
+    with_slot(pane, |slot| {
         *slot = Some(Transform {
             from,
             to: Frame::real(real),
@@ -380,16 +390,16 @@ pub(crate) fn clear(
 }
 
 /// The frame to draw this window in. Real geometry when nothing is animating.
-pub(crate) fn frame(window: &Window, real: Rectangle<i32, Logical>, now: Duration) -> Frame {
-    with_slot(window, |slot| {
+pub(crate) fn frame(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) -> Frame {
+    with_slot(pane, |slot| {
         slot.map_or_else(|| Frame::real(real), |transform| transform.frame(now))
     })
     .unwrap_or_else(|| Frame::real(real))
 }
 
 /// Retire finished transforms. Returns whether this window is still animating.
-pub(crate) fn settle(window: &Window, now: Duration) -> bool {
-    with_slot(window, |slot| {
+pub(crate) fn settle(pane: &Pane, now: Duration) -> bool {
+    with_slot(pane, |slot| {
         let Some(transform) = *slot else {
             return false;
         };
@@ -404,24 +414,16 @@ pub(crate) fn settle(window: &Window, now: Duration) -> bool {
     .unwrap_or(false)
 }
 
-/// Whether a window has ever been shown.
-#[derive(Debug, Default)]
-struct Shown(std::cell::Cell<bool>);
-
 /// Claim the first-show moment, returning whether this call won it.
 ///
 /// The moment is the first commit that carries a buffer, not the map request:
 /// before that commit the client has not been told its size, so there is no
 /// geometry either to place it at or to animate to. Both happen here, once.
-pub(crate) fn mark_shown(window: &Window) -> bool {
-    window.user_data().insert_if_missing(Shown::default);
-    let Some(shown) = window.user_data().get::<Shown>() else {
-        return false;
-    };
-    !shown.0.replace(true)
+pub(crate) fn mark_shown(pane: &Pane) -> bool {
+    !pane.drawn().shown.replace(true)
 }
 
-/// Put a window at `start` and animate it to where it actually lives.
+/// Put a pane at `start` and animate it to where it actually lives.
 ///
 /// The primitive behind every "appears from somewhere" animation. With a dock
 /// icon's rectangle it is the icon-grows-into-a-window genie; with the window's
@@ -429,14 +431,14 @@ pub(crate) fn mark_shown(window: &Window) -> bool {
 /// the edge of the screen it is something nobody has asked for yet. The
 /// compositor does not decide which — see `docs/shell-boundary.md`.
 pub(crate) fn from(
-    window: &Window,
+    pane: &Pane,
     real: Rectangle<i32, Logical>,
     start: Frame,
     now: Duration,
     duration: Duration,
     easing: Curve,
 ) {
-    with_slot(window, |slot| {
+    with_slot(pane, |slot| {
         *slot = Some(Transform {
             from: start,
             to: Frame::real(real),
@@ -451,9 +453,9 @@ pub(crate) fn from(
 ///
 /// The fallback for when no script has an opinion. `lua/open.lua` normally
 /// does.
-pub(crate) fn open(window: &Window, real: Rectangle<i32, Logical>, now: Duration) {
+pub(crate) fn open(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) {
     let target = Frame::real(real);
-    with_slot(window, |slot| {
+    with_slot(pane, |slot| {
         *slot = Some(Transform {
             from: target.scaled(0.88).with_opacity(0.0),
             to: target,
@@ -474,9 +476,9 @@ pub(crate) const CLOSING: Duration = Duration::from_millis(190);
 /// window has to stay invisible for the moment between the animation ending
 /// and the client acting on the close it is about to be sent, or it would
 /// reappear at full size for a frame or two.
-pub(crate) fn close(window: &Window, real: Rectangle<i32, Logical>, now: Duration) {
-    let from = frame(window, real, now);
-    with_slot(window, |slot| {
+pub(crate) fn close(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) {
+    let from = frame(pane, real, now);
+    with_slot(pane, |slot| {
         *slot = Some(Transform {
             from,
             to: from.scaled(0.86).with_opacity(0.0),
