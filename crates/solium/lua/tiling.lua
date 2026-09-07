@@ -17,38 +17,49 @@
 local config = require("config")
 local workspaces = require("workspaces")
 local modes = require("modes")
+local monitors = require("monitors")
 
 local tiling = { active = false, trees = {} }
 
--- One tree per workspace. A window closing on workspace 2 must not disturb
--- the arrangement on workspace 1, and a shared tree cannot promise that.
-local function tree_for(index)
-    if not tiling.trees[index] then
-        tiling.trees[index] = sol.layout.tree()
+-- One tree per workspace *per monitor*.
+--
+-- Per workspace because a window closing on workspace 2 must not disturb the
+-- arrangement on workspace 1. Per monitor for the same reason twice over: the
+-- screens are different sizes, the split that reads well on one is wrong on
+-- the other, and a window moved across has to leave one arrangement and join
+-- another rather than being in both.
+local function tree_for(index, monitor)
+    local key = monitors.key(index, monitor)
+    if not tiling.trees[key] then
+        tiling.trees[key] = sol.layout.tree()
     end
-    return tiling.trees[index]
+    return tiling.trees[key]
 end
 
-local function options()
-    local area = sol.monitor()
-    area.gap = config.gap
-    area.split = config.tiling.split
-    return area
+-- The area a tree divides, which is one monitor's work area.
+local function options(monitor)
+    local area = monitor and monitors.named(monitor) or sol.monitor()
+    -- A copy: the monitor table is the snapshot's, and the layout adds keys.
+    local out = { x = area.x, y = area.y, w = area.w, h = area.h }
+    out.gap = config.gap
+    out.split = config.tiling.split
+    return out
 end
 
 function tiling.apply(animation)
     if not tiling.active then
         return
     end
-    local tree = tree_for(workspaces.active)
-    local slots = tree:layout(options())
-    if #slots == 0 then
-        return
-    end
 
     sol.animate(animation or config.tiling.motion)
-    for _, slot in ipairs(slots) do
-        sol.place(slot.id, slot)
+    -- Every monitor, each against its own area. One `sol.animate` for the lot,
+    -- because two screens rearranging at once is one movement -- see
+    -- docs/animation.md on why the feel is set per batch.
+    for _, each in ipairs(monitors.each(workspaces.visible())) do
+        local tree = tree_for(workspaces.active, each.monitor.name)
+        for _, slot in ipairs(tree:layout(options(each.monitor.name))) do
+            sol.place(slot.id, slot)
+        end
     end
 end
 
@@ -56,17 +67,27 @@ end
 -- switched on, and as a backstop: events are the normal path, this is what
 -- makes a missed one recoverable rather than permanent.
 function tiling.adopt()
-    local tree = tree_for(workspaces.active)
+    -- Also how a window that moved between monitors settles: it is missing
+    -- from its new screen's tree and still in its old one's, and both halves
+    -- are fixed here.
     local present = {}
-    for _, window in ipairs(workspaces.visible()) do
-        present[window.id] = true
-        if not tree:contains(window.id) then
-            tree:insert(window.id, nil, nil, nil, options())
+    for _, each in ipairs(monitors.each(workspaces.visible())) do
+        local tree = tree_for(workspaces.active, each.monitor.name)
+        for _, window in ipairs(each.windows) do
+            present[window.id] = each.monitor.name
+            if not tree:contains(window.id) then
+                tree:insert(window.id, nil, nil, nil, options(each.monitor.name))
+            end
         end
     end
-    for _, id in ipairs(tree:windows()) do
-        if not present[id] then
-            tree:remove(id)
+    for key, tree in pairs(tiling.trees) do
+        for _, id in ipairs(tree:windows()) do
+            -- Removed when the window is gone, and when it is on another
+            -- monitor now: one window in two trees is one window given two
+            -- slots, and it ends up in whichever was laid out last.
+            if not present[id] or monitors.key(workspaces.active, present[id]) ~= key then
+                tree:remove(id)
+            end
         end
     end
 end
@@ -92,11 +113,17 @@ sol.on("layout", function()
 end)
 
 sol.on("open", function(id)
-    local tree = tree_for(workspaces.active)
+    local tree = tree_for(workspaces.active, monitors.of(id))
     local cursor = sol.cursor()
     -- Skip the window being opened: it is already mapped and under the
     -- pointer, so asking without skipping names it as its own split target.
-    tree:insert(id, sol.window_at(cursor.x, cursor.y, id), cursor.x, cursor.y, options())
+    tree:insert(
+        id,
+        sol.window_at(cursor.x, cursor.y, id),
+        cursor.x,
+        cursor.y,
+        options(monitors.of(id))
+    )
     tiling.apply()
 end)
 
@@ -119,12 +146,22 @@ sol.on("drop", function(id, x, y)
     -- the topmost thing under it, and asking without skipping just names the
     -- window in your hand.
     local target = sol.window_at(x, y, id)
-    local tree = tree_for(workspaces.active)
+    -- Where it was *dropped*, which after a drag across the boundary is the
+    -- other monitor's tree. Taken out of every tree first, so a window moved
+    -- between screens does not stay in the one it left.
+    local landed = monitors.of(id)
+    for _, tree in pairs(tiling.trees) do
+        tree:remove(id)
+    end
+    local tree = tree_for(workspaces.active, landed)
     if target and target ~= id then
         -- Re-inserting where it was dropped is the swap: out of its old seam,
         -- into the one under the pointer.
-        tree:remove(id)
-        tree:insert(id, target, x, y, options())
+        tree:insert(id, target, x, y, options(landed))
+    else
+        -- Dropped on nothing: it still belongs to whatever screen it landed
+        -- on, so it rejoins that tree rather than falling out of the layout.
+        tree:insert(id, nil, x, y, options(landed))
     end
     tiling.apply(config.tiling.snap)
 end)
@@ -138,15 +175,16 @@ sol.on("resize", function(id, x, y, horizontal, vertical)
     if not tiling.active then
         return
     end
-    local tree = tree_for(workspaces.active)
+    local monitor = monitors.of(id)
+    local tree = tree_for(workspaces.active, monitor)
     -- The seam goes where the pointer is. Not where it moved to: a delta would
     -- be measured against a layout this very drag just changed, and the windows
     -- would shake for as long as the button was held.
     if horizontal then
-        tree:drag_seam(id, "width", x, y, options())
+        tree:drag_seam(id, "width", x, y, options(monitor))
     end
     if vertical then
-        tree:drag_seam(id, "height", x, y, options())
+        tree:drag_seam(id, "height", x, y, options(monitor))
     end
     -- Placed immediately. An animation would be chasing the pointer, and the
     -- pointer wins.
@@ -163,7 +201,7 @@ sol.bind("super+minus", function()
         if window.focused then focused = window.id end
     end
     if focused then
-        tree_for(workspaces.active):resize(focused, -0.05)
+        tree_for(workspaces.active, monitors.of(focused)):resize(focused, -0.05)
         tiling.apply(config.tiling.snap)
     end
 end)
@@ -174,7 +212,7 @@ sol.bind("super+equal", function()
         if window.focused then focused = window.id end
     end
     if focused then
-        tree_for(workspaces.active):resize(focused, 0.05)
+        tree_for(workspaces.active, monitors.of(focused)):resize(focused, 0.05)
         tiling.apply(config.tiling.snap)
     end
 end)
