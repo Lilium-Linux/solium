@@ -27,6 +27,30 @@ pub(crate) fn capture_frames() -> usize {
         .max(1)
 }
 
+/// How many monitors the nested backend should pretend to have.
+///
+/// ```sh
+/// SOLIUM_OUTPUTS=2 ./target/debug/solium
+/// ```
+///
+/// Side by side inside the one window, each with its own layer map, work area
+/// and render pass. This exists because nested and hardware are different
+/// compositors and that has already cost this project a cursor that was
+/// invisible for its entire life: without it, every single-output assumption
+/// removed this week would first be exercised on a TTY, where nothing can be
+/// read and a mistake costs a session.
+///
+/// One is the default and takes the ordinary path, unchanged — the second
+/// monitor is what turns the extra machinery on, so everyday nested
+/// development pays nothing for it.
+pub(crate) fn outputs() -> usize {
+    std::env::var("SOLIUM_OUTPUTS")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(1)
+        .clamp(1, 4)
+}
+
 pub(crate) fn capture_interval() -> Duration {
     millis("SOLIUM_CAPTURE_INTERVAL").unwrap_or(Duration::from_millis(16))
 }
