@@ -119,8 +119,21 @@ if [[ -n "$attach" ]]; then
     log="/dev/null"
     echo "attached to pid $solium on $attach"
 else
-    # shellcheck disable=SC2086  # tty_flag is one word or empty, deliberately
-    SOLIUM_TRIGGER_AT="$triggers" nice -n 5 "$binary" $tty_flag >"$log" 2>&1 &
+    # Backgrounded, and on a TTY that is a problem: the compositor's output
+    # goes to a log, the VT shows nothing, and the natural response is to
+    # switch away -- which deactivates the session, revokes every input device,
+    # and trips the input watchdog into shutting down a session that was
+    # working. The first hardware soak died exactly that way, twenty seconds
+    # in, having brought up both monitors correctly first.
+    #
+    # So on a TTY the compositor keeps the terminal and its output stays on
+    # screen; the sampling runs behind it instead. Nested there is nothing to
+    # look at and a log is better.
+    if [[ -n "$tty_flag" ]]; then
+        SOLIUM_TRIGGER_AT="$triggers" nice -n 5 "$binary" --tty 2>&1 | tee "$log" &
+    else
+        SOLIUM_TRIGGER_AT="$triggers" nice -n 5 "$binary" >"$log" 2>&1 &
+    fi
     solium=$!
 fi
 
