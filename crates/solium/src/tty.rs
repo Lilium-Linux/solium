@@ -351,6 +351,28 @@ pub(crate) fn run() -> Result<()> {
         active: true,
     };
 
+    // Whether this session actually owns the seat, said plainly and early.
+    //
+    // Without it, the compositor comes up looking entirely healthy: it opens
+    // the GPU, enumerates both monitors, picks modes and CRTCs, starts
+    // XWayland, and logs all of it -- and then nothing appears on the screen
+    // and no key does anything, because it never became DRM master and
+    // libinput was never handed a device. The only sign is a Smithay warning
+    // buried a hundred lines up. Twenty-five runs on this machine went that
+    // way before anyone noticed, and two of them were reported as working.
+    //
+    // A session that is inactive at start-up is not necessarily doomed --
+    // libseat may enable it a moment later, and `ActivateSession` takes master
+    // then -- so this is a warning and not a refusal.
+    if !state.session.is_active() {
+        tracing::warn!(
+            "this session does not own the seat yet: no DRM master and no input devices. \
+             usually it means something else still holds seat0 -- a desktop session that \
+             has not gone inactive, or a shell that belongs to one. `loginctl list-sessions` \
+             shows which session is active."
+        );
+    }
+
     let drm_events = state.open_gpu(&seat_name)?;
     state.input = Some(start_input(&mut event_loop, &state.session, &seat_name)?);
 
