@@ -70,13 +70,22 @@ function workspaces.visible(windows)
 end
 
 -- Draw every window where its workspace is, relative to the one in view.
+--
+-- The offset is *its own monitor's* size, not the active one's. A window on a
+-- 1920 screen slid by a 2560's width lands somewhere nothing can reach, and
+-- comes back to where it started only by luck.
+--
+-- Workspaces themselves are deliberately global rather than per monitor: one
+-- switch moves every screen. Per-monitor workspaces are a real design and a
+-- different one -- it decides whether a workspace is a desk or a screenful --
+-- and that choice belongs in a mode somebody writes, not in the compositor.
 function workspaces.apply(animation)
-    local area = sol.monitor()
     local spread = workspaces.settings.spread or 1.0
     local active_col, active_row = workspaces.cell(workspaces.active)
 
     sol.animate(animation or workspaces.settings.motion)
     for _, window in ipairs(sol.windows()) do
+        local area = sol.monitor(window.id)
         local col, row = workspaces.cell(workspaces.at(window.id))
         local dx = (col - active_col) * area.w * spread
         local dy = (row - active_row) * area.h * spread

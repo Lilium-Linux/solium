@@ -9,6 +9,8 @@
 -- If any of those ever needs new Rust, the transform layer is missing
 -- something and *that* is the bug to fix -- not this file.
 
+local monitors = require("monitors")
+
 local overview = { active = false }
 
 local PADDING = 24
@@ -29,15 +31,30 @@ function overview.enter()
         return
     end
 
+    -- One grid per monitor, each on its own screen.
+    --
+    -- Not one grid across both: overview exists so you can see everything at
+    -- once and point at the one you want, and a window that jumped to the
+    -- other screen to be shown is a window you then have to find. Windows stay
+    -- on the monitor they are on; they only get smaller.
+    --
     -- The grid comes from `sol.layout`, the same arrangement the preview page
     -- draws, so what is tuned there is what happens here.
-    local area = sol.monitor()
-    area.padding = PADDING
-    local slots = sol.layout.grid(windows, area)
-
     sol.animate(ENTER)
-    for index, window in ipairs(windows) do
-        sol.present(window.id, slots[index])
+    for _, each in ipairs(monitors.each(windows)) do
+        if #each.windows > 0 then
+            local area = each.monitor
+            local slots = sol.layout.grid(each.windows, {
+                x = area.x,
+                y = area.y,
+                w = area.w,
+                h = area.h,
+                padding = PADDING,
+            })
+            for index, window in ipairs(each.windows) do
+                sol.present(window.id, slots[index])
+            end
+        end
     end
 
     sol.grab_input(true)
