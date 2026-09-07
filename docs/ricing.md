@@ -66,6 +66,18 @@ return { decoration = "left" }
 `top`, `left`, `bottom`, `border`, `reactive`, `proximity`, `reveal`, `pulse`.
 Reload and every open window is re-framed.
 
+### No frame at all
+
+```lua
+return { decoration = "none" }
+```
+
+No bar, no border, and no QML scene built per window — which is different from
+a decoration that draws nothing: there is no scene to rasterise, so an
+undecorated desktop costs nothing per window. For a tiling layout whose own bar
+makes a titlebar redundant, or for taste. `SOLIUM_DECORATION=none` does it for
+one run.
+
 ### Your own frame
 
 Copy one you like into `~/.config/solium/qml/decorations/` and edit it. A file
