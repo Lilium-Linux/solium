@@ -65,6 +65,32 @@ pub(crate) enum Align {
     End,
 }
 
+/// Which mode to drive a monitor at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Wanted {
+    /// The highest refresh rate at the monitor's preferred resolution.
+    ///
+    /// The default, and not the same as "preferred": the EDID's preferred
+    /// *flag* names a resolution and usually pairs it with a pedestrian refresh
+    /// rate. A 260 Hz panel reports 2560x1440@60 as preferred, and taking that
+    /// literally drives a fast display slowly and makes every animation in the
+    /// compositor look worse than it is.
+    #[default]
+    Best,
+    /// Exactly what the EDID's preferred flag says, refresh rate included.
+    /// For a monitor that misbehaves at its highest rate.
+    Preferred,
+    /// The largest resolution, at its highest refresh rate.
+    Widest,
+    /// A particular mode. `None` for the refresh means "the highest available
+    /// at this resolution".
+    Exact {
+        width: i32,
+        height: i32,
+        refresh: Option<i32>,
+    },
+}
+
 /// One monitor, as the configuration describes it.
 #[derive(Clone, Debug)]
 pub(crate) struct Placement {
@@ -78,9 +104,14 @@ pub(crate) struct Placement {
     /// people actually want to write, because it does not go stale when a
     /// monitor's resolution changes.
     pub(crate) beside: Option<(Side, String, Align)>,
-    /// The mode to ask this connector for: width, height, and optionally a
-    /// refresh rate in Hz. Without one, the best mode the connector offers.
-    pub(crate) mode: Option<(i32, i32, Option<i32>)>,
+    /// Which mode to drive it at.
+    pub(crate) mode: Wanted,
+    /// Whether to ask for variable refresh rate.
+    ///
+    /// `None` leaves it alone, which on every driver means off. Worth being a
+    /// three-state rather than a bool so that a monitor mentioned for its
+    /// position does not silently have VRR turned off for it.
+    pub(crate) vrr: Option<bool>,
     /// Rotation and flipping. A monitor stood on its end is `"90"`.
     pub(crate) transform: Option<Transform>,
     /// Whether to drive it at all. A connected monitor that is switched off
@@ -130,9 +161,16 @@ impl Arrangement {
         self.find(name).is_none_or(|placement| placement.enabled)
     }
 
-    /// The mode this connector was asked for, if any.
-    pub(crate) fn mode(&self, name: &str) -> Option<(i32, i32, Option<i32>)> {
-        self.find(name)?.mode
+    /// Which mode this connector was asked for.
+    pub(crate) fn mode(&self, name: &str) -> Wanted {
+        self.find(name)
+            .map(|placement| placement.mode)
+            .unwrap_or_default()
+    }
+
+    /// Whether this connector was asked for variable refresh rate.
+    pub(crate) fn vrr(&self, name: &str) -> Option<bool> {
+        self.find(name)?.vrr
     }
 
     /// The transform this connector was asked for, if any.
@@ -332,6 +370,54 @@ fn beside(
     .into()
 }
 
+/// A mode by the way a configuration writes one.
+///
+/// `"2560x1440@165"`, `"2560x1440"`, or one of the words `best`, `preferred`
+/// and `widest`. The `WxH@R` form is what every display tool on Linux uses and
+/// what anyone will reach for first, so it is the form the documentation shows;
+/// a table with `w`, `h` and `refresh` keys does the same thing for anyone
+/// generating a configuration rather than writing one.
+///
+/// Returns `None` for anything it cannot read, so the caller can say which
+/// monitor and fall back rather than guessing.
+pub(crate) fn mode(text: &str) -> Option<Wanted> {
+    let text = text.trim().to_ascii_lowercase();
+    match text.as_str() {
+        "best" | "auto" | "" => return Some(Wanted::Best),
+        "preferred" => return Some(Wanted::Preferred),
+        "widest" | "highres" => return Some(Wanted::Widest),
+        _ => {}
+    }
+
+    // `2560x1440@165`, and the refresh is optional. Split on the `@` first so
+    // a malformed rate cannot be read as part of the height.
+    let (size, refresh) = match text.split_once('@') {
+        Some((size, refresh)) => {
+            // Trailing `hz` is what people write, and a fractional rate is
+            // what a mode list prints; both mean the same integer here.
+            let refresh = refresh.trim_end_matches("hz").trim();
+            let refresh: f64 = refresh.parse().ok()?;
+            if refresh <= 0.0 {
+                return None;
+            }
+            #[expect(clippy::cast_possible_truncation, reason = "a refresh rate in hertz")]
+            (size, Some(refresh.round() as i32))
+        }
+        None => (text.as_str(), None),
+    };
+    let (width, height) = size.split_once('x')?;
+    let width: i32 = width.trim().parse().ok()?;
+    let height: i32 = height.trim().parse().ok()?;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    Some(Wanted::Exact {
+        width,
+        height,
+        refresh,
+    })
+}
+
 /// A transform by the name a configuration writes.
 ///
 /// The numbers are degrees anticlockwise, which is what every other display
@@ -421,7 +507,8 @@ mod tests {
             name: name.to_owned(),
             at: None,
             beside: None,
-            mode: None,
+            mode: Wanted::default(),
+            vrr: None,
             transform: None,
             enabled: true,
             primary: false,
@@ -702,6 +789,54 @@ mod tests {
             },
         ]);
         assert_eq!(arrangement.primary(), Some("DP-2"));
+    }
+
+    #[test]
+    fn modes_parse_the_way_people_write_them() {
+        // The form every display tool uses, and the one anyone reaches for.
+        assert_eq!(
+            mode("2560x1440@165"),
+            Some(Wanted::Exact {
+                width: 2560,
+                height: 1440,
+                refresh: Some(165)
+            })
+        );
+        // A resolution alone means its highest refresh.
+        assert_eq!(
+            mode("1920x1080"),
+            Some(Wanted::Exact {
+                width: 1920,
+                height: 1080,
+                refresh: None
+            })
+        );
+        // What a mode list prints, and what people type.
+        assert_eq!(
+            mode("2560x1440@59.94"),
+            Some(Wanted::Exact {
+                width: 2560,
+                height: 1440,
+                refresh: Some(60)
+            })
+        );
+        assert_eq!(
+            mode(" 2560 x 1440 @ 165 Hz "),
+            Some(Wanted::Exact {
+                width: 2560,
+                height: 1440,
+                refresh: Some(165)
+            })
+        );
+        assert_eq!(mode("preferred"), Some(Wanted::Preferred));
+        assert_eq!(mode("best"), Some(Wanted::Best));
+        assert_eq!(mode("widest"), Some(Wanted::Widest));
+        // Unreadable rather than guessed at: the caller says which monitor and
+        // falls back, which is a line in the log instead of a wrong mode.
+        assert_eq!(mode("2560x"), None);
+        assert_eq!(mode("2560x1440@"), None);
+        assert_eq!(mode("2560x1440@0"), None);
+        assert_eq!(mode("as big as it goes"), None);
     }
 
     #[test]

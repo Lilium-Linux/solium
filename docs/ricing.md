@@ -124,8 +124,8 @@ You almost never want coordinates. Say what is beside what:
 ```lua
 return {
     monitors = {
-        { name = "DP-1", primary = true },
-        { name = "DP-2", right_of = "DP-1", align = "end" },
+        { name = "DP-1", mode = "2560x1440@260", vrr = true, primary = true },
+        { name = "DP-2", mode = "2560x1440@75", right_of = "DP-1", align = "end" },
         { name = "DP-3", above = "DP-1", transform = "90" },
         { name = "HDMI-A-1", enabled = false },
     },
@@ -143,7 +143,8 @@ does not exist here.
 | `right_of`, `left_of`, `above`, `below` | beside another monitor, by name. A chain resolves whatever order you write the list in, and no monitor in it needs coordinates |
 | `align` | `"start"`, `"centre"` (default) or `"end"` — how the *other* axis lines up against something taller or wider |
 | `x`, `y` | the top-left corner outright, if you would rather |
-| `mode` | `{ w = 2560, h = 1440, refresh = 165 }`; `refresh` is optional and in Hz |
+| `mode` | `"2560x1440@165"`. The refresh is optional; so is the whole thing — see below |
+| `vrr` | variable refresh rate, where the monitor and driver offer it |
 | `transform` | `"90"`, `"180"`, `"270"`, `"normal"`, or the same with `flipped-` |
 | `enabled = false` | do not drive it |
 | `primary = true` | where a dock, a bar, or any layer surface that named no output goes |
@@ -151,7 +152,44 @@ does not exist here.
 
 `super+shift+r` applies a change without ending the session.
 
-Three of these are worth a sentence more.
+**Refresh rate lives in `mode`.** `"2560x1440@165"`, the way every display tool
+on Linux writes one. Drop the `@` part and you get the fastest mode at that
+resolution; drop `mode` entirely and you get the fastest mode at the
+*preferred* resolution, which is almost always what you want. Three words also
+work:
+
+| | |
+|---|---|
+| `"best"` | highest refresh at the preferred resolution — the default |
+| `"preferred"` | exactly what the monitor's EDID says, refresh included |
+| `"widest"` | the largest resolution, fastest at that size |
+
+`"best"` is not `"preferred"`, and the difference is the reason it is the
+default: the EDID's preferred *flag* names a resolution and usually pairs it
+with a pedestrian 60 Hz. A 260 Hz panel reports `2560x1440@60` as preferred.
+Taking that literally drives a fast display slowly and makes every animation in
+the compositor look worse than it is. `"preferred"` is there for a monitor that
+is unstable at its fastest rate, which is a real thing and not something the
+automatic choice can know about.
+
+A mode the monitor does not have warns and falls back rather than going black.
+`solium --probe` lists every mode each monitor offers, in exactly the form
+`mode` takes — which is the whole reason to run it:
+
+```
+DP-1         connected, 36 modes, best 2560x1440@260
+               2560x1440@260, 240, 200, 165, 144, 120, 100, 60  (preferred)
+               1920x1080@240, 120, 60, 50
+```
+
+**`vrr` is off unless asked for.** FreeSync, G-Sync compatible, Adaptive-Sync —
+the display's refresh follows what is being drawn instead of the other way
+round, which is what removes tearing and stutter on anything that cannot hold a
+steady frame rate. It is not on by default because it interacts badly with some
+panels at low frame rates — visible flicker — and that is not something to turn
+on for somebody. The log says whether the connector actually offered it.
+
+Three more are worth a sentence.
 
 **`align` is not cosmetic.** A 1080p beside a 1440p leaves 360 rows belonging
 to no screen at all, and which end of the small monitor that dead strip is at

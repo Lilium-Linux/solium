@@ -880,25 +880,45 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     }
                 }
 
-                // A mode, as width, height and optionally a refresh rate. A
-                // width without a height is not a mode, so it is ignored
-                // rather than half-applied.
+                // A mode, written the way every display tool writes one:
+                // `"2560x1440@165"`. A table with `w`, `h` and `refresh` does
+                // the same thing, for anyone generating a configuration rather
+                // than typing it.
                 let mode = match row.get::<Value>("mode") {
+                    Ok(Value::String(text)) => {
+                        let text = text.to_str().ok().map(|text| text.to_string());
+                        match text.as_deref().and_then(crate::monitor::mode) {
+                            Some(mode) => mode,
+                            None => {
+                                tracing::warn!(
+                                    monitor = name,
+                                    mode = ?text,
+                                    "not a mode -- write it as 2560x1440@165, or as one of \
+                                     best, preferred, widest"
+                                );
+                                crate::monitor::Wanted::default()
+                            }
+                        }
+                    }
                     Ok(Value::Table(mode)) => {
                         match (mode.get::<Option<i32>>("w")?, mode.get::<Option<i32>>("h")?) {
-                            (Some(w), Some(h)) if w > 0 && h > 0 => {
-                                Some((w, h, mode.get::<Option<i32>>("refresh")?))
+                            (Some(width), Some(height)) if width > 0 && height > 0 => {
+                                crate::monitor::Wanted::Exact {
+                                    width,
+                                    height,
+                                    refresh: mode.get::<Option<i32>>("refresh")?,
+                                }
                             }
                             _ => {
                                 tracing::warn!(
                                     monitor = name,
-                                    "a mode needs both w and h -- ignoring it"
+                                    "a mode table needs both w and h -- ignoring it"
                                 );
-                                None
+                                crate::monitor::Wanted::default()
                             }
                         }
                     }
-                    _ => None,
+                    _ => crate::monitor::Wanted::default(),
                 };
 
                 let transform = match row.get::<Value>("transform") {
@@ -928,6 +948,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     at,
                     beside,
                     mode,
+                    vrr: row.get::<Option<bool>>("vrr")?,
                     transform,
                     enabled: row.get::<Option<bool>>("enabled")?.unwrap_or(true),
                     primary: row.get::<Option<bool>>("primary")?.unwrap_or(false),
