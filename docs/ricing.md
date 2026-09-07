@@ -112,6 +112,36 @@ you do not otherwise have is which application you are waiting for.
     SOLIUM_LOADING=mine        # ~/.config/solium/qml/loading/mine.qml
     SOLIUM_LOADING=~/mine.qml  # anywhere
 
+### Where your monitors are
+
+The compositor cannot work out which screen is on the left. The kernel reports
+connectors in an order that has nothing to do with your desk, so it guesses —
+left to right in that order, top edges aligned — and about half the time the
+guess is wrong. Fixing it is one line per screen:
+
+```lua
+return {
+    monitors = {
+        { name = "DP-1", x = 0, y = 0 },
+        { name = "DP-2", x = 2560, y = 180 },
+    },
+}
+```
+
+`solium --probe` prints the connector names this machine has, without taking
+the screen away from whatever is currently drawing on it. A name nothing
+answers to gets a line in the log rather than being ignored — a monitor
+arrangement that silently does nothing is the hardest kind to debug, and the
+usual cause is a connector name that does not exist here.
+
+Positions are top-left corners in one **global space** that every monitor is a
+window onto. So `y` is how much lower one screen sits than the other, which is
+what a monitor standing on a different-height desk actually needs, and a
+monitor you do not name goes to the right of everything you did — plugging in a
+third does not land it on top of one of the other two.
+
+`super+shift+r` applies a change without ending the session.
+
 ### Your own colours
 
 Copy `Solium/Theme.qml` into `~/.config/solium/qml/Solium/` and change it.

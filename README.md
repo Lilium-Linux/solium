@@ -27,7 +27,7 @@ Three flags worth knowing:
 | | |
 |---|---|
 | `--check` | would the configuration load? which bindings survived? |
-| `--probe` | what the hardware offers, without taking it |
+| `--probe` | what the hardware offers — connectors, modes — without taking it |
 | `--debug-mode` | adds the Developer Tweaks panel, on `super+shift+d` |
 
 `super+shift+q` ends the session and `super+shift+r` reloads the configuration
@@ -45,6 +45,10 @@ and reload while the session runs. X11 clients work through XWayland. Copy and
 paste works, both selections. A window's life begins when the user asks for the
 application rather than when its client connects, so it takes its place in the
 layout immediately and the application appears inside it.
+
+Several monitors, each with its own display pipeline, refresh rate and layout —
+one global coordinate space, arranged from the configuration or guessed left to
+right. Every layout runs per screen, and the pointer crosses between them.
 
 Protocols: `xdg-shell`, `wlr-layer-shell`, `xdg-decoration`, `xdg-output`,
 `xdg-activation`, `wp-viewporter`, `wp-fractional-scale`, `linux-dmabuf`,
@@ -94,7 +98,7 @@ it.
 | | |
 |---|---|
 | [docs/ricing.md](docs/ricing.md) | configuring it — start here |
-| [docs/modes.md](docs/modes.md) | desktop modes, and how to write one |
+| [docs/modes.md](docs/modes.md) | desktop modes, and how to write one — including per monitor |
 | [docs/animation.md](docs/animation.md) | the animation engine, and how to change the feel |
 | [docs/decorations.md](docs/decorations.md) | window frames and everything else drawn in QML |
 | [docs/architecture.md](docs/architecture.md) | how it is built, and why |
