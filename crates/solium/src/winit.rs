@@ -485,6 +485,11 @@ pub(crate) fn run() -> Result<()> {
             render::Prepared::default()
         };
 
+        // Before the output buffer is bound, alongside `prepare` and for the
+        // same reason: a capture binds a framebuffer of its own, and doing
+        // that underneath a bound output redirects the whole frame into it.
+        crate::screencopy::settle(&mut state, backend.renderer(), &prepared);
+
         // Not `match backend.bind() { _ if !wanted => ... }`: the scrutinee runs
         // before the guard, so that acquired a buffer on every idle frame and
         // threw it away without ever submitting it. The host's EGL surface ends
@@ -558,7 +563,12 @@ pub(crate) fn run() -> Result<()> {
                         let scale = state
                             .output_for(screen)
                             .map_or(1.0, |output| output.current_scale().fractional_scale());
-                        render::elements(&mut state, renderer, scale, &prepared, screen)
+                        render::elements(
+                            &mut state,
+                            renderer,
+                            &prepared,
+                            render::Picture::screen(screen, scale),
+                        )
                     };
 
                     let result = damage_tracker.render_output(

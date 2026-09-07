@@ -141,6 +141,16 @@ pub(crate) struct Solium {
 
     pub(crate) space: Space<Window>,
 
+    /// Registers `zwlr_screencopy_manager_v1`, which is screenshots, screen
+    /// recording and screen sharing. See `screencopy.rs`.
+    #[expect(dead_code, reason = "holds the global; dropping it would remove it")]
+    pub(crate) screencopy_state: crate::screencopy::ScreencopyState,
+    /// Captures a client has asked for and not yet been given.
+    ///
+    /// Drained by whichever backend is running, because reading pixels needs a
+    /// renderer and that is the one place there is one.
+    pub(crate) pending_captures: Vec<crate::screencopy::Capture>,
+
     /// Where the monitors are, relative to each other. See `monitor.rs`.
     ///
     /// Empty until a script says otherwise, which means "left to right in
@@ -527,6 +537,8 @@ impl Solium {
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
             seat_state,
+            screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),
+            pending_captures: Vec::new(),
             space: Space::default(),
             arrangement: monitor::Arrangement::default(),
             panes: crate::pane::Panes::default(),
@@ -799,6 +811,29 @@ impl Solium {
                     .and_then(|real| self.output_of(real))
             })
             .or_else(|| self.active_output())
+    }
+
+    /// A monitor's size in its own logical coordinates.
+    ///
+    /// The mode divided by the scale, which is what every protocol that
+    /// positions something against an output speaks in.
+    pub(crate) fn output_logical_size(
+        &self,
+        output: &Output,
+    ) -> smithay::utils::Size<i32, Logical> {
+        self.space
+            .output_geometry(output)
+            .map(|geometry| geometry.size)
+            .unwrap_or_default()
+    }
+
+    /// Drop a queued capture whose frame has gone away.
+    pub(crate) fn forget_capture(
+        &mut self,
+        frame: &smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
+    ) {
+        self.pending_captures
+            .retain(|capture| &capture.frame != frame);
     }
 
     /// How many device pixels to a logical one, on a rectangle's own monitor.
@@ -3359,6 +3394,9 @@ impl FractionalScaleHandler for Solium {
     }
 }
 smithay::delegate_fractional_scale!(Solium);
+// No `delegate_screencopy!`: Smithay has no handler for it, so `screencopy.rs`
+// writes the `Dispatch` impls itself and there is nothing to delegate to.
+
 smithay::delegate_viewporter!(Solium);
 smithay::delegate_presentation!(Solium);
 

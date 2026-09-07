@@ -18,7 +18,7 @@
 //! It maps one small window, waits for a few frames, and reports what came
 //! back. Exit status is zero only if every check passed, so it can be a gate.
 
-use std::os::unix::io::AsFd as _;
+use std::os::unix::io::{AsFd as _, AsRawFd as _};
 use std::time::Duration;
 
 use wayland_client::protocol::{
@@ -43,6 +43,10 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
 };
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+};
 
 /// How tall a probe bar is, and how much of the screen it reserves.
 const BAR: i32 = 48;
@@ -58,7 +62,17 @@ struct Probe {
     shm: Option<wl_shm::WlShm>,
     wm_base: Option<XdgWmBase>,
     layer_shell: Option<ZwlrLayerShellV1>,
+    screencopy: Option<ZwlrScreencopyManagerV1>,
     presentation: Option<WpPresentation>,
+    /// What a capture told us to allocate, and how it went.
+    shot: Option<Shot>,
+    /// The bars, kept alive past the layer check.
+    ///
+    /// Not tidiness: the capture check looks for one of them in the top rows
+    /// of the image, which is the only way a client can tell an upside-down
+    /// screenshot from a right-way-up one. Dropped at the end of `main` with
+    /// everything else.
+    bars_alive: Vec<(WlSurface, ZwlrLayerSurfaceV1)>,
     /// Every output, in the order advertised: the proxy, its name, and the
     /// size of its current mode.
     outputs: Vec<Screen>,
@@ -71,6 +85,23 @@ struct Probe {
     /// One entry per frame the compositor said it had presented.
     presented: Vec<Presented>,
     discarded: usize,
+}
+
+/// A screen capture in progress.
+#[derive(Debug, Default)]
+struct Shot {
+    /// From the `buffer` event: what to allocate.
+    format: Option<u32>,
+    width: u32,
+    height: u32,
+    stride: u32,
+    /// Whether the compositor finished describing the buffer.
+    described: bool,
+    /// Whether it said the copy is done, and whether it gave up.
+    ready: bool,
+    failed: bool,
+    /// The flags it reported, `Y_INVERT` among them.
+    flags: u32,
 }
 
 /// One `wl_output`, as a client learns about it.
@@ -151,6 +182,7 @@ fn main() {
         "zwp_primary_selection_device_manager_v1",
         "zxdg_decoration_manager_v1",
         "zwlr_layer_shell_v1",
+        "zwlr_screencopy_manager_v1",
     ] {
         let version = probe
             .globals
@@ -200,6 +232,19 @@ fn main() {
         }
     }
 
+    // A screenshot, which is the one check that looks at what the compositor
+    // actually drew rather than at what it said.
+    if probe.has("zwlr_screencopy_manager_v1") {
+        // The whole monitor, then a region of it — the two entry points the
+        // protocol has, and `grim` uses both.
+        for region in [None, Some((200, 300, 400, 250))] {
+            match take_a_shot(&connection, &mut queue, &mut probe, region) {
+                Ok(()) => {}
+                Err(reason) => failures.push(reason),
+            }
+        }
+    }
+
     // Presentation feedback needs a window on screen to be about.
     if probe.has("wp_presentation") {
         match map_and_measure(&connection, &mut queue, &mut probe) {
@@ -233,6 +278,263 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+/// Ask for a screenshot, and look at it.
+///
+/// The only check here that examines what the compositor *drew* rather than
+/// what it said. Every other one reads an event; this one reads pixels, which
+/// is the difference between "the protocol answers" and "there is a desktop in
+/// the buffer".
+///
+/// Nothing that speaks this protocol is installed on the machine this was
+/// written on — no grim, no wf-recorder, no portal — so this is not a
+/// convenience. It is the only oracle there is.
+///
+/// `WL_PROBE_SHOT=<path>` writes the capture out as a binary PPM, because
+/// "some pixels were not zero" and "that is my desktop" are different claims
+/// and only one of them can be checked by a program.
+fn take_a_shot(
+    connection: &Connection,
+    queue: &mut wayland_client::EventQueue<Probe>,
+    probe: &mut Probe,
+    region: Option<(i32, i32, i32, i32)>,
+) -> Result<(), String> {
+    let handle = queue.handle();
+    let (Some(shm), Some(screencopy)) = (probe.shm.clone(), probe.screencopy.clone()) else {
+        return Err("zwlr_screencopy_manager_v1 is advertised and would not bind".to_owned());
+    };
+    let Some(screen) = probe.outputs.first() else {
+        return Err("no outputs to capture".to_owned());
+    };
+    let (output, name) = (screen.output.clone(), screen.name.clone());
+
+    println!();
+    probe.shot = Some(Shot::default());
+    // No cursor: a screenshot with somebody's mouse in it is the thing
+    // `overlay_cursor` exists to let you avoid, and asking for it here would
+    // make the pixel check depend on where the pointer happens to be.
+    let frame = match region {
+        None => screencopy.capture_output(0, &output, &handle, ()),
+        Some((x, y, w, h)) => screencopy.capture_output_region(0, &output, x, y, w, h, &handle, ()),
+    };
+
+    for turn in 0..50 {
+        if turn == 10 {
+            eprintln!("wl-probe: still waiting to be told what buffer to allocate…");
+        }
+        settle(connection, queue, probe)?;
+        if probe.shot.as_ref().is_some_and(|shot| shot.described) {
+            break;
+        }
+    }
+
+    let (format, width, height, stride) = {
+        let shot = probe.shot.as_ref().ok_or("the capture vanished")?;
+        if !shot.described {
+            return Err("the compositor never said what buffer a capture needs".to_owned());
+        }
+        (
+            shot.format.ok_or("a capture with no format")?,
+            shot.width,
+            shot.height,
+            shot.stride,
+        )
+    };
+    println!("capture of {name}: {width}x{height}, stride {stride}, format {format}");
+
+    if width == 0 || height == 0 {
+        return Err("a capture of nothing".to_owned());
+    }
+    if stride < width * 4 {
+        return Err(format!(
+            "a stride of {stride} cannot hold {width} pixels of four bytes"
+        ));
+    }
+    // What the buffer *should* be: the whole monitor in device pixels, or the
+    // region asked for scaled the same way. A wrong size here is a capture of
+    // something other than what was asked for, and every check below would
+    // pass on it.
+    let scale = probe
+        .outputs
+        .first()
+        .map_or(1, |screen| screen.scale.max(1));
+    let expected = match region {
+        None => u32::try_from(screen_pixels(probe)).unwrap_or(0),
+        Some((_, _, w, _)) => u32::try_from(w.max(0) * scale).unwrap_or(0),
+    };
+    if width != expected {
+        return Err(format!(
+            "a capture of {name} is {width} wide, expected {expected} device pixels"
+        ));
+    }
+
+    // A pool the size the compositor asked for, and a buffer over it.
+    let length = (stride * height) as usize;
+    let file = tempfile_rs();
+    file.set_len(length as u64)
+        .unwrap_or_else(|err| panic!("wl-probe: could not size the capture pool: {err}"));
+    let pool = shm.create_pool(file.as_fd(), length as i32, &handle, ());
+    let buffer = pool.create_buffer(
+        0,
+        width as i32,
+        height as i32,
+        stride as i32,
+        wl_shm::Format::try_from(format).unwrap_or(wl_shm::Format::Xrgb8888),
+        &handle,
+        (),
+    );
+
+    frame.copy(&buffer);
+    for turn in 0..100 {
+        if turn == 20 {
+            eprintln!("wl-probe: still waiting for the capture to be filled…");
+        }
+        settle(connection, queue, probe)?;
+        let shot = probe.shot.as_ref().ok_or("the capture vanished")?;
+        if shot.ready || shot.failed {
+            break;
+        }
+    }
+
+    let shot = probe.shot.as_ref().ok_or("the capture vanished")?;
+    if shot.failed {
+        return Err(format!("the compositor refused to capture {name}"));
+    }
+    if !shot.ready {
+        return Err(format!(
+            "asked for a capture of {name} and was never told it was done"
+        ));
+    }
+    println!("  ok      filled, flags {:#04b}", shot.flags);
+
+    // And now the part no event can tell us: is there a desktop in it?
+    let pixels = std::fs::read(
+        std::path::Path::new("/proc/self/fd").join(file.as_fd().as_raw_fd().to_string()),
+    )
+    .unwrap_or_default();
+    let pixels = if pixels.len() >= length {
+        pixels
+    } else {
+        // Reading back through /proc is a convenience, not a guarantee. Map
+        // the pool instead if it did not work.
+        return Err("could not read the capture back to look at it".to_owned());
+    };
+
+    if let Ok(path) = std::env::var("WL_PROBE_SHOT") {
+        write_ppm(&path, width, height, stride, &pixels);
+        println!("  wrote {path}");
+    }
+
+    // Not all zeros. An unbound framebuffer reads back as nothing at all, and
+    // that is the failure this catches -- but only that one: the compositor
+    // clears to a dark grey, so "not black" is true of an empty desktop too.
+    let lit = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+        .count();
+    if lit * 2 <= (width * height) as usize {
+        return Err(format!(
+            "a capture of {name} came back mostly zeros -- the copy went somewhere else"
+        ));
+    }
+
+    // More than one colour in it. A capture that is a single flat colour is
+    // either an empty clear or a copy of the wrong thing, and both look fine
+    // to the check above.
+    let mut seen = std::collections::HashSet::new();
+    for row in 0..height as usize {
+        let start = row * stride as usize;
+        for x in (0..width as usize).step_by(7) {
+            let at = start + x * 4;
+            if let Some(pixel) = pixels.get(at..at + 3) {
+                seen.insert([pixel[0], pixel[1], pixel[2]]);
+            }
+        }
+        if seen.len() > 8 {
+            break;
+        }
+    }
+    println!("  ok      {} distinct colours sampled", seen.len());
+    if seen.len() < 2 {
+        return Err(format!(
+            "a capture of {name} is one flat colour -- nothing was drawn into it"
+        ));
+    }
+
+    // And the right way up, or in the right place. A bar was anchored to the
+    // *top* of this monitor a moment ago, so its colour belongs in the top
+    // rows of a whole-output capture and in neither band of a capture that
+    // starts below it.
+    //
+    // The first of those is a check that cannot be done any other way: an
+    // upside-down screenshot is perfectly legible and reads as a compositor
+    // bug rather than a row-order one, which is exactly how it happened here.
+    // The second catches a region offset that was ignored, which would hand
+    // back the top-left corner whatever was asked for.
+    fn band(pixels: &[u8], width: u32, height: u32, stride: u32, from: usize) -> usize {
+        let mut found = 0;
+        for row in from..(from + 8).min(height as usize) {
+            let start = row * stride as usize;
+            for x in (0..width as usize).step_by(5) {
+                let Some(pixel) = pixels.get(start + x * 4..start + x * 4 + 3) else {
+                    continue;
+                };
+                // The bar is a solid mid-blue; the desktop behind it is
+                // near-black and the windows a dark slate. Blue clearly
+                // dominant is the test, not an exact value — the buffer is
+                // BGRX, so blue is byte zero.
+                if usize::from(pixel[0]) > usize::from(pixel[2]) + 40 {
+                    found += 1;
+                }
+            }
+        }
+        found
+    }
+    let (top, bottom) = (
+        band(&pixels, width, height, stride, 2),
+        band(&pixels, width, height, stride, height as usize - 10),
+    );
+    println!("  ok      bar pixels: {top} near the top, {bottom} near the bottom");
+    match region {
+        None if top <= bottom => Err(format!(
+            "a capture of {name} has the top-anchored bar at the bottom -- the rows are \
+             upside down ({top} bar pixels at the top, {bottom} at the bottom)"
+        )),
+        // A region that starts below the bar must not contain it. If it does,
+        // the offset was ignored and this is the top of the screen.
+        Some((_, y, _, _)) if y > 64 && top > 0 => Err(format!(
+            "a capture of {name} from y={y} contains the bar, which is at the top of the \
+             screen -- the region offset was ignored"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The first output's width in device pixels.
+fn screen_pixels(probe: &Probe) -> i32 {
+    probe.outputs.first().map_or(0, |screen| screen.width)
+}
+
+/// Write a captured buffer out as a binary PPM, so a person can look at it.
+fn write_ppm(path: &str, width: u32, height: u32, stride: u32, pixels: &[u8]) {
+    let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
+    for row in 0..height as usize {
+        let start = row * stride as usize;
+        for x in 0..width as usize {
+            let at = start + x * 4;
+            // Xrgb8888 is little-endian BGRX in memory.
+            let (Some(b), Some(g), Some(r)) =
+                (pixels.get(at), pixels.get(at + 1), pixels.get(at + 2))
+            else {
+                return;
+            };
+            out.extend_from_slice(&[*r, *g, *b]);
+        }
+    }
+    let _ = std::fs::write(path, out);
 }
 
 /// Anchor a bar to the top of every monitor and check where each one landed.
@@ -368,6 +670,11 @@ fn anchor_a_bar(
             None => wrong.push(format!("a bar that named {name} was never configured")),
         }
     }
+
+    // Held past this function: see `Probe::bars_alive`.
+    probe
+        .bars_alive
+        .extend(surfaces.into_iter().map(|(surface, bar, _)| (surface, bar)));
 
     if let Some(first) = wrong.into_iter().next() {
         return Err(first);
@@ -605,6 +912,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
             "zwlr_layer_shell_v1" => {
                 state.layer_shell = Some(registry.bind(name, version.min(4), handle, ()));
             }
+            "zwlr_screencopy_manager_v1" => {
+                state.screencopy = Some(registry.bind(name, version.min(3), handle, ()));
+            }
             "wp_presentation" => {
                 state.presentation = Some(registry.bind(name, version.min(1), handle, ()));
             }
@@ -704,6 +1014,43 @@ delegate_noop!(Probe: ignore WlShmPool);
 delegate_noop!(Probe: ignore WlBuffer);
 delegate_noop!(Probe: ignore XdgToplevel);
 delegate_noop!(Probe: ignore ZwlrLayerShellV1);
+delegate_noop!(Probe: ignore ZwlrScreencopyManagerV1);
+
+impl Dispatch<ZwlrScreencopyFrameV1, ()> for Probe {
+    fn event(
+        state: &mut Self,
+        _frame: &ZwlrScreencopyFrameV1,
+        event: zwlr_screencopy_frame_v1::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(shot) = state.shot.as_mut() else {
+            return;
+        };
+        match event {
+            zwlr_screencopy_frame_v1::Event::Buffer {
+                format,
+                width,
+                height,
+                stride,
+            } => {
+                shot.format = Some(format.into());
+                shot.width = width;
+                shot.height = height;
+                shot.stride = stride;
+                // Version 3 sends `buffer_done`; older versions do not, so a
+                // buffer event is enough on its own to start allocating.
+                shot.described = true;
+            }
+            zwlr_screencopy_frame_v1::Event::BufferDone => shot.described = true,
+            zwlr_screencopy_frame_v1::Event::Flags { flags } => shot.flags = flags.into(),
+            zwlr_screencopy_frame_v1::Event::Ready { .. } => shot.ready = true,
+            zwlr_screencopy_frame_v1::Event::Failed => shot.failed = true,
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<WlOutput, ()> for Probe {
     fn event(

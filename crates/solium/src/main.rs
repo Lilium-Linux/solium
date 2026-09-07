@@ -21,6 +21,7 @@ mod pane;
 mod present;
 mod qml;
 mod render;
+mod screencopy;
 mod script;
 mod state;
 mod surface;

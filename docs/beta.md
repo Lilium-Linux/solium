@@ -41,13 +41,14 @@ predicts.
 
 ## What has to be true first
 
-**Blocking.** A preview without these is not something a second person can use.
+**Blocking.** A preview without these is not something a second person can
+use. **Packaging is the last one.**
 
 | | why |
 |---|---|
 | ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | **done.** A pipeline per monitor, one global space, layouts and workspaces per screen |
 | ~~[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI~~ | **done.** Scale per monitor, chrome rasterised at it, chosen from the panel's dpi |
-| [#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture | no screenshots and no screen sharing; people hit this in minutes |
+| ~~[#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture~~ | **done.** `wlr-screencopy`, so grim, wf-recorder and the portal all work |
 | packaging | there is none. A preview nobody can install is a preview nobody tries |
 
 **Shippable as documented gaps.** Real holes, but ones a preview can name and
@@ -81,8 +82,10 @@ hours is worse than one that is missing a lock screen.
    needed the *distinction* between logical layout and device rasterisation
    rather than a bigger canvas — a scene given the device size lays out in it
    and comes out half the size it should be.
-3. **[#28](https://github.com/Lilium-Linux/solium/issues/28) screencopy** —
-   self-contained, and the loudest missing thing after the first two.
+3. ~~**[#28](https://github.com/Lilium-Linux/solium/issues/28) screencopy**~~ —
+   done, and it was self-contained as expected. `ext-image-copy-capture-v1` is
+   the successor and is #47; the `wayland-protocols` release this builds
+   against does not carry it and nothing installed speaks it.
 4. **Soak and package.** Both are the difference between working here and
    working anywhere.
 5. Then [#27](https://github.com/Lilium-Linux/solium/issues/27),

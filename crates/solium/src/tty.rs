@@ -904,6 +904,10 @@ impl State {
         // of its own.
         let prepared = render::prepare(&mut self.solium, renderer);
 
+        // Before any output's buffer is bound, for the reason `Prepared` gives:
+        // a capture binds a framebuffer of its own.
+        crate::screencopy::settle(&mut self.solium, renderer, &prepared);
+
         for index in 0..self.screens.len() {
             // Indexed rather than iterated: building a screen's elements needs
             // `&mut self.solium` as well as `&mut` that screen, and they are
@@ -931,7 +935,12 @@ impl State {
             // This monitor's scale, not a constant. Two screens in one frame
             // can want different ones.
             let scale = output.current_scale().fractional_scale();
-            let elements = render::elements(&mut self.solium, renderer, scale, &prepared, area);
+            let elements = render::elements(
+                &mut self.solium,
+                renderer,
+                &prepared,
+                render::Picture::screen(area, scale),
+            );
 
             let Some(screen) = self.screens.get_mut(index) else {
                 continue;

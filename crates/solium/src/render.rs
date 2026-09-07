@@ -235,23 +235,62 @@ fn scene(
     state.redraw = true;
 }
 
-/// What to draw on one output, topmost first.
+/// One picture to draw: which part of the desktop, at what scale, with or
+/// without the pointer.
 ///
-/// Called once per monitor. `screen` is where this output sits in the global
-/// space, and every rect here is global — a pane's slot, the pointer, the work
-/// area — so the last thing each of them does is move by `-screen.loc`. Getting
-/// that offset wrong does not look like an offset: the second monitor draws the
-/// first monitor's picture, which reads as mirroring.
+/// Bundled rather than passed as three arguments because there is now more than
+/// one reason to ask for a picture. A screen capture wants the same frame a
+/// monitor gets and usually *not* the pointer, and a fourth positional `bool`
+/// on a call that already had five arguments is the kind of thing that gets
+/// passed in the wrong order once and then silently stays wrong.
+/// Named `Picture` and not `Frame` because `present::Frame` already means
+/// something else in here — a window's transform for this instant. Two
+/// `Frame`s in one file is a reader's problem for as long as the file lasts.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Picture {
+    /// Where this picture sits in the global space.
+    pub(crate) screen: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    /// Device pixels per logical one.
+    pub(crate) scale: f64,
+    /// Whether to draw the pointer.
+    pub(crate) cursor: bool,
+}
+
+impl Picture {
+    /// What a monitor gets: its whole area, its own scale, pointer included.
+    pub(crate) fn screen(
+        screen: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+        scale: f64,
+    ) -> Self {
+        Self {
+            screen,
+            scale,
+            cursor: true,
+        }
+    }
+}
+
+/// What to draw for one frame, topmost first.
+///
+/// Called once per monitor. `frame.screen` is where that output sits in the
+/// global space, and every rect here is global — a pane's slot, the pointer,
+/// the work area — so the last thing each of them does is move by
+/// `-screen.loc`. Getting that offset wrong does not look like an offset: the
+/// second monitor draws the first monitor's picture, which reads as mirroring.
 ///
 /// Anything that does not touch this screen is left out entirely, so a window
 /// on the other monitor costs this one nothing.
 pub(crate) fn elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
-    scale: f64,
     prepared: &Prepared,
-    screen: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    picture: Picture,
 ) -> Vec<Element> {
+    let Picture {
+        screen,
+        scale,
+        cursor: with_cursor,
+    } = picture;
     let now = state.clock.now();
     let output_scale = Scale::from(scale);
     let mut elements = Vec::new();
@@ -268,7 +307,13 @@ pub(crate) fn elements(
     // The pointer, above everything — including anything a shell anchors on
     // top. Nothing else draws it, so leaving it out is not a missing detail:
     // it is a session where the mouse appears not to work.
-    elements.extend(cursor(state, renderer, output_scale, scale, shift));
+    //
+    // Left out of a capture unless it was asked for, which is what
+    // `overlay_cursor` in the screencopy protocol means: a screenshot of a
+    // window should not have somebody's mouse in it.
+    if with_cursor {
+        elements.extend(cursor(state, renderer, output_scale, scale, shift));
+    }
 
     // The shell, when one is hosted: above the windows, below the pointer.
     // Only on the monitor it was built for; see `Solium::shell`.
