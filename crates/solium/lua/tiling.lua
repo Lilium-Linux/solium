@@ -28,8 +28,12 @@ local tiling = { active = false, trees = {} }
 -- screens are different sizes, the split that reads well on one is wrong on
 -- the other, and a window moved across has to leave one arrangement and join
 -- another rather than being in both.
-local function tree_for(index, monitor)
-    local key = monitors.key(index, monitor)
+-- Takes only the monitor: which workspace that screen is showing is a thing
+-- `workspaces` knows and nothing here should be passing around. Threading the
+-- index through every call site is how one of them ends up asking for the
+-- wrong screen's workspace.
+local function tree_for(monitor)
+    local key = monitors.key(workspaces.on(monitor), monitor)
     if not tiling.trees[key] then
         tiling.trees[key] = sol.layout.tree()
     end
@@ -56,7 +60,7 @@ function tiling.apply(animation)
     -- because two screens rearranging at once is one movement -- see
     -- docs/animation.md on why the feel is set per batch.
     for _, each in ipairs(monitors.each(workspaces.visible())) do
-        local tree = tree_for(workspaces.active, each.monitor.name)
+        local tree = tree_for(each.monitor.name)
         for _, slot in ipairs(tree:layout(options(each.monitor.name))) do
             sol.place(slot.id, slot)
         end
@@ -72,7 +76,7 @@ function tiling.adopt()
     -- are fixed here.
     local present = {}
     for _, each in ipairs(monitors.each(workspaces.visible())) do
-        local tree = tree_for(workspaces.active, each.monitor.name)
+        local tree = tree_for(each.monitor.name)
         for _, window in ipairs(each.windows) do
             present[window.id] = each.monitor.name
             if not tree:contains(window.id) then
@@ -85,7 +89,9 @@ function tiling.adopt()
             -- Removed when the window is gone, and when it is on another
             -- monitor now: one window in two trees is one window given two
             -- slots, and it ends up in whichever was laid out last.
-            if not present[id] or monitors.key(workspaces.active, present[id]) ~= key then
+            if not present[id]
+                or monitors.key(workspaces.on(present[id]), present[id]) ~= key
+            then
                 tree:remove(id)
             end
         end
@@ -113,7 +119,7 @@ sol.on("layout", function()
 end)
 
 sol.on("open", function(id)
-    local tree = tree_for(workspaces.active, monitors.of(id))
+    local tree = tree_for(monitors.of(id))
     local cursor = sol.cursor()
     -- Skip the window being opened: it is already mapped and under the
     -- pointer, so asking without skipping names it as its own split target.
@@ -153,7 +159,7 @@ sol.on("drop", function(id, x, y)
     for _, tree in pairs(tiling.trees) do
         tree:remove(id)
     end
-    local tree = tree_for(workspaces.active, landed)
+    local tree = tree_for(landed)
     if target and target ~= id then
         -- Re-inserting where it was dropped is the swap: out of its old seam,
         -- into the one under the pointer.
@@ -176,7 +182,7 @@ sol.on("resize", function(id, x, y, horizontal, vertical)
         return
     end
     local monitor = monitors.of(id)
-    local tree = tree_for(workspaces.active, monitor)
+    local tree = tree_for(monitor)
     -- The seam goes where the pointer is. Not where it moved to: a delta would
     -- be measured against a layout this very drag just changed, and the windows
     -- would shake for as long as the button was held.
@@ -201,7 +207,7 @@ sol.bind("super+minus", function()
         if window.focused then focused = window.id end
     end
     if focused then
-        tree_for(workspaces.active, monitors.of(focused)):resize(focused, -0.05)
+        tree_for(monitors.of(focused)):resize(focused, -0.05)
         tiling.apply(config.tiling.snap)
     end
 end)
@@ -212,7 +218,7 @@ sol.bind("super+equal", function()
         if window.focused then focused = window.id end
     end
     if focused then
-        tree_for(workspaces.active, monitors.of(focused)):resize(focused, 0.05)
+        tree_for(monitors.of(focused)):resize(focused, 0.05)
         tiling.apply(config.tiling.snap)
     end
 end)

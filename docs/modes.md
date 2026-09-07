@@ -138,6 +138,48 @@ new screen's tree, still in its old one's, both halves fixed in one pass.
 movement; see [animation.md](animation.md) on why the feel is set per batch and
 not per window.
 
+### A window is drawn only on the monitors it lives on
+
+Its **slot** decides that, not its transform. A transform can move a window
+around its own monitors and off them; it cannot put it on somebody else's.
+
+This is worth knowing before you write a mode that moves a window a long way,
+because it is what makes such a mode work on more than one screen. Workspaces
+are the example. A workspace switch does not move windows — it draws the ones
+belonging to other workspaces a screen away, and with one monitor "a screen
+away" is off the desktop, which is how they are hidden. With two side by side,
+one screen away is *the other monitor*: switching the left screen's workspace
+threw its windows onto the right screen, on top of what was already there.
+
+The intent was always containment; one screen just made moving and hiding the
+same thing. So the rule is enforced where it belongs, and the slide stays one
+screen long — which is what makes it read as a slide. Offsetting by the whole
+desk instead would hide them correctly and look wrong: the window would leave
+the screen halfway through and the next arrive halfway through, with empty
+screen in between.
+
+The slot and not the drawn rect, so a window straddling the bezel — dragged
+between screens, where the slot itself is on both — is still drawn on both.
+
+### Workspaces
+
+`config.workspaces.per_monitor` decides whether each screen has its own
+workspace in view. On by default: `super+2` switches the monitor the pointer is
+on and leaves the other showing what it was. Off, one switch moves every
+screen.
+
+Both are real desktops, and the difference is what you take a workspace to
+*be* — a screenful, or a whole desk. `workspaces.lua` shares every line
+between them: which workspace a monitor shows is looked up by monitor either
+way, and with the setting off every monitor looks up the same entry.
+
+If you keep per-workspace state of your own, key it by monitor as well.
+`monitors.key(workspaces.on(name), name)` is the string `tiling.lua` and
+`scrolling.lua` both use, and `tree_for` takes only the monitor — the workspace
+that screen is showing is something `workspaces` knows, and threading it
+through every call site is how one of them ends up asking for the wrong
+screen's.
+
 `monitors.active()` is the monitor the pointer is on — where a new window goes,
 and what a binding pressed with no particular window in mind is about. It is
 the pointer and not the focused window on purpose: look at the second screen,

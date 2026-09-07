@@ -200,6 +200,21 @@ local defaults = {
     },
 
     workspaces = {
+        -- Whether each monitor has its own active workspace.
+        --
+        -- On, `super+2` switches the screen the pointer is on and leaves the
+        -- other showing whatever it was: a reference on the second monitor
+        -- stays put while you move around on the first. This is what sway,
+        -- Hyprland and niri do, and what most people expect.
+        --
+        -- Off, one switch moves every screen at once, so a workspace is a
+        -- whole desk rather than a screenful. That is GNOME's model, and it is
+        -- the right one if you think of your two monitors as one surface you
+        -- happen to have cut in half.
+        --
+        -- Only matters with more than one monitor.
+        per_monitor = true,
+
         -- "horizontal": workspaces sit in a row and slide sideways.
         -- "vertical":   a column, sliding up and down.
         -- "grid":       both, `columns` wide and `rows` tall.
