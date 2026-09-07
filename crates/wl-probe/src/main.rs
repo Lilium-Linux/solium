@@ -166,6 +166,17 @@ fn main() {
         }
     }
 
+    // Connect, learn what is there, and leave -- with no surface of any kind.
+    //
+    // This exists to be a client lifecycle with no window in it. `super+return`
+    // in the soak both connects a client *and* maps a toplevel, so a leak that
+    // tracks it cannot be attributed to either; churning this instead can. See
+    // issue #33.
+    if std::env::var_os("WL_PROBE_CONNECT_ONLY").is_some() {
+        println!("connected, {} globals, leaving", probe.globals.len());
+        return;
+    }
+
     let mut failures = Vec::new();
 
     println!("globals: {}", probe.globals.len());
