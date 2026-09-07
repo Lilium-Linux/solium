@@ -2,6 +2,19 @@
 
 Epics in dependency order. Each should leave the compositor running and testable.
 
+**E1 to E6 have landed.** The compositor boots on hardware, transforms and
+animates windows through one engine, is scripted in Lua, has floating, tiling
+and scrolling layouts, draws its own decorations from QML, and expresses every
+mode as a script over the transform — which was the bet, and it held: none of
+the modes needed new Rust.
+
+E7 and E8 are open. So is the protocol work that turns a working compositor into
+a usable one; that lives on the issue tracker rather than here, prioritised by
+whether an application can be used at all without it.
+
+Each epic below keeps its original acceptance criteria, because what "done"
+meant at the time is the more useful record.
+
 ## E1 — Boots and shows a window
 
 Smithay skeleton with a Vulkan renderer. Winit backend for development, DRM for

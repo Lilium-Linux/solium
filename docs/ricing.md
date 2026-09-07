@@ -40,6 +40,7 @@ different list, not a longer one.
 | your bindings and layout | `~/.config/solium/init.lua` |
 | one module, replaced | `~/.config/solium/tiling.lua`, `scrolling.lua`, … |
 | your decorations | `~/.config/solium/qml/decorations/*.qml` |
+| your loading window | `~/.config/solium/qml/loading/*.qml` |
 | your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml` |
 
 Your directory is searched first in every case. A file you write shadows the
@@ -64,6 +65,44 @@ named `top.qml` there shadows the shipped `top.qml`, so you can keep using
 `decoration = "top"` and mean yours. `crates/solium/qml/decorations/README.md`
 is the contract: what a frame is told, what it can ask for, and what it
 reserves.
+
+### What a window shows before its application exists
+
+A window's life starts when you ask for the application, not when the program
+gets around to connecting — it takes its place in the layout immediately, the
+other windows move aside, and the application appears *inside* it. What is in
+it meanwhile is yours:
+
+```lua
+return {
+    loading = {
+        scene = "window",       -- qml/loading/window.qml, or a path
+        patience = 8000,        -- give up on it after this long, in ms
+        reserves_a_slot = true, -- take a place in the layout straight away
+        decorated = false,      -- draw the titlebar while it waits
+        fade = 180,             -- how long the scene takes to dissolve, in ms
+    },
+}
+```
+
+`reserves_a_slot = false` is the quieter reading: the other windows only move
+aside once the application is really there. `decorated = true` gives the
+waiting window a titlebar, and therefore a close button for an application
+that is not coming.
+
+`fade` is the dissolve as the application appears underneath. It is the
+compositor's, not the scene's, and a scene **cannot** do it for itself — Qt's
+software renderer repaints only what it thinks changed, onto the pixels already
+there, so each half-transparent frame would land on its own opaque previous one
+and nothing would fade. Set `fade = 0` to cut straight to the application.
+
+Your own scene goes in `~/.config/solium/qml/loading/`. It is handed the
+program's name and how long it has waited; the one that ships uses only the
+name, on the grounds that the window already *is* the window and the one fact
+you do not otherwise have is which application you are waiting for.
+
+    SOLIUM_LOADING=mine        # ~/.config/solium/qml/loading/mine.qml
+    SOLIUM_LOADING=~/mine.qml  # anywhere
 
 ### Your own colours
 
