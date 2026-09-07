@@ -307,11 +307,22 @@ impl Scripts {
                 .get("package")
                 .map_err(failed("reading `package`"))?;
             let path: String = package.get("path").unwrap_or_default();
-            // The user's directory first, then the config's own, then Lua's.
-            // Ordered this way so dropping a single `config.lua` into
-            // ~/.config/solium overrides just that file — copying the whole
-            // set to change one number is not configurability.
-            let mut search = format!("{directory}/?.lua;{path}");
+            // The user's directory first, then the config's own, then the
+            // shipped set, then Lua's. Ordered this way so dropping a single
+            // `config.lua` into ~/.config/solium overrides just that file —
+            // copying the whole set to change one number is not
+            // configurability.
+            //
+            // The shipped directory is added *unconditionally*, and that is
+            // the fix for the thing this whole model rests on. The path used
+            // to be built from the chosen config's own directory, which is
+            // the shipped one only while you are using the shipped
+            // `init.lua`. Write your own and `require("modes")` stopped
+            // resolving — so the documented way to start ("replace the entry
+            // point, require everything that ships, add your own") could not
+            // work at all. Found by running the example out of the guide.
+            let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+            let mut search = format!("{directory}/?.lua;{shipped}/?.lua;{path}");
             if let Some(user) = Self::user_config_dir() {
                 search = format!("{}/?.lua;{search}", user.display());
             }
