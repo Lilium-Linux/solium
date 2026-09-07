@@ -189,7 +189,8 @@ pub(crate) fn run() -> Result<()> {
     let mut solium = Solium::new(display_handle.clone());
     solium.socket_name = start_socket(&mut event_loop, display)?;
 
-    crate::xwayland::start(&event_loop.handle(), &display_handle);
+    let loop_handle = event_loop.handle();
+    crate::xwayland::start(&loop_handle, &display_handle);
 
     let config = Scripts::config_path();
     solium.start_scripts(match Scripts::load(&config) {

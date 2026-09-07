@@ -282,7 +282,17 @@ impl XwmHandler for Solium {
 
     fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {}
 
-    /// The X11 side asking for the Wayland clipboard's contents.
+    /// Whether an X11 client may read a selection a Wayland client owns.
+    ///
+    /// Yes. The default is `false`, which is the right default for a library
+    /// that cannot know what its user wants; here the two halves of one
+    /// session should be able to paste into each other, and refusing is what
+    /// made copying in Steam and pasting in a terminal silently do nothing.
+    fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
+        true
+    }
+
+    /// An X11 client wants a Wayland client's selection written to `fd`.
     fn send_selection(
         &mut self,
         _xwm: XwmId,
@@ -290,12 +300,45 @@ impl XwmHandler for Solium {
         mime_type: String,
         fd: std::os::fd::OwnedFd,
     ) {
+        self.serve_x11_selection(selection, mime_type, fd);
+    }
+
+    /// An X11 client has copied something.
+    fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mimes: Vec<String>) {
         tracing::debug!(
             ?selection,
-            %mime_type,
-            "an X11 client asked for the selection"
+            count = mimes.len(),
+            "an X11 client copied something"
         );
-        drop(fd);
+        self.take_x11_selection(selection, mimes);
+    }
+
+    /// And has let it go again.
+    fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+        self.drop_x11_selection(selection);
+    }
+}
+
+/// Serve a selection an X11 client owns to the Wayland client that asked.
+///
+/// The last link, and it lives here rather than on `Solium` because
+/// `X11Wm::send_selection` needs the event loop to pump the transfer with, and
+/// the two backends have loops over different state types. So the request is
+/// recorded where it arrives and carried out where there is a loop — the same
+/// arrangement `pending_resize` and `pending_drop` already use, and for the
+/// same reason.
+pub(crate) fn settle_selection<D>(solium: &mut Solium, handle: &LoopHandle<'static, D>)
+where
+    D: XwmHandler + 'static,
+{
+    let Some((selection, mime_type, fd)) = solium.pending_selection.take() else {
+        return;
+    };
+    let Some(xwm) = solium.xwm.as_mut() else {
+        return;
+    };
+    if let Err(err) = xwm.send_selection(selection, mime_type, fd, handle.clone()) {
+        tracing::warn!(?err, ?selection, "an X11 selection could not be read");
     }
 }
 
@@ -415,6 +458,18 @@ impl XwmHandler for crate::tty::State {
 
     fn move_request(&mut self, xwm: XwmId, window: X11Surface, button: u32) {
         self.solium.move_request(xwm, window, button);
+    }
+
+    fn allow_selection_access(&mut self, xwm: XwmId, selection: SelectionTarget) -> bool {
+        self.solium.allow_selection_access(xwm, selection)
+    }
+
+    fn new_selection(&mut self, xwm: XwmId, selection: SelectionTarget, mimes: Vec<String>) {
+        self.solium.new_selection(xwm, selection, mimes);
+    }
+
+    fn cleared_selection(&mut self, xwm: XwmId, selection: SelectionTarget) {
+        self.solium.cleared_selection(xwm, selection);
     }
 
     fn send_selection(

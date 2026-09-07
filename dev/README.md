@@ -26,6 +26,7 @@ a demo into a regression test.
 | `dev/app-check.sh <program>` | a client runs, draws, and provokes no protocol error |
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, from a real client's side |
+| `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
@@ -45,6 +46,11 @@ whether presentation feedback worked at all.
 
 It exits non-zero if anything it asked for went unanswered, so it can be a
 gate.
+
+`clipboard-check.sh` runs its X11 half in a container, because the host has no
+`xclip` and cannot install one. **Run it more than once.** The bug it was
+written for failed about one time in three, so a single green run proves
+nothing — which is exactly how it nearly shipped.
 
 ## Capturing a frame
 
