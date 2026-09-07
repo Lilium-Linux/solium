@@ -622,8 +622,13 @@ impl State {
         self.solium.redraw = false;
 
         // Offscreen captures first, for the reason `render::Prepared` gives.
-        let mut prepared = render::prepare(&mut self.solium, renderer, 1.0);
-        let elements = render::elements(&mut self.solium, renderer, 1.0, &mut prepared);
+        let prepared = render::prepare(&mut self.solium, renderer, 1.0);
+        let screen = self
+            .output
+            .as_ref()
+            .and_then(|output| self.solium.space.output_geometry(output))
+            .unwrap_or_default();
+        let elements = render::elements(&mut self.solium, renderer, 1.0, &prepared, screen);
         match compositor.render_frame(
             renderer,
             &elements,
@@ -736,7 +741,12 @@ fn handle_input(state: &mut State, output: &Output, event: InputEvent<LibinputIn
 
     // The same entry point the nested backend uses: a binding, a profile or a
     // grab must not behave differently because libinput is underneath.
-    crate::input::handle(&mut state.solium, output, event);
+    let region = state
+        .solium
+        .space
+        .output_geometry(output)
+        .unwrap_or_default();
+    crate::input::handle(&mut state.solium, region, event);
 
     // Things the input layer cannot do itself, because only a backend has a
     // session to do them with.

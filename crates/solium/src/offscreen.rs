@@ -129,3 +129,144 @@ pub(crate) fn capture(
     crate::warp::release_framebuffer(renderer);
     drawn.then_some((texture, size))
 }
+
+/// One monitor's worth of picture, drawn into a texture of its own.
+///
+/// The nested backend's multi-monitor mode. On the hardware each output has its
+/// own buffer and its own page flip; here there is one window, so each virtual
+/// monitor is rendered into its own texture exactly as it would be into its own
+/// buffer, and the window draws those side by side.
+///
+/// That is not a shortcut around the real thing — it is the real thing with the
+/// scanout replaced. Every per-output path runs for each of them: its own
+/// elements built at its own origin, its own layer map, its own work area. What
+/// it cannot simulate is a second *pipeline*, which is `tty.rs`'s half of the
+/// problem.
+pub(crate) struct Screens {
+    /// One texture per monitor, kept across frames. Allocating these per frame
+    /// would be several hundred megabytes a second of texture churn on a
+    /// development path, and would make the leak check in `dev/leak.sh` read
+    /// like a leak.
+    textures: Vec<(Size<i32, Physical>, GlesTexture)>,
+}
+
+impl std::fmt::Debug for Screens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Screens")
+            .field("count", &self.textures.len())
+            .finish()
+    }
+}
+
+impl Screens {
+    pub(crate) fn new() -> Self {
+        Self {
+            textures: Vec::new(),
+        }
+    }
+
+    /// The texture for monitor `index`, at `size`, creating or replacing it if
+    /// the size is not what it was.
+    fn texture(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        index: usize,
+        size: Size<i32, Physical>,
+    ) -> Option<&mut GlesTexture> {
+        while self.textures.len() <= index {
+            let buffer: Size<i32, BufferCoords> = (size.w.max(1), size.h.max(1)).into();
+            let texture = renderer.create_buffer(Fourcc::Abgr8888, buffer).ok()?;
+            self.textures.push((size, texture));
+        }
+        if self
+            .textures
+            .get(index)
+            .is_some_and(|(had, _)| *had != size)
+        {
+            let buffer: Size<i32, BufferCoords> = (size.w.max(1), size.h.max(1)).into();
+            let texture = renderer.create_buffer(Fourcc::Abgr8888, buffer).ok()?;
+            *self.textures.get_mut(index)? = (size, texture);
+        }
+        self.textures.get_mut(index).map(|(_, texture)| texture)
+    }
+
+    /// Draw one monitor and hand back its texture.
+    pub(crate) fn draw(
+        &mut self,
+        state: &mut Solium,
+        renderer: &mut GlesRenderer,
+        prepared: &crate::render::Prepared,
+        index: usize,
+        screen: Rectangle<i32, smithay::utils::Logical>,
+        scale: f64,
+    ) -> Option<(GlesTexture, Size<i32, Physical>)> {
+        let size: Size<i32, Physical> = (
+            ((f64::from(screen.size.w) * scale).ceil() as i32).max(1),
+            ((f64::from(screen.size.h) * scale).ceil() as i32).max(1),
+        )
+            .into();
+
+        // Built before the texture is bound, because building can bind
+        // framebuffers of its own -- the warp pass -- and a bind underneath a
+        // bind redirects the whole picture. Same reason `Prepared` exists.
+        let elements = crate::render::elements(state, renderer, scale, prepared, screen);
+
+        let mut texture = self.texture(renderer, index, size)?.clone();
+        let drawn = {
+            let mut framebuffer = match renderer.bind(&mut texture) {
+                Ok(framebuffer) => framebuffer,
+                Err(err) => {
+                    tracing::warn!(?err, index, "could not bind a monitor's buffer");
+                    crate::warp::release_framebuffer(renderer);
+                    return None;
+                }
+            };
+            match renderer.render(&mut framebuffer, size, Transform::Normal) {
+                Err(err) => {
+                    tracing::warn!(?err, index, "could not render a monitor");
+                    false
+                }
+                Ok(mut frame) => {
+                    // The same background the backends clear to, so an empty
+                    // monitor looks like an empty monitor rather than a hole.
+                    frame
+                        .clear(
+                            Color32F::new(0.05, 0.05, 0.06, 1.0),
+                            &[Rectangle::from_size(size)],
+                        )
+                        .unwrap_or_else(|err| tracing::warn!(?err, "clearing a monitor failed"));
+
+                    let whole = [Rectangle::from_size(size)];
+                    // Reversed: this list is topmost-first, and drawing it in
+                    // that order onto a cleared buffer paints the top of the
+                    // stack first and everything else over it.
+                    for element in elements.iter().rev() {
+                        let source = element.src();
+                        let destination = element.geometry(Scale::from(scale));
+                        if let Err(err) = element.draw(&mut frame, source, destination, &whole, &[])
+                        {
+                            tracing::warn!(?err, index, "an element did not render");
+                        }
+                    }
+
+                    match frame.finish() {
+                        Ok(sync) => match sync.wait() {
+                            Ok(()) => true,
+                            Err(err) => {
+                                tracing::warn!(?err, "waiting for a monitor's draw failed");
+                                false
+                            }
+                        },
+                        Err(err) => {
+                            tracing::warn!(?err, "a monitor's draw did not finish");
+                            false
+                        }
+                    }
+                }
+            }
+        };
+
+        crate::warp::release_framebuffer(renderer);
+        drawn.then_some((texture, size))
+    }
+}

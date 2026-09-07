@@ -9,7 +9,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use smithay::{
     backend::{
-        renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
+        renderer::{
+            Renderer as _,
+            damage::OutputDamageTracker,
+            element::{Id, Kind, texture::TextureRenderElement},
+            gles::GlesRenderer,
+        },
         winit::{self, WinitEvent},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -26,7 +31,7 @@ use smithay::{
 };
 
 use crate::{
-    capture, dev, layer, render,
+    capture, dev, render,
     script::Scripts,
     state::{ClientState, Solium},
     synth,
@@ -180,29 +185,67 @@ pub(crate) fn run() -> Result<()> {
         .and_then(|monitor| monitor.refresh_rate_millihertz())
         .and_then(|rate| i32::try_from(rate).ok())
         .unwrap_or(60_000);
-    let mode = Mode { size, refresh };
-    tracing::info!(refresh, "output mode");
-    let output = Output::new(
-        "winit".to_string(),
-        PhysicalProperties {
-            size: (0, 0).into(),
-            subpixel: Subpixel::Unknown,
-            make: "Solium".into(),
-            model: "Winit".into(),
-        },
-    );
-    let _global = output.create_global::<Solium>(&display_handle);
-    output.change_current_state(
-        Some(mode),
-        Some(Transform::Flipped180),
-        None,
-        Some((0, 0).into()),
-    );
-    output.set_preferred(mode);
-    state.space.map_output(&output, (0, 0));
-    // Anchored surfaces are arranged against the output, so it has to exist
-    // first; a shell connecting before this would be told a size of zero.
-    layer::arrange(&output);
+    // One window, and as many monitors inside it as asked for. Side by side,
+    // sharing the window's width.
+    //
+    // This exists because nested and hardware are different compositors, and
+    // that has already cost this project a cursor that was invisible for its
+    // entire life. Multi-monitor is the single-output assumption removed from a
+    // dozen places, and every one of them would otherwise be developed against
+    // a backend where the assumption is still true and then discovered on a
+    // TTY, where nothing can be read and every attempt costs a session.
+    //
+    // The picture is the honest one: each of these gets its own layer map, its
+    // own work area, its own elements built at its own origin. What it cannot
+    // simulate is a second *pipeline* — one refresh rate, one page flip, one
+    // buffer — which is exactly the part `tty.rs` owns.
+    let count = dev::outputs();
+    let width = (size.w / i32::try_from(count).unwrap_or(1)).max(1);
+    let mut outputs = Vec::new();
+    let mut globals = Vec::new();
+    for index in 0..count {
+        let mode = Mode {
+            size: (width, size.h).into(),
+            refresh,
+        };
+        let output = Output::new(
+            if count == 1 {
+                "winit".to_owned()
+            } else {
+                format!("winit-{}", index + 1)
+            },
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Solium".into(),
+                model: "Winit".into(),
+            },
+        );
+        globals.push(output.create_global::<Solium>(&display_handle));
+        output.change_current_state(
+            Some(mode),
+            Some(Transform::Flipped180),
+            None,
+            Some((0, 0).into()),
+        );
+        output.set_preferred(mode);
+        // Mapped anywhere; `place_outputs` decides where. Doing it in one place
+        // means the nested backend and the hardware get the same arrangement
+        // from the same configuration.
+        state.space.map_output(&output, (0, 0));
+        outputs.push(output);
+    }
+    state.place_outputs();
+    if count > 1 {
+        tracing::info!(count, width, "nested with more than one monitor");
+    }
+    // The output every device's absolute positions are measured against: the
+    // window is one surface, so a position in it spans all of them.
+    let output = outputs
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no outputs: SOLIUM_OUTPUTS must be at least 1"))?;
+    let _global = globals;
 
     // Scripts are loaded before the first frame so a mode can be triggered
     // immediately. A broken config leaves the compositor usable and unbound
@@ -216,7 +259,19 @@ pub(crate) fn run() -> Result<()> {
         }
     });
 
-    let mut damage_tracker = OutputDamageTracker::from_output(&output);
+    // Damage is tracked against the window. With one monitor the window *is*
+    // the output, so the output's own tracker is right; with several the window
+    // is the desk and each monitor is a texture on it, so it is built from the
+    // window's size instead.
+    let mut damage_tracker = if outputs.len() > 1 {
+        OutputDamageTracker::new(size, 1.0, Transform::Flipped180)
+    } else {
+        OutputDamageTracker::from_output(&output)
+    };
+    // Where each monitor sits in the global space. Refreshed every frame rather
+    // than held, because `super+shift+r` can rearrange them.
+    let mut screens: Vec<Rectangle<i32, smithay::utils::Logical>> = Vec::new();
+    let mut monitors = crate::offscreen::Screens::new();
 
     // Frames are captured a few ticks in, not on the first one: a client that
     // has just been configured has not drawn yet, and a capture of an empty
@@ -263,20 +318,41 @@ pub(crate) fn run() -> Result<()> {
     // developer's real session.
     tracing::info!(socket = %socket_name, "solium is up -- run clients with WAYLAND_DISPLAY set to this");
 
+    let mut resized = false;
     loop {
         let status = winit.dispatch_new_events(|event| match event {
             WinitEvent::Resized { size, .. } => {
-                output.change_current_state(
-                    Some(Mode {
-                        size,
-                        refresh: 60_000,
-                    }),
-                    None,
-                    None,
-                    None,
-                );
+                // Every monitor, not just the first. Resizing only `output`
+                // gave the left-hand screen the whole window's width, so it
+                // then covered the right-hand one — and a pointer over the
+                // second monitor was answered with the first, which is a
+                // window opening on the screen you are not looking at.
+                let count = i32::try_from(outputs.len()).unwrap_or(1).max(1);
+                let width = (size.w / count).max(1);
+                for monitor in &outputs {
+                    monitor.change_current_state(
+                        Some(Mode {
+                            size: (width, size.h).into(),
+                            refresh: 60_000,
+                        }),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+                // Their positions depend on their widths, so the arrangement
+                // is decided again rather than kept.
+                resized = true;
             }
-            WinitEvent::Input(event) => crate::input::handle(&mut state, &output, event),
+            WinitEvent::Input(event) => {
+                // The union, not one monitor: the host reports a position
+                // within the *window*, and the window is every monitor at
+                // once. Measuring against `outputs[0]` would squeeze the whole
+                // window into the left-hand screen.
+                let region = crate::monitor::union(&state.space)
+                    .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
+                crate::input::handle(&mut state, region, event);
+            }
             WinitEvent::Focus(focused) => {
                 tracing::info!(focused, "nested window focus changed");
             }
@@ -312,6 +388,19 @@ pub(crate) fn run() -> Result<()> {
             monitor_reported = true;
         }
 
+        if resized {
+            resized = false;
+            state.place_outputs();
+        }
+
+        screens.clear();
+        screens.extend(
+            state
+                .space
+                .outputs()
+                .filter_map(|output| state.space.output_geometry(output)),
+        );
+
         // Read once for the whole iteration, so everything animating in this
         // frame agrees about when "now" is.
         let now = state.clock.now();
@@ -327,7 +416,9 @@ pub(crate) fn run() -> Result<()> {
         while drags.last().is_some_and(|(at, _, _)| now >= *at) {
             if let Some((_, from, to)) = drags.pop() {
                 tracing::info!(?from, ?to, "scripted drag");
-                synth::drag(&mut state, &output, from.into(), to.into(), 12);
+                let region = crate::monitor::union(&state.space)
+                    .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
+                synth::drag(&mut state, region, from.into(), to.into(), 12);
             }
         }
         while loadings.last().is_some_and(|(at, _)| now >= *at) {
@@ -385,7 +476,7 @@ pub(crate) fn run() -> Result<()> {
         // Before the output buffer is bound: this pass binds framebuffers of
         // its own, and doing that underneath a bound output redirects the
         // whole frame into a texture. See `render::Prepared`.
-        let mut prepared = if wanted {
+        let prepared = if wanted {
             render::prepare(&mut state, backend.renderer(), 1.0)
         } else {
             render::Prepared::default()
@@ -407,7 +498,46 @@ pub(crate) fn run() -> Result<()> {
                     // Every window reaches the screen through the presentation
                     // transform, so a mode cannot animate differently from the
                     // layout -- they are the same code path.
-                    let elements = render::elements(&mut state, renderer, 1.0, &mut prepared);
+                    //
+                    // One monitor takes the direct path, which is every
+                    // ordinary nested run: elements straight into the window's
+                    // buffer, damage tracked per element, nothing extra. More
+                    // than one and each is drawn into a texture of its own
+                    // first, because that is what having its own buffer means.
+                    let elements = if screens.len() > 1 {
+                        let mut whole = Vec::new();
+                        for (index, screen) in screens.iter().enumerate() {
+                            let Some((texture, _)) =
+                                monitors.draw(&mut state, renderer, &prepared, index, *screen, 1.0)
+                            else {
+                                continue;
+                            };
+                            whole.push(render::Element::Screen(
+                                TextureRenderElement::from_static_texture(
+                                    Id::new(),
+                                    renderer.context_id(),
+                                    screen.loc.to_f64().to_physical(1.0),
+                                    texture,
+                                    1,
+                                    Transform::Normal,
+                                    None,
+                                    None,
+                                    Some(screen.size),
+                                    None,
+                                    Kind::Unspecified,
+                                ),
+                            ));
+                        }
+                        whole
+                    } else {
+                        render::elements(
+                            &mut state,
+                            renderer,
+                            1.0,
+                            &prepared,
+                            screens.first().copied().unwrap_or_default(),
+                        )
+                    };
 
                     let result = damage_tracker.render_output(
                         renderer,

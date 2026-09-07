@@ -49,6 +49,12 @@ render_elements! {
     /// A surface drawn straight, with no rescale wrapper: the offscreen pass
     /// draws at real size, so there is nothing to scale.
     Window2 = WaylandSurfaceRenderElement<GlesRenderer>,
+    /// A whole monitor, already drawn into a texture of its own.
+    ///
+    /// Only the nested backend's multi-monitor mode produces these: there is
+    /// one window and several screens to put in it. On the hardware a monitor
+    /// is a scanout buffer and never an element. See `offscreen::Screens`.
+    Screen = smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>,
 }
 
 /// Textures captured for this frame, one per deformed window.
@@ -66,10 +72,17 @@ pub(crate) struct Prepared {
 }
 
 impl Prepared {
-    /// Hand over the texture captured for `window`, if there is one.
-    fn take(&mut self, window: &Window) -> Option<GlesTexture> {
-        let at = self.warps.iter().position(|(each, _)| each == window)?;
-        Some(self.warps.swap_remove(at).1)
+    /// Lend the texture captured for `window`, if there is one.
+    ///
+    /// Lent rather than taken: with more than one monitor `elements` runs once
+    /// per output, and a texture removed by the first one would leave a
+    /// deformed window undrawn on every other screen. `GlesTexture` is a
+    /// handle, so the clone is a refcount.
+    fn texture(&self, window: &Window) -> Option<GlesTexture> {
+        self.warps
+            .iter()
+            .find(|(each, _)| each == window)
+            .map(|(_, texture)| texture.clone())
     }
 }
 
@@ -77,6 +90,18 @@ impl Prepared {
 ///
 /// Must run before the backend binds its own buffer; see [`Prepared`].
 pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f64) -> Prepared {
+    state.memory_report();
+    // Every QML animation in the process, advanced once for this frame --
+    // decorations, the cursor, the shell. Whether any scene then has something
+    // new to draw is each scene's own answer.
+    //
+    // Once per *frame* and not once per output: with two monitors, ticking in
+    // `elements` would advance every animation twice as fast as the clock, and
+    // on monitors of different refresh rates by different amounts.
+    crate::qml::tick(state.clock.now());
+    // The shell reads the window list; it changes only when windows do.
+    state.publish_windows();
+
     let mut warps = Vec::new();
 
     for (pane, window) in state.on_screen() {
@@ -199,41 +224,62 @@ fn scene(
     state.redraw = true;
 }
 
+/// What to draw on one output, topmost first.
+///
+/// Called once per monitor. `screen` is where this output sits in the global
+/// space, and every rect here is global — a pane's slot, the pointer, the work
+/// area — so the last thing each of them does is move by `-screen.loc`. Getting
+/// that offset wrong does not look like an offset: the second monitor draws the
+/// first monitor's picture, which reads as mirroring.
+///
+/// Anything that does not touch this screen is left out entirely, so a window
+/// on the other monitor costs this one nothing.
 pub(crate) fn elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     scale: f64,
-    prepared: &mut Prepared,
+    prepared: &Prepared,
+    screen: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
 ) -> Vec<Element> {
-    state.memory_report();
     let now = state.clock.now();
-    // Every QML animation in the process, advanced once for this frame --
-    // decorations, the cursor, the shell. Whether any scene then has
-    // something new to draw is each scene's own answer.
-    crate::qml::tick(now);
     let output_scale = Scale::from(scale);
     let mut elements = Vec::new();
+    // From global coordinates into this output's own, as a float offset so a
+    // window drawn mid-animation is not rounded to the monitor's grid.
+    let shift = smithay::utils::Point::<f64, smithay::utils::Logical>::from((
+        -f64::from(screen.loc.x),
+        -f64::from(screen.loc.y),
+    ));
+    let onto = |rect: smithay::utils::Rectangle<f64, smithay::utils::Logical>| {
+        smithay::utils::Rectangle::new(rect.loc + shift, rect.size)
+    };
 
     // The pointer, above everything — including anything a shell anchors on
     // top. Nothing else draws it, so leaving it out is not a missing detail:
     // it is a session where the mouse appears not to work.
-    elements.extend(cursor(state, renderer, output_scale, scale));
-
-    // The shell reads the window list; it changes only when windows do.
-    state.publish_windows();
+    elements.extend(cursor(state, renderer, output_scale, scale, shift));
 
     // The shell, when one is hosted: above the windows, below the pointer.
-    state.publish_windows();
+    // Only on the monitor it was built for; see `Solium::shell`.
     if let Some(area) = state.work_area()
+        && area.overlaps(screen)
         && let Some(shell) = state.shell()
-        && let Some(element) = shell.element(renderer, area, now, 1.0)
+        && let Some(element) = shell.element(
+            renderer,
+            smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
+            now,
+            1.0,
+        )
     {
         elements.push(Element::Chrome(element));
     }
 
     // Anchored surfaces above the windows: panels, notifications, an overlay.
     // Collected first because the frame is built topmost-first.
-    let output = state.space.outputs().next().cloned();
+    //
+    // A layer map's geometry is already in its own output's coordinates, so
+    // these are the one thing on this list that must *not* be shifted.
+    let output = state.output_for(screen);
     if let Some(output) = output.as_ref() {
         let map = layer_map_for_output(output);
         for surface in map.layers().rev().filter(|layer| layer::is_above(layer)) {
@@ -256,16 +302,23 @@ pub(crate) fn elements(
     // The Developer Tweaks panel, above everything: it is a tool for looking
     // at what the compositor is doing, so nothing should be able to cover it.
     if let Some(area) = state.tweaks_area()
+        && area.overlaps(screen)
         && let Some(panel) = state.tweaks_panel()
-        && let Some(element) = panel.element(renderer, area, now, 1.0)
+        && let Some(element) = panel.element(
+            renderer,
+            smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
+            now,
+            1.0,
+        )
     {
         elements.push(Element::Chrome(element));
     }
 
     for (pane, window) in state.on_screen() {
-        let Some(outer) = state.pane_outer_of(pane) else {
+        let Some(global) = state.pane_outer_of(pane) else {
             continue;
         };
+        let outer = smithay::utils::Rectangle::new(global.loc - screen.loc, global.size);
         // Whether what is drawn here is ours or the client's. A window whose
         // application has not arrived is obviously ours; so is one whose
         // client has mapped and is not ready to be seen, which is most of the
@@ -283,8 +336,27 @@ pub(crate) fn elements(
 
         // The transform is expressed against the *outer* rect — the window
         // including its frame — so the frame scales and moves with the window
-        // rather than beside it.
-        let frame = state.drawn(pane, outer);
+        // rather than beside it. Computed in global coordinates, because that
+        // is the space a script's target was written in, and moved onto this
+        // screen afterwards.
+        let mut frame = state.drawn(pane, global);
+        // A window entirely on another monitor is not this monitor's business.
+        // Tested against the *drawn* rect and not the slot: a window animating
+        // across the boundary is half on each, and both halves have to be
+        // drawn or it disappears from one screen mid-flight.
+        //
+        // Skipped only when the transform is a plain rectangle. A matrix or a
+        // deform can put pixels well outside `frame.rect` — a genie reaches
+        // toward a dock that may be on the other screen — and there is no cheap
+        // rect that bounds it, so those are always drawn and the renderer
+        // clips.
+        if frame.matrix.is_identity()
+            && frame.deform.is_none()
+            && !frame.rect.overlaps(screen.to_f64())
+        {
+            continue;
+        }
+        frame.rect = onto(frame.rect);
         // The frame's share, in drawn pixels: a transform that scaled the
         // window scaled its frame with it.
         let insets = state.insets_of(pane);
@@ -335,7 +407,7 @@ pub(crate) fn elements(
         // one thing instead of the client tilting away from its own titlebar.
         if (!frame.matrix.is_identity() || frame.deform.is_some())
             && let Some(mesh) = crate::warp::mesh(frame.rect, frame.matrix, frame.deform, scale)
-            && let Some(texture) = prepared.take(&window)
+            && let Some(texture) = prepared.texture(&window)
         {
             elements.push(Element::Warped(crate::warp::Warp::new(
                 Id::new(),
@@ -413,7 +485,7 @@ pub(crate) fn elements(
     }
 
     // And the ones below: a wallpaper, and anything else a shell puts behind
-    // the windows.
+    // the windows. This output's own, as above.
     if let Some(output) = output.as_ref() {
         let map = layer_map_for_output(output);
         for surface in map.layers().rev().filter(|layer| !layer::is_above(layer)) {
@@ -447,11 +519,18 @@ fn cursor(
     renderer: &mut GlesRenderer,
     output_scale: Scale<f64>,
     scale: f64,
+    shift: smithay::utils::Point<f64, smithay::utils::Logical>,
 ) -> Vec<Element> {
     let Some(pointer) = state.seat.get_pointer() else {
         return Vec::new();
     };
-    let location = pointer.current_location();
+    // The pointer is one thing in a global space and there are several screens
+    // to draw it on. Each output draws it at its own offset, and the ones it is
+    // not over draw it off their own edge, where the renderer discards it. No
+    // test for "is the pointer on this monitor" is needed or wanted: a cursor
+    // straddling the boundary has to appear on both, and picking one would clip
+    // it to a half-cursor at the exact moment it crosses.
+    let location = pointer.current_location() + shift;
 
     match state.pointer.status.clone() {
         CursorImageStatus::Hidden => Vec::new(),

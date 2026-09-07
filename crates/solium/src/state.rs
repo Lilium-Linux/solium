@@ -80,7 +80,7 @@ use zxdg_toplevel_decoration_v1::Mode;
 use crate::{
     decoration::{Action, Decorations, Insets, TITLEBAR_HEIGHT},
     input::{grab::MoveGrab, profile::Profile, resize},
-    layer,
+    layer, monitor,
     pane::Pane,
     present::{self, Clock, Frame},
     script::{AnimationSpec, Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
@@ -140,6 +140,13 @@ pub(crate) struct Solium {
     pub(crate) layer_shell_state: WlrLayerShellState,
 
     pub(crate) space: Space<Window>,
+
+    /// Where the monitors are, relative to each other. See `monitor.rs`.
+    ///
+    /// Empty until a script says otherwise, which means "left to right in
+    /// connector order" — right about half the time, and wrong in a way that
+    /// is obvious and one line to fix.
+    pub(crate) arrangement: monitor::Arrangement,
 
     /// What the compositor thinks its windows are. See `pane.rs`.
     ///
@@ -521,6 +528,7 @@ impl Solium {
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
             seat_state,
             space: Space::default(),
+            arrangement: monitor::Arrangement::default(),
             panes: crate::pane::Panes::default(),
             popups: PopupManager::default(),
             seat,
@@ -693,14 +701,155 @@ impl Solium {
             .is_some_and(|id| self.decorations.contains(id))
     }
 
-    /// The output area windows may use.
+    /// The monitor the user is working on.
+    ///
+    /// **The one the pointer is on.** One rule, and it needs no state: a new
+    /// window opens where you are looking, `sol.monitor()` means the screen in
+    /// front of you, and there is nothing to get out of step.
+    ///
+    /// The alternative — the focused window's monitor — sounds more careful and
+    /// is worse in the case that actually happens: move the pointer to the
+    /// second screen, click the empty desktop, open a terminal. Nothing was
+    /// focused, so nothing changed, and the terminal appears on the screen you
+    /// just looked away from. It is also inconsistent with the layout policy
+    /// this project already has, where a new window splits *the window under
+    /// the pointer*.
+    ///
+    /// A window is still maximised and fitted against the monitor **it** is on,
+    /// not this one. Where a window goes and where a window is are different
+    /// questions.
+    pub(crate) fn active_output(&self) -> Option<Output> {
+        let at = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location());
+        match at {
+            Some(at) => monitor::at(&self.space, at).or_else(|| monitor::nearest(&self.space, at)),
+            None => self.space.outputs().next().cloned(),
+        }
+    }
+
+    /// The output whose place in the global space is exactly this rectangle.
+    ///
+    /// How the render loop gets from "the screen I am drawing" back to the
+    /// output that owns the layer surfaces on it. Matched on geometry rather
+    /// than carried through, so there is one fewer thing to keep in step.
+    pub(crate) fn output_for(&self, screen: Rectangle<i32, Logical>) -> Option<Output> {
+        self.space
+            .outputs()
+            .find(|output| self.space.output_geometry(output) == Some(screen))
+            .cloned()
+    }
+
+    /// The monitor covering a point, or the nearest one to it.
+    ///
+    /// Never `None` while any output is mapped, on purpose. The callers are
+    /// asking in order to place or size something, and "no monitor" is not an
+    /// answer they can do anything with — an L-shaped arrangement has a hole in
+    /// it, and a window whose centre lands in the hole still has to go
+    /// somewhere.
+    pub(crate) fn output_at(&self, point: Point<i32, Logical>) -> Option<Output> {
+        let point = point.to_f64();
+        monitor::at(&self.space, point).or_else(|| monitor::nearest(&self.space, point))
+    }
+
+    /// The monitor a rectangle is on, judged by its centre.
+    ///
+    /// Derived rather than stored, and that is the point: a window dragged to
+    /// the next screen belongs to it the moment it is more than half way
+    /// there, with no bookkeeping to keep in step and nothing to go stale.
+    pub(crate) fn output_of(&self, rect: Rectangle<i32, Logical>) -> Option<Output> {
+        self.output_at((rect.loc.x + rect.size.w / 2, rect.loc.y + rect.size.h / 2).into())
+    }
+
+    /// The area windows may use on the monitor the user is working on.
     ///
     /// Whatever is left once every anchored surface has taken its exclusive
     /// zone — a number the *shell* chooses and may change at runtime, not a
     /// constant here. Every placement decision reads this rather than the raw
     /// output.
     pub(crate) fn work_area(&self) -> Option<Rectangle<i32, Logical>> {
-        Some(layer::work_area(self.space.outputs().next()?))
+        self.work_area_on(&self.active_output()?)
+    }
+
+    /// The same, for a monitor you already have.
+    pub(crate) fn work_area_on(&self, output: &Output) -> Option<Rectangle<i32, Logical>> {
+        // The layer map's zone is in the output's own coordinates; every rect
+        // the compositor works in is global. Without this offset a bar on the
+        // second monitor reserves its strip from the *first* one, which looks
+        // like the exclusive zone being applied to the wrong screen because it
+        // is.
+        let geometry = self.space.output_geometry(output)?;
+        let mut area = layer::work_area(output);
+        area.loc += geometry.loc;
+        Some(area)
+    }
+
+    /// The area a rectangle's own monitor offers it.
+    pub(crate) fn work_area_of(
+        &self,
+        rect: Rectangle<i32, Logical>,
+    ) -> Option<Rectangle<i32, Logical>> {
+        self.work_area_on(&self.output_of(rect)?)
+    }
+
+    /// Put every mapped output where the arrangement says.
+    ///
+    /// Called when an output appears or goes away and when the configuration is
+    /// read again, and it is the only place an output's position is decided.
+    /// Re-running it with nothing changed is harmless and cheap, which is what
+    /// makes it safe to call from a reload.
+    pub(crate) fn place_outputs(&mut self) {
+        let monitors: Vec<_> = self
+            .space
+            .outputs()
+            .map(|output| {
+                let size = output
+                    .current_mode()
+                    .map(|mode| mode.size.to_logical(1))
+                    .unwrap_or_default();
+                (output.name(), size)
+            })
+            .collect();
+        if monitors.is_empty() {
+            return;
+        }
+
+        for name in self.arrangement.unmatched(&monitors) {
+            // Warned rather than ignored: a connector name that does not exist
+            // on this machine is the usual reason a monitor configuration
+            // appears to do nothing at all, and it is invisible otherwise.
+            tracing::warn!(
+                monitor = name,
+                "no connector by that name -- run `solium --probe` for the ones this machine has"
+            );
+        }
+
+        let places = self.arrangement.place(&monitors);
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        for (output, at) in outputs.iter().zip(places) {
+            self.space.map_output(output, at);
+            tracing::info!(monitor = output.name(), x = at.x, y = at.y, "placed");
+        }
+        self.arrange_layers();
+    }
+
+    /// Arrange anchored surfaces on every monitor.
+    ///
+    /// Returns whether anything moved, because a changed exclusive zone changes
+    /// a work area and the windows placed against the old one are now wrong.
+    pub(crate) fn arrange_layers(&mut self) -> bool {
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        // A plain loop rather than `any`, deliberately: `any` short-circuits,
+        // and the first output reporting a change would leave every one after
+        // it unarranged — a bar on the second monitor placed against nothing.
+        let mut moved = false;
+        for output in &outputs {
+            if layer::arrange(output) {
+                moved = true;
+            }
+        }
+        moved
     }
 
     /// A window's application id, as the client set it.
@@ -993,12 +1142,34 @@ impl Solium {
                         |window| self.window_title(window),
                     ),
                     focused: pane.client().is_some() && focused.as_ref() == pane.client(),
+                    monitor: self
+                        .output_of(outer)
+                        .map(|output| output.name())
+                        .unwrap_or_default(),
                 })
+            })
+            .collect();
+
+        let active = self.active_output();
+        let monitors = self
+            .space
+            .outputs()
+            .map(|output| crate::script::MonitorInfo {
+                name: output.name(),
+                area: self.work_area_on(output).map(to_rect).unwrap_or_default(),
+                whole: self
+                    .space
+                    .output_geometry(output)
+                    .map(to_rect)
+                    .unwrap_or_default(),
+                scale: output.current_scale().fractional_scale(),
+                focused: active.as_ref() == Some(output),
             })
             .collect();
 
         Snapshot {
             windows,
+            monitors,
             work_area: self.work_area().map(to_rect).unwrap_or_default(),
             cursor: (cursor.x, cursor.y),
         }
@@ -1187,6 +1358,17 @@ impl Solium {
                 }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
                 Command::Reload => self.request = Some(Request::Reload),
+                Command::Monitors(arrangement) => {
+                    self.arrangement = arrangement;
+                    // Applied immediately, and applied again on reload, so
+                    // moving a monitor is `super+shift+r` rather than logging
+                    // out. Anything already placed is now measured against a
+                    // different work area, which is why the layout is asked to
+                    // run again.
+                    self.place_outputs();
+                    self.trigger_relayout();
+                    self.redraw = true;
+                }
                 Command::Quit => {
                     tracing::info!("a script asked to stop");
                     self.request = Some(Request::Quit);
@@ -1444,8 +1626,13 @@ impl Solium {
         // Anchored surfaces above windows are hit first: a click on a panel is
         // the panel's, and it reserved that strip precisely so nothing of the
         // client's would be under the cursor there.
-        if let Some(output) = self.space.outputs().next()
-            && let Some(found) = layer::surface_under(output, location)
+        //
+        // The monitor under the point, not the first one: a layer map's
+        // geometry is in its own output's coordinates, so asking the wrong
+        // output hit-tests the right strip on the wrong screen.
+        if let Some(output) = monitor::at(&self.space, location)
+            && let Some(geometry) = self.space.output_geometry(&output)
+            && let Some(found) = layer::surface_under(&output, location - geometry.loc.to_f64())
         {
             return Some(found);
         }
@@ -1831,10 +2018,13 @@ impl Solium {
         let Some(toplevel) = window.toplevel().cloned() else {
             return;
         };
-        let Some(work_area) = self.work_area() else {
+        let Some(current) = self.real_geometry(window) else {
             return;
         };
-        let Some(current) = self.real_geometry(window) else {
+        // The monitor this window is on, not the one the pointer is on: a
+        // window maximised while you point at the other screen must fill its
+        // own, and jumping across is the last thing a maximise should do.
+        let Some(work_area) = self.work_area_of(current) else {
             return;
         };
 
@@ -2298,13 +2488,15 @@ impl Solium {
     pub(crate) fn shell(&mut self) -> Option<&mut crate::surface::ShellSurface> {
         if self.shell.is_none() {
             let scene = std::env::var_os("SOLIUM_SHELL_SCENE")?;
-            let area = self.work_area()?;
-            let name = self
-                .space
-                .outputs()
-                .next()
-                .map(smithay::output::Output::name)
-                .unwrap_or_default();
+            // One scene on the active monitor. A shell that wants a bar on
+            // every screen writes layer surfaces, one per output, which is the
+            // supported route and the reason `new_layer_surface` honours the
+            // output a client names — this is the in-process development
+            // affordance, and giving it a screen each would be building the
+            // multi-monitor shell the compositor has no business owning.
+            let output = self.active_output()?;
+            let area = self.work_area_on(&output)?;
+            let name = output.name();
             // What shell components ask for about the screen they are on.
             let properties = format!(
                 "{{\"screenInfo\":{{\"name\":\"{name}\",\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"scale\":1}}}}",
@@ -2545,7 +2737,14 @@ impl Solium {
     /// for the floating case, where nothing else has an opinion.
     fn fitted_size(&self, window: &Window) -> Size<i32, Logical> {
         let size = window.geometry().size;
-        let Some(area) = self.work_area() else {
+        // A window that already has a place is measured against its own
+        // monitor; a brand new one against the active one, which is where it
+        // is about to be put.
+        let area = self
+            .real_geometry(window)
+            .and_then(|real| self.work_area_of(real))
+            .or_else(|| self.work_area());
+        let Some(area) = area else {
             return size;
         };
         let insets = self.frame_insets(window);
@@ -2794,14 +2993,13 @@ impl WlrLayerShellHandler for Solium {
         _layer: Layer,
         namespace: String,
     ) {
-        // A surface may name an output or leave the choice to us. With one
-        // output the distinction does not bite yet, but honouring the request
-        // now means a shell written against Solium is not written against a
-        // simplification.
+        // A surface may name an output or leave the choice to us; a shell that
+        // puts a bar on each screen names one per bar, and that is the request
+        // that has to be honoured for the second screen to get a bar at all.
         let output = wl_output
             .as_ref()
             .and_then(Output::from_resource)
-            .or_else(|| self.space.outputs().next().cloned());
+            .or_else(|| self.active_output());
         let Some(output) = output else {
             tracing::warn!(
                 namespace,
@@ -2820,7 +3018,7 @@ impl WlrLayerShellHandler for Solium {
         // Arranging assigns the size and position the client is waiting to be
         // told; it must happen before the client can draw anything.
         layer::arrange(&output);
-        tracing::info!(namespace, "layer surface mapped");
+        tracing::info!(namespace, monitor = output.name(), "layer surface mapped");
     }
 
     fn ack_configure(&mut self, _surface: WlSurface, _configure: LayerSurfaceConfigure) {}
@@ -2951,8 +3149,10 @@ impl FractionalScaleHandler for Solium {
     ///
     /// Answered from the output it is on rather than from a constant, so the
     /// answer stays right the day an output is not 1x. A surface not on any
-    /// output yet is told the first output's scale, which is the one it is
-    /// about to be on.
+    /// output yet is told the active monitor's scale, which is the one it is
+    /// about to be on — and with two monitors at different scales, being told
+    /// the *first* one's would be a client rendering at the wrong size on
+    /// whichever screen it actually opened on.
     fn new_fractional_scale(
         &mut self,
         surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
@@ -2960,7 +3160,7 @@ impl FractionalScaleHandler for Solium {
         let scale = self
             .window_for(&surface)
             .and_then(|window| self.space.outputs_for_element(&window).first().cloned())
-            .or_else(|| self.space.outputs().next().cloned())
+            .or_else(|| self.active_output())
             .map_or(1.0, |output| output.current_scale().fractional_scale());
         with_states(&surface, |states| {
             with_fractional_scale(states, |fractional| {

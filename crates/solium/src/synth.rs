@@ -20,8 +20,7 @@ use smithay::{
         ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent, PointerButtonEvent,
         PointerMotionEvent, UnusedEvent,
     },
-    output::Output,
-    utils::{Logical, Point},
+    utils::{Logical, Point, Rectangle},
 };
 
 use crate::state::Solium;
@@ -145,7 +144,7 @@ impl InputBackend for Synthetic {
 /// not a working grab.
 pub(crate) fn drag(
     state: &mut Solium,
-    output: &Output,
+    region: Rectangle<i32, Logical>,
     from: Point<f64, Logical>,
     to: Point<f64, Logical>,
     steps: u32,
@@ -160,11 +159,11 @@ pub(crate) fn drag(
     // Put the pointer on the target first. Relative motion has no absolute
     // form, so getting somewhere means moving there from wherever it is.
     let start = current(state);
-    send_motion(state, output, from - start, tick(&mut time));
+    send_motion(state, region, from - start, tick(&mut time));
 
     send_button(
         state,
-        output,
+        region,
         BTN_LEFT,
         ButtonState::Pressed,
         tick(&mut time),
@@ -178,12 +177,12 @@ pub(crate) fn drag(
             span.x * (progress - previous),
             span.y * (progress - previous),
         );
-        send_motion(state, output, delta.into(), tick(&mut time));
+        send_motion(state, region, delta.into(), tick(&mut time));
     }
 
     send_button(
         state,
-        output,
+        region,
         BTN_LEFT,
         ButtonState::Released,
         tick(&mut time),
@@ -198,10 +197,15 @@ fn current(state: &Solium) -> Point<f64, Logical> {
         .unwrap_or_default()
 }
 
-fn send_motion(state: &mut Solium, output: &Output, delta: Point<f64, Logical>, time: u64) {
+fn send_motion(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    delta: Point<f64, Logical>,
+    time: u64,
+) {
     crate::input::handle::<Synthetic>(
         state,
-        output,
+        region,
         InputEvent::PointerMotion {
             event: Motion { delta, time },
         },
@@ -210,14 +214,14 @@ fn send_motion(state: &mut Solium, output: &Output, delta: Point<f64, Logical>, 
 
 fn send_button(
     state: &mut Solium,
-    output: &Output,
+    region: Rectangle<i32, Logical>,
     button: u32,
     button_state: ButtonState,
     time: u64,
 ) {
     crate::input::handle::<Synthetic>(
         state,
-        output,
+        region,
         InputEvent::PointerButton {
             event: Button {
                 button,

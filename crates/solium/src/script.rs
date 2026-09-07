@@ -69,6 +69,32 @@ pub(crate) struct WindowInfo {
     pub(crate) drawn: Rect,
     pub(crate) title: String,
     pub(crate) focused: bool,
+    /// Which monitor it is on, by name.
+    ///
+    /// Derived from where the window is rather than remembered, so a window
+    /// dragged to the next screen belongs to it without anything having to be
+    /// told. This is what lets a layout run per monitor: group the windows by
+    /// this, lay out each group in that monitor's own area.
+    pub(crate) monitor: String,
+}
+
+/// A monitor as a script sees it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MonitorInfo {
+    /// The connector name — `DP-1`, `eDP-1`, `winit-2`. What `WindowInfo`'s
+    /// `monitor` matches, and what a configured arrangement names.
+    pub(crate) name: String,
+    /// What windows may use: the monitor less whatever anchored surfaces have
+    /// reserved. In the global space, so a rect from here can be handed
+    /// straight to `sol.place`.
+    pub(crate) area: Rect,
+    /// The whole monitor, exclusive zones included. What a wallpaper or a
+    /// fullscreen window covers.
+    pub(crate) whole: Rect,
+    /// How many device pixels to a logical one.
+    pub(crate) scale: f64,
+    /// Whether this is the one the pointer is on. See `Solium::active_output`.
+    pub(crate) focused: bool,
 }
 
 /// What the compositor looked like when a handler was called.
@@ -76,6 +102,12 @@ pub(crate) struct WindowInfo {
 pub(crate) struct Snapshot {
     /// Topmost first, so hit-testing walks it in order.
     pub(crate) windows: Vec<WindowInfo>,
+    /// Every monitor, in the order the compositor holds them.
+    pub(crate) monitors: Vec<MonitorInfo>,
+    /// The active monitor's work area — what `sol.monitor()` answers.
+    ///
+    /// Kept as its own field rather than found in `monitors` every time,
+    /// because almost every script wants exactly this and nothing else.
     pub(crate) work_area: Rect,
     pub(crate) cursor: (f64, f64),
 }
@@ -132,6 +164,8 @@ pub(crate) enum Command {
     Quit,
     /// Read the configuration again.
     Reload,
+    /// Where the monitors are, relative to each other.
+    Monitors(crate::monitor::Arrangement),
     /// Show or hide the Developer Tweaks panel.
     TweaksToggle,
     /// Move and resize a window for real — the layout's authority, not a
@@ -753,15 +787,92 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("h", window.rect.h)?;
                 entry.set("title", window.title.clone())?;
                 entry.set("focused", window.focused)?;
+                entry.set("monitor", window.monitor.clone())?;
                 windows.set(index + 1, entry)?;
             }
             Ok(windows)
         })?,
     )?;
 
+    // Reads with no argument, configures with a table. One name for one
+    // subject: `sol.monitors()` asks where the monitors are, `sol.monitors{…}`
+    // says. The same shape as `sol.monitor()`, which answers about one.
+    sol.set(
+        "monitors",
+        lua.create_function(|lua, options: Option<Vec<mlua::Table>>| {
+            let Some(rows) = options else {
+                let monitors = lua.create_table()?;
+                for (index, monitor) in snapshot(lua)?.monitors.iter().enumerate() {
+                    let entry = monitor.area.to_table(lua)?;
+                    entry.set("name", monitor.name.clone())?;
+                    entry.set("scale", monitor.scale)?;
+                    entry.set("focused", monitor.focused)?;
+                    // The whole monitor as well as the usable part: a
+                    // wallpaper and a fullscreen window want the one a bar has
+                    // not taken a bite out of.
+                    entry.set("whole", monitor.whole.to_table(lua)?)?;
+                    monitors.set(index + 1, entry)?;
+                }
+                return Ok(Value::Table(monitors));
+            };
+
+            let mut places = Vec::new();
+            for row in rows {
+                // A row with no name cannot be matched to a connector, and
+                // silently dropping it is how a configuration appears to be
+                // ignored. Say which row, because the list has no other
+                // landmarks.
+                let Ok(Value::String(name)) = row.get::<Value>("name") else {
+                    tracing::warn!(
+                        row = places.len() + 1,
+                        "a monitor with no name -- run `solium --probe` for the ones this \
+                         machine has"
+                    );
+                    continue;
+                };
+                let Ok(name) = name.to_str() else {
+                    continue;
+                };
+                places.push(crate::monitor::Placement {
+                    name: name.to_string(),
+                    at: (
+                        row.get::<Option<i32>>("x")?.unwrap_or(0),
+                        row.get::<Option<i32>>("y")?.unwrap_or(0),
+                    )
+                        .into(),
+                });
+            }
+            with_pending(lua, |pending| {
+                pending
+                    .commands
+                    .push(Command::Monitors(crate::monitor::Arrangement::new(
+                        places.clone(),
+                    )));
+            })?;
+            Ok(Value::Nil)
+        })?,
+    )?;
+
+    // The monitor a window is on, or the active one when asked about nothing.
+    //
+    // Both answers are a work-area rect, so every script written when there
+    // was one monitor still reads correctly: `sol.monitor()` meant "the screen"
+    // and still does — it is just no longer the only one.
     sol.set(
         "monitor",
-        lua.create_function(|lua, ()| snapshot(lua)?.work_area.to_table(lua))?,
+        lua.create_function(|lua, id: Option<u64>| {
+            let snapshot = snapshot(lua)?;
+            let named = id
+                .and_then(|id| snapshot.windows.iter().find(|window| window.id == id))
+                .and_then(|window| {
+                    snapshot
+                        .monitors
+                        .iter()
+                        .find(|monitor| monitor.name == window.monitor)
+                })
+                .map(|monitor| monitor.area);
+            named.unwrap_or(snapshot.work_area).to_table(lua)
+        })?,
     )?;
 
     sol.set(
@@ -1577,6 +1688,24 @@ mod tests {
                 },
                 drawn: Rect::default(),
                 title: "a window".to_owned(),
+                focused: true,
+                monitor: "test-1".to_owned(),
+            }],
+            monitors: vec![MonitorInfo {
+                name: "test-1".to_owned(),
+                area: Rect {
+                    x: 0.0,
+                    y: 34.0,
+                    w: 1600.0,
+                    h: 866.0,
+                },
+                whole: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1600.0,
+                    h: 900.0,
+                },
+                scale: 1.0,
                 focused: true,
             }],
             work_area: Rect {

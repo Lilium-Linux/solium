@@ -29,8 +29,7 @@ use smithay::{
         },
         touch::{DownEvent, MotionEvent as TouchMotionEvent, UpEvent},
     },
-    output::Output,
-    utils::{Logical, Point, SERIAL_COUNTER},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
     wayland::pointer_constraints::{PointerConstraint, with_pointer_constraint},
 };
 
@@ -59,15 +58,28 @@ enum Action {
 }
 
 /// Route one backend event to the seat.
-pub(crate) fn handle<B: InputBackend>(state: &mut Solium, output: &Output, event: InputEvent<B>) {
+///
+/// `region` is the part of the global space this device's *absolute* positions
+/// are measured against — a touchscreen's own monitor, or the nested window,
+/// which is one surface spanning however many monitors are inside it. The
+/// backend knows which of those it is and the input layer does not need to.
+///
+/// A relative device has no region: a mouse reports how far it moved, and the
+/// pointer it moves crosses every screen, so that path is bounded by all of
+/// them instead.
+pub(crate) fn handle<B: InputBackend>(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    event: InputEvent<B>,
+) {
     match event {
         InputEvent::Keyboard { event } => keyboard(state, event),
-        InputEvent::PointerMotion { event } => pointer_relative(state, output, event),
-        InputEvent::PointerMotionAbsolute { event } => pointer_motion(state, output, event),
+        InputEvent::PointerMotion { event } => pointer_relative(state, event),
+        InputEvent::PointerMotionAbsolute { event } => pointer_motion(state, region, event),
         InputEvent::PointerButton { event } => pointer_button(state, event),
         InputEvent::PointerAxis { event } => pointer_axis(state, event),
-        InputEvent::TouchDown { event } => touch_down(state, output, event),
-        InputEvent::TouchMotion { event } => touch_motion(state, output, event),
+        InputEvent::TouchDown { event } => touch_down(state, region, event),
+        InputEvent::TouchMotion { event } => touch_motion(state, region, event),
         InputEvent::TouchUp { event } => touch_up(state, event),
         InputEvent::TouchFrame { .. } => {
             if let Some(touch) = state.seat.get_touch() {
@@ -205,13 +217,13 @@ fn combo_for(modifiers: &ModifiersState, keysym: Keysym) -> String {
 
 fn pointer_motion<B: InputBackend>(
     state: &mut Solium,
-    output: &Output,
+    region: Rectangle<i32, Logical>,
     event: impl AbsolutePositionEvent<B>,
 ) {
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
-    let location = absolute_location(output, &event);
+    let location = absolute_location(region, &event);
 
     // Frames see the pointer before clients do, so buttons light up on hover.
     // Motion is *also* forwarded below, because the pointer leaving a window
@@ -259,16 +271,20 @@ fn pointer_motion<B: InputBackend>(
 /// moved and leaves the position to us, which means a compositor that only
 /// handles the absolute case has a pointer that never moves — and no way to
 /// tell that apart from input being dead.
-fn pointer_relative<B: InputBackend>(
-    state: &mut Solium,
-    output: &Output,
-    event: impl PointerMotionEvent<B>,
-) {
+fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMotionEvent<B>) {
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
+    // Every screen, not the device's own: a mouse moved right past the edge of
+    // one monitor is a pointer arriving on the next, and that is the whole of
+    // what crossing between monitors is.
+    let screens: Vec<_> = state
+        .space
+        .outputs()
+        .filter_map(|output| state.space.output_geometry(output))
+        .collect();
     let was = pointer.current_location();
-    let (location, locked) = held(state, &pointer, confine(output, was + event.delta()), was);
+    let (location, locked) = held(state, &pointer, confine(&screens, was + event.delta()), was);
     let under = state.surface_under(location);
     // A locked pointer does not move, and the protocol is explicit that it is
     // not merely held in place: the compositor sends no motion at all. Sending
@@ -413,21 +429,55 @@ enum Held {
     Inside(Option<bool>),
 }
 
-/// Keep the pointer on the screen.
+/// Keep the pointer on a screen — any screen.
 ///
 /// Relative motion has no bounds of its own: without this the pointer walks off
-/// the output and never comes back, which looks exactly like it froze.
-fn confine(output: &Output, location: Point<f64, Logical>) -> Point<f64, Logical> {
-    let size = output
-        .current_mode()
-        .map(|mode| mode.size)
-        .unwrap_or_default();
-    let last = |edge: i32| f64::from((edge - 1).max(0));
-    (
-        location.x.clamp(0.0, last(size.w)),
-        location.y.clamp(0.0, last(size.h)),
-    )
-        .into()
+/// the desktop and never comes back, which looks exactly like it froze.
+///
+/// Two monitors are not one big rectangle. A 2560x1440 beside a 1920x1080 with
+/// their top edges aligned leaves 360 rows below the smaller one that belong to
+/// no screen at all, and an L-shaped arrangement is mostly hole. So the test is
+/// "is this point on *a* monitor", and a point that is on none is pulled into
+/// the nearest one rather than clamped to a bounding box — clamping to the box
+/// is what would let the pointer sit in the dead corner, visible, unable to
+/// reach anything, which is worse than not moving at all.
+fn confine(
+    screens: &[Rectangle<i32, Logical>],
+    location: Point<f64, Logical>,
+) -> Point<f64, Logical> {
+    // The edge, not one past it: a pointer at exactly x = width is off the
+    // right-hand monitor, and on a single screen it was off the desktop.
+    let inside = |screen: &Rectangle<i32, Logical>| {
+        let (left, top) = (f64::from(screen.loc.x), f64::from(screen.loc.y));
+        let right = left + f64::from((screen.size.w - 1).max(0));
+        let bottom = top + f64::from((screen.size.h - 1).max(0));
+        (left, top, right, bottom)
+    };
+
+    if screens.iter().any(|screen| {
+        let (left, top, right, bottom) = inside(screen);
+        location.x >= left && location.x <= right && location.y >= top && location.y <= bottom
+    }) {
+        return location;
+    }
+
+    // Nowhere valid: the closest point on the closest screen. Measured to the
+    // *clamped* point rather than to the screen's centre, so a pointer just
+    // below the small monitor lands on its bottom edge instead of being thrown
+    // to the middle of the big one.
+    let nearest = screens
+        .iter()
+        .map(|screen| {
+            let (left, top, right, bottom) = inside(screen);
+            let at = Point::from((location.x.clamp(left, right), location.y.clamp(top, bottom)));
+            let (dx, dy) = (at.x - location.x, at.y - location.y);
+            (at, dx * dx + dy * dy)
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b));
+
+    // No screens at all. Nothing is on the desktop to be off the edge of, so
+    // the pointer is left where it was asked to go.
+    nearest.map_or(location, |(at, _)| at)
 }
 
 /// Focus whatever the pointer is over, if the profile says so.
@@ -751,11 +801,15 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
     state.redraw = true;
 }
 
-fn touch_down<B: InputBackend>(state: &mut Solium, output: &Output, event: impl TouchDownEvent<B>) {
+fn touch_down<B: InputBackend>(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    event: impl TouchDownEvent<B>,
+) {
     let Some(touch) = state.seat.get_touch() else {
         return;
     };
-    let location = absolute_location(output, &event);
+    let location = absolute_location(region, &event);
     let under = state.surface_under(location);
     let serial = SERIAL_COUNTER.next_serial();
 
@@ -779,13 +833,13 @@ fn touch_down<B: InputBackend>(state: &mut Solium, output: &Output, event: impl 
 
 fn touch_motion<B: InputBackend>(
     state: &mut Solium,
-    output: &Output,
+    region: Rectangle<i32, Logical>,
     event: impl TouchMotionEventTrait<B>,
 ) {
     let Some(touch) = state.seat.get_touch() else {
         return;
     };
-    let location = absolute_location(output, &event);
+    let location = absolute_location(region, &event);
     let under = state.surface_under(location);
 
     touch.motion(
@@ -813,19 +867,23 @@ fn touch_up<B: InputBackend>(state: &mut Solium, event: impl TouchUpEvent<B>) {
     );
 }
 
-/// Turn a backend's window-relative position into compositor coordinates.
+/// Turn a device's own position into a point in the global space.
 ///
-/// The winit backend reports positions normalised to its window, so they are
-/// scaled by the output mode rather than used directly.
+/// An absolute device reports where it is within *its* region normalised to
+/// 0..1 — the nested window, or the monitor a touchscreen is glued to. So the
+/// value is scaled by that region's size and then offset by where the region
+/// sits, which is the step that was missing while there was only ever one
+/// region and it was always at the origin.
 fn absolute_location<B: InputBackend>(
-    output: &Output,
+    region: Rectangle<i32, Logical>,
     event: &impl AbsolutePositionEvent<B>,
 ) -> Point<f64, Logical> {
-    let size = output
-        .current_mode()
-        .map(|mode| mode.size)
-        .unwrap_or_default();
-    (event.x_transformed(size.w), event.y_transformed(size.h)).into()
+    let at: Point<f64, Logical> = (
+        event.x_transformed(region.size.w),
+        event.y_transformed(region.size.h),
+    )
+        .into();
+    at + region.loc.to_f64()
 }
 
 #[cfg(test)]
@@ -833,8 +891,7 @@ mod tests {
     use super::{Request, combo_for, confine, escape};
     use smithay::{
         input::keyboard::{Keysym, ModifiersState},
-        output::{Mode, Output, PhysicalProperties, Subpixel},
-        utils::Transform,
+        utils::Rectangle,
     };
 
     fn modifiers(ctrl: bool, alt: bool) -> ModifiersState {
@@ -903,45 +960,77 @@ mod tests {
         assert_eq!(escape(&modifiers(true, true), Keysym::Return), None);
     }
 
-    fn output() -> Output {
-        let output = Output::new(
-            "test".to_owned(),
-            PhysicalProperties {
-                size: (0, 0).into(),
-                subpixel: Subpixel::Unknown,
-                make: "Solium".into(),
-                model: "test".into(),
-            },
-        );
-        output.change_current_state(
-            Some(Mode {
-                size: (1920, 1080).into(),
-                refresh: 60_000,
-            }),
-            Some(Transform::Normal),
-            None,
-            Some((0, 0).into()),
-        );
-        output
-    }
-
-    /// Relative motion has no bounds of its own. Without this the pointer walks
-    /// off the output and never comes back, which looks exactly like a freeze.
+    /// One screen, and the case this started as: relative motion has no bounds
+    /// of its own, so without confinement the pointer walks off and never comes
+    /// back, which looks exactly like a freeze.
     #[test]
     fn the_pointer_stays_on_the_screen() {
-        let output = output();
-        assert_eq!(confine(&output, (-40.0, -10.0).into()), (0.0, 0.0).into());
+        let screens = [Rectangle::new((0, 0).into(), (1920, 1080).into())];
+        assert_eq!(confine(&screens, (-40.0, -10.0).into()), (0.0, 0.0).into());
         assert_eq!(
-            confine(&output, (9999.0, 9999.0).into()),
+            confine(&screens, (9999.0, 9999.0).into()),
             (1919.0, 1079.0).into()
         );
     }
 
     #[test]
     fn a_pointer_already_on_the_screen_is_left_alone() {
+        let screens = [Rectangle::new((0, 0).into(), (1920, 1080).into())];
         assert_eq!(
-            confine(&output(), (640.0, 480.0).into()),
+            confine(&screens, (640.0, 480.0).into()),
             (640.0, 480.0).into()
         );
+    }
+
+    /// The whole point of the change: the edge between two monitors is not an
+    /// edge. A pointer that stopped at x = 1919 was a second screen nothing
+    /// could reach.
+    #[test]
+    fn the_pointer_crosses_between_monitors() {
+        let screens = [
+            Rectangle::new((0, 0).into(), (1920, 1080).into()),
+            Rectangle::new((1920, 0).into(), (1920, 1080).into()),
+        ];
+        assert_eq!(
+            confine(&screens, (1920.0, 500.0).into()),
+            (1920.0, 500.0).into()
+        );
+        // And still stops at the far edge of the far monitor.
+        assert_eq!(
+            confine(&screens, (5000.0, 500.0).into()),
+            (3839.0, 500.0).into()
+        );
+    }
+
+    /// Two monitors of different heights leave rows that belong to no screen.
+    /// Clamping to the bounding box would let the pointer sit in that dead
+    /// corner — on nothing, over nothing, unable to reach anything.
+    #[test]
+    fn the_pointer_cannot_sit_in_the_gap_between_monitors() {
+        let screens = [
+            Rectangle::new((0, 0).into(), (2560, 1440).into()),
+            Rectangle::new((2560, 0).into(), (1920, 1080).into()),
+        ];
+        let at = confine(&screens, (3000.0, 1300.0).into());
+        assert!(
+            screens.iter().any(|screen| {
+                at.x >= f64::from(screen.loc.x)
+                    && at.x <= f64::from(screen.loc.x + screen.size.w - 1)
+                    && at.y >= f64::from(screen.loc.y)
+                    && at.y <= f64::from(screen.loc.y + screen.size.h - 1)
+            }),
+            "the pointer was left at {at:?}, which is on no monitor"
+        );
+        // Pulled to the nearest edge rather than to a centre: it was just below
+        // the small monitor, so it belongs on the bottom of the small monitor.
+        assert_eq!(at, (3000.0, 1079.0).into());
+    }
+
+    /// No outputs mapped at all. Nothing to be off the edge of, and a pointer
+    /// snapped to the origin on every event would be a pointer that cannot move
+    /// while a monitor is being reconfigured.
+    #[test]
+    fn with_no_screens_the_pointer_is_left_where_it_was_put() {
+        assert_eq!(confine(&[], (640.0, 480.0).into()), (640.0, 480.0).into());
     }
 }
