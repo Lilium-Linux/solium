@@ -10,6 +10,9 @@ local config = require("config")
 -- everything else. Both take effect immediately when reloaded.
 sol.decoration(config.decoration)
 sol.loading(config.loading)
+-- Where the monitors go. Applied on reload too, so moving a screen in the
+-- configuration is `super+shift+r` rather than logging out.
+sol.monitors(config.monitors)
 
 -- Only reachable when the compositor was started with --debug-mode, but the
 -- entries are declared either way: what costs nothing to declare should not
