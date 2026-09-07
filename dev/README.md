@@ -133,6 +133,27 @@ monitor is the one the pointer is on.
 
 Two windows tiled on each screen, in one capture, with no hands.
 
+### Soaking on a TTY, which is the only honest soak
+
+A nested soak measures the nested backend as much as the compositor: Solium is
+a client of the host there, with its own EGL surface, its own cursor theme and
+its own client-side libraries, none of which exist on a real session. A leak
+found nested is a leak *somewhere*, and saying which needs the other backend.
+
+`--attach` samples a compositor it did not start, so it cannot pass the
+scripted input — which used to leave an attached soak with nothing but the
+client spawner for churn, and the window lifecycle is the thing worth
+churning. Generate the input separately:
+
+    # on the TTY
+    SOLIUM_TRIGGER_AT="$(dev/soak.sh --triggers 60)" ./target/debug/solium --tty
+
+    # from another VT or over ssh
+    dev/soak.sh 60 --attach wayland-1
+
+The trigger list is start-time only, which is why it has to be built before
+the session rather than sent to it.
+
 ## Capturing a frame
 
 ```sh

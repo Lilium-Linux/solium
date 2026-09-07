@@ -37,6 +37,30 @@ attach=""
 if [[ "${2:-}" == "--attach" ]]; then
     attach="${3:?--attach needs the compositor socket, e.g. wayland-1}"
 fi
+
+# Print the scripted-input list for a run of this many minutes and exit.
+#
+#   SOLIUM_TRIGGER_AT="$(dev/soak.sh --triggers 60)" ./target/debug/solium --tty
+#
+# Attach mode samples a compositor it did not start, so it cannot pass the
+# trigger list -- which means an attached soak had only the client spawner for
+# churn, and the window lifecycle is the thing worth churning. This closes
+# that: generate the list here, start the session on the VT with it, and
+# attach the sampler from another terminal.
+if [[ "${1:-}" == "--triggers" ]]; then
+    minutes="${2:?--triggers needs a number of minutes}"
+    read -r -a cycle <<< "${SOLIUM_SOAK_CYCLE:-super+return super+g super+m super+space super+ctrl+right super+q}"
+    out=""
+    at=4000
+    while (( at < minutes * 60000 )); do
+        for key in "${cycle[@]}"; do
+            out+="${at}:${key},"
+            at=$(( at + 3300 ))
+        done
+    done
+    echo "${out%,}"
+    exit 0
+fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$root/target/debug/solium"
 # Stamped, so two runs cannot land on the same file. `SOLIUM_SOAK_DIR` was
