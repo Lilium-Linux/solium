@@ -44,3 +44,15 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+
+      # The configuration is Lua, and nothing above this line reads Lua. A
+      # syntax error in config.lua compiles, tests and clippies perfectly
+      # cleanly, and then the compositor starts with no scripts at all -- no
+      # layouts, no bindings, no decorations. That shipped past a green local
+      # gate once, which is why `dev/gate.sh` grew this step; CI was still
+      # missing the check that was added to catch the bug that motivated it.
+      #
+      # Needs no display and no GPU: it loads the scripts and reports what
+      # bound, then exits.
+      - name: Scripts
+        run: ./target/debug/solium --check
