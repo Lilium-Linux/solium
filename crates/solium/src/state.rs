@@ -493,7 +493,11 @@ fn size_window(window: &Window, client: Rectangle<i32, Logical>) {
 impl Solium {
     pub(crate) fn new(display_handle: DisplayHandle) -> Self {
         let mut seat_state = SeatState::new();
-        let mut seat = seat_state.new_wl_seat(&display_handle, "winit");
+        // "solium", not "winit". The name reaches clients through `wl_seat`,
+        // and the nested backend's name was hardcoded here, so a session on
+        // real hardware announced a seat called after a windowing library it
+        // was not using.
+        let mut seat = seat_state.new_wl_seat(&display_handle, "solium");
 
         // Every capability is advertised on every form factor. Which of them a
         // machine actually has is a hardware question; how it behaves is the
