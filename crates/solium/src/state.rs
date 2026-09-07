@@ -17,6 +17,9 @@ use smithay::wayland::pointer_constraints::{
 };
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::wayland::viewporter::ViewporterState;
+use smithay::wayland::xdg_activation::{
+    XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+};
 use std::collections::HashMap;
 
 use smithay::{
@@ -247,6 +250,17 @@ pub(crate) struct Solium {
     )]
     pub(crate) fractional_scale_state: FractionalScaleManagerState,
 
+    /// Handing focus from whoever launched an application to the application.
+    ///
+    /// A token is minted by the launcher, travels to the launched program in
+    /// its environment, and comes back when that program has a window. Two
+    /// things fall out of it: an application can raise itself without any
+    /// window being able to steal focus by simply asking, and the compositor
+    /// can recognise the window it opened for a program *whatever* the program
+    /// did to its own processes on the way — which is the one thing walking up
+    /// from a pid cannot do.
+    pub(crate) activation_state: XdgActivationState,
+
     /// The middle-click clipboard. A separate selection with its own protocol,
     /// and its absence is not subtle: a terminal that pastes on middle click
     /// pastes nothing at all.
@@ -470,6 +484,7 @@ impl Solium {
             relative_pointer_state: RelativePointerManagerState::new::<Self>(&display_handle),
             pointer_constraints_state: PointerConstraintsState::new::<Self>(&display_handle),
             constraint_hint: None,
+            activation_state: XdgActivationState::new::<Self>(&display_handle),
             viewporter_state: ViewporterState::new::<Self>(&display_handle),
             fractional_scale_state: FractionalScaleManagerState::new::<Self>(&display_handle),
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
@@ -718,6 +733,50 @@ impl Solium {
         let client = surface.client()?;
         let credentials = client.get_credentials(&self.display_handle).ok()?;
         u32::try_from(credentials.pid).ok()
+    }
+
+    /// Move a client into the window that was opened for its launch.
+    ///
+    /// The late half of adoption. `new_toplevel` matches on the process and
+    /// gets it right for anything that stays as the process we spawned; a
+    /// program whose launcher forks and exits breaks that chain and opens a
+    /// window of its own. When it then activates with the token we gave it,
+    /// this puts it where it belonged: the window it was already in is retired
+    /// and its content moves to the one that has been waiting.
+    ///
+    /// Returns whether it went anywhere, so an unrecognised token can fall
+    /// through to being an ordinary request for focus.
+    fn claim_into(&mut self, pane: crate::pane::PaneId, surface: &WlSurface) -> bool {
+        // Still waiting, or already given up on.
+        if !self.panes.get(pane).is_some_and(Pane::is_loading) {
+            return false;
+        }
+        let Some(window) = self.window_for(surface) else {
+            return false;
+        };
+        let Some(wrong) = self.panes.id_of(&window) else {
+            return false;
+        };
+        if wrong == pane {
+            return true;
+        }
+
+        if let Some(held) = self.panes.get_mut(pane) {
+            held.adopt(window.clone());
+        }
+        // The pane it opened in goes, and with it the frame and the id nothing
+        // should have learned. Retired rather than left empty: `sync_panes`
+        // would drop it anyway, and the layout is told now rather than a frame
+        // late.
+        self.panes.remove(wrong);
+        self.trigger_close(wrong);
+        tracing::debug!(
+            pane = pane.get(),
+            was = wrong.get(),
+            "an application arrived in its window, by token"
+        );
+        self.redraw = true;
+        true
     }
 
     /// Give a mapped client to the window that was opened for it, or open a
@@ -1235,6 +1294,25 @@ impl Solium {
         // Before the fork, so the window is on screen and the other windows
         // have moved aside by the time the program has been asked to start.
         let pane = self.begin_loading(program, None);
+
+        // And a token in the child's environment, naming the window we just
+        // opened for it.
+        //
+        // This is what makes the window find its application whatever the
+        // application does to its own processes. Matching on the pid works
+        // right up until a launcher forks and exits -- Firefox does -- and then
+        // the chain from the client runs into init and stops. A token does not
+        // care: we made it, we handed it over, and whatever comes back holding
+        // it is the thing we launched.
+        let token = {
+            let data = XdgActivationTokenData::default();
+            data.user_data.insert_if_missing(|| LaunchedFor(pane));
+            let (token, _) = self.activation_state.create_external_token(data);
+            token.as_str().to_owned()
+        };
+        process.env("XDG_ACTIVATION_TOKEN", &token);
+        // The older spelling, for programs that only look for that one.
+        process.env("DESKTOP_STARTUP_ID", &token);
 
         match process.spawn() {
             Ok(mut child) => {
@@ -2719,6 +2797,47 @@ impl Solium {
         tracing::debug!(server_side, "decoration mode agreed");
     }
 }
+
+/// The pane a token was minted for, carried on the token itself.
+///
+/// This is the whole of the fix for launching through a wrapper: a token is a
+/// thing we made and handed out, so whatever the program does to its processes,
+/// the token that comes back is still the one we gave it.
+struct LaunchedFor(crate::pane::PaneId);
+
+impl XdgActivationHandler for Solium {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.activation_state
+    }
+
+    /// A window asking to be brought forward.
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        // Ours, from a launch: the window belongs in the one we opened for it.
+        if let Some(pane) = data.user_data.get::<LaunchedFor>().map(|it| it.0)
+            && self.claim_into(pane, &surface)
+        {
+            self.activation_state.remove_token(&token);
+            return;
+        }
+
+        // Anyone else's: a window asking for focus, which is what the protocol
+        // is for. Honoured because the token is proof the request came from
+        // something the user was actually using -- a client cannot mint one for
+        // itself out of nothing, which is the difference between this and a
+        // window simply demanding focus.
+        if let Some(window) = self.window_for(&surface) {
+            tracing::debug!("a window asked to be brought forward");
+            self.focus_window(&window, SERIAL_COUNTER.next_serial());
+        }
+        self.activation_state.remove_token(&token);
+    }
+}
+smithay::delegate_xdg_activation!(Solium);
 
 impl FractionalScaleHandler for Solium {
     /// A client has asked what scale it is really drawn at.
