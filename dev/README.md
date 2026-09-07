@@ -66,6 +66,14 @@ and never sent an initial configure, and a client may not attach a buffer until
 it has been configured once. Every bar and every dock was invisible, for as
 long as `layer.rs` has claimed that any existing panel works.
 
+It also reports each monitor's scale and logical size as a client sees them,
+which is the only place that can be checked from — and the second thing it
+caught was itself: it compared a layer surface's configure against the
+monitor's *mode* and called a correct 2x answer a bar on the wrong monitor.
+Layer sizes are logical. A probe that is wrong about the protocol is worse than
+no probe, so its expectations are worth as much scrutiny as the compositor's
+behaviour.
+
 `clipboard-check.sh` runs its X11 half in a container, because the host has no
 `xclip` and cannot install one. **Run it more than once.** The bug it was
 written for failed about one time in three, so a single green run proves
