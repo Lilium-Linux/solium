@@ -110,8 +110,31 @@ pub(crate) fn probe() -> Result<()> {
         }
         let modes = connector.modes();
         let best = preferred_mode(&connector);
+        // The dots per inch, and therefore the scale `auto` will choose. The
+        // one number you need to decide whether to override it, and the one
+        // thing a monitor's own menu never tells you.
+        let (physical_width, physical_height) = connector.size().unwrap_or((0, 0));
+        let density = match (best, physical_width) {
+            (Some(mode), physical) if physical > 0 => {
+                let scale = crate::monitor::automatic(
+                    (
+                        i32::try_from(physical).unwrap_or_default(),
+                        i32::try_from(physical_height).unwrap_or_default(),
+                    )
+                        .into(),
+                    (i32::from(mode.size().0), i32::from(mode.size().1)).into(),
+                );
+                format!(
+                    ", {}x{}mm, {:.0} dpi, scale {scale}",
+                    physical_width,
+                    physical_height,
+                    f64::from(mode.size().0) / (f64::from(physical_width) / 25.4),
+                )
+            }
+            _ => ", no physical size reported, scale 1".to_owned(),
+        };
         println!(
-            "  {name:<12} connected, {} modes, best {}",
+            "  {name:<12} connected, {} modes, best {}{density}",
             modes.len(),
             best.map_or_else(
                 || "none".to_owned(),
@@ -121,7 +144,7 @@ pub(crate) fn probe() -> Result<()> {
                     mode.size().1,
                     f64::from(mode.vrefresh())
                 )
-            )
+            ),
         );
         // Every mode it offers, in the form `mode` in the configuration takes,
         // because knowing what to write there is the whole reason to ask. One
@@ -735,15 +758,19 @@ impl State {
             };
             let planes = device.planes(&crtc).ok();
 
+            // In millimetres, as EDID reports it -- and plenty of monitors
+            // report 0x0, which is why the scale heuristic has to cope with
+            // knowing nothing.
             let (physical_width, physical_height) = connector.size().unwrap_or((0, 0));
+            let physical: smithay::utils::Size<i32, smithay::utils::Raw> = (
+                i32::try_from(physical_width).unwrap_or_default(),
+                i32::try_from(physical_height).unwrap_or_default(),
+            )
+                .into();
             let output = Output::new(
                 name.clone(),
                 PhysicalProperties {
-                    size: (
-                        i32::try_from(physical_width).unwrap_or_default(),
-                        i32::try_from(physical_height).unwrap_or_default(),
-                    )
-                        .into(),
+                    size: physical,
                     subpixel: Subpixel::Unknown,
                     make: "Solium".into(),
                     model: "DRM".into(),
@@ -765,6 +792,11 @@ impl State {
                 .arrangement
                 .transform(&name)
                 .unwrap_or(Transform::Normal);
+            // The scale is applied by `place_outputs`, once, for both
+            // backends -- see `Solium::scale_outputs`. It changes only the
+            // logical size and needs no modeset, unlike the mode and the
+            // transform, which is why those two are settled here and it is
+            // not.
             output.change_current_state(Some(wl_mode), Some(transform), None, Some((0, 0).into()));
             output.set_preferred(wl_mode);
             // Mapped anywhere; `place_outputs` decides where, once, from the
@@ -870,7 +902,7 @@ impl State {
         // tick, the window list. See `render::prepare`. It also has to happen
         // before any output's buffer is bound, because it binds framebuffers
         // of its own.
-        let prepared = render::prepare(&mut self.solium, renderer, 1.0);
+        let prepared = render::prepare(&mut self.solium, renderer);
 
         for index in 0..self.screens.len() {
             // Indexed rather than iterated: building a screen's elements needs
@@ -896,7 +928,10 @@ impl State {
             let Some(renderer) = self.renderer.as_mut() else {
                 return;
             };
-            let elements = render::elements(&mut self.solium, renderer, 1.0, &prepared, area);
+            // This monitor's scale, not a constant. Two screens in one frame
+            // can want different ones.
+            let scale = output.current_scale().fractional_scale();
+            let elements = render::elements(&mut self.solium, renderer, scale, &prepared, area);
 
             let Some(screen) = self.screens.get_mut(index) else {
                 continue;

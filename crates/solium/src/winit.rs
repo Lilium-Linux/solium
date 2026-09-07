@@ -200,6 +200,9 @@ pub(crate) fn run() -> Result<()> {
     // simulate is a second *pipeline* — one refresh rate, one page flip, one
     // buffer — which is exactly the part `tty.rs` owns.
     let count = dev::outputs();
+    // The window's pixels, split between the monitors. Each one's *logical*
+    // size is this divided by its own scale, which is what `output_geometry`
+    // works out and what `place_outputs` lays out.
     let width = (size.w / i32::try_from(count).unwrap_or(1)).max(1);
     let mut outputs = Vec::new();
     for index in 0..count {
@@ -477,7 +480,7 @@ pub(crate) fn run() -> Result<()> {
         // its own, and doing that underneath a bound output redirects the
         // whole frame into a texture. See `render::Prepared`.
         let prepared = if wanted {
-            render::prepare(&mut state, backend.renderer(), 1.0)
+            render::prepare(&mut state, backend.renderer())
         } else {
             render::Prepared::default()
         };
@@ -506,37 +509,56 @@ pub(crate) fn run() -> Result<()> {
                     // first, because that is what having its own buffer means.
                     let elements = if screens.len() > 1 {
                         let mut whole = Vec::new();
+                        // Each monitor takes its share of the window's
+                        // *pixels*, and its logical size is that share divided
+                        // by its own scale. So a 2x monitor's texture comes
+                        // back twice as large in logical terms and exactly the
+                        // share wide in pixels, and goes into the window one
+                        // to one — which is the point: you are looking at the
+                        // pixels that monitor would scan out, not a picture of
+                        // them.
+                        let mut at = 0.0_f64;
                         for (index, screen) in screens.iter().enumerate() {
-                            let Some((texture, _)) =
-                                monitors.draw(&mut state, renderer, &prepared, index, *screen, 1.0)
+                            let scale = state
+                                .output_for(*screen)
+                                .map_or(1.0, |output| output.current_scale().fractional_scale());
+                            let Some((texture, pixels)) = monitors
+                                .draw(&mut state, renderer, &prepared, index, *screen, scale)
                             else {
                                 continue;
                             };
+                            // `src` must be given whenever `size` is: Smithay
+                            // defaults it to the drawn size, which crops the
+                            // texture to its top-left corner instead of
+                            // scaling it. Same trap `Decoration::frame`
+                            // records, and it cost the same half hour again.
+                            let source = Rectangle::from_size(
+                                (f64::from(pixels.w), f64::from(pixels.h)).into(),
+                            );
                             whole.push(render::Element::Screen(
                                 TextureRenderElement::from_static_texture(
                                     Id::new(),
                                     renderer.context_id(),
-                                    screen.loc.to_f64().to_physical(1.0),
+                                    (at, 0.0),
                                     texture,
                                     1,
                                     Transform::Normal,
                                     None,
-                                    None,
-                                    Some(screen.size),
+                                    Some(source),
+                                    Some((pixels.w, pixels.h).into()),
                                     None,
                                     Kind::Unspecified,
                                 ),
                             ));
+                            at += f64::from(pixels.w);
                         }
                         whole
                     } else {
-                        render::elements(
-                            &mut state,
-                            renderer,
-                            1.0,
-                            &prepared,
-                            screens.first().copied().unwrap_or_default(),
-                        )
+                        let screen = screens.first().copied().unwrap_or_default();
+                        let scale = state
+                            .output_for(screen)
+                            .map_or(1.0, |output| output.current_scale().fractional_scale());
+                        render::elements(&mut state, renderer, scale, &prepared, screen)
                     };
 
                     let result = damage_tracker.render_output(

@@ -130,8 +130,27 @@ local defaults = {
     --                                     monitor -- stable, but not a choice
     --                                     anybody made.
     --
-    --   scale = 1.5                       read, reported in the log, and not
-    --                                     honoured yet. See issue #39.
+    --   scale = 2                         how many device pixels to a logical
+    --                                     one. Everything doubles in size: a
+    --                                     window, a titlebar, the pointer, and
+    --                                     the compositor's own QML is
+    --                                     rasterised at that many pixels
+    --                                     rather than stretched.
+    --
+    --                                     Left out, it is worked out from the
+    --                                     panel's own size -- 2x above 192 dpi,
+    --                                     which is the number GNOME and KDE
+    --                                     both use, and 1x below. That puts a
+    --                                     13" 4K laptop at 2x and a 27" 4K at
+    --                                     1x, and the second of those is
+    --                                     genuinely a matter of taste, which
+    --                                     is why this is settable. `--probe`
+    --                                     and the log both print the dpi it
+    --                                     measured.
+    --
+    --                                     Fractional values work; between 0.5
+    --                                     and 8. Anything else is refused as
+    --                                     far likelier a typo than a request.
     --
     -- `super+shift+r` applies a change without ending the session.
     monitors = {},

@@ -943,6 +943,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     _ => None,
                 };
 
+                let name_for_warning = name.clone();
                 places.push(crate::monitor::Placement {
                     name,
                     at,
@@ -952,7 +953,30 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     transform,
                     enabled: row.get::<Option<bool>>("enabled")?.unwrap_or(true),
                     primary: row.get::<Option<bool>>("primary")?.unwrap_or(false),
-                    scale: row.get::<Option<f64>>("scale")?,
+                    scale: match row.get::<Value>("scale") {
+                        Ok(Value::Number(value)) => match crate::monitor::scaling(&value) {
+                            Some(scale) => scale,
+                            None => {
+                                tracing::warn!(
+                                    monitor = name_for_warning,
+                                    scale = value,
+                                    "not a sensible scale -- between 0.5 and 8, or \"auto\""
+                                );
+                                crate::monitor::Scaling::Auto
+                            }
+                        },
+                        Ok(Value::Integer(value)) => {
+                            #[expect(
+                                clippy::cast_precision_loss,
+                                reason = "a scale is a small number"
+                            )]
+                            let value = value as f64;
+                            crate::monitor::scaling(&value).unwrap_or(crate::monitor::Scaling::Auto)
+                        }
+                        // "auto", and anything unreadable, which means the
+                        // same thing and has already been warned about.
+                        _ => crate::monitor::Scaling::Auto,
+                    },
                 });
             }
             with_pending(lua, |pending| {

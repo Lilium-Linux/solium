@@ -46,7 +46,7 @@ predicts.
 | | why |
 |---|---|
 | ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | **done.** A pipeline per monitor, one global space, layouts and workspaces per screen |
-| [#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI | every laptop user gets a half-size desktop and bounces immediately |
+| ~~[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI~~ | **done.** Scale per monitor, chrome rasterised at it, chosen from the panel's dpi |
 | [#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture | no screenshots and no screen sharing; people hit this in minutes |
 | packaging | there is none. A preview nobody can install is a preview nobody tries |
 
@@ -75,11 +75,12 @@ hours is worse than one that is missing a lock screen.
    by what it is rather than which port it is in,
    [#45](https://github.com/Lilium-Linux/solium/issues/45) mirroring,
    [#46](https://github.com/Lilium-Linux/solium/issues/46) 10-bit.
-2. **[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI**, next and
-   for the reason #41 was first: it is the same call sites. Every one of them
-   now takes an output or a screen rect rather than assuming, so the remaining
-   work is honouring `current_scale()` instead of the `1.0` that is still
-   passed to `render::elements` — a much smaller change than it was a day ago.
+2. ~~**[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI**~~ —
+   done, and #41 was indeed most of it: every call site already took an output
+   or a screen rect. The part that was not plumbing was the QML host, which
+   needed the *distinction* between logical layout and device rasterisation
+   rather than a bigger canvas — a scene given the device size lays out in it
+   and comes out half the size it should be.
 3. **[#28](https://github.com/Lilium-Linux/solium/issues/28) screencopy** —
    self-contained, and the loudest missing thing after the first two.
 4. **Soak and package.** Both are the difference between working here and

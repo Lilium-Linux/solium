@@ -47,6 +47,9 @@ const HOTSPOT: (i32, i32) = (0, 0);
 pub(crate) struct Cursor {
     scene: qml::Scene,
     buffer: Option<MemoryRenderBuffer>,
+    /// The scale the buffer currently holds, so moving the pointer between
+    /// monitors at different scales rasterises again rather than stretching.
+    scale: f64,
 }
 
 impl Cursor {
@@ -56,6 +59,7 @@ impl Cursor {
         Ok(Self {
             scene,
             buffer: None,
+            scale: 1.0,
         })
     }
 
@@ -68,11 +72,28 @@ impl Cursor {
         &mut self,
         renderer: &mut R,
         location: Point<f64, Logical>,
+        scale: f64,
     ) -> Option<MemoryRenderBufferRenderElement<R>>
     where
         R: Renderer + ImportMem,
         R::TextureId: Send + Clone + 'static,
     {
+        // 24 logical pixels, whatever the monitor is. On a 2x display that is
+        // a 48-pixel image, and drawing the 24-pixel one there would leave a
+        // pointer a quarter of the size it should be -- which on a HiDPI panel
+        // is a pointer you cannot find, and this module exists because an
+        // invisible pointer reads as input being dead.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a cursor is 24 logical pixels"
+        )]
+        let edge = ((f64::from(SIZE) * scale).round() as i32).max(1);
+        let rescaled = (self.scale - scale).abs() > f64::EPSILON;
+        if rescaled {
+            self.scene.resize(edge, edge, scale);
+            self.scale = scale;
+        }
+
         let rendered = match self.scene.render() {
             Ok(rendered) => rendered,
             Err(err) => {
@@ -81,8 +102,8 @@ impl Cursor {
             }
         };
 
-        let size = (SIZE, SIZE);
-        let fresh = self.buffer.is_none();
+        let size = (edge, edge);
+        let fresh = self.buffer.is_none() || rescaled;
         if fresh {
             self.buffer = Some(MemoryRenderBuffer::new(
                 Fourcc::Argb8888,
@@ -97,7 +118,7 @@ impl Cursor {
         if rendered.changed || fresh {
             let mut context = buffer.render();
             let copy = context.draw(|target| {
-                let row_bytes = usize::try_from(SIZE.max(0)).unwrap_or_default() * 4;
+                let row_bytes = usize::try_from(edge.max(0)).unwrap_or_default() * 4;
                 for (row, destination) in target.chunks_exact_mut(row_bytes).enumerate() {
                     let start = row * rendered.stride;
                     let Some(source) = rendered.pixels.get(start..start + row_bytes) else {
@@ -113,18 +134,22 @@ impl Cursor {
             }
         }
 
+        // Physical, and the hotspot is logical, so both go through the scale.
         let position = (
-            location.x - f64::from(HOTSPOT.0),
-            location.y - f64::from(HOTSPOT.1),
+            (location.x - f64::from(HOTSPOT.0)) * scale,
+            (location.y - f64::from(HOTSPOT.1)) * scale,
         );
 
+        // The whole buffer in its own pixels, mapped down to 24 logical
+        // pixels, which the output scale takes back up to `edge`.
+        let source = Rectangle::from_size((f64::from(edge), f64::from(edge)).into());
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             position,
             buffer,
             None,
-            None,
-            None,
+            Some(source),
+            Some((SIZE, SIZE).into()),
             Kind::Cursor,
         )
         .inspect_err(|err| tracing::warn!(?err, "could not upload the cursor"))

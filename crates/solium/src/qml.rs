@@ -43,7 +43,12 @@ mod ffi {
             error: *mut *const c_char,
         ) -> *mut Scene;
         pub(super) fn solium_qml_scene_free(scene: *mut Scene);
-        pub(super) fn solium_qml_scene_resize(scene: *mut Scene, width: c_int, height: c_int);
+        pub(super) fn solium_qml_scene_resize(
+            scene: *mut Scene,
+            width: c_int,
+            height: c_int,
+            scale: f64,
+        );
         pub(super) fn solium_qml_tick(elapsed_ms: c_longlong);
         pub(super) fn solium_qml_scene_render(scene: *mut Scene) -> c_int;
         pub(super) fn solium_qml_scene_pixels(scene: *const Scene, stride: *mut c_int)
@@ -180,7 +185,10 @@ pub(crate) struct Rendered<'a> {
 /// A live QML scene.
 pub(crate) struct Scene {
     scene: *mut ffi::Scene,
+    /// Device pixels — the size of the image the compositor uploads.
     size: (i32, i32),
+    /// Device pixels per logical one.
+    scale: f64,
 }
 
 // The scene is bound to the GL context it was created on, and that context
@@ -242,17 +250,31 @@ impl Scene {
         Ok(Self {
             scene,
             size: (width, height),
+            scale: 1.0,
         })
     }
 
+    /// Resize a scene to `width` by `height` **device** pixels, at `scale`
+    /// device pixels to a logical one.
+    ///
+    /// The scene is laid out in logical units and rasterised at the full size,
+    /// so a titlebar declared 32 pixels tall in QML is 32 *logical* pixels on
+    /// every monitor and is drawn with as many real pixels as that monitor has.
+    /// The alternative — laying out in device pixels — makes every hardcoded
+    /// size in every QML file mean something different per monitor.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
-    pub(crate) fn resize(&mut self, width: i32, height: i32) {
-        if self.size == (width, height) || width <= 0 || height <= 0 {
+    pub(crate) fn resize(&mut self, width: i32, height: i32, scale: f64) {
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        if self.size == (width, height) && (self.scale - scale).abs() < f64::EPSILON {
             return;
         }
         self.size = (width, height);
+        self.scale = scale;
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
-        unsafe { ffi::solium_qml_scene_resize(self.scene, width, height) }
+        unsafe { ffi::solium_qml_scene_resize(self.scene, width, height, scale) }
     }
 
     /// Advance QML animations to a point on the compositor's clock.

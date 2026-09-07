@@ -89,7 +89,7 @@ impl Prepared {
 /// Capture a texture for every window whose transform is not a rectangle.
 ///
 /// Must run before the backend binds its own buffer; see [`Prepared`].
-pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f64) -> Prepared {
+pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepared {
     state.memory_report();
     // Every QML animation in the process, advanced once for this frame --
     // decorations, the cursor, the shell. Whether any scene then has something
@@ -115,6 +115,10 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer, scale: f6
         if frame.matrix.is_identity() && frame.deform.is_none() {
             continue;
         }
+        // Captured at *its own monitor's* scale. One frame can span monitors
+        // at different scales, and a texture taken at 1x and drawn on a 2x
+        // screen is the blur this whole change exists to remove.
+        let scale = state.scale_of(outer);
         if let Some((texture, _size)) = crate::offscreen::capture(state, renderer, &window, scale) {
             warps.push((window, texture));
         }
@@ -149,6 +153,7 @@ fn chrome(
     pane: crate::pane::PaneId,
     frame: present::Frame,
     outer: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    scale: f64,
 ) {
     let title = state.pane_title(pane);
     let look = crate::decoration::Look {
@@ -160,9 +165,14 @@ fn chrome(
     };
     let mut animating = false;
     if let Some(decoration) = state.decorations.get_mut(pane) {
-        if let Some(element) =
-            decoration.frame(renderer, frame.rect, outer.size, &look, frame.opacity)
-        {
+        if let Some(element) = decoration.frame(
+            renderer,
+            frame.rect,
+            outer.size,
+            &look,
+            frame.opacity,
+            scale,
+        ) {
             elements.push(Element::Chrome(element));
         }
         animating = decoration.animating();
@@ -188,6 +198,7 @@ fn scene(
     pane: crate::pane::PaneId,
     frame: present::Frame,
     now: std::time::Duration,
+    scale: f64,
 ) {
     let rect = frame.rect;
     let waited = state.panes.get(pane).map_or(0, |held| {
@@ -216,7 +227,7 @@ fn scene(
         return;
     };
     held.set_int("waited", waited);
-    if let Some(element) = held.element(renderer, area, now, alpha) {
+    if let Some(element) = held.element(renderer, area, now, alpha, scale) {
         elements.push(Element::Chrome(element));
     }
     // A scene animates on its own clock and damages nothing, so the next frame
@@ -269,6 +280,7 @@ pub(crate) fn elements(
             smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
             now,
             1.0,
+            scale,
         )
     {
         elements.push(Element::Chrome(element));
@@ -309,6 +321,7 @@ pub(crate) fn elements(
             smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
             now,
             1.0,
+            scale,
         )
     {
         elements.push(Element::Chrome(element));
@@ -403,9 +416,9 @@ pub(crate) fn elements(
         // is off.
         if ours {
             if state.loading.decorated {
-                chrome(state, renderer, &mut elements, pane, frame, outer);
+                chrome(state, renderer, &mut elements, pane, frame, outer, scale);
             }
-            scene(state, renderer, &mut elements, pane, frame, now);
+            scene(state, renderer, &mut elements, pane, frame, now, scale);
             continue;
         }
 
@@ -418,7 +431,7 @@ pub(crate) fn elements(
         // underneath is already the window, and this dissolves to reveal it
         // rather than being swapped for it.
         if state.pane_has_scene(pane) {
-            scene(state, renderer, &mut elements, pane, frame, now);
+            scene(state, renderer, &mut elements, pane, frame, now, scale);
         }
 
         let Some(real) = state.real_geometry(&window) else {
@@ -450,7 +463,7 @@ pub(crate) fn elements(
         // reserved space: a frame that takes nothing and floats over the
         // window -- a bar that appears on hover, a border that does not push
         // the client around -- is a decoration too.
-        chrome(state, renderer, &mut elements, pane, frame, outer);
+        chrome(state, renderer, &mut elements, pane, frame, outer, scale);
 
         // What is left of the drawn rect once the frame has taken its share is
         // the client's.
@@ -595,7 +608,7 @@ fn cursor(
         CursorImageStatus::Named(_) => state
             .pointer
             .art()
-            .and_then(|cursor| cursor.element(renderer, location))
+            .and_then(|cursor| cursor.element(renderer, location, scale))
             .map(Element::Chrome)
             .into_iter()
             .collect(),
@@ -639,7 +652,7 @@ pub(crate) fn flat_window_elements(
             // texture at its real size, and the warp applies the transform's
             // opacity to the whole texture afterwards. Applying it twice would
             // fade the frame squared.
-            && let Some(element) = decoration.frame(renderer, whole, outer.size, &look, 1.0)
+            && let Some(element) = decoration.frame(renderer, whole, outer.size, &look, 1.0, scale)
         {
             elements.push(Element::Chrome(element));
         }
