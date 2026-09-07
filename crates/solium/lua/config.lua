@@ -168,6 +168,10 @@ local defaults = {
     --   "proximity"  a border that answers the pointer arriving and leaving
     --   "reveal"     a bar that slides out of the window's edge on approach
     --   "pulse"      a bar with an animation running in it
+    --   "none"       no frame at all: no bar, no border, and no QML scene
+    --                built per window. For a desktop with no window furniture,
+    --                or a tiling layout whose own bar makes a titlebar
+    --                redundant.
     decoration = "top",
 
     -- What a window does between being asked for and its application

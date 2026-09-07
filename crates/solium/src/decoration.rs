@@ -511,6 +511,13 @@ impl Decorations {
             return false;
         }
         self.style = style;
+        if bare(self.style.as_deref()) {
+            // Every frame goes, and the clients are resized to the room they
+            // now have -- which the caller does, because it is the one holding
+            // the windows.
+            self.frames.clear();
+            return true;
+        }
         let path = qml_path(self.style.as_deref());
         let existing: Vec<(PaneId, (i32, i32))> = self
             .frames
@@ -533,6 +540,9 @@ impl Decorations {
 
     pub(crate) fn insert(&mut self, id: PaneId, width: i32, height: i32) {
         if self.frames.contains_key(&id) {
+            return;
+        }
+        if bare(self.style.as_deref()) {
             return;
         }
         match Decoration::new(&qml_path(self.style.as_deref()), width, height) {
@@ -631,6 +641,26 @@ fn qml_path(style: Option<&str>) -> PathBuf {
         }
     }
     shipped_decoration(&name)
+}
+
+/// Whether this style means "draw no frame at all".
+///
+/// A real setting and not only a diagnostic: some people want a desktop with
+/// no window furniture, and a tiling layout with a bar of its own has no use
+/// for a titlebar on every window.
+///
+/// It is also the arm that isolates the per-window leak in #33. A bare window
+/// still maps a toplevel, still opens and closes a pane, still has its buffers
+/// imported — it simply never builds a `qml::Scene`. Whether the leak survives
+/// that is the difference between blaming the QML host and blaming the surface.
+fn bare(style: Option<&str>) -> bool {
+    let chosen = std::env::var("SOLIUM_DECORATION")
+        .ok()
+        .or_else(|| style.map(ToOwned::to_owned));
+    matches!(
+        chosen.as_deref().map(str::trim),
+        Some("none" | "None" | "NONE")
+    )
 }
 
 /// One of the decorations that ship with the compositor, by name.
