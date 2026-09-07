@@ -39,7 +39,12 @@ if [[ "${2:-}" == "--attach" ]]; then
 fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$root/target/debug/solium"
-out="${SOLIUM_SOAK_DIR:-/tmp/solium-soak}"
+# Stamped, so two runs cannot land on the same file. `SOLIUM_SOAK_DIR` was
+# always here and the default was not: a short diagnostic run truncated the
+# CSV of a twenty-three minute one, and the only record left was what had
+# already been read out of it. A soak whose data one later command can clobber
+# is a soak you get to do twice.
+out="${SOLIUM_SOAK_DIR:-/tmp/solium-soak-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$out"
 csv="$out/samples.csv"
 log="$out/compositor.log"
@@ -52,7 +57,17 @@ fi
 
 # The scripted half of the workload, generated up front: triggers are relative
 # to start-up, so an hour of use is an hour of entries.
-cycle=(super+return super+g super+m super+space super+ctrl+right super+q)
+# What gets pressed, in order, one key every 3.3 seconds.
+#
+# Overridable because the workload *is* the experiment: this default mixes
+# window churn with the deform path -- `super+g` rotates and `super+m` genies,
+# and both capture the window to an offscreen texture every frame -- so a leak
+# it finds cannot be attributed to either. Two runs with the halves separated
+# can.
+#
+#   SOLIUM_SOAK_CYCLE="super+return super+space super+q"   # no deform
+#   SOLIUM_SOAK_CYCLE="super+g super+m"                    # deform only
+read -r -a cycle <<< "${SOLIUM_SOAK_CYCLE:-super+return super+g super+m super+space super+ctrl+right super+q}"
 triggers=""
 at=4000
 while (( at < minutes * 60000 )); do
@@ -125,11 +140,12 @@ while (( $(date +%s) < deadline )); do
     kill -0 "$solium" 2>/dev/null || { echo "COMPOSITOR DIED at $(( $(date +%s) - start ))s" | tee -a "$csv"; break; }
 
     # Client churn, on its own slower rhythm than the keyboard scripting.
-    if (( tick % 6 == 0 )); then
+    if (( tick % 6 == 0 )) && [[ "${SOLIUM_SOAK_CLIENTS:-1}" != "0" ]]; then
         env -u LD_LIBRARY_PATH -u DISPLAY WAYLAND_DISPLAY="$socket" kitty >/dev/null 2>&1 &
         clients+=($!)
     fi
-    if (( tick % 9 == 4 )) && [[ -n "$x_display" ]]; then
+    if (( tick % 9 == 4 )) && [[ -n "$x_display" ]] \
+        && [[ "${SOLIUM_SOAK_CLIENTS:-1}" != "0" ]]; then
         # An X11 client, in bursts: the point is the surface lifecycle, and
         # glxgears left running is just heat.
         ( env -u LD_LIBRARY_PATH DISPLAY="$x_display" WAYLAND_DISPLAY="$socket" \
