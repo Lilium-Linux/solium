@@ -28,6 +28,8 @@ something** — that is the test.
 ├──────────────────────────────────────────────┤
 │  Script API: enumerate, transform, bind      │  Rust
 ├──────────────────────────────────────────────┤
+│  Panes: what the compositor calls a window   │  Rust
+├──────────────────────────────────────────────┤
 │  Presentation transform + animation clock    │  Rust
 ├──────────────────────────────────────────────┤
 │  Render: Smithay renderer traits (GLES2)     │  Rust
@@ -35,6 +37,43 @@ something** — that is the test.
 │  Smithay: protocols, input, backends         │  crate
 └──────────────────────────────────────────────┘
 ```
+
+### A window is a pane, not a client's surface
+
+The compositor does not work with `smithay::desktop::Window` directly. It works
+with a **pane**: an identity and a slot, whose *content* is a QML scene the
+compositor draws, a mapped client, or the remains of one on its way out.
+
+The reason is that a window's life should begin when the user asks for the
+application, not when the application's client happens to connect. Everything
+that follows from that — the slot reserved immediately, the other windows moving
+aside, being able to close it while it is still loading, the application's
+content simply appearing inside it — is impossible while the compositor's idea
+of a window *is* the client's, because that type requires a surface to exist.
+
+A pane keeps its id and its slot across all three kinds of content. **Adoption**
+is the point: when a client belonging to a launch we started maps a toplevel, the
+toplevel becomes that pane's content. Nothing is created, nothing is replaced,
+and nothing else in the compositor notices — a decoration keyed by pane id
+carries its animation straight through the handover.
+
+A client is matched to its pane by an activation token first and by walking up
+from its process id second. The token is what survives a launcher that forks and
+exits; the process walk is the fast path for everything that does not.
+
+`Space` has not gone away and is not going to. It stays underneath as the
+authority on stacking and damage for a mapped client, because that bookkeeping
+is worth keeping and not worth rewriting. `Panes` is the view *over* it, and
+`sync_panes` is the single place the two are reconciled — so they cannot drift
+apart at any of the sites that map or unmap.
+
+QML is not a special case bolted on here. A pane whose content is a scene is as
+ordinary as one whose content is a client, which is what makes a loading window,
+a placeholder for an application that died, and a surface the compositor draws
+for its own reasons one mechanism instead of three.
+
+The design and the order the migration went in are recorded in
+`docs/spikes/2026-09-06-window-provider.md`.
 
 ### Presentation transform
 
