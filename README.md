@@ -50,14 +50,18 @@ Several monitors, each with its own display pipeline, refresh rate and layout â€
 one global coordinate space, arranged from the configuration or guessed left to
 right. Every layout runs per screen, and the pointer crosses between them.
 
-Protocols: `xdg-shell`, `wlr-layer-shell`, `xdg-decoration`, `xdg-output`,
-`xdg-activation`, `wp-viewporter`, `wp-fractional-scale`, `linux-dmabuf`,
-`relative-pointer`, `pointer-constraints`, `primary-selection`,
-`xwayland-shell`.
+Protocols: `xdg-shell`, `wlr-layer-shell`, `wlr-screencopy`, `xdg-decoration`,
+`xdg-output`, `xdg-activation`, `wp-viewporter`, `wp-fractional-scale`,
+`wp-presentation`, `linux-dmabuf`, `relative-pointer`, `pointer-constraints`,
+`primary-selection`, `xwayland-shell`.
 
-Not yet: any scale but 1x, screen capture, session locking, IME. Everything
-known is on the issue tracker, prioritised by whether an application can be
-used at all without it rather than by how hard it is.
+Screenshots, recording and screen sharing all come from `wlr-screencopy`, so
+`grim`, `wf-recorder` and `xdg-desktop-portal-wlr` work â€” which is what a
+conferencing application asks the portal for.
+
+Not yet: session locking, IME. Everything known is on the issue tracker,
+prioritised by whether an application can be used at all without it rather
+than by how hard it is.
 
 ## Configuring it
 

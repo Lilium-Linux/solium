@@ -209,7 +209,12 @@ impl Screens {
         // Built before the texture is bound, because building can bind
         // framebuffers of its own -- the warp pass -- and a bind underneath a
         // bind redirects the whole picture. Same reason `Prepared` exists.
-        let elements = crate::render::elements(state, renderer, scale, prepared, screen);
+        let elements = crate::render::elements(
+            state,
+            renderer,
+            prepared,
+            crate::render::Picture::screen(screen, scale),
+        );
 
         let mut texture = self.texture(renderer, index, size)?.clone();
         let drawn = {

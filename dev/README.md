@@ -26,7 +26,7 @@ a demo into a regression test.
 | `dev/gate.sh` | fmt, clippy, tests, build, and that the Lua configuration loads |
 | `dev/app-check.sh <program>` | a client runs, draws, and provokes no protocol error |
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
-| `cargo run -p wl-probe` | the protocols answer, from a real client's side, and a bar lands on the monitor it named |
+| `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
@@ -65,6 +65,15 @@ That check found that layer surfaces had never worked at all: they were mapped
 and never sent an initial configure, and a client may not attach a buffer until
 it has been configured once. Every bar and every dock was invisible, for as
 long as `layer.rs` has claimed that any existing panel works.
+
+`WL_PROBE_SHOT=/tmp/shot.ppm` writes the capture it took out as a binary PPM,
+because "some pixels were not zero" and "that is my desktop" are different
+claims and only one of them can be checked by a program. It checks what it can:
+that the buffer is the size that was asked for, that it holds more than one
+colour, and — the one thing no event can tell a client — that it is the right
+way up, by looking for the top-anchored bar in the top rows. That check earned
+itself immediately: the first capture came back upside down, which is perfectly
+legible and reads as a compositor bug rather than a row-order one.
 
 It also reports each monitor's scale and logical size as a client sees them,
 which is the only place that can be checked from — and the second thing it
