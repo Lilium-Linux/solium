@@ -9,10 +9,14 @@ use std::time::Duration;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
+use smithay::wayland::fractional_scale::{
+    FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
+};
 use smithay::wayland::pointer_constraints::{
     PointerConstraintsHandler, PointerConstraintsState, with_pointer_constraint,
 };
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
+use smithay::wayland::viewporter::ViewporterState;
 use std::collections::HashMap;
 
 use smithay::{
@@ -217,6 +221,31 @@ pub(crate) struct Solium {
     /// Where a locked pointer's client would like the cursor left when the
     /// lock ends. Advice, taken at unlock. See `cursor_position_hint`.
     pub(crate) constraint_hint: Option<Point<f64, Logical>>,
+
+    /// Cropping and scaling a surface without the client redrawing it.
+    ///
+    /// How a video player presents a frame decoded at one size at another size
+    /// — and how anything that scales does it without paying for a resize. The
+    /// renderer already honours a viewport once the global exists; what was
+    /// missing was the global, so every client fell back to redrawing at the
+    /// size it wanted.
+    #[expect(
+        dead_code,
+        reason = "registers wp_viewporter; dropping it would remove the global"
+    )]
+    pub(crate) viewporter_state: ViewporterState,
+    /// Telling a surface what scale it is really being drawn at.
+    ///
+    /// Without it a client has only the integer scale from `wl_output`, so on
+    /// anything that is not a whole number it picks the next one up and is
+    /// scaled back down — which is the blurry-on-a-150%-display problem. Solium
+    /// is 1x everywhere today and this reports exactly that; the value is that
+    /// it stops being a guess.
+    #[expect(
+        dead_code,
+        reason = "registers wp_fractional_scale_manager_v1; dropping it would remove the global"
+    )]
+    pub(crate) fractional_scale_state: FractionalScaleManagerState,
 
     /// The middle-click clipboard. A separate selection with its own protocol,
     /// and its absence is not subtle: a terminal that pastes on middle click
@@ -441,6 +470,8 @@ impl Solium {
             relative_pointer_state: RelativePointerManagerState::new::<Self>(&display_handle),
             pointer_constraints_state: PointerConstraintsState::new::<Self>(&display_handle),
             constraint_hint: None,
+            viewporter_state: ViewporterState::new::<Self>(&display_handle),
+            fractional_scale_state: FractionalScaleManagerState::new::<Self>(&display_handle),
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
             seat_state,
@@ -2688,6 +2719,32 @@ impl Solium {
         tracing::debug!(server_side, "decoration mode agreed");
     }
 }
+
+impl FractionalScaleHandler for Solium {
+    /// A client has asked what scale it is really drawn at.
+    ///
+    /// Answered from the output it is on rather than from a constant, so the
+    /// answer stays right the day an output is not 1x. A surface not on any
+    /// output yet is told the first output's scale, which is the one it is
+    /// about to be on.
+    fn new_fractional_scale(
+        &mut self,
+        surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) {
+        let scale = self
+            .window_for(&surface)
+            .and_then(|window| self.space.outputs_for_element(&window).first().cloned())
+            .or_else(|| self.space.outputs().next().cloned())
+            .map_or(1.0, |output| output.current_scale().fractional_scale());
+        with_states(&surface, |states| {
+            with_fractional_scale(states, |fractional| {
+                fractional.set_preferred_scale(scale);
+            });
+        });
+    }
+}
+smithay::delegate_fractional_scale!(Solium);
+smithay::delegate_viewporter!(Solium);
 
 impl PointerConstraintsHandler for Solium {
     /// A client has asked for the pointer to be held still or kept inside a
