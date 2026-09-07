@@ -37,7 +37,7 @@ smoothly, and clicking it still focuses it. Layout is unchanged on reset.
 
 ## E3 — Lua scripting surface
 
-Embed Lua. Expose enumeration (`windows`, `monitor`, `cursor`), transforms
+Embed Lua. Expose enumeration (`windows`, `monitors`, `cursor`), transforms
 (`present`, `present_clear`, `animate`), and binding (`on`, `grab_input`).
 
 Done when: **overview mode exists as a script only**, no Rust changes. A key
