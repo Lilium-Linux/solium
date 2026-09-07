@@ -100,6 +100,7 @@ it.
 | [docs/architecture.md](docs/architecture.md) | how it is built, and why |
 | [docs/shell-boundary.md](docs/shell-boundary.md) | what belongs to the compositor and what to the shell |
 | [docs/roadmap.md](docs/roadmap.md) | epics, in dependency order |
+| [docs/beta.md](docs/beta.md) | what has to be true before a public preview |
 | [dev/README.md](dev/README.md) | the knobs and checks it is tested with |
 | `docs/spikes/` | decisions, with the evidence that settled them |
 
