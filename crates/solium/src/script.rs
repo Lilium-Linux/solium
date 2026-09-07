@@ -28,6 +28,7 @@ use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use mlua::{Lua, Table, Value};
+use smithay::utils::{Logical, Point};
 
 use crate::present::Curve;
 
@@ -95,6 +96,10 @@ pub(crate) struct MonitorInfo {
     pub(crate) scale: f64,
     /// Whether this is the one the pointer is on. See `Solium::active_output`.
     pub(crate) focused: bool,
+    /// Whether this is the one a dock goes on. See `Solium::primary_output`.
+    pub(crate) primary: bool,
+    /// Its rotation, as the name a configuration would write.
+    pub(crate) transform: String,
 }
 
 /// What the compositor looked like when a handler was called.
@@ -807,6 +812,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     entry.set("name", monitor.name.clone())?;
                     entry.set("scale", monitor.scale)?;
                     entry.set("focused", monitor.focused)?;
+                    entry.set("primary", monitor.primary)?;
+                    entry.set("transform", monitor.transform.clone())?;
                     // The whole monitor as well as the usable part: a
                     // wallpaper and a fullscreen window want the one a bar has
                     // not taken a bite out of.
@@ -833,13 +840,98 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 let Ok(name) = name.to_str() else {
                     continue;
                 };
+                let name = name.to_string();
+
+                // A position outright, when both halves were given. One half
+                // alone is treated as unset rather than as zero: `y = 200` on
+                // its own almost certainly means "and leave x alone", and
+                // reading the other as 0 would slide the monitor to the left
+                // edge of the desk for no stated reason.
+                let (x, y) = (row.get::<Option<i32>>("x")?, row.get::<Option<i32>>("y")?);
+                let at = match (x, y) {
+                    (Some(x), Some(y)) => Some(Point::<i32, Logical>::from((x, y))),
+                    (Some(x), None) => Some(Point::from((x, 0))),
+                    (None, Some(y)) => Some(Point::from((0, y))),
+                    (None, None) => None,
+                };
+
+                // Or beside another monitor, which is the form that does not
+                // go stale when a resolution changes.
+                let align = match row.get::<Value>("align") {
+                    Ok(Value::String(name)) => name
+                        .to_str()
+                        .ok()
+                        .and_then(|name| crate::monitor::align(&name))
+                        .unwrap_or_default(),
+                    _ => crate::monitor::Align::default(),
+                };
+                let mut beside = None;
+                for (key, side) in [
+                    ("right_of", crate::monitor::Side::Right),
+                    ("left_of", crate::monitor::Side::Left),
+                    ("above", crate::monitor::Side::Above),
+                    ("below", crate::monitor::Side::Below),
+                ] {
+                    if let Ok(Value::String(anchor)) = row.get::<Value>(key)
+                        && let Ok(anchor) = anchor.to_str()
+                    {
+                        beside = Some((side, anchor.to_string(), align));
+                        break;
+                    }
+                }
+
+                // A mode, as width, height and optionally a refresh rate. A
+                // width without a height is not a mode, so it is ignored
+                // rather than half-applied.
+                let mode = match row.get::<Value>("mode") {
+                    Ok(Value::Table(mode)) => {
+                        match (mode.get::<Option<i32>>("w")?, mode.get::<Option<i32>>("h")?) {
+                            (Some(w), Some(h)) if w > 0 && h > 0 => {
+                                Some((w, h, mode.get::<Option<i32>>("refresh")?))
+                            }
+                            _ => {
+                                tracing::warn!(
+                                    monitor = name,
+                                    "a mode needs both w and h -- ignoring it"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+
+                let transform = match row.get::<Value>("transform") {
+                    Ok(Value::String(value)) => {
+                        let value = value.to_str().ok().map(|value| value.to_string());
+                        match value.as_deref().and_then(crate::monitor::transform) {
+                            Some(transform) => Some(transform),
+                            None => {
+                                tracing::warn!(
+                                    monitor = name,
+                                    transform = ?value,
+                                    "not a transform -- one of normal, 90, 180, 270, \
+                                     flipped, flipped-90, flipped-180, flipped-270"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    // A number is what people write for a rotation, and
+                    // refusing it over a quotation mark would be pedantry.
+                    Ok(Value::Integer(degrees)) => crate::monitor::transform(&degrees.to_string()),
+                    _ => None,
+                };
+
                 places.push(crate::monitor::Placement {
-                    name: name.to_string(),
-                    at: (
-                        row.get::<Option<i32>>("x")?.unwrap_or(0),
-                        row.get::<Option<i32>>("y")?.unwrap_or(0),
-                    )
-                        .into(),
+                    name,
+                    at,
+                    beside,
+                    mode,
+                    transform,
+                    enabled: row.get::<Option<bool>>("enabled")?.unwrap_or(true),
+                    primary: row.get::<Option<bool>>("primary")?.unwrap_or(false),
+                    scale: row.get::<Option<f64>>("scale")?,
                 });
             }
             with_pending(lua, |pending| {
@@ -1707,6 +1799,8 @@ mod tests {
                 },
                 scale: 1.0,
                 focused: true,
+                primary: true,
+                transform: "normal".to_owned(),
             }],
             work_area: Rect {
                 x: 0.0,

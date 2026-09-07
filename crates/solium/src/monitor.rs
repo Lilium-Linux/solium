@@ -36,17 +36,72 @@
 use smithay::{
     desktop::{Space, Window},
     output::Output,
-    utils::{Logical, Point, Rectangle, Size},
+    utils::{Logical, Point, Rectangle, Size, Transform},
 };
 
-/// One line of the configured arrangement.
+/// Which side of another monitor a screen sits on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Side {
+    Left,
+    Right,
+    Above,
+    Below,
+}
+
+/// How the other axis lines up when one monitor is placed beside another.
+///
+/// Worth having rather than always aligning the top edges. A 1080p beside a
+/// 1440p leaves 360 rows belonging to no screen, and which end of the small
+/// monitor that dead strip is at decides whether the pointer catches on it on
+/// the way to the taskbar or on the way to the menu bar. `centre` is the
+/// default because it halves the strip instead of putting all of it at one end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Align {
+    /// Top edges, or left edges.
+    Start,
+    #[default]
+    Centre,
+    /// Bottom edges, or right edges.
+    End,
+}
+
+/// One monitor, as the configuration describes it.
 #[derive(Clone, Debug)]
 pub(crate) struct Placement {
     /// The connector name, as the kernel reports it: `DP-1`, `HDMI-A-1`,
     /// `eDP-1`. `--probe` prints the ones this machine has.
     pub(crate) name: String,
-    /// Where its top-left corner goes in the global space.
-    pub(crate) at: Point<i32, Logical>,
+    /// Where its top-left corner goes in the global space, when a position was
+    /// given outright.
+    pub(crate) at: Option<Point<i32, Logical>>,
+    /// Beside another monitor, when that was given instead — which is what
+    /// people actually want to write, because it does not go stale when a
+    /// monitor's resolution changes.
+    pub(crate) beside: Option<(Side, String, Align)>,
+    /// The mode to ask this connector for: width, height, and optionally a
+    /// refresh rate in Hz. Without one, the best mode the connector offers.
+    pub(crate) mode: Option<(i32, i32, Option<i32>)>,
+    /// Rotation and flipping. A monitor stood on its end is `"90"`.
+    pub(crate) transform: Option<Transform>,
+    /// Whether to drive it at all. A connected monitor that is switched off
+    /// here is not given a CRTC, so it costs nothing and frees one.
+    pub(crate) enabled: bool,
+    /// Whether this is the monitor things belonging to one screen go on — a
+    /// dock, a bar, a layer surface that named no output.
+    pub(crate) primary: bool,
+    /// Read, reported, and not yet honoured. See #39.
+    pub(crate) scale: Option<f64>,
+}
+
+/// Where the monitors went, and what could not be worked out.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Layout {
+    /// One position per monitor given, in the same order.
+    pub(crate) at: Vec<Point<i32, Logical>>,
+    /// Monitors whose `right_of` (or `below`, …) named something that is not
+    /// there, or that name each other in a circle. Placed anyway, to the right
+    /// of everything, and reported so the caller can say so.
+    pub(crate) unresolved: Vec<String>,
 }
 
 /// The arrangement a script asked for.
@@ -63,55 +118,170 @@ impl Arrangement {
         Self { placements }
     }
 
+    fn find(&self, name: &str) -> Option<&Placement> {
+        self.placements
+            .iter()
+            .find(|placement| placement.name == name)
+    }
+
+    /// Whether this connector should be driven. Unmentioned monitors are on:
+    /// a configuration that names two screens must not switch off a third.
+    pub(crate) fn enabled(&self, name: &str) -> bool {
+        self.find(name).is_none_or(|placement| placement.enabled)
+    }
+
+    /// The mode this connector was asked for, if any.
+    pub(crate) fn mode(&self, name: &str) -> Option<(i32, i32, Option<i32>)> {
+        self.find(name)?.mode
+    }
+
+    /// The transform this connector was asked for, if any.
+    pub(crate) fn transform(&self, name: &str) -> Option<Transform> {
+        self.find(name)?.transform
+    }
+
+    /// The monitor things belonging to one screen go on.
+    ///
+    /// The first one marked `primary` that is actually here, and otherwise
+    /// nothing — the caller falls back to the first monitor, which it has and
+    /// this does not.
+    pub(crate) fn primary(&self) -> Option<&str> {
+        self.placements
+            .iter()
+            .find(|placement| placement.primary && placement.enabled)
+            .map(|placement| placement.name.as_str())
+    }
+
+    /// Configured monitors that asked for a scale.
+    ///
+    /// Reported so the caller can say it is not honoured yet rather than let
+    /// somebody believe it is. See #39.
+    pub(crate) fn scaled(&self) -> Vec<&str> {
+        self.placements
+            .iter()
+            .filter(|placement| placement.scale.is_some())
+            .map(|placement| placement.name.as_str())
+            .collect()
+    }
+
     /// Where each of `monitors` goes, in the order given.
     ///
-    /// Named ones take their configured position. The rest go to the right of
-    /// everything placed so far — *including* the configured ones, so adding a
-    /// third screen to a configuration that names two does not land it on top
-    /// of one of them.
+    /// Monitors given a position outright take it. The rest are resolved
+    /// against whatever is already placed, and when nothing more can be
+    /// resolved one unplaced monitor is *seeded* — given the next free space to
+    /// the right — and resolving continues.
     ///
-    /// Always returns one position per monitor. A layout that dropped an output
-    /// would be a black screen with no error, so there is no path here that
-    /// can leave one out.
-    pub(crate) fn place(
-        &self,
-        monitors: &[(String, Size<i32, Logical>)],
-    ) -> Vec<Point<i32, Logical>> {
+    /// The seeding is the part that matters, and the first version of this did
+    /// not have it. Almost nobody writes coordinates: they write
+    ///
+    /// ```lua
+    /// { name = "DP-1", primary = true },
+    /// { name = "DP-2", right_of = "DP-1" },
+    /// ```
+    ///
+    /// where the anchor has no position either, because which screen is at the
+    /// origin is not a thing anyone cares about. Resolving relatives only
+    /// against *positioned* monitors leaves that configuration entirely
+    /// unresolved — which is the way it will almost always be written.
+    ///
+    /// Seeding prefers a monitor something else is anchored to, so the chain
+    /// gets its foot on the ground rather than being seeded from the middle.
+    ///
+    /// Always returns one position per monitor. A monitor left without one
+    /// would be a screen that is on and black with nothing said about it, so
+    /// there is no path here that can leave one out.
+    pub(crate) fn place(&self, monitors: &[(String, Size<i32, Logical>)]) -> Layout {
         let mut placed: Vec<Option<Point<i32, Logical>>> = vec![None; monitors.len()];
+        let mut unresolved = Vec::new();
+        let index_of = |name: &str| monitors.iter().position(|(each, _)| each == name);
+        let beside_of = |name: &str| {
+            self.find(name)
+                .and_then(|placement| placement.beside.clone())
+        };
 
+        // Positions given outright.
         for (index, (name, _)) in monitors.iter().enumerate() {
-            if let Some(placement) = self
-                .placements
+            if let Some(at) = self.find(name).and_then(|placement| placement.at) {
+                placed[index] = Some(at);
+            }
+        }
+
+        // One extra round beyond the number of monitors: each round either
+        // resolves something, seeds something, or finishes, so this cannot
+        // spin on a configuration where two screens name each other.
+        for _ in 0..=monitors.len() {
+            // Everything that can be worked out from what is already placed.
+            loop {
+                let mut progress = false;
+                for (index, (name, size)) in monitors.iter().enumerate() {
+                    if placed[index].is_some() {
+                        continue;
+                    }
+                    let Some((side, anchor, align)) = beside_of(name) else {
+                        continue;
+                    };
+                    let Some(anchor_index) = index_of(&anchor) else {
+                        continue;
+                    };
+                    let Some(anchor_at) = placed[anchor_index] else {
+                        continue;
+                    };
+                    let anchor_size = monitors[anchor_index].1;
+                    placed[index] = Some(beside(anchor_at, anchor_size, side, align, *size));
+                    progress = true;
+                }
+                if !progress {
+                    break;
+                }
+            }
+
+            // Stuck. Seed one monitor and go round again — preferring one that
+            // something else is waiting on, so a chain is seeded from its end
+            // rather than its middle.
+            let anchors: Vec<String> = monitors
                 .iter()
-                .find(|placement| placement.name == *name)
-            {
-                placed[index] = Some(placement.at);
+                .filter_map(|(name, _)| beside_of(name).map(|(_, anchor, _)| anchor))
+                .collect();
+            let seed = monitors
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| placed[*index].is_none())
+                .min_by_key(|(_, (name, _))| {
+                    // An anchor first, then enumeration order.
+                    u8::from(!anchors.contains(name))
+                })
+                .map(|(index, _)| index);
+            let Some(seed) = seed else {
+                break;
+            };
+
+            // The right edge of everything decided so far, so a seeded monitor
+            // lands beside the others rather than on top of them.
+            let edge = placed
+                .iter()
+                .zip(monitors)
+                .filter_map(|(at, (_, size))| at.map(|at| at.x + size.w))
+                .max()
+                .unwrap_or(0);
+            placed[seed] = Some((edge, 0).into());
+
+            // A monitor that asked to be beside something and had to be seeded
+            // instead named something that is not here, or is in a circle with
+            // it. Placed anyway, and said out loud.
+            if beside_of(&monitors[seed].0).is_some() {
+                unresolved.push(monitors[seed].0.clone());
             }
         }
 
-        // The right edge of everything decided so far, so an unconfigured
-        // monitor lands beside the others rather than under them.
-        let mut edge = placed
-            .iter()
-            .zip(monitors)
-            .filter_map(|(at, (_, size))| at.map(|at| at.x + size.w))
-            .max()
-            .unwrap_or(0);
-
-        for (index, (_, size)) in monitors.iter().enumerate() {
-            if placed[index].is_some() {
-                continue;
-            }
-            placed[index] = Some((edge, 0).into());
-            edge += size.w;
+        Layout {
+            // Every entry was filled by the loop above; the fallback keeps the
+            // signature honest rather than describing a reachable case.
+            at: placed
+                .into_iter()
+                .map(|at| at.unwrap_or_default())
+                .collect(),
+            unresolved,
         }
-
-        // Every entry was filled by the loop above; the fallback keeps the
-        // signature honest rather than describing a reachable case.
-        placed
-            .into_iter()
-            .map(|at| at.unwrap_or_default())
-            .collect()
     }
 
     /// Configured names that no connector answered to.
@@ -124,6 +294,69 @@ impl Arrangement {
             .map(|placement| placement.name.as_str())
             .filter(|name| !monitors.iter().any(|(each, _)| each == name))
             .collect()
+    }
+}
+
+/// Where a monitor of `size` goes when placed on one side of another.
+fn beside(
+    anchor_at: Point<i32, Logical>,
+    anchor_size: Size<i32, Logical>,
+    side: Side,
+    align: Align,
+    size: Size<i32, Logical>,
+) -> Point<i32, Logical> {
+    // How far along the *other* axis it slides, so the two line up as asked.
+    let offset = |anchor: i32, own: i32| match align {
+        Align::Start => 0,
+        Align::Centre => (anchor - own) / 2,
+        Align::End => anchor - own,
+    };
+    match side {
+        Side::Right => (
+            anchor_at.x + anchor_size.w,
+            anchor_at.y + offset(anchor_size.h, size.h),
+        ),
+        Side::Left => (
+            anchor_at.x - size.w,
+            anchor_at.y + offset(anchor_size.h, size.h),
+        ),
+        Side::Below => (
+            anchor_at.x + offset(anchor_size.w, size.w),
+            anchor_at.y + anchor_size.h,
+        ),
+        Side::Above => (
+            anchor_at.x + offset(anchor_size.w, size.w),
+            anchor_at.y - size.h,
+        ),
+    }
+    .into()
+}
+
+/// A transform by the name a configuration writes.
+///
+/// The numbers are degrees anticlockwise, which is what every other display
+/// tool calls them, and `flipped` is mirrored horizontally first.
+pub(crate) fn transform(name: &str) -> Option<Transform> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "normal" | "0" => Some(Transform::Normal),
+        "90" => Some(Transform::_90),
+        "180" => Some(Transform::_180),
+        "270" => Some(Transform::_270),
+        "flipped" | "flipped-0" => Some(Transform::Flipped),
+        "flipped-90" => Some(Transform::Flipped90),
+        "flipped-180" => Some(Transform::Flipped180),
+        "flipped-270" => Some(Transform::Flipped270),
+        _ => None,
+    }
+}
+
+/// An alignment by the name a configuration writes.
+pub(crate) fn align(name: &str) -> Option<Align> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "start" | "top" | "left" => Some(Align::Start),
+        "centre" | "center" | "middle" => Some(Align::Centre),
+        "end" | "bottom" | "right" => Some(Align::End),
+        _ => None,
     }
 }
 
@@ -181,6 +414,21 @@ pub(crate) fn union(space: &Space<Window>) -> Option<Rectangle<i32, Logical>> {
 mod tests {
     use super::*;
 
+    /// A monitor named with nothing said about it: on, not primary, wherever
+    /// the arrangement puts it. The tests vary one field at a time from here.
+    fn named(name: &str) -> Placement {
+        Placement {
+            name: name.to_owned(),
+            at: None,
+            beside: None,
+            mode: None,
+            transform: None,
+            enabled: true,
+            primary: false,
+            scale: None,
+        }
+    }
+
     fn monitors(names: &[(&str, i32, i32)]) -> Vec<(String, Size<i32, Logical>)> {
         names
             .iter()
@@ -188,23 +436,37 @@ mod tests {
             .collect()
     }
 
+    fn at(name: &str, x: i32, y: i32) -> Placement {
+        Placement {
+            at: Some((x, y).into()),
+            ..named(name)
+        }
+    }
+
+    fn beside_of(name: &str, side: Side, anchor: &str, align: Align) -> Placement {
+        Placement {
+            beside: Some((side, anchor.to_owned(), align)),
+            ..named(name)
+        }
+    }
+
     #[test]
     fn one_monitor_is_at_the_origin() {
-        let placed = Arrangement::default().place(&monitors(&[("eDP-1", 1920, 1080)]));
-        assert_eq!(placed, vec![Point::from((0, 0))]);
+        let layout = Arrangement::default().place(&monitors(&[("eDP-1", 1920, 1080)]));
+        assert_eq!(layout.at, vec![Point::from((0, 0))]);
     }
 
     #[test]
     fn unconfigured_monitors_go_left_to_right() {
         // The default guess, and the reason it is a guess: enumeration order
         // is the only thing available and it says nothing about the desk.
-        let placed = Arrangement::default().place(&monitors(&[
+        let layout = Arrangement::default().place(&monitors(&[
             ("DP-1", 2560, 1440),
             ("HDMI-A-1", 1920, 1080),
             ("DP-2", 1280, 1024),
         ]));
         assert_eq!(
-            placed,
+            layout.at,
             vec![
                 Point::from((0, 0)),
                 Point::from((2560, 0)),
@@ -215,22 +477,16 @@ mod tests {
 
     #[test]
     fn a_configured_monitor_takes_its_position() {
-        let arrangement = Arrangement::new(vec![
-            Placement {
-                name: "HDMI-A-1".to_owned(),
-                at: (0, 0).into(),
-            },
-            Placement {
-                name: "DP-1".to_owned(),
-                at: (1920, 200).into(),
-            },
-        ]);
+        let arrangement = Arrangement::new(vec![at("HDMI-A-1", 0, 0), at("DP-1", 1920, 200)]);
         // Enumerated in the other order, on purpose: the configuration decides
         // the arrangement, and the kernel's order must not be able to override
         // it.
-        let placed =
+        let layout =
             arrangement.place(&monitors(&[("DP-1", 2560, 1440), ("HDMI-A-1", 1920, 1080)]));
-        assert_eq!(placed, vec![Point::from((1920, 200)), Point::from((0, 0))]);
+        assert_eq!(
+            layout.at,
+            vec![Point::from((1920, 200)), Point::from((0, 0))]
+        );
     }
 
     #[test]
@@ -238,42 +494,225 @@ mod tests {
         // A third screen plugged into a configuration that names two. Placing
         // it at the origin would put it on top of one of them, which looks
         // like both being broken rather than one being unconfigured.
-        let arrangement = Arrangement::new(vec![Placement {
-            name: "DP-1".to_owned(),
-            at: (0, 0).into(),
-        }]);
-        let placed =
+        let arrangement = Arrangement::new(vec![at("DP-1", 0, 0)]);
+        let layout =
             arrangement.place(&monitors(&[("DP-1", 2560, 1440), ("HDMI-A-1", 1920, 1080)]));
-        assert_eq!(placed, vec![Point::from((0, 0)), Point::from((2560, 0))]);
+        assert_eq!(layout.at, vec![Point::from((0, 0)), Point::from((2560, 0))]);
     }
 
     #[test]
     fn every_monitor_gets_a_position() {
         // The property that matters more than any particular arrangement: a
         // monitor with no position is a screen that is on and black.
-        let arrangement = Arrangement::new(vec![Placement {
-            name: "nothing-called-this".to_owned(),
-            at: (100, 100).into(),
-        }]);
+        let arrangement = Arrangement::new(vec![at("nothing-called-this", 100, 100)]);
         let all = monitors(&[("DP-1", 800, 600), ("DP-2", 800, 600), ("DP-3", 800, 600)]);
-        assert_eq!(arrangement.place(&all).len(), all.len());
+        assert_eq!(arrangement.place(&all).at.len(), all.len());
     }
 
     #[test]
     fn a_name_nothing_answers_to_is_reported() {
-        let arrangement = Arrangement::new(vec![
-            Placement {
-                name: "DP-1".to_owned(),
-                at: (0, 0).into(),
-            },
-            Placement {
-                name: "DP-9".to_owned(),
-                at: (0, 0).into(),
-            },
-        ]);
+        let arrangement = Arrangement::new(vec![at("DP-1", 0, 0), at("DP-9", 0, 0)]);
         assert_eq!(
             arrangement.unmatched(&monitors(&[("DP-1", 800, 600)])),
             vec!["DP-9"]
         );
+    }
+
+    /// The form people actually want to write: no arithmetic, and it does not
+    /// go stale when a monitor's resolution changes.
+    #[test]
+    fn a_monitor_can_be_placed_beside_another() {
+        let arrangement = Arrangement::new(vec![
+            at("DP-1", 0, 0),
+            beside_of("DP-2", Side::Right, "DP-1", Align::Start),
+        ]);
+        let layout = arrangement.place(&monitors(&[("DP-1", 2560, 1440), ("DP-2", 1920, 1080)]));
+        assert_eq!(layout.at, vec![Point::from((0, 0)), Point::from((2560, 0))]);
+        assert!(layout.unresolved.is_empty());
+    }
+
+    #[test]
+    fn beside_works_on_all_four_sides() {
+        let anchor = Point::from((1000, 1000));
+        let anchor_size = Size::from((2560, 1440));
+        let size = Size::from((1920, 1080));
+        let start = Align::Start;
+        assert_eq!(
+            beside(anchor, anchor_size, Side::Right, start, size),
+            Point::from((3560, 1000))
+        );
+        assert_eq!(
+            beside(anchor, anchor_size, Side::Left, start, size),
+            Point::from((-920, 1000))
+        );
+        assert_eq!(
+            beside(anchor, anchor_size, Side::Below, start, size),
+            Point::from((1000, 2440))
+        );
+        assert_eq!(
+            beside(anchor, anchor_size, Side::Above, start, size),
+            Point::from((1000, -80))
+        );
+    }
+
+    /// A 1080p beside a 1440p leaves 360 rows belonging to no screen, and
+    /// which end of the small monitor they sit at is what the alignment
+    /// chooses. Centring halves the strip rather than putting it all at one
+    /// end, which is why it is the default.
+    #[test]
+    fn alignment_decides_where_the_dead_strip_goes() {
+        let anchor = Point::from((0, 0));
+        let anchor_size = Size::from((2560, 1440));
+        let size = Size::from((1920, 1080));
+        assert_eq!(
+            beside(anchor, anchor_size, Side::Right, Align::Start, size).y,
+            0
+        );
+        assert_eq!(
+            beside(anchor, anchor_size, Side::Right, Align::Centre, size).y,
+            180
+        );
+        assert_eq!(
+            beside(anchor, anchor_size, Side::Right, Align::End, size).y,
+            360
+        );
+    }
+
+    /// Written in the wrong order on purpose. A configuration is a list a
+    /// person edits, and requiring them to sort it by dependency would be a
+    /// rule nobody is told about until it silently does the wrong thing.
+    #[test]
+    fn a_chain_resolves_whatever_order_it_is_written_in() {
+        let arrangement = Arrangement::new(vec![
+            beside_of("DP-3", Side::Right, "DP-2", Align::Start),
+            beside_of("DP-2", Side::Right, "DP-1", Align::Start),
+            at("DP-1", 0, 0),
+        ]);
+        let layout = arrangement.place(&monitors(&[
+            ("DP-1", 1000, 1000),
+            ("DP-2", 1000, 1000),
+            ("DP-3", 1000, 1000),
+        ]));
+        assert_eq!(
+            layout.at,
+            vec![
+                Point::from((0, 0)),
+                Point::from((1000, 0)),
+                Point::from((2000, 0)),
+            ]
+        );
+    }
+
+    /// The way anyone will actually write it: the anchor has no position
+    /// either, because which screen is at the origin is not a thing people
+    /// care about. The first version of this resolved relatives only against
+    /// *positioned* monitors, so this configuration — the likely one — came out
+    /// entirely unresolved and in enumeration order.
+    #[test]
+    fn an_anchor_with_no_position_of_its_own_still_anchors() {
+        let arrangement = Arrangement::new(vec![
+            named("DP-1"),
+            beside_of("DP-2", Side::Right, "DP-1", Align::Start),
+        ]);
+        // Enumerated the other way round, so nothing about the answer can be
+        // coming from the kernel's order.
+        let layout = arrangement.place(&monitors(&[("DP-2", 1920, 1080), ("DP-1", 2560, 1440)]));
+        assert_eq!(layout.at, vec![Point::from((2560, 0)), Point::from((0, 0))]);
+        assert!(layout.unresolved.is_empty());
+    }
+
+    /// A chain with nothing positioned anywhere in it. Seeding prefers a
+    /// monitor something else is anchored to, so the chain gets its foot on the
+    /// ground rather than being seeded from the middle.
+    #[test]
+    fn a_chain_needs_no_coordinates_at_all() {
+        let arrangement = Arrangement::new(vec![
+            beside_of("DP-3", Side::Right, "DP-2", Align::Start),
+            beside_of("DP-2", Side::Right, "DP-1", Align::Start),
+            named("DP-1"),
+        ]);
+        let layout = arrangement.place(&monitors(&[
+            ("DP-1", 1000, 1000),
+            ("DP-2", 1000, 1000),
+            ("DP-3", 1000, 1000),
+        ]));
+        assert_eq!(
+            layout.at,
+            vec![
+                Point::from((0, 0)),
+                Point::from((1000, 0)),
+                Point::from((2000, 0)),
+            ]
+        );
+        assert!(layout.unresolved.is_empty());
+    }
+
+    /// Two monitors each to the right of the other. Nothing can satisfy that.
+    /// One of them is seeded and reported, and the other then resolves against
+    /// it — which is a better desk than dumping both in a row, and the only
+    /// unacceptable answer is one that never finishes.
+    #[test]
+    fn monitors_that_name_each_other_still_get_placed() {
+        let arrangement = Arrangement::new(vec![
+            beside_of("DP-1", Side::Right, "DP-2", Align::Start),
+            beside_of("DP-2", Side::Right, "DP-1", Align::Start),
+        ]);
+        let layout = arrangement.place(&monitors(&[("DP-1", 800, 600), ("DP-2", 800, 600)]));
+        assert_eq!(layout.at, vec![Point::from((0, 0)), Point::from((800, 0))]);
+        assert_eq!(layout.unresolved, vec!["DP-1"]);
+    }
+
+    #[test]
+    fn an_anchor_that_is_not_there_is_reported() {
+        let arrangement = Arrangement::new(vec![beside_of(
+            "DP-2",
+            Side::Right,
+            "the-one-i-unplugged",
+            Align::Start,
+        )]);
+        let layout = arrangement.place(&monitors(&[("DP-2", 800, 600)]));
+        assert_eq!(layout.at, vec![Point::from((0, 0))]);
+        assert_eq!(layout.unresolved, vec!["DP-2"]);
+    }
+
+    /// A configuration that names two screens must not switch off a third.
+    #[test]
+    fn a_monitor_nobody_mentioned_is_on() {
+        let arrangement = Arrangement::new(vec![Placement {
+            enabled: false,
+            ..named("DP-1")
+        }]);
+        assert!(!arrangement.enabled("DP-1"));
+        assert!(arrangement.enabled("DP-2"));
+    }
+
+    #[test]
+    fn a_monitor_switched_off_cannot_be_the_primary_one() {
+        // Otherwise a dock goes on a screen that is not being driven, which
+        // is a dock nobody can see and no error anywhere.
+        let arrangement = Arrangement::new(vec![
+            Placement {
+                primary: true,
+                enabled: false,
+                ..named("DP-1")
+            },
+            Placement {
+                primary: true,
+                ..named("DP-2")
+            },
+        ]);
+        assert_eq!(arrangement.primary(), Some("DP-2"));
+    }
+
+    #[test]
+    fn transforms_and_alignments_parse_the_names_people_write() {
+        assert_eq!(transform("90"), Some(Transform::_90));
+        assert_eq!(transform("Flipped-180"), Some(Transform::Flipped180));
+        assert_eq!(transform("normal"), Some(Transform::Normal));
+        assert_eq!(transform("sideways"), None);
+        assert_eq!(align("center"), Some(Align::Centre));
+        assert_eq!(align("centre"), Some(Align::Centre));
+        assert_eq!(align("bottom"), Some(Align::End));
+        assert_eq!(align("askew"), None);
     }
 }

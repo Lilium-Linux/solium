@@ -26,7 +26,7 @@ a demo into a regression test.
 | `dev/gate.sh` | fmt, clippy, tests, build, and that the Lua configuration loads |
 | `dev/app-check.sh <program>` | a client runs, draws, and provokes no protocol error |
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
-| `cargo run -p wl-probe` | the protocols answer, from a real client's side |
+| `cargo run -p wl-probe` | the protocols answer, from a real client's side, and a bar lands on the monitor it named |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
@@ -47,6 +47,24 @@ whether presentation feedback worked at all.
 
 It exits non-zero if anything it asked for went unanswered, so it can be a
 gate.
+
+It also anchors a bar to the top of every monitor with an exclusive zone and
+checks that each was configured to *that* monitor's width — a layer surface
+that landed on the wrong screen comes back with the wrong number, and there is
+no way to see that from inside the compositor. Two knobs:
+
+    WL_PROBE_BAR=DP-2    only that monitor. One bar on one screen can tell
+                         "each monitor's own work area" from "every monitor's";
+                         a bar on all of them cannot.
+    WL_PROBE_HOLD=10     keep the bars up for ten seconds, so the compositor's
+                         own frame can be captured — an exclusive zone is a
+                         claim about where everybody *else's* windows go, and
+                         no client can see those.
+
+That check found that layer surfaces had never worked at all: they were mapped
+and never sent an initial configure, and a client may not attach a buffer until
+it has been configured once. Every bar and every dock was invisible, for as
+long as `layer.rs` has claimed that any existing panel works.
 
 `clipboard-check.sh` runs its X11 half in a container, because the host has no
 `xclip` and cannot install one. **Run it more than once.** The bug it was

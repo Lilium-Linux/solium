@@ -153,6 +153,58 @@ impl AsFd for Card {
 impl smithay::reexports::drm::Device for Card {}
 impl smithay::reexports::drm::control::Device for Card {}
 
+/// The mode a connector was asked for, or the best it offers.
+///
+/// An exact resolution match, at the requested refresh rate when one was given
+/// and at the highest available when it was not. Anything else warns and falls
+/// back to the automatic choice: a configuration that asks for a mode the
+/// monitor does not have should cost a line in the log, never a black screen.
+fn chosen_mode(
+    connector: &connector::Info,
+    wanted: Option<(i32, i32, Option<i32>)>,
+    name: &str,
+) -> Option<DrmMode> {
+    let Some((width, height, refresh)) = wanted else {
+        return preferred_mode(connector);
+    };
+
+    let matching: Vec<&DrmMode> = connector
+        .modes()
+        .iter()
+        .filter(|mode| i32::from(mode.size().0) == width && i32::from(mode.size().1) == height)
+        .collect();
+
+    let picked = match refresh {
+        // Within one hertz: a 59.94 Hz mode is reported as 60 and asking for
+        // 60 must find it.
+        Some(refresh) => matching
+            .iter()
+            .find(|mode| {
+                i32::try_from(mode.vrefresh())
+                    .unwrap_or(0)
+                    .abs_diff(refresh)
+                    <= 1
+            })
+            .copied(),
+        None => matching.iter().max_by_key(|mode| mode.vrefresh()).copied(),
+    };
+
+    match picked {
+        Some(mode) => Some(*mode),
+        None => {
+            tracing::warn!(
+                monitor = name,
+                asked = format!(
+                    "{width}x{height}{}",
+                    refresh.map(|r| format!("@{r}")).unwrap_or_default()
+                ),
+                "this monitor has no such mode -- using its best instead"
+            );
+            preferred_mode(connector)
+        }
+    }
+}
+
 /// The best mode a connector offers.
 ///
 /// The EDID's preferred flag names a *resolution*, and usually pairs it with a
@@ -592,7 +644,7 @@ impl State {
         }
 
         let formats = renderer.egl_context().dmabuf_render_formats().clone();
-        let found = connected(&device)?;
+        let found = connected(&device, &self.solium.arrangement)?;
         for (connector, crtc, mode) in found {
             let name = format!(
                 "{}-{}",
@@ -642,12 +694,16 @@ impl State {
             // The returned `GlobalId` is a handle, not a guard: dropping it
             // does not remove the global, which is why nothing keeps it.
             let _ = output.create_global::<Solium>(&self.solium.display_handle);
-            output.change_current_state(
-                Some(wl_mode),
-                Some(Transform::Normal),
-                None,
-                Some((0, 0).into()),
-            );
+            // A rotation makes the logical size portrait -- `output_geometry`
+            // applies the transform to the mode -- so layouts and work areas
+            // follow it without knowing about it, and the display pipeline
+            // does the turning.
+            let transform = self
+                .solium
+                .arrangement
+                .transform(&name)
+                .unwrap_or(Transform::Normal);
+            output.change_current_state(Some(wl_mode), Some(transform), None, Some((0, 0).into()));
             output.set_preferred(wl_mode);
             // Mapped anywhere; `place_outputs` decides where, once, from the
             // configured arrangement — the same call the nested backend makes,
@@ -830,7 +886,10 @@ impl State {
 /// restricts routing far more than anything current does, so the cost of
 /// getting it wrong is one monitor and a line in the log rather than a
 /// session, and it is written down here rather than discovered.
-fn connected(device: &DrmDevice) -> Result<Vec<(connector::Info, crtc::Handle, DrmMode)>> {
+fn connected(
+    device: &DrmDevice,
+    arrangement: &crate::monitor::Arrangement,
+) -> Result<Vec<(connector::Info, crtc::Handle, DrmMode)>> {
     let resources = device.resource_handles().context("reading DRM resources")?;
     let mut found = Vec::new();
     let mut taken: Vec<crtc::Handle> = Vec::new();
@@ -847,7 +906,18 @@ fn connected(device: &DrmDevice) -> Result<Vec<(connector::Info, crtc::Handle, D
         if connector.state() != connector::State::Connected {
             continue;
         }
-        let Some(mode) = preferred_mode(&connector) else {
+        // Switched off in the configuration. Skipped before a CRTC is claimed,
+        // so it frees one for another monitor rather than merely staying dark
+        // — which is the point of turning a screen off on a card with three
+        // CRTCs and four connectors.
+        if !arrangement.enabled(&name) {
+            tracing::info!(
+                monitor = name,
+                "connected, and switched off by configuration"
+            );
+            continue;
+        }
+        let Some(mode) = chosen_mode(&connector, arrangement.mode(&name), &name) else {
             // Connected and offering nothing to drive it with. Rare, and worth
             // a line: from the other side of the screen it is indistinguishable
             // from the compositor ignoring the monitor.

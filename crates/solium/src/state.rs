@@ -63,7 +63,7 @@ use smithay::{
         selection::{SelectionHandler, SelectionSource, SelectionTarget},
         shell::{
             wlr_layer::{
-                Layer, LayerSurface as WlrLayerSurface, LayerSurfaceConfigure,
+                Layer, LayerSurface as WlrLayerSurface, LayerSurfaceConfigure, LayerSurfaceData,
                 WlrLayerShellHandler, WlrLayerShellState,
             },
             xdg::{
@@ -725,7 +725,9 @@ impl Solium {
             .map(|pointer| pointer.current_location());
         match at {
             Some(at) => monitor::at(&self.space, at).or_else(|| monitor::nearest(&self.space, at)),
-            None => self.space.outputs().next().cloned(),
+            // No pointer yet, which is the moment before the first input
+            // device is reported. The primary monitor is the stable answer.
+            None => self.primary_output(),
         }
     }
 
@@ -739,6 +741,28 @@ impl Solium {
             .outputs()
             .find(|output| self.space.output_geometry(output) == Some(screen))
             .cloned()
+    }
+
+    /// The monitor things belonging to *one* screen go on.
+    ///
+    /// A dock, a bar, a layer surface that named no output. Not the active
+    /// monitor: a dock connects once, at startup, and pinning it to whichever
+    /// screen the pointer happened to be over at that moment means it appears
+    /// on a different monitor depending on where the mouse was left — which
+    /// looks like the compositor placing it at random, because it is.
+    ///
+    /// `primary = true` in the configuration decides it. Otherwise the first
+    /// monitor, which is at least stable across sessions.
+    pub(crate) fn primary_output(&self) -> Option<Output> {
+        let named = self.arrangement.primary();
+        named
+            .and_then(|name| {
+                self.space
+                    .outputs()
+                    .find(|output| output.name() == name)
+                    .cloned()
+            })
+            .or_else(|| self.space.outputs().next().cloned())
     }
 
     /// The monitor covering a point, or the nearest one to it.
@@ -825,9 +849,27 @@ impl Solium {
             );
         }
 
-        let places = self.arrangement.place(&monitors);
+        let layout = self.arrangement.place(&monitors);
+        for name in &layout.unresolved {
+            // Named a neighbour that is not here, or two monitors named each
+            // other. Placed to the right of everything rather than dropped,
+            // and said out loud: the position it ends up at is the one thing
+            // that will not look like the configuration was read.
+            tracing::warn!(
+                monitor = name,
+                "could not be placed beside what it names -- put it at the right-hand end"
+            );
+        }
+        for name in self.arrangement.scaled() {
+            // Accepted so the key has its final name, and reported so nobody
+            // spends an afternoon believing a scale is being applied.
+            tracing::warn!(
+                monitor = name,
+                "scale is read but not honoured yet -- see issue #39"
+            );
+        }
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
-        for (output, at) in outputs.iter().zip(places) {
+        for (output, at) in outputs.iter().zip(layout.at) {
             // Only when it actually moved. Remapping an output resets its
             // damage memory, so re-placing everything on every reload would
             // throw away damage tracking to achieve nothing -- and would log a
@@ -1163,6 +1205,7 @@ impl Solium {
             .collect();
 
         let active = self.active_output();
+        let primary = self.primary_output();
         let monitors = self
             .space
             .outputs()
@@ -1176,6 +1219,8 @@ impl Solium {
                     .unwrap_or_default(),
                 scale: output.current_scale().fractional_scale(),
                 focused: active.as_ref() == Some(output),
+                primary: primary.as_ref() == Some(output),
+                transform: format!("{:?}", output.current_transform()).to_lowercase(),
             })
             .collect();
 
@@ -2500,13 +2545,17 @@ impl Solium {
     pub(crate) fn shell(&mut self) -> Option<&mut crate::surface::ShellSurface> {
         if self.shell.is_none() {
             let scene = std::env::var_os("SOLIUM_SHELL_SCENE")?;
-            // One scene on the active monitor. A shell that wants a bar on
+            // One scene, on the primary monitor. A shell that wants a bar on
             // every screen writes layer surfaces, one per output, which is the
             // supported route and the reason `new_layer_surface` honours the
             // output a client names — this is the in-process development
             // affordance, and giving it a screen each would be building the
             // multi-monitor shell the compositor has no business owning.
-            let output = self.active_output()?;
+            //
+            // The primary monitor and not the active one, for the same reason
+            // a dock goes there: a bar that moves screens when the pointer
+            // does is a bar nobody asked to move.
+            let output = self.primary_output()?;
             let area = self.work_area_on(&output)?;
             let name = output.name();
             // What shell components ask for about the screen they are on.
@@ -2852,6 +2901,61 @@ impl CompositorHandler for Solium {
             }
         }
         self.popups.commit(surface);
+        self.configure_layer(surface);
+    }
+}
+
+impl Solium {
+    /// Send a layer surface its first configure, so it can draw.
+    ///
+    /// The protocol says the initial configure goes out in response to the
+    /// surface's first commit, and Smithay is deliberate about not sending it
+    /// from `arrange` — a client is allowed to set its size *before*
+    /// committing, and a configure sent earlier would carry the wrong one.
+    /// That leaves it to the compositor, and nothing here was doing it.
+    ///
+    /// So a bar mapped, took its exclusive zone, and was never told what size
+    /// to be — and a client may not attach a buffer until it has been
+    /// configured once. Every layer surface was invisible, which means the
+    /// claim in `layer.rs` that any existing panel works was untrue for the
+    /// whole time it has been written down. Found by `wl-probe` anchoring one
+    /// and waiting, which is the entire reason that program exists.
+    fn configure_layer(&mut self, surface: &WlSurface) {
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        for output in outputs {
+            let map = layer_map_for_output(&output);
+            let Some(layer) = map
+                .layers()
+                .find(|layer| layer.layer_surface().wl_surface() == surface)
+                .cloned()
+            else {
+                continue;
+            };
+            // The map is dropped before arranging: `arrange` takes it again,
+            // and the lock is not reentrant.
+            drop(map);
+            let sent = with_states(surface, |states| {
+                states
+                    .data_map
+                    .get::<LayerSurfaceData>()
+                    .and_then(|data| data.lock().ok())
+                    .is_some_and(|attributes| attributes.initial_configure_sent)
+            });
+            if !sent {
+                // Arranged first, so the size it is told is the one it will
+                // actually be given rather than a guess to be corrected.
+                layer::arrange(&output);
+                layer.layer_surface().send_configure();
+                self.relayout_for_layers();
+            }
+            return;
+        }
+    }
+
+    /// A layer surface changed the room windows get, so the layout is re-run.
+    fn relayout_for_layers(&mut self) {
+        self.trigger_relayout();
+        self.redraw = true;
     }
 }
 
@@ -3008,10 +3112,14 @@ impl WlrLayerShellHandler for Solium {
         // A surface may name an output or leave the choice to us; a shell that
         // puts a bar on each screen names one per bar, and that is the request
         // that has to be honoured for the second screen to get a bar at all.
+        //
+        // The primary monitor when it names none, and not the active one: a
+        // dock connects at startup, and where the pointer happened to be then
+        // is not a decision anybody made. See `primary_output`.
         let output = wl_output
             .as_ref()
             .and_then(Output::from_resource)
-            .or_else(|| self.active_output());
+            .or_else(|| self.primary_output());
         let Some(output) = output else {
             tracing::warn!(
                 namespace,

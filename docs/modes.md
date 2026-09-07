@@ -73,7 +73,8 @@ screen. Release it when you leave, or nothing will ever reach a window again.
 
 ```lua
 sol.windows()          -- every window: id, rect, drawn, title, focused, monitor
-sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale, focused
+sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale,
+                       --                 transform, focused, primary
 sol.monitor()          -- the active monitor's work area
 sol.monitor(id)        -- the work area of the monitor that window is on
 sol.cursor()           -- { x, y }
@@ -142,6 +143,17 @@ and what a binding pressed with no particular window in mind is about. It is
 the pointer and not the focused window on purpose: look at the second screen,
 click the empty desktop, press the key for a terminal, and a focus-based rule
 would open it on the screen you just looked away from.
+
+The `primary` flag is a different question and answers a different one: it is
+where things belonging to *one* screen go — a dock, a bar, a layer surface that
+named no output. It does not move, which is the whole point of it. See
+[shell-boundary.md](shell-boundary.md).
+
+`x`, `y`, `w`, `h` are the **work area** — the monitor less whatever bars have
+reserved — and `whole` is the monitor itself, which is what a wallpaper or a
+fullscreen window covers. Both are in the global space, so either can be handed
+straight to `sol.place`. Copy the rect before adding keys to it; the one you
+were given belongs to the snapshot.
 
 ## The arrangements that ship
 

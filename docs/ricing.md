@@ -112,35 +112,78 @@ you do not otherwise have is which application you are waiting for.
     SOLIUM_LOADING=mine        # ~/.config/solium/qml/loading/mine.qml
     SOLIUM_LOADING=~/mine.qml  # anywhere
 
-### Where your monitors are
+### Your monitors
 
 The compositor cannot work out which screen is on the left. The kernel reports
 connectors in an order that has nothing to do with your desk, so it guesses —
-left to right in that order, top edges aligned — and about half the time the
-guess is wrong. Fixing it is one line per screen:
+every connected screen driven, left to right in that order — and about half the
+time the guess is wrong.
+
+You almost never want coordinates. Say what is beside what:
 
 ```lua
 return {
     monitors = {
-        { name = "DP-1", x = 0, y = 0 },
-        { name = "DP-2", x = 2560, y = 180 },
+        { name = "DP-1", primary = true },
+        { name = "DP-2", right_of = "DP-1", align = "end" },
+        { name = "DP-3", above = "DP-1", transform = "90" },
+        { name = "HDMI-A-1", enabled = false },
     },
 }
 ```
 
 `solium --probe` prints the connector names this machine has, without taking
-the screen away from whatever is currently drawing on it. A name nothing
-answers to gets a line in the log rather than being ignored — a monitor
-arrangement that silently does nothing is the hardest kind to debug, and the
-usual cause is a connector name that does not exist here.
+the screen from whatever is drawing on it. A name nothing answers to gets a
+line in the log rather than being ignored — a monitor arrangement that silently
+does nothing is the hardest kind to debug, and the usual cause is a name that
+does not exist here.
 
-Positions are top-left corners in one **global space** that every monitor is a
-window onto. So `y` is how much lower one screen sits than the other, which is
-what a monitor standing on a different-height desk actually needs, and a
-monitor you do not name goes to the right of everything you did — plugging in a
-third does not land it on top of one of the other two.
+| key | |
+|---|---|
+| `right_of`, `left_of`, `above`, `below` | beside another monitor, by name. A chain resolves whatever order you write the list in, and no monitor in it needs coordinates |
+| `align` | `"start"`, `"centre"` (default) or `"end"` — how the *other* axis lines up against something taller or wider |
+| `x`, `y` | the top-left corner outright, if you would rather |
+| `mode` | `{ w = 2560, h = 1440, refresh = 165 }`; `refresh` is optional and in Hz |
+| `transform` | `"90"`, `"180"`, `"270"`, `"normal"`, or the same with `flipped-` |
+| `enabled = false` | do not drive it |
+| `primary = true` | where a dock, a bar, or any layer surface that named no output goes |
+| `scale` | read, reported in the log, **not honoured yet** — [#39](https://github.com/Lilium-Linux/solium/issues/39) |
 
 `super+shift+r` applies a change without ending the session.
+
+Three of these are worth a sentence more.
+
+**`align` is not cosmetic.** A 1080p beside a 1440p leaves 360 rows belonging
+to no screen at all, and which end of the small monitor that dead strip is at
+decides where the pointer catches on its way past. `"centre"` halves the strip
+instead of putting all of it at one end, which is why it is the default;
+`"end"` lines the bottom edges up, which is what you want if both monitors
+stand on the same desk.
+
+**`enabled = false` frees a CRTC**, not just the screen. A CRTC is the hardware
+that scans a buffer out, there are usually four, and a connector without one
+stays dark — so switching off a monitor you are not using is how you drive a
+fourth on a card with three.
+
+**A rotated monitor's work area is portrait.** `transform` changes the logical
+size, so every layout follows it without knowing anything about rotation, and
+the display pipeline does the turning.
+
+Everything is applied at startup. A monitor plugged in while the session is
+running is not picked up yet —
+[#43](https://github.com/Lilium-Linux/solium/issues/43).
+
+### Bars, docks and wallpapers
+
+They are ordinary clients over `wlr-layer-shell`, which means any panel already
+written for that protocol works. A surface names the output it wants and the
+compositor honours it, so a bar on every screen is one surface per screen, each
+reserving from *that* monitor's work area. One that names no output gets the
+primary monitor.
+
+See **[shell-boundary.md](shell-boundary.md)** for why that is a client rather
+than something the compositor draws, and what was learned from it being the
+other way round.
 
 ### Your own colours
 
