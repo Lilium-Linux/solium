@@ -45,7 +45,7 @@ predicts.
 
 | | why |
 |---|---|
-| ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | **done.** A pipeline per monitor, one global space, layouts per screen |
+| ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | **done.** A pipeline per monitor, one global space, layouts and workspaces per screen |
 | [#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI | every laptop user gets a half-size desktop and bounces immediately |
 | [#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture | no screenshots and no screen sharing; people hit this in minutes |
 | packaging | there is none. A preview nobody can install is a preview nobody tries |
@@ -66,8 +66,15 @@ hours is worse than one that is missing a lock screen.
 ## Order, and why
 
 1. ~~**[#41](https://github.com/Lilium-Linux/solium/issues/41)
-   multi-monitor**~~ — done, on the `multi-monitor` branch. It was the biggest
-   and the one everything else is easier after, which is why it went first.
+   multi-monitor**~~ — done and on `main`, verified on two monitors at 260 Hz
+   and 75 Hz. It was the biggest and the one everything else is easier after,
+   which is why it went first. Left over as its own issues:
+   [#42](https://github.com/Lilium-Linux/solium/issues/42) absolute devices,
+   [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug,
+   [#44](https://github.com/Lilium-Linux/solium/issues/44) matching a monitor
+   by what it is rather than which port it is in,
+   [#45](https://github.com/Lilium-Linux/solium/issues/45) mirroring,
+   [#46](https://github.com/Lilium-Linux/solium/issues/46) 10-bit.
 2. **[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI**, next and
    for the reason #41 was first: it is the same call sites. Every one of them
    now takes an output or a screen rect rather than assuming, so the remaining
