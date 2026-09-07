@@ -57,7 +57,7 @@ use smithay::{
 };
 
 use crate::{
-    layer, render,
+    render,
     script::Scripts,
     state::{ClientState, Request, Solium},
 };
@@ -205,12 +205,9 @@ pub(crate) fn run() -> Result<()> {
         solium,
         session,
         renderer: None,
-        compositor: None,
-        output: None,
+        screens: Vec::new(),
         input: None,
         animating: false,
-        pending_feedback: None,
-        pending: false,
         input_devices: 0,
         drm: None,
         signal: event_loop.get_signal(),
@@ -225,10 +222,21 @@ pub(crate) fn run() -> Result<()> {
     event_loop
         .handle()
         .insert_source(drm_events, move |event, metadata, state| match event {
-            DrmEvent::VBlank(_) => {
-                if let Some(compositor) = state.compositor.as_mut()
-                    && let Err(err) = compositor.frame_submitted()
-                {
+            // Which CRTC flipped, and therefore which monitor. Ignored while
+            // there was one screen; with two it is the whole of telling them
+            // apart, and answering the wrong one's clients with this one's
+            // timestamp is exactly what presentation-time exists to prevent.
+            DrmEvent::VBlank(crtc) => {
+                let Some(screen) = state
+                    .screens
+                    .iter_mut()
+                    .find(|screen| screen.crtc == crtc)
+                else {
+                    // A flip from a CRTC we do not drive. Nothing to do with
+                    // it, and nothing to be alarmed about either.
+                    return;
+                };
+                if let Err(err) = screen.compositor.frame_submitted() {
                     tracing::warn!(?err, "the frame that just flipped was not accepted");
                 }
 
@@ -236,7 +244,7 @@ pub(crate) fn run() -> Result<()> {
                 // asked about. The kernel's own flip timestamp and sequence
                 // number, not ours: a number we invented here would be a guess
                 // at the thing the protocol exists to stop clients guessing.
-                if let Some(mut feedback) = state.pending_feedback.take() {
+                if let Some(mut feedback) = screen.pending_feedback.take() {
                     let (time, sequence) = match metadata.as_ref().map(|it| (it.time, it.sequence)) {
                         Some((DrmEventTime::Monotonic(time), sequence)) => (time, sequence),
                         // Realtime, or no metadata at all on a driver that does
@@ -246,13 +254,16 @@ pub(crate) fn run() -> Result<()> {
                         // would be off by the epoch.
                         _ => {
                             feedback.discarded();
+                            screen.pending = false;
                             return;
                         }
                     };
-                    let refresh = state
+                    // This monitor's refresh, not some other monitor's: a
+                    // client on a 60 Hz panel told it has 3.8 ms to draw will
+                    // miss every frame it is paced by.
+                    let refresh = screen
                         .output
-                        .as_ref()
-                        .and_then(|output| output.current_mode())
+                        .current_mode()
                         .map(|mode| {
                             std::time::Duration::from_secs_f64(
                                 1000.0 / f64::from(mode.refresh.max(1)) / 1000.0,
@@ -266,11 +277,16 @@ pub(crate) fn run() -> Result<()> {
                         smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
                     );
                 }
-                // The frame is on the screen: the pipeline is free, and clients
-                // may draw the next one.
-                state.pending = false;
+                // This screen's pipeline is free, and its clients may draw the
+                // next frame. Only this screen's: a monitor still waiting on
+                // its own flip has not freed anything.
+                screen.pending = false;
                 state.send_frames();
-                if state.solium.redraw || state.animating {
+                // `owed` as well as the usual two: this screen may have been
+                // skipped while it was busy, and nothing else is going to ask
+                // on its behalf.
+                let owed = state.screens.iter().any(|screen| screen.owed);
+                if state.solium.redraw || state.animating || owed {
                     state.render();
                 }
             }
@@ -298,8 +314,11 @@ pub(crate) fn run() -> Result<()> {
                     drm.pause();
                 }
                 // No vblank is coming while the session is away, so a frame
-                // left marked in-flight would block every render on return.
-                state.pending = false;
+                // left marked in-flight would block every render on return --
+                // on every screen, because every screen has its own.
+                for screen in &mut state.screens {
+                    screen.pending = false;
+                }
             }
             SessionEvent::ActivateSession => {
                 tracing::info!("session resumed");
@@ -318,10 +337,14 @@ pub(crate) fn run() -> Result<()> {
                 {
                     tracing::error!(?err, "the GPU did not come back");
                 }
-                if let Some(compositor) = state.compositor.as_mut()
-                    && let Err(err) = compositor.reset_state()
-                {
-                    tracing::warn!(?err, "could not reset the display after resuming");
+                for screen in &mut state.screens {
+                    if let Err(err) = screen.compositor.reset_state() {
+                        tracing::warn!(
+                            ?err,
+                            monitor = screen.output.name(),
+                            "could not reset a display after resuming"
+                        );
+                    }
                 }
                 state.active = true;
                 state.render();
@@ -410,13 +433,60 @@ pub(crate) fn run() -> Result<()> {
         .map_err(|err| anyhow!("running the event loop: {err}"))
 }
 
+/// One monitor's pipeline: its connector, its CRTC, its buffers, its flips.
+///
+/// There is one of these per screen and they are genuinely independent. Two
+/// monitors have two refresh rates, and their page flips arrive whenever each
+/// display is ready — so `pending` and the feedback callbacks belong to a
+/// screen and not to the compositor. Held as one value they were: a 60 Hz
+/// display would have paced a 260 Hz one, and a flip on either would have
+/// answered the other's clients with the wrong timestamp.
+struct Screen {
+    output: Output,
+    /// Which CRTC drives it, which is how a page flip is matched back to it.
+    crtc: crtc::Handle,
+    compositor: Compositor,
+    /// A frame has been queued on this CRTC and has not reached the screen.
+    ///
+    /// Building another before this one flips is work that can only be thrown
+    /// away, and it is how a compositor ends up rendering faster than the
+    /// display can show — which costs the GPU everything and the viewer
+    /// nothing.
+    pending: bool,
+    /// The feedback callbacks for the frame in flight on *this* screen,
+    /// waiting for the page flip that will say when it was actually shown.
+    pending_feedback: Option<smithay::desktop::utils::OutputPresentationFeedback>,
+    /// This screen was skipped because it was busy, and still owes a frame.
+    ///
+    /// Necessary the moment the pipelines are separate, and easy to miss.
+    /// `redraw` is one flag for the whole compositor and it is cleared by the
+    /// render that consumed it — so a 260 Hz monitor drawing while a 75 Hz one
+    /// is mid-flip clears the flag on the slow monitor's behalf, and the slow
+    /// monitor is left showing a frame that is one change out of date until
+    /// something unrelated happens to damage the screen again.
+    ///
+    /// This is the same shape of bug as an animation that only advances when
+    /// something else asks for a frame.
+    owed: bool,
+}
+
+impl std::fmt::Debug for Screen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Screen")
+            .field("output", &self.output.name())
+            .field("crtc", &self.crtc)
+            .field("pending", &self.pending)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Everything the hardware backend holds, plus the compositor itself.
 pub(crate) struct State {
     pub(crate) solium: Solium,
     session: LibSeatSession,
     renderer: Option<GlesRenderer>,
-    compositor: Option<Compositor>,
-    output: Option<Output>,
+    /// One per connected monitor, in the order the connectors were enumerated.
+    screens: Vec<Screen>,
     /// The libinput context, kept so it can be suspended and resumed.
     ///
     /// A VT switch revokes every device fd. libinput has to be told, or it
@@ -425,16 +495,6 @@ pub(crate) struct State {
     input: Option<Libinput>,
     /// Whether any window was still moving at the last frame.
     animating: bool,
-    /// The feedback callbacks for the frame that is in flight, waiting for the
-    /// page flip that will tell us when it was actually shown.
-    pending_feedback: Option<smithay::desktop::utils::OutputPresentationFeedback>,
-    /// A frame has been queued and has not reached the screen yet.
-    ///
-    /// Building another before this one flips is work that can only be thrown
-    /// away, and it is how a compositor ends up rendering faster than the
-    /// display can show — which costs the GPU everything and the viewer
-    /// nothing.
-    pending: bool,
     /// How many input devices libinput has handed us.
     ///
     /// Zero is not a slow start, it is a session nobody can talk to — see the
@@ -531,124 +591,197 @@ impl State {
             }
         }
 
-        let (connector, crtc, mode) = first_output(&device)?;
-        let name = format!(
-            "{}-{}",
-            connector.interface().as_str(),
-            connector.interface_id()
-        );
-        let (width, height) = mode.size();
-        tracing::info!(
-            output = name,
-            mode = format!("{width}x{height}@{:.0}", f64::from(mode.vrefresh())),
-            "driving this connector"
-        );
-
-        let surface = device
-            .create_surface(crtc, mode, &[connector.handle()])
-            .context("creating the DRM surface")?;
-        let planes = device.planes(&crtc).ok();
-
-        let (physical_width, physical_height) = connector.size().unwrap_or((0, 0));
-        let output = Output::new(
-            name,
-            PhysicalProperties {
-                size: (
-                    i32::try_from(physical_width).unwrap_or_default(),
-                    i32::try_from(physical_height).unwrap_or_default(),
-                )
-                    .into(),
-                subpixel: Subpixel::Unknown,
-                make: "Solium".into(),
-                model: "DRM".into(),
-            },
-        );
-        let wl_mode = Mode {
-            size: (i32::from(width), i32::from(height)).into(),
-            refresh: i32::try_from(mode.vrefresh()).unwrap_or(60) * 1000,
-        };
-        let _global = output.create_global::<Solium>(&self.solium.display_handle);
-        output.change_current_state(
-            Some(wl_mode),
-            Some(Transform::Normal),
-            None,
-            Some((0, 0).into()),
-        );
-        output.set_preferred(wl_mode);
-        self.solium.space.map_output(&output, (0, 0));
-        layer::arrange(&output);
-
         let formats = renderer.egl_context().dmabuf_render_formats().clone();
-        let compositor = DrmCompositor::new(
-            &output,
-            surface,
-            planes,
-            GbmAllocator::new(
-                gbm.clone(),
-                GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
-            ),
-            // The exporter turns a rendered buffer into something the display
-            // can scan out; the GBM device alone is not that.
-            GbmFramebufferExporter::new(gbm.clone(), node.into()),
-            COLOR_FORMATS,
-            formats,
-            device.cursor_size(),
-            Some(gbm),
-        )
-        .context("setting up the display pipeline")?;
+        let found = connected(&device)?;
+        for (connector, crtc, mode) in found {
+            let name = format!(
+                "{}-{}",
+                connector.interface().as_str(),
+                connector.interface_id()
+            );
+            let (width, height) = mode.size();
+            tracing::info!(
+                monitor = name,
+                mode = format!("{width}x{height}@{:.0}", f64::from(mode.vrefresh())),
+                ?crtc,
+                "driving this connector"
+            );
+
+            // Each connector gets its own surface on its own CRTC. A failure
+            // here loses *one* monitor rather than the session: on a two-screen
+            // desk, a compositor that refuses to start because the second
+            // display did something odd is worse than one that comes up on the
+            // first and says why.
+            let surface = match device.create_surface(crtc, mode, &[connector.handle()]) {
+                Ok(surface) => surface,
+                Err(err) => {
+                    tracing::error!(?err, monitor = name, "no DRM surface for this connector");
+                    continue;
+                }
+            };
+            let planes = device.planes(&crtc).ok();
+
+            let (physical_width, physical_height) = connector.size().unwrap_or((0, 0));
+            let output = Output::new(
+                name.clone(),
+                PhysicalProperties {
+                    size: (
+                        i32::try_from(physical_width).unwrap_or_default(),
+                        i32::try_from(physical_height).unwrap_or_default(),
+                    )
+                        .into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "Solium".into(),
+                    model: "DRM".into(),
+                },
+            );
+            let wl_mode = Mode {
+                size: (i32::from(width), i32::from(height)).into(),
+                refresh: i32::try_from(mode.vrefresh()).unwrap_or(60) * 1000,
+            };
+            // The returned `GlobalId` is a handle, not a guard: dropping it
+            // does not remove the global, which is why nothing keeps it.
+            let _ = output.create_global::<Solium>(&self.solium.display_handle);
+            output.change_current_state(
+                Some(wl_mode),
+                Some(Transform::Normal),
+                None,
+                Some((0, 0).into()),
+            );
+            output.set_preferred(wl_mode);
+            // Mapped anywhere; `place_outputs` decides where, once, from the
+            // configured arrangement — the same call the nested backend makes,
+            // so both get the same layout from the same configuration.
+            self.solium.space.map_output(&output, (0, 0));
+
+            let compositor = match DrmCompositor::new(
+                &output,
+                surface,
+                planes,
+                GbmAllocator::new(
+                    gbm.clone(),
+                    GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+                ),
+                // The exporter turns a rendered buffer into something the
+                // display can scan out; the GBM device alone is not that.
+                GbmFramebufferExporter::new(gbm.clone(), node.into()),
+                COLOR_FORMATS,
+                formats.clone(),
+                device.cursor_size(),
+                Some(gbm.clone()),
+            ) {
+                Ok(compositor) => compositor,
+                Err(err) => {
+                    tracing::error!(?err, monitor = name, "no display pipeline for this monitor");
+                    self.solium.space.unmap_output(&output);
+                    continue;
+                }
+            };
+
+            self.screens.push(Screen {
+                output,
+                crtc,
+                compositor,
+                pending: false,
+                pending_feedback: None,
+                owed: false,
+            });
+        }
+
+        if self.screens.is_empty() {
+            return Err(anyhow!("no connected display could be driven"));
+        }
+        tracing::info!(monitors = self.screens.len(), "displays up");
+        // Positions, then the anchored surfaces that depend on them.
+        self.solium.place_outputs();
 
         self.renderer = Some(renderer);
-        self.compositor = Some(compositor);
-        self.output = Some(output);
         self.drm = Some(device);
         Ok(notifier)
     }
 
-    /// Draw a frame and queue it for the next vblank.
+    /// Draw a frame on every screen that is ready for one.
+    ///
+    /// A monitor still waiting on its own page flip is skipped and the others
+    /// are drawn anyway. That is the point of the pipelines being separate: a
+    /// 60 Hz display must not pace a 260 Hz one, and it would if either being
+    /// busy stopped the whole frame.
     fn render(&mut self) {
-        if !self.active || self.pending {
+        if !self.active {
             return;
         }
-        let (Some(renderer), Some(compositor)) = (self.renderer.as_mut(), self.compositor.as_mut())
-        else {
+        let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
 
-        // Read once for the whole frame, so everything animating in it agrees
-        // about when "now" is.
+        // Read once for the whole frame, so everything animating on every
+        // screen agrees about when "now" is.
         let now = self.solium.clock.now();
         // Cleared before drawing, not after: a client that commits while we
         // are rendering has damaged the *next* frame, not this one.
         self.solium.redraw = false;
 
-        // Offscreen captures first, for the reason `render::Prepared` gives.
+        // Once per frame and not once per screen: offscreen captures, the QML
+        // tick, the window list. See `render::prepare`. It also has to happen
+        // before any output's buffer is bound, because it binds framebuffers
+        // of its own.
         let prepared = render::prepare(&mut self.solium, renderer, 1.0);
-        let screen = self
-            .output
-            .as_ref()
-            .and_then(|output| self.solium.space.output_geometry(output))
-            .unwrap_or_default();
-        let elements = render::elements(&mut self.solium, renderer, 1.0, &prepared, screen);
-        match compositor.render_frame(
-            renderer,
-            &elements,
-            [0.05, 0.05, 0.06, 1.0],
-            FrameFlags::DEFAULT,
-        ) {
-            Ok(result) if !result.is_empty => match compositor.queue_frame(()) {
-                Ok(()) => {
-                    self.pending = true;
-                    // Taken now, reported at the flip. The callbacks belong to
-                    // the frame that was just queued, and a later frame's
-                    // commits must not be answered with this one's timestamp.
-                    if let Some(output) = self.output.as_ref() {
-                        self.pending_feedback = Some(self.solium.presentation_feedback(output));
-                    }
+
+        for index in 0..self.screens.len() {
+            // Indexed rather than iterated: building a screen's elements needs
+            // `&mut self.solium` as well as `&mut` that screen, and they are
+            // fields of the same struct.
+            let Some(screen) = self.screens.get(index) else {
+                continue;
+            };
+            if screen.pending {
+                // Remembered, because the flag that asked for this frame is
+                // about to be cleared by the screens that could draw it.
+                if let Some(screen) = self.screens.get_mut(index) {
+                    screen.owed = true;
                 }
-                Err(err) => tracing::warn!(?err, "could not queue a frame"),
-            },
-            Ok(_) => {}
-            Err(err) => tracing::warn!(?err, "rendering failed"),
+                continue;
+            }
+            let output = screen.output.clone();
+            let area = self
+                .solium
+                .space
+                .output_geometry(&output)
+                .unwrap_or_default();
+            let Some(renderer) = self.renderer.as_mut() else {
+                return;
+            };
+            let elements = render::elements(&mut self.solium, renderer, 1.0, &prepared, area);
+
+            let Some(screen) = self.screens.get_mut(index) else {
+                continue;
+            };
+            // Drawn now, whatever the outcome: an empty result means there was
+            // nothing on this screen to draw, which settles the debt as surely
+            // as a queued frame does.
+            screen.owed = false;
+            match screen.compositor.render_frame(
+                renderer,
+                &elements,
+                [0.05, 0.05, 0.06, 1.0],
+                FrameFlags::DEFAULT,
+            ) {
+                Ok(result) if !result.is_empty => match screen.compositor.queue_frame(()) {
+                    Ok(()) => {
+                        screen.pending = true;
+                        // Taken now, reported at *this* screen's flip. The
+                        // callbacks belong to the frame just queued here, and
+                        // neither a later frame's commits nor another
+                        // monitor's may be answered with this one's timestamp.
+                        screen.pending_feedback = Some(self.solium.presentation_feedback(&output));
+                    }
+                    Err(err) => {
+                        tracing::warn!(?err, monitor = output.name(), "could not queue a frame");
+                    }
+                },
+                Ok(_) => {}
+                Err(err) => tracing::warn!(?err, monitor = output.name(), "rendering failed"),
+            }
         }
 
         self.animating = self.solium.settle(now);
@@ -664,46 +797,93 @@ impl State {
     /// paced by the display, which is the only thing that can actually show
     /// its work.
     fn send_frames(&mut self) {
-        let Some(output) = self.output.as_ref() else {
-            return;
-        };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        let throttle = frame_interval(output);
-        for window in self.solium.space.elements() {
-            window.send_frame(output, now, Some(throttle), |_, _| Some(output.clone()));
+        // Every screen, each at its own refresh. A window on a 60 Hz monitor
+        // paced by a 260 Hz one is a client asked to draw four times as often
+        // as anything can show it; the other way round it misses every frame.
+        // Smithay throttles per output, so a window straddling two monitors is
+        // correctly paced by both rather than by whichever asked last.
+        for screen in &self.screens {
+            let output = &screen.output;
+            let throttle = frame_interval(output);
+            for window in self.solium.space.elements() {
+                window.send_frame(output, now, Some(throttle), |_, _| Some(output.clone()));
+            }
         }
     }
 }
 
-/// The first connected connector with a mode, and a CRTC to drive it.
-fn first_output(device: &DrmDevice) -> Result<(connector::Info, crtc::Handle, DrmMode)> {
+/// Every connected connector with a mode, each given a CRTC of its own.
+///
+/// A CRTC is the hardware that scans a buffer out to a connector, and there
+/// are a fixed few of them — usually four. Two monitors need two, and they
+/// must be *different* ones: hand the same CRTC to both connectors and the
+/// second modeset takes the first's screen away, which looks like the first
+/// monitor going black the moment the second is set up.
+///
+/// Assigned greedily, in connector order, from the CRTCs each connector's
+/// encoders can actually reach. Greedy is not optimal — a card where the last
+/// connector can only use a CRTC an earlier one already took would lose that
+/// monitor, and a matching algorithm would not. That case needs hardware that
+/// restricts routing far more than anything current does, so the cost of
+/// getting it wrong is one monitor and a line in the log rather than a
+/// session, and it is written down here rather than discovered.
+fn connected(device: &DrmDevice) -> Result<Vec<(connector::Info, crtc::Handle, DrmMode)>> {
     let resources = device.resource_handles().context("reading DRM resources")?;
+    let mut found = Vec::new();
+    let mut taken: Vec<crtc::Handle> = Vec::new();
 
     for handle in resources.connectors() {
         let Ok(connector) = device.get_connector(*handle, false) else {
             continue;
         };
+        let name = format!(
+            "{}-{}",
+            connector.interface().as_str(),
+            connector.interface_id()
+        );
         if connector.state() != connector::State::Connected {
             continue;
         }
         let Some(mode) = preferred_mode(&connector) else {
+            // Connected and offering nothing to drive it with. Rare, and worth
+            // a line: from the other side of the screen it is indistinguishable
+            // from the compositor ignoring the monitor.
+            tracing::warn!(monitor = name, "connected but offers no usable mode");
             continue;
         };
 
-        // Any encoder's CRTC will do for one output; picking properly matters
-        // when there are several, which is the multi-output work.
+        let mut chosen = None;
         for encoder in connector.encoders() {
             let Ok(encoder) = device.get_encoder(*encoder) else {
                 continue;
             };
-            if let Some(crtc) = resources.filter_crtcs(encoder.possible_crtcs()).first() {
-                return Ok((connector, *crtc, mode));
+            chosen = resources
+                .filter_crtcs(encoder.possible_crtcs())
+                .into_iter()
+                .find(|crtc| !taken.contains(crtc));
+            if chosen.is_some() {
+                break;
             }
         }
+        match chosen {
+            Some(crtc) => {
+                taken.push(crtc);
+                found.push((connector, crtc, mode));
+            }
+            None => tracing::warn!(
+                monitor = name,
+                "no free CRTC for this connector -- it will stay dark"
+            ),
+        }
     }
-    Err(anyhow!("no connected display with a usable mode"))
+
+    if found.is_empty() {
+        return Err(anyhow!("no connected display with a usable mode"));
+    }
+    Ok(found)
 }
 
 /// Real input devices, feeding the same seam the winit backend feeds.
@@ -723,7 +903,14 @@ fn start_input(
     event_loop
         .handle()
         .insert_source(LibinputInputBackend::new(context), |event, (), state| {
-            let Some(output) = state.output.clone() else {
+            // The first monitor, as the region an absolute device's positions
+            // are measured against. Right for a single screen and a guess with
+            // several: libinput can say which output a touchscreen or tablet is
+            // glued to, and reading that is what makes touch land on the right
+            // monitor. Filed as #42 rather than guessed at here -- a mouse and
+            // a keyboard are unaffected, because relative motion is bounded by
+            // every screen instead.
+            let Some(output) = state.screens.first().map(|screen| screen.output.clone()) else {
                 return;
             };
             handle_input(state, &output, event);

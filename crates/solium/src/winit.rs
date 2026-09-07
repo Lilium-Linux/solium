@@ -202,7 +202,6 @@ pub(crate) fn run() -> Result<()> {
     let count = dev::outputs();
     let width = (size.w / i32::try_from(count).unwrap_or(1)).max(1);
     let mut outputs = Vec::new();
-    let mut globals = Vec::new();
     for index in 0..count {
         let mode = Mode {
             size: (width, size.h).into(),
@@ -221,7 +220,9 @@ pub(crate) fn run() -> Result<()> {
                 model: "Winit".into(),
             },
         );
-        globals.push(output.create_global::<Solium>(&display_handle));
+        // The returned `GlobalId` is a handle, not a guard: dropping it does
+        // not remove the global, which is why nothing keeps it.
+        let _ = output.create_global::<Solium>(&display_handle);
         output.change_current_state(
             Some(mode),
             Some(Transform::Flipped180),
@@ -245,7 +246,6 @@ pub(crate) fn run() -> Result<()> {
         .first()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("no outputs: SOLIUM_OUTPUTS must be at least 1"))?;
-    let _global = globals;
 
     // Scripts are loaded before the first frame so a mode can be triggered
     // immediately. A broken config leaves the compositor usable and unbound

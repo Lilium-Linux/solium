@@ -828,6 +828,18 @@ impl Solium {
         let places = self.arrangement.place(&monitors);
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         for (output, at) in outputs.iter().zip(places) {
+            // Only when it actually moved. Remapping an output resets its
+            // damage memory, so re-placing everything on every reload would
+            // throw away damage tracking to achieve nothing -- and would log a
+            // line per monitor per reload, which is how a log stops being read.
+            if self
+                .space
+                .output_geometry(output)
+                .map(|geometry| geometry.loc)
+                == Some(at)
+            {
+                continue;
+            }
             self.space.map_output(output, at);
             tracing::info!(monitor = output.name(), x = at.x, y = at.y, "placed");
         }

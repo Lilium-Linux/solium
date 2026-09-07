@@ -21,6 +21,27 @@ local defaults = {
     -- Space between windows and around the work area, in logical pixels.
     gap = 12,
 
+    -- Where the monitors are, relative to each other.
+    --
+    -- Empty means "arrange them yourself": left to right in the order the
+    -- kernel enumerated the connectors, top edges aligned. That is right about
+    -- half the time, and wrong in a way you can see and fix in one line.
+    --
+    --     monitors = {
+    --         { name = "DP-1", x = 0, y = 0 },
+    --         { name = "DP-2", x = 2560, y = 180 },
+    --     },
+    --
+    -- The names are connector names; `solium --probe` prints the ones this
+    -- machine has, and a name nothing answers to is warned about in the log
+    -- rather than ignored. Positions are the top-left corner in the global
+    -- space, so `y` is how much lower one monitor sits than the other -- which
+    -- is what a screen standing on a different-height desk actually needs.
+    --
+    -- A monitor you do not name goes to the right of everything you did, so
+    -- plugging in a third does not land it on top of one of the other two.
+    monitors = {},
+
     -- Which QML file frames every window. A name is one of the decorations in
     -- `qml/decorations`, or one of your own in
     -- ~/.config/solium/qml/decorations, which shadows a shipped one of the
