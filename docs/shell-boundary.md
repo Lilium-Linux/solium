@@ -47,11 +47,42 @@ an existing compositor. It is the reason for writing one.
 
 ## What is still a client
 
-Ordinary applications, over `xdg-shell`. And `wlr-layer-shell` stays
-implemented so that *foreign* panels and wallpapers can attach if someone wants
-them — but Lilium's own shell does not use it, and the compositor's work area
-is computed from whatever the hosted shell reserves as readily as from a layer
-surface.
+Ordinary applications, over `xdg-shell`.
+
+**And, today, the bar and the dock too** — over `wlr-layer-shell`. The
+in-compositor dock described below existed, proved the morph, and was then
+taken back out: it made the compositor own a design, a font stack and a layout
+it had no reason to, and it made the interesting question — how does a
+*replaceable* shell attach? — disappear rather than get answered. `layer.rs`
+records that in full.
+
+So the boundary as it stands is: window-coupled things are scenes in the
+compositor's engine, and everything that merely sits on a screen is a client
+that anchors itself. The one-engine argument above is not withdrawn — it is
+what the titlebars are built on, and it is what a dock would come back inside
+for if the morph is ever wanted for real. It is a claim about where the line
+*can* be drawn, and drawing it there is a later decision than this file
+originally assumed.
+
+### Where a dock goes, with more than one monitor
+
+A layer surface names the output it wants, and the compositor honours it. That
+is how a shell puts a bar on every screen: one surface per output, each with
+its own exclusive zone, each reserving from *that* monitor's work area.
+
+A surface that names no output gets the **primary** monitor — the one
+`primary = true` picks out in `monitors`, or the first if nothing does. Not the
+monitor the pointer is on, which is what it briefly was: a dock connects once,
+at startup, and pinning it to whichever screen the mouse happened to be over
+then means it appears somewhere different depending on where the mouse was
+left. That looks like the compositor placing it at random, because it is.
+
+`sol.monitors()` gives a script the list, with `primary` and `focused` flags,
+so a shell written in Lua can decide for itself which screens get a bar.
+
+`SOLIUM_SHELL_SCENE` still hosts one QML scene in-process, on the primary
+monitor. It is a development affordance for exercising the QML host, not the
+shell — a shell that wants a bar per screen writes layer surfaces.
 
 ## What this costs, honestly
 
@@ -74,29 +105,33 @@ for.
 |---|---|---|
 | Applications | Clients | `xdg-shell` |
 | Window frames | Compositor's QML engine | directly |
-| Bar, dock, launcher | The same QML engine | directly |
+| Loading windows, the pointer | The same QML engine | directly |
+| Bar, dock, launcher, wallpaper | Clients | `wlr-layer-shell` |
+| Which monitor a bar is on | The client names an output | `zwlr_layer_surface_v1` |
 | Colours and metrics | `Solium.Theme`, one singleton | imported by every scene |
 | What an animation *does* | Lua script | `sol.present_from`, `sol.on("open")` |
-| Foreign panels, wallpapers | Clients | `wlr-layer-shell` |
 
 
-## What arrived with the dock
+## What the dock proved, before it was removed
 
-The first piece of shell drawn by the compositor, and the reason the boundary
-sits where it does.
+Kept because it is the evidence for the architecture, not because the code is
+still there — `shell.rs` and `sol.dock` are gone, and a dock is a layer-shell
+client now.
 
-`shell.rs` holds a dock: a QML scene rendered by the same host that draws the
-window frames, importing the same `Solium.Theme`. `sol.dock` says what it
-holds, because which programs belong on a dock is not the compositor's
-opinion, and it reserves its own strip out of `work_area` the way a
-layer-shell client would with an exclusive zone.
+It was a QML scene rendered by the same host that draws the window frames,
+importing the same `Solium.Theme`, reserving its own strip out of `work_area`.
+The morph was the whole argument made concrete: pressing an icon fired a `dock`
+event carrying **the rectangle that icon occupies**, a script spawned the
+program and handed that rectangle to `sol.present_from`, and the window grew
+out of it. Captured frame by frame in `docs/morph.png` — 460x208 near the dock,
+then 928x504, 1192x672, settled at full size about a third of a second later.
 
-The morph is the whole argument made concrete. Pressing an icon fires a `dock`
-event carrying **the rectangle that icon occupies**; a script spawns the
-program and hands that rectangle to `sol.present_from`; the window grows out
-of it. Captured frame by frame in `docs/morph.png`: 460x208 near the dock,
-then 928x504, 1192x672, and settled at full size about a third of a second
-later.
+`sol.present_from` is still there and still does that. What is missing is a
+dock to give it a rectangle, and `config.lua` still carries `dock.morph` for
+the day one exists. A layer-shell dock could hand over an icon rect through a
+protocol, and that is exactly the side-channel the one-engine argument says
+will go stale — so if the morph is wanted for real, this is the decision to
+reopen rather than route around.
 
 None of that is reachable from a separate process. A client dock can pass a
 rectangle over IPC, but by the time the window exists the two are separate

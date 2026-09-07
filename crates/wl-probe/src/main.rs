@@ -22,10 +22,14 @@ use std::os::unix::io::AsFd as _;
 use std::time::Duration;
 
 use wayland_client::protocol::{
-    wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_registry, wl_shm, wl_shm_pool::WlShmPool,
+    wl_buffer::WlBuffer,
+    wl_compositor::WlCompositor,
+    wl_output::{self, WlOutput},
+    wl_registry, wl_shm,
+    wl_shm_pool::WlShmPool,
     wl_surface::WlSurface,
 };
-use wayland_client::{Connection, Dispatch, QueueHandle, delegate_noop};
+use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols::wp::presentation_time::client::{
     wp_presentation::{self, WpPresentation},
     wp_presentation_feedback::{self, WpPresentationFeedback},
@@ -35,6 +39,13 @@ use wayland_protocols::xdg::shell::client::{
     xdg_toplevel::XdgToplevel,
     xdg_wm_base::{self, XdgWmBase},
 };
+use wayland_protocols_wlr::layer_shell::v1::client::{
+    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
+};
+
+/// How tall a probe bar is, and how much of the screen it reserves.
+const BAR: i32 = 48;
 
 /// How many frames to ask about before reporting.
 const FRAMES: usize = 5;
@@ -46,7 +57,13 @@ struct Probe {
     compositor: Option<WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     wm_base: Option<XdgWmBase>,
+    layer_shell: Option<ZwlrLayerShellV1>,
     presentation: Option<WpPresentation>,
+    /// Every output, in the order advertised: the proxy, its name, and the
+    /// size of its current mode.
+    outputs: Vec<Screen>,
+    /// The size each layer surface was configured to, by the output it named.
+    bars: Vec<(String, u32, u32)>,
     /// The clock id the compositor says its timestamps are on.
     clock: Option<u32>,
     surface: Option<WlSurface>,
@@ -54,6 +71,17 @@ struct Probe {
     /// One entry per frame the compositor said it had presented.
     presented: Vec<Presented>,
     discarded: usize,
+}
+
+/// One `wl_output`, as a client learns about it.
+#[derive(Debug)]
+struct Screen {
+    output: WlOutput,
+    /// From `wl_output.name`, which is version 4 — the connector name, and the
+    /// same string `monitors` in the configuration uses.
+    name: String,
+    width: i32,
+    height: i32,
 }
 
 #[derive(Debug)]
@@ -126,11 +154,53 @@ fn main() {
         }
     }
 
+    println!();
+    println!("outputs: {}", probe.outputs.len());
+    for screen in &probe.outputs {
+        let name = if screen.name.is_empty() {
+            // Version 4 or nothing. A compositor that does not send a name
+            // leaves a client unable to say which monitor it wants, which is
+            // the whole of putting a bar on the right screen.
+            "(no name — wl_output is below version 4)"
+        } else {
+            &screen.name
+        };
+        println!("  {name}  {}x{}", screen.width, screen.height);
+    }
+    if probe.outputs.iter().any(|screen| screen.name.is_empty()) {
+        failures.push("an output arrived with no name".to_owned());
+    }
+
+    // A bar, a dock or a wallpaper is a layer surface, and which monitor one
+    // lands on cannot be checked from inside the compositor.
+    if probe.has("zwlr_layer_shell_v1") {
+        match anchor_a_bar(&connection, &mut queue, &mut probe) {
+            Ok(()) => {}
+            Err(reason) => failures.push(reason),
+        }
+    }
+
     // Presentation feedback needs a window on screen to be about.
     if probe.has("wp_presentation") {
         match map_and_measure(&connection, &mut queue, &mut probe) {
             Ok(()) => {}
             Err(reason) => failures.push(reason),
+        }
+    }
+
+    // Held up so the compositor's own picture can be looked at: an exclusive
+    // zone is a claim about the *other* windows, and no client can see those.
+    if let Ok(seconds) = std::env::var("WL_PROBE_HOLD")
+        && let Ok(seconds) = seconds.trim().parse::<u64>()
+    {
+        println!();
+        println!("holding the bars up for {seconds}s — capture the compositor now");
+        let until = std::time::Instant::now() + Duration::from_secs(seconds);
+        while std::time::Instant::now() < until {
+            if queue.roundtrip(&mut probe).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -143,6 +213,135 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+/// Anchor a bar to the top of every monitor and check where each one landed.
+///
+/// This is the dock question, and it is one a compositor cannot answer about
+/// itself. A layer surface names the output it wants; if the compositor puts it
+/// on a different monitor, the configure comes back with the wrong width, and
+/// that is measurable from out here and from nowhere else.
+///
+/// The exclusive zone is the other half, and it is *not* checkable from a
+/// client: it is a claim about where the compositor puts everybody else's
+/// windows. `WL_PROBE_HOLD=<seconds>` keeps the bars up so the compositor's own
+/// frame can be captured and looked at.
+fn anchor_a_bar(
+    connection: &Connection,
+    queue: &mut wayland_client::EventQueue<Probe>,
+    probe: &mut Probe,
+) -> Result<(), String> {
+    let handle = queue.handle();
+    let (Some(compositor), Some(shm), Some(layer_shell)) = (
+        probe.compositor.clone(),
+        probe.shm.clone(),
+        probe.layer_shell.clone(),
+    ) else {
+        return Err("zwlr_layer_shell_v1 is advertised and would not bind".to_owned());
+    };
+    if probe.outputs.is_empty() {
+        return Err("no outputs to put a bar on".to_owned());
+    }
+
+    println!();
+    // One monitor, when asked for. A bar on every screen cannot tell "each
+    // monitor's own work area" from "every monitor's work area" — the picture
+    // looks the same either way. One bar on one screen can.
+    let only = std::env::var("WL_PROBE_BAR").ok();
+    let screens: Vec<(WlOutput, String, i32)> = probe
+        .outputs
+        .iter()
+        .filter(|screen| only.as_deref().is_none_or(|only| only == screen.name))
+        .map(|screen| (screen.output.clone(), screen.name.clone(), screen.width))
+        .collect();
+    if screens.is_empty() {
+        return Err(format!(
+            "no output called {:?} — this compositor has {:?}",
+            only.unwrap_or_default(),
+            probe
+                .outputs
+                .iter()
+                .map(|screen| screen.name.clone())
+                .collect::<Vec<_>>()
+        ));
+    }
+
+    let mut surfaces = Vec::new();
+    for (output, name, _) in &screens {
+        let surface = compositor.create_surface(&handle, ());
+        // Named explicitly. A surface that names no output is put wherever the
+        // compositor's primary monitor is, which is the right default and the
+        // wrong thing to test with: it cannot tell a correct answer from a
+        // coincidence.
+        let bar = layer_shell.get_layer_surface(
+            &surface,
+            Some(output),
+            Layer::Top,
+            format!("wl-probe-bar-{name}"),
+            &handle,
+            name.clone(),
+        );
+        bar.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+        bar.set_size(0, BAR as u32);
+        // The claim the rest of the desktop has to honour: this many pixels
+        // off *this* monitor's work area, and no other monitor's.
+        bar.set_exclusive_zone(BAR);
+        surface.commit();
+        surfaces.push((surface, bar, name.clone()));
+    }
+
+    for turn in 0..50 {
+        if turn == 10 {
+            eprintln!("wl-probe: still waiting for the bars to be configured…");
+        }
+        settle(connection, queue, probe)?;
+        if probe.bars.len() >= screens.len() {
+            break;
+        }
+    }
+
+    // Configured, so they can be drawn. Something visible, because the point
+    // of holding them up is to look at them.
+    for (surface, _, _) in &surfaces {
+        let buffer = solid_buffer(&shm, &handle, 3840, BAR);
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage(0, 0, i32::MAX, i32::MAX);
+        surface.commit();
+    }
+    settle(connection, queue, probe)?;
+
+    let mut wrong = Vec::new();
+    for (_, name, width) in &screens {
+        match probe.bars.iter().find(|(on, _, _)| on == name) {
+            Some((_, configured, height)) => {
+                let ok = i64::from(*configured) == i64::from(*width);
+                println!(
+                    "  {} bar on {name}: configured {configured}x{height}, monitor is {width} wide",
+                    if ok { "ok     " } else { "MISMATCH" }
+                );
+                if !ok {
+                    // Anchored left and right, so the width it is given is the
+                    // width of the monitor it is on. A different number means a
+                    // different monitor.
+                    wrong.push(format!(
+                        "a bar that named {name} was configured {configured} wide, but {name} \
+                         is {width} — it landed on another monitor"
+                    ));
+                }
+                if i64::from(*height) != i64::from(BAR) {
+                    wrong.push(format!(
+                        "a bar on {name} asked for {BAR} tall and was configured {height}"
+                    ));
+                }
+            }
+            None => wrong.push(format!("a bar that named {name} was never configured")),
+        }
+    }
+
+    if let Some(first) = wrong.into_iter().next() {
+        return Err(first);
+    }
+    Ok(())
 }
 
 /// Put a window up, ask about `FRAMES` frames, and check the answers.
@@ -360,6 +559,20 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
             }
             "wl_shm" => state.shm = Some(registry.bind(name, 1, handle, ())),
             "xdg_wm_base" => state.wm_base = Some(registry.bind(name, version.min(6), handle, ())),
+            // Version 4 for `wl_output.name`, which is the connector name and
+            // the only way a client can say *which* monitor it means.
+            "wl_output" => {
+                let output: WlOutput = registry.bind(name, version.min(4), handle, ());
+                state.outputs.push(Screen {
+                    output,
+                    name: String::new(),
+                    width: 0,
+                    height: 0,
+                });
+            }
+            "zwlr_layer_shell_v1" => {
+                state.layer_shell = Some(registry.bind(name, version.min(4), handle, ()));
+            }
             "wp_presentation" => {
                 state.presentation = Some(registry.bind(name, version.min(1), handle, ()));
             }
@@ -458,3 +671,67 @@ delegate_noop!(Probe: ignore wl_shm::WlShm);
 delegate_noop!(Probe: ignore WlShmPool);
 delegate_noop!(Probe: ignore WlBuffer);
 delegate_noop!(Probe: ignore XdgToplevel);
+delegate_noop!(Probe: ignore ZwlrLayerShellV1);
+
+impl Dispatch<WlOutput, ()> for Probe {
+    fn event(
+        state: &mut Self,
+        output: &WlOutput,
+        event: wl_output::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(screen) = state
+            .outputs
+            .iter_mut()
+            .find(|screen| &screen.output == output)
+        else {
+            return;
+        };
+        match event {
+            wl_output::Event::Name { name } => screen.name = name,
+            // The *current* mode, not every mode the monitor offers -- an
+            // output sends one of these per mode it supports.
+            wl_output::Event::Mode {
+                flags: WEnum::Value(flags),
+                width,
+                height,
+                ..
+            } if flags.contains(wl_output::Mode::Current) => {
+                screen.width = width;
+                screen.height = height;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwlrLayerSurfaceV1, String> for Probe {
+    fn event(
+        state: &mut Self,
+        bar: &ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        on: &String,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                // Acknowledged before anything is attached: the protocol says
+                // a surface may not draw until it has agreed a size, and a
+                // compositor is within its rights to kill a client that does.
+                bar.ack_configure(serial);
+                state.bars.push((on.clone(), width, height));
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                eprintln!("wl-probe: the compositor closed the bar on {on}");
+            }
+            _ => {}
+        }
+    }
+}

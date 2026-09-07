@@ -15,6 +15,11 @@ publish = false
 [dependencies]
 wayland-client    = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+# `zwlr_layer_shell_v1` lives here rather than in wayland-protocols. A bar, a
+# dock and a wallpaper are layer surfaces, and which monitor one lands on --
+# and whose work area its exclusive zone comes out of -- is exactly the kind of
+# claim that cannot be checked from inside the compositor.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 # Not the workspace lints. Those deny `unwrap`, `expect` and `panic` because a
 # compositor crash takes the session with it — there is no supervisor and

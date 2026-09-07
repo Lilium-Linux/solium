@@ -142,8 +142,14 @@ documented as working since it was written.
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `cargo run -p wl-probe` | the protocols answer, from a real client's side |
 | `SOLIUM_OUTPUTS=2 dev/run-nested.sh` | two monitors, without a second monitor |
+| `WL_PROBE_BAR=… WL_PROBE_HOLD=…` | a bar lands on the monitor it named, and takes its zone from that one |
 
-`wl-probe` is the one to extend. A compositor cannot test its own protocol
+`wl-probe` is the one to extend, and extending it paid for itself the same
+afternoon: asked to anchor a bar, it found that layer surfaces had never been
+sent an initial configure. Every bar and every dock had been invisible for as
+long as the compositor has claimed to support them, and nothing else was ever
+going to notice — no shipped check used the protocol, and nothing installed on
+this machine does. A compositor cannot test its own protocol
 support from the inside, and "the global is advertised" is a different claim
 from "a client that uses it gets the right answers". Every protocol added from
 here should get a check in it.

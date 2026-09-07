@@ -21,25 +21,79 @@ local defaults = {
     -- Space between windows and around the work area, in logical pixels.
     gap = 12,
 
-    -- Where the monitors are, relative to each other.
+    -- The monitors.
     --
-    -- Empty means "arrange them yourself": left to right in the order the
-    -- kernel enumerated the connectors, top edges aligned. That is right about
-    -- half the time, and wrong in a way you can see and fix in one line.
+    -- Empty means "work it out": every connected screen is driven, left to
+    -- right in the order the kernel enumerated the connectors, top edges
+    -- aligned. That is right about half the time, and wrong in a way you can
+    -- see and fix in one line.
     --
     --     monitors = {
-    --         { name = "DP-1", x = 0, y = 0 },
-    --         { name = "DP-2", x = 2560, y = 180 },
+    --         { name = "DP-1", primary = true },
+    --         { name = "DP-2", right_of = "DP-1", align = "end" },
+    --         { name = "DP-3", above = "DP-1", transform = "90" },
+    --         { name = "HDMI-A-1", enabled = false },
     --     },
     --
-    -- The names are connector names; `solium --probe` prints the ones this
-    -- machine has, and a name nothing answers to is warned about in the log
-    -- rather than ignored. Positions are the top-left corner in the global
-    -- space, so `y` is how much lower one monitor sits than the other -- which
-    -- is what a screen standing on a different-height desk actually needs.
+    -- `name` is the connector name; `solium --probe` prints the ones this
+    -- machine has, and a name nothing answers to gets a line in the log rather
+    -- than being ignored. Everything else is optional:
     --
-    -- A monitor you do not name goes to the right of everything you did, so
-    -- plugging in a third does not land it on top of one of the other two.
+    --   right_of, left_of, above, below   beside another monitor, by name.
+    --                                     Prefer this to x and y: it does not
+    --                                     go stale when a resolution changes,
+    --                                     and a chain resolves whatever order
+    --                                     you write the list in.
+    --
+    --   align = "start" | "centre"        which way the *other* axis lines up
+    --         | "end"                     when placed beside something taller
+    --                                     or wider. "centre" is the default.
+    --                                     A 1080p beside a 1440p leaves 360
+    --                                     rows belonging to no screen, and
+    --                                     this decides which end they are at
+    --                                     -- which is where the pointer will
+    --                                     catch on the way past.
+    --
+    --   x, y                              the top-left corner outright, in the
+    --                                     one global space every monitor is a
+    --                                     window onto. `y` is how much lower
+    --                                     one screen sits than another, which
+    --                                     is what a monitor on a taller desk
+    --                                     actually needs.
+    --
+    --   mode = { w, h, refresh }          ask for a particular mode. Without
+    --                                     one you get the best the monitor
+    --                                     offers -- the highest refresh at its
+    --                                     preferred resolution, because the
+    --                                     EDID's preferred *flag* names a
+    --                                     resolution and usually pairs it with
+    --                                     a pedestrian 60 Hz. `refresh` is in
+    --                                     Hz and optional. A mode the monitor
+    --                                     does not have warns and falls back.
+    --
+    --   transform = "90"                  rotation, anticlockwise, as degrees:
+    --                                     "normal", "90", "180", "270", or the
+    --                                     same with a "flipped-" prefix. A
+    --                                     rotated monitor's work area is
+    --                                     portrait, so every layout follows it
+    --                                     without knowing about it.
+    --
+    --   enabled = false                   do not drive it. It also frees its
+    --                                     CRTC for another screen, which
+    --                                     matters on a card with more
+    --                                     connectors than CRTCs.
+    --
+    --   primary = true                    the monitor things belonging to one
+    --                                     screen go on: a dock, a bar, any
+    --                                     layer surface that did not name an
+    --                                     output. Without this it is the first
+    --                                     monitor -- stable, but not a choice
+    --                                     anybody made.
+    --
+    --   scale = 1.5                       read, reported in the log, and not
+    --                                     honoured yet. See issue #39.
+    --
+    -- `super+shift+r` applies a change without ending the session.
     monitors = {},
 
     -- Which QML file frames every window. A name is one of the decorations in
