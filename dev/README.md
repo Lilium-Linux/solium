@@ -25,10 +25,26 @@ a demo into a regression test.
 | `dev/gate.sh` | fmt, clippy, tests, build, and that the Lua configuration loads |
 | `dev/app-check.sh <program>` | a client runs, draws, and provokes no protocol error |
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
+| `cargo run -p wl-probe` | the protocols answer, from a real client's side |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
 over the top, so the only place the failure shows is the hardware.
+
+`wl-probe` is a Wayland client, and exists because a compositor cannot test its
+own protocol support from the inside. "The global is advertised" is a different
+claim from "a client that uses it gets the right answers", and the gap between
+those two has been where every protocol bug this week actually lived. Real
+applications make fine oracles — Firefox's `WAYLAND_DEBUG` log is excellent —
+right up until nothing installed happens to use the protocol you just added.
+Firefox never binds `wp_presentation`, so nothing on this machine could say
+whether presentation feedback worked at all.
+
+    ./target/debug/solium &
+    WAYLAND_DISPLAY=wayland-1 cargo run -p wl-probe
+
+It exits non-zero if anything it asked for went unanswered, so it can be a
+gate.
 
 ## Capturing a frame
 
