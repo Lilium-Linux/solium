@@ -74,9 +74,19 @@ csv="$out/samples.csv"
 log="$out/compositor.log"
 
 [[ -x "$binary" ]] || { echo "not built: $binary" >&2; exit 1; }
-if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+# On a TTY there is no host compositor and therefore no WAYLAND_DISPLAY, which
+# is the whole point: `SOLIUM_SOAK_TTY=1` starts the session on the hardware
+# and soaks it in one command. A nested soak measures the nested backend as
+# much as the compositor -- see #33, where two of the leaking descriptors
+# belong to client-side libraries that only exist when nested.
+if [[ "${SOLIUM_SOAK_TTY:-0}" == "1" ]]; then
+    tty_flag="--tty"
+elif [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
     echo "refusing to start: WAYLAND_DISPLAY is empty or unset." >&2
+    echo "for a soak on the hardware instead: SOLIUM_SOAK_TTY=1 dev/soak.sh 60" >&2
     exit 1
+else
+    tty_flag=""
 fi
 
 # The scripted half of the workload, generated up front: triggers are relative
@@ -109,7 +119,8 @@ if [[ -n "$attach" ]]; then
     log="/dev/null"
     echo "attached to pid $solium on $attach"
 else
-    SOLIUM_TRIGGER_AT="$triggers" nice -n 5 "$binary" >"$log" 2>&1 &
+    # shellcheck disable=SC2086  # tty_flag is one word or empty, deliberately
+    SOLIUM_TRIGGER_AT="$triggers" nice -n 5 "$binary" $tty_flag >"$log" 2>&1 &
     solium=$!
 fi
 
@@ -140,7 +151,7 @@ for _ in $(seq 1 60); do
     sleep 0.1
 done
 
-echo "soak: ${minutes} minutes, socket=$socket, x11=${x_display:-none}"
+echo "soak: ${minutes} minutes${tty_flag:+ on the hardware}, socket=$socket, x11=${x_display:-none}"
 echo "samples: $csv"
 
 kwin="$(pgrep -x kwin_wayland | head -1)"
