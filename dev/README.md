@@ -88,6 +88,21 @@ pointer over the second monitor was answered with the first — a window opening
 on the screen you are not looking at. That would otherwise have been found on a
 TTY, where nothing can be read and each attempt costs a session.
 
+Give one of them a scale and you have a HiDPI screen to look at without owning
+one:
+
+```lua
+sol.monitors({
+    { name = "winit-1" },
+    { name = "winit-2", scale = 2, right_of = "winit-1" },
+})
+```
+
+Each monitor takes its share of the window's *pixels* and its logical size is
+that share divided by its scale, so you are looking at the pixels that monitor
+would scan out rather than a picture of them. A 2x monitor's half of the window
+holds half as much desktop at twice the detail.
+
 Combine it with the scripted input knobs to place windows on a chosen screen:
 `SOLIUM_DRAG_AT` moves the pointer through the real input path, and the active
 monitor is the one the pointer is on.

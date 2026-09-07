@@ -158,6 +158,7 @@ impl ShellSurface {
         area: Rectangle<i32, Logical>,
         now: Duration,
         alpha: f32,
+        scale: f64,
     ) -> Option<MemoryRenderBufferRenderElement<R>>
     where
         R: Renderer + ImportMem,
@@ -165,8 +166,17 @@ impl ShellSurface {
     {
         self.reload_if_changed(now);
 
-        let size = (area.size.w.max(1), area.size.h.max(1));
-        self.scene.resize(size.0, size.1);
+        // In device pixels, as `Decoration::frame` does and for the same
+        // reason: QML rasterises in pixels, so a scene drawn at its logical
+        // size on a 2x screen is drawn at half that screen's resolution and
+        // stretched.
+        let pixels = |logical: i32| {
+            #[expect(clippy::cast_possible_truncation, reason = "a scene on this screen")]
+            let scaled = (f64::from(logical) * scale).round() as i32;
+            scaled.max(1)
+        };
+        let size = (pixels(area.size.w), pixels(area.size.h));
+        self.scene.resize(size.0, size.1, scale);
 
         let rendered = match self.scene.render() {
             Ok(rendered) => rendered,
@@ -208,13 +218,17 @@ impl ShellSurface {
             }
         }
 
+        // `src` is the whole buffer in its own pixels and `size` is the
+        // logical destination, which the output scale then takes back up to
+        // exactly these pixels. The position is physical.
+        let source = Rectangle::from_size((f64::from(size.0), f64::from(size.1)).into());
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
-            (f64::from(area.loc.x), f64::from(area.loc.y)),
+            (f64::from(area.loc.x) * scale, f64::from(area.loc.y) * scale),
             buffer,
             Some(alpha),
-            None,
-            None,
+            Some(source),
+            Some(area.size),
             Kind::Unspecified,
         )
         .inspect_err(|err| tracing::warn!(?err, "could not upload the shell surface"))

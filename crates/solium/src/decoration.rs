@@ -115,6 +115,29 @@ impl Insets {
         .collect()
     }
 
+    /// The same bands, with the insets taken in device pixels.
+    ///
+    /// `width` and `height` are the buffer's own pixels, so the insets — which
+    /// are logical — have to be scaled to match. Reusing `bands` on a 2x screen
+    /// would copy a band half as tall as the titlebar and leave the rest of it
+    /// showing whatever was in the buffer before.
+    pub(crate) fn bands_at(
+        self,
+        width: i32,
+        height: i32,
+        scale: f64,
+    ) -> Vec<Rectangle<i32, BufferCoords>> {
+        #[expect(clippy::cast_possible_truncation, reason = "an inset on this screen")]
+        let up = |edge: i32| (f64::from(edge) * scale).ceil() as i32;
+        Self {
+            top: up(self.top),
+            right: up(self.right),
+            bottom: up(self.bottom),
+            left: up(self.left),
+        }
+        .bands(width, height)
+    }
+
     /// Whether there is any frame to draw.
     pub(crate) const fn any(self) -> bool {
         self.top != 0 || self.right != 0 || self.bottom != 0 || self.left != 0
@@ -183,9 +206,14 @@ impl Decoration {
         let overlay = scene.get_bool("overlay") || !insets.any();
         // ...and then grown to the whole outer rect, which is what it draws:
         // the client area within it is simply left transparent.
+        // At 1x, because the insets were just read from a scene laid out that
+        // way and the first `frame` call resizes it to the monitor it lands on
+        // anyway. The insets themselves are logical and do not change with the
+        // scale, which is the point of laying QML out in logical units.
         scene.resize(
             (width + insets.horizontal()).max(1),
             (height + insets.vertical()).max(1),
+            1.0,
         );
         Ok(Self {
             scene,
@@ -251,6 +279,7 @@ impl Decoration {
         outer: Size<i32, Logical>,
         look: &Look<'_>,
         alpha: f32,
+        scale: f64,
     ) -> Option<MemoryRenderBufferRenderElement<R>>
     where
         R: Renderer + ImportMem,
@@ -258,7 +287,22 @@ impl Decoration {
     {
         let width = outer.w.max(1);
         let height = outer.h.max(1);
-        self.scene.resize(width, height);
+        // QML rasterises in device pixels, so on a 2x monitor a frame drawn at
+        // its logical size is drawn at half the resolution of the screen it
+        // lands on and then stretched. That is the whole of what a blurry
+        // HiDPI desktop *is*, and a compositor's own chrome being the blurry
+        // part is the least forgivable version of it.
+        //
+        // So the buffer is `logical * scale` pixels and the element maps it
+        // back down to the logical rect, which the output scale then takes
+        // back up to exactly these pixels. One to one.
+        let pixels = |logical: i32| {
+            #[expect(clippy::cast_possible_truncation, reason = "a frame on this screen")]
+            let scaled = (f64::from(logical) * scale).round() as i32;
+            scaled.max(1)
+        };
+        let (buffer_width, buffer_height) = (pixels(width), pixels(height));
+        self.scene.resize(buffer_width, buffer_height, scale);
 
         // Compared field by field rather than by building a `Shown`: this runs
         // for every window of every frame, and the title is the one thing here
@@ -287,7 +331,7 @@ impl Decoration {
             self.shown.pointer_inside = pointer_inside;
         }
 
-        let size = (width, height);
+        let size = (buffer_width, buffer_height);
         let resized = self.buffer_size != size;
 
         // The buffer is made *before* the scene is rendered, so the render can
@@ -313,7 +357,9 @@ impl Decoration {
             let regions = if self.overlay || resized {
                 vec![Rectangle::from_size(size.into())]
             } else {
-                self.insets.bands(size.0, size.1)
+                // In buffer pixels, like everything else here: the bands are a
+                // copy optimisation over the image, not a logical rect.
+                self.insets.bands_at(size.0, size.1, scale)
             };
             // Split so the scene and the buffer can be borrowed at once: they
             // are two fields, and the copy needs both.
@@ -375,11 +421,19 @@ impl Decoration {
         // of scaling it — at full size the two are equal and it looks correct,
         // and it only shows up once a mode scales the frame down: the title
         // slides right and the buttons vanish off the edge.
-        let source = Rectangle::from_size((f64::from(width), f64::from(height)).into());
+        //
+        // The whole buffer, in its own pixels — the buffer's scale is 1, so
+        // its "logical" size is its pixel size.
+        let source =
+            Rectangle::from_size((f64::from(buffer_width), f64::from(buffer_height)).into());
+
+        // Physical, which is what the parameter has always been: at 1x a
+        // logical position was the same number and it did not matter.
+        let position = (rect.loc.x * scale, rect.loc.y * scale);
 
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
-            (rect.loc.x, rect.loc.y),
+            position,
             buffer,
             Some(alpha),
             Some(source),

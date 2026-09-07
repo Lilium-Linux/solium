@@ -107,8 +107,11 @@ struct SoliumQmlScene
     QQmlComponent *component = nullptr;
     QQuickItem *root = nullptr;
     QImage image;
+    /* Device pixels: the size of the image the compositor uploads. */
     int width = 0;
     int height = 0;
+    /* Device pixels per logical one. See solium_qml_scene_resize. */
+    double scale = 1.0;
     /* Whether the scene has changed since it was last rendered. */
     bool dirty = true;
     /* Backing store for the last value handed out by take_string. */
@@ -196,6 +199,9 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
     auto *scene = new SoliumQmlScene();
     scene->width = width > 0 ? width : 1;
     scene->height = height > 0 ? height : 1;
+    // A scene is built at 1x and rescaled by `solium_qml_scene_resize` the
+    // first time it is drawn, which every scene is.
+    scene->scale = 1.0;
 
     scene->control = new QQuickRenderControl();
     scene->window = new QQuickWindow(scene->control);
@@ -269,7 +275,9 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
     // which is a fixed 24x24 and so was invisible for its whole life. An
     // invisible pointer is not a cosmetic failure; it is indistinguishable from
     // input being dead.
-    scene->window->setRenderTarget(QQuickRenderTarget::fromPaintDevice(&scene->image));
+    QQuickRenderTarget target = QQuickRenderTarget::fromPaintDevice(&scene->image);
+    target.setDevicePixelRatio(scene->scale);
+    scene->window->setRenderTarget(target);
 
     return scene;
 }
@@ -286,26 +294,52 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
     delete scene;
 }
 
-extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int height)
+extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int height, double scale)
 {
     if (scene == nullptr || width <= 0 || height <= 0) {
         return;
     }
-    if (scene->width == width && scene->height == height) {
+    if (scale <= 0.0) {
+        scale = 1.0;
+    }
+    if (scene->width == width && scene->height == height && scene->scale == scale) {
         return;
     }
     scene->width = width;
     scene->height = height;
-    scene->window->setGeometry(0, 0, width, height);
+    scene->scale = scale;
+
+    // `width` and `height` are *device* pixels — the image the compositor will
+    // upload. The scene itself is laid out in logical ones, and the ratio
+    // between them is the device pixel ratio.
+    //
+    // This distinction is the whole of HiDPI here, and getting it wrong is not
+    // subtle in either direction. Give QML the device size and it lays out in
+    // it: `font.pixelSize: 14` is fourteen device pixels, so on a 2x monitor
+    // the text comes out half the size it should be in a canvas twice as
+    // large. Give it the logical size with no ratio and Qt rasterises at
+    // logical resolution and the image is stretched — blurry chrome, which is
+    // exactly what a badly scaled desktop looks like.
+    //
+    // Logical geometry, device-sized target, ratio between them. Then a
+    // titlebar is 32 logical pixels on every monitor and is drawn with as many
+    // real pixels as that monitor has.
+    const int logical_width = qMax(1, qRound(width / scale));
+    const int logical_height = qMax(1, qRound(height / scale));
+    scene->window->setGeometry(0, 0, logical_width, logical_height);
     if (scene->root != nullptr) {
-        scene->root->setWidth(width);
-        scene->root->setHeight(height);
+        scene->root->setWidth(logical_width);
+        scene->root->setHeight(logical_height);
     }
+
     scene->image = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
+    scene->image.setDevicePixelRatio(scale);
     scene->image.fill(Qt::transparent);
     // Set with the image rather than before every render: it is a property of
     // where the scene draws, and that only changes when the image does.
-    scene->window->setRenderTarget(QQuickRenderTarget::fromPaintDevice(&scene->image));
+    QQuickRenderTarget target = QQuickRenderTarget::fromPaintDevice(&scene->image);
+    target.setDevicePixelRatio(scale);
+    scene->window->setRenderTarget(target);
     scene->dirty = true;
 }
 

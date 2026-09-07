@@ -42,7 +42,12 @@ SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width, int height
 
 void solium_qml_scene_free(SoliumQmlScene *scene);
 
-void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int height);
+/* Resize a scene. `width` and `height` are *device* pixels — the image the
+ * compositor uploads — and `scale` is how many of those make a logical one, so
+ * the scene is laid out in width/scale by height/scale and rasterised at the
+ * full size. See the comment on the definition: getting this the wrong way
+ * round gives either half-size text or blurry chrome. */
+void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int height, double scale);
 
 /*
  * Advance QML animations to `elapsed_ms`.

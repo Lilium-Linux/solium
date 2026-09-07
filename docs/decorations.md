@@ -102,6 +102,23 @@ MouseArea {
 }
 ```
 
+## Sizes are logical, always
+
+A frame is laid out in **logical** pixels and rasterised at whatever its
+monitor's scale is. `insetTop: 3` is three logical pixels on a 1x screen and
+six real ones on a 2x screen, and `Theme.fontSize` behaves the same way.
+
+Nothing is required of you for that to work, and that is the point: there is no
+scale property to read and no arithmetic to do. It is worth knowing only so
+that you do not try. A frame that multiplied its own sizes by a scale would be
+twice as big as it asked to be, and a frame that hardcoded device pixels would
+be a different size on each monitor.
+
+The compositor rasterises the scene at `logical × scale` and hands Qt the ratio
+between the two, so a titlebar on a HiDPI screen gets more detail rather than
+more blur. Test it with `SOLIUM_OUTPUTS=2` and a scale on one of them; see
+[dev/README.md](../dev/README.md).
+
 ## Colours and fonts
 
 Nothing in a frame should contain a hex code. `Solium.Theme` has them:

@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use smithay::output::Output;
+use smithay::output::{Output, Scale};
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
 use smithay::wayland::fractional_scale::{
@@ -786,6 +786,31 @@ impl Solium {
         self.output_at((rect.loc.x + rect.size.w / 2, rect.loc.y + rect.size.h / 2).into())
     }
 
+    /// The monitor a surface is on, for telling it what to draw itself like.
+    ///
+    /// A window's own monitor when it has one, and the active one otherwise —
+    /// which covers a surface that has committed but is not placed yet, and is
+    /// the monitor it is about to be on.
+    fn output_for_surface(&self, surface: &WlSurface) -> Option<Output> {
+        self.window_for(surface)
+            .and_then(|window| {
+                self.real_geometry(&window)
+                    .filter(|real| real.size.w > 0 && real.size.h > 0)
+                    .and_then(|real| self.output_of(real))
+            })
+            .or_else(|| self.active_output())
+    }
+
+    /// How many device pixels to a logical one, on a rectangle's own monitor.
+    ///
+    /// What everything the compositor draws itself has to rasterise at. One
+    /// frame can span monitors at different scales, so this is asked per
+    /// window rather than once for the frame.
+    pub(crate) fn scale_of(&self, rect: Rectangle<i32, Logical>) -> f64 {
+        self.output_of(rect)
+            .map_or(1.0, |output| output.current_scale().fractional_scale())
+    }
+
     /// The area windows may use on the monitor the user is working on.
     ///
     /// Whatever is left once every anchored surface has taken its exclusive
@@ -824,6 +849,16 @@ impl Solium {
     /// Re-running it with nothing changed is harmless and cheap, which is what
     /// makes it safe to call from a reload.
     pub(crate) fn place_outputs(&mut self) {
+        // Scale first, because it decides each monitor's *logical* size and
+        // the positions are laid out in logical space.
+        //
+        // Here and not where the outputs are created, which is where it was:
+        // the nested backend loads its scripts after making its outputs, so
+        // the arrangement was empty and every scale read as automatic. Doing
+        // it in the one place both backends already call also means
+        // `super+shift+r` can change a scale without ending the session.
+        self.scale_outputs();
+
         let monitors: Vec<_> = self
             .space
             .outputs()
@@ -860,14 +895,6 @@ impl Solium {
                 "could not be placed beside what it names -- put it at the right-hand end"
             );
         }
-        for name in self.arrangement.scaled() {
-            // Accepted so the key has its final name, and reported so nobody
-            // spends an afternoon believing a scale is being applied.
-            tracing::warn!(
-                monitor = name,
-                "scale is read but not honoured yet -- see issue #39"
-            );
-        }
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         for (output, at) in outputs.iter().zip(layout.at) {
             // Only when it actually moved. Remapping an output resets its
@@ -886,6 +913,35 @@ impl Solium {
             tracing::info!(monitor = output.name(), x = at.x, y = at.y, "placed");
         }
         self.arrange_layers();
+    }
+
+    /// Give every monitor the scale it asked for, or the one its size implies.
+    fn scale_outputs(&mut self) {
+        for output in self.space.outputs().cloned().collect::<Vec<_>>() {
+            let name = output.name();
+            let physical = output.physical_properties().size;
+            let Some(mode) = output.current_mode() else {
+                continue;
+            };
+            let scale = match self.arrangement.scale(&name) {
+                monitor::Scaling::Fixed(scale) => scale,
+                // A window has no physical size, so a nested output reports
+                // 0x0 and lands on 1x: a scale there has to be asked for.
+                monitor::Scaling::Auto => monitor::automatic(physical, mode.size),
+            };
+            let current = output.current_scale().fractional_scale();
+            if (current - scale).abs() < f64::EPSILON {
+                continue;
+            }
+            if physical.w > 0 {
+                #[expect(clippy::cast_possible_truncation, reason = "reported, not measured")]
+                let dpi = (f64::from(mode.size.w) / (f64::from(physical.w) / 25.4)).round() as i32;
+                tracing::info!(monitor = name, dpi, scale, "scale");
+            } else {
+                tracing::info!(monitor = name, scale, "scale");
+            }
+            output.change_current_state(None, None, Some(Scale::Fractional(scale)), None);
+        }
     }
 
     /// Arrange anchored surfaces on every monitor.
@@ -2888,6 +2944,19 @@ impl CompositorHandler for Solium {
         // and how much of it changed are the damage tracker's business; that
         // it changed at all is this.
         self.redraw = true;
+
+        // What scale and rotation a surface should draw itself at, for clients
+        // that never bind `wp_fractional_scale_v1`. That protocol is answered
+        // too — see `new_fractional_scale` — but it is the newer one, and a
+        // client that only knows `wl_surface.preferred_buffer_scale` would
+        // otherwise draw at 1x on a 2x screen and be scaled up.
+        if let Some(output) = self.output_for_surface(surface) {
+            let scale = output.current_scale().integer_scale();
+            let transform = output.current_transform();
+            with_states(surface, |states| {
+                smithay::wayland::compositor::send_surface_state(surface, states, scale, transform);
+            });
+        }
 
         // Sub-surfaces commit through their root; only the root needs handling.
         if !is_sync_subsurface(surface) {

@@ -36,7 +36,7 @@
 use smithay::{
     desktop::{Space, Window},
     output::Output,
-    utils::{Logical, Point, Rectangle, Size, Transform},
+    utils::{Logical, Physical, Point, Rectangle, Size, Transform},
 };
 
 /// Which side of another monitor a screen sits on.
@@ -91,6 +91,44 @@ pub(crate) enum Wanted {
     },
 }
 
+/// How many device pixels to a logical one.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum Scaling {
+    /// Worked out from the panel's physical size and its mode. The default.
+    #[default]
+    Auto,
+    /// What the configuration said.
+    Fixed(f64),
+}
+
+/// The dots per inch above which a display is treated as needing 2x.
+///
+/// 192 is what GNOME and KDE both use, and matching them matters more than
+/// being right in the abstract: it is the number every monitor's marketing and
+/// every forum answer is implicitly calibrated against.
+///
+/// It puts a 13" 4K laptop panel (~331 dpi) at 2x, which is unreadable
+/// otherwise, and a 27" 4K (~163 dpi) at 1x, which is arguable and is exactly
+/// why `scale` is settable. A 27" 1440p desktop panel is ~109 and nowhere near.
+const HIDPI: f64 = 192.0;
+
+/// The scale a panel of this size and resolution probably wants.
+///
+/// `physical` is in millimetres, as EDID reports it. A monitor that does not
+/// say — and plenty do not, reporting 0x0 — gets 1x, because a guess from no
+/// information is worse than the status quo.
+pub(crate) fn automatic(
+    physical: Size<i32, smithay::utils::Raw>,
+    mode: Size<i32, Physical>,
+) -> f64 {
+    if physical.w <= 0 || mode.w <= 0 {
+        return 1.0;
+    }
+    let inches = f64::from(physical.w) / 25.4;
+    let dpi = f64::from(mode.w) / inches;
+    if dpi >= HIDPI { 2.0 } else { 1.0 }
+}
+
 /// One monitor, as the configuration describes it.
 #[derive(Clone, Debug)]
 pub(crate) struct Placement {
@@ -120,8 +158,8 @@ pub(crate) struct Placement {
     /// Whether this is the monitor things belonging to one screen go on — a
     /// dock, a bar, a layer surface that named no output.
     pub(crate) primary: bool,
-    /// Read, reported, and not yet honoured. See #39.
-    pub(crate) scale: Option<f64>,
+    /// How many device pixels to a logical one.
+    pub(crate) scale: Scaling,
 }
 
 /// Where the monitors went, and what could not be worked out.
@@ -190,16 +228,11 @@ impl Arrangement {
             .map(|placement| placement.name.as_str())
     }
 
-    /// Configured monitors that asked for a scale.
-    ///
-    /// Reported so the caller can say it is not honoured yet rather than let
-    /// somebody believe it is. See #39.
-    pub(crate) fn scaled(&self) -> Vec<&str> {
-        self.placements
-            .iter()
-            .filter(|placement| placement.scale.is_some())
-            .map(|placement| placement.name.as_str())
-            .collect()
+    /// The scale this connector was asked for.
+    pub(crate) fn scale(&self, name: &str) -> Scaling {
+        self.find(name)
+            .map(|placement| placement.scale)
+            .unwrap_or_default()
     }
 
     /// Where each of `monitors` goes, in the order given.
@@ -370,6 +403,20 @@ fn beside(
     .into()
 }
 
+/// A scale by the way a configuration writes one.
+///
+/// A number, or the word `auto`. Refuses anything outside a sane band rather
+/// than believing it: a scale of 0 divides the desktop by zero and a scale of
+/// 40 makes one window fill a wall, and both are far more likely to be a typo
+/// than a request.
+pub(crate) fn scaling(value: &f64) -> Option<Scaling> {
+    if *value >= 0.5 && *value <= 8.0 {
+        Some(Scaling::Fixed(*value))
+    } else {
+        None
+    }
+}
+
 /// A mode by the way a configuration writes one.
 ///
 /// `"2560x1440@165"`, `"2560x1440"`, or one of the words `best`, `preferred`
@@ -512,7 +559,7 @@ mod tests {
             transform: None,
             enabled: true,
             primary: false,
-            scale: None,
+            scale: Scaling::default(),
         }
     }
 
@@ -789,6 +836,34 @@ mod tests {
             },
         ]);
         assert_eq!(arrangement.primary(), Some("DP-2"));
+    }
+
+    /// The heuristic, on real panels. Matching what GNOME and KDE do matters
+    /// more than being right in the abstract, because that is the number
+    /// everybody's expectations are calibrated against.
+    #[test]
+    fn the_automatic_scale_reads_laptops_and_desktops_apart() {
+        // A 13.3" 4K laptop panel: unreadable at 1x.
+        assert_eq!(automatic((294, 165).into(), (3840, 2160).into()), 2.0);
+        // A 27" 1440p desktop panel, which is what this is developed on.
+        assert_eq!(automatic((596, 336).into(), (2560, 1440).into()), 1.0);
+        // A 27" 4K: 163 dpi, under the line, and exactly the case the issue
+        // says only a person can decide. It gets 1x and `scale` is settable.
+        assert_eq!(automatic((596, 336).into(), (3840, 2160).into()), 1.0);
+        // A monitor that reports no physical size at all -- and plenty do.
+        // A guess from no information is worse than the status quo.
+        assert_eq!(automatic((0, 0).into(), (3840, 2160).into()), 1.0);
+    }
+
+    #[test]
+    fn a_scale_outside_reason_is_refused() {
+        assert_eq!(scaling(&1.5), Some(Scaling::Fixed(1.5)));
+        assert_eq!(scaling(&2.0), Some(Scaling::Fixed(2.0)));
+        // Far likelier a typo than a request, and both ends are ruinous: zero
+        // divides the desktop by zero, forty makes one window fill a wall.
+        assert_eq!(scaling(&0.0), None);
+        assert_eq!(scaling(&40.0), None);
+        assert_eq!(scaling(&-2.0), None);
     }
 
     #[test]

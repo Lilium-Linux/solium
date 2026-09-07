@@ -148,7 +148,7 @@ does not exist here.
 | `transform` | `"90"`, `"180"`, `"270"`, `"normal"`, or the same with `flipped-` |
 | `enabled = false` | do not drive it |
 | `primary = true` | where a dock, a bar, or any layer surface that named no output goes |
-| `scale` | read, reported in the log, **not honoured yet** — [#39](https://github.com/Lilium-Linux/solium/issues/39) |
+| `scale` | device pixels per logical one. Left out, worked out from the panel |
 
 `super+shift+r` applies a change without ending the session.
 
@@ -181,6 +181,28 @@ DP-1         connected, 36 modes, best 2560x1440@260
                2560x1440@260, 240, 200, 165, 144, 120, 100, 60  (preferred)
                1920x1080@240, 120, 60, 50
 ```
+
+**`scale` is worked out for you, and you can override it.** Left out, it comes
+from the panel's own size: 2x above 192 dpi and 1x below, which is the number
+GNOME and KDE both use — matching them matters more than being right in the
+abstract, because it is what every monitor's marketing and every forum answer
+is implicitly calibrated against. That puts a 13" 4K laptop at 2x and a 27" 4K
+at 1x, and the second of those is genuinely a matter of taste, which is why it
+is settable. Fractional values work.
+
+`solium --probe` prints the dpi it measured and the scale it would choose, per
+monitor, which is the one number you need to decide whether to disagree:
+
+```
+DP-1  connected, 36 modes, best 2560x1440@260, 600x340mm, 108 dpi, scale 1
+```
+
+Scaling is not a zoom. Everything the compositor draws itself — titlebars, the
+loading window, the pointer — is *rasterised* at the monitor's pixel count
+rather than drawn small and stretched, so a 2x screen gets twice the detail and
+not twice the blur. Your QML keeps working unchanged: it is laid out in logical
+units, so `titlebarHeight: 32` is 32 logical pixels on every monitor and is
+drawn with as many real pixels as that monitor has.
 
 **`vrr` is off unless asked for.** FreeSync, G-Sync compatible, Adaptive-Sync —
 the display's refresh follows what is being drawn instead of the other way
