@@ -15,6 +15,7 @@ use smithay::wayland::fractional_scale::{
 use smithay::wayland::pointer_constraints::{
     PointerConstraintsHandler, PointerConstraintsState, with_pointer_constraint,
 };
+use smithay::wayland::presentation::PresentationState;
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xdg_activation::{
@@ -261,6 +262,19 @@ pub(crate) struct Solium {
     /// from a pid cannot do.
     pub(crate) activation_state: XdgActivationState,
 
+    /// Telling a client when its frame actually reached the screen.
+    ///
+    /// A client that has to guess when its work was shown guesses wrong, and
+    /// the way that looks is video that judders on a screen fast enough to have
+    /// shown it smoothly. `wp_presentation` hands over the real timestamp, the
+    /// refresh interval and a sequence number, so a player can pace itself
+    /// against the display instead of against a timer.
+    #[expect(
+        dead_code,
+        reason = "registers wp_presentation; dropping it would remove the global"
+    )]
+    pub(crate) presentation_state: PresentationState,
+
     /// The middle-click clipboard. A separate selection with its own protocol,
     /// and its absence is not subtle: a terminal that pastes on middle click
     /// pastes nothing at all.
@@ -486,6 +500,11 @@ impl Solium {
             constraint_hint: None,
             activation_state: XdgActivationState::new::<Self>(&display_handle),
             viewporter_state: ViewporterState::new::<Self>(&display_handle),
+            // 1 is CLOCK_MONOTONIC, which is the clock every timestamp in this
+            // compositor comes from -- both the DRM page-flip time and our own
+            // animation clock. Telling a client a different clock id than the
+            // one the numbers are on is worse than not telling it at all.
+            presentation_state: PresentationState::new::<Self>(&display_handle, 1),
             fractional_scale_state: FractionalScaleManagerState::new::<Self>(&display_handle),
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
@@ -590,6 +609,29 @@ impl Solium {
             || Frame::real(real),
             |pane| present::frame(pane, real, self.clock.now()),
         )
+    }
+
+    /// Gather the presentation-feedback callbacks committed for this frame.
+    ///
+    /// Taken *before* the frame is sent, and reported when it has actually been
+    /// shown — which on the hardware is the page flip and nowhere earlier. A
+    /// compositor that answers at render time is answering a different question
+    /// than the one asked, and answering it with a number that is always early.
+    pub(crate) fn presentation_feedback(
+        &self,
+        output: &smithay::output::Output,
+    ) -> smithay::desktop::utils::OutputPresentationFeedback {
+        let mut feedback = smithay::desktop::utils::OutputPresentationFeedback::new(output);
+        for window in self.space.elements() {
+            window.take_presentation_feedback(
+                &mut feedback,
+                // One output, so everything on screen scanned out on it. This
+                // is the closure that would have to learn about several.
+                |_, _| Some(output.clone()),
+                |_, _| smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+            );
+        }
+        feedback
     }
 
     /// Every pane on screen, topmost first, with its client if it has one.
@@ -2864,6 +2906,7 @@ impl FractionalScaleHandler for Solium {
 }
 smithay::delegate_fractional_scale!(Solium);
 smithay::delegate_viewporter!(Solium);
+smithay::delegate_presentation!(Solium);
 
 impl PointerConstraintsHandler for Solium {
     /// A client has asked for the pointer to be held still or kept inside a

@@ -1,0 +1,25 @@
+[package]
+name    = "wl-probe"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+publish = false
+
+# A Wayland *client*, deliberately: the compositor cannot test its own protocol
+# support from the inside, and "the global is advertised" is not the same claim
+# as "a client that uses it gets the right answers". Every protocol added to
+# Solium this week was verified by borrowing a real application and reading its
+# WAYLAND_DEBUG log, which works until no installed application happens to use
+# the protocol in question. This is that gap.
+[dependencies]
+wayland-client    = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+
+# Not the workspace lints. Those deny `unwrap`, `expect` and `panic` because a
+# compositor crash takes the session with it — there is no supervisor and
+# nothing to show but a black screen. A test client has neither problem: it is
+# run by hand, and a panic costs one run and prints a backtrace, which is
+# exactly what a probe should do when the compositor answers something absurd.
+[lints.rust]
+unsafe_code = "warn"

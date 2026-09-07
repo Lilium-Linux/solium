@@ -30,7 +30,7 @@ use smithay::{
     backend::{
         allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         drm::{
-            DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmNode, NodeType,
+            DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmEventTime, DrmNode, NodeType,
             compositor::{DrmCompositor, FrameFlags},
             exporter::gbm::GbmFramebufferExporter,
         },
@@ -208,6 +208,7 @@ pub(crate) fn run() -> Result<()> {
         output: None,
         input: None,
         animating: false,
+        pending_feedback: None,
         pending: false,
         input_devices: 0,
         drm: None,
@@ -222,12 +223,47 @@ pub(crate) fn run() -> Result<()> {
     // has actually reached the screen, rather than on a timer that has no idea.
     event_loop
         .handle()
-        .insert_source(drm_events, move |event, _metadata, state| match event {
+        .insert_source(drm_events, move |event, metadata, state| match event {
             DrmEvent::VBlank(_) => {
                 if let Some(compositor) = state.compositor.as_mut()
                     && let Err(err) = compositor.frame_submitted()
                 {
                     tracing::warn!(?err, "the frame that just flipped was not accepted");
+                }
+
+                // The frame is on the screen, and *this* is the moment clients
+                // asked about. The kernel's own flip timestamp and sequence
+                // number, not ours: a number we invented here would be a guess
+                // at the thing the protocol exists to stop clients guessing.
+                if let Some(mut feedback) = state.pending_feedback.take() {
+                    let (time, sequence) = match metadata.as_ref().map(|it| (it.time, it.sequence)) {
+                        Some((DrmEventTime::Monotonic(time), sequence)) => (time, sequence),
+                        // Realtime, or no metadata at all on a driver that does
+                        // not provide it. Discarded rather than answered with
+                        // our own clock, because the client was told these
+                        // timestamps are CLOCK_MONOTONIC and a realtime one
+                        // would be off by the epoch.
+                        _ => {
+                            feedback.discarded();
+                            return;
+                        }
+                    };
+                    let refresh = state
+                        .output
+                        .as_ref()
+                        .and_then(|output| output.current_mode())
+                        .map(|mode| {
+                            std::time::Duration::from_secs_f64(
+                                1000.0 / f64::from(mode.refresh.max(1)) / 1000.0,
+                            )
+                        })
+                        .unwrap_or_else(|| std::time::Duration::from_millis(16));
+                    feedback.presented::<_, smithay::utils::Monotonic>(
+                        time,
+                        smithay::wayland::presentation::Refresh::fixed(refresh),
+                        u64::from(sequence),
+                        smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
+                    );
                 }
                 // The frame is on the screen: the pipeline is free, and clients
                 // may draw the next one.
@@ -388,6 +424,9 @@ pub(crate) struct State {
     input: Option<Libinput>,
     /// Whether any window was still moving at the last frame.
     animating: bool,
+    /// The feedback callbacks for the frame that is in flight, waiting for the
+    /// page flip that will tell us when it was actually shown.
+    pending_feedback: Option<smithay::desktop::utils::OutputPresentationFeedback>,
     /// A frame has been queued and has not reached the screen yet.
     ///
     /// Building another before this one flips is work that can only be thrown
@@ -591,7 +630,15 @@ impl State {
             FrameFlags::DEFAULT,
         ) {
             Ok(result) if !result.is_empty => match compositor.queue_frame(()) {
-                Ok(()) => self.pending = true,
+                Ok(()) => {
+                    self.pending = true;
+                    // Taken now, reported at the flip. The callbacks belong to
+                    // the frame that was just queued, and a later frame's
+                    // commits must not be answered with this one's timestamp.
+                    if let Some(output) = self.output.as_ref() {
+                        self.pending_feedback = Some(self.solium.presentation_feedback(output));
+                    }
+                }
                 Err(err) => tracing::warn!(?err, "could not queue a frame"),
             },
             Ok(_) => {}

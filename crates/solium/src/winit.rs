@@ -104,6 +104,40 @@ pub(crate) fn run() -> Result<()> {
     // The app_id is stable and specific so the host compositor can be told
     // where to put this window and to leave the focus alone -- developing a
     // compositor should not steal focus from whatever is already running.
+    // Do not wait for the host's vblank.
+    //
+    // Smithay already asks for this the proper way — `init_from_attributes`
+    // passes `vsync: false`, which becomes an EGL swap interval of zero — and
+    // the NVIDIA driver ignores it. Its own default wins unless this variable
+    // says otherwise, so the request has to be made twice, in two languages.
+    //
+    // It has to be off. A nested compositor that blocks in `eglSwapBuffers`
+    // waiting for a host that has stopped servicing its surface does not
+    // stutter, it stops: the whole event loop is in that call, so no client is
+    // answered, no input is read, and nothing in the log says why. Backtrace
+    // from a real one, which is what finally identified it:
+    //
+    //     WlEglSurface::swap_buffers
+    //     EGLSurface::swap_buffers
+    //     WinitGraphicsBackend::submit
+    //     solium::winit::run
+    //
+    // The host composites this window anyway, so waiting for its refresh buys
+    // nothing even when it works. Set here rather than in a script so that
+    // running the binary directly cannot hit it, and only if it is unset, so
+    // anyone who wants the other behaviour can still ask for it.
+    if std::env::var_os("__GL_SYNC_TO_VBLANK").is_none() {
+        // SAFETY: single-threaded at this point -- this runs before the event
+        // loop, the renderer, and any thread that could read the environment.
+        #[expect(
+            unsafe_code,
+            reason = "setting an environment variable before EGL reads it"
+        )]
+        unsafe {
+            std::env::set_var("__GL_SYNC_TO_VBLANK", "0");
+        }
+    }
+
     let (mut backend, mut winit) = winit::init_from_attributes::<GlesRenderer>(
         WindowAttributes::default()
             .with_title("Solium (nested)")
@@ -420,6 +454,36 @@ pub(crate) fn run() -> Result<()> {
         // frame is not presented. One frame of a 60 Hz window is not visible,
         // and attempting the submit anyway costs an EGL surface reallocation
         // that fails.
+        // Presentation feedback, nested.
+        //
+        // A compositor inside another compositor cannot know when the host
+        // actually put the frame on a screen — there is no page flip here to
+        // ask. So the callbacks are answered with the moment the frame was
+        // handed over and *without* the Vsync flag, which is the protocol's way
+        // of saying this timestamp is when it was submitted rather than when it
+        // was shown. Discarding them instead would be worse: a client would
+        // wait for an answer that never comes.
+        if rendered
+            && let Some(mut feedback) = state
+                .space
+                .outputs()
+                .next()
+                .cloned()
+                .map(|output| state.presentation_feedback(&output))
+        {
+            // CLOCK_MONOTONIC, because that is the clock id the clients were
+            // told. Not `SystemTime`: that is the realtime clock and would be
+            // off by the epoch, which is the one way to make this worse than
+            // saying nothing.
+            let refresh = std::time::Duration::from_micros(16_667);
+            feedback.presented(
+                smithay::utils::Clock::<smithay::utils::Monotonic>::new().now(),
+                smithay::wayland::presentation::Refresh::variable(refresh),
+                0,
+                smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+            );
+        }
+
         if rendered
             && !captured
             && let Err(err) = backend.submit(Some(&[damage]))
