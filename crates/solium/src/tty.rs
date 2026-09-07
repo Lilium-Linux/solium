@@ -31,6 +31,7 @@ use smithay::{
         allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         drm::{
             DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmEventTime, DrmNode, NodeType,
+            VrrSupport,
             compositor::{DrmCompositor, FrameFlags},
             exporter::gbm::GbmFramebufferExporter,
         },
@@ -108,11 +109,11 @@ pub(crate) fn probe() -> Result<()> {
             continue;
         }
         let modes = connector.modes();
-        let preferred = preferred_mode(&connector);
+        let best = preferred_mode(&connector);
         println!(
-            "  {name:<12} connected, {} modes, preferred {}",
+            "  {name:<12} connected, {} modes, best {}",
             modes.len(),
-            preferred.map_or_else(
+            best.map_or_else(
                 || "none".to_owned(),
                 |mode| format!(
                     "{}x{}@{:.0}",
@@ -122,6 +123,35 @@ pub(crate) fn probe() -> Result<()> {
                 )
             )
         );
+        // Every mode it offers, in the form `mode` in the configuration takes,
+        // because knowing what to write there is the whole reason to ask. One
+        // line per resolution with its rates beside it: a monitor advertises
+        // thirty-odd modes and most of them are the same handful of sizes.
+        let mut sizes: Vec<(u16, u16)> = Vec::new();
+        for mode in modes {
+            if !sizes.contains(&mode.size()) {
+                sizes.push(mode.size());
+            }
+        }
+        for (width, height) in sizes {
+            let mut rates: Vec<u32> = modes
+                .iter()
+                .filter(|mode| mode.size() == (width, height))
+                .map(|mode| mode.vrefresh())
+                .collect();
+            rates.sort_unstable_by(|a, b| b.cmp(a));
+            rates.dedup();
+            let rates: Vec<String> = rates.iter().map(u32::to_string).collect();
+            let flagged = modes.iter().any(|mode| {
+                mode.size() == (width, height)
+                    && mode.mode_type().contains(ModeTypeFlags::PREFERRED)
+            });
+            let preferred = if flagged { "  (preferred)" } else { "" };
+            println!(
+                "                 {width}x{height}@{}{preferred}",
+                rates.join(", ")
+            );
+        }
     }
     Ok(())
 }
@@ -155,17 +185,48 @@ impl smithay::reexports::drm::control::Device for Card {}
 
 /// The mode a connector was asked for, or the best it offers.
 ///
-/// An exact resolution match, at the requested refresh rate when one was given
-/// and at the highest available when it was not. Anything else warns and falls
-/// back to the automatic choice: a configuration that asks for a mode the
-/// monitor does not have should cost a line in the log, never a black screen.
+/// Anything that cannot be satisfied warns and falls back to the automatic
+/// choice: a configuration that asks for a mode the monitor does not have
+/// should cost a line in the log, never a black screen.
 fn chosen_mode(
     connector: &connector::Info,
-    wanted: Option<(i32, i32, Option<i32>)>,
+    wanted: crate::monitor::Wanted,
     name: &str,
 ) -> Option<DrmMode> {
-    let Some((width, height, refresh)) = wanted else {
-        return preferred_mode(connector);
+    use crate::monitor::Wanted;
+
+    let (width, height, refresh) = match wanted {
+        Wanted::Best => return preferred_mode(connector),
+        Wanted::Preferred => {
+            // The EDID's preferred flag taken literally, refresh rate and all.
+            // For a monitor that is unstable at its highest rate, which is a
+            // real thing and not something `Best` can know about.
+            return connector
+                .modes()
+                .iter()
+                .find(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
+                .or_else(|| connector.modes().first())
+                .copied();
+        }
+        Wanted::Widest => {
+            // The largest area, and then the fastest at that size.
+            let widest = connector
+                .modes()
+                .iter()
+                .max_by_key(|mode| i64::from(mode.size().0) * i64::from(mode.size().1))?
+                .size();
+            return connector
+                .modes()
+                .iter()
+                .filter(|mode| mode.size() == widest)
+                .max_by_key(|mode| mode.vrefresh())
+                .copied();
+        }
+        Wanted::Exact {
+            width,
+            height,
+            refresh,
+        } => (width, height, refresh),
     };
 
     let matching: Vec<&DrmMode> = connector
@@ -175,7 +236,7 @@ fn chosen_mode(
         .collect();
 
     let picked = match refresh {
-        // Within one hertz: a 59.94 Hz mode is reported as 60 and asking for
+        // Within one hertz: a 59.94 Hz mode is reported as 60, and asking for
         // 60 must find it.
         Some(refresh) => matching
             .iter()
@@ -198,7 +259,8 @@ fn chosen_mode(
                     "{width}x{height}{}",
                     refresh.map(|r| format!("@{r}")).unwrap_or_default()
                 ),
-                "this monitor has no such mode -- using its best instead"
+                "this monitor has no such mode -- using its best instead; \
+                 `solium --probe` lists how many it offers"
             );
             preferred_mode(connector)
         }
@@ -733,6 +795,33 @@ impl State {
                     continue;
                 }
             };
+
+            // Variable refresh rate, when asked for and when the monitor and
+            // the driver both agree. Reported either way: a monitor sold on
+            // having VRR and not offering it over the cable in use is a thing
+            // that happens, and hearing so from a log beats inferring it from
+            // stutter.
+            let mut compositor = compositor;
+            if let Some(vrr) = self.solium.arrangement.vrr(&name) {
+                match compositor.vrr_supported(connector.handle()) {
+                    Ok(VrrSupport::NotSupported) if vrr => tracing::warn!(
+                        monitor = name,
+                        "asked for vrr and this connector does not offer it"
+                    ),
+                    Ok(support) => match compositor.use_vrr(vrr) {
+                        Ok(()) => {
+                            tracing::info!(
+                                monitor = name,
+                                vrr,
+                                modeset = support == VrrSupport::RequiresModeset,
+                                "variable refresh rate"
+                            );
+                        }
+                        Err(err) => tracing::warn!(?err, monitor = name, "could not set vrr"),
+                    },
+                    Err(err) => tracing::warn!(?err, monitor = name, "could not ask about vrr"),
+                }
+            }
 
             self.screens.push(Screen {
                 output,

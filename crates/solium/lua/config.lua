@@ -29,8 +29,8 @@ local defaults = {
     -- see and fix in one line.
     --
     --     monitors = {
-    --         { name = "DP-1", primary = true },
-    --         { name = "DP-2", right_of = "DP-1", align = "end" },
+    --         { name = "DP-1", mode = "2560x1440@260", vrr = true, primary = true },
+    --         { name = "DP-2", mode = "2560x1440@75", right_of = "DP-1", align = "end" },
     --         { name = "DP-3", above = "DP-1", transform = "90" },
     --         { name = "HDMI-A-1", enabled = false },
     --     },
@@ -61,15 +61,55 @@ local defaults = {
     --                                     is what a monitor on a taller desk
     --                                     actually needs.
     --
-    --   mode = { w, h, refresh }          ask for a particular mode. Without
-    --                                     one you get the best the monitor
-    --                                     offers -- the highest refresh at its
-    --                                     preferred resolution, because the
+    --   mode = "2560x1440@260"            resolution and refresh rate. The
+    --                                     refresh is optional -- "2560x1440"
+    --                                     alone means the fastest mode at that
+    --                                     size. A table `{ w = , h = ,
+    --                                     refresh = }` does the same thing, for
+    --                                     generating a configuration rather
+    --                                     than writing one.
+    --
+    --                                     Three words also work:
+    --                                       "best"       the highest refresh at
+    --                                                    the preferred
+    --                                                    resolution. The
+    --                                                    default.
+    --                                       "preferred"  exactly what the
+    --                                                    monitor's EDID says,
+    --                                                    refresh included --
+    --                                                    for one that is
+    --                                                    unstable at its
+    --                                                    fastest.
+    --                                       "widest"     the largest
+    --                                                    resolution, fastest at
+    --                                                    that size.
+    --
+    --                                     "best" is not "preferred": the
     --                                     EDID's preferred *flag* names a
     --                                     resolution and usually pairs it with
-    --                                     a pedestrian 60 Hz. `refresh` is in
-    --                                     Hz and optional. A mode the monitor
-    --                                     does not have warns and falls back.
+    --                                     a pedestrian 60 Hz. A 260 Hz panel
+    --                                     reports 2560x1440@60 as preferred,
+    --                                     and taking that literally drives a
+    --                                     fast display slowly and makes every
+    --                                     animation look worse than it is.
+    --
+    --                                     A mode the monitor does not have
+    --                                     warns and falls back; `--probe` says
+    --                                     how many each one offers.
+    --
+    --   vrr = true                        variable refresh rate, where the
+    --                                     monitor and the driver both offer it
+    --                                     -- FreeSync, G-Sync compatible,
+    --                                     Adaptive-Sync. The display's refresh
+    --                                     follows what is actually being drawn
+    --                                     instead of the other way round, which
+    --                                     is what removes the tear and the
+    --                                     stutter on anything that cannot hold
+    --                                     a steady frame rate. Left alone by
+    --                                     default, because it interacts badly
+    --                                     with some panels at low frame rates
+    --                                     (visible flicker) and that is not a
+    --                                     thing to turn on for somebody.
     --
     --   transform = "90"                  rotation, anticlockwise, as degrees:
     --                                     "normal", "90", "180", "270", or the

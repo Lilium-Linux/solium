@@ -27,7 +27,7 @@ Three flags worth knowing:
 | | |
 |---|---|
 | `--check` | would the configuration load? which bindings survived? |
-| `--probe` | what the hardware offers — connectors, modes — without taking it |
+| `--probe` | every connector and every mode it offers, without taking the screen |
 | `--debug-mode` | adds the Developer Tweaks panel, on `super+shift+d` |
 
 `super+shift+q` ends the session and `super+shift+r` reloads the configuration
