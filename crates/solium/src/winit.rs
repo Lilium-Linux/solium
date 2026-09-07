@@ -114,8 +114,13 @@ pub(crate) fn run() -> Result<()> {
     // It has to be off. A nested compositor that blocks in `eglSwapBuffers`
     // waiting for a host that has stopped servicing its surface does not
     // stutter, it stops: the whole event loop is in that call, so no client is
-    // answered, no input is read, and nothing in the log says why. Backtrace
-    // from a real one, which is what finally identified it:
+    // answered, no input is read, and nothing in the log says why.
+    //
+    // The way to hit it is to let the machine go to sleep. The host stops
+    // compositing, the vblank being waited for never arrives, and the session
+    // is dead when you come back to it — which is how this was found, and it is
+    // worth naming because it is not a thing anyone thinks to test. Backtrace
+    // from a real one:
     //
     //     WlEglSurface::swap_buffers
     //     EGLSurface::swap_buffers
