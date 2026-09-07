@@ -1,0 +1,230 @@
+# Desktop modes
+
+A mode is a Lua file. Tiling is one, scrolling is one, overview is one, and so
+is whatever you write. The compositor holds no opinion about any of them.
+
+That is not a boast about extensibility — it is the architecture's test. **If a
+new mode needs new Rust, the transform layer is missing something**, and that
+missing thing is the bug rather than your mode. Overview is ninety lines of Lua
+for exactly this reason: it was written to find out whether the claim was true.
+
+## The two ways to move a window
+
+Everything a mode does comes down to one of these, and picking the wrong one is
+the most common mistake.
+
+```lua
+sol.place(id, { x = 0, y = 0, w = 960, h = 1080 })   -- where it LIVES
+sol.present(id, { rect = { x = 40, y = 40, w = 320, h = 180 } })  -- where it is DRAWN
+```
+
+`place` is the layout's authority. The window is really that size; the client is
+told, and asked to redraw. Use it for arrangements — tiling, scrolling, a
+window snapping back after a drag.
+
+`present` is a transform. The window still lives where it lived and the client
+never learns anything happened; it is simply drawn somewhere else. Use it for
+anything temporary — overview, an app switcher, a peek, a genie. Then:
+
+```lua
+sol.present_clear(id)   -- animate back to real geometry and stop transforming
+```
+
+The distinction is why leaving overview is exact rather than approximate. The
+layout was never disturbed, so there is nothing to restore.
+
+`sol.present_from(id, rect)` is the third: draw the window at `rect` and animate
+it to where it lives. That is every "appears from somewhere" animation — a
+window opening, or growing out of a dock icon.
+
+## What a mode is told
+
+```lua
+sol.on("open",   function(id) end)                 -- a window's life began
+sol.on("close",  function(id) end)                 -- it is going
+sol.on("focus",  function(id) end)                 -- the keyboard moved
+sol.on("drop",   function(id, x, y) end)           -- a drag finished
+sol.on("resize", function(id, x, y, horizontal, vertical) end)
+sol.on("scroll", function(dx, dy) end)             -- a modified wheel turn
+sol.on("click",  function(x, y) end)               -- only while grabbing input
+sol.on("layout", function() end)                   -- the room windows get changed
+```
+
+Three of these are worth reading twice.
+
+**`open` fires when the window opens, which is before its application exists.**
+A window's life begins when the user asks for the program. Your mode is told
+then, gets to place the window then, and the application appears inside it
+later. Nothing special is required of you for that to work — but it is why
+`open` is the event that puts a window into your arrangement, and `layout` is
+not. A layout keeps its own structure and adds to it on `open`; `layout` only
+means "re-run what you already hold".
+
+**`resize` gives you the pointer's position, not a delta.** Deliberately: a
+delta would be measured against a layout your own last response just changed,
+and the windows shake for as long as the button is held. `horizontal` and
+`vertical` say which axes the dragged edge can move.
+
+**`click` only arrives while you hold input.** `sol.grab_input(true)` takes keys
+and clicks away from clients, which is what a mode needs while it owns the
+screen. Release it when you leave, or nothing will ever reach a window again.
+
+## What a mode can ask
+
+```lua
+sol.windows()          -- every window: id, rect, drawn, title, focused
+sol.monitor()          -- the work area, after bars have taken their share
+sol.cursor()           -- { x, y }
+sol.window_at(x, y, skip)  -- the id under a point, optionally skipping one
+```
+
+`sol.windows()` is a snapshot taken fresh for your handler, never a live view.
+A window closing while you hold its id is ordinary: `place` and `present` on an
+id that no longer exists do nothing rather than failing.
+
+`rect` is where the window lives; `drawn` is where it is being drawn right now,
+which in a mode is somewhere else. Read `drawn` when you care what the user is
+looking at, `rect` when you care what the layout thinks.
+
+`skip` on `window_at` exists because of one specific bug: a new window is
+already mapped and under the pointer, so asking "what am I pointing at" without
+skipping it names the window as its own split target.
+
+## The arrangements that ship
+
+You do not have to compute geometry yourself.
+
+```lua
+local slots = sol.layout.grid(windows, area)          -- overview's grid
+local slots = sol.layout.master_stack(count, area)    -- one big, the rest beside
+local slots = sol.layout.strip(columns, area)         -- a row, with an offset
+```
+
+These are pure: windows in, rectangles out. Two are not, and cannot be:
+
+```lua
+local tree = sol.layout.tree()        -- dwindle
+local scroller = sol.layout.scroller()  -- niri's model
+```
+
+A dwindle tree is stateful because the arrangement is. Where a window lands
+depends on which window was split and where the pointer was, and no function of
+"how many windows are there" can recover that afterwards. Same for a scroller:
+which column is active and where the view sits relative to it are not in the
+window list.
+
+They are held by the script that made one, not by the compositor:
+
+```lua
+tree:insert(id, target, x, y, options)
+tree:remove(id)
+tree:contains(id)
+tree:windows()
+tree:layout(options)      -- the slots, to hand to sol.place
+tree:resize(id, share)
+tree:drag_seam(id, "width", x, y, options)
+```
+
+`options` is `sol.monitor()` with `gap` and `split` added. Passing the monitor
+in rather than the tree asking for it is what lets one tree per workspace exist
+without any of them knowing about workspaces.
+
+## A whole mode
+
+This is real and it works. Paste it into `~/.config/solium/mymode.lua` and
+`require("mymode")` from your `init.lua`.
+
+```lua
+-- Two columns, newest window on the right, everything else stacked on the left.
+local modes = require("modes")
+local mine = { active = false }
+
+local function arrange()
+    if not mine.active then return end
+    local windows = sol.windows()
+    if #windows == 0 then return end
+
+    local area = sol.monitor()
+    local gap = 12
+    local half = (area.w - gap * 3) / 2
+
+    sol.animate({ duration = 220, easing = "outCubic" })
+
+    -- The newest window takes the right half.
+    local newest = windows[1]
+    sol.place(newest.id, {
+        x = area.x + gap * 2 + half, y = area.y + gap,
+        w = half, h = area.h - gap * 2,
+    })
+
+    -- The rest share the left half, top to bottom.
+    local rest = #windows - 1
+    if rest > 0 then
+        local each = (area.h - gap * (rest + 1)) / rest
+        for index = 2, #windows do
+            sol.place(windows[index].id, {
+                x = area.x + gap, y = area.y + gap + (index - 2) * (each + gap),
+                w = half, h = each,
+            })
+        end
+    end
+end
+
+sol.on("open",   arrange)
+sol.on("close",  arrange)
+sol.on("layout", arrange)
+
+function mine.started() arrange() end
+function mine.toggle() modes.use("mine") end
+
+modes.register("mine", mine)
+sol.bind("super+y", mine.toggle)
+
+return mine
+```
+
+Four things in there are the conventions rather than the content.
+
+**Register with `modes`, do not keep your own on/off flag.** A layout is a
+choice of one. Two layouts both placing every window means the second one to run
+wins and the arrangement looks like whichever that happened to be — and
+switching away from one leaves its windows where it put them. `modes.use(name)`
+turns the others off, calls your `started`, and calls their `stopped`. Calling
+it with the mode already current falls back to floating, so one key toggles.
+
+**Guard on `active`.** Your handlers stay registered when your mode is off.
+
+**`sol.animate` before the batch, not per window.** It applies to everything
+queued after it, so every window in one arrangement moves over the same interval
+on the same clock. Setting it per window is how an arrangement ends up looking
+like several separate animations that happen to overlap.
+
+**Newest window first.** `sol.windows()` is topmost-first, which is the order a
+hit test wants and the order "the one I just opened" is at the front of.
+
+## Modes that are not layouts
+
+`overview.lua` is worth reading as the other shape a mode takes: it grabs input,
+transforms every window onto a grid with `present`, and clears them on the way
+out. It never calls `place`, so the layout underneath is untouched and leaving
+is exact.
+
+That file is also the architecture's proof, and its comment says so — the app
+switcher is that with a row instead of a grid, peek is it with one window at the
+cursor, and the icon-to-window genie is it with an icon rect as the starting
+point. If any of those ever needs new Rust, the transform layer is missing
+something.
+
+## Worth knowing
+
+`solium --check` prints every binding it registered and will tell you an edit
+dropped one. `super+shift+r` reloads while the session runs, so a mode can be
+written against a desktop you are using.
+
+A configuration that fails to load is reported with the file and the line, and
+the running session keeps whatever it already had. A typo costs a line of output
+rather than your windows.
+
+See also: **[animation.md](animation.md)** for how the feel is configured,
+**[ricing.md](ricing.md)** for the settings a mode should read rather than
+hardcode.

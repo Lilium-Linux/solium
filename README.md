@@ -93,7 +93,10 @@ it.
 
 | | |
 |---|---|
-| [docs/ricing.md](docs/ricing.md) | configuring it — settings, decorations, bindings, modes |
+| [docs/ricing.md](docs/ricing.md) | configuring it — start here |
+| [docs/modes.md](docs/modes.md) | desktop modes, and how to write one |
+| [docs/animation.md](docs/animation.md) | the animation engine, and how to change the feel |
+| [docs/decorations.md](docs/decorations.md) | window frames and everything else drawn in QML |
 | [docs/architecture.md](docs/architecture.md) | how it is built, and why |
 | [docs/shell-boundary.md](docs/shell-boundary.md) | what belongs to the compositor and what to the shell |
 | [docs/roadmap.md](docs/roadmap.md) | epics, in dependency order |

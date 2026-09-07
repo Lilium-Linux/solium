@@ -32,6 +32,14 @@ different list, not a longer one.
 
 `crates/solium/lua/config.lua` is the list of everything you can put in there.
 
+Three guides go deeper than the recipes below:
+
+| | |
+|---|---|
+| [modes.md](modes.md) | what a desktop mode is, and how to write one |
+| [animation.md](animation.md) | the animation engine, curves, and where the feel lives |
+| [decorations.md](decorations.md) | window frames, the loading window, the pointer |
+
 ## Where things live
 
 | what | where |
@@ -147,6 +155,9 @@ A mode is a Lua module that reacts to events — `open`, `close`, `focus`,
 `drop`, `resize`, `scroll` — and asks for placements. `tiling.lua` is Hyprland's
 dwindle in about a hundred lines; `scrolling.lua` is niri's model. Copy either
 into your own directory and it takes over.
+
+**[modes.md](modes.md)** is the guide, with a whole working mode in forty lines
+and the two mistakes everyone makes first.
 
 ## Worth knowing
 
