@@ -12,6 +12,9 @@ E7 and E8 are open. So is the protocol work that turns a working compositor into
 a usable one; that lives on the issue tracker rather than here, prioritised by
 whether an application can be used at all without it.
 
+For what has to be true before anyone else can run this, and the order to do it
+in, see [beta.md](beta.md).
+
 Each epic below keeps its original acceptance criteria, because what "done"
 meant at the time is the more useful record.
 
