@@ -12,6 +12,7 @@ a demo into a regression test.
 | `SOLIUM_CAPTURE_INTERVAL=<ms>` | Time between frames of a burst (default 16). |
 | `SOLIUM_TRIGGER_AT=` | Fire key bindings, as `<ms>:<combo>` separated by commas — e.g. `5200:super+space,6200:super+space`. Goes through the same path a keypress does. |
 | `SOLIUM_CLICK_AT=` | Fire pointer presses, as `<ms>:<x>,<y>` separated by semicolons. |
+| `SOLIUM_OUTPUTS=<n>` | Give the nested backend `n` monitors, side by side in its one window (1–4). Each gets its own layer map, work area and render pass, drawn into a texture of its own exactly as it would be into its own buffer. One is the default and takes the ordinary path unchanged. |
 | `SOLIUM_LUA_INIT=<path>` | Load this configuration instead of `~/.config/solium/init.lua` or the bundled one. |
 | `SOLIUM_QML_TOPBAR=`, `SOLIUM_QML_TITLEBAR=` | Load chrome from elsewhere, so it can be restyled without a rebuild. |
 | `SOLIUM_DEV_IMAGE=` | The container `dev/run-nested.sh` runs in. |
@@ -51,6 +52,36 @@ gate.
 `xclip` and cannot install one. **Run it more than once.** The bug it was
 written for failed about one time in three, so a single green run proves
 nothing — which is exactly how it nearly shipped.
+
+### Two monitors, without a second monitor
+
+    SOLIUM_OUTPUTS=2 dev/run-nested.sh
+
+Two monitors side by side in the nested window, each with its own layer map,
+work area and render pass, each drawn into a texture of its own — which is what
+having its own scanout buffer means. Every per-output path runs for each of
+them; what it cannot simulate is a second *pipeline*, one refresh rate and one
+page flip per screen, which is `tty.rs`'s half of the problem.
+
+It exists for the same reason `cursor-check.sh` does, and it earned itself
+immediately. The window-resize handler only ever resized the first output, so
+the left screen took the whole window's width and covered the right one, and a
+pointer over the second monitor was answered with the first — a window opening
+on the screen you are not looking at. That would otherwise have been found on a
+TTY, where nothing can be read and each attempt costs a session.
+
+Combine it with the scripted input knobs to place windows on a chosen screen:
+`SOLIUM_DRAG_AT` moves the pointer through the real input path, and the active
+monitor is the one the pointer is on.
+
+    SOLIUM_OUTPUTS=2 \
+      SOLIUM_DRAG_AT="1000:100,500>400,500;3500:400,500>1200,500" \
+      SOLIUM_LOADING_AT="1500:one,2500:two,4000:three,5000:four" \
+      SOLIUM_TRIGGER_AT=6000:super+t \
+      SOLIUM_CAPTURE=/tmp/tile.ppm SOLIUM_CAPTURE_AT=8000 \
+      dev/run-nested.sh
+
+Two windows tiled on each screen, in one capture, with no hands.
 
 ## Capturing a frame
 

@@ -45,7 +45,7 @@ predicts.
 
 | | why |
 |---|---|
-| [#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor | one screen is used and the rest stay black. The largest remaining refactor |
+| ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | **done.** A pipeline per monitor, one global space, layouts per screen |
 | [#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI | every laptop user gets a half-size desktop and bounces immediately |
 | [#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture | no screenshots and no screen sharing; people hit this in minutes |
 | packaging | there is none. A preview nobody can install is a preview nobody tries |
@@ -65,13 +65,14 @@ hours is worse than one that is missing a lock screen.
 
 ## Order, and why
 
-1. **[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor**,
-   on its own branch. The biggest, the most invasive, and the one everything
-   else is easier after. Do it first and with a clear head, not at the end of a
-   session.
-2. **[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI**, with or
-   immediately after it — the same call sites, the same `outputs().next()`
-   assumptions, and doing them separately means touching the same code twice.
+1. ~~**[#41](https://github.com/Lilium-Linux/solium/issues/41)
+   multi-monitor**~~ — done, on the `multi-monitor` branch. It was the biggest
+   and the one everything else is easier after, which is why it went first.
+2. **[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI**, next and
+   for the reason #41 was first: it is the same call sites. Every one of them
+   now takes an output or a screen rect rather than assuming, so the remaining
+   work is honouring `current_scale()` instead of the `1.0` that is still
+   passed to `render::elements` — a much smaller change than it was a day ago.
 3. **[#28](https://github.com/Lilium-Linux/solium/issues/28) screencopy** —
    self-contained, and the loudest missing thing after the first two.
 4. **Soak and package.** Both are the difference between working here and
@@ -104,6 +105,13 @@ drawing policies — one drew every loop iteration, the other on damage — so
 every animation was developed against the one where a missing damage signal is
 invisible. They gate on the same test now. Keep it that way.
 
+The answer to this is to make the nested backend able to *be* the hardware in
+the way that matters, not to test less. `SOLIUM_OUTPUTS=n` gives it that many
+monitors and found a real bug within minutes of existing — the resize handler
+only resized the first output, so the left screen covered the right one and a
+pointer over the second monitor was answered with the first. On a TTY that is
+an hour and a session; nested it is a screenshot.
+
 **Take a backtrace before theorising.** An hour went into deciding why the
 nested backend hung. `eu-stack -p $(pgrep -x solium)` answered it in a minute:
 `WlEglSurface::swap_buffers`.
@@ -133,6 +141,7 @@ documented as working since it was written.
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `cargo run -p wl-probe` | the protocols answer, from a real client's side |
+| `SOLIUM_OUTPUTS=2 dev/run-nested.sh` | two monitors, without a second monitor |
 
 `wl-probe` is the one to extend. A compositor cannot test its own protocol
 support from the inside, and "the global is advertised" is a different claim

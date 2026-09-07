@@ -72,8 +72,10 @@ screen. Release it when you leave, or nothing will ever reach a window again.
 ## What a mode can ask
 
 ```lua
-sol.windows()          -- every window: id, rect, drawn, title, focused
-sol.monitor()          -- the work area, after bars have taken their share
+sol.windows()          -- every window: id, rect, drawn, title, focused, monitor
+sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale, focused
+sol.monitor()          -- the active monitor's work area
+sol.monitor(id)        -- the work area of the monitor that window is on
 sol.cursor()           -- { x, y }
 sol.window_at(x, y, skip)  -- the id under a point, optionally skipping one
 ```
@@ -89,6 +91,57 @@ looking at, `rect` when you care what the layout thinks.
 `skip` on `window_at` exists because of one specific bug: a new window is
 already mapped and under the pointer, so asking "what am I pointing at" without
 skipping it names the window as its own split target.
+
+## A layout runs per monitor
+
+There is **one global coordinate space** and every monitor is a rectangle in
+it. That is the whole mechanism: a window is on the second screen because its
+`x` lands there. There is no per-screen coordinate system and nothing to
+convert.
+
+The consequence is the thing to get right. `sol.monitor()` answers *one*
+screen, so a mode that lays every window out against it piles both monitors'
+worth of windows onto whichever one the pointer happens to be on. A layout is
+per monitor:
+
+```lua
+local monitors = require("monitors")
+
+for _, each in ipairs(monitors.each()) do
+    -- each.monitor is the rect; each.windows are the windows on it
+end
+```
+
+`monitors.each()` always lists every monitor, including one with nothing on it
+— a layout has to hear about an empty screen, because that is what tells it the
+last window left.
+
+Anything stateful is keyed by monitor as well as workspace. `tiling.lua` keeps
+a dwindle tree per pair and `scrolling.lua` a strip, via `monitors.key`:
+
+```lua
+local function tree_for(workspace, monitor)
+    local key = monitors.key(workspace, monitor)
+    ...
+end
+```
+
+Two reasons, and the second is the one that bites. The screens are different
+sizes, so a split or a column width that reads well on one is wrong on the
+other. And a window moved across has to *leave* one arrangement and join the
+other: a window in two trees is a window given two slots, and it ends up in
+whichever was laid out last. `adopt` is where that settles — missing from its
+new screen's tree, still in its old one's, both halves fixed in one pass.
+
+**One `sol.animate` for every screen.** Two monitors rearranging at once is one
+movement; see [animation.md](animation.md) on why the feel is set per batch and
+not per window.
+
+`monitors.active()` is the monitor the pointer is on — where a new window goes,
+and what a binding pressed with no particular window in mind is about. It is
+the pointer and not the focused window on purpose: look at the second screen,
+click the empty desktop, press the key for a terminal, and a focus-based rule
+would open it on the screen you just looked away from.
 
 ## The arrangements that ship
 
@@ -125,9 +178,11 @@ tree:resize(id, share)
 tree:drag_seam(id, "width", x, y, options)
 ```
 
-`options` is `sol.monitor()` with `gap` and `split` added. Passing the monitor
-in rather than the tree asking for it is what lets one tree per workspace exist
-without any of them knowing about workspaces.
+`options` is a monitor's work area with `gap` and `split` added. Passing the
+monitor in rather than the tree asking for it is what lets one tree per
+workspace *per monitor* exist without any of them knowing about either. Copy
+the rect before adding keys — the one from `sol.monitors()` belongs to the
+snapshot.
 
 ## A whole mode
 
