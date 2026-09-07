@@ -67,7 +67,8 @@ pub(crate) fn run() -> Result<()> {
 
     // X11 clients, if XWayland is installed. Started before the socket source
     // so that a client launched from a script's startup has a display to find.
-    crate::xwayland::start(&event_loop.handle(), &display_handle);
+    let loop_handle = event_loop.handle();
+    crate::xwayland::start(&loop_handle, &display_handle);
 
     event_loop
         .handle()
@@ -356,6 +357,9 @@ pub(crate) fn run() -> Result<()> {
         // applied once, here, however many times the mouse reported it. See
         // `settle_resize`.
         state.settle_resize();
+        // And a Wayland client waiting on an X11 client's clipboard. Here
+        // because this is where a loop handle exists; see `settle_selection`.
+        crate::xwayland::settle_selection(&mut state, &loop_handle);
 
         // A capture that is due needs a frame to be captured *from*. Asked for
         // rather than assumed: with drawing gated on damage a still screen

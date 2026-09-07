@@ -51,14 +51,16 @@ use smithay::{
         },
         dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::{OutputHandler, OutputManagerState},
-        selection::SelectionHandler,
         selection::data_device::{
             ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
-            set_data_device_focus,
+            clear_data_device_selection, request_data_device_client_selection,
+            set_data_device_focus, set_data_device_selection,
         },
         selection::primary_selection::{
-            PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
+            PrimarySelectionHandler, PrimarySelectionState, clear_primary_selection,
+            request_primary_client_selection, set_primary_focus, set_primary_selection,
         },
+        selection::{SelectionHandler, SelectionSource, SelectionTarget},
         shell::{
             wlr_layer::{
                 Layer, LayerSurface as WlrLayerSurface, LayerSurfaceConfigure,
@@ -274,6 +276,14 @@ pub(crate) struct Solium {
         reason = "registers wp_presentation; dropping it would remove the global"
     )]
     pub(crate) presentation_state: PresentationState,
+
+    /// A selection an X11 client owns that a Wayland client has asked to read.
+    ///
+    /// Recorded rather than served, for the same reason the resize and the drop
+    /// are: pumping an X11 transfer needs the event loop, and only a backend
+    /// has one — the two backends have loops over different state types, so
+    /// there is no one handle this could hold. See `settle_selection`.
+    pub(crate) pending_selection: Option<(SelectionTarget, String, std::os::fd::OwnedFd)>,
 
     /// The middle-click clipboard. A separate selection with its own protocol,
     /// and its absence is not subtle: a terminal that pastes on middle click
@@ -498,6 +508,7 @@ impl Solium {
             relative_pointer_state: RelativePointerManagerState::new::<Self>(&display_handle),
             pointer_constraints_state: PointerConstraintsState::new::<Self>(&display_handle),
             constraint_hint: None,
+            pending_selection: None,
             activation_state: XdgActivationState::new::<Self>(&display_handle),
             viewporter_state: ViewporterState::new::<Self>(&display_handle),
             // 1 is CLOCK_MONOTONIC, which is the clock every timestamp in this
@@ -1649,6 +1660,60 @@ impl Solium {
         }
         self.redraw = true;
         true
+    }
+
+    /// An X11 client has copied something. Offer it to Wayland clients.
+    ///
+    /// Offered as the compositor's own selection rather than any client's,
+    /// which is what `set_data_device_selection` is for: from a Wayland
+    /// client's side there is simply a selection available in these formats,
+    /// and it never learns that the thing holding it does not speak Wayland.
+    pub(crate) fn take_x11_selection(&mut self, ty: SelectionTarget, mimes: Vec<String>) {
+        let display = self.display_handle.clone();
+        match ty {
+            SelectionTarget::Clipboard => {
+                set_data_device_selection(&display, &self.seat, mimes, ());
+            }
+            SelectionTarget::Primary => {
+                set_primary_selection(&display, &self.seat, mimes, ());
+            }
+        }
+    }
+
+    /// The X11 client that owned a selection has let it go.
+    pub(crate) fn drop_x11_selection(&mut self, ty: SelectionTarget) {
+        let display = self.display_handle.clone();
+        match ty {
+            SelectionTarget::Clipboard => clear_data_device_selection(&display, &self.seat),
+            SelectionTarget::Primary => clear_primary_selection(&display, &self.seat),
+        }
+    }
+
+    /// An X11 client wants to read a selection a Wayland client owns.
+    ///
+    /// Asked of whichever client owns it, which writes into the descriptor X11
+    /// gave us. Nothing is copied through the compositor.
+    pub(crate) fn serve_x11_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+    ) {
+        // Two calls rather than one `match` producing a result: the clipboard
+        // and the primary selection fail with different error types, and
+        // flattening them would mean stringifying one to match the other.
+        match ty {
+            SelectionTarget::Clipboard => {
+                if let Err(err) = request_data_device_client_selection(&self.seat, mime_type, fd) {
+                    tracing::warn!(?err, "no Wayland client would serve the clipboard to X11");
+                }
+            }
+            SelectionTarget::Primary => {
+                if let Err(err) = request_primary_client_selection(&self.seat, mime_type, fd) {
+                    tracing::warn!(?err, "no Wayland client would serve the primary to X11");
+                }
+            }
+        }
     }
 
     /// Give the keyboard to something, if a window went and left it nowhere.
@@ -3016,6 +3081,59 @@ delegate_dmabuf!(Solium);
 
 impl SelectionHandler for Solium {
     type SelectionUserData = ();
+
+    /// A Wayland client has copied something. Tell the X11 side it exists.
+    ///
+    /// Only that it exists, and in which formats — the data itself is not moved
+    /// anywhere. X11 selections are the same idea: the owner advertises types
+    /// and hands over bytes when someone asks. Copying a megabyte in one
+    /// toolkit and pasting nothing in the other should cost nothing.
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        let mimes = source.map(|source| source.mime_types());
+        if let Err(err) = xwm.new_selection(ty, mimes) {
+            tracing::warn!(?err, ?ty, "could not offer a selection to X11");
+            return;
+        }
+
+        // Make the X server actually hear about it.
+        //
+        // `new_selection` issues `SetSelectionOwner` and does not flush, and
+        // x11rb buffers requests -- so the ownership change sits in the output
+        // buffer until something unrelated forces a flush, which is the next X
+        // event to arrive. If none does, the X server still believes nobody
+        // owns the selection: a client asking gets nothing, and the compositor
+        // is never even consulted. Copying in a Wayland app and pasting in an
+        // X11 one worked or did not depending on whether anything else
+        // happened to be talking to X, which is as good as a coin toss.
+        //
+        // There is no public `flush` on `X11Wm`. This is a read-only query
+        // that round-trips, and a round-trip has to flush the output buffer
+        // before it can wait for the reply. The answer is discarded; the flush
+        // is the point.
+        let _ = xwm.get_randr_primary_output();
+    }
+
+    /// A Wayland client wants to read a selection an X11 client owns.
+    ///
+    /// Recorded here and carried out by the backend: see `pending_selection`.
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        (): &(),
+    ) {
+        self.pending_selection = Some((ty, mime_type, fd));
+    }
 }
 
 impl OutputHandler for Solium {}
