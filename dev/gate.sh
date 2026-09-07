@@ -10,9 +10,9 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 run() {
     podman run --rm --userns=keep-id --security-opt label=disable \
-        -v /home/kotoxik:/home/kotoxik \
-        -e CARGO_HOME=/home/kotoxik/.cargo -e CARGO_BUILD_JOBS=2 \
-        -e PATH=/home/kotoxik/.cargo/bin:/usr/local/bin:/usr/bin:/bin \
+        -v "$HOME:$HOME" \
+        -e CARGO_HOME="$HOME/.cargo" -e CARGO_BUILD_JOBS=2 \
+        -e PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
         -w "$root" localhost/solium-build:fc44 \
         sh -c "$1"
 }
