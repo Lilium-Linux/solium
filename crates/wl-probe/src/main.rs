@@ -82,6 +82,18 @@ struct Screen {
     name: String,
     width: i32,
     height: i32,
+    /// From `wl_output.scale`. Device pixels per logical one, as an integer —
+    /// the protocol has no fractional form, and a compositor rounds up.
+    scale: i32,
+}
+
+impl Screen {
+    /// The monitor's size in *logical* pixels, which is what every protocol
+    /// that positions anything speaks in.
+    fn logical(&self) -> (i32, i32) {
+        let scale = self.scale.max(1);
+        (self.width / scale, self.height / scale)
+    }
 }
 
 #[derive(Debug)]
@@ -165,7 +177,15 @@ fn main() {
         } else {
             &screen.name
         };
-        println!("  {name}  {}x{}", screen.width, screen.height);
+        let (logical_width, logical_height) = screen.logical();
+        if screen.scale > 1 {
+            println!(
+                "  {name}  {}x{} at {}x  ({logical_width}x{logical_height} logical)",
+                screen.width, screen.height, screen.scale
+            );
+        } else {
+            println!("  {name}  {}x{}", screen.width, screen.height);
+        }
     }
     if probe.outputs.iter().any(|screen| screen.name.is_empty()) {
         failures.push("an output arrived with no name".to_owned());
@@ -248,11 +268,21 @@ fn anchor_a_bar(
     // monitor's own work area" from "every monitor's work area" — the picture
     // looks the same either way. One bar on one screen can.
     let only = std::env::var("WL_PROBE_BAR").ok();
+    // The *logical* width, because that is what a layer surface is configured
+    // in. Comparing against the mode said a bar on a 2x monitor had landed on
+    // another monitor, which is what this check is for and was wrong about:
+    // the compositor was right and the expectation was 1x-only.
     let screens: Vec<(WlOutput, String, i32)> = probe
         .outputs
         .iter()
         .filter(|screen| only.as_deref().is_none_or(|only| only == screen.name))
-        .map(|screen| (screen.output.clone(), screen.name.clone(), screen.width))
+        .map(|screen| {
+            (
+                screen.output.clone(),
+                screen.name.clone(),
+                screen.logical().0,
+            )
+        })
         .collect();
     if screens.is_empty() {
         return Err(format!(
@@ -316,7 +346,8 @@ fn anchor_a_bar(
             Some((_, configured, height)) => {
                 let ok = i64::from(*configured) == i64::from(*width);
                 println!(
-                    "  {} bar on {name}: configured {configured}x{height}, monitor is {width} wide",
+                    "  {} bar on {name}: configured {configured}x{height}, monitor is \
+                     {width} logical wide",
                     if ok { "ok     " } else { "MISMATCH" }
                 );
                 if !ok {
@@ -325,7 +356,7 @@ fn anchor_a_bar(
                     // different monitor.
                     wrong.push(format!(
                         "a bar that named {name} was configured {configured} wide, but {name} \
-                         is {width} — it landed on another monitor"
+                         is {width} logical — it landed on another monitor"
                     ));
                 }
                 if i64::from(*height) != i64::from(BAR) {
@@ -568,6 +599,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                     name: String::new(),
                     width: 0,
                     height: 0,
+                    scale: 1,
                 });
             }
             "zwlr_layer_shell_v1" => {
@@ -702,6 +734,7 @@ impl Dispatch<WlOutput, ()> for Probe {
                 screen.width = width;
                 screen.height = height;
             }
+            wl_output::Event::Scale { factor } => screen.scale = factor,
             _ => {}
         }
     }
