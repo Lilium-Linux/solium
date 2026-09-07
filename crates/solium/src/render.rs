@@ -340,16 +340,40 @@ pub(crate) fn elements(
         // is the space a script's target was written in, and moved onto this
         // screen afterwards.
         let mut frame = state.drawn(pane, global);
-        // A window entirely on another monitor is not this monitor's business.
-        // Tested against the *drawn* rect and not the slot: a window animating
-        // across the boundary is half on each, and both halves have to be
-        // drawn or it disappears from one screen mid-flight.
+
+        // **A window is drawn only on the monitors it lives on.** Its slot
+        // decides that, not its transform.
+        //
+        // This is the rule that makes a mode work on more than one screen, and
+        // it is not an optimisation. A workspace switch does not move windows:
+        // it draws the ones belonging to other workspaces a screen away. With
+        // one monitor, "a screen away" means off the desktop, which is how they
+        // are hidden. With two side by side, one screen away is *the other
+        // monitor* — so switching the left screen's workspace threw its
+        // windows onto the right screen, on top of whatever was there.
+        //
+        // The intent was always containment; a single screen just made moving
+        // and hiding the same operation. Deciding by the slot restores it on
+        // any number of monitors, and keeps the slide one screen long, which is
+        // what makes it read as a slide. Offsetting by the whole desk instead
+        // would hide them correctly and look wrong: the window would leave the
+        // screen halfway through and the next would arrive halfway through,
+        // with empty screen in between.
+        //
+        // The *slot* and not the drawn rect, so a window straddling the bezel
+        // — dragged between screens, where the slot itself is on both — is
+        // still drawn on both. A transform can move a window around its own
+        // monitors and off them. It cannot put it on somebody else's.
+        if !global.overlaps(screen) {
+            continue;
+        }
+        // And within its own monitors, one that has been transformed clean off
+        // this screen has nothing to contribute to it.
         //
         // Skipped only when the transform is a plain rectangle. A matrix or a
         // deform can put pixels well outside `frame.rect` — a genie reaches
-        // toward a dock that may be on the other screen — and there is no cheap
-        // rect that bounds it, so those are always drawn and the renderer
-        // clips.
+        // toward a dock — and there is no cheap rect that bounds it, so those
+        // are always drawn and the renderer clips.
         if frame.matrix.is_identity()
             && frame.deform.is_none()
             && !frame.rect.overlaps(screen.to_f64())

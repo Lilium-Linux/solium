@@ -26,8 +26,12 @@ local scrolling = { active = false, views = {} }
 -- because a column's width is a share of *the view*, and the view is one
 -- screen -- a shared strip on a 2560 and a 1920 beside it would have columns
 -- that are the right width on neither.
-local function view_for(index, monitor)
-    local key = monitors.key(index, monitor or (monitors.active() or {}).name)
+-- Takes only the monitor: which workspace that screen is showing belongs to
+-- `workspaces`, and threading the index through every call site is how one of
+-- them ends up asking for the wrong screen's workspace.
+local function view_for(monitor)
+    monitor = monitor or (monitors.active() or {}).name
+    local key = monitors.key(workspaces.on(monitor), monitor)
     if not scrolling.views[key] then
         scrolling.views[key] = sol.layout.scroller()
     end
@@ -46,7 +50,7 @@ end
 -- The strip a window is in, and the monitor it belongs to.
 local function view_of(id)
     local monitor = monitors.of(id)
-    return view_for(workspaces.active, monitor), monitor
+    return view_for(monitor), monitor
 end
 
 function scrolling.apply(animation)
@@ -57,7 +61,7 @@ function scrolling.apply(animation)
     -- One `sol.animate` for every screen: two strips moving at once is one
     -- movement. See docs/animation.md.
     for _, each in ipairs(monitors.each(workspaces.visible())) do
-        local view = view_for(workspaces.active, each.monitor.name)
+        local view = view_for(each.monitor.name)
         for _, slot in ipairs(view:layout(options(each.monitor.name))) do
             sol.place(slot.id, slot)
         end
@@ -72,7 +76,7 @@ end
 local function settle(animation)
     scrolling.apply(animation)
     local active = monitors.active()
-    local focused = view_for(workspaces.active, active and active.name):focused()
+    local focused = view_for(active and active.name):focused()
     if focused then
         sol.focus(focused)
     end
@@ -83,7 +87,7 @@ function scrolling.adopt()
     -- new screen's strip, still in its old one's, and both fixed here.
     local present = {}
     for _, each in ipairs(monitors.each(workspaces.visible())) do
-        local view = view_for(workspaces.active, each.monitor.name)
+        local view = view_for(each.monitor.name)
         for _, window in ipairs(each.windows) do
             present[window.id] = each.monitor.name
             if not view:contains(window.id) then
@@ -95,7 +99,7 @@ function scrolling.adopt()
         for _, window in ipairs(sol.windows()) do
             local belongs = present[window.id]
             if view:contains(window.id)
-                and (not belongs or monitors.key(workspaces.active, belongs) ~= key)
+                and (not belongs or monitors.key(workspaces.on(belongs), belongs) ~= key)
             then
                 view:remove(window.id)
             end
@@ -146,7 +150,7 @@ sol.on("drop", function(id, x, y)
     -- Where it *landed*: a window dragged across the boundary belongs to the
     -- other screen's strip, so it leaves every strip and joins that one.
     local landed = monitors.of(id)
-    local view = view_for(workspaces.active, landed)
+    local view = view_for(landed)
     local target = sol.window_at(x, y, id)
     if not view:contains(id) then
         for _, each in pairs(scrolling.views) do
@@ -200,7 +204,7 @@ sol.on("scroll", function(_, dy)
     -- pointing at, which is the only thing it could reasonably mean.
     local active = monitors.active()
     local name = active and active.name
-    view_for(workspaces.active, name):focus_sideways(dy > 0 and 1 or -1, options(name))
+    view_for(name):focus_sideways(dy > 0 and 1 or -1, options(name))
     settle(config.scrolling.snap)
 end)
 
@@ -210,7 +214,7 @@ local function bind(combo, action)
             return
         end
         local active = monitors.active()
-        action(view_for(workspaces.active, active and active.name), active and active.name)
+        action(view_for(active and active.name), active and active.name)
         settle(config.scrolling.snap)
     end)
 end

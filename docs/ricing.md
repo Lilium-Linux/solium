@@ -211,6 +211,22 @@ Everything is applied at startup. A monitor plugged in while the session is
 running is not picked up yet —
 [#43](https://github.com/Lilium-Linux/solium/issues/43).
 
+### One workspace per screen, or one for the desk
+
+Each monitor has its own workspace in view by default: `super+2` switches the
+screen the pointer is on and leaves the other showing what it was, so a
+reference on the second monitor stays put while you move around on the first.
+
+One line makes a workspace a whole desk instead, so a switch moves every screen
+together:
+
+```lua
+return { workspaces = { per_monitor = false } }
+```
+
+Neither is more correct — the difference is whether you think of your monitors
+as two screens or as one surface you happen to have cut in half.
+
 ### Bars, docks and wallpapers
 
 They are ordinary clients over `wlr-layer-shell`, which means any panel already
