@@ -979,11 +979,38 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
         }
     }
 
+    // Cached before the deletes, because the postcondition below has to be
+    // established after `scene` is gone and cannot read it then.
+    const bool was_gpu = scene->gpu;
+    const EGLDisplay display = scene->egl_display;
+
     delete scene->root;
     delete scene->component;
     delete scene->window;
     delete scene->control;
     delete scene;
+
+    // "A GPU scene freed leaves no GL context current" is stated as fact in
+    // qml.rs, on `Scene::gpu`'s postcondition and in `Drop for Scene`, and the
+    // whole shape of release_the_thread rests on it: building a scene and
+    // freeing one are supposed to end the same way, so that a caller with no
+    // renderer never has to care which happened.
+    //
+    // Up to here it was inherited rather than established. Qt's
+    // ~QOpenGLContext does call doneCurrent when its context is the current
+    // one, which is why it has held so far — but that is Qt's business, it is
+    // conditional on a thread-local this file has spent three commits learning
+    // not to trust, and a documented postcondition that is only true by
+    // someone else's accident is not one.
+    //
+    // GPU scenes only. A software scene never had a context and the compositor
+    // may legitimately have its own current across the free; releasing it there
+    // would be this file reaching into a path it has no business in.
+    if (was_gpu && eglGetCurrentContext() != EGL_NO_CONTEXT) {
+        const EGLDisplay current = eglGetCurrentDisplay();
+        eglMakeCurrent(current != EGL_NO_DISPLAY ? current : display, EGL_NO_SURFACE,
+                       EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    }
 }
 
 extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int height, double scale)
