@@ -689,6 +689,60 @@ static void mirror_for_the_compositor(QQuickRenderTarget *target)
     target->setMirrorVertically(true);
 }
 
+/*
+ * Tell Qt the truth about whose context is current, when it has it wrong.
+ *
+ * This is the other half of the fact solium_qml_scene_free already documents,
+ * and it decides whether the second frame draws at all — and, on the teardown
+ * path, whether Qt deletes its own GL objects or the compositor's.
+ *
+ * QOpenGLContext::currentContext() is a thread-local Qt sets in its own
+ * makeCurrent. The compositor takes the thread back with a raw eglMakeCurrent —
+ * it has to; it is not a Qt program — and Qt never sees that, so the
+ * thread-local goes stale rather than null. QRhiGles2::ensureContext() then
+ * asks exactly that question, believes its context is already current, skips
+ * the makeCurrent it needs, and issues the whole frame against whatever context
+ * really is current: the compositor's. Nothing fails. beginFrame, sync, render
+ * and endFrame all return, the fence is real and signals, and the dmabuf stays
+ * empty, because the FBO and texture names Qt drew through mean something else
+ * — or nothing — in the compositor's context.
+ *
+ * Measured on this machine, and it is not subtle once you know where to look:
+ * with the compositor's context current across a render the buffer reads back
+ * as 16384 zero bytes and with Qt's it reads back as the frame, byte for byte
+ * identical to the software path. The first frame after a scene is built works
+ * either way, because initialize() left Qt's context current and nothing has
+ * taken it yet, which is exactly why a one-frame probe cannot see this.
+ *
+ * On a *teardown* it is worse, because teardown deletes. QRhiGles2::destroy()
+ * and the scenegraph invalidate reached through `delete scene->window` and
+ * `delete scene->control` both go through the same ensureContext(), and then
+ * executeDeferredReleases() issues glDeleteTextures, glDeleteBuffers,
+ * glDeleteFramebuffers and glDeleteProgram for Qt's own names. Against the
+ * compositor's context those integers name the compositor's objects — a client
+ * surface, the texture program, a vertex buffer — and they are deleted.
+ *
+ * doneCurrent() is the supported way to say it: it releases the context and
+ * clears the thread-local, so ensureContext() below finds no current context
+ * and makes its own current properly. It also releases the *compositor's*
+ * context from this thread, which is fine and expected — the compositor
+ * restores its own context after every call in here, because Qt's teardown
+ * leaves none current anyway.
+ */
+static void clear_stale_current_context(const SoliumQmlScene *scene)
+{
+    QOpenGLContext *believed = QOpenGLContext::currentContext();
+    if (believed == nullptr) {
+        return;
+    }
+    // Genuinely current: this is the frame right after initialize(), or a
+    // second render with nothing in between. Nothing to correct.
+    if (scene->egl_context != EGL_NO_CONTEXT && eglGetCurrentContext() == scene->egl_context) {
+        return;
+    }
+    believed->doneCurrent();
+}
+
 extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int width, int height,
                                                     int dmabuf_fd, int stride,
                                                     unsigned long long modifier,
@@ -762,6 +816,32 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
         return;
     }
 
+    // Before any Qt teardown runs, and for the same reason the render path does
+    // it — but the stakes here are higher, because teardown *deletes*.
+    //
+    // `delete scene->window` and `delete scene->control` below reach
+    // QRhiGles2::destroy() and the scenegraph invalidate, both of which go
+    // through the same QRhiGles2::ensureContext(). It skips its makeCurrent when
+    // Qt's stale thread-local says Qt's context is already current, which is
+    // exactly what it says after the compositor has taken the thread back. Then
+    // executeDeferredReleases() calls glDeleteTextures, glDeleteBuffers,
+    // glDeleteFramebuffers and glDeleteProgram on Qt's own names — against the
+    // compositor's context, where those integers name the compositor's objects.
+    //
+    // Which is the corruption the comment on the texture delete below describes,
+    // arriving through a door that comment was not watching: it guards the one
+    // delete this file makes by hand, and Qt makes a dozen more on its way out.
+    //
+    // Before this became the ordinary ordering the compositor's context was
+    // never current across a GPU scene's lifetime, so it could not happen. It is
+    // reachable on plain lifecycle now: a pane closing, a loading scene replaced
+    // when its client attaches, a scripted instance dropped on reload.
+    //
+    // Measured: with this line removed and nothing else changed, freeing one
+    // scene destroys the compositor's GL buffers 1 and 2 — smithay's vertex
+    // buffers, which existed before Qt was started at all.
+    clear_stale_current_context(scene);
+
     // The two GPU resources have very different requirements, and treating them
     // as one thing is what made the first version of this wrong.
     //
@@ -810,10 +890,10 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
                 scene->texture = 0;
             }
         } else {
-            qWarning("a GPU scene was freed without its own GL context current, so "
-                     "texture %u was left for Qt's context teardown to reclaim. "
-                     "Make the scene's context current around solium_qml_scene_free "
-                     "to release it explicitly.",
+            qWarning("a GPU scene was freed with another context on the thread, so "
+                     "texture %u was left for Qt's own teardown to reclaim rather "
+                     "than deleted here. Nothing leaks; the render control below "
+                     "destroys the context the name belongs to.",
                      scene->texture);
         }
     }
@@ -1043,51 +1123,6 @@ static int fence_after_render()
         return -1;
     }
     return fence_fd;
-}
-
-/*
- * Tell Qt the truth about whose context is current, when it has it wrong.
- *
- * This is the other half of the fact solium_qml_scene_free already documents,
- * and it is the one that decides whether the second frame draws at all.
- *
- * QOpenGLContext::currentContext() is a thread-local Qt sets in its own
- * makeCurrent. The compositor takes the thread back with a raw eglMakeCurrent —
- * it has to; it is not a Qt program — and Qt never sees that, so the
- * thread-local goes stale rather than null. QRhiGles2::ensureContext() then
- * asks exactly that question, believes its context is already current, skips
- * the makeCurrent it needs, and issues the whole frame against whatever context
- * really is current: the compositor's. Nothing fails. beginFrame, sync, render
- * and endFrame all return, the fence is real and signals, and the dmabuf stays
- * empty, because the FBO and texture names Qt drew through mean something else
- * — or nothing — in the compositor's context.
- *
- * Measured on this machine, and it is not subtle once you know where to look:
- * with the compositor's context current across a render the buffer reads back
- * as 16384 zero bytes and with Qt's it reads back as the frame, byte for byte
- * identical to the software path. The first frame after a scene is built works
- * either way, because initialize() left Qt's context current and nothing has
- * taken it yet, which is exactly why a one-frame probe cannot see this.
- *
- * doneCurrent() is the supported way to say it: it releases the context and
- * clears the thread-local, so ensureContext() below finds no current context
- * and makes its own current properly. It also releases the *compositor's*
- * context from this thread, which is fine and expected — the compositor
- * restores its own context after every call in here, because Qt's teardown
- * leaves none current anyway.
- */
-static void clear_stale_current_context(const SoliumQmlScene *scene)
-{
-    QOpenGLContext *believed = QOpenGLContext::currentContext();
-    if (believed == nullptr) {
-        return;
-    }
-    // Genuinely current: this is the frame right after initialize(), or a
-    // second render with nothing in between. Nothing to correct.
-    if (scene->egl_context != EGL_NO_CONTEXT && eglGetCurrentContext() == scene->egl_context) {
-        return;
-    }
-    believed->doneCurrent();
 }
 
 extern "C" int solium_qml_scene_render_gpu(SoliumQmlScene *scene, int *fence_fd)
