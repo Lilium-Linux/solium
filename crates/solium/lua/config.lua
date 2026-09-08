@@ -35,10 +35,13 @@ local defaults = {
     -- `~` is expanded. The image is cropped to fill the screen rather than
     -- fitted, so nothing is letterboxed.
     --
-    -- What actually draws it is `qml/wallpaper.qml`, and that is the more
-    -- interesting knob: copy it to ~/.config/solium/qml/wallpaper.qml and the
-    -- background can be a gradient, a shader, a clock, or anything else QML
-    -- can be. `super+shift+r` reloads it while the session runs.
+    -- What actually draws it is `lua/wallpaper.lua` and `qml/wallpaper.qml`,
+    -- and that is the more interesting part: there is no wallpaper code in the
+    -- compositor at all. It is nine lines of Lua calling `sol.surface`, which
+    -- draws any QML scene at any layer on any monitor -- so a bar, a dock or a
+    -- heads-up display is the same call with a different layer. Copy
+    -- `qml/wallpaper.qml` to ~/.config/solium/qml/ and the background can be a
+    -- gradient, a shader or a clock. `super+shift+r` reloads it.
     wallpaper = "solium",
 
     -- The keyboard.
