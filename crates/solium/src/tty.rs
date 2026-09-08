@@ -946,13 +946,27 @@ impl State {
         let Some(drm) = self.drm.as_ref() else {
             return;
         };
-        let found = match connected(drm, &self.solium.arrangement) {
+        // Forced: see `connected`. Without this the kernel hands back what it
+        // knew before the cable moved, and nothing ever changes.
+        let found = match connected(drm, &self.solium.arrangement, true) {
             Ok(found) => found,
             Err(err) => {
                 tracing::error!(?err, "could not re-read the connectors");
                 return;
             }
         };
+
+        tracing::debug!(
+            found = ?found
+                .iter()
+                .map(|(connector, _, _)| format!(
+                    "{}-{}",
+                    connector.interface().as_str(),
+                    connector.interface_id()
+                ))
+                .collect::<Vec<_>>(),
+            "connectors after a forced probe"
+        );
 
         // Gone first, so a connector that was unplugged releases its CRTC
         // before anything newly plugged in tries to claim one. There are only
@@ -996,6 +1010,20 @@ impl State {
         }
 
         if !changed {
+            // Worth a line. This is what a stale connector probe looks like
+            // from the log -- the event arrives, nothing happens, and there is
+            // no way to tell that from the event never arriving. Which is the
+            // shape the first hardware test took.
+            let names: Vec<String> = self
+                .screens
+                .iter()
+                .map(|screen| screen.output.name())
+                .collect();
+            tracing::info!(
+                driving = ?names,
+                connected = theirs.len(),
+                "the connectors changed and the set of screens did not"
+            );
             return;
         }
 
@@ -1107,7 +1135,7 @@ impl State {
         self.renderer = Some(renderer);
         self.node = Some(node);
         self.gbm = Some(gbm);
-        let found = connected(&device, &self.solium.arrangement)?;
+        let found = connected(&device, &self.solium.arrangement, false)?;
         self.drm = Some(device);
 
         for (connector, crtc, mode) in found {
@@ -1293,16 +1321,33 @@ fn gone<T: Copy + PartialEq>(driving: &[T], connected: &[T]) -> Vec<usize> {
         .collect()
 }
 
+/// Every connector with a monitor on it, with a CRTC and a mode for each.
+///
+/// `probe` decides whether the kernel is made to go and *ask* the connector,
+/// or whether its cached answer is good enough, and getting that wrong is
+/// invisible until somebody pulls a cable. The cache is filled when the device
+/// is opened and is not refreshed by the `change` uevent -- the uevent is the
+/// kernel saying "something changed, come and look", and a compositor that
+/// comes and looks without forcing a probe is handed the same answer it had
+/// before. That is exactly what happened the first time this was tested on
+/// hardware: the event arrived three times, `connected` reported both monitors
+/// every time, and a disconnected screen kept its CRTC and kept being drawn
+/// to.
+///
+/// Not forced at startup, because there the cache was filled a moment ago by
+/// the open, and a forced probe is a DDC round trip per connector -- which is
+/// tens of milliseconds each and can wake a monitor that was asleep.
 fn connected(
     device: &DrmDevice,
     arrangement: &crate::monitor::Arrangement,
+    probe: bool,
 ) -> Result<Vec<(connector::Info, crtc::Handle, DrmMode)>> {
     let resources = device.resource_handles().context("reading DRM resources")?;
     let mut found = Vec::new();
     let mut taken: Vec<crtc::Handle> = Vec::new();
 
     for handle in resources.connectors() {
-        let Ok(connector) = device.get_connector(*handle, false) else {
+        let Ok(connector) = device.get_connector(*handle, probe) else {
             continue;
         };
         let name = format!(
