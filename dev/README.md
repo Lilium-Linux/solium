@@ -178,6 +178,37 @@ underneath it. The window was measured before the lock and after the unlock,
 which is the only way that bug is visible — while locked, nothing of it is on
 screen to see.
 
+## Hotplug, and how to test it without a cable
+
+Monitors arriving and leaving ([#43](https://github.com/Lilium-Linux/solium/issues/43)) cannot be exercised here. The
+nested backend has no connectors, and a virtual one (`vkms`) needs a kernel
+module this machine will not load without a password. So the resync path is
+covered by unit tests on the part with reasoning in it -- `tty::gone`, which
+decides which screens went -- and the rest has never run.
+
+**It needs testing on the hardware, and there are two ways.** The second does
+not involve reaching behind the desk:
+
+1. Turn a monitor off at its own power switch, or unplug it, with the session
+   running. The log should say `monitor gone`, the remaining screen should
+   take the windows, and turning it back on should say `monitor arrived`.
+2. Set `enabled = false` on a monitor in `config.monitors` and press
+   `super+shift+r`. That goes through *the same* `resync_screens` -- an
+   `enabled` change is an unplug as far as everything downstream is concerned
+   -- so it exercises the whole path from a keyboard.
+
+The second one existing is why the two share a path rather than each having
+their own: a configuration reload is something people do at a desk many times
+an evening, and unplugging a monitor is something they do once. The path that
+gets exercised is the one that works.
+
+What to watch for, because these are the ways it goes wrong quietly: a
+`wl_output` that stays in `wayland-info` after the monitor is gone; windows
+left on a screen nobody can see; a bar that does not come back when the monitor
+does; and the second monitor failing to light when it is moved from one port to
+another, which is the case where dropping has to happen before adding because
+there are fewer CRTCs than connectors.
+
 `clipboard-check.sh` runs its X11 half in a container, because the host has no
 `xclip` and cannot install one. **Run it more than once.** The bug it was
 written for failed about one time in three, so a single green run proves

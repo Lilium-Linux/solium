@@ -40,7 +40,7 @@ use smithay::{
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::gles::GlesRenderer,
         session::{Event as SessionEvent, Session as _, libseat::LibSeatSession},
-        udev,
+        udev::{self, UdevBackend, UdevEvent},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
@@ -56,6 +56,9 @@ use smithay::{
     utils::{DeviceFd, Transform},
     wayland::dmabuf::DmabufFeedbackBuilder,
 };
+
+use smithay::backend::allocator::format::FormatSet;
+use smithay::reexports::wayland_server::backend::GlobalId;
 
 use crate::{
     render,
@@ -343,6 +346,8 @@ pub(crate) fn run() -> Result<()> {
         session,
         renderer: None,
         screens: Vec::new(),
+        gbm: None,
+        node: None,
         input: None,
         animating: false,
         input_devices: 0,
@@ -455,6 +460,39 @@ pub(crate) fn run() -> Result<()> {
             DrmEvent::Error(err) => tracing::error!(?err, "DRM error"),
         })
         .map_err(|err| anyhow!("watching for page flips: {err}"))?;
+
+    // Monitors arriving and leaving. The kernel sends a `change` uevent on the
+    // DRM device when a connector's state changes -- a cable, a dock, a
+    // monitor's own power switch -- and without watching for it the connectors
+    // are whatever they were at startup, forever.
+    //
+    // `Added` and `Removed` are about the *GPU*, not about monitors, and are
+    // logged rather than acted on: a second graphics card appearing mid-session
+    // is real (#63) and is not this.
+    let udev = UdevBackend::new(seat_name.clone())
+        .map_err(|err| anyhow!("watching udev for monitors: {err}"))?;
+    event_loop
+        .handle()
+        .insert_source(udev, move |event, (), state| match event {
+            UdevEvent::Changed { device_id } => {
+                // Every DRM device on the seat reports here, and this
+                // compositor drives one. Comparing the id keeps another card's
+                // hotplug from re-reading ours for nothing.
+                if state.node.is_some_and(|node| node.dev_id() == device_id) {
+                    tracing::info!("the connectors changed");
+                    state.resync_screens();
+                }
+            }
+            UdevEvent::Added { path, .. } => {
+                tracing::info!(gpu = %path.display(), "a GPU appeared; not driving it (#63)");
+            }
+            UdevEvent::Removed { device_id } => {
+                if state.node.is_some_and(|node| node.dev_id() == device_id) {
+                    tracing::error!("the GPU this session is running on was removed");
+                }
+            }
+        })
+        .map_err(|err| anyhow!("watching udev: {err}"))?;
 
     // Session changes: switching away must release the devices, and switching
     // back must take them again and redraw. Skipping either half is what leaves
@@ -595,6 +633,13 @@ pub(crate) fn run() -> Result<()> {
             // a notification that arrives up to one frame late is a notification
             // about somebody having left the room.
             crate::idle::settle(&mut state.solium);
+            // A reload that turned a monitor off or on. The same path a cable
+            // takes, deliberately: it is the one that gets exercised, because
+            // editing a configuration is something people do at a desk and
+            // unplugging a monitor is something they do once.
+            if std::mem::take(&mut state.solium.rescan_outputs) {
+                state.resync_screens();
+            }
             let _ = state.solium.display_handle.flush_clients();
         })
         .map_err(|err| anyhow!("running the event loop: {err}"))
@@ -612,6 +657,20 @@ struct Screen {
     output: Output,
     /// Which CRTC drives it, which is how a page flip is matched back to it.
     crtc: crtc::Handle,
+    /// The `wl_output` global, kept only so it can be removed again.
+    ///
+    /// A `GlobalId` is a handle and not a guard -- dropping it leaves the
+    /// global advertised -- so a monitor that is unplugged and forgotten stays
+    /// in every client's list of screens forever, and a client that puts a
+    /// window on it is putting it nowhere. This is the one place in the
+    /// compositor where `remove_global` is genuinely necessary.
+    global: GlobalId,
+    /// The connector this screen is driven through.
+    ///
+    /// Kept for the same reason as the CRTC: when the connectors are
+    /// enumerated again after a hotplug, this is what says whether *this*
+    /// screen is one of the ones still there.
+    connector: connector::Handle,
     compositor: Compositor,
     /// A frame has been queued on this CRTC and has not reached the screen.
     ///
@@ -669,11 +728,298 @@ pub(crate) struct State {
     input_devices: usize,
     /// Held for the session's lifetime: dropping it closes the device.
     drm: Option<DrmDevice>,
+    /// The buffer allocator and the node it belongs to.
+    ///
+    /// Locals in `open_gpu` until hotplug: a monitor plugged in later needs
+    /// exactly the same pieces a monitor found at startup did, and reopening
+    /// the GPU to get them would take the screen away from the monitors that
+    /// are already working.
+    gbm: Option<GbmDevice<DrmDeviceFd>>,
+    node: Option<DrmNode>,
     signal: LoopSignal,
     active: bool,
 }
 
 impl State {
+    /// Drive one connector: a DRM surface, an output, a display pipeline.
+    ///
+    /// Split out of `open_gpu` for hotplug. A monitor plugged in while the
+    /// session runs needs precisely what a monitor found at startup needed, and
+    /// the only honest way to guarantee that is for both to be this function --
+    /// the alternative is a second copy that drifts, and it drifts in the
+    /// direction of the path nobody exercises.
+    ///
+    /// Returns whether the screen came up. A failure here loses *one* monitor
+    /// rather than the session: on a two-screen desk, refusing to continue
+    /// because the second display did something odd is worse than coming up on
+    /// the first and saying why.
+    fn add_screen(
+        &mut self,
+        connector: &connector::Info,
+        crtc: crtc::Handle,
+        mode: DrmMode,
+        formats: &FormatSet,
+    ) -> bool {
+        let (Some(drm), Some(gbm), Some(node)) = (self.drm.as_mut(), self.gbm.as_ref(), self.node)
+        else {
+            return false;
+        };
+        let gbm = gbm.clone();
+        let name = format!(
+            "{}-{}",
+            connector.interface().as_str(),
+            connector.interface_id()
+        );
+        let (width, height) = mode.size();
+        tracing::info!(
+            monitor = name,
+            mode = format!("{width}x{height}@{:.0}", f64::from(mode.vrefresh())),
+            ?crtc,
+            "driving this connector"
+        );
+
+        // Each connector gets its own surface on its own CRTC. A failure
+        // here loses *one* monitor rather than the session: on a two-screen
+        // desk, a compositor that refuses to start because the second
+        // display did something odd is worse than one that comes up on the
+        // first and says why.
+        let surface = match drm.create_surface(crtc, mode, &[connector.handle()]) {
+            Ok(surface) => surface,
+            Err(err) => {
+                tracing::error!(?err, monitor = name, "no DRM surface for this connector");
+                return false;
+            }
+        };
+        let planes = drm.planes(&crtc).ok();
+
+        // In millimetres, as EDID reports it -- and plenty of monitors
+        // report 0x0, which is why the scale heuristic has to cope with
+        // knowing nothing.
+        let (physical_width, physical_height) = connector.size().unwrap_or((0, 0));
+        let physical: smithay::utils::Size<i32, smithay::utils::Raw> = (
+            i32::try_from(physical_width).unwrap_or_default(),
+            i32::try_from(physical_height).unwrap_or_default(),
+        )
+            .into();
+        let output = Output::new(
+            name.clone(),
+            PhysicalProperties {
+                size: physical,
+                subpixel: Subpixel::Unknown,
+                make: "Solium".into(),
+                model: "DRM".into(),
+            },
+        );
+        let wl_mode = Mode {
+            size: (i32::from(width), i32::from(height)).into(),
+            refresh: i32::try_from(mode.vrefresh()).unwrap_or(60) * 1000,
+        };
+        // The returned `GlobalId` is a handle, not a guard: dropping it
+        // does not remove the global, which is why nothing keeps it.
+        let global = output.create_global::<Solium>(&self.solium.display_handle);
+        // A rotation makes the logical size portrait -- `output_geometry`
+        // applies the transform to the mode -- so layouts and work areas
+        // follow it without knowing about it, and the display pipeline
+        // does the turning.
+        let transform = self
+            .solium
+            .arrangement
+            .transform(&name)
+            .unwrap_or(Transform::Normal);
+        // The scale is applied by `place_outputs`, once, for both
+        // backends -- see `Solium::scale_outputs`. It changes only the
+        // logical size and needs no modeset, unlike the mode and the
+        // transform, which is why those two are settled here and it is
+        // not.
+        output.change_current_state(Some(wl_mode), Some(transform), None, Some((0, 0).into()));
+        output.set_preferred(wl_mode);
+        // Mapped anywhere; `place_outputs` decides where, once, from the
+        // configured arrangement — the same call the nested backend makes,
+        // so both get the same layout from the same configuration.
+        self.solium.space.map_output(&output, (0, 0));
+
+        let compositor = match DrmCompositor::new(
+            &output,
+            surface,
+            planes,
+            GbmAllocator::new(
+                gbm.clone(),
+                GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+            ),
+            // The exporter turns a rendered buffer into something the
+            // display can scan out; the GBM device alone is not that.
+            GbmFramebufferExporter::new(gbm.clone(), node.into()),
+            COLOR_FORMATS,
+            formats.clone(),
+            drm.cursor_size(),
+            Some(gbm.clone()),
+        ) {
+            Ok(compositor) => compositor,
+            Err(err) => {
+                tracing::error!(?err, monitor = name, "no display pipeline for this monitor");
+                self.solium.space.unmap_output(&output);
+                return false;
+            }
+        };
+
+        // Variable refresh rate, when asked for and when the monitor and
+        // the driver both agree. Reported either way: a monitor sold on
+        // having VRR and not offering it over the cable in use is a thing
+        // that happens, and hearing so from a log beats inferring it from
+        // stutter.
+        let mut compositor = compositor;
+        if let Some(vrr) = self.solium.arrangement.vrr(&name) {
+            match compositor.vrr_supported(connector.handle()) {
+                Ok(VrrSupport::NotSupported) if vrr => tracing::warn!(
+                    monitor = name,
+                    "asked for vrr and this connector does not offer it"
+                ),
+                Ok(support) => match compositor.use_vrr(vrr) {
+                    Ok(()) => {
+                        tracing::info!(
+                            monitor = name,
+                            vrr,
+                            modeset = support == VrrSupport::RequiresModeset,
+                            "variable refresh rate"
+                        );
+                    }
+                    Err(err) => tracing::warn!(?err, monitor = name, "could not set vrr"),
+                },
+                Err(err) => tracing::warn!(?err, monitor = name, "could not ask about vrr"),
+            }
+        }
+
+        self.screens.push(Screen {
+            output,
+            crtc,
+            global,
+            connector: connector.handle(),
+            compositor,
+            pending: false,
+            pending_feedback: None,
+            owed: false,
+        });
+        true
+    }
+
+    /// Stop driving one screen and take it out of the session.
+    ///
+    /// Four things have to happen and leaving any of them out is its own bug:
+    /// the global goes, or every client keeps offering a monitor that is not
+    /// there; the layer surfaces are closed, or a bar waits forever for a
+    /// configure from a screen that has gone; the output is unmapped, or the
+    /// space keeps a rectangle nothing can draw to; and the `Screen` is
+    /// dropped, which is what releases the CRTC for whatever is plugged in
+    /// next.
+    ///
+    /// The frame in flight needs nothing done to it, and that is worth saying
+    /// because it looks like it should: this screen may hold presentation
+    /// feedback for a page flip that will now never arrive, and the protocol
+    /// requires every client to be told either `presented` or `discarded`.
+    /// Smithay's `SurfacePresentationFeedback` discards itself on drop, so
+    /// dropping the `Screen` is the whole of it. Checked rather than assumed --
+    /// the alternative was every `wp_presentation` client hanging on a
+    /// callback that never came.
+    fn drop_screen(&mut self, index: usize) {
+        if index >= self.screens.len() {
+            return;
+        }
+        let screen = self.screens.remove(index);
+        tracing::info!(monitor = screen.output.name(), "monitor gone");
+        self.solium
+            .display_handle
+            .remove_global::<Solium>(screen.global.clone());
+        self.solium.space.unmap_output(&screen.output);
+        crate::layer::close_all(&screen.output);
+        drop(screen);
+    }
+
+    /// Make the screens match what is actually plugged in.
+    ///
+    /// Called on a DRM `change` uevent -- which is what the kernel sends when
+    /// a connector's state changes -- and on a configuration reload, because
+    /// `enabled = false` on a monitor is an unplug as far as everything down
+    /// from here is concerned. Those being the same path is the point: one of
+    /// them is exercised every time somebody edits their configuration and the
+    /// other only when they reach behind the desk.
+    fn resync_screens(&mut self) {
+        let Some(drm) = self.drm.as_ref() else {
+            return;
+        };
+        let found = match connected(drm, &self.solium.arrangement) {
+            Ok(found) => found,
+            Err(err) => {
+                tracing::error!(?err, "could not re-read the connectors");
+                return;
+            }
+        };
+
+        // Gone first, so a connector that was unplugged releases its CRTC
+        // before anything newly plugged in tries to claim one. There are only
+        // so many CRTCs, and on most hardware fewer than there are connectors:
+        // adding before dropping is how a monitor moved from one port to
+        // another fails to come up.
+        let mine: Vec<_> = self.screens.iter().map(|screen| screen.connector).collect();
+        let theirs: Vec<_> = found
+            .iter()
+            .map(|(connector, _, _)| connector.handle())
+            .collect();
+        let mut changed = false;
+        // Descending, so removing one does not shift the next one's index out
+        // from under it.
+        for index in gone(&mine, &theirs) {
+            self.drop_screen(index);
+            changed = true;
+        }
+
+        let formats = match self.renderer.as_ref() {
+            Some(renderer) => renderer.egl_context().dmabuf_render_formats().clone(),
+            None => return,
+        };
+        for (connector, crtc, mode) in found {
+            if self
+                .screens
+                .iter()
+                .any(|screen| screen.connector == connector.handle())
+            {
+                continue;
+            }
+            let name = format!(
+                "{}-{}",
+                connector.interface().as_str(),
+                connector.interface_id()
+            );
+            tracing::info!(monitor = name, "monitor arrived");
+            if self.add_screen(&connector, crtc, mode, &formats) {
+                changed = true;
+            }
+        }
+
+        if !changed {
+            return;
+        }
+
+        if self.screens.is_empty() {
+            // Not fatal. Every monitor can be unplugged from a running machine
+            // and plugged back in, and a compositor that ended the session on
+            // the way through would take every application with it -- for a
+            // cable.
+            tracing::warn!("no monitors are connected; waiting for one");
+        }
+
+        // Where the remaining screens sit, then the windows on them. A window
+        // whose slot was on the monitor that went away is still a valid
+        // rectangle in the global space and simply is not on any screen, so
+        // the layout is asked to place everything again rather than being told
+        // about the one that moved.
+        self.solium.place_outputs();
+        self.solium.trigger_relayout();
+        self.solium.redraw = true;
+        for screen in &mut self.screens {
+            screen.owed = true;
+        }
+    }
+
     /// Open the GPU, pick a connector, and set up its output.
     fn open_gpu(&mut self, seat: &str) -> Result<DrmDeviceNotifier> {
         let path: PathBuf = udev::primary_gpu(seat)
@@ -697,8 +1043,7 @@ impl State {
             .map_err(|err| anyhow!("opening {} through the session: {err}", path.display()))?;
         let fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
-        let (mut device, notifier) =
-            DrmDevice::new(fd.clone(), true).context("initialising DRM")?;
+        let (device, notifier) = DrmDevice::new(fd.clone(), true).context("initialising DRM")?;
         let gbm = GbmDevice::new(fd).context("creating the GBM device")?;
 
         // SAFETY: the GBM device outlives the display; both are moved into the
@@ -759,140 +1104,14 @@ impl State {
         }
 
         let formats = renderer.egl_context().dmabuf_render_formats().clone();
+        self.renderer = Some(renderer);
+        self.node = Some(node);
+        self.gbm = Some(gbm);
         let found = connected(&device, &self.solium.arrangement)?;
+        self.drm = Some(device);
+
         for (connector, crtc, mode) in found {
-            let name = format!(
-                "{}-{}",
-                connector.interface().as_str(),
-                connector.interface_id()
-            );
-            let (width, height) = mode.size();
-            tracing::info!(
-                monitor = name,
-                mode = format!("{width}x{height}@{:.0}", f64::from(mode.vrefresh())),
-                ?crtc,
-                "driving this connector"
-            );
-
-            // Each connector gets its own surface on its own CRTC. A failure
-            // here loses *one* monitor rather than the session: on a two-screen
-            // desk, a compositor that refuses to start because the second
-            // display did something odd is worse than one that comes up on the
-            // first and says why.
-            let surface = match device.create_surface(crtc, mode, &[connector.handle()]) {
-                Ok(surface) => surface,
-                Err(err) => {
-                    tracing::error!(?err, monitor = name, "no DRM surface for this connector");
-                    continue;
-                }
-            };
-            let planes = device.planes(&crtc).ok();
-
-            // In millimetres, as EDID reports it -- and plenty of monitors
-            // report 0x0, which is why the scale heuristic has to cope with
-            // knowing nothing.
-            let (physical_width, physical_height) = connector.size().unwrap_or((0, 0));
-            let physical: smithay::utils::Size<i32, smithay::utils::Raw> = (
-                i32::try_from(physical_width).unwrap_or_default(),
-                i32::try_from(physical_height).unwrap_or_default(),
-            )
-                .into();
-            let output = Output::new(
-                name.clone(),
-                PhysicalProperties {
-                    size: physical,
-                    subpixel: Subpixel::Unknown,
-                    make: "Solium".into(),
-                    model: "DRM".into(),
-                },
-            );
-            let wl_mode = Mode {
-                size: (i32::from(width), i32::from(height)).into(),
-                refresh: i32::try_from(mode.vrefresh()).unwrap_or(60) * 1000,
-            };
-            // The returned `GlobalId` is a handle, not a guard: dropping it
-            // does not remove the global, which is why nothing keeps it.
-            let _ = output.create_global::<Solium>(&self.solium.display_handle);
-            // A rotation makes the logical size portrait -- `output_geometry`
-            // applies the transform to the mode -- so layouts and work areas
-            // follow it without knowing about it, and the display pipeline
-            // does the turning.
-            let transform = self
-                .solium
-                .arrangement
-                .transform(&name)
-                .unwrap_or(Transform::Normal);
-            // The scale is applied by `place_outputs`, once, for both
-            // backends -- see `Solium::scale_outputs`. It changes only the
-            // logical size and needs no modeset, unlike the mode and the
-            // transform, which is why those two are settled here and it is
-            // not.
-            output.change_current_state(Some(wl_mode), Some(transform), None, Some((0, 0).into()));
-            output.set_preferred(wl_mode);
-            // Mapped anywhere; `place_outputs` decides where, once, from the
-            // configured arrangement — the same call the nested backend makes,
-            // so both get the same layout from the same configuration.
-            self.solium.space.map_output(&output, (0, 0));
-
-            let compositor = match DrmCompositor::new(
-                &output,
-                surface,
-                planes,
-                GbmAllocator::new(
-                    gbm.clone(),
-                    GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
-                ),
-                // The exporter turns a rendered buffer into something the
-                // display can scan out; the GBM device alone is not that.
-                GbmFramebufferExporter::new(gbm.clone(), node.into()),
-                COLOR_FORMATS,
-                formats.clone(),
-                device.cursor_size(),
-                Some(gbm.clone()),
-            ) {
-                Ok(compositor) => compositor,
-                Err(err) => {
-                    tracing::error!(?err, monitor = name, "no display pipeline for this monitor");
-                    self.solium.space.unmap_output(&output);
-                    continue;
-                }
-            };
-
-            // Variable refresh rate, when asked for and when the monitor and
-            // the driver both agree. Reported either way: a monitor sold on
-            // having VRR and not offering it over the cable in use is a thing
-            // that happens, and hearing so from a log beats inferring it from
-            // stutter.
-            let mut compositor = compositor;
-            if let Some(vrr) = self.solium.arrangement.vrr(&name) {
-                match compositor.vrr_supported(connector.handle()) {
-                    Ok(VrrSupport::NotSupported) if vrr => tracing::warn!(
-                        monitor = name,
-                        "asked for vrr and this connector does not offer it"
-                    ),
-                    Ok(support) => match compositor.use_vrr(vrr) {
-                        Ok(()) => {
-                            tracing::info!(
-                                monitor = name,
-                                vrr,
-                                modeset = support == VrrSupport::RequiresModeset,
-                                "variable refresh rate"
-                            );
-                        }
-                        Err(err) => tracing::warn!(?err, monitor = name, "could not set vrr"),
-                    },
-                    Err(err) => tracing::warn!(?err, monitor = name, "could not ask about vrr"),
-                }
-            }
-
-            self.screens.push(Screen {
-                output,
-                crtc,
-                compositor,
-                pending: false,
-                pending_feedback: None,
-                owed: false,
-            });
+            self.add_screen(&connector, crtc, mode, &formats);
         }
 
         if self.screens.is_empty() {
@@ -901,9 +1120,6 @@ impl State {
         tracing::info!(monitors = self.screens.len(), "displays up");
         // Positions, then the anchored surfaces that depend on them.
         self.solium.place_outputs();
-
-        self.renderer = Some(renderer);
-        self.drm = Some(device);
         Ok(notifier)
     }
 
@@ -1058,6 +1274,25 @@ impl State {
 /// restricts routing far more than anything current does, so the cost of
 /// getting it wrong is one monitor and a line in the log rather than a
 /// session, and it is written down here rather than discovered.
+/// Which of the screens being driven are no longer connected, by index,
+/// highest first.
+///
+/// Highest first because the caller removes them one at a time from a `Vec`,
+/// and ascending indices go stale the moment the first one is removed --
+/// silently, by dropping the wrong monitor.
+///
+/// Generic over the handle so it can be tested. Everything else in the resync
+/// path needs a real GPU, and this is the half with the reasoning in it.
+fn gone<T: Copy + PartialEq>(driving: &[T], connected: &[T]) -> Vec<usize> {
+    driving
+        .iter()
+        .enumerate()
+        .filter(|(_, handle)| !connected.contains(handle))
+        .map(|(index, _)| index)
+        .rev()
+        .collect()
+}
+
 fn connected(
     device: &DrmDevice,
     arrangement: &crate::monitor::Arrangement,
@@ -1237,4 +1472,40 @@ fn start_socket(event_loop: &mut EventLoop<State>, display: Display<Solium>) -> 
         .map_err(|err| anyhow!("inserting the display source: {err}"))?;
 
     Ok(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gone;
+
+    #[test]
+    fn nothing_changed_means_nothing_to_drop() {
+        assert!(gone(&[1, 2, 3], &[1, 2, 3]).is_empty());
+    }
+
+    #[test]
+    fn a_monitor_that_went_away_is_found_by_index() {
+        assert_eq!(gone(&[1, 2, 3], &[1, 3]), vec![1]);
+    }
+
+    /// Highest first, and this is the whole reason the function exists rather
+    /// than being a `filter` at the call site. The caller removes them one at
+    /// a time from a `Vec`; ascending, removing index 0 shifts index 2 to 1
+    /// and the second removal takes a monitor that is still plugged in.
+    #[test]
+    fn several_are_reported_highest_first() {
+        assert_eq!(gone(&[1, 2, 3, 4], &[2, 4]), vec![2, 0]);
+    }
+
+    #[test]
+    fn every_monitor_unplugged_is_allowed() {
+        assert_eq!(gone(&[1, 2], &[]), vec![1, 0]);
+    }
+
+    /// A monitor moved from one port to another looks like one going and a
+    /// different one arriving, which is exactly what it is.
+    #[test]
+    fn a_monitor_moved_to_another_port_is_a_swap() {
+        assert_eq!(gone(&[1, 2], &[1, 3]), vec![1]);
+    }
 }
