@@ -503,12 +503,29 @@ Three things worth knowing before running it on a TTY:
   plugin with `drmModeGetResources failed (Permission denied)`, `headless`
   alone still opens the card.
 
-* **`pkill -x solium` stops working.** Qt's eglfs installs its own `SIGTERM`
-  handler and the process no longer dies from one — measured: with the knob off
-  it exits, with it on it survives and needs `pkill -9`. The README says
-  elsewhere that `pkill` from another VT always works; with this knob it does
-  not. `Ctrl`+`Alt`+`Backspace` is unaffected, because that is Solium reading
-  its own input devices.
+* **Qt is told not to install signal handlers, and it matters more than it
+  sounds.** eglfs builds a `QFbVtHandler`, which takes `SIGINT`, `SIGTERM`,
+  `SIGCONT` and `SIGTSTP`. Those handlers do not exit; each writes a byte to a
+  socketpair, and the `_exit(1)` happens whenever Qt's event queue is next
+  drained — here, `qml::tick`'s `processEvents`, which `render::prepare` only
+  reaches when something wants a frame. So a `SIGTERM` to an idle compositor
+  does nothing at all, and the *next redraw* turns it into an `_exit(1)` from
+  inside a render, skipping every Rust destructor: the libseat session, the DRM
+  master release, the VT restore. Whether it happens depends on whether anything
+  asked for a frame afterwards, which is not a property you want in the path
+  that puts your console back.
+
+  `QT_QPA_NO_SIGNAL_HANDLER=1` is set beside the `QT_QPA_EGLFS_*` variables and
+  removes it: measured, the process dies on `SIGTERM` with the knob on, both
+  idle and while drawing. `QT_QPA_ENABLE_TERMINAL_KEYBOARD=1` goes with it —
+  despite the name it tells Qt to *leave the console keyboard alone*, which it
+  otherwise mutes when stdin is a terminal and un-mutes from a destructor this
+  process never runs.
+
+  `Ctrl`+`Alt`+`Backspace` was never affected either way: it is decided in
+  `input/mod.rs` from Solium's own libinput devices, and
+  `QT_QPA_EGLFS_DISABLE_INPUT=1` means eglfs creates no input handlers to
+  compete with them.
 
 * **Qt's `qWarning` does not go to stderr on this Fedora build.** It goes to
   journald, so the whole diagnostic half of the host — every EGL and GL error
@@ -582,6 +599,14 @@ keyboard at all — which is how the first run of this backend ended in a reboot
 Two more things stand between you and that: if libinput reports no input devices
 within five seconds, Solium stops on its own rather than hold a display nobody
 can talk to; and from another VT, `pkill -x solium` always works.
+
+That second one is worth one sentence of qualification, because it is a
+last-resort escape and you are reading it before taking a VT. It holds for an
+ordinary session, and it holds with `SOLIUM_QML_GPU=1` only because Solium sets
+`QT_QPA_NO_SIGNAL_HANDLER` before starting Qt — without it eglfs installs its
+own `SIGTERM` handler, and the process then neither dies nor cleanly survives.
+See *QML on the GPU*. On a build that predates that, or one where
+`QT_QPA_PLATFORM` was set from outside, reach for `pkill -9 -x solium`.
 
 **Reading what happened.** A hardware session writes to
 `~/.local/state/solium/session.log` as well as to the terminal, because the
