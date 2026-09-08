@@ -42,11 +42,13 @@ predicts.
 ## What has to be true first
 
 **Blocking.** A preview without these is not something a second person can
-use. **Packaging is the last one.**
+use.
 
 | | why |
 |---|---|
-| ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | **done.** A pipeline per monitor, one global space, layouts and workspaces per screen |
+| [#48](https://github.com/Lilium-Linux/solium/issues/48) no DRM master | **the new first one.** 25 of 25 hardware runs never became master, so nothing below is known to reach a screen |
+| packaging | there is none. A preview nobody can install is a preview nobody tries |
+| ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | connectors, modes, CRTCs and placement — see the correction below |
 | ~~[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI~~ | **done.** Scale per monitor, chrome rasterised at it, chosen from the panel's dpi |
 | ~~[#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture~~ | **done.** `wlr-screencopy`, so grim, wf-recorder and the portal all work |
 | packaging | there is none. A preview nobody can install is a preview nobody tries |
@@ -99,10 +101,41 @@ without the thing**, not by effort. That is why `cursor-shape-v1` is P3 — its
 absence costs nothing, because clients fall back to `wl_pointer.set_cursor` —
 and multi-monitor is P1.
 
+## A correction: "verified on hardware" was too strong
+
+This document said multi-monitor was verified on hardware, and it was said on
+the strength of two sessions that reported both monitors coming up. They did
+report that, and the log is correct as far as it goes: both connectors
+enumerated, modes chosen, separate CRTCs assigned, DP-2 placed at x=2560.
+
+What none of them did was become DRM master. Twenty-five hardware sessions,
+twenty-five failures, every one of them carrying Smithay's `Unable to become
+drm master, assuming unprivileged mode` a hundred lines above the part anyone
+read. Without master there is no scanout and libinput is handed no devices,
+which is also why the input watchdog kept stopping sessions that looked
+perfectly healthy.
+
+So what is verified on hardware is: the DRM device opens, the connectors are
+found, modes and CRTCs are chosen correctly, and the outputs are laid out
+where the configuration says. **Whether a frame has ever reached a physical
+screen is unknown.** Everything else here — HiDPI, the per-monitor pipelines,
+screencopy — was tested nested only, and #33's leak numbers were all measured
+nested too.
+
+That is a bookkeeping failure as much as a technical one. The warning was in
+the first log and neither the author nor the assistant looked for it, because
+both were reading the lines that said what they hoped.
+
 ## Traps, paid for in full
 
 Every one of these cost real time in the first four days. They are here because
 the next person to hit them will be us.
+
+**A green log is not a working desktop.** Twenty-five hardware sessions logged
+`displays up monitors=2` and never drove a pixel. Everything that succeeded
+was logged at INFO and the one thing that failed was a warning from a
+dependency, phrased as an assumption. When the claim is "it works on the
+hardware", the evidence is a photograph of the screen, not a log.
 
 **Run a test more than once.** Three separate bugs this week were found only by
 repetition. The clipboard flush failed about one run in three: the first test
