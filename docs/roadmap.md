@@ -93,6 +93,83 @@ Done when: changing a setting is visible immediately, with no restart.
 
 ---
 
+## What is left to be a complete compositor
+
+The epics above describe the *architecture* and it is finished: one engine, one
+clock, modes as scripts, decorations in-process. What is left is almost none of
+it. A compositor is complete when a person can use it all day without meeting
+something it cannot do, and that is a different list — mostly protocols, mostly
+unglamorous, and each one invisible until the day it is missing.
+
+Three tiers, and the order matters more than the contents.
+
+### 1. Things a desktop cannot do without
+
+These are not features. Each one is a day where somebody stops using the
+compositor and does not come back.
+
+| | why it stops someone |
+|---|---|
+| [#27](https://github.com/Lilium-Linux/solium/issues/27) session lock | you cannot walk away from the machine. Not a gap — a reason not to log in |
+| [#26](https://github.com/Lilium-Linux/solium/issues/26) IME | no CJK, no compose key, no emoji picker. Unusable for most of the world's writers |
+| [#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit | the screen blanks during a film or a presentation |
+| [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | a laptop lid, a dock, a monitor's power switch. "Restart your session" is not an answer |
+| [#24](https://github.com/Lilium-Linux/solium/issues/24) cursor-shape | clients fall back today, so it costs nothing — until one does not |
+| [#50](https://github.com/Lilium-Linux/solium/issues/50) foreign-toplevel | a dock cannot list windows or switch to them, so Lilium's own shell cannot have a task switcher |
+| [#51](https://github.com/Lilium-Linux/solium/issues/51) output-management | monitors are configured in a file; E8's settings surface cannot move one at runtime, and `kanshi` cannot work |
+| [#52](https://github.com/Lilium-Linux/solium/issues/52) data-control | no clipboard manager can work |
+
+The last three were found by writing this section, which is the argument for
+writing it. The shell is the reason all three matter more here than elsewhere:
+a dock that cannot enumerate windows is a launcher, and a settings panel that
+cannot move a monitor is a text editor with buttons.
+
+### 2. Things that have to be true, not built
+
+Correctness and confidence rather than capability. Nothing here adds a feature
+and all of it decides whether the thing is trustworthy.
+
+| | |
+|---|---|
+| [#33](https://github.com/Lilium-Linux/solium/issues/33) the per-window leak | ~5 MB and ~1 descriptor per window, measured nested. Whether it is real on hardware is untested |
+| [#48](https://github.com/Lilium-Linux/solium/issues/48) the seat flake | two sessions in twenty-five got no input devices and were stopped by the watchdog |
+| a hardware soak | the compositor has never run unattended for hours on a real session |
+| packaging | there is none, and a preview nobody can install is a preview nobody tries |
+
+### 3. The part that is not parity
+
+Everything above brings Solium level with a good tiling compositor. None of it
+is why this project exists.
+
+- **[E7](https://github.com/Lilium-Linux/solium/issues/7) — touch, gestures, form factors.** One binary usable by touch on a
+  tablet and by pointer on a desktop. The animation engine already takes an
+  initial velocity precisely so a gesture's throw can be handed to it; nothing
+  yet hands it one.
+- **[E8](https://github.com/Lilium-Linux/solium/issues/8) — settings.** A surface built from what scripts declare rather than a
+  fixed schema, so adding a mode adds its settings.
+- **The dock, and the morph.** `sol.present_from` still does what
+  `docs/shell-boundary.md` records: a window grows out of the rectangle an icon
+  occupied. What is missing is a dock to give it a rectangle — and doing that
+  across a process boundary is the design question that file says to reopen
+  rather than route around.
+
+### What "complete" would mean here
+
+Not "has every protocol". A compositor is complete for this project when the
+same binary runs a phone, a tablet and a desktop; when every mode is a script
+somebody can rewrite; and when nothing in a normal day makes the user notice
+they are running something unusual. The first is E7. The second is done. The
+third is tier one.
+
+**Honest position on evidence.** Everything in tiers one and two is judged from
+nested runs and from reading. The hardware backend brings up both monitors,
+picks modes and CRTCs correctly, and has been used with real applications on a
+TTY — but no soak, no leak measurement and no HiDPI or screencopy test has ever
+run on it. That is not a small caveat and it belongs in the plan rather than in
+a footnote.
+
+---
+
 ## Sequencing notes
 
 - **E2 and E3 are the whole bet.** If overview cannot be a script, the
