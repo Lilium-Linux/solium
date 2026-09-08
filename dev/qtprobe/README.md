@@ -17,21 +17,32 @@ is worth re-running after a Qt update rather than reasoning about.
 
 ## dmabuf round-trip
 
-**2026-09-08: no.** `eglCreateImageKHR` rejects the dmabuf with `EGL_BAD_MATCH`
-(0x3009), reproducibly — three runs, both `offscreen` and `eglfs`, identical
-result each time. The GBM allocation itself succeeds first: a 256×256
-`ARGB8888` buffer, stride 1024, modifier `0x300000000e08014`. That modifier's
-vendor byte (`0x03`) is `DRM_FORMAT_MOD_VENDOR_NVIDIA`, not
-`DRM_FORMAT_MOD_INVALID` — so this is NVIDIA's own GBM handing back one of its
-own real tiled modifiers, and NVIDIA's own EGL then refusing to import it as a
-dma-buf. The break is specifically at EGL's dma-buf import step, not at buffer
-allocation, GBM device creation, or the render node.
+**2026-09-08: yes — a GBM buffer can be imported as an EGLImage and bound to
+a texture, provided the importing `EGLDisplay` is paired with the same GBM
+device the buffer was allocated on.** That pairing matters: it is not the
+default `EGLDisplay`, and getting it wrong looks exactly like the feature
+being unsupported. Read this whole section before re-deriving it — the
+device pairing is the part that is easy to get wrong quietly.
 
-    dmabuf: eglCreateImageKHR failed 0x3009  (format=ARGB8888 stride=1024 modifier=0x300000000e08014)
+Solium's own `EGLDisplay` (`crates/solium/src/tty.rs`, `open_gpu`) is built
+as `EGLDisplay::new(gbm.clone())` — a GBM-platform display on a specific
+`GbmDevice` object, not `eglGetDisplay(EGL_DEFAULT_DISPLAY)`. The probe
+imports the same dmabuf against both, to make the contrast impossible to
+miss:
 
-`EGL_ANDROID_native_fence_sync` is present in `eglQueryString`'s extension
-list, so fencing was never reached as a second blocker — the round trip fails
-before that matters.
+    dmabuf[default display]: eglCreateImageKHR failed 0x3009  (format=ARGB8888 stride=1024 modifier=0x300000000e08014)
+    dmabuf[gbm-paired display]: ok  texture=1 stride=1024 modifier=0x300000000e08014
+
+Same fd, same 256×256 `ARGB8888` buffer, same stride (1024), same modifier
+(`0x300000000e08014` — vendor byte `0x03` is `DRM_FORMAT_MOD_VENDOR_NVIDIA`,
+a real tiled modifier, not `DRM_FORMAT_MOD_INVALID`). The default display
+rejects it with `EGL_BAD_MATCH` (`0x3009`); a display obtained via
+`eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbm, nullptr)` on the
+buffer's own `gbm_device*` accepts it. Reproducible across three runs, both
+`offscreen` and `eglfs`, identical every time. `EGL_EXT_image_dma_buf_import`
+and `EGL_EXT_image_dma_buf_import_modifiers` are both present on both
+displays, and `EGL_ANDROID_native_fence_sync` is present — none of those were
+the blocker.
 
 Qt: `qt6-qtbase-6.11.1-1.fc44.x86_64` (host runtime — what the probe binary
 actually loads when run natively; built in the container against Qt6Gui
@@ -42,8 +53,12 @@ driver 610.57.04.
     display: :0  screen: 0
     direct rendering: Yes
 
-This is the stall point the spike named in advance: "NVIDIA's driver is where
-dmabuf round-trips and cross-context fences are least forgiving." The
-dmabuf-backed render target route is closed on this machine. Full probe
-output, build log, and detail:
+Not tested by this probe: rendering into the bound texture through an FBO
+from a second, Qt-owned context on the same device, and fencing the hand-off
+to the compositor's context — the harder half the spike named ("NVIDIA's
+driver is where dmabuf round-trips and cross-context fences are least
+forgiving"). This result is the allocate/import/bind step only, and it
+works; the render-and-fence pipeline is what the tasks that depend on this
+one build and prove. Full probe output, both rounds, and the full trail from
+the wrong first answer to this one:
 `.superpowers/sdd/2026-09-08-qml-gpu-render-target/task-1-report.md`.
