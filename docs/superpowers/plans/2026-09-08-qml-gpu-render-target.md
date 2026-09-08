@@ -115,6 +115,10 @@ Expected: `dmabuf: ok  texture=… stride=… modifier=0x…` and the fence exte
 
 Append the finding to `dev/qtprobe/README.md` under a new `## dmabuf round-trip` heading — the values printed, the date, and the Qt and driver versions from `rpm -q qt6-qtbase` and `glxinfo -B | head -3`.
 
+**Also update the build command already in that README**: it does not link gbm,
+egl or glesv2, so after this change it no longer builds the probe. A recorded
+finding beside a command that does not work is worse than no record.
+
 **If this task fails**, stop the plan and report. Everything below assumes it passed, and the spec records what to do instead: bound the ambition to one animated layer with modest bleed on the software path.
 
 - [ ] **Step 4: Commit**
@@ -453,7 +457,7 @@ git commit -m "qml: allocate the buffer Qt renders a scene into"
 - Consumes: `target::allocate`, `Target::as_ffi`, the FFI from Task 2.
 - Produces:
   - `Scene::gpu(qml_path: &Path, width: i32, height: i32, target: &Target, initial: Option<&str>) -> Result<Self>`
-  - `Scene::render_gpu(&mut self) -> Result<Option<OwnedFd>>` — `Ok(None)` when unchanged.
+  - `Scene::render_gpu(&mut self) -> Result<Option<Option<OwnedFd>>>` — outer `None` when the scene was unchanged; inner `None` when the driver gave no fence and the host waited with `glFinish` instead.
   - `dev::qml_gpu() -> bool`, reading `SOLIUM_QML_GPU`.
 
 - [ ] **Step 1: Add the dev knob**
