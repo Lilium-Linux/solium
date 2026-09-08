@@ -190,6 +190,18 @@ struct SoliumQmlScene
      * disagrees would disagree intermittently. */
     GLuint texture = 0;
     EGLImageKHR egl_image = EGL_NO_IMAGE_KHR;
+    /* Which EGL display and context the two above belong to, captured at import
+     * from eglGetCurrentDisplay/eglGetCurrentContext.
+     *
+     * Recorded rather than re-derived because at teardown there is no other way
+     * to ask the question that matters. Qt's QOpenGLContext::currentContext() is
+     * a thread-local Qt sets in its own makeCurrent; the compositor takes the
+     * thread back with a raw eglMakeCurrent, which Qt never sees, so that
+     * thread-local stays pointing at Qt's context — stale, not null. Comparing
+     * these two against eglGetCurrentContext/eglGetCurrentDisplay is an
+     * EGL-level question and gets an EGL-level answer. */
+    EGLDisplay egl_display = EGL_NO_DISPLAY;
+    EGLContext egl_context = EGL_NO_CONTEXT;
 };
 
 /*
@@ -481,11 +493,11 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
  * below carries the EGL error code and the display pointer: 0x3009 there is the
  * signature of exactly that.
  */
-static GLuint import_dmabuf_texture(int dmabuf_fd, int width, int height, int stride,
-                                    unsigned long long modifier, unsigned int fourcc,
-                                    EGLImageKHR *out_image)
+static bool import_dmabuf_texture(SoliumQmlScene *scene, int dmabuf_fd, int stride,
+                                  unsigned long long modifier, unsigned int fourcc)
 {
-    *out_image = EGL_NO_IMAGE_KHR;
+    const int width = scene->width;
+    const int height = scene->height;
 
     // Resolved once per process; the entry points do not depend on the display
     // they are later called with.
@@ -498,19 +510,31 @@ static GLuint import_dmabuf_texture(int dmabuf_fd, int width, int height, int st
                  "glEGLImageTargetTexture2DOES: %s)",
                  create_image != nullptr ? "found" : "missing",
                  target_texture != nullptr ? "found" : "missing");
-        return 0;
+        return false;
     }
 
     // Qt's display and Qt's context, because the texture has to exist in the
     // context Qt renders with — a texture on any other context is a name Qt
     // would happily bind and quietly draw nothing into.
+    //
+    // Both are read at the EGL level and *recorded on the scene*, which is what
+    // makes the texture safe to delete later. See solium_qml_scene_free: at
+    // teardown the only honest question is "is the context this texture belongs
+    // to the one current right now", and that can only be answered by comparing
+    // against the values captured here. QOpenGLContext::currentContext() cannot
+    // answer it — it is Qt's own thread-local, set by QOpenGLContext::makeCurrent
+    // and untouched by the raw eglMakeCurrent the compositor uses to take the
+    // thread back, so it goes stale rather than null.
     EGLDisplay display = eglGetCurrentDisplay();
+    EGLContext egl_context = eglGetCurrentContext();
     QOpenGLContext *context = QOpenGLContext::currentContext();
-    if (display == EGL_NO_DISPLAY || context == nullptr) {
+    if (display == EGL_NO_DISPLAY || egl_context == EGL_NO_CONTEXT || context == nullptr) {
         qWarning("dmabuf import: Qt left no %s current — the RHI is not on EGL, "
                  "so there is no context to import into",
-                 display == EGL_NO_DISPLAY ? "EGL display" : "QOpenGLContext");
-        return 0;
+                 display == EGL_NO_DISPLAY      ? "EGL display"
+                 : egl_context == EGL_NO_CONTEXT ? "EGL context"
+                                                 : "QOpenGLContext");
+        return false;
     }
 
     const char *extensions = eglQueryString(display, EGL_EXTENSIONS);
@@ -520,29 +544,45 @@ static GLuint import_dmabuf_texture(int dmabuf_fd, int width, int height, int st
         strstr(extensions, "EGL_EXT_image_dma_buf_import_modifiers") != nullptr;
     if (!has_import) {
         qWarning("dmabuf import: EGL_EXT_image_dma_buf_import absent on Qt's display");
-        return 0;
+        return false;
     }
 
-    // The modifier attributes need their own extension, and a buffer with no
-    // known layout must not carry the INVALID sentinel through as if it were a
-    // real tiling — either way the import goes without them and lets the driver
-    // assume linear. Built by hand rather than as a fixed array because those
-    // two cases differ only in whether four entries are there at all.
-    EGLint attribs[15];
-    int n = 0;
-    attribs[n++] = EGL_WIDTH;                     attribs[n++] = width;
-    attribs[n++] = EGL_HEIGHT;                    attribs[n++] = height;
-    attribs[n++] = EGL_LINUX_DRM_FOURCC_EXT;      attribs[n++] = static_cast<EGLint>(fourcc);
-    attribs[n++] = EGL_DMA_BUF_PLANE0_FD_EXT;     attribs[n++] = dmabuf_fd;
-    attribs[n++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT; attribs[n++] = 0;
-    attribs[n++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;  attribs[n++] = stride;
-    if (has_modifiers && modifier != kModifierInvalid) {
-        attribs[n++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
-        attribs[n++] = static_cast<EGLint>(modifier & 0xffffffffULL);
-        attribs[n++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
-        attribs[n++] = static_cast<EGLint>(modifier >> 32);
+    // Sized by its own initialiser, never counted by hand.
+    //
+    // The first version of this counted the entries itself and declared
+    // `EGLint attribs[15]` for a list of seventeen, writing eight bytes past
+    // the end — on the path that *works*, modifier present, which is why it
+    // looked fine. Nothing diagnoses that: the index is a runtime variable, so
+    // -Wall -Wextra at -O2 says nothing and the corruption is whatever happened
+    // to be in those eight bytes of frame. The array now takes its length from
+    // the list itself, which is the form that cannot be miscounted.
+    //
+    // Both cases live in one list because an EGL attribute list ends at its
+    // first EGL_NONE: dropping the modifier pairs is a matter of moving the
+    // terminator up over them rather than building a second list. The modifier
+    // attributes need their own extension, and a buffer with no known layout
+    // must not carry the INVALID sentinel through as if it were a real tiling —
+    // either way the import goes without them and lets the driver assume linear.
+    EGLint attribs[] = {
+        EGL_WIDTH, width,
+        EGL_HEIGHT, height,
+        EGL_LINUX_DRM_FOURCC_EXT, static_cast<EGLint>(fourcc),
+        EGL_DMA_BUF_PLANE0_FD_EXT, dmabuf_fd,
+        EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+        EGL_DMA_BUF_PLANE0_PITCH_EXT, stride,
+        EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, static_cast<EGLint>(modifier & 0xffffffffULL),
+        EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, static_cast<EGLint>(modifier >> 32),
+        EGL_NONE,
+    };
+    // Where EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT sits above. The assertion is the
+    // point: any edit to the list changes its length and trips it, so the index
+    // cannot quietly drift away from the entry it names.
+    constexpr size_t modifier_lo_index = 12;
+    static_assert(sizeof(attribs) / sizeof(attribs[0]) == modifier_lo_index + 5,
+                  "the two modifier pairs must be the last four entries before EGL_NONE");
+    if (!has_modifiers || modifier == kModifierInvalid) {
+        attribs[modifier_lo_index] = EGL_NONE;
     }
-    attribs[n++] = EGL_NONE;
 
     EGLImageKHR image =
         create_image(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
@@ -553,7 +593,7 @@ static GLuint import_dmabuf_texture(int dmabuf_fd, int width, int height, int st
                  "paired with the device the buffer came from",
                  eglGetError(), width, height, fourcc, stride, modifier,
                  static_cast<void *>(display));
-        return 0;
+        return false;
     }
 
     // Through Qt's own function table rather than libGLESv2. Qt may have built
@@ -569,15 +609,15 @@ static GLuint import_dmabuf_texture(int dmabuf_fd, int width, int height, int st
     if (error != GL_NO_ERROR) {
         qWarning("dmabuf import: glEGLImageTargetTexture2DOES failed 0x%x", error);
         gl->glDeleteTextures(1, &texture);
-        // The image exists even though nothing was bound to it, and *out_image
-        // is still EGL_NO_IMAGE_KHR — so this is the only place it can be
+        // The image exists even though nothing was bound to it, and nothing has
+        // been recorded on the scene — so this is the only place it can be
         // released. The caller has no handle on it to free.
         static PFNEGLDESTROYIMAGEKHRPROC destroy_image =
             reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
         if (destroy_image != nullptr) {
             destroy_image(display, image);
         }
-        return 0;
+        return false;
     }
 
     // An imported image has no mipmaps and cannot be wrapped, so the defaults
@@ -592,8 +632,11 @@ static GLuint import_dmabuf_texture(int dmabuf_fd, int width, int height, int st
     gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     gl->glBindTexture(GL_TEXTURE_2D, 0);
 
-    *out_image = image;
-    return texture;
+    scene->texture = texture;
+    scene->egl_image = image;
+    scene->egl_display = display;
+    scene->egl_context = egl_context;
+    return true;
 }
 
 extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int width, int height,
@@ -639,9 +682,7 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int wi
         return nullptr;
     }
 
-    scene->texture = import_dmabuf_texture(dmabuf_fd, width, height, stride, modifier, fourcc,
-                                           &scene->egl_image);
-    if (scene->texture == 0) {
+    if (!import_dmabuf_texture(scene, dmabuf_fd, stride, modifier, fourcc)) {
         solium_qml_scene_free(scene);
         return nullptr;
     }
@@ -670,33 +711,58 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
         return;
     }
 
-    // GL first, while Qt's context still exists: deleting the control tears
-    // down the RHI and the context with it, and a texture name outliving its
-    // context is not something that can be freed afterwards.
+    // The two GPU resources have very different requirements, and treating them
+    // as one thing is what made the first version of this wrong.
     //
-    // Only when Qt's context is actually current, though. By the time the
-    // compositor drops a scene it has normally restored its own context, and
-    // glDeleteTextures against *that* would delete whatever object happens to
-    // share the name — silent corruption of an unrelated surface, which is far
-    // worse than the leak. So the leak is taken, and named.
-    if (scene->texture != 0 || scene->egl_image != EGL_NO_IMAGE_KHR) {
-        QOpenGLContext *context = QOpenGLContext::currentContext();
-        EGLDisplay display = eglGetCurrentDisplay();
-        if (context != nullptr && display != EGL_NO_DISPLAY) {
-            if (scene->texture != 0) {
+    // The EGLImage belongs to a *display*, not to a context: eglDestroyImageKHR
+    // needs the right EGLDisplay and no current context at all. We recorded that
+    // display at import, so this is always safe and always runs. It also has to
+    // run: an EGLImage is not reclaimed when a context dies, so skipping it
+    // leaks for the life of the process.
+    if (scene->egl_image != EGL_NO_IMAGE_KHR && scene->egl_display != EGL_NO_DISPLAY) {
+        static PFNEGLDESTROYIMAGEKHRPROC destroy_image =
+            reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
+                eglGetProcAddress("eglDestroyImageKHR"));
+        if (destroy_image != nullptr) {
+            destroy_image(scene->egl_display, scene->egl_image);
+        }
+        scene->egl_image = EGL_NO_IMAGE_KHR;
+    }
+
+    // The texture belongs to a *context*, and a GL name is only meaningful
+    // inside the one that issued it. Both Qt's context and the compositor's
+    // number their textures from 1, so deleting name N against the wrong context
+    // destroys whatever that context happens to have called N — a live client
+    // surface, most likely. That is unrecoverable and silent, and it is strictly
+    // worse than not deleting at all.
+    //
+    // So the test is an EGL-level identity check against what was recorded at
+    // import: is *this* context, on *this* display, the one current right now.
+    // The earlier version asked QOpenGLContext::currentContext() != nullptr,
+    // which cannot answer that — Qt's thread-local still points at Qt's context
+    // after the compositor takes the thread back with a raw eglMakeCurrent, so
+    // the guard passed and the delete ran against the compositor's context,
+    // causing the exact corruption this comment describes.
+    //
+    // When the check fails the texture name is left alone. It is not leaked for
+    // the life of the process: GL objects belong to their context, and Qt's
+    // context is destroyed a few lines below with the render control, which
+    // reclaims it. The warning is about the caller's contract, not about memory.
+    if (scene->texture != 0) {
+        const bool qt_context_is_current = scene->egl_context != EGL_NO_CONTEXT &&
+            eglGetCurrentContext() == scene->egl_context &&
+            eglGetCurrentDisplay() == scene->egl_display;
+        if (qt_context_is_current) {
+            QOpenGLContext *context = QOpenGLContext::currentContext();
+            if (context != nullptr) {
                 context->functions()->glDeleteTextures(1, &scene->texture);
-            }
-            if (scene->egl_image != EGL_NO_IMAGE_KHR) {
-                static PFNEGLDESTROYIMAGEKHRPROC destroy_image =
-                    reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
-                        eglGetProcAddress("eglDestroyImageKHR"));
-                if (destroy_image != nullptr) {
-                    destroy_image(display, scene->egl_image);
-                }
+                scene->texture = 0;
             }
         } else {
-            qWarning("a GPU scene was freed with no GL context current: texture %u "
-                     "and its EGLImage are leaked until the process exits",
+            qWarning("a GPU scene was freed without its own GL context current, so "
+                     "texture %u was left for Qt's context teardown to reclaim. "
+                     "Make the scene's context current around solium_qml_scene_free "
+                     "to release it explicitly.",
                      scene->texture);
         }
     }

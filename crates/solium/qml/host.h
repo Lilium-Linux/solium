@@ -31,6 +31,28 @@ int solium_qml_start(const char *import_path);
  * called in a process: the scene graph backend is chosen once. Calling the
  * other one afterwards returns 0 rather than quietly handing back a host on
  * the wrong backend.
+ *
+ * Two limits on that contract, both of which the caller has to plan around
+ * rather than discover:
+ *
+ * 1. It cannot always return. This selects the QPA platform plugin (eglfs), and
+ *    the plugin is loaded inside QGuiApplication's constructor. When a named
+ *    plugin cannot initialise — not built into this Qt, or eglfs unable to open
+ *    a DRM device — Qt calls qFatal and the *process aborts*. Verified here:
+ *    given a plugin name that does not exist, this call dies with SIGABRT
+ *    rather than returning 0. So on a machine where the GPU path is unavailable
+ *    in that particular way there is no fallback, there is a crash. A caller
+ *    that needs the software path to stay reachable has to decide whether the
+ *    GPU path is viable *before* calling this; the return value is too late.
+ *
+ * 2. Returning 1 does not mean the path works. It means Qt came up on an RHI
+ *    backend. Everything the GPU path actually depends on — the render control
+ *    initialising, the dmabuf importing — is per scene, and is reported by
+ *    solium_qml_scene_new_gpu returning NULL. There is no way back at that
+ *    point: Qt fixes its scene graph backend for the life of the process, so
+ *    solium_qml_start() will then correctly refuse and the caller is left with
+ *    a GPU host that cannot build GPU scenes. Treat NULL from the *first*
+ *    scene_new_gpu as fatal to the GPU path, not as a per-scene error.
  */
 int solium_qml_start_gpu(const char *import_path);
 
@@ -77,6 +99,23 @@ SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int width, int h
 SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width, int height,
                                      const char **error);
 
+/* Destroy a scene.
+ *
+ * For a scene from solium_qml_scene_new_gpu, call this with that scene's own GL
+ * context current — the one Qt made current inside solium_qml_scene_new_gpu,
+ * not the compositor's. The texture lives in Qt's context and a GL name only
+ * means anything inside the context that issued it; both contexts number their
+ * textures from 1, so deleting against the wrong one would destroy an unrelated
+ * object. The host checks (at the EGL level, against what it recorded at
+ * import) and skips the delete rather than risk that, so getting this wrong is
+ * a warning and a slightly later reclaim, not corruption. The EGLImage is
+ * released either way: it belongs to a display, not a context.
+ *
+ * Either way, this leaves *no* context current: Qt makes its own current to
+ * tear down its RHI and then releases it, whatever was current on the way in.
+ * Measured — eglGetCurrentContext() is NULL on return. So the compositor has to
+ * make its own context current again after freeing a GPU scene, exactly as it
+ * does after rendering one. */
 void solium_qml_scene_free(SoliumQmlScene *scene);
 
 /* Resize a scene. `width` and `height` are *device* pixels — the image the
