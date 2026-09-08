@@ -33,7 +33,7 @@ Each of these is a day where somebody stops using the compositor.
 
 | | what breaks without it |
 |---|---|
-| [#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout | `add_keyboard(Default::default(), …)` — every session is US QWERTY with a fixed repeat rate, and there is no way to change either. Most of the world cannot type their own language. Nothing else on this page locks out more people |
+| ~~[#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout~~ | **done**, and the entry that used to be here was wrong: it said every session was US QWERTY with no way to change it. `XkbConfig::default()` is empty names, and xkbcommon reads `XKB_DEFAULT_LAYOUT` when they are, so that always worked. What was actually missing was a *setting* — and the repeat rate, which no environment variable reaches |
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) `text-input-v3`, `input-method-v2` | no CJK, no compose key, no emoji picker, no on-screen keyboard — and the on-screen keyboard is what a phone is |
 | [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | a laptop lid, a dock, a monitor's power switch. "Restart your session" is not an answer |
 | [#24](https://github.com/Lilium-Linux/solium/issues/24) `cursor-shape-v1` | clients fall back today, so it costs nothing — until one does not |

@@ -117,6 +117,37 @@ answer is in the frames — the desktop, then one frame of the compositor's own
 backdrop between the lock and the client's first buffer, then the client's
 colour, and nothing of the session anywhere in between.
 
+The ordinary run also reports the keyboard: the layout names in group order,
+which one is active, and the repeat rate. That is the only way to check a
+compositor's keyboard from outside it — the keymap arrives as a file descriptor
+and no event describes what is in it. Two knobs:
+
+    WL_PROBE_KEYMAP=/tmp/km.xkb   write the keymap out. Forty thousand bytes
+                                  behind a file descriptor is the compositor's
+                                  most opaque answer, and "the layouts look
+                                  right" is a different claim from "here is
+                                  what it sent".
+    WL_PROBE_KEYBOARD=10          map a window, take focus, and report every
+                                  layout change the compositor announces.
+                                  Pair it with a scripted binding:
+
+        XDG_CONFIG_HOME=/path/to/config \
+            SOLIUM_TRIGGER_AT="6000:super+shift+k" ./target/debug/solium &
+        WL_PROBE_KEYBOARD=10 WAYLAND_DISPLAY=wayland-1 ./target/debug/wl-probe
+
+The compositor switching its own layout and the *client being told* are
+different claims, and only the second one matters: a layout that changed and
+was not announced is a keyboard that types the wrong letters.
+
+Reading the keymap took three wrong turns, all of which looked right, and they
+are written down in `layouts_in_keymap_text` because each would cost the next
+person the same hour. The short version: the fd's offset is at the end, so
+`read` returns zero bytes and looks exactly like a compositor that sent
+nothing — clients are told to mmap it, which is why every real toolkit works.
+The `xkb_symbols` section name looks like a parseable recipe and is a trap.
+And libxkbcommon writes `name[1]=`, not the `name[Group1]=` that xkbcomp writes
+and every example online shows.
+
 `WL_PROBE_IDLE=1` runs the whole idle sequence against a real window: go idle
 on a short timeout, take an inhibitor and come back, hold it through more than
 the timeout and stay awake, drop it and go idle again. The sequence is the

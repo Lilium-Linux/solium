@@ -21,6 +21,49 @@ local defaults = {
     -- Space between windows and around the work area, in logical pixels.
     gap = 12,
 
+    -- The keyboard.
+    --
+    -- Empty means "whatever the session already said". Every name here is an
+    -- xkb name, and leaving one blank makes xkbcommon fall back to the
+    -- matching `XKB_DEFAULT_*` environment variable -- which is where a
+    -- display manager or a `~/.profile` usually puts it, and which worked
+    -- before any of this existed. Naming one here takes precedence.
+    --
+    --     keyboard = {
+    --         layout  = "us,ua",
+    --         variant = ",",
+    --         options = "grp:alt_shift_toggle,compose:ralt",
+    --         model   = "pc105",
+    --     },
+    --
+    --   layout    a comma-separated list. The first is the one you start in;
+    --            `solium --check` prints what the session ended up with.
+    --   variant   one per layout, in the same order, and blank for "plain".
+    --            "us,ua" with ",dvorak" is US ordinary and Ukrainian Dvorak.
+    --   options   xkb options, comma separated. `grp:` ones switch layout and
+    --            are handled inside the keymap, so they work without the
+    --            compositor being involved. `compose:ralt` gives a compose
+    --            key, which is the nearest thing to an input method until
+    --            #26 lands.
+    --   model     rarely worth setting; "pc105" is assumed by the rules.
+    --
+    -- The repeat rate is the compositor's own, not xkb's, so no environment
+    -- variable reaches it and this is the only place it can be set:
+    --
+    --   repeat_rate    repeats per second after the delay. 25 is the default.
+    --   repeat_delay   milliseconds held before repeating starts. 200.
+    --
+    -- Switching layout from a binding is the same function:
+    --
+    --     sol.bind("super+space", function()
+    --         local kb = sol.keyboard()
+    --         sol.keyboard{ active = kb.active % #kb.layouts + 1 }
+    --     end)
+    --
+    -- and `sol.keyboard()` is also how a shell draws a layout indicator: it
+    -- returns the layout names, which one is active, and the repeat settings.
+    keyboard = {},
+
     -- The monitors.
     --
     -- Empty means "work it out": every connected screen is driven, left to

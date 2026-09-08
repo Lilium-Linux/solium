@@ -152,6 +152,16 @@ pub(crate) struct Solium {
     /// deciding that.
     pub(crate) idle: crate::idle::Idle,
 
+    /// The keymap in force, kept so a reload that changes nothing does not
+    /// re-send one. See `keymap.rs`.
+    pub(crate) keymap: Option<crate::keymap::Keymap>,
+    /// What the keyboard currently is, cached rather than read.
+    ///
+    /// Reading it means locking xkb and walking the keymap, and `snapshot` is
+    /// built for every script event -- every window move, every focus change.
+    /// Refreshed where it changes instead, which is one place.
+    pub(crate) keyboard: crate::keymap::State,
+
     /// Registers `ext_session_lock_manager_v1`: the lock screen. See `lock.rs`.
     pub(crate) session_lock_state: SessionLockManagerState,
     /// Set while the session is locked, and the single thing every other part
@@ -526,7 +536,16 @@ impl Solium {
         // machine actually has is a hardware question; how it behaves is the
         // profile's, and advertising a capability that never sends events is
         // cheaper than a client that cannot discover a device that appears.
-        let _ = seat.add_keyboard(Default::default(), 200, 25);
+        // `XkbConfig::default()` is empty strings, and that is the useful
+        // default rather than a lazy one: xkbcommon reads `XKB_DEFAULT_LAYOUT`
+        // and its siblings when the names are empty, so a session that sets
+        // them in the usual place is honoured before any script has run. A
+        // script can then say otherwise -- see `keymap.rs`.
+        let _ = seat.add_keyboard(
+            Default::default(),
+            crate::keymap::REPEAT_DELAY,
+            crate::keymap::REPEAT_RATE,
+        );
         let _ = seat.add_pointer();
         let _ = seat.add_touch();
 
@@ -566,6 +585,8 @@ impl Solium {
             idle_state: crate::idle::IdleState::new::<Self>(&display_handle),
             idle_inhibit_state: crate::idle::inhibit_state(&display_handle),
             idle: crate::idle::Idle::default(),
+            keymap: None,
+            keyboard: crate::keymap::State::initial(),
             session_lock_state: crate::lock::state(&display_handle),
             lock: None,
             seat_state,
@@ -1372,6 +1393,7 @@ impl Solium {
         Snapshot {
             windows,
             monitors,
+            keyboard: self.keyboard.clone(),
             work_area: self.work_area().map(to_rect).unwrap_or_default(),
             cursor: (cursor.x, cursor.y),
         }
@@ -1560,6 +1582,17 @@ impl Solium {
                 }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
                 Command::Reload => self.request = Some(Request::Reload),
+                Command::Keyboard(request) => {
+                    if crate::keymap::apply(self, &request) {
+                        let now = crate::keymap::describe(self);
+                        tracing::info!(
+                            layouts = ?now.layouts,
+                            active = now.active,
+                            repeat = format!("{}/s after {}ms", now.repeat_rate, now.repeat_delay),
+                            "keyboard"
+                        );
+                    }
+                }
                 Command::Monitors(arrangement) => {
                     self.arrangement = arrangement;
                     // Applied immediately, and applied again on reload, so
@@ -2821,6 +2854,11 @@ impl Solium {
 
     /// Take the scripts, and act on whatever they asked for while loading.
     pub(crate) fn start_scripts(&mut self, scripts: Option<Scripts>) {
+        // Before the scripts run, so `sol.keyboard()` answers truthfully even
+        // in a configuration that never calls `sol.keyboard{…}` -- which is
+        // the common case, since the useful default is whatever the session's
+        // `XKB_DEFAULT_*` already said.
+        self.keyboard = crate::keymap::describe(self);
         let Some(mut scripts) = scripts else {
             self.scripts = None;
             return;
