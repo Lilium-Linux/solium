@@ -55,6 +55,12 @@ pub(crate) fn work_area(output: &Output) -> Rectangle<i32, Logical> {
 
 /// The layer surface drawn at a point, with its origin, searched top down.
 ///
+/// `point` is in the output's own coordinates and so is the origin that comes
+/// back; the caller adds the output's position to get either into the
+/// compositor's space. The origin is the surface's top-left corner, so that
+/// `point - origin` is the point within the surface -- which is the only
+/// number the client is ever told.
+///
 /// Only the layers above windows are considered: a click on the wallpaper
 /// belongs to whatever is above it, not to the wallpaper.
 pub(crate) fn surface_under(
@@ -71,7 +77,12 @@ pub(crate) fn surface_under(
             point - geometry.loc.to_f64(),
             smithay::desktop::WindowSurfaceType::ALL,
         )
-        .map(|(surface, offset)| (surface, point - offset.to_f64()))
+        // The subsurface's offset is within the layer surface, so the layer's
+        // own position has to be added back. Returning `point - offset` here
+        // instead -- the surface-local point in place of the origin -- told
+        // every bar and dock that the pointer was somewhere it was not, and
+        // told it a *different* wrong place for each position of the cursor.
+        .map(|(surface, offset)| (surface, (geometry.loc + offset).to_f64()))
 }
 
 /// Whether a layer wants to be drawn above windows.
