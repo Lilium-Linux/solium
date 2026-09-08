@@ -12,20 +12,36 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Fedora, not the runner's own Ubuntu, and for the same reason
+    # `dev/Containerfile` exists: this project needs Qt 6 Quick >= 6.5 and
+    # Ubuntu ships 6.4.2. That is not a version to wait out -- CI failed on
+    # every push from the day it was added until this line, always in the
+    # build script, always for that one number, while `dev/gate.sh` was green
+    # the whole time because it runs in a container that has the right Qt.
+    #
+    # A CI that tests a different toolchain from the one anybody builds with
+    # is not testing the project. Keep this version in step with
+    # `dev/Containerfile`'s FEDORA_VERSION.
+    container: registry.fedoraproject.org/fedora:44
     steps:
-      - uses: actions/checkout@v5
-
-      # Smithay links against the system Wayland, input and session stacks.
-      # Installed here rather than at the ticket that adds the dependency, so
-      # CI does not break the first time a real backend lands.
+      # Before the checkout: `actions/checkout` uses git when git is there and
+      # silently falls back to downloading a tarball when it is not, which
+      # works and leaves no history for anything later to look at.
+      #
+      # The rest is `dev/Containerfile`'s list, minus `foot` -- a terminal is
+      # for looking at a running compositor by hand and there is nobody here to
+      # look. Smithay links against the system Wayland, input and session
+      # stacks, so all of it is needed to compile rather than to run.
       - name: System dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwayland-dev libinput-dev libudev-dev libseat-dev \
-            libxkbcommon-dev libgbm-dev libegl1-mesa-dev libdrm-dev \
-            libdisplay-info-dev pkg-config \
-            qt6-base-dev qt6-declarative-dev
+          dnf install -y --setopt=install_weak_deps=False \
+            git gcc gcc-c++ make pkgconf-pkg-config \
+            wayland-devel libinput-devel systemd-devel libseat-devel \
+            libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
+            libdrm-devel libdisplay-info-devel \
+            qt6-qtbase-devel qt6-qtdeclarative-devel
+
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
