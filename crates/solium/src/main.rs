@@ -14,6 +14,7 @@ mod decoration;
 mod dev;
 mod input;
 mod layer;
+mod lock;
 mod mat4;
 mod monitor;
 mod offscreen;

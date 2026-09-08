@@ -960,6 +960,7 @@ impl State {
             // This monitor's scale, not a constant. Two screens in one frame
             // can want different ones.
             let scale = output.current_scale().fractional_scale();
+            let locked = self.solium.lock.is_some();
             let elements = render::elements(
                 &mut self.solium,
                 renderer,
@@ -974,6 +975,14 @@ impl State {
             // nothing on this screen to draw, which settles the debt as surely
             // as a queued frame does.
             screen.owed = false;
+            // As in the nested backend: while locked, every frame is drawn in
+            // full. Resetting the buffer ages tells the compositor that no
+            // buffer's contents can be relied on, so nothing of the desktop
+            // can survive in the parts of a scanout buffer that damage
+            // tracking would otherwise leave alone.
+            if locked {
+                screen.compositor.reset_buffers();
+            }
             match screen.compositor.render_frame(
                 renderer,
                 &elements,

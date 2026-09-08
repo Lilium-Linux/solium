@@ -50,11 +50,10 @@ use.
 | ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | **done.** A pipeline per monitor, one global space, layouts and workspaces per screen |
 | ~~[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI~~ | **done.** Scale per monitor, chrome rasterised at it, chosen from the panel's dpi |
 | ~~[#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture~~ | **done.** `wlr-screencopy`, so grim, wf-recorder and the portal all work |
-| packaging | there is none. A preview nobody can install is a preview nobody tries |
+| ~~[#27](https://github.com/Lilium-Linux/solium/issues/27) session lock~~ | **done.** `ext-session-lock-v1`, and it fails locked rather than open |
 
 **Shippable as documented gaps.** Real holes, but ones a preview can name and
-survive: [#27](https://github.com/Lilium-Linux/solium/issues/27) session lock,
-[#26](https://github.com/Lilium-Linux/solium/issues/26) IME,
+survive: [#26](https://github.com/Lilium-Linux/solium/issues/26) IME,
 [#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit,
 [#33](https://github.com/Lilium-Linux/solium/issues/33) the ~190KB-per-window
 leak.
@@ -87,10 +86,18 @@ hours is worse than one that is missing a lock screen.
    done, and it was self-contained as expected. `ext-image-copy-capture-v1` is
    the successor and is #47; the `wayland-protocols` release this builds
    against does not carry it and nothing installed speaks it.
-4. **Soak and package.** Both are the difference between working here and
+4. ~~**[#27](https://github.com/Lilium-Linux/solium/issues/27) session lock**~~
+   — done. The protocol was the easy half; the hard half was that "locked"
+   has to mean something to every path that interprets input, and one of them
+   asked none of the questions the others did. `resize_target` walks the panes
+   itself rather than going through `window_under`, so with the obvious guards
+   in place a drag on a locked screen still resized a window nobody could see,
+   and it was still that size after unlocking. Found by firing a scripted drag
+   during a lock and measuring the window afterwards, which is the only reason
+   it was found at all.
+5. **Soak and package.** Both are the difference between working here and
    working anywhere.
-5. Then [#27](https://github.com/Lilium-Linux/solium/issues/27),
-   [#36](https://github.com/Lilium-Linux/solium/issues/36),
+6. Then [#36](https://github.com/Lilium-Linux/solium/issues/36),
    [#33](https://github.com/Lilium-Linux/solium/issues/33),
    [#38](https://github.com/Lilium-Linux/solium/issues/38) in whatever order
    suits, and the P3s after the preview is out.

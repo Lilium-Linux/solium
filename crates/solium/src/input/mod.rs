@@ -123,8 +123,18 @@ fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>
             // the only keys that must work when everything else is broken:
             // without them a compositor that mishandles input is a machine you
             // can only recover with the power button.
-            if let Some(request) = escape(modifiers, handle.modified_sym()) {
+            let locked = state.lock.is_some();
+            if let Some(request) = escape(modifiers, handle.modified_sym(), locked) {
                 return FilterResult::Intercept(Some(Action::Backend(request)));
+            }
+
+            // Locked: nothing is bound. A binding runs a script, and a script
+            // can spawn a terminal in one line -- so leaving bindings live
+            // would turn the lock screen into a menu of ways past it. Keys go
+            // to whatever has focus, which while locked is the lock surface or
+            // nothing at all.
+            if locked {
+                return FilterResult::Forward;
             }
 
             let combo = combo_for(modifiers, handle.modified_sym());
@@ -181,12 +191,20 @@ fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>
 /// kernel would normally act on it, but not once the VT is in graphics mode, so
 /// switching away from Solium is Solium's job. Ctrl+Alt+Backspace stops it
 /// outright: the last resort that does not involve the power button.
-fn escape(modifiers: &ModifiersState, keysym: Keysym) -> Option<Request> {
+///
+/// Both are given up while the session is locked -- but only one of them.
+/// Quitting is refused, because ending the session is precisely how someone
+/// would get to the desktop underneath a lock screen, and a lock you can leave
+/// with a three-key chord is not a lock. Switching VT stays: whoever can press
+/// it is standing at the machine, logind owns the seat, and nothing of this
+/// session is visible on another terminal. Taking it away would only remove
+/// the way out of a compositor that has stopped answering.
+fn escape(modifiers: &ModifiersState, keysym: Keysym, locked: bool) -> Option<Request> {
     if !(modifiers.ctrl && modifiers.alt) {
         return None;
     }
     if keysym == Keysym::BackSpace {
-        return Some(Request::Quit);
+        return (!locked).then_some(Request::Quit);
     }
     let raw = keysym.raw();
     (Keysym::XF86_Switch_VT_1.raw()..=Keysym::XF86_Switch_VT_12.raw())
@@ -228,13 +246,20 @@ fn pointer_motion<B: InputBackend>(
     // Frames see the pointer before clients do, so buttons light up on hover.
     // Motion is *also* forwarded below, because the pointer leaving a window
     // has to reach it or the window keeps a stale hover state.
-    hover_frame(state, location);
-    if let Some(area) = state.work_area()
-        && let Some(shell) = state.shell()
-    {
-        shell.pointer(area, location.x, location.y, None);
+    //
+    // None of it while the session is locked. The pointer still moves and
+    // still reaches the lock surface -- a lock screen you cannot click the
+    // password field of is no use -- but nothing of the session's may notice
+    // it going past.
+    if state.lock.is_none() {
+        hover_frame(state, location);
+        if let Some(area) = state.work_area()
+            && let Some(shell) = state.shell()
+        {
+            shell.pointer(area, location.x, location.y, None);
+        }
+        follow_pointer(state, location, pointer.is_grabbed());
     }
-    follow_pointer(state, location, pointer.is_grabbed());
 
     let under = state.surface_under(location);
 
@@ -303,13 +328,21 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
             state.pointer.status = CursorImageStatus::default_named();
         }
 
-        hover_frame(state, location);
-        if let Some(area) = state.work_area()
-            && let Some(shell) = state.shell()
-        {
-            shell.pointer(area, location.x, location.y, None);
+        // As in `pointer_motion`: while the session is locked, nothing of the
+        // session's may notice the pointer going past. Repeated here rather
+        // than shared because this is the path a *real mouse* takes -- winit
+        // reports position, libinput reports movement -- and a guard that
+        // existed only on the nested path would be a lock screen that leaked
+        // on the hardware and nowhere else.
+        if state.lock.is_none() {
+            hover_frame(state, location);
+            if let Some(area) = state.work_area()
+                && let Some(shell) = state.shell()
+            {
+                shell.pointer(area, location.x, location.y, None);
+            }
+            follow_pointer(state, location, pointer.is_grabbed());
         }
-        follow_pointer(state, location, pointer.is_grabbed());
         pointer.motion(
             state,
             under.clone(),
@@ -559,6 +592,34 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     let button_state = event.state();
     let location = pointer.current_location();
 
+    // Locked: the press is the lock screen's, and the compositor does not get
+    // to interpret it. Everything between here and the plain forward below is
+    // an interpretation -- the shell's buttons, the tweaks panel, a titlebar,
+    // a resize edge, click-to-focus, a script's click handler -- and each one
+    // acts on the session that is supposed to be sealed.
+    //
+    // This is not belt and braces over the checks in `window_under` and
+    // `frame_under`. `resize_target` walks the panes itself and asks neither
+    // of them, so before this guard existed a press near where a window's
+    // edge used to be started a resize grab: dragging the mouse on a locked
+    // screen resized a window nobody could see, and it was still that size
+    // when the session unlocked. Found by doing exactly that and measuring
+    // the window afterwards.
+    if state.lock.is_some() {
+        pointer.button(
+            state,
+            &ButtonEvent {
+                button,
+                state: button_state,
+                serial,
+                time: event.time_msec(),
+            },
+        );
+        pointer.frame(state);
+        state.redraw = true;
+        return;
+    }
+
     // The shell sees the pointer before clients do, and only when nothing is
     // being dragged.
     if !pointer.is_grabbed()
@@ -748,10 +809,13 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
     // it is how a scrolling layout moves its viewport. Unmodified, the wheel
     // belongs to whatever is under the cursor -- a layout that ate every wheel
     // event would make every terminal inside it unusable.
-    let held_super = state
-        .seat
-        .get_keyboard()
-        .is_some_and(|keyboard| keyboard.modifier_state().logo);
+    // Locked, no wheel gesture is the compositor's: `trigger_scroll` runs a
+    // script, and a script that can move a layout can do anything else too.
+    let held_super = state.lock.is_none()
+        && state
+            .seat
+            .get_keyboard()
+            .is_some_and(|keyboard| keyboard.modifier_state().logo);
     if held_super {
         let horizontal = event.amount(Axis::Horizontal).unwrap_or_default();
         let vertical = event.amount(Axis::Vertical).unwrap_or_default();
@@ -905,15 +969,15 @@ mod tests {
     #[test]
     fn ctrl_alt_f3_asks_for_the_third_terminal() {
         assert_eq!(
-            escape(&modifiers(true, true), Keysym::XF86_Switch_VT_3),
+            escape(&modifiers(true, true), Keysym::XF86_Switch_VT_3, false),
             Some(Request::Vt(3))
         );
         assert_eq!(
-            escape(&modifiers(true, true), Keysym::XF86_Switch_VT_1),
+            escape(&modifiers(true, true), Keysym::XF86_Switch_VT_1, false),
             Some(Request::Vt(1))
         );
         assert_eq!(
-            escape(&modifiers(true, true), Keysym::XF86_Switch_VT_12),
+            escape(&modifiers(true, true), Keysym::XF86_Switch_VT_12, false),
             Some(Request::Vt(12))
         );
     }
@@ -921,8 +985,30 @@ mod tests {
     #[test]
     fn ctrl_alt_backspace_stops_the_compositor() {
         assert_eq!(
-            escape(&modifiers(true, true), Keysym::BackSpace),
+            escape(&modifiers(true, true), Keysym::BackSpace, false),
             Some(Request::Quit)
+        );
+    }
+
+    /// Ctrl+Alt+Backspace is how you get out of a compositor that has stopped
+    /// answering -- and it is also how you would get past a lock screen, since
+    /// the desktop is behind the session that it ends. Locked, it does nothing.
+    #[test]
+    fn ctrl_alt_backspace_does_not_end_a_locked_session() {
+        assert_eq!(
+            escape(&modifiers(true, true), Keysym::BackSpace, true),
+            None
+        );
+    }
+
+    /// Switching terminal stays available while locked, and deliberately.
+    /// It exposes nothing: the locked session's contents are not on the
+    /// terminal being switched to, and whoever pressed it is at the machine.
+    #[test]
+    fn a_locked_session_can_still_switch_terminal() {
+        assert_eq!(
+            escape(&modifiers(true, true), Keysym::XF86_Switch_VT_2, true),
+            Some(Request::Vt(2))
         );
     }
 
@@ -930,11 +1016,20 @@ mod tests {
     /// text field would end the session.
     #[test]
     fn the_escapes_need_both_modifiers() {
-        assert_eq!(escape(&modifiers(false, false), Keysym::BackSpace), None);
-        assert_eq!(escape(&modifiers(true, false), Keysym::BackSpace), None);
-        assert_eq!(escape(&modifiers(false, true), Keysym::BackSpace), None);
         assert_eq!(
-            escape(&modifiers(true, false), Keysym::XF86_Switch_VT_2),
+            escape(&modifiers(false, false), Keysym::BackSpace, false),
+            None
+        );
+        assert_eq!(
+            escape(&modifiers(true, false), Keysym::BackSpace, false),
+            None
+        );
+        assert_eq!(
+            escape(&modifiers(false, true), Keysym::BackSpace, false),
+            None
+        );
+        assert_eq!(
+            escape(&modifiers(true, false), Keysym::XF86_Switch_VT_2, false),
             None
         );
     }
@@ -956,8 +1051,8 @@ mod tests {
 
     #[test]
     fn ordinary_keys_are_not_escapes() {
-        assert_eq!(escape(&modifiers(true, true), Keysym::a), None);
-        assert_eq!(escape(&modifiers(true, true), Keysym::Return), None);
+        assert_eq!(escape(&modifiers(true, true), Keysym::a, false), None);
+        assert_eq!(escape(&modifiers(true, true), Keysym::Return, false), None);
     }
 
     /// One screen, and the case this started as: relative motion has no bounds
