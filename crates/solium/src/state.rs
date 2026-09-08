@@ -90,6 +90,30 @@ use crate::{
     script::{AnimationSpec, Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
 };
 
+/// One JSON string, quoted and escaped.
+///
+/// The property bag handed to a QML scene is JSON text, and a wallpaper path
+/// is the first thing put in it that a *user* wrote. A path with a quote or a
+/// backslash in it would otherwise end the string early and take the whole
+/// scene with it -- which presents as the wallpaper silently not existing.
+fn serde_json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// A rectangle grown outward by the frame drawn around it.
 fn grown(real: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logical> {
     if !insets.any() {
@@ -151,6 +175,17 @@ pub(crate) struct Solium {
     /// Who is waiting to be told nobody is here, and who is stopping us
     /// deciding that.
     pub(crate) idle: crate::idle::Idle,
+
+    /// The wallpaper, one scene per monitor.
+    ///
+    /// Per monitor because a `ShellSurface` caches one rasterisation at one
+    /// size: two screens of different sizes sharing one would re-rasterise a
+    /// 2560x1440 image twice a frame, for ever.
+    pub(crate) wallpaper: std::collections::HashMap<String, crate::surface::ShellSurface>,
+    /// The image to show, from `config.wallpaper`. `None` disables it and
+    /// leaves the clear colour, which is what somebody running a `swaybg`
+    /// wants.
+    pub(crate) wallpaper_source: Option<String>,
 
     /// The keymap in force, kept so a reload that changes nothing does not
     /// re-send one. See `keymap.rs`.
@@ -593,6 +628,8 @@ impl Solium {
             idle_state: crate::idle::IdleState::new::<Self>(&display_handle),
             idle_inhibit_state: crate::idle::inhibit_state(&display_handle),
             idle: crate::idle::Idle::default(),
+            wallpaper: std::collections::HashMap::new(),
+            wallpaper_source: Some(crate::surface::DEFAULT_WALLPAPER.to_owned()),
             keymap: None,
             keyboard: crate::keymap::State::initial(),
             session_lock_state: crate::lock::state(&display_handle),
@@ -1600,6 +1637,17 @@ impl Solium {
                             repeat = format!("{}/s after {}ms", now.repeat_rate, now.repeat_delay),
                             "keyboard"
                         );
+                    }
+                }
+                Command::Wallpaper(source) => {
+                    if self.wallpaper_source != source {
+                        self.wallpaper_source = source;
+                        // Every monitor's scene is thrown away, because they
+                        // are caches of the old image. Rebuilt on the next
+                        // frame that asks for one.
+                        self.wallpaper.clear();
+                        self.redraw = true;
+                        tracing::info!(source = ?self.wallpaper_source, "wallpaper");
                     }
                 }
                 Command::Monitors(arrangement) => {
@@ -2944,6 +2992,45 @@ impl Solium {
     /// the compositor, which is a thing that already exists here. What it
     /// offers comes from the scripts, so the panel is a list of whatever
     /// `tweaks.lua` declares.
+    /// The wallpaper scene for one monitor, built on first use.
+    ///
+    /// Keyed by monitor name so each screen keeps its own rasterisation at its
+    /// own size and scale. A monitor that goes away leaves its scene behind
+    /// until something else clears it, which is deliberate: unplugging a
+    /// screen and plugging it back in should not re-decode the image.
+    pub(crate) fn wallpaper_for(
+        &mut self,
+        output: &Output,
+    ) -> Option<&mut crate::surface::ShellSurface> {
+        let source = self.wallpaper_source.clone()?;
+        let name = output.name();
+        if !self.wallpaper.contains_key(&name) {
+            let scene =
+                std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/wallpaper.qml"));
+            // JSON, because that is what the property bag is. A path with a
+            // quote in it would otherwise end the string and take the scene
+            // with it.
+            let properties = format!(
+                "{{\"source\":{}}}",
+                serde_json_string(&crate::surface::resolve_wallpaper(&source))
+            );
+            match crate::surface::ShellSurface::new(scene, &properties) {
+                Ok(paper) => {
+                    self.wallpaper.insert(name.clone(), paper);
+                }
+                Err(err) => {
+                    // Once, not every frame: a wallpaper that will not load is
+                    // a line in the log and a plain background, not a session
+                    // that stops.
+                    tracing::error!(?err, "the wallpaper would not load");
+                    self.wallpaper_source = None;
+                    return None;
+                }
+            }
+        }
+        self.wallpaper.get_mut(&name)
+    }
+
     pub(crate) fn tweaks_panel(&mut self) -> Option<&mut crate::surface::ShellSurface> {
         if !crate::dev::debug_mode() {
             return None;

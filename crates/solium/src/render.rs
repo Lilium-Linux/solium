@@ -423,6 +423,27 @@ pub(crate) fn elements(
         elements.push(Element::Chrome(element));
     }
 
+    // The wallpaper, underneath everything the session owns.
+    //
+    // Built here and pushed at the very end, because this list is topmost-first:
+    // everything added after this point is drawn *over* it, so the last thing
+    // in the list is the bottom of the screen.
+    //
+    // A layer surface on the `background` layer still wins -- those go in the
+    // loop above, which is earlier in the list and therefore on top. Somebody
+    // running `swaybg` gets `swaybg`, and sets `wallpaper = false` to stop
+    // paying for both.
+    let wallpaper = output.as_ref().and_then(|output| {
+        let area = state.space.output_geometry(output)?;
+        let element = state.wallpaper_for(output)?.element(
+            renderer,
+            smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
+            now,
+            1.0,
+            scale,
+        )?;
+        Some(Element::Chrome(element))
+    });
     for (pane, window) in state.on_screen() {
         let Some(global) = state.pane_outer_of(pane) else {
             continue;
@@ -636,6 +657,10 @@ pub(crate) fn elements(
                 ))
             }));
         }
+    }
+
+    if let Some(wallpaper) = wallpaper {
+        elements.push(wallpaper);
     }
 
     elements

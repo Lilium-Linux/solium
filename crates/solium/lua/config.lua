@@ -21,6 +21,26 @@ local defaults = {
     -- Space between windows and around the work area, in logical pixels.
     gap = 12,
 
+    -- The wallpaper.
+    --
+    -- The one that ships is the default; a path replaces it, and `false`
+    -- turns it off. Turn it off if you run `swaybg`, `hyprpaper` or a shell
+    -- that draws its own -- a layer surface on the background layer is drawn
+    -- over this one, so leaving both on means paying for a picture nobody
+    -- sees.
+    --
+    --     wallpaper = "~/Pictures/whatever.png",
+    --     wallpaper = false,
+    --
+    -- `~` is expanded. The image is cropped to fill the screen rather than
+    -- fitted, so nothing is letterboxed.
+    --
+    -- What actually draws it is `qml/wallpaper.qml`, and that is the more
+    -- interesting knob: copy it to ~/.config/solium/qml/wallpaper.qml and the
+    -- background can be a gradient, a shader, a clock, or anything else QML
+    -- can be. `super+shift+r` reloads it while the session runs.
+    wallpaper = "solium",
+
     -- The keyboard.
     --
     -- Empty means "whatever the session already said". Every name here is an

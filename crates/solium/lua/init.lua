@@ -12,6 +12,7 @@ sol.decoration(config.decoration)
 sol.loading(config.loading)
 -- Where the monitors go. Applied on reload too, so moving a screen in the
 -- configuration is `super+shift+r` rather than logging out.
+sol.wallpaper(config.wallpaper)
 sol.keyboard(config.keyboard)
 sol.monitors(config.monitors)
 
