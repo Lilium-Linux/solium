@@ -15,6 +15,7 @@ a demo into a regression test.
 | `SOLIUM_OUTPUTS=<n>` | Give the nested backend `n` monitors, side by side in its one window (1–4). Each gets its own layer map, work area and render pass, drawn into a texture of its own exactly as it would be into its own buffer. One is the default and takes the ordinary path unchanged. |
 | `SOLIUM_LUA_INIT=<path>` | Load this configuration instead of `~/.config/solium/init.lua` or the bundled one. |
 | `SOLIUM_QML_TOPBAR=`, `SOLIUM_QML_TITLEBAR=` | Load chrome from elsewhere, so it can be restyled without a rebuild. |
+| `SOLIUM_QML_GPU=1` | Bring Qt up on the OpenGL scene graph and render QML into a dmabuf the compositor allocated, rather than rasterising it on the CPU. **Not yet usable for a session** — see *QML on the GPU*. |
 | `SOLIUM_DEV_IMAGE=` | The container `dev/run-nested.sh` runs in. |
 | `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
 | `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |
@@ -440,6 +441,83 @@ wrong otherwise, and both were hit:
 
   On a 260 Hz display, 55 fps puts a dragged window four frames behind the
   cursor, which is exactly what it looks like.
+
+**Never glob `target/debug/build/solium-*/out/`.** The Qt host is compiled into
+`libsolium_qml_host.a` under that path, and there is more than one such
+directory: cargo makes a separate one per unit metadata, so `cargo build -p
+solium` and `cargo build` (or `cargo test`) each own one. A test harness or a
+script that links "the" archive by glob picks whichever the shell sorts first,
+which is not the newest, and there is no error — the link succeeds and you
+measure a build from an hour ago. It cost a full round of debugging a fix that
+was already in the tree.
+
+This is not something one commit introduced and another can remove; it is how
+cargo lays the directory out. Either pin the newest,
+
+```sh
+ls -td target/debug/build/solium-*/out | head -1
+```
+
+or compile `crates/solium/qml/host.cpp` from source in the harness's own
+`build.rs`, which is the only way to be certain that what runs is what is
+checked out.
+
+## QML on the GPU
+
+```sh
+SOLIUM_QML_GPU=1 ./target/debug/solium
+```
+
+Qt comes up on its OpenGL scene graph instead of the software rasteriser, and
+renders each scene into a dmabuf the compositor allocated through GBM rather
+than into a `QImage` it then has to upload. Off by default.
+
+**It cannot run a session yet.** Qt picks one scene graph per process and there
+is no way back, so the moment this succeeds every *software* scene stops
+loading — the wallpaper, the window frames and the cursor all fail with `a
+software scene cannot render on it`, and the desktop comes up empty. What the
+knob does today is answer, in the real compositor process, whether the path
+works on this machine:
+
+```
+INFO solium::qml: QML on the GPU: Qt rendered into a buffer we allocated
+                  node=/dev/dri/renderD128 fenced=true
+```
+
+That line means a buffer was allocated, imported into Qt's context as a
+texture, drawn into by real QML, and fenced with a `sync_file` the driver
+exported. `fenced=false` is also a pass — it means the driver declined to
+export a fence and the host waited with `glFinish` instead, which costs a stall
+and nothing else.
+
+Three things worth knowing before running it on a TTY:
+
+* **Qt must be kept off the card node.** Solium writes
+  `$XDG_RUNTIME_DIR/solium-eglfs-kms.json` naming the *render* node and
+  `"headless"`, and sets `QT_QPA_EGLFS_KMS_CONFIG` before Qt starts. Without
+  it eglfs opens `/dev/dri/card1`, and because Qt starts while the scripts load
+  — before `open_gpu` — the kernel hands *Qt* DRM master, logind's `SetMaster`
+  then fails, and the only thing said about it is Smithay's `unable to become
+  drm master`, which is benign noise every other run. A black screen on a TTY
+  with nothing to read. Both JSON keys are needed: `device` alone fails the
+  plugin with `drmModeGetResources failed (Permission denied)`, `headless`
+  alone still opens the card.
+
+* **`pkill -x solium` stops working.** Qt's eglfs installs its own `SIGTERM`
+  handler and the process no longer dies from one — measured: with the knob off
+  it exits, with it on it survives and needs `pkill -9`. The README says
+  elsewhere that `pkill` from another VT always works; with this knob it does
+  not. `Ctrl`+`Alt`+`Backspace` is unaffected, because that is Solium reading
+  its own input devices.
+
+* **Qt's `qWarning` does not go to stderr on this Fedora build.** It goes to
+  journald, so the whole diagnostic half of the host — every EGL and GL error
+  code the import path prints — is invisible in the terminal and in
+  `session.log`. Set `QT_FORCE_STDERR_LOGGING=1` or you debug blind:
+
+  ```sh
+  SOLIUM_QML_GPU=1 QT_FORCE_STDERR_LOGGING=1 ./target/debug/solium
+  ```
 
 ## Checking an animation frame by frame
 
