@@ -164,6 +164,14 @@ pub(crate) struct Solium {
 
     /// Registers `ext_session_lock_manager_v1`: the lock screen. See `lock.rs`.
     pub(crate) session_lock_state: SessionLockManagerState,
+    /// The set of monitors the backend is driving may no longer be right.
+    ///
+    /// Set when a configuration reload changes which monitors are enabled, and
+    /// read by the hardware backend, which is the only one with connectors to
+    /// look at. A flag rather than a `Request` because it is not a thing the
+    /// session does -- it is a thing the session notices.
+    pub(crate) rescan_outputs: bool,
+
     /// Set while the session is locked, and the single thing every other part
     /// of the compositor checks before it draws or delivers anything.
     ///
@@ -589,6 +597,7 @@ impl Solium {
             keyboard: crate::keymap::State::initial(),
             session_lock_state: crate::lock::state(&display_handle),
             lock: None,
+            rescan_outputs: false,
             seat_state,
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),
             pending_captures: Vec::new(),
@@ -1594,7 +1603,15 @@ impl Solium {
                     }
                 }
                 Command::Monitors(arrangement) => {
-                    self.arrangement = arrangement;
+                    let was = std::mem::replace(&mut self.arrangement, arrangement);
+                    // `enabled = false` on a monitor is an unplug as far as
+                    // everything downstream is concerned, and `enabled = true`
+                    // is a plug -- so the backend is asked to look again
+                    // rather than this growing its own way to drop a screen.
+                    // Nothing to do nested: there are no connectors there.
+                    if was.enablement() != self.arrangement.enablement() {
+                        self.rescan_outputs = true;
+                    }
                     // Applied immediately, and applied again on reload, so
                     // moving a monitor is `super+shift+r` rather than logging
                     // out. Anything already placed is now measured against a

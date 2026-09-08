@@ -35,7 +35,7 @@ Each of these is a day where somebody stops using the compositor.
 |---|---|
 | ~~[#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout~~ | **done**, and the entry that used to be here was wrong: it said every session was US QWERTY with no way to change it. `XkbConfig::default()` is empty names, and xkbcommon reads `XKB_DEFAULT_LAYOUT` when they are, so that always worked. What was actually missing was a *setting* — and the repeat rate, which no environment variable reaches |
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) `text-input-v3`, `input-method-v2` | no CJK, no compose key, no emoji picker, no on-screen keyboard — and the on-screen keyboard is what a phone is |
-| [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | a laptop lid, a dock, a monitor's power switch. "Restart your session" is not an answer |
+| [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | written and never run against a real cable — see the backend row below |
 | [#24](https://github.com/Lilium-Linux/solium/issues/24) `cursor-shape-v1` | clients fall back today, so it costs nothing — until one does not |
 | [#50](https://github.com/Lilium-Linux/solium/issues/50) `ext-foreign-toplevel-list` | a dock cannot list windows or switch to them, so Lilium's own shell cannot have a task switcher |
 | [#51](https://github.com/Lilium-Linux/solium/issues/51) `wlr-output-management` | monitors live in a file; nothing can move one at runtime and `kanshi` cannot work |
@@ -89,7 +89,7 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 
 | | |
 |---|---|
-| [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | listed above because it is tier one, repeated here because it is a udev problem, not a protocol |
+| [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | the resync path is written and has never run against a real cable. The diff is unit-tested; nothing else is |
 | [#63](https://github.com/Lilium-Linux/solium/issues/63) multi-GPU | `udev::primary_gpu` and nothing else. A laptop with a discrete card renders on one of them, and a monitor on the other card's port cannot be driven at all |
 | [#44](https://github.com/Lilium-Linux/solium/issues/44) monitor identity | a screen is matched by which port it is in, so moving a cable moves the configuration |
 | [#45](https://github.com/Lilium-Linux/solium/issues/45) mirroring | no way to put one screen on another. Every presentation wants it |

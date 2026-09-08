@@ -85,6 +85,23 @@ pub(crate) fn surface_under(
         .map(|(surface, offset)| (surface, (geometry.loc + offset).to_f64()))
 }
 
+/// Tell every bar and dock on a monitor that it is going away.
+///
+/// The protocol is explicit: when an output is destroyed, its layer surfaces
+/// are closed. Skipping it leaves a bar holding a surface for a screen that no
+/// longer exists, waiting for a configure that will never come -- and when the
+/// monitor is plugged back in, the bar does not reappear, because as far as it
+/// knows it never left.
+///
+/// The map itself needs no clearing: it lives in the output's own user data
+/// and goes when the output does.
+pub(crate) fn close_all(output: &Output) {
+    let map = layer_map_for_output(output);
+    for layer in map.layers() {
+        layer.layer_surface().send_close();
+    }
+}
+
 /// Whether a layer wants to be drawn above windows.
 pub(crate) fn is_above(layer: &LayerSurface) -> bool {
     matches!(layer.layer(), Layer::Top | Layer::Overlay)

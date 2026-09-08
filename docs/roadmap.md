@@ -121,7 +121,7 @@ compositor and does not come back.
 | [#54](https://github.com/Lilium-Linux/solium/issues/54) output power | nothing can turn a screen off, which is what an idle timeout is for on a laptop |
 | [#63](https://github.com/Lilium-Linux/solium/issues/63) multi-GPU | a monitor on the second card cannot be driven at all — which is docking an ordinary laptop |
 | ~~[#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit~~ | **done**, with `ext-idle-notify` beside it — the two are one feature. Blanking policy is still nobody's: see `wlr-output-power-management` |
-| [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | a laptop lid, a dock, a monitor's power switch. "Restart your session" is not an answer |
+| [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | **written, never run.** A monitor plugged in mid-session is picked up and one unplugged is dropped -- on paper. It cannot be tested here (no connectors nested, no `vkms` without root) and needs a session on the hardware |
 | [#24](https://github.com/Lilium-Linux/solium/issues/24) cursor-shape | clients fall back today, so it costs nothing — until one does not |
 | [#50](https://github.com/Lilium-Linux/solium/issues/50) foreign-toplevel | a dock cannot list windows or switch to them, so Lilium's own shell cannot have a task switcher |
 | [#51](https://github.com/Lilium-Linux/solium/issues/51) output-management | monitors are configured in a file; E8's settings surface cannot move one at runtime, and `kanshi` cannot work |

@@ -183,6 +183,24 @@ pub(crate) struct Arrangement {
 }
 
 impl Arrangement {
+    /// Which monitors this arrangement enables, by name, in a form two
+    /// arrangements can be compared on.
+    ///
+    /// Only the enablement, because that is the only part of a monitor
+    /// configuration that changes *which screens exist*. Moving one, or
+    /// changing its mode, is answered by `place_outputs` and a modeset; taking
+    /// one away is an unplug and has to go through the same path a real unplug
+    /// does.
+    pub(crate) fn enablement(&self) -> Vec<(String, bool)> {
+        let mut names: Vec<(String, bool)> = self
+            .placements
+            .iter()
+            .map(|place| (place.name.clone(), place.enabled))
+            .collect();
+        names.sort();
+        names
+    }
+
     pub(crate) fn new(placements: Vec<Placement>) -> Self {
         Self { placements }
     }
@@ -545,6 +563,7 @@ pub(crate) fn union(space: &Space<Window>) -> Option<Rectangle<i32, Logical>> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     /// A monitor named with nothing said about it: on, not primary, wherever
@@ -568,6 +587,24 @@ mod tests {
             .iter()
             .map(|(name, w, h)| ((*name).to_owned(), Size::from((*w, *h))))
             .collect()
+    }
+
+    /// Only enablement, and order-independent. Two configurations that enable
+    /// the same monitors are the same set of screens however they are written,
+    /// and a reload that merely reordered the list must not tear every monitor
+    /// down and build it again.
+    #[test]
+    fn enablement_ignores_everything_but_which_monitors_are_on() {
+        let off = |name: &str| Placement {
+            enabled: false,
+            ..named(name)
+        };
+        let one = Arrangement::new(vec![named("DP-1"), off("DP-2")]);
+        let reordered = Arrangement::new(vec![off("DP-2"), at("DP-1", 100, 0)]);
+        assert_eq!(one.enablement(), reordered.enablement());
+
+        let both_on = Arrangement::new(vec![named("DP-1"), named("DP-2")]);
+        assert_ne!(one.enablement(), both_on.enablement());
     }
 
     fn at(name: &str, x: i32, y: i32) -> Placement {
