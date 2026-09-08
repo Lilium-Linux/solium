@@ -25,7 +25,10 @@ use wayland_client::protocol::{
     wl_buffer::WlBuffer,
     wl_compositor::WlCompositor,
     wl_output::{self, WlOutput},
-    wl_registry, wl_shm,
+    wl_pointer::{self, WlPointer},
+    wl_registry,
+    wl_seat::WlSeat,
+    wl_shm,
     wl_shm_pool::WlShmPool,
     wl_surface::WlSurface,
 };
@@ -67,6 +70,11 @@ struct Probe {
     wm_base: Option<XdgWmBase>,
     layer_shell: Option<ZwlrLayerShellV1>,
     screencopy: Option<ZwlrScreencopyManagerV1>,
+    seat: Option<WlSeat>,
+    /// Where the compositor said the pointer was, in the surface's own
+    /// coordinates. The one number a client cannot check any other way: a
+    /// compositor that reports the wrong place has buttons that miss.
+    pointer_at: Vec<(f64, f64)>,
     decorations: Option<ZxdgDecorationManagerV1>,
     presentation: Option<WpPresentation>,
     /// What a capture told us to allocate, and how it went.
@@ -297,6 +305,22 @@ fn main() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
+        }
+        // Where the pointer was told it was, while it was over a bar. The bars
+        // are anchored to the top of the screen at y 0, so with a click driven
+        // to a known place these coordinates should be that place. Printed
+        // rather than asserted because only the caller knows where it aimed.
+        if probe.pointer_at.is_empty() {
+            println!("the pointer never entered a bar");
+        } else {
+            let mut seen: Vec<String> = Vec::new();
+            for (x, y) in &probe.pointer_at {
+                let at = format!("{x:.0},{y:.0}");
+                if !seen.contains(&at) {
+                    seen.push(at);
+                }
+            }
+            println!("pointer, in the bar's own coordinates: {}", seen.join("  "));
         }
     }
 
@@ -1039,6 +1063,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
             "zwlr_screencopy_manager_v1" => {
                 state.screencopy = Some(registry.bind(name, version.min(3), handle, ()));
             }
+            "wl_seat" => {
+                let seat: WlSeat = registry.bind(name, version.min(5), handle, ());
+                seat.get_pointer(handle, ());
+                state.seat = Some(seat);
+            }
             "zxdg_decoration_manager_v1" => {
                 state.decorations = Some(registry.bind(name, version.min(1), handle, ()));
             }
@@ -1142,6 +1171,37 @@ delegate_noop!(Probe: ignore WlBuffer);
 delegate_noop!(Probe: ignore XdgToplevel);
 delegate_noop!(Probe: ignore ZwlrLayerShellV1);
 delegate_noop!(Probe: ignore ZwlrScreencopyManagerV1);
+delegate_noop!(Probe: ignore WlSeat);
+
+impl Dispatch<WlPointer, ()> for Probe {
+    fn event(
+        probe: &mut Self,
+        _pointer: &WlPointer,
+        event: wl_pointer::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        // `enter` and `motion` both carry the position *within the surface*,
+        // and that is the only number here worth recording: the compositor
+        // works in its own coordinates and has to subtract the surface's
+        // corner to get this one. Subtracting the wrong corner is invisible
+        // from inside the compositor and is a bar whose buttons all miss.
+        match event {
+            wl_pointer::Event::Enter {
+                surface_x,
+                surface_y,
+                ..
+            }
+            | wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => probe.pointer_at.push((surface_x, surface_y)),
+            _ => {}
+        }
+    }
+}
 delegate_noop!(Probe: ignore ZxdgDecorationManagerV1);
 
 impl Dispatch<ZxdgToplevelDecorationV1, ()> for Probe {

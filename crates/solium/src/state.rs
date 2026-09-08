@@ -1806,9 +1806,12 @@ impl Solium {
         // output hit-tests the right strip on the wrong screen.
         if let Some(output) = monitor::at(&self.space, location)
             && let Some(geometry) = self.space.output_geometry(&output)
-            && let Some(found) = layer::surface_under(&output, location - geometry.loc.to_f64())
+            && let Some((surface, origin)) =
+                layer::surface_under(&output, location - geometry.loc.to_f64())
         {
-            return Some(found);
+            // `origin` came back in the output's coordinates; the pointer is
+            // measured in the compositor's.
+            return Some((surface, origin + geometry.loc.to_f64()));
         }
 
         let now = self.clock.now();

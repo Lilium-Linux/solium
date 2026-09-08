@@ -83,6 +83,20 @@ Layer sizes are logical. A probe that is wrong about the protocol is worse than
 no probe, so its expectations are worth as much scrutiny as the compositor's
 behaviour.
 
+With `WL_PROBE_HOLD` set it also reports where the compositor said the pointer
+was, in the bar's own coordinates. Drive the pointer somewhere known and the
+two numbers should match:
+
+    SOLIUM_DRAG_AT="4000:400,20>400,20" ./target/debug/solium &
+    WL_PROBE_HOLD=7 WAYLAND_DISPLAY=wayland-1 ./target/debug/wl-probe
+
+That is the only way to check it: the compositor works in its own coordinates
+and subtracts the surface's corner to get the client's, and subtracting the
+wrong corner is invisible from the inside. It was subtracting the wrong corner.
+Every bar and dock was told the pointer was at `0,0` no matter where it really
+was — so every button on every panel would have missed, and the one at the
+top-left corner would have swallowed every click.
+
 `clipboard-check.sh` runs its X11 half in a container, because the host has no
 `xclip` and cannot install one. **Run it more than once.** The bug it was
 written for failed about one time in three, so a single green run proves
