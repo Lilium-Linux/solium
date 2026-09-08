@@ -11,6 +11,8 @@
 //! deliberately narrow: a handle, a render call, some setters. Everything Qt is
 //! behind the C ABI.
 
+mod target;
+
 use std::{
     ffi::{CStr, CString, c_char, c_double, c_int, c_longlong},
     path::Path,
