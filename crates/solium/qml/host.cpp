@@ -415,6 +415,27 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
     if (g_app == nullptr) {
         return fail("qt was not started");
     }
+    // The mirror of the check solium_qml_scene_new_gpu opens with, and not
+    // symmetry for its own sake: a *software* scene on a GPU host is a
+    // segfault, not a bad-looking frame.
+    //
+    // Everything below succeeds under g_gpu_mode — the window is built, the QML
+    // loads, the QImage is attached — and the crash arrives a frame later,
+    // inside solium_qml_scene_render's control->sync(). With the RHI adaptation
+    // selected Qt builds a QSGBatchRenderer, which asks the render context for
+    // its QRhi; this scene never called initialize(), so there is none, and Qt
+    // dereferences it regardless. QRhi::ubufAlignment() on a null this, SIGSEGV,
+    // the session gone. Measured: the compositor came up, drew its first cursor
+    // frame and died in that call.
+    //
+    // Refusing at construction turns that into a scene that will not load,
+    // which every caller in the compositor already handles by drawing nothing
+    // and saying so — a bare window, an invisible pointer, a gap in the
+    // picture. All recoverable, none of them fatal.
+    if (g_gpu_mode) {
+        return fail("this process came up on the GPU scene graph and a software scene cannot "
+                    "render on it; build it with solium_qml_scene_new_gpu instead");
+    }
 
     auto *scene = new SoliumQmlScene();
     scene->width = width > 0 ? width : 1;
