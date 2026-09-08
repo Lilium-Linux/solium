@@ -26,6 +26,7 @@ mod qml;
 mod render;
 mod screencopy;
 mod script;
+mod scripted;
 mod state;
 mod surface;
 mod synth;

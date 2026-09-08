@@ -12,13 +12,16 @@ sol.decoration(config.decoration)
 sol.loading(config.loading)
 -- Where the monitors go. Applied on reload too, so moving a screen in the
 -- configuration is `super+shift+r` rather than logging out.
-sol.wallpaper(config.wallpaper)
 sol.keyboard(config.keyboard)
 sol.monitors(config.monitors)
 
 -- Only reachable when the compositor was started with --debug-mode, but the
 -- entries are declared either way: what costs nothing to declare should not
 -- need a conditional.
+-- The wallpaper is a script like any other mode: `sol.surface` and a QML
+-- file, and nothing in the compositor knows what a wallpaper is.
+require("wallpaper")
+
 require("tweaks")
 
 require("modes")

@@ -382,6 +382,18 @@ pub(crate) fn elements(
         elements.push(Element::Chrome(element));
     }
 
+    // Scripted surfaces at the top layer: above the windows, and below the
+    // client surfaces on the same layer -- a real bar covers a scripted one,
+    // because the client was installed on purpose.
+    elements.extend(scripted(
+        state,
+        renderer,
+        crate::scripted::Layer::Top,
+        screen,
+        now,
+        scale,
+    ));
+
     // Anchored surfaces above the windows: panels, notifications, an overlay.
     // Collected first because the frame is built topmost-first.
     //
@@ -407,6 +419,17 @@ pub(crate) fn elements(
         }
     }
 
+    // Scripted surfaces at the overlay layer: above the client bars, below
+    // the pointer and the tweaks panel.
+    elements.extend(scripted(
+        state,
+        renderer,
+        crate::scripted::Layer::Overlay,
+        screen,
+        now,
+        scale,
+    ));
+
     // The Developer Tweaks panel, above everything: it is a tool for looking
     // at what the compositor is doing, so nothing should be able to cover it.
     if let Some(area) = state.tweaks_area()
@@ -423,27 +446,6 @@ pub(crate) fn elements(
         elements.push(Element::Chrome(element));
     }
 
-    // The wallpaper, underneath everything the session owns.
-    //
-    // Built here and pushed at the very end, because this list is topmost-first:
-    // everything added after this point is drawn *over* it, so the last thing
-    // in the list is the bottom of the screen.
-    //
-    // A layer surface on the `background` layer still wins -- those go in the
-    // loop above, which is earlier in the list and therefore on top. Somebody
-    // running `swaybg` gets `swaybg`, and sets `wallpaper = false` to stop
-    // paying for both.
-    let wallpaper = output.as_ref().and_then(|output| {
-        let area = state.space.output_geometry(output)?;
-        let element = state.wallpaper_for(output)?.element(
-            renderer,
-            smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
-            now,
-            1.0,
-            scale,
-        )?;
-        Some(Element::Chrome(element))
-    });
     for (pane, window) in state.on_screen() {
         let Some(global) = state.pane_outer_of(pane) else {
             continue;
@@ -638,6 +640,17 @@ pub(crate) fn elements(
         }));
     }
 
+    // Scripted surfaces at the bottom layer: under the windows, over the
+    // client background surfaces and the wallpaper.
+    elements.extend(scripted(
+        state,
+        renderer,
+        crate::scripted::Layer::Bottom,
+        screen,
+        now,
+        scale,
+    ));
+
     // And the ones below: a wallpaper, and anything else a shell puts behind
     // the windows. This output's own, as above.
     if let Some(output) = output.as_ref() {
@@ -659,11 +672,76 @@ pub(crate) fn elements(
         }
     }
 
-    if let Some(wallpaper) = wallpaper {
-        elements.push(wallpaper);
-    }
+    // The bottom of the frame: a wallpaper and anything else declared there.
+    // After the client background surfaces above, so a `swaybg` covers this
+    // rather than the other way round.
+    elements.extend(scripted(
+        state,
+        renderer,
+        crate::scripted::Layer::Background,
+        screen,
+        now,
+        scale,
+    ));
 
     elements
+}
+
+/// Everything a script asked the compositor to draw, at one layer.
+///
+/// One function for the wallpaper, a bar, an overlay and whatever else gets
+/// declared — which is the whole point of `scripted.rs`. Nothing in here knows
+/// what any of them are for.
+fn scripted(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    layer: crate::scripted::Layer,
+    screen: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    now: std::time::Duration,
+    scale: f64,
+) -> Vec<Element> {
+    let Some(output) = state.output_for(screen) else {
+        return Vec::new();
+    };
+    let Some(geometry) = state.space.output_geometry(&output) else {
+        return Vec::new();
+    };
+    let primary = state.primary_output();
+
+    // Which of them belong on this screen, decided before anything is
+    // borrowed mutably to rasterise it.
+    let wanted: Vec<(
+        usize,
+        smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    )> = state
+        .surfaces
+        .iter()
+        .enumerate()
+        .filter(|(_, surface)| surface.layer() == layer)
+        .filter_map(|(index, surface)| {
+            Some((index, surface.area_on(&output, geometry, primary.as_ref())?))
+        })
+        .collect();
+
+    let mut drawn = Vec::new();
+    for (index, area) in wanted {
+        let Some(surface) = state.surfaces.get_mut(index) else {
+            continue;
+        };
+        let Some(instance) = surface.instance(&output) else {
+            continue;
+        };
+        if let Some(element) = instance.element(
+            renderer,
+            smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
+            now,
+            1.0,
+            scale,
+        ) {
+            drawn.push(Element::Chrome(element));
+        }
+    }
+    drawn
 }
 
 /// The pointer, however it is currently set.

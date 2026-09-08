@@ -136,9 +136,40 @@ wallpaper = "~/Pictures/whatever.png",
 layer is drawn *over* this one, so leaving both on means paying to rasterise a
 picture nobody sees.
 
-The more interesting knob is the file that draws it. Copy
-`qml/wallpaper.qml` to `~/.config/solium/qml/wallpaper.qml` and the background
-becomes whatever QML can be:
+The more interesting part is that **there is no wallpaper in the compositor.**
+`lua/wallpaper.lua` is nine lines and calls one thing:
+
+```lua
+sol.surface("wallpaper", {
+    scene = "wallpaper.qml",
+    layer = "background",
+    on    = "every-monitor",
+    properties = { source = "wallpaper/solium.png" },
+})
+```
+
+`sol.surface` draws any QML scene at any layer on any monitor, so a bar, a
+dock, a heads-up display or a debug overlay is the same call with a different
+`layer` and a different `on`:
+
+```lua
+sol.surface("clock", {
+    scene = "clock.qml",
+    layer = "top",
+    on    = { x = 40, y = 40, w = 420, h = 90 },
+    properties = { format = "HH:mm" },
+})
+```
+
+`layer` is `background`, `bottom`, `top` or `overlay`, and each sits *under*
+the matching wlr-layer-shell layer — so a real bar covers a scripted one, and
+`swaybg` covers this wallpaper. `on` takes `every-monitor`, `primary`, a
+connector name, or a rect in the global space.
+`sol.surface(name, false)` removes one. These are drawn, not clicked: a surface
+that wants the pointer is still a layer-shell client.
+
+Copy `qml/wallpaper.qml` to `~/.config/solium/qml/wallpaper.qml` and the
+background becomes whatever QML can be:
 
 ```qml
 import QtQuick

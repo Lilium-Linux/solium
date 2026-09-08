@@ -176,8 +176,12 @@ pub(crate) enum Command {
     Monitors(crate::monitor::Arrangement),
     /// Which layouts the keyboard has, which is live, and how keys repeat.
     Keyboard(crate::keymap::Request),
-    /// The wallpaper image, or `None` for none at all.
-    Wallpaper(Option<String>),
+    /// A surface for the compositor to draw in QML: a wallpaper, a bar, an
+    /// overlay. Boxed because it is much larger than the other variants and an
+    /// enum is as big as its widest arm.
+    Surface(Box<crate::scripted::Declaration>),
+    /// Take one away, by name.
+    SurfaceGone(String),
     /// Show or hide the Developer Tweaks panel.
     TweaksToggle,
     /// Move and resize a window for real — the layout's authority, not a
@@ -824,26 +828,91 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // The wallpaper. A path, `"solium"` for the one that ships, or `false`
-    // for none -- which is what somebody running `swaybg` or a shell of their
-    // own wants, so the compositor stops rasterising a picture nobody sees.
+    // Anything the compositor should draw in QML: a wallpaper, a bar, a dock,
+    // a heads-up display.
+    //
+    //     sol.surface("wallpaper", {
+    //         scene = "wallpaper.qml",
+    //         layer = "background",
+    //         on    = "every-monitor",
+    //         properties = { source = "…" },
+    //     })
+    //
+    // `sol.surface(name, false)` takes one away. Re-declaring the same name
+    // replaces it, so running the configuration again is idempotent.
+    //
+    // This is the primitive the wallpaper used to be a special case of. See
+    // `scripted.rs` for why it is worth having rather than a `Command` each.
     sol.set(
-        "wallpaper",
-        lua.create_function(|lua, source: Value| {
-            let wanted = match source {
-                Value::String(path) => Some(path.to_str()?.to_owned()),
-                // `false` means none at all. `nil` -- which is what arrives
-                // when the configuration has no `wallpaper` key -- means the
-                // one that ships, so a fresh install has a desktop rather than
-                // a flat colour.
-                Value::Boolean(false) => None,
-                Value::Nil | Value::Boolean(true) => {
-                    Some(crate::surface::DEFAULT_WALLPAPER.to_owned())
+        "surface",
+        lua.create_function(|lua, (name, options): (String, Value)| {
+            let options = match options {
+                Value::Table(options) => options,
+                // `false` and `nil` both remove it, so a configuration that
+                // stops declaring something and one that declares it off mean
+                // the same thing.
+                _ => {
+                    with_pending(lua, |pending| {
+                        pending.commands.push(Command::SurfaceGone(name.clone()));
+                    })?;
+                    return Ok(Value::Nil);
                 }
-                _ => return Ok(Value::Nil),
             };
+
+            let scene: String = options.get("scene")?;
+            let Some(scene) = crate::scripted::find_scene(&scene) else {
+                // Named rather than ignored: a scene that is not there is a
+                // typo, and a surface that silently does not appear is the
+                // hardest kind of configuration mistake to find.
+                tracing::error!(surface = name, scene, "no such QML scene");
+                return Ok(Value::Nil);
+            };
+
+            let layer = options
+                .get::<Option<String>>("layer")?
+                .as_deref()
+                .and_then(crate::scripted::Layer::parse)
+                .unwrap_or_default();
+
+            let on = match options.get::<Value>("on")? {
+                Value::String(where_) => match where_.to_str()?.as_ref() {
+                    "primary" => crate::scripted::On::Primary,
+                    "every-monitor" => crate::scripted::On::EveryMonitor,
+                    monitor => crate::scripted::On::Monitor(monitor.to_owned()),
+                },
+                Value::Table(rect) => match rect_from(&rect)? {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "a rect from a script is screen-sized"
+                    )]
+                    Some(rect) => crate::scripted::On::Rect(smithay::utils::Rectangle::new(
+                        (rect.x.round() as i32, rect.y.round() as i32).into(),
+                        (
+                            (rect.w.round() as i32).max(1),
+                            (rect.h.round() as i32).max(1),
+                        )
+                            .into(),
+                    )),
+                    None => crate::scripted::On::EveryMonitor,
+                },
+                _ => crate::scripted::On::EveryMonitor,
+            };
+
+            let properties = match options.get::<Option<Table>>("properties")? {
+                Some(table) => json_object(&table)?,
+                None => "{}".to_owned(),
+            };
+
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Wallpaper(wanted.clone()));
+                pending
+                    .commands
+                    .push(Command::Surface(Box::new(crate::scripted::Declaration {
+                        name: name.clone(),
+                        scene: scene.clone(),
+                        layer,
+                        on: on.clone(),
+                        properties: properties.clone(),
+                    })));
             })?;
             Ok(Value::Nil)
         })?,
@@ -1497,6 +1566,57 @@ fn with_pending(lua: &Lua, f: impl FnOnce(&mut Pending)) -> mlua::Result<()> {
             "sol functions may only be called from a handler",
         )),
     }
+}
+
+/// A Lua table as a JSON object, for a QML scene's properties.
+///
+/// Shallow on purpose. QML properties are scalars, lists and objects, and a
+/// deep converter would need to answer what a Lua table with both array and
+/// map keys means -- which is a question with no good answer and no caller
+/// asking it. One level of nesting covers every scene there is.
+fn json_object(table: &Table) -> mlua::Result<String> {
+    let mut out = String::from("{");
+    let mut first = true;
+    for pair in table.pairs::<String, Value>() {
+        let (key, value) = pair?;
+        let Some(rendered) = json_value(&value)? else {
+            continue;
+        };
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(&crate::scripted::json_string(&key));
+        out.push(':');
+        out.push_str(&rendered);
+    }
+    out.push('}');
+    Ok(out)
+}
+
+/// One value, or `None` for something JSON has no word for.
+fn json_value(value: &Value) -> mlua::Result<Option<String>> {
+    Ok(match value {
+        Value::String(text) => Some(crate::scripted::json_string(&text.to_str()?)),
+        Value::Integer(number) => Some(number.to_string()),
+        // Infinities and NaN are not JSON, and a scene handed `Infinity` fails
+        // to parse the whole bag rather than that one property.
+        Value::Number(number) if number.is_finite() => Some(number.to_string()),
+        Value::Boolean(yes) => Some(yes.to_string()),
+        Value::Table(table) => {
+            let nested = table
+                .clone()
+                .sequence_values::<Value>()
+                .filter_map(|item| item.ok().and_then(|item| json_value(&item).ok().flatten()))
+                .collect::<Vec<_>>();
+            Some(if nested.is_empty() {
+                json_object(table)?
+            } else {
+                format!("[{}]", nested.join(","))
+            })
+        }
+        _ => None,
+    })
 }
 
 fn rect_from(options: &Table) -> mlua::Result<Option<Rect>> {

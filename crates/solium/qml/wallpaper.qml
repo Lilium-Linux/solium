@@ -22,9 +22,11 @@ import QtQuick
 Item {
     id: paper
 
-    // The image to show, from `config.wallpaper`. Empty means the colour
-    // below and nothing else, which is also what a path that will not load
-    // falls back to.
+    // The image to show, from `config.wallpaper` by way of `lua/wallpaper.lua`.
+    // A relative path resolves against this file, which is how the shipped
+    // image is found; an absolute one is taken as given. Empty means the
+    // colour below and nothing else, which is also where a path that will not
+    // load ends up.
     required property string source
 
     // Underneath the image, always, and not merely when there is no image.
