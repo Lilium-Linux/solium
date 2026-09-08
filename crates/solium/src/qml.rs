@@ -160,8 +160,16 @@ const PREFLIGHT_SIDE: i32 = 64;
 /// the QPA platform plugin, Qt loads that inside `QGuiApplication`'s
 /// constructor, and Qt calls `qFatal` on a plugin it cannot bring up — SIGABRT,
 /// exit 134, no return value to inspect. So everything that can be decided
-/// before it is decided before it, and a `false` from this function is always a
-/// decision taken while the software path was still reachable.
+/// before it is decided before it — the render node, the KMS config, the GBM
+/// device *and the buffer itself* — and a `false` from this function is always
+/// a decision taken while the software path was still reachable.
+///
+/// The buffer belongs in that list and was not in it at first. Allocating it
+/// inside the pre-flight reads naturally, and it put the one remaining
+/// fallible, machine-dependent step on the wrong side of the door: a driver
+/// that will not give out an ARGB8888 render buffer would have got a committed
+/// GPU host and an empty desktop, one call after the software path was still
+/// there for the taking.
 ///
 /// The second is that a `1` back from it is not evidence the path *works*: it
 /// says Qt came up on an RHI, and every remaining thing the GPU path depends on
@@ -179,7 +187,7 @@ fn start_on_gpu(import_path: &CStr) -> bool {
         );
         return false;
     };
-    if let Err(err) = point_qt_away_from_the_card(&node) {
+    if let Err(err) = keep_qt_off_the_hardware(&node) {
         tracing::warn!(?err, "could not fence Qt off the card node; using software");
         return false;
     }
@@ -202,6 +210,20 @@ fn start_on_gpu(import_path: &CStr) -> bool {
             return false;
         }
     };
+    // And the buffer with it, for exactly the same reason. Opening the device
+    // says nothing about whether it will hand out an ARGB8888 buffer marked
+    // RENDERING; that is a separate question with its own ways to fail, and it
+    // can be answered here, while the software path still exists. Asking it one
+    // call later — inside the pre-flight, where it started — left a machine
+    // that cannot allocate with a committed GPU host and an empty desktop,
+    // which is the outcome this whole ordering is arranged to avoid.
+    let target = match target::allocate(&gbm, PREFLIGHT_SIDE, PREFLIGHT_SIDE) {
+        Ok(target) => target,
+        Err(err) => {
+            tracing::warn!(?err, "no buffer to render a scene into; using software");
+            return false;
+        }
+    };
 
     // SAFETY: `import_path` outlives the call. This is the point of no return:
     // it either sets the scene graph backend for the process or aborts it.
@@ -213,7 +235,11 @@ fn start_on_gpu(import_path: &CStr) -> bool {
         return false;
     }
 
-    match preflight(&gbm) {
+    // The device is finished with: the buffer above is the only thing this
+    // needed it for, and a `Dmabuf` outlives the `GbmDevice` it came from.
+    drop(gbm);
+
+    match preflight(target) {
         Ok(fenced) => {
             tracing::info!(
                 node = %node.display(),
@@ -249,9 +275,7 @@ fn start_on_gpu(import_path: &CStr) -> bool {
 /// `Ok(false)` is a pass, not a failure: the driver declining to export a fence
 /// means the host waited on the CPU with `glFinish` instead, which is correct
 /// and only costs a stall.
-fn preflight(gbm: &GbmDevice<DrmDeviceFd>) -> Result<bool> {
-    let target = target::allocate(gbm, PREFLIGHT_SIDE, PREFLIGHT_SIDE)
-        .context("allocating a buffer to test the GPU path with")?;
+fn preflight(target: target::Target) -> Result<bool> {
     let qml = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/probe.qml"));
     let mut scene = Scene::gpu(&qml, PREFLIGHT_SIDE, PREFLIGHT_SIDE, target, None)?;
     // A scene is dirty the moment it is built, so this always renders. `None`
@@ -265,7 +289,7 @@ fn preflight(gbm: &GbmDevice<DrmDeviceFd>) -> Result<bool> {
 
 /// The render node of the GPU this seat boots on.
 ///
-/// The *render* node, never the card: see `point_qt_away_from_the_card`. Found
+/// The *render* node, never the card: see `keep_qt_off_the_hardware`. Found
 /// through udev rather than taken from `tty::State::open_gpu`, which computes
 /// the same thing at `tty.rs:1110-1113`, because scenes are built while the
 /// scripts load and that happens *before* the GPU is opened — the ordering is
@@ -283,7 +307,14 @@ fn render_node() -> Option<PathBuf> {
     node.dev_path_with_type(NodeType::Render)
 }
 
-/// Point Qt's eglfs at a render node, headless, so it cannot take DRM master.
+/// Everything Qt has to be told before it exists, so it touches no hardware.
+///
+/// Four pieces of machine state eglfs will otherwise take for itself: the DRM
+/// card node, this process's input devices, its signal dispositions and the
+/// console keyboard. Every one of them already has an owner — the compositor —
+/// and every one of them is settled here, in the last moment before
+/// `QGuiApplication` reads them. The signal and keyboard halves are argued at
+/// the `set_var` calls below; the card node is the rest of this comment.
 ///
 /// eglfs does not *need* master and cannot take one by asking. The kernel gives
 /// it away implicitly, to whoever opens the card node while nobody holds it —
@@ -300,7 +331,7 @@ fn render_node() -> Option<PathBuf> {
 /// zero times and issues zero ioctls against it, and still renders QML into the
 /// dmabuf. `QT_QPA_EGLFS_DEVICE` does not exist in this Qt build; the config
 /// file is the only way in.
-fn point_qt_away_from_the_card(node: &Path) -> Result<()> {
+fn keep_qt_off_the_hardware(node: &Path) -> Result<()> {
     let node = node
         .to_str()
         .ok_or_else(|| anyhow!("the render node's path is not UTF-8"))?;
@@ -332,6 +363,41 @@ fn point_qt_away_from_the_card(node: &Path) -> Result<()> {
         // second reader of them inside Qt is a second consumer of every event.
         std::env::set_var("QT_QPA_EGLFS_DISABLE_INPUT", "1");
         std::env::set_var("QT_QPA_EGLFS_KMS_NO_EVENT_READER_THREAD", "1");
+        // Qt does not get to decide when this process dies.
+        //
+        // eglfs builds a QFbVtHandler, which installs handlers for SIGINT,
+        // SIGTERM, SIGCONT and SIGTSTP. They do not exit; each writes a byte to
+        // a socketpair, and the `_exit(1)` happens later, wherever Qt's event
+        // queue is next drained — for us that is `qml::tick`'s
+        // `processEvents`, reached only from `render::prepare`, which both
+        // backends gate on `redraw || animating`. So a SIGTERM to a compositor
+        // with nothing to draw is not handled and not fatal; it just sits
+        // there, and the next thing that wants a frame turns it into an
+        // `_exit(1)` from inside a render. That skips every Rust destructor on
+        // the way out — the libseat session, the DRM master release, the VT
+        // restore — and whether it happens at all depends on whether anything
+        // asked for a frame afterwards. A compositor that dies without putting
+        // the VT back is how a TTY session ends in a reboot.
+        //
+        // Verified against libQt6EglFSDeviceIntegration.so.6.11.1: this string
+        // is read at 0x12334 and gates the four `sigaction` calls at
+        // 0x123b1-0x123fd; the `_exit` is at 0x12467.
+        std::env::set_var("QT_QPA_NO_SIGNAL_HANDLER", "1");
+        // And it does not get to mute the console keyboard either.
+        //
+        // Reads backwards: setting this makes Qt *leave the terminal keyboard
+        // alone*. The same QFbVtHandler calls `isatty(0)` and, when stdin is a
+        // terminal — which it is for a session started from a TTY login shell —
+        // issues KDSKBMUTE and KDSKBMODE(K_OFF) on it. The matching restore
+        // lives in ~QFbVtHandler, and this process never destroys its
+        // QGuiApplication, so that restore cannot run.
+        //
+        // Solium already owns the console through libseat, which puts the VT in
+        // graphics mode and restores it at the end of the session. A second
+        // party muting the same keyboard and never unmuting it can only
+        // subtract, and Qt has no keyboard to serve here anyway — the line
+        // above told it not to take any input.
+        std::env::set_var("QT_QPA_ENABLE_TERMINAL_KEYBOARD", "1");
     }
     tracing::debug!(config = %config.display(), node, "pointed Qt's eglfs at the render node");
     Ok(())
