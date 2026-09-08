@@ -541,6 +541,24 @@ impl Scripts {
     /// A decoration reserving a different amount is the case that needs it:
     /// the slots are the same but what fits in them is not, and a layout that
     /// is never told goes on believing its own last arithmetic.
+    /// The set of monitors changed: one arrived, or one went away.
+    ///
+    /// Separate from `layout` because it is a different question. `layout`
+    /// asks a mode to arrange the windows it already knows about; this says
+    /// the screens themselves are not the screens they were, so a mode holding
+    /// per-monitor state -- which both shipped layouts do, one tree or one
+    /// view per screen -- has to re-home the windows whose monitor is gone
+    /// before arranging anything.
+    ///
+    /// Without it a window on an unplugged monitor is in a tree that nothing
+    /// iterates, because `tiling.apply` walks the monitors that *exist*. It
+    /// keeps its old slot, which is now off every screen, and it reappears
+    /// there when the monitor comes back -- which is exactly what a hardware
+    /// test found.
+    pub(crate) fn monitors_changed(&mut self, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "monitors", ()))
+    }
+
     pub(crate) fn relayout(&mut self, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "layout", ()))
     }

@@ -223,9 +223,10 @@ pub(crate) fn run() -> Result<()> {
                 model: "Winit".into(),
             },
         );
-        // The returned `GlobalId` is a handle, not a guard: dropping it does
-        // not remove the global, which is why nothing keeps it.
-        let _ = output.create_global::<Solium>(&display_handle);
+        // Kept, unlike before: a `GlobalId` is a handle and not a guard, so
+        // taking a nested monitor away needs this to remove it with. See
+        // `SOLIUM_OUTPUTS_AT`.
+        let global = output.create_global::<Solium>(&display_handle);
         output.change_current_state(
             Some(mode),
             Some(Transform::Flipped180),
@@ -237,7 +238,7 @@ pub(crate) fn run() -> Result<()> {
         // means the nested backend and the hardware get the same arrangement
         // from the same configuration.
         state.space.map_output(&output, (0, 0));
-        outputs.push(output);
+        outputs.push((output, global));
     }
     state.place_outputs();
     if count > 1 {
@@ -247,7 +248,7 @@ pub(crate) fn run() -> Result<()> {
     // window is one surface, so a position in it spans all of them.
     let output = outputs
         .first()
-        .cloned()
+        .map(|(output, _)| output.clone())
         .ok_or_else(|| anyhow::anyhow!("no outputs: SOLIUM_OUTPUTS must be at least 1"))?;
 
     // Scripts are loaded before the first frame so a mode can be triggered
@@ -293,6 +294,7 @@ pub(crate) fn run() -> Result<()> {
     let mut triggers = dev::triggers();
     let mut clicks = dev::clicks();
     let mut drags = dev::drags();
+    let mut screen_changes = dev::outputs_at();
     let mut loadings = dev::loading_at();
     // Reversed so `last` is the *earliest*, which is what the `while ... pop`
     // below wants. `drags` was the one list that missed this, so with more than
@@ -303,6 +305,7 @@ pub(crate) fn run() -> Result<()> {
     clicks.reverse();
     loadings.reverse();
     drags.reverse();
+    screen_changes.reverse();
 
     // Frame pacing, reported periodically. Latency is the thing this
     // compositor will be judged on, and "it feels laggy" is not something that
@@ -332,7 +335,7 @@ pub(crate) fn run() -> Result<()> {
                 // window opening on the screen you are not looking at.
                 let count = i32::try_from(outputs.len()).unwrap_or(1).max(1);
                 let width = (size.w / count).max(1);
-                for monitor in &outputs {
+                for (monitor, _) in &outputs {
                     monitor.change_current_state(
                         Some(Mode {
                             size: (width, size.h).into(),
@@ -416,6 +419,55 @@ pub(crate) fn run() -> Result<()> {
                 state.trigger(&combo);
             }
         }
+        // A nested monitor going away and coming back. The DRM half of hotplug
+        // needs a cable; this half -- what a layout does with a window whose
+        // monitor has gone -- is identical nested, and it is the half that has
+        // broken twice.
+        while screen_changes.last().is_some_and(|(at, _)| now >= *at) {
+            if let Some((_, wanted)) = screen_changes.pop() {
+                tracing::info!(wanted, have = outputs.len(), "scripted monitor change");
+                while outputs.len() > wanted {
+                    let Some((output, global)) = outputs.pop() else {
+                        break;
+                    };
+                    tracing::info!(monitor = output.name(), "monitor gone");
+                    state.display_handle.remove_global::<Solium>(global);
+                    crate::layer::close_all(&output);
+                    state.space.unmap_output(&output);
+                }
+                while outputs.len() < wanted {
+                    let index = outputs.len();
+                    let output = Output::new(
+                        format!("winit-{}", index + 1),
+                        PhysicalProperties {
+                            size: (0, 0).into(),
+                            subpixel: Subpixel::Unknown,
+                            make: "Solium".into(),
+                            model: "Winit".into(),
+                        },
+                    );
+                    let global = output.create_global::<Solium>(&display_handle);
+                    let mode = Mode {
+                        size: (width, size.h).into(),
+                        refresh,
+                    };
+                    output.change_current_state(
+                        Some(mode),
+                        Some(Transform::Flipped180),
+                        None,
+                        Some((0, 0).into()),
+                    );
+                    output.set_preferred(mode);
+                    state.space.map_output(&output, (0, 0));
+                    tracing::info!(monitor = output.name(), "monitor arrived");
+                    outputs.push((output, global));
+                }
+                // The same call the hardware backend makes, which is the whole
+                // point of this knob existing.
+                state.settle_monitors();
+            }
+        }
+
         while drags.last().is_some_and(|(at, _, _)| now >= *at) {
             if let Some((_, from, to)) = drags.pop() {
                 tracing::info!(?from, ?to, "scripted drag");

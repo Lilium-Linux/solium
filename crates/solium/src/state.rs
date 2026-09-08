@@ -1718,6 +1718,26 @@ impl Solium {
                 .into(),
         );
 
+        self.move_pane(pane, outer, was, animation, now);
+    }
+
+    /// Put a pane's outer rectangle somewhere, and make every copy of that
+    /// fact agree.
+    ///
+    /// There are three, and missing any one of them is a window that does not
+    /// move -- or worse, moves and comes back. The space is the authority for
+    /// a mapped window, so `sync_panes` writes it into the pane's slot every
+    /// frame: setting the slot without telling the space is undone before the
+    /// next frame is drawn, silently. That is not hypothetical, it is what the
+    /// first attempt at `rescue_offscreen` did.
+    fn move_pane(
+        &mut self,
+        pane: crate::pane::PaneId,
+        outer: Rectangle<i32, Logical>,
+        was: Rectangle<i32, Logical>,
+        animation: AnimationSpec,
+        now: Duration,
+    ) {
         // The frame's share comes off whichever sides it reserved; what is
         // left is the client's.
         let client = inner(outer, self.insets_of(pane));
@@ -3063,6 +3083,124 @@ impl Solium {
 
     /// Tell scripts a window has gone, so a layout can forget it.
     /// Tell the layout the space windows get has changed.
+    /// Tell the scripts the set of monitors is not what it was.
+    ///
+    /// Fired before the relayout rather than instead of it: re-homing the
+    /// windows and arranging them are two steps, and a mode that does the
+    /// first is still expecting the second.
+    /// Everything a change in the set of monitors has to do, in one call.
+    ///
+    /// Both backends call this and nothing else, so the nested one and the
+    /// hardware one cannot drift -- which matters more here than usual,
+    /// because the hardware path needs a cable to exercise and the nested one
+    /// does not.
+    pub(crate) fn settle_monitors(&mut self) {
+        self.place_outputs();
+        self.rescue_offscreen();
+        self.trigger_monitors_changed();
+        self.trigger_relayout();
+        self.redraw = true;
+    }
+
+    /// Bring back any window that is no longer on any screen.
+    ///
+    /// This is the compositor's job and not a layout's, which took two
+    /// hardware reports and a nested reproduction to establish. The obvious
+    /// place for it is the layout -- a monitor went, so re-run the layout and
+    /// it will put everything somewhere -- and that is wrong twice over. A
+    /// tiling layout only walks the monitors that *exist*, so a window in a
+    /// departed monitor's tree is in a tree nothing iterates. And the default
+    /// mode is floating, where no layout runs at all: `tiling.active` and
+    /// `scrolling.active` both start false, so on a stock configuration there
+    /// is nobody to ask.
+    ///
+    /// A window nobody can reach is not a layout preference, it is a window
+    /// the user has lost. So it is an invariant the compositor keeps, and a
+    /// script is free to move it again afterwards -- `trigger_relayout` runs
+    /// straight after this.
+    ///
+    /// Only windows that are *entirely* off every screen are touched. One
+    /// hanging half off an edge is a normal thing to have arranged on purpose.
+    fn rescue_offscreen(&mut self) {
+        let screens: Vec<Rectangle<i32, Logical>> = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output))
+            .collect();
+        // No screens at all: every window is off-screen and there is nowhere
+        // to put it. Leaving the slots alone means they are still where they
+        // were when a monitor comes back, which is the best available answer.
+        if screens.is_empty() {
+            return;
+        }
+
+        let stranded: Vec<(crate::pane::PaneId, Rectangle<i32, Logical>)> = self
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                let outer = self.pane_outer(pane)?;
+                screens
+                    .iter()
+                    .all(|screen| !screen.overlaps(outer))
+                    .then_some((pane.id(), outer))
+            })
+            .collect();
+
+        for (pane, outer) in stranded {
+            let centre = (
+                f64::from(outer.loc.x) + f64::from(outer.size.w) / 2.0,
+                f64::from(outer.loc.y) + f64::from(outer.size.h) / 2.0,
+            );
+            let Some(screen) = monitor::nearest(&self.space, centre.into())
+                .and_then(|output| self.space.output_geometry(&output))
+            else {
+                continue;
+            };
+            // Onto the nearest screen, keeping its size, clamped so the whole
+            // window is on it when it fits. Not centred: a window that was in
+            // the top-left of the monitor that went should still feel like the
+            // window that was in the top-left.
+            let size = (
+                outer.size.w.min(screen.size.w),
+                outer.size.h.min(screen.size.h),
+            );
+            let x = outer
+                .loc
+                .x
+                .clamp(screen.loc.x, screen.loc.x + screen.size.w - size.0);
+            let y = outer
+                .loc
+                .y
+                .clamp(screen.loc.y, screen.loc.y + screen.size.h - size.1);
+            let moved = Rectangle::new((x, y).into(), (size.0, size.1).into());
+            // Through the same move every layout uses. Setting the slot alone
+            // looks like it works and does not: the space still holds the old
+            // position and writes it back the next frame.
+            //
+            // Animated from where it was, which is off screen -- so it flies
+            // in from the edge the monitor was on rather than appearing. That
+            // is worth the two lines: a window that teleports is one the user
+            // has to find again.
+            let now = self.clock.now();
+            self.move_pane(pane, moved, outer, AnimationSpec::default(), now);
+            tracing::info!(
+                from = ?outer.loc,
+                to = ?moved.loc,
+                "a window was left on no screen and has been brought back"
+            );
+        }
+    }
+
+    pub(crate) fn trigger_monitors_changed(&mut self) {
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.monitors_changed(snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
     pub(crate) fn trigger_relayout(&mut self) {
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
