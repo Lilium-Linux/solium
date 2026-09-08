@@ -182,8 +182,6 @@ pub(crate) enum Command {
     Surface(Box<crate::scripted::Declaration>),
     /// Take one away, by name.
     SurfaceGone(String),
-    /// Show or hide the Developer Tweaks panel.
-    TweaksToggle,
     /// Move and resize a window for real — the layout's authority, not a
     /// transform. The compositor animates it there from where it was.
     Place {
@@ -417,50 +415,6 @@ impl Scripts {
     }
 
     /// Run the handler bound to a key combination.
-    /// The Developer Tweaks entries, as the scripts declared them.
-    ///
-    /// A JSON array, straight from Lua: the panel is a list of whatever the
-    /// configuration says it is, so adding a tweak is editing `tweaks.lua`
-    /// rather than the compositor.
-    pub(crate) fn tweaks(&self) -> Option<String> {
-        let sol = self.lua.globals().get::<Table>("sol").ok()?;
-        let entries: Table = sol.get("_tweaks").ok()?;
-        // Written out by hand rather than through a serialiser: three known
-        // string fields do not justify a dependency, and this is the same
-        // shape `publish_windows` already hands the shell.
-        let quoted = |value: String| value.replace('\\', "").replace('"', "'");
-        let mut out = String::from("[");
-        for (index, entry) in entries.sequence_values::<Table>().enumerate() {
-            let Ok(entry) = entry else { continue };
-            let id = quoted(entry.get("id").unwrap_or_default());
-            let label = quoted(entry.get("label").unwrap_or_default());
-            let group = quoted(entry.get("group").unwrap_or_default());
-            if index > 0 {
-                out.push(',');
-            }
-            out.push_str(&format!(
-                "{{\"id\":\"{id}\",\"label\":\"{label}\",\"group\":\"{group}\"}}"
-            ));
-        }
-        out.push(']');
-        Some(out)
-    }
-
-    /// Run the handler for a tweak the panel asked for.
-    pub(crate) fn tweak(&mut self, id: &str, snapshot: Snapshot) -> Outcome {
-        let id = id.to_owned();
-        self.dispatch(snapshot, move |sol| {
-            let handler: Value = sol.get("_tweak")?;
-            match handler {
-                Value::Function(function) => {
-                    function.call::<()>(id)?;
-                    Ok(true)
-                }
-                _ => Ok(false),
-            }
-        })
-    }
-
     pub(crate) fn key(&mut self, combo: &str, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, |sol| {
             let bindings: Table = sol.get("_bindings")?;
@@ -563,6 +517,20 @@ impl Scripts {
     /// test found.
     pub(crate) fn monitors_changed(&mut self, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "monitors", ()))
+    }
+
+    /// A scripted surface was pressed and asked for something.
+    pub(crate) fn surface_action(
+        &mut self,
+        name: &str,
+        action: &str,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        let name = name.to_owned();
+        let action = action.to_owned();
+        self.dispatch(snapshot, move |sol| {
+            call_listeners(sol, "surface", (name.clone(), action.clone()))
+        })
     }
 
     pub(crate) fn relayout(&mut self, snapshot: Snapshot) -> Outcome {
@@ -838,6 +806,10 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     //         properties = { source = "…" },
     //     })
     //
+    // `interactive = true` lets the pointer reach it: the scene sets an
+    // `action` string and a `sol.on("surface", …)` handler is told about it,
+    // which is how the tweaks panel works and how a bar's buttons would.
+    //
     // `sol.surface(name, false)` takes one away. Re-declaring the same name
     // replaces it, so running the configuration again is idempotent.
     //
@@ -902,6 +874,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 Some(table) => json_object(&table)?,
                 None => "{}".to_owned(),
             };
+            let interactive = options.get::<Option<bool>>("interactive")?.unwrap_or(false);
 
             with_pending(lua, |pending| {
                 pending
@@ -912,6 +885,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                         layer,
                         on: on.clone(),
                         properties: properties.clone(),
+                        interactive,
                     })));
             })?;
             Ok(Value::Nil)
@@ -1300,29 +1274,15 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // What the Developer Tweaks panel offers, and what to do when one is
     // pressed. Both live in Lua so the panel is a list of whatever the
     // configuration says rather than a menu built into the compositor.
+    // Whether the compositor was started with `--debug-mode`.
+    //
+    // A script's gate rather than the compositor's: the Developer Tweaks panel
+    // used to be gated in Rust, and now `lua/tweaks.lua` declines to declare
+    // itself. Anything else that only belongs in a development session can do
+    // the same.
     sol.set(
-        "tweaks",
-        lua.create_function(|lua, entries: Table| {
-            let sol: Table = lua.globals().get("sol")?;
-            sol.set("_tweaks", entries)
-        })?,
-    )?;
-
-    // Show or hide the panel. Does nothing without `--debug-mode`, so the
-    // binding can live in the ordinary configuration.
-    sol.set(
-        "tweaks_toggle",
-        lua.create_function(|lua, ()| {
-            with_pending(lua, |pending| pending.commands.push(Command::TweaksToggle))
-        })?,
-    )?;
-
-    sol.set(
-        "on_tweak",
-        lua.create_function(|lua, handler: mlua::Function| {
-            let sol: Table = lua.globals().get("sol")?;
-            sol.set("_tweak", handler)
-        })?,
+        "debug_mode",
+        lua.create_function(|_, ()| Ok(crate::dev::debug_mode()))?,
     )?;
 
     sol.set(

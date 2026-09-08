@@ -218,6 +218,19 @@ does; and the second monitor failing to light when it is moved from one port to
 another, which is the case where dropping has to happen before adding because
 there are fewer CRTCs than connectors.
 
+`SOLIUM_CLICK_AT` and `SOLIUM_DRAG_AT` are not two spellings of the same thing,
+and the difference cost an hour. `SOLIUM_CLICK_AT` calls `trigger_click`, which
+is the *script* click handler — it never touches the input path. `SOLIUM_DRAG_AT`
+goes through `synth`, `input::handle` and the real pointer, so it is the one
+that exercises hit-testing, grabs and anything a surface does with a press. A
+drag from a point to itself is a click:
+
+    SOLIUM_DRAG_AT="6500:1436,472>1436,472"
+
+Testing the Developer Tweaks panel with `SOLIUM_CLICK_AT` showed nothing
+happening and looked exactly like the panel being broken, when the panel was
+fine and the instrument was measuring something else.
+
 `clipboard-check.sh` runs its X11 half in a container, because the host has no
 `xclip` and cannot install one. **Run it more than once.** The bug it was
 written for failed about one time in three, so a single green run proves

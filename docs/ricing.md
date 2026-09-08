@@ -165,8 +165,38 @@ sol.surface("clock", {
 the matching wlr-layer-shell layer — so a real bar covers a scripted one, and
 `swaybg` covers this wallpaper. `on` takes `every-monitor`, `primary`, a
 connector name, or a rect in the global space.
-`sol.surface(name, false)` removes one. These are drawn, not clicked: a surface
-that wants the pointer is still a layer-shell client.
+`sol.surface(name, false)` removes one.
+
+`interactive = true` lets the pointer reach it. The scene sets an `action`
+string, the compositor takes it, and whoever is listening is told:
+
+```lua
+sol.surface("panel", { scene = "panel.qml", layer = "overlay",
+                       on = area, interactive = true })
+
+sol.on("surface", function(name, action)
+    if name == "panel" then
+        sol.log("pressed " .. action)
+    end
+end)
+```
+
+That is the whole of how the Developer Tweaks panel works, and it is entirely
+in `lua/tweaks.lua` — the compositor has no idea what a tweak is.
+
+**Place things on the `monitors` event, not at the top of your script.** Scripts
+load before the screens are known — on the hardware backend, before the GPU is
+even opened — so a rect computed at load time is computed against zeros. The
+event fires once when the monitors are first known and again on every hotplug,
+which is when a placement needs redoing anyway:
+
+```lua
+sol.on("monitors", function()
+    local screen = sol.monitor()
+    sol.surface("panel", { scene = "panel.qml", layer = "top",
+                           on = { x = screen.x, y = screen.y, w = screen.w, h = 40 } })
+end)
+```
 
 Copy `qml/wallpaper.qml` to `~/.config/solium/qml/wallpaper.qml` and the
 background becomes whatever QML can be:

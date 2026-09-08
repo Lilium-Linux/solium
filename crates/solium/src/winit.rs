@@ -263,6 +263,10 @@ pub(crate) fn run() -> Result<()> {
         }
     });
 
+    // The screens exist and the scripts have loaded: whichever came second,
+    // this is the first moment a script can be told where the monitors are.
+    state.monitors_ready();
+
     // Damage is tracked against the window. With one monitor the window *is*
     // the output, so the output's own tracker is right; with several the window
     // is the desk and each monitor is a texture on it, so it is built from the

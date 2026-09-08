@@ -258,11 +258,12 @@ fn pointer_motion<B: InputBackend>(
     // password field of is no use -- but nothing of the session's may notice
     // it going past.
     if state.lock.is_none() {
-        hover_frame(state, location);
-        if let Some(area) = state.work_area()
-            && let Some(shell) = state.shell()
-        {
-            shell.pointer(area, location.x, location.y, None);
+        // Scripted surfaces above the windows see the pointer first, so a
+        // button on a bar lights up on hover. Then frames, then the ones
+        // below.
+        if !state.surface_pointer(true, location, None) {
+            hover_frame(state, location);
+            state.surface_pointer(false, location, None);
         }
         follow_pointer(state, location, pointer.is_grabbed());
     }
@@ -341,11 +342,9 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
         // existed only on the nested path would be a lock screen that leaked
         // on the hardware and nowhere else.
         if state.lock.is_none() {
-            hover_frame(state, location);
-            if let Some(area) = state.work_area()
-                && let Some(shell) = state.shell()
-            {
-                shell.pointer(area, location.x, location.y, None);
+            if !state.surface_pointer(true, location, None) {
+                hover_frame(state, location);
+                state.surface_pointer(false, location, None);
             }
             follow_pointer(state, location, pointer.is_grabbed());
         }
@@ -537,34 +536,11 @@ fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bo
     state.focus_window(&window, SERIAL_COUNTER.next_serial());
 }
 
-/// Offer the pointer to the Developer Tweaks panel.
-///
-/// Returns whether the panel took it: it is drawn above everything, so a
-/// press inside it is not also a press on whatever is underneath.
-fn tweaks_pointer(
-    state: &mut Solium,
-    location: Point<f64, Logical>,
-    pressed: Option<bool>,
-) -> bool {
-    let Some(area) = state.tweaks_area() else {
-        return false;
-    };
-    if !area.to_f64().contains(location) {
-        return false;
-    }
-    let Some(panel) = state.tweaks_panel() else {
-        return false;
-    };
-    panel.pointer(area, location.x, location.y, pressed);
-    state.redraw = true;
-    true
-}
-
 /// Let a window frame see the pointer, so its buttons light up on hover.
+///
+/// The callers offer the pointer to the surfaces above the windows first, so
+/// nothing here has to know about panels.
 fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
-    if tweaks_pointer(state, location, None) {
-        return;
-    }
     // The whole window, not just the frame band: a decoration that reacts to
     // the cursor wants to know where it is while it crosses the client too.
     let under = state.decorated_under(location);
@@ -626,18 +602,11 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         return;
     }
 
-    // The shell sees the pointer before clients do, and only when nothing is
-    // being dragged.
+    // Scripted surfaces above the windows see the press before clients do, and
+    // only when nothing is being dragged. A bar, a panel, an overlay: all the
+    // same path, and the compositor knows what none of them are for.
     if !pointer.is_grabbed()
-        && let Some(area) = state.work_area()
-        && state.shell().is_some_and(|shell| {
-            shell.pointer(
-                area,
-                location.x,
-                location.y,
-                Some(button_state == ButtonState::Pressed),
-            )
-        })
+        && state.surface_pointer(true, location, Some(button_state == ButtonState::Pressed))
     {
         return;
     }
@@ -649,15 +618,6 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             state.trigger_click(location.x, location.y);
         }
         return;
-    }
-
-    // A press in the tweaks panel is the panel's, and nothing else's.
-    if !pointer.is_grabbed() {
-        let pressed = button_state == ButtonState::Pressed;
-        if tweaks_pointer(state, location, Some(pressed)) {
-            state.settle_tweaks();
-            return;
-        }
     }
 
     // A press on a frame belongs to the frame: it either hits a button or
@@ -782,6 +742,15 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                 state.focus_window(&window, serial);
             }
         }
+    }
+
+    // Scripted surfaces *below* the windows, which is where a dock or a
+    // desktop menu lives: they get the press only because nothing above
+    // wanted it.
+    if !pointer.is_grabbed()
+        && state.surface_pointer(false, location, Some(button_state == ButtonState::Pressed))
+    {
+        return;
     }
 
     pointer.button(
