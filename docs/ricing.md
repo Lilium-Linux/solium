@@ -124,6 +124,42 @@ you do not otherwise have is which application you are waiting for.
     SOLIUM_LOADING=mine        # ~/.config/solium/qml/loading/mine.qml
     SOLIUM_LOADING=~/mine.qml  # anywhere
 
+### Your wallpaper
+
+```lua
+wallpaper = "~/Pictures/whatever.png",
+```
+
+`~` is expanded, the image is cropped to fill rather than fitted, and
+`wallpaper = false` turns it off — which is what you want if you run `swaybg`,
+`hyprpaper`, or a shell that draws its own. A layer surface on the background
+layer is drawn *over* this one, so leaving both on means paying to rasterise a
+picture nobody sees.
+
+The more interesting knob is the file that draws it. Copy
+`qml/wallpaper.qml` to `~/.config/solium/qml/wallpaper.qml` and the background
+becomes whatever QML can be:
+
+```qml
+import QtQuick
+
+Item {
+    required property string source
+
+    Rectangle {
+        anchors.fill: parent
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: "#12002e" }
+            GradientStop { position: 1.0; color: "#7c4dff" }
+        }
+    }
+}
+```
+
+`super+shift+r` reloads it without ending the session. `source` is handed in
+whatever the configuration said, and a scene that ignores it — like the one
+above — is perfectly valid.
+
 ### Your keyboard
 
 ```lua

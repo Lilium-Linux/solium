@@ -1,3 +1,5 @@
+<img src="docs/brand/logotype.svg" width="132" alt="Solium">
+
 # Solium
 
 The compositor of [Lilium DE](https://github.com/Lilium-Linux). Wayland, written
@@ -6,12 +8,14 @@ in Rust on [Smithay](https://github.com/Smithay/smithay).
 One compositor for phone, tablet, laptop and desktop — tiling, scrolling,
 floating and overview modes, all scriptable, all animated by the same engine.
 
-![Three terminals tiled, with titlebars the compositor drew in QML](docs/tiling.png)
+![Two windows on the Solium wallpaper, one with a titlebar the compositor drew in QML](docs/desktop.png)
 
-Every titlebar above is QML rendered by the compositor and reloadable while the
-session runs; the arrangement is `lua/tiling.lua` and nothing about it is
-compiled in. [docs/modes.md](docs/modes.md) has the same picture for every other
-mode, frame by frame.
+Captured by the compositor reading back its own framebuffer. The window on the
+right wears a titlebar that is QML rendered in-process and reloadable while the
+session runs; the one on the left asked to draw its own and was let. The
+wallpaper is drawn by the compositor too, and is a QML file you can replace.
+[docs/modes.md](docs/modes.md) has the same picture for every mode, frame by
+frame.
 
 ## Running it
 
@@ -62,6 +66,12 @@ Protocols: `xdg-shell`, `wlr-layer-shell`, `wlr-screencopy`, `ext-session-lock`,
 `xdg-activation`, `wp-viewporter`, `wp-fractional-scale`, `wp-presentation`,
 `linux-dmabuf`, `relative-pointer`, `pointer-constraints`, `primary-selection`,
 `xwayland-shell`.
+
+The desktop has a wallpaper before anything else is running, because a session
+whose first frame is flat grey looks the same as a broken one. It is
+`qml/wallpaper.qml` — a QML file, so it can be a gradient, a shader or a clock
+instead — and a layer surface on the background layer still wins, so `swaybg`
+and anything like it work unchanged.
 
 Screenshots, recording and screen sharing all come from `wlr-screencopy`, so
 `grim`, `wf-recorder` and `xdg-desktop-portal-wlr` work — which is what a

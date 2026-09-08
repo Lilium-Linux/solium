@@ -176,6 +176,8 @@ pub(crate) enum Command {
     Monitors(crate::monitor::Arrangement),
     /// Which layouts the keyboard has, which is live, and how keys repeat.
     Keyboard(crate::keymap::Request),
+    /// The wallpaper image, or `None` for none at all.
+    Wallpaper(Option<String>),
     /// Show or hide the Developer Tweaks panel.
     TweaksToggle,
     /// Move and resize a window for real — the layout's authority, not a
@@ -819,6 +821,31 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 windows.set(index + 1, entry)?;
             }
             Ok(windows)
+        })?,
+    )?;
+
+    // The wallpaper. A path, `"solium"` for the one that ships, or `false`
+    // for none -- which is what somebody running `swaybg` or a shell of their
+    // own wants, so the compositor stops rasterising a picture nobody sees.
+    sol.set(
+        "wallpaper",
+        lua.create_function(|lua, source: Value| {
+            let wanted = match source {
+                Value::String(path) => Some(path.to_str()?.to_owned()),
+                // `false` means none at all. `nil` -- which is what arrives
+                // when the configuration has no `wallpaper` key -- means the
+                // one that ships, so a fresh install has a desktop rather than
+                // a flat colour.
+                Value::Boolean(false) => None,
+                Value::Nil | Value::Boolean(true) => {
+                    Some(crate::surface::DEFAULT_WALLPAPER.to_owned())
+                }
+                _ => return Ok(Value::Nil),
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Wallpaper(wanted.clone()));
+            })?;
+            Ok(Value::Nil)
         })?,
     )?;
 

@@ -52,6 +52,40 @@ pub(crate) struct ShellSurface {
     checked: Duration,
 }
 
+/// The wallpaper that ships with the compositor.
+///
+/// A bare name rather than a path: `resolve_wallpaper` turns it into the file
+/// beside `wallpaper.qml`. Anything else in the configuration is taken as a
+/// path, so `wallpaper = "solium"` means the one in the box and
+/// `wallpaper = "~/Pictures/whatever.png"` means that.
+pub(crate) const DEFAULT_WALLPAPER: &str = "solium";
+
+/// Turn what the configuration said into a URL QML can load.
+///
+/// Three cases, and the middle one is the reason this exists rather than the
+/// path being passed through: `~` is not expanded by anything between the Lua
+/// file and Qt, so a configuration written the way every other dotfile writes
+/// it would silently load nothing.
+pub(crate) fn resolve_wallpaper(source: &str) -> String {
+    if source == DEFAULT_WALLPAPER {
+        return format!(
+            "file://{}",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/qml/wallpaper/solium.png")
+        );
+    }
+    if let Some(rest) = source.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return format!("file://{}/{rest}", std::path::Path::new(&home).display());
+    }
+    // Already a URL -- `file:`, and also `qrc:` or `image:` for a scene that
+    // has been replaced wholesale.
+    if source.contains("://") {
+        return source.to_owned();
+    }
+    format!("file://{source}")
+}
+
 impl ShellSurface {
     /// Host the QML at `source`, handing it `properties` as a JSON object.
     ///
