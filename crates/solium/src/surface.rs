@@ -491,12 +491,14 @@ fn build(source: &Path, properties: &str, width: i32, height: i32) -> Result<qml
 /// file can make an EGL call in.
 ///
 /// Only *this* file, and that distinction is the whole reason this exists as a
-/// deliberate call rather than something the renderer handles. `GlesRenderer`
-/// re-binds its own context inside every operation it offers, so an empty
-/// thread costs it one `eglMakeCurrent` and nothing else. What it cannot cover
-/// is a call that is not smithay's, and the very next thing here is exactly
-/// that: `EGLFence::import` is an `eglCreateSync` against our display, and it
-/// needs a current context nobody else is going to make for it.
+/// deliberate call rather than something the renderer handles. Every entry
+/// point on `GlesRenderer` itself re-binds its context, so between frames an
+/// empty thread costs it one `eglMakeCurrent` and nothing else — a live
+/// `GlesFrame` is the exception, and `qml::no_frame_in_flight` is where that is
+/// spelled out and enforced. What the renderer cannot cover either way is a
+/// call that is not smithay's, and the very next thing here is exactly that:
+/// `EGLFence::import` is an `eglCreateSync` against our display, and it needs a
+/// current context nobody else is going to make for it.
 ///
 /// `EGLContext::make_current` is the API. There is no `bind_context`.
 ///

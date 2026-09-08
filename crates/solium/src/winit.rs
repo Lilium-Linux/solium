@@ -652,6 +652,11 @@ pub(crate) fn run() -> Result<()> {
                         )
                     };
 
+                    // As on the hardware backend: the frame is built and
+                    // finished inside this call, so the mark brackets it and is
+                    // dropped before anything looks at the result. See
+                    // `qml::no_frame_in_flight`.
+                    let frame = crate::qml::frame_in_flight();
                     let result = damage_tracker.render_output(
                         renderer,
                         &mut framebuffer,
@@ -659,6 +664,7 @@ pub(crate) fn run() -> Result<()> {
                         &elements,
                         [0.05, 0.05, 0.06, 1.0],
                     );
+                    drop(frame);
                     if let Err(err) = &result {
                         tracing::warn!(?err, "render failed");
                     }
