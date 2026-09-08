@@ -46,22 +46,29 @@ use.
 
 | | why |
 |---|---|
-| packaging | there is none. A preview nobody can install is a preview nobody tries |
+| [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | there is none. A preview nobody can install is a preview nobody tries |
+| [#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout | US QWERTY and nothing else. A second person who does not write English cannot use this at all, which is what "blocking" means |
 | ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | **done.** A pipeline per monitor, one global space, layouts and workspaces per screen |
 | ~~[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI~~ | **done.** Scale per monitor, chrome rasterised at it, chosen from the panel's dpi |
 | ~~[#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture~~ | **done.** `wlr-screencopy`, so grim, wf-recorder and the portal all work |
 | ~~[#27](https://github.com/Lilium-Linux/solium/issues/27) session lock~~ | **done.** `ext-session-lock-v1`, and it fails locked rather than open |
 
 **Shippable as documented gaps.** Real holes, but ones a preview can name and
-survive: [#26](https://github.com/Lilium-Linux/solium/issues/26) IME,
-[#33](https://github.com/Lilium-Linux/solium/issues/33) the ~190KB-per-window
-leak.
+survive: [#26](https://github.com/Lilium-Linux/solium/issues/26) IME, [#33](https://github.com/Lilium-Linux/solium/issues/33) the ~190KB-per-window leak,
+[#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug, [#56](https://github.com/Lilium-Linux/solium/issues/56) window rules. Named in the README rather
+than discovered, and [docs/gaps.md](gaps.md) is the full list.
 
 **Not features, and do them anyway.** CI runs the gate but not the checks under
-`dev/`. And the compositor has never been soaked — left running unattended for
-hours with window churn — because that could not be done on the development
-host. That needs solving rather than skipping: a preview that dies after six
-hours is worse than one that is missing a lock screen.
+`dev/` — and until it was moved onto Fedora it did not run the gate either: it
+had failed on every push since the day it was added, because Ubuntu ships Qt
+6.4 and this needs 6.5. Two gates testing different toolchains is one gate.
+
+The compositor has also never been soaked — left running unattended for hours
+with window churn — because that could not be done on the development host.
+That needs solving rather than skipping ([#65](https://github.com/Lilium-Linux/solium/issues/65)): a preview that dies
+after six hours is worse than one that is missing a lock screen. Suspend and
+resume ([#64](https://github.com/Lilium-Linux/solium/issues/64)) have never been tried at all, which is the same
+sentence about laptops.
 
 ## Order, and why
 
