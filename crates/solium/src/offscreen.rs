@@ -80,6 +80,10 @@ pub(crate) fn capture(
         };
         // The renderer stays borrowed for as long as the frame lives, so the
         // release cannot happen in here; the frame's own scope ends first.
+        //
+        // Nothing that touches a QML scene may run between here and the end of
+        // this scope; see `qml::no_frame_in_flight`.
+        let _frame = crate::qml::frame_in_flight();
         match renderer.render(&mut framebuffer, size, Transform::Normal) {
             Err(err) => {
                 tracing::warn!(?err, "could not render into the offscreen buffer");
@@ -226,6 +230,7 @@ impl Screens {
                     return None;
                 }
             };
+            let _frame = crate::qml::frame_in_flight();
             match renderer.render(&mut framebuffer, size, Transform::Normal) {
                 Err(err) => {
                     tracing::warn!(?err, index, "could not render a monitor");

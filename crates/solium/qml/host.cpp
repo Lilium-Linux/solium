@@ -783,11 +783,22 @@ static void clear_stale_current_context(const SoliumQmlScene *scene)
  * "Nothing current" and not "the compositor's context current", because this
  * file has no way to name the compositor's context and does not need one. The
  * danger was never an empty thread; it is somebody *else's* context on it.
- * Every GlesRenderer operation re-binds its own context before it touches GL —
- * import, bind, render, wait, copy, with_context, all of them — so an empty
- * thread costs one eglMakeCurrent and nothing else. The single call that is not
- * smithay's, our own EGLFence::import, sits after an explicit restore in
- * surface.rs, which is where it belongs and where it is visible.
+ * Every entry point on GlesRenderer itself re-binds its own context before it
+ * touches GL — import_dmabuf, bind, render, wait, copy_framebuffer,
+ * GlesRenderer::with_context — so an empty thread costs one eglMakeCurrent and
+ * nothing else.
+ *
+ * That is true of the *renderer* and not of a live *frame*, which is the one
+ * thing in this design that carries a current context across calls.
+ * GlesFrame::with_context is `Ok(func(&self.renderer.gl))` with no make_current
+ * at all, and so are finish_internal and the frame's own destructor. So the
+ * invariant is narrower than "an empty thread is harmless": no GPU-scene entry
+ * point may run while a GlesFrame is alive. It is stated and enforced on the
+ * Rust side, in qml::no_frame_in_flight, because that is where the frames are.
+ *
+ * The one compositor-side call that an empty thread is *not* enough for is our
+ * own EGLFence::import, and that sits after an explicit restore in surface.rs,
+ * where it is visible.
  */
 static void release_the_thread(const SoliumQmlScene *scene)
 {

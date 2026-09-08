@@ -1242,12 +1242,19 @@ impl State {
             if locked {
                 screen.compositor.reset_buffers();
             }
-            match screen.compositor.render_frame(
+            // `render_frame` builds and finishes a `GlesFrame` inside itself,
+            // so the mark brackets the call rather than a scope of ours, and is
+            // dropped before the result is matched on. See
+            // `qml::no_frame_in_flight`.
+            let frame = crate::qml::frame_in_flight();
+            let rendered = screen.compositor.render_frame(
                 renderer,
                 &elements,
                 [0.05, 0.05, 0.06, 1.0],
                 FrameFlags::DEFAULT,
-            ) {
+            );
+            drop(frame);
+            match rendered {
                 Ok(result) if !result.is_empty => match screen.compositor.queue_frame(()) {
                     Ok(()) => {
                         screen.pending = true;

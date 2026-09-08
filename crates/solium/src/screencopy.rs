@@ -408,6 +408,7 @@ fn fill(
             .bind(&mut texture)
             .context("binding the capture buffer")?;
         {
+            let _frame = crate::qml::frame_in_flight();
             let mut frame = renderer
                 .render(&mut framebuffer, size, Transform::Normal)
                 .context("rendering the capture")?;

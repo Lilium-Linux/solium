@@ -20,6 +20,7 @@
 mod target;
 
 use std::{
+    cell::Cell,
     ffi::{CStr, CString, c_char, c_double, c_int, c_longlong, c_uint, c_ulonglong},
     os::fd::{FromRawFd as _, OwnedFd},
     path::{Path, PathBuf},
@@ -174,6 +175,87 @@ pub(crate) fn set_allocator(gbm: GbmDevice<DrmDeviceFd>) {
 /// The device scene buffers come from, or `None` on a backend that has none.
 fn allocator() -> Option<&'static GbmDevice<DrmDeviceFd>> {
     ALLOCATOR.get()
+}
+
+// How many `GlesFrame`s are alive on this thread.
+//
+// A counter and not a flag because the offscreen pass nests: a warped window is
+// drawn into its own texture, and on the nested backend a whole monitor is
+// drawn into one on top of that.
+thread_local! {
+    static FRAMES_IN_FLIGHT: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Says a `GlesFrame` is alive for as long as this is held. See
+/// [`no_frame_in_flight`].
+#[must_use = "the frame is only marked for as long as this is held"]
+pub(crate) struct FrameInFlight(());
+
+/// Mark a live `GlesFrame`, for the whole of its life.
+pub(crate) fn frame_in_flight() -> FrameInFlight {
+    FRAMES_IN_FLIGHT.with(|frames| frames.set(frames.get().saturating_add(1)));
+    FrameInFlight(())
+}
+
+impl Drop for FrameInFlight {
+    fn drop(&mut self) {
+        FRAMES_IN_FLIGHT.with(|frames| frames.set(frames.get().saturating_sub(1)));
+    }
+}
+
+impl std::fmt::Debug for FrameInFlight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FrameInFlight")
+    }
+}
+
+/// Refuse to hand the thread to Qt while the compositor is mid-frame.
+///
+/// **The invariant this whole file depends on and cannot state in a signature:
+/// no GPU-scene entry point may run while a `GlesFrame` is alive.**
+///
+/// A `GlesFrame` is the one thing in this design that carries a current GL
+/// context *across* calls. `Renderer::render` makes the context current when it
+/// builds the frame and every method on the frame afterwards assumes it still
+/// is — `GlesFrame::with_context` is `Ok(func(&self.renderer.gl))` with no
+/// `make_current` at all (smithay `gles/mod.rs:1999-2004`), and so are
+/// `finish_internal` and the frame's own `Drop`. `warp.rs` calls exactly that
+/// method, and its SAFETY comment is true only because the frame is alive.
+///
+/// Every GPU-scene call in here breaks that. Building a scene and freeing one
+/// leave *no* context current; rendering one leaves Qt's. Do either inside a
+/// live frame and every remaining `element.draw`, plus the `cleanup()` inside
+/// `finish_internal`, becomes a GL call with no context — which on EGL is not
+/// an error. It is a no-op. The frame comes out black, the renderer quietly
+/// stops reclaiming textures, and nothing is written to the log: the same
+/// signature as the three defects this path has already produced.
+///
+/// It holds today, and only by convention: every render path collects its
+/// elements before it binds anything (`offscreen.rs`, `tty.rs`, `render.rs`),
+/// and neither `RenderElement::draw` in `warp.rs` touches a scene. Task 7 is
+/// where that stops being enough — a decoration that builds or renders its
+/// scene lazily from inside `draw` is exactly this, and would look like a
+/// rendering bug rather than an ordering one.
+///
+/// Loud in every build rather than only in a debug one. The counter costs a
+/// `Cell` increment per frame, and the alternative in a release build is the
+/// silence described above.
+pub(crate) fn no_frame_in_flight(what: &str) {
+    let live = FRAMES_IN_FLIGHT.with(Cell::get);
+    if live == 0 {
+        return;
+    }
+    tracing::error!(
+        what,
+        live,
+        "a QML scene was touched inside a live GlesFrame: the compositor's \
+         context is about to be taken off this thread mid-frame, and the GL \
+         calls left in the frame will silently do nothing"
+    );
+    debug_assert_eq!(
+        live, 0,
+        "{what} ran inside a live GlesFrame; see qml::no_frame_in_flight"
+    );
 }
 
 /// The scene the pre-flight renders, and how big.
@@ -629,9 +711,10 @@ impl Scene {
     /// back, so the host gives the thread up before returning — see
     /// `release_the_thread` in `qml/host.cpp`. That is deliberate and it is what
     /// lets this be called from somewhere with no renderer to restore, which
-    /// `ShellSurface::new` is. An empty thread is safe: every `GlesRenderer`
-    /// operation makes its own context current before touching GL. Somebody
-    /// else's context on the thread is what is not safe.
+    /// `ShellSurface::new` is. An empty thread is safe *between* frames: every
+    /// entry point on `GlesRenderer` itself makes its own context current
+    /// before touching GL. It is not safe *inside* one — see
+    /// [`no_frame_in_flight`], which is asserted here.
     ///
     /// `render_gpu` is the one call that does *not* hold to this, and says so.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
@@ -650,6 +733,7 @@ impl Scene {
         // for another would hear about it a frame later, from the host, in a
         // warning about resizing — nowhere near the mistake. So it is answered
         // here, where the two sizes are both in scope.
+        no_frame_in_flight("building a GPU scene");
         if (target.width, target.height) != (width, height) {
             return Err(anyhow!(
                 "a {width}x{height} scene cannot render into a {}x{} buffer",
@@ -759,6 +843,7 @@ impl Scene {
             // says which scene, and says it as an error the caller can carry.
             return Err(anyhow!("a software scene has no buffer to render into"));
         }
+        no_frame_in_flight("rendering a GPU scene");
         let mut fence: c_int = -1;
         // SAFETY: `self.scene` is non-null for the lifetime of `self`, and
         // `fence` is a live local for the length of the call.
@@ -946,6 +1031,10 @@ impl Drop for Scene {
         // current on the way in. Measured, in both orderings. Anything holding
         // a context has to make it current again afterwards.
         //
+        if self.target.is_some() {
+            no_frame_in_flight("freeing a GPU scene");
+        }
+
         // SAFETY: freed exactly once, since `Scene` is not Clone and this
         // pointer is never handed out.
         unsafe { ffi::solium_qml_scene_free(self.scene) }
@@ -960,5 +1049,37 @@ impl std::fmt::Debug for Scene {
             .field("size", &self.size)
             .field("gpu", &self.target.is_some())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The guard has to actually catch the thing it exists for, and a guard
+    /// that is never exercised is a comment with a runtime cost.
+    #[test]
+    fn a_scene_touched_inside_a_live_frame_is_refused() {
+        assert_eq!(super::FRAMES_IN_FLIGHT.with(super::Cell::get), 0);
+        {
+            let _frame = super::frame_in_flight();
+            assert_eq!(super::FRAMES_IN_FLIGHT.with(super::Cell::get), 1);
+            // Nested, as the offscreen pass does.
+            let _inner = super::frame_in_flight();
+            assert_eq!(super::FRAMES_IN_FLIGHT.with(super::Cell::get), 2);
+        }
+        assert_eq!(super::FRAMES_IN_FLIGHT.with(super::Cell::get), 0);
+    }
+
+    /// And it has to *panic* in a debug build rather than only log, or the
+    /// thing it is meant to stop is not stopped.
+    ///
+    /// Debug only, because that is the half of `no_frame_in_flight` that
+    /// panics; a release build logs the same thing and carries on, which is
+    /// deliberate and is argued there.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "live GlesFrame")]
+    fn the_assertion_fires() {
+        let _frame = super::frame_in_flight();
+        super::no_frame_in_flight("a test");
     }
 }
