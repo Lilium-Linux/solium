@@ -448,6 +448,73 @@ git commit -m "qml: allocate the buffer Qt renders a scene into"
 
 ### Task 4: A GPU scene, end to end, behind an environment variable
 
+> **Corrections from Tasks 1–3.** All of the following were measured on this
+> machine after this plan was written. Where they contradict the steps below,
+> these win.
+>
+> 1. **Qt must be pointed away from the card node, or it may take DRM master.**
+>    `eglfs_kms` needs no master and cannot take one by asking — but the kernel
+>    grants master *implicitly* to whoever opens the node when nothing holds
+>    it. `start_scripts` runs before `open_gpu`, and `Command::Spawn` reaches
+>    `qml::start()`, so a user config with a top-level `sol.spawn(…)` starts Qt
+>    first. Qt's fd becomes master, logind's `SetMaster` then returns `EBUSY`,
+>    and the only symptom is Smithay's `unable to become drm master` warning —
+>    which `tty.rs` documents as benign noise. A black screen on a TTY with
+>    nothing to read.
+>
+>    Before `QGuiApplication`, write a KMS config and set three variables:
+>
+>    ```json
+>    { "device": "<Solium's own render node>", "headless": "64x64" }
+>    ```
+>    ```
+>    QT_QPA_EGLFS_KMS_CONFIG=<that file>
+>    QT_QPA_EGLFS_DISABLE_INPUT=1
+>    QT_QPA_EGLFS_KMS_NO_EVENT_READER_THREAD=1
+>    ```
+>
+>    Both JSON keys are required: `device` alone fails with
+>    `drmModeGetResources failed (Permission denied)`; `headless` alone still
+>    opens `card1`. Measured with this config: zero `card1` opens, zero
+>    ioctls, `initialize()` true, and real QML rendered into the dmabuf.
+>    `QT_QPA_EGLFS_DEVICE` does not exist in this Qt build. Pass the render
+>    node in — `open_gpu` already computes it at `tty.rs:1110-1113` — rather
+>    than hard-coding it, which also handles a second GPU.
+>
+> 2. **The host does not dup the fd.** The text below and Step 2's SAFETY
+>    comment both say it does. It keeps nothing; EGL takes its own reference
+>    during `eglCreateImageKHR`. Verified by closing the fd immediately after
+>    import and rendering correctly anyway. Do not "fix" the Rust side on the
+>    old premise.
+>
+> 3. **The `Scene` must keep its `Target` alive.** Qt does not need it after
+>    the constructor, but Task 5 re-imports the same dmabuf to sample it, and
+>    nothing in the struct below holds a reference. Store the `Target` in the
+>    `Scene`, or pair them.
+>
+> 4. **Do not create a texture.** `import_dmabuf_texture` already does
+>    `glGenTextures`/`glBindTexture` and hands the name to Qt. Rust supplies
+>    only fd, stride, modifier and fourcc.
+>
+> 5. **Restore the compositor's context after *both* rendering and freeing.**
+>    `initialize()` leaves Qt's context current on return from the
+>    constructor, and Qt's teardown leaves *no* context current on return from
+>    `scene_free` (`eglGetCurrentContext()` is NULL, measured in both
+>    orderings). The global constraint only mentions rendering; it is wider
+>    than that.
+>
+> 6. **`start_gpu` cannot fall back.** Qt calls `qFatal` on a platform plugin
+>    it cannot load — verified, SIGABRT, exit 134 — so the process dies rather
+>    than returning 0. Any availability decision must be made *before*
+>    calling it. And `start_gpu` returning 1 is not evidence the path works:
+>    a scene-level failure leaves `g_gpu_mode` true with no in-process
+>    fallback, so with `SOLIUM_QML_GPU` set every scene would fail hard.
+>    Decide that deliberately rather than by omission.
+>
+> 7. **Stale build artefacts give false passes.** Task 3's commit added a
+>    second `target/debug/build/solium-*/out/` directory; a glob over that path
+>    links whichever it finds first, silently. Pin with `ls -t | head -1`.
+
 **Files:**
 - Modify: `crates/solium/src/qml.rs`
 - Modify: `crates/solium/src/surface.rs`
