@@ -181,10 +181,13 @@ impl XwmHandler for Solium {
         let location = window.geometry().loc;
         let element = Window::new_x11_window(window);
         self.space.map_element(element.clone(), location, true);
-        // A pane even for these. They are never laid out, but they are on
-        // screen and under the pointer, and every path that asks what is on
-        // screen now asks for panes.
-        self.take_pane(element);
+        // A pane even for these -- they are on screen and under the pointer,
+        // and every path that asks what is on screen asks for panes -- but an
+        // *unmanaged* one. "Never laid out" was the intent and not the
+        // behaviour: they went into the window list a layout reads, so
+        // dragging a text selection out of an application opened a menu, and
+        // the desktop reflowed to make room for it.
+        self.take_unmanaged_pane(element);
     }
 
     fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {

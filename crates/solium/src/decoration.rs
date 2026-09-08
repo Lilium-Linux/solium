@@ -492,6 +492,12 @@ impl Decoration {
 #[derive(Debug, Default)]
 pub(crate) struct Decorations {
     frames: HashMap<PaneId, Decoration>,
+    /// Panes that will never have a frame, as opposed to not having one yet.
+    ///
+    /// A client drawing its own decorations, and an override-redirect menu.
+    /// The distinction exists so `Solium::insets_of` knows whether to keep
+    /// reserving room for a frame that is coming.
+    bare: std::collections::HashSet<PaneId>,
     /// Which decoration to build, as a script named it. `None` is whatever
     /// the environment or the default says.
     style: Option<String>,
@@ -543,8 +549,10 @@ impl Decorations {
             return;
         }
         if bare(self.style.as_deref()) {
+            self.bare.insert(id);
             return;
         }
+        self.bare.remove(&id);
         match Decoration::new(&qml_path(self.style.as_deref()), width, height) {
             Ok(decoration) => {
                 self.frames.insert(id, decoration);
@@ -561,10 +569,27 @@ impl Decorations {
     pub(crate) fn retain(&mut self, keep: impl Fn(PaneId) -> bool) {
         let before = self.frames.len();
         self.frames.retain(|id, _| keep(*id));
+        self.bare.retain(|id| keep(*id));
         let dropped = before - self.frames.len();
         if dropped > 0 {
             tracing::debug!(dropped, "dropped window frames with their panes");
         }
+    }
+
+    /// This pane will never have a frame. See the `bare` field.
+    pub(crate) fn set_bare(&mut self, id: PaneId) {
+        self.bare.insert(id);
+    }
+
+    /// Whether this pane is deliberately without a frame.
+    pub(crate) fn is_bare(&self, id: PaneId) -> bool {
+        self.bare.contains(&id)
+    }
+
+    /// It may have a frame again — leaving fullscreen, or a client changing
+    /// its mind about drawing its own.
+    pub(crate) fn unset_bare(&mut self, id: PaneId) {
+        self.bare.remove(&id);
     }
 
     pub(crate) fn remove(&mut self, id: PaneId) {
