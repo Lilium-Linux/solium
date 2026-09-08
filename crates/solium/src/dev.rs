@@ -202,6 +202,23 @@ fn parse_list_with<T>(
     parsed
 }
 
+/// Render QML on the GPU rather than the CPU.
+///
+/// ```sh
+/// SOLIUM_QML_GPU=1 ./target/debug/solium --tty
+/// ```
+///
+/// Off by default while the dmabuf path proves itself. The software path is
+/// the fallback and must keep working: a machine where this fails still has
+/// to run a desktop.
+///
+/// Read once, in `qml::start`, and acted on once. Qt fixes its scene graph
+/// backend for the life of the process, so this cannot be a per-scene choice
+/// and re-reading it could only ever disagree with itself.
+pub(crate) fn qml_gpu() -> bool {
+    std::env::var_os("SOLIUM_QML_GPU").is_some()
+}
+
 /// Whether to report what the compositor is holding, once a second.
 ///
 /// ```sh
