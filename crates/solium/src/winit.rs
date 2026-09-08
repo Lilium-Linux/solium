@@ -176,6 +176,17 @@ pub(crate) fn run() -> Result<()> {
         );
     }
 
+    // Said once, at startup, because with the knob set this is the difference
+    // between a bare desktop and a broken one. `qml::set_allocator` is the
+    // hardware backend's call and there is no equivalent here — winit hands its
+    // renderer a display, not a GBM device — so a scene has nothing to allocate
+    // a buffer from. Qt still comes up on the GPU if it can, and then refuses
+    // software scenes as well, so with this knob set nested draws no QML at
+    // all. That is not something to work out from a blank window.
+    if crate::dev::qml_gpu() {
+        tracing::info!("nested: no GBM device, so QML scenes have no buffer to render into");
+    }
+
     let size = backend.window_size();
     // The host's actual refresh, not an assumed 60: a client pacing itself to
     // the wrong number is a client that misses frames on purpose.

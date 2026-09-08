@@ -30,7 +30,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow};
 use smithay::{
     backend::{
-        allocator::gbm::GbmDevice,
+        allocator::{dmabuf::Dmabuf, gbm::GbmDevice},
         drm::{DrmDeviceFd, DrmNode, NodeType},
         udev,
     },
@@ -145,6 +145,36 @@ pub(crate) fn start() -> Result<()> {
 
 /// Whether Qt came up on the GPU. `None` until the first scene asks for one.
 static GPU: OnceLock<bool> = OnceLock::new();
+
+/// Whether the scenes in this process render on the GPU.
+///
+/// The question a surface has to ask before it builds anything, because Qt
+/// fixes its scene graph for the life of the process and a host that came up on
+/// one backend refuses scenes of the other kind — a GPU host will not build a
+/// software scene, and `solium_qml_start` will not hand a software host back to
+/// a caller that asked for the GPU. So this is not "is the knob set": it is
+/// what Qt actually did with it, which is only known once `start` has run.
+pub(crate) fn on_gpu() -> bool {
+    GPU.get().copied().unwrap_or(false)
+}
+
+/// The allocator scenes are rendered through, set once by the backend.
+///
+/// A global because a `Scene` is created from wherever a frame is first needed
+/// — a decoration, a wallpaper, a panel — and threading an allocator through
+/// every one of those call sites would put GBM in the signature of things that
+/// have no business knowing what GBM is.
+static ALLOCATOR: OnceLock<GbmDevice<DrmDeviceFd>> = OnceLock::new();
+
+/// Hand the compositor's GBM device to the scenes. First caller wins.
+pub(crate) fn set_allocator(gbm: GbmDevice<DrmDeviceFd>) {
+    let _ = ALLOCATOR.set(gbm);
+}
+
+/// The device scene buffers come from, or `None` on a backend that has none.
+fn allocator() -> Option<&'static GbmDevice<DrmDeviceFd>> {
+    ALLOCATOR.get()
+}
 
 /// The scene the pre-flight renders, and how big.
 ///
@@ -662,6 +692,42 @@ impl Scene {
             scale: 1.0,
             target: Some(target),
         })
+    }
+
+    /// A GPU scene of `width` by `height` device pixels, buffer and all.
+    ///
+    /// The size is fixed for the life of the scene, which is why this and not a
+    /// `resize` is how a surface changes size on the GPU path: the buffer is
+    /// allocated here, a dmabuf cannot grow, and `solium_qml_scene_resize`
+    /// refuses a pixel-size change rather than swapping the texture for a paint
+    /// device and moving the scene back onto the CPU behind the caller's back.
+    ///
+    /// Fails on a backend that set no allocator — the nested one — which is the
+    /// only honest answer there: Qt is on the GPU, so a software scene is not
+    /// available either.
+    ///
+    /// Leaves *Qt's* GL context current on this thread, as [`Scene::gpu`] does.
+    pub(crate) fn gpu_sized(
+        qml_path: &Path,
+        width: i32,
+        height: i32,
+        initial: Option<&str>,
+    ) -> Result<Self> {
+        let gbm = allocator().ok_or_else(|| {
+            anyhow!("this backend has no GBM device, so it cannot render QML on the GPU")
+        })?;
+        let target = target::allocate(gbm, width, height)?;
+        Self::gpu(qml_path, width, height, target, initial)
+    }
+
+    /// The buffer this scene renders into, on the GPU path.
+    ///
+    /// What the compositor imports and samples. Borrowed rather than handed
+    /// out: the scene owns the buffer, and the arrangement that makes the whole
+    /// path safe is that the thing being read cannot outlive the thing drawing
+    /// into it.
+    pub(crate) fn buffer(&self) -> Option<&Dmabuf> {
+        self.target.as_ref().map(|target| &target.dmabuf)
     }
 
     /// Render, returning a fence that signals when Qt's work has landed.
