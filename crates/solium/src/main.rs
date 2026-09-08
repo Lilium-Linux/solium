@@ -12,6 +12,7 @@ mod capture;
 mod cursor;
 mod decoration;
 mod dev;
+mod idle;
 mod input;
 mod layer;
 mod lock;

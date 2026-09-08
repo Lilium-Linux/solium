@@ -54,7 +54,6 @@ use.
 
 **Shippable as documented gaps.** Real holes, but ones a preview can name and
 survive: [#26](https://github.com/Lilium-Linux/solium/issues/26) IME,
-[#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit,
 [#33](https://github.com/Lilium-Linux/solium/issues/33) the ~190KB-per-window
 leak.
 
@@ -95,10 +94,14 @@ hours is worse than one that is missing a lock screen.
    and it was still that size after unlocking. Found by firing a scripted drag
    during a lock and measuring the window afterwards, which is the only reason
    it was found at all.
-5. **Soak and package.** Both are the difference between working here and
+5. ~~**[#36](https://github.com/Lilium-Linux/solium/issues/36) idle**~~ — done,
+   both halves. What the issue said would happen did: the visibility rule was
+   written against where a window *lives* and a workspace switch moves where
+   it is *drawn*, so a video on another workspace went on holding the machine
+   awake until a test hid one and waited.
+6. **Soak and package.** Both are the difference between working here and
    working anywhere.
-6. Then [#36](https://github.com/Lilium-Linux/solium/issues/36),
-   [#33](https://github.com/Lilium-Linux/solium/issues/33),
+7. Then [#33](https://github.com/Lilium-Linux/solium/issues/33),
    [#38](https://github.com/Lilium-Linux/solium/issues/38) in whatever order
    suits, and the P3s after the preview is out.
 

@@ -590,6 +590,11 @@ pub(crate) fn run() -> Result<()> {
                 state.solium.redraw = true;
             }
             state.solium.popups.cleanup();
+            // Who has been idle long enough to be told about it. Once a frame
+            // rather than on a timer: both loops wake at least every 16 ms, and
+            // a notification that arrives up to one frame late is a notification
+            // about somebody having left the room.
+            crate::idle::settle(&mut state.solium);
             let _ = state.solium.display_handle.flush_clients();
         })
         .map_err(|err| anyhow!("running the event loop: {err}"))
