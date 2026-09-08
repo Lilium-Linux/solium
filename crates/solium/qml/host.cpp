@@ -24,6 +24,16 @@
  *   actually changes. See docs/spikes for the numbers and for the two ways back
  *   to the GPU path (a plugin that adopts contexts, or a dmabuf-backed target).
  *
+ * The second of those two ways is now also in this file, as a parallel set of
+ * `_gpu` entry points: the compositor allocates a buffer through GBM, we import
+ * its dmabuf into Qt's own context as a texture, and Qt renders into that. The
+ * contexts still share nothing — the *buffer* is what crosses, which is what
+ * two processes would have had to do anyway. Everything about the software path
+ * below is unchanged and stays the fallback; a machine where the import fails
+ * must still run a desktop. The two are chosen between once per process, in
+ * solium_qml_start / solium_qml_start_gpu, because the scene graph backend is a
+ * process-wide decision in Qt.
+ *
  * Two things about this file that are easy to get wrong:
  *
  *   * There is no Qt event loop. Nothing calls exec(), so Qt's timers never
@@ -44,18 +54,42 @@
 #include <QtCore/QAbstractAnimation>
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
+#include <QtCore/QSize>
 #include <QtCore/QUrl>
 #include <QtCore/QVariant>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QImage>
 #include <QtCore/QString>
 #include <QtGui/QMouseEvent>
+#include <QtGui/QOpenGLContext>
+#include <QtGui/QOpenGLFunctions>
 #include <QtQml/QQmlComponent>
 #include <QtQml/QQmlEngine>
 #include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickRenderControl>
 #include <QtQuick/QQuickRenderTarget>
 #include <QtQuick/QQuickWindow>
+#include <QtQuick/QSGRendererInterface>
+
+/*
+ * EGL last, and deliberately so.
+ *
+ * <EGL/egl.h> reaches <EGL/eglplatform.h>, which on a good many Linux setups
+ * still pulls in Xlib for EGLNativeDisplayType — and Xlib defines `None`,
+ * `Status` and `Bool` as bare macros. Parsed before Qt's headers those break
+ * the build in a way that reads like a Qt problem. dev/qtprobe/probe.cpp has
+ * the same ordering for the same reason.
+ *
+ * The GLES2 headers are *not* included, even though the dmabuf import is a
+ * GLES extension: gl2ext.h wants gl2.h's core typedefs, which fight with
+ * whichever GL header Qt's own qopengl.h has already chosen. The one entry
+ * point we need from it is declared by hand below instead, and the handful of
+ * plain GL calls go through QOpenGLFunctions — see import_dmabuf_texture.
+ */
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+
+#include <cstring>
 
 namespace {
 
@@ -98,6 +132,33 @@ int g_argc = 1;
 char g_arg0[] = "solium";
 char *g_argv[] = { g_arg0, nullptr };
 
+/*
+ * Which scene graph this process came up on.
+ *
+ * There is no separate "started" flag: `g_app != nullptr` has always been it,
+ * and a second one would be a second authority over the same fact. This says
+ * *which* of the two starters won the race to be first, so the other one can
+ * refuse rather than hand back a host on a backend the caller did not ask for.
+ */
+bool g_gpu_mode = false;
+
+/*
+ * glEGLImageTargetTexture2DOES, declared rather than included.
+ *
+ * It lives in <GLES2/gl2ext.h>, which cannot be included beside Qt's own GL
+ * headers without the two fighting over the core typedefs. The signature is one
+ * line; GLeglImageOES is a void pointer by definition, and on every ABI this
+ * compositor runs on APIENTRY is empty, so a plain function pointer is the same
+ * thing. It is never linked directly either way — see import_dmabuf_texture.
+ */
+using ImageTargetTexture2D = void (*)(GLenum target, void *image);
+
+/* DRM_FORMAT_MOD_INVALID, without dragging in <drm_fourcc.h> for one constant.
+ * A buffer whose modifier is this has no *known* layout, and the import must
+ * then leave the modifier attributes off entirely rather than pass the sentinel
+ * through as if it were a real tiling. */
+constexpr unsigned long long kModifierInvalid = (1ULL << 56) - 1;
+
 } // namespace
 
 struct SoliumQmlScene
@@ -116,30 +177,33 @@ struct SoliumQmlScene
     bool dirty = true;
     /* Backing store for the last value handed out by take_string. */
     QByteArray taken;
+
+    /* GPU scenes only. `image` is null on those and `texture` is zero on
+     * software ones, so either could stand in for this flag — but "which path
+     * is this scene on" is the question the code keeps asking, and answering it
+     * by inspecting a side effect is how the two paths get tangled. */
+    bool gpu = false;
+    /* The compositor's dmabuf, imported into Qt's context. The EGLImage is kept
+     * alongside the texture only so it can be destroyed with it: the texture
+     * would outlive it perfectly well under EGL_KHR_image_base, but every
+     * compositor that does this keeps the pair together, and a driver that
+     * disagrees would disagree intermittently. */
+    GLuint texture = 0;
+    EGLImageKHR egl_image = EGL_NO_IMAGE_KHR;
 };
 
-extern "C" int solium_qml_start(const char *import_path)
+/*
+ * Everything the two starters have in common.
+ *
+ * Which scene graph to use has to be decided *before* this runs — Qt reads that
+ * decision while the application object is being built — so backend selection
+ * stays in the callers and only what comes after it lives here.
+ */
+static bool start_common(const char *import_path)
 {
-    if (g_app != nullptr) {
-        return 1;
-    }
-
-    // No windows are ever created: the scene renders into an image. The
-    // offscreen platform is the one that does not expect a display server.
-    qputenv("QT_QPA_PLATFORM", "offscreen");
-
-    // The software rasteriser is a scene *graph adaptation*, not an RHI
-    // backend, so it is selected by name here rather than through
-    // setGraphicsApi -- which selects between OpenGL, Vulkan, Metal and D3D and
-    // will happily accept `Software` while leaving the adaptation unchanged.
-    // Getting that wrong fails later and unhelpfully, in
-    // QQuickRenderControl::initialize.
-    qputenv("QT_QUICK_BACKEND", "software");
-    QQuickWindow::setSceneGraphBackend(QStringLiteral("software"));
-
     g_app = new QGuiApplication(g_argc, g_argv);
     if (g_app == nullptr) {
-        return 0;
+        return false;
     }
 
     g_driver = new CompositorAnimationDriver();
@@ -162,6 +226,79 @@ extern "C" int solium_qml_start(const char *import_path)
             g_engine->addImportPath(path);
         }
     }
+    return true;
+}
+
+extern "C" int solium_qml_start(const char *import_path)
+{
+    if (g_app != nullptr) {
+        // Already up. If it came up on the GPU this is a caller asking for the
+        // other backend, and Qt cannot give it one: say no rather than hand
+        // back a host that will not do what the caller is about to assume.
+        return g_gpu_mode ? 0 : 1;
+    }
+
+    // No windows are ever created: the scene renders into an image. The
+    // offscreen platform is the one that does not expect a display server.
+    qputenv("QT_QPA_PLATFORM", "offscreen");
+
+    // The software rasteriser is a scene *graph adaptation*, not an RHI
+    // backend, so it is selected by name here rather than through
+    // setGraphicsApi -- which selects between OpenGL, Vulkan, Metal and D3D and
+    // will happily accept `Software` while leaving the adaptation unchanged.
+    // Getting that wrong fails later and unhelpfully, in
+    // QQuickRenderControl::initialize.
+    qputenv("QT_QUICK_BACKEND", "software");
+    QQuickWindow::setSceneGraphBackend(QStringLiteral("software"));
+
+    return start_common(import_path) ? 1 : 0;
+}
+
+extern "C" int solium_qml_start_gpu(const char *import_path)
+{
+    if (g_app != nullptr) {
+        return g_gpu_mode ? 1 : 0;
+    }
+
+    // eglfs, not offscreen — and this is measured, not preferred.
+    //
+    // Qt Quick picks its scene graph *adaptation* from the platform plugin's
+    // capabilities, and the offscreen plugin does not report OpenGL, so Qt
+    // silently selects the software adaptation no matter what setGraphicsApi
+    // below asks for. QQuickRenderControl::initialize() then refuses with
+    // "QRhi is only compatible with default adaptation", which names neither
+    // the platform nor the adaptation and reads like an RHI bug. Measured on
+    // this machine, Qt 6.11, NVIDIA 610.57.04: offscreen never gets an RHI;
+    // eglfs does, and the whole import/render/fence round trip works on it.
+    //
+    // eglfs loads its eglfs_kms integration, which opens /dev/dri/card1 and
+    // builds a GBM device of its own. That is a thing to watch when this runs
+    // inside the compositor rather than in a test harness, because the
+    // compositor is already DRM master on that node — QT_QPA_EGLFS_INTEGRATION
+    // is the knob if it turns out to matter. It did not need master for any of
+    // what QQuickRenderControl does, which is all this path uses.
+    //
+    // Left alone if the environment already names a platform, so that
+    // possibility stays testable from outside without a rebuild.
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+        qputenv("QT_QPA_PLATFORM", "eglfs");
+    }
+
+    // The RHI path is selected by *not* naming the software backend, and by
+    // asking for OpenGL explicitly. Both matter: the default backend is chosen
+    // from the platform and is not OpenGL everywhere. Note the asymmetry with
+    // solium_qml_start above — QT_QUICK_BACKEND is an adaptation, setGraphicsApi
+    // is an RHI backend, and they are not two ways of saying the same thing.
+    //
+    // An externally set QT_QUICK_BACKEND=software still wins over this, which is
+    // deliberate: it is a documented Qt escape hatch. It surfaces immediately as
+    // QQuickRenderControl::initialize() failing, which is the loud failure.
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+
+    if (!start_common(import_path)) {
+        return 0;
+    }
+    g_gpu_mode = true;
     return 1;
 }
 
@@ -180,6 +317,77 @@ extern "C" SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width,
                                                 const char **error)
 {
     return solium_qml_scene_new_with(qml_path, width, height, nullptr, error);
+}
+
+/*
+ * Build the QML and hang it off the scene's window.
+ *
+ * Everything from the component to the dirty signals is identical whether the
+ * pixels end up in a QImage or in a texture, so both constructors call this and
+ * only the render target differs between them.
+ *
+ * On failure `*error` is pointed at a description and the scene is left intact
+ * for the caller to free — the caller allocated it and knows what else it has
+ * attached by now, which is not a decision to make from in here.
+ */
+static bool load_component(SoliumQmlScene *scene, const char *qml_path,
+                           const char *initial_json, const char **error)
+{
+    const auto fail = [error](const char *message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    scene->component =
+        new QQmlComponent(g_engine, QUrl::fromLocalFile(QString::fromUtf8(qml_path)));
+    if (scene->component->isError()) {
+        // Static, because the pointer outlives this frame: the caller frees the
+        // scene — and with it the component the string came from — before it
+        // ever looks at the message.
+        static QByteArray reason;
+        reason = scene->component->errorString().toUtf8();
+        return fail(reason.constData());
+    }
+
+    // Required properties have to be supplied *at creation*: setting them
+    // afterwards is too late, and the component simply fails to build. The
+    // shell's dock declares `required property var screenInfo`, which is what
+    // made it resolve and still refuse to exist.
+    QVariantMap initial;
+    if (initial_json != nullptr) {
+        QJsonParseError parsed{};
+        const auto document = QJsonDocument::fromJson(QByteArray(initial_json), &parsed);
+        if (parsed.error == QJsonParseError::NoError && document.isObject()) {
+            initial = document.object().toVariantMap();
+        } else {
+            qWarning("initial properties were not an object: %s",
+                     qPrintable(parsed.errorString()));
+        }
+    }
+
+    QObject *created = initial.isEmpty() ? scene->component->create()
+                                         : scene->component->createWithInitialProperties(initial);
+    scene->root = qobject_cast<QQuickItem *>(created);
+    if (scene->root == nullptr) {
+        delete created;
+        return fail("the QML root is not an Item, or the component could not be created — a required property left unset will do this");
+    }
+
+    scene->root->setParentItem(scene->window->contentItem());
+    scene->root->setWidth(scene->width);
+    scene->root->setHeight(scene->height);
+
+    // Qt tells us when the scene needs redrawing, so an idle bar costs one
+    // comparison per frame instead of a rasterisation and an upload.
+    // Lambdas rather than slots, so this file still needs no moc.
+    QObject::connect(scene->control, &QQuickRenderControl::renderRequested,
+                     scene->control, [scene]() { scene->dirty = true; });
+    QObject::connect(scene->control, &QQuickRenderControl::sceneChanged,
+                     scene->control, [scene]() { scene->dirty = true; });
+
+    return true;
 }
 
 extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int width, int height,
@@ -215,53 +423,13 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
     // current on this thread on its way to failing. The compositor's own
     // eglMakeCurrent then fails with BAD_ACCESS, because EGL refuses to hand a
     // thread to one client API while another holds it. The software scene graph
-    // needs none of it.
+    // needs none of it. (The GPU constructor below does call it, and must.)
 
-    scene->component =
-        new QQmlComponent(g_engine, QUrl::fromLocalFile(QString::fromUtf8(qml_path)));
-    if (scene->component->isError()) {
-        static QByteArray reason;
-        reason = scene->component->errorString().toUtf8();
+    const char *reason = nullptr;
+    if (!load_component(scene, qml_path, initial_json, &reason)) {
         solium_qml_scene_free(scene);
-        return fail(reason.constData());
+        return fail(reason);
     }
-
-    // Required properties have to be supplied *at creation*: setting them
-    // afterwards is too late, and the component simply fails to build. The
-    // shell's dock declares `required property var screenInfo`, which is what
-    // made it resolve and still refuse to exist.
-    QVariantMap initial;
-    if (initial_json != nullptr) {
-        QJsonParseError parsed{};
-        const auto document = QJsonDocument::fromJson(QByteArray(initial_json), &parsed);
-        if (parsed.error == QJsonParseError::NoError && document.isObject()) {
-            initial = document.object().toVariantMap();
-        } else {
-            qWarning("initial properties were not an object: %s",
-                     qPrintable(parsed.errorString()));
-        }
-    }
-
-    QObject *created = initial.isEmpty() ? scene->component->create()
-                                         : scene->component->createWithInitialProperties(initial);
-    scene->root = qobject_cast<QQuickItem *>(created);
-    if (scene->root == nullptr) {
-        delete created;
-        solium_qml_scene_free(scene);
-        return fail("the QML root is not an Item, or the component could not be created — a required property left unset will do this");
-    }
-
-    scene->root->setParentItem(scene->window->contentItem());
-    scene->root->setWidth(scene->width);
-    scene->root->setHeight(scene->height);
-
-    // Qt tells us when the scene needs redrawing, so an idle bar costs one
-    // comparison per frame instead of a rasterisation and an upload.
-    // Lambdas rather than slots, so this file still needs no moc.
-    QObject::connect(scene->control, &QQuickRenderControl::renderRequested,
-                     scene->control, [scene]() { scene->dirty = true; });
-    QObject::connect(scene->control, &QQuickRenderControl::sceneChanged,
-                     scene->control, [scene]() { scene->dirty = true; });
 
     // Premultiplied because that is what the compositor blends with; asking it
     // to un-premultiply every frame would be work for nothing.
@@ -282,11 +450,257 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
     return scene;
 }
 
+/*
+ * Import the compositor's dmabuf as a texture in whichever context is current.
+ *
+ * This is dev/qtprobe/probe.cpp's try_import with the allocation taken out: the
+ * buffer is the compositor's now, and only its description crosses the FFI.
+ * Everything the probe learned the hard way is preserved —
+ *
+ *   * The entry points are resolved through eglGetProcAddress, never linked.
+ *     This system's libEGL.so exports only the core EGL 1.5 `eglCreateImage`
+ *     and libGLESv2.so exports nothing at all for the OES import (checked with
+ *     `nm -D`), so naming them directly fails at link time. That is not a local
+ *     quirk either: direct linkage to an EXT/KHR/OES name is never guaranteed
+ *     on any vendor's driver.
+ *
+ *   * The import only succeeds on an EGLDisplay paired with the same device the
+ *     buffer was allocated on. The probe measured *both*: the default display
+ *     refused the identical fd with EGL_BAD_MATCH (0x3009) while a
+ *     EGL_PLATFORM_GBM_KHR display on the buffer's own gbm_device took it.
+ *
+ * The second point is the one to keep in mind here, because the display used is
+ * whichever one Qt made current and nothing lets us choose it — handing Qt our
+ * own context is not available (QEGLContext::fromNative returns null on every
+ * plugin this Qt has, which is the whole reason for the shared-buffer design).
+ * Measured: under eglfs, Qt's display is a GBM-platform display on
+ * /dev/dri/card1, and it accepts a buffer allocated on /dev/dri/renderD128.
+ * So the pairing the probe found is per *GPU*, not per gbm_device object or per
+ * DRM node — which is what makes this design possible at all. It does mean a
+ * second GPU would break it, silently and only on that machine, so the failure
+ * below carries the EGL error code and the display pointer: 0x3009 there is the
+ * signature of exactly that.
+ */
+static GLuint import_dmabuf_texture(int dmabuf_fd, int width, int height, int stride,
+                                    unsigned long long modifier, unsigned int fourcc,
+                                    EGLImageKHR *out_image)
+{
+    *out_image = EGL_NO_IMAGE_KHR;
+
+    // Resolved once per process; the entry points do not depend on the display
+    // they are later called with.
+    static PFNEGLCREATEIMAGEKHRPROC create_image =
+        reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
+    static ImageTargetTexture2D target_texture =
+        reinterpret_cast<ImageTargetTexture2D>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
+    if (create_image == nullptr || target_texture == nullptr) {
+        qWarning("dmabuf import: entry points missing (eglCreateImageKHR: %s, "
+                 "glEGLImageTargetTexture2DOES: %s)",
+                 create_image != nullptr ? "found" : "missing",
+                 target_texture != nullptr ? "found" : "missing");
+        return 0;
+    }
+
+    // Qt's display and Qt's context, because the texture has to exist in the
+    // context Qt renders with — a texture on any other context is a name Qt
+    // would happily bind and quietly draw nothing into.
+    EGLDisplay display = eglGetCurrentDisplay();
+    QOpenGLContext *context = QOpenGLContext::currentContext();
+    if (display == EGL_NO_DISPLAY || context == nullptr) {
+        qWarning("dmabuf import: Qt left no %s current — the RHI is not on EGL, "
+                 "so there is no context to import into",
+                 display == EGL_NO_DISPLAY ? "EGL display" : "QOpenGLContext");
+        return 0;
+    }
+
+    const char *extensions = eglQueryString(display, EGL_EXTENSIONS);
+    const bool has_import = extensions != nullptr &&
+        strstr(extensions, "EGL_EXT_image_dma_buf_import") != nullptr;
+    const bool has_modifiers = extensions != nullptr &&
+        strstr(extensions, "EGL_EXT_image_dma_buf_import_modifiers") != nullptr;
+    if (!has_import) {
+        qWarning("dmabuf import: EGL_EXT_image_dma_buf_import absent on Qt's display");
+        return 0;
+    }
+
+    // The modifier attributes need their own extension, and a buffer with no
+    // known layout must not carry the INVALID sentinel through as if it were a
+    // real tiling — either way the import goes without them and lets the driver
+    // assume linear. Built by hand rather than as a fixed array because those
+    // two cases differ only in whether four entries are there at all.
+    EGLint attribs[15];
+    int n = 0;
+    attribs[n++] = EGL_WIDTH;                     attribs[n++] = width;
+    attribs[n++] = EGL_HEIGHT;                    attribs[n++] = height;
+    attribs[n++] = EGL_LINUX_DRM_FOURCC_EXT;      attribs[n++] = static_cast<EGLint>(fourcc);
+    attribs[n++] = EGL_DMA_BUF_PLANE0_FD_EXT;     attribs[n++] = dmabuf_fd;
+    attribs[n++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT; attribs[n++] = 0;
+    attribs[n++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;  attribs[n++] = stride;
+    if (has_modifiers && modifier != kModifierInvalid) {
+        attribs[n++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+        attribs[n++] = static_cast<EGLint>(modifier & 0xffffffffULL);
+        attribs[n++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+        attribs[n++] = static_cast<EGLint>(modifier >> 32);
+    }
+    attribs[n++] = EGL_NONE;
+
+    EGLImageKHR image =
+        create_image(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
+    if (image == EGL_NO_IMAGE_KHR) {
+        qWarning("dmabuf import: eglCreateImageKHR failed 0x%x  "
+                 "(%dx%d fourcc=0x%x stride=%d modifier=0x%llx display=%p)  "
+                 "— 0x3009 is EGL_BAD_MATCH, which here means Qt's display is not "
+                 "paired with the device the buffer came from",
+                 eglGetError(), width, height, fourcc, stride, modifier,
+                 static_cast<void *>(display));
+        return 0;
+    }
+
+    // Through Qt's own function table rather than libGLESv2. Qt may have built
+    // this context as desktop GL, and calling into a second GL dispatch library
+    // against it is the kind of thing that works everywhere until it does not.
+    // QOpenGLFunctions is by definition the GL that Qt's RHI is driving.
+    QOpenGLFunctions *gl = context->functions();
+    GLuint texture = 0;
+    gl->glGenTextures(1, &texture);
+    gl->glBindTexture(GL_TEXTURE_2D, texture);
+    target_texture(GL_TEXTURE_2D, image);
+    const GLenum error = gl->glGetError();
+    if (error != GL_NO_ERROR) {
+        qWarning("dmabuf import: glEGLImageTargetTexture2DOES failed 0x%x", error);
+        gl->glDeleteTextures(1, &texture);
+        // The image exists even though nothing was bound to it, and *out_image
+        // is still EGL_NO_IMAGE_KHR — so this is the only place it can be
+        // released. The caller has no handle on it to free.
+        static PFNEGLDESTROYIMAGEKHRPROC destroy_image =
+            reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
+        if (destroy_image != nullptr) {
+            destroy_image(display, image);
+        }
+        return 0;
+    }
+
+    // An imported image has no mipmaps and cannot be wrapped, so the defaults
+    // (mipmapped minification, repeat) leave the texture incomplete. It is only
+    // ever an FBO attachment here, where completeness is not checked — but the
+    // compositor samples the same buffer on the other side, and a texture that
+    // is fine as a target and wrong as a source is a bug that only appears once
+    // the picture is otherwise working.
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gl->glBindTexture(GL_TEXTURE_2D, 0);
+
+    *out_image = image;
+    return texture;
+}
+
+extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int width, int height,
+                                                    int dmabuf_fd, int stride,
+                                                    unsigned long long modifier,
+                                                    unsigned int fourcc,
+                                                    const char *initial_json)
+{
+    if (g_app == nullptr || !g_gpu_mode) {
+        qWarning("solium_qml_scene_new_gpu called without a GPU host — "
+                 "solium_qml_start_gpu has to have succeeded first");
+        return nullptr;
+    }
+    if (width <= 0 || height <= 0 || stride <= 0 || dmabuf_fd < 0) {
+        qWarning("solium_qml_scene_new_gpu: %dx%d stride=%d fd=%d is not a buffer",
+                 width, height, stride, dmabuf_fd);
+        return nullptr;
+    }
+
+    auto *scene = new SoliumQmlScene();
+    scene->gpu = true;
+    scene->width = width;
+    scene->height = height;
+    // Built at 1x like a software scene; resize supplies the real ratio. The
+    // buffer's pixel size is fixed, so for a GPU scene only the *scale* can
+    // change afterwards — see solium_qml_scene_resize.
+    scene->scale = 1.0;
+
+    scene->control = new QQuickRenderControl();
+    scene->window = new QQuickWindow(scene->control);
+    scene->window->setColor(Qt::transparent);
+    scene->window->setGeometry(0, 0, scene->width, scene->height);
+
+    // The RHI path *requires* initialize(); the software path forbids it. This
+    // is the one line where the two genuinely diverge, and it also has the side
+    // effect the whole GPU design hangs off: it makes Qt's own context current
+    // on this thread, which is what the import below needs and what the
+    // compositor has to undo afterwards before its next eglMakeCurrent.
+    if (!scene->control->initialize()) {
+        qWarning("QQuickRenderControl::initialize failed — Qt could not bring up "
+                 "an RHI on this platform plugin, so the GPU path is not available");
+        solium_qml_scene_free(scene);
+        return nullptr;
+    }
+
+    scene->texture = import_dmabuf_texture(dmabuf_fd, width, height, stride, modifier, fourcc,
+                                           &scene->egl_image);
+    if (scene->texture == 0) {
+        solium_qml_scene_free(scene);
+        return nullptr;
+    }
+
+    // The fd is not kept and not dup'd: EGL takes its own reference on the
+    // buffer during eglCreateImageKHR, so the caller's fd is only borrowed for
+    // the length of this call. Holding it here would be a second owner of a
+    // lifetime the compositor already tracks through its Dmabuf.
+    QQuickRenderTarget target =
+        QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
+    target.setDevicePixelRatio(scene->scale);
+    scene->window->setRenderTarget(target);
+
+    const char *reason = nullptr;
+    if (!load_component(scene, qml_path, initial_json, &reason)) {
+        qWarning("solium_qml_scene_new_gpu: %s", reason != nullptr ? reason : "the QML did not load");
+        solium_qml_scene_free(scene);
+        return nullptr;
+    }
+    return scene;
+}
+
 extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
 {
     if (scene == nullptr) {
         return;
     }
+
+    // GL first, while Qt's context still exists: deleting the control tears
+    // down the RHI and the context with it, and a texture name outliving its
+    // context is not something that can be freed afterwards.
+    //
+    // Only when Qt's context is actually current, though. By the time the
+    // compositor drops a scene it has normally restored its own context, and
+    // glDeleteTextures against *that* would delete whatever object happens to
+    // share the name — silent corruption of an unrelated surface, which is far
+    // worse than the leak. So the leak is taken, and named.
+    if (scene->texture != 0 || scene->egl_image != EGL_NO_IMAGE_KHR) {
+        QOpenGLContext *context = QOpenGLContext::currentContext();
+        EGLDisplay display = eglGetCurrentDisplay();
+        if (context != nullptr && display != EGL_NO_DISPLAY) {
+            if (scene->texture != 0) {
+                context->functions()->glDeleteTextures(1, &scene->texture);
+            }
+            if (scene->egl_image != EGL_NO_IMAGE_KHR) {
+                static PFNEGLDESTROYIMAGEKHRPROC destroy_image =
+                    reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
+                        eglGetProcAddress("eglDestroyImageKHR"));
+                if (destroy_image != nullptr) {
+                    destroy_image(display, scene->egl_image);
+                }
+            }
+        } else {
+            qWarning("a GPU scene was freed with no GL context current: texture %u "
+                     "and its EGLImage are leaked until the process exits",
+                     scene->texture);
+        }
+    }
+
     delete scene->root;
     delete scene->component;
     delete scene->window;
@@ -305,6 +719,39 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
     if (scene->width == width && scene->height == height && scene->scale == scale) {
         return;
     }
+
+    // A GPU scene draws into a buffer the compositor allocated, so its pixel
+    // size is not this function's to change: the texture is exactly as big as
+    // the dmabuf. Falling through would replace the texture target with a paint
+    // device and move the scene silently back onto the CPU, still rendering,
+    // still looking fine — into an image nobody uploads, while the compositor
+    // keeps sampling a texture frozen on its last frame.
+    //
+    // A scale-only change is fine and does happen: the same buffer, laid out
+    // for a different monitor ratio.
+    if (scene->gpu) {
+        if (width != scene->width || height != scene->height) {
+            qWarning("a GPU scene cannot be resized in place (%dx%d to %dx%d): "
+                     "rebuild it on a buffer of the new size",
+                     scene->width, scene->height, width, height);
+            return;
+        }
+        scene->scale = scale;
+        const int logical_width = qMax(1, qRound(width / scale));
+        const int logical_height = qMax(1, qRound(height / scale));
+        scene->window->setGeometry(0, 0, logical_width, logical_height);
+        if (scene->root != nullptr) {
+            scene->root->setWidth(logical_width);
+            scene->root->setHeight(logical_height);
+        }
+        QQuickRenderTarget target =
+            QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
+        target.setDevicePixelRatio(scale);
+        scene->window->setRenderTarget(target);
+        scene->dirty = true;
+        return;
+    }
+
     scene->width = width;
     scene->height = height;
     scene->scale = scale;
@@ -408,6 +855,109 @@ extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)
     scene->control->sync();
     scene->control->render();
     scene->dirty = false;
+    return 1;
+}
+
+/*
+ * A fence for the frame Qt has just submitted, or a CPU wait instead.
+ *
+ * The compositor samples this buffer from a different context on a different
+ * device queue. Without something ordering the two it reads whatever has landed
+ * so far, which shows up as intermittent tearing and half-drawn chrome — the
+ * worst kind of bug to find out about, because it is invisible until it is not
+ * and never reproduces on demand.
+ *
+ * Returns the fence fd for the caller to own and close, or -1 having already
+ * waited on the CPU. -1 is the correct answer and not an error: it just costs a
+ * stall instead of a hand-off.
+ */
+static int fence_after_render()
+{
+    EGLDisplay display = eglGetCurrentDisplay();
+    QOpenGLContext *context = QOpenGLContext::currentContext();
+    if (display == EGL_NO_DISPLAY || context == nullptr) {
+        // Nothing to fence *with* and nothing to flush *through*. The scene did
+        // render, so this is not a render failure — but the caller has to be
+        // told there is no ordering, and -1 is exactly that statement.
+        qWarning("no EGL display or GL context current after a GPU render: "
+                 "the frame is unfenced and unflushed");
+        return -1;
+    }
+
+    // Extension entry points, resolved not linked — the same rule as the import.
+    static PFNEGLCREATESYNCKHRPROC create_sync =
+        reinterpret_cast<PFNEGLCREATESYNCKHRPROC>(eglGetProcAddress("eglCreateSyncKHR"));
+    static PFNEGLDESTROYSYNCKHRPROC destroy_sync =
+        reinterpret_cast<PFNEGLDESTROYSYNCKHRPROC>(eglGetProcAddress("eglDestroySyncKHR"));
+    static PFNEGLDUPNATIVEFENCEFDANDROIDPROC dup_fence =
+        reinterpret_cast<PFNEGLDUPNATIVEFENCEFDANDROIDPROC>(
+            eglGetProcAddress("eglDupNativeFenceFDANDROID"));
+
+    QOpenGLFunctions *gl = context->functions();
+    if (create_sync == nullptr || destroy_sync == nullptr || dup_fence == nullptr) {
+        // EGL_ANDROID_native_fence_sync is present on this machine (the probe
+        // checked), so this branch is for the machines where it is not. A
+        // glFinish is correct, just expensive: it blocks until the GPU is idle,
+        // which is a superset of "this frame has landed".
+        gl->glFinish();
+        return -1;
+    }
+
+    EGLSyncKHR sync = create_sync(display, EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr);
+    if (sync == EGL_NO_SYNC_KHR) {
+        gl->glFinish();
+        return -1;
+    }
+
+    // Flush *between* creating the sync and dup'ing it, which is the order the
+    // extension requires and not an arbitrary one: the fence is inserted into
+    // the command stream by eglCreateSyncKHR, and eglDupNativeFenceFDANDROID is
+    // only defined once that command has actually been submitted. Dup first and
+    // the driver has a fence it has not been asked to schedule.
+    gl->glFlush();
+    const int fence_fd = dup_fence(display, sync);
+    destroy_sync(display, sync);
+
+    if (fence_fd == EGL_NO_NATIVE_FENCE_FD_ANDROID) {
+        // The driver made a sync object and then declined to export it. Same
+        // fallback: wait here, and say so with -1.
+        gl->glFinish();
+        return -1;
+    }
+    return fence_fd;
+}
+
+extern "C" int solium_qml_scene_render_gpu(SoliumQmlScene *scene, int *fence_fd)
+{
+    if (scene == nullptr || fence_fd == nullptr) {
+        return 0;
+    }
+    // Set before any early return, so a caller that ignores the return value
+    // still never closes an uninitialised fd.
+    *fence_fd = -1;
+
+    if (scene->control == nullptr || !scene->gpu || scene->texture == 0) {
+        qWarning("solium_qml_scene_render_gpu on a scene that is not a GPU scene");
+        return 0;
+    }
+    if (!scene->dirty) {
+        return SOLIUM_QML_UNCHANGED;
+    }
+
+    // polish, begin, sync, render, end — and here beginFrame/endFrame *are*
+    // required, which is the exact inverse of the software path above. They
+    // bracket a frame on the RHI; the software adaptation has no RHI and logs
+    // about it, the RHI path has one and needs it told when a frame starts and
+    // stops. Same five calls, one pair present in one path and absent in the
+    // other, and neither is a copy of the other with a line missing.
+    scene->control->polishItems();
+    scene->control->beginFrame();
+    scene->control->sync();
+    scene->control->render();
+    scene->control->endFrame();
+    scene->dirty = false;
+
+    *fence_fd = fence_after_render();
     return 1;
 }
 

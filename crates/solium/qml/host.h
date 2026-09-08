@@ -24,6 +24,43 @@ typedef struct SoliumQmlScene SoliumQmlScene;
  */
 int solium_qml_start(const char *import_path);
 
+/* Start the host on the RHI (OpenGL) scene graph rather than the software one.
+ *
+ * Returns 1 when Qt came up on the GPU, 0 when it did not — in which case the
+ * caller must fall back to solium_qml_start(). Only one of the two may be
+ * called in a process: the scene graph backend is chosen once. Calling the
+ * other one afterwards returns 0 rather than quietly handing back a host on
+ * the wrong backend.
+ */
+int solium_qml_start_gpu(const char *import_path);
+
+/* A scene that renders into a buffer we allocated.
+ *
+ * `dmabuf_fd` is borrowed for the call — EGL takes its own reference on the
+ * buffer during the import, so the caller may close its fd as soon as this
+ * returns. `modifier` is the DRM format modifier, `fourcc` the DRM fourcc.
+ *
+ * Returns NULL on failure, having written the reason to the warning log. There
+ * is no `error` out-parameter, unlike the software constructor: every way this
+ * can fail is a property of the driver or of Qt rather than of the QML, so the
+ * useful detail is an EGL or GL error code and not a component error string.
+ */
+SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int width, int height,
+                                         int dmabuf_fd, int stride,
+                                         unsigned long long modifier,
+                                         unsigned int fourcc,
+                                         const char *initial_json);
+
+/* Render, and hand back a fence that signals when the GPU is done.
+ *
+ * `*fence_fd` is set to -1 when the driver gave no fence, which the caller must
+ * treat as "finished" only after glFinish. Ownership passes to the caller.
+ *
+ * Returns 1 when it rendered, SOLIUM_QML_UNCHANGED when the scene was already
+ * up to date, 0 on failure.
+ */
+int solium_qml_scene_render_gpu(SoliumQmlScene *scene, int *fence_fd);
+
 /*
  * Load `qml_path` into a scene rendering at `width` x `height`.
  *
