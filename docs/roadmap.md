@@ -91,6 +91,25 @@ compositor schema, so adding a mode adds its settings automatically.
 
 Done when: changing a setting is visible immediately, with no restart.
 
+### [E9](https://github.com/Lilium-Linux/solium/issues/84) — The transform layer and the layouts, made right
+
+Three places hold a window's position and nothing makes them agree. Filed after
+the same shape of bug arrived three times from hardware. Includes the resize
+problems, and a spike reading how Hyprland and niri each solved resize.
+
+Done when there is one answer to "where is this window", and a mode that gets
+it wrong fails loudly rather than quietly.
+
+### [E10](https://github.com/Lilium-Linux/solium/issues/85) — Atrium, and what modes still cannot do
+
+A stage-manager mode, named for the central hall of a Roman house rather than
+for Apple's word. The point is not the mode: it is the strongest test the
+architecture has been given, and whatever it turns out to need in Rust is
+exactly the list of what the transform layer still lacks.
+
+Done when atrium is a script somebody can rewrite, and nothing in it needed a
+special case in `render.rs`.
+
 ---
 
 ## What is left to be a complete compositor
