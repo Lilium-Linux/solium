@@ -623,9 +623,17 @@ impl Scene {
     /// tying its life to the scene's is the only arrangement in which the thing
     /// being read cannot be freed while something is still drawing into it.
     ///
-    /// Leaves *Qt's* GL context current on this thread: `QQuickRenderControl::
-    /// initialize` makes it so and does not put anything back. See
-    /// `render_gpu`.
+    /// Leaves **no** GL context current on this thread.
+    ///
+    /// `QQuickRenderControl::initialize` makes Qt's own current and puts nothing
+    /// back, so the host gives the thread up before returning — see
+    /// `release_the_thread` in `qml/host.cpp`. That is deliberate and it is what
+    /// lets this be called from somewhere with no renderer to restore, which
+    /// `ShellSurface::new` is. An empty thread is safe: every `GlesRenderer`
+    /// operation makes its own context current before touching GL. Somebody
+    /// else's context on the thread is what is not safe.
+    ///
+    /// `render_gpu` is the one call that does *not* hold to this, and says so.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn gpu(
         qml_path: &Path,
@@ -706,7 +714,7 @@ impl Scene {
     /// only honest answer there: Qt is on the GPU, so a software scene is not
     /// available either.
     ///
-    /// Leaves *Qt's* GL context current on this thread, as [`Scene::gpu`] does.
+    /// Leaves no GL context current on this thread, as [`Scene::gpu`] does.
     pub(crate) fn gpu_sized(
         qml_path: &Path,
         width: i32,
@@ -737,9 +745,13 @@ impl Scene {
     /// instead, so the frame is already complete — that is a correct answer and
     /// not an error, it just costs a stall rather than a hand-off.
     ///
-    /// Leaves *Qt's* GL context current on this thread. Whoever else holds a
-    /// context here has to make it current again before the next GL call, or
-    /// that call fails somewhere with nothing to do with this one.
+    /// The one call here that leaves *Qt's* GL context current on this thread —
+    /// building a scene and freeing one both leave none. It is not given back
+    /// because the caller has to take its own context anyway before it can
+    /// import Qt's fence, so a release here would only be an extra
+    /// `eglMakeCurrent` on the way to the same place. Whoever holds a context
+    /// has to make it current again before the next GL call, or that call fails
+    /// somewhere with nothing to do with this one.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn render_gpu(&mut self) -> Result<Option<Option<OwnedFd>>> {
         if self.target.is_none() {

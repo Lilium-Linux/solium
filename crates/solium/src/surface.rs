@@ -95,6 +95,12 @@ impl ShellSurface {
     /// The properties matter: shell components declare things `required`, and
     /// a required property must be supplied before the component is built or
     /// it is never built at all.
+    ///
+    /// Takes no renderer, and on the GPU path that is the reason the host gives
+    /// the thread back itself rather than leaving the caller to restore a
+    /// context. This is reached from a client attaching — `state.rs`'s
+    /// `begin_loading` — with no frame in sight and nothing to restore *to*.
+    /// See `Scene::gpu`.
     pub(crate) fn new(source: PathBuf, properties: &str) -> Result<Self> {
         qml::start()?;
         // 1x1 and not the real size, which is not known until the first draw:
@@ -349,10 +355,12 @@ impl ShellSurface {
         size: (i32, i32),
     ) -> Option<TextureRenderElement<GlesTexture>> {
         let rendered = self.render_on_gpu(now, size, scale);
-        // Unconditional, and underneath every way out of the call above:
-        // building a scene, rendering one and freeing one all leave the
-        // thread's context somewhere other than ours, including the paths that
-        // failed. The next EGL call is three lines down.
+        // Unconditional, and underneath every way out of the call above,
+        // including the paths that failed. Rendering leaves Qt's context on the
+        // thread; building a scene and freeing one leave none. Neither is a
+        // state the next line can run in — `EGLFence::import` is an
+        // `eglCreateSync` of our own, not smithay's, so nothing will make our
+        // context current for it.
         if let Err(err) = restore(renderer) {
             tracing::error!(?err, "the compositor's EGL context could not be restored");
             return None;
@@ -478,28 +486,28 @@ fn build(source: &Path, properties: &str, width: i32, height: i32) -> Result<qml
 
 /// Put the compositor's EGL context back after Qt has had the thread.
 ///
-/// Every call into a GPU scene leaves the thread's context somewhere else.
-/// `QQuickRenderControl::initialize` makes Qt's own current and puts nothing
-/// back, `render()` leaves it that way, and freeing a scene tears Qt's context
-/// down and leaves *no* context current at all. Ours has to be current again
-/// before the next EGL or GL call — and the next one is not always in this
-/// file, so a miss here surfaces in whichever draw the compositor happens to
-/// make next, with nothing about it to point back here.
+/// `render_gpu` leaves Qt's context on the thread and building or freeing a
+/// scene leaves none, so after any of them the thread is not in a state this
+/// file can make an EGL call in.
 ///
-/// It is deliberately not left to the renderer to do for itself. `GlesRenderer`
-/// does re-bind its context inside almost every operation it offers, but not
-/// all of them are its own: the very first thing this file does afterwards is
-/// `EGLFence::import`, which is an `eglCreateSync` against our display and
-/// needs a current context that smithay is not going to make for it.
+/// Only *this* file, and that distinction is the whole reason this exists as a
+/// deliberate call rather than something the renderer handles. `GlesRenderer`
+/// re-binds its own context inside every operation it offers, so an empty
+/// thread costs it one `eglMakeCurrent` and nothing else. What it cannot cover
+/// is a call that is not smithay's, and the very next thing here is exactly
+/// that: `EGLFence::import` is an `eglCreateSync` against our display, and it
+/// needs a current context nobody else is going to make for it.
 ///
 /// `EGLContext::make_current` is the API. There is no `bind_context`.
 ///
 /// This has a matching half on the other side, and neither works alone. An
-/// `eglMakeCurrent` is invisible to Qt — it keeps its own thread-local record
-/// of which context is current — so once this has run, Qt believes it still has
-/// the thread and skips the `makeCurrent` its next frame needs. See
-/// `clear_stale_current_context` in `qml/host.cpp`, which is what makes the
-/// *second* frame draw.
+/// `eglMakeCurrent` is invisible to Qt — it keeps its own thread-local record of
+/// which context is current — so once this has run, Qt believes it still has the
+/// thread and skips the `makeCurrent` its next call needs. On a render that
+/// draws the frame into our context and leaves the buffer empty; on a *teardown*
+/// it deletes Qt's GL object names out of our context, which are our objects.
+/// See `clear_stale_current_context` in `qml/host.cpp`, which is what makes the
+/// second frame draw and the first free safe.
 #[expect(unsafe_code, reason = "restoring our EGL context after Qt")]
 fn restore(renderer: &GlesRenderer) -> Result<()> {
     // SAFETY: called on the thread that owns this context, with no other
