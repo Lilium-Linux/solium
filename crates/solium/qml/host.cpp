@@ -690,6 +690,34 @@ static void mirror_for_the_compositor(QQuickRenderTarget *target)
 }
 
 /*
+ * Is this scene's own GL context the one current on this thread right now?
+ *
+ * The single owner of that question. It was asked in two places with two
+ * different answers — the texture delete compared display *and* context, the
+ * render path compared only the context — and in a third, the teardown reached
+ * through `delete scene->control`, it was not asked at all. One rule, one
+ * place, so a fourth site inherits it rather than re-deriving it.
+ *
+ * Asked at the EGL level, deliberately. QOpenGLContext::currentContext() cannot
+ * answer it: it is a thread-local Qt sets inside its own makeCurrent, and the
+ * compositor takes the thread back with a raw eglMakeCurrent that Qt never
+ * sees, so that thread-local goes *stale rather than null*. The values compared
+ * here were captured from eglGetCurrentDisplay/eglGetCurrentContext at import,
+ * where Qt genuinely did have the thread.
+ *
+ * Both halves and not just the context: a context handle is only meaningful
+ * against the display that issued it, and the stricter of the two old tests is
+ * the one the texture delete needs. Nothing that was safe under the looser test
+ * is unsafe under this one.
+ */
+static bool scene_context_is_current(const SoliumQmlScene *scene)
+{
+    return scene->egl_context != EGL_NO_CONTEXT && scene->egl_display != EGL_NO_DISPLAY &&
+        eglGetCurrentContext() == scene->egl_context &&
+        eglGetCurrentDisplay() == scene->egl_display;
+}
+
+/*
  * Tell Qt the truth about whose context is current, when it has it wrong.
  *
  * This is the other half of the fact solium_qml_scene_free already documents,
@@ -732,12 +760,7 @@ static void mirror_for_the_compositor(QQuickRenderTarget *target)
 static void clear_stale_current_context(const SoliumQmlScene *scene)
 {
     QOpenGLContext *believed = QOpenGLContext::currentContext();
-    if (believed == nullptr) {
-        return;
-    }
-    // Genuinely current: this is the frame right after initialize(), or a
-    // second render with nothing in between. Nothing to correct.
-    if (scene->egl_context != EGL_NO_CONTEXT && eglGetCurrentContext() == scene->egl_context) {
+    if (believed == nullptr || scene_context_is_current(scene)) {
         return;
     }
     believed->doneCurrent();
@@ -867,23 +890,26 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
     // surface, most likely. That is unrecoverable and silent, and it is strictly
     // worse than not deleting at all.
     //
-    // So the test is an EGL-level identity check against what was recorded at
-    // import: is *this* context, on *this* display, the one current right now.
+    // So the test is scene_context_is_current: an EGL-level identity check
+    // against what was recorded at import.
     // The earlier version asked QOpenGLContext::currentContext() != nullptr,
     // which cannot answer that — Qt's thread-local still points at Qt's context
     // after the compositor takes the thread back with a raw eglMakeCurrent, so
     // the guard passed and the delete ran against the compositor's context,
     // causing the exact corruption this comment describes.
     //
+    // Note this is asked *after* clear_stale_current_context above, so in the
+    // ordinary ordering it is false by construction: no context is current, and
+    // the name is left for the teardown below. That is the intended outcome and
+    // not an accident of ordering — the alternative is a raw eglMakeCurrent
+    // behind Qt's back to reclaim one integer that dies moments later anyway.
+    //
     // When the check fails the texture name is left alone. It is not leaked for
     // the life of the process: GL objects belong to their context, and Qt's
     // context is destroyed a few lines below with the render control, which
     // reclaims it. The warning is about the caller's contract, not about memory.
     if (scene->texture != 0) {
-        const bool qt_context_is_current = scene->egl_context != EGL_NO_CONTEXT &&
-            eglGetCurrentContext() == scene->egl_context &&
-            eglGetCurrentDisplay() == scene->egl_display;
-        if (qt_context_is_current) {
+        if (scene_context_is_current(scene)) {
             QOpenGLContext *context = QOpenGLContext::currentContext();
             if (context != nullptr) {
                 context->functions()->glDeleteTextures(1, &scene->texture);
