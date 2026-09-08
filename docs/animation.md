@@ -27,6 +27,12 @@ had.
 
 ## Curves
 
+![The animation curves, sampled from the Rust engine rather than redrawn](animation-curves.png)
+
+Sampled from the engine itself rather than drawn to illustrate it, so what is
+plotted is what runs — including the durations, which for a spring are an
+outcome rather than a setting.
+
 Five have names:
 
 | name | |

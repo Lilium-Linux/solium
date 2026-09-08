@@ -8,6 +8,13 @@ new mode needs new Rust, the transform layer is missing something**, and that
 missing thing is the bug rather than your mode. Overview is ninety lines of Lua
 for exactly this reason: it was written to find out whether the claim was true.
 
+![Every mode, frame by frame, twenty milliseconds apart](modes-frame-by-frame.png)
+
+Every mode above is captured by the compositor reading back its own
+framebuffer, twenty milliseconds apart. One engine drew all four rows, which is
+the whole argument on one page: a window opening, overview entering, and two
+layouts arranging are the same interpolation with different targets.
+
 ## The two ways to move a window
 
 Everything a mode does comes down to one of these, and picking the wrong one is
@@ -239,6 +246,14 @@ the rect before adding keys — the one from `sol.monitors()` belongs to the
 snapshot.
 
 ## A whole mode
+
+![Overview entering and leaving, and the desktop coming back unchanged](overview-in-lua.png)
+
+Above: three windows at rest with their QML frames, `super+space` into overview,
+and `super+space` again. The last frame differs from the first by zero pixels,
+which is the property that matters — a mode that cannot put the desktop back
+exactly is a mode nobody will use twice. All of it is `lua/overview.lua`.
+
 
 This is real and it works. Paste it into `~/.config/solium/mymode.lua` and
 `require("mymode")` from your `init.lua`.

@@ -9,6 +9,21 @@ The property-by-property contract for a frame lives next to the frames, at
 [`crates/solium/qml/decorations/README.md`](../crates/solium/qml/decorations/README.md).
 This is the guide: what the pieces are, how to write one, and what it costs.
 
+![Titlebars drawn by the compositor in QML, at rest and scaled down in overview](window-frames.png)
+
+Both halves are the same QML. In overview each frame scales with the window it
+belongs to rather than being redrawn at a new size, because a frame is part of
+the window as far as the transform layer is concerned — which is why a mode can
+scale a window at all without knowing what a titlebar is.
+
+<img src="cursor.png" width="112" alt="The pointer, drawn from QML like everything else">
+
+The pointer is the same story in miniature: not an image loaded from a cursor
+theme, but QML rasterised by the compositor, so it belongs to the same design
+system as the frames. See [#81](https://github.com/Lilium-Linux/solium/issues/81)
+for what that costs — there is no way yet to make it match the theme every
+other application on the machine follows.
+
 ## The four kinds
 
 | what | where | named by |

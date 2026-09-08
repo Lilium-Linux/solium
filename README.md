@@ -6,6 +6,13 @@ in Rust on [Smithay](https://github.com/Smithay/smithay).
 One compositor for phone, tablet, laptop and desktop — tiling, scrolling,
 floating and overview modes, all scriptable, all animated by the same engine.
 
+![Three terminals tiled, with titlebars the compositor drew in QML](docs/tiling.png)
+
+Every titlebar above is QML rendered by the compositor and reloadable while the
+session runs; the arrangement is `lua/tiling.lua` and nothing about it is
+compiled in. [docs/modes.md](docs/modes.md) has the same picture for every other
+mode, frame by frame.
+
 ## Running it
 
 From a free TTY (`Ctrl+Alt+F3`), and not from inside a running desktop session —
@@ -113,9 +120,18 @@ against GLES directly, so a Vulkan backend stays a contained change later.
 ## Status
 
 Alpha. It runs on hardware and is used to develop itself, which is the only
-test that counts for a compositor. It is not something to depend on yet: there
-is no lock screen, no screen capture, and a bug in here takes the session with
-it.
+test that counts for a compositor. It is not something to depend on yet, and
+the honest reasons are: the keyboard layout cannot be changed from US QWERTY
+([#53](https://github.com/Lilium-Linux/solium/issues/53)), a monitor plugged in
+mid-session is not picked up
+([#43](https://github.com/Lilium-Linux/solium/issues/43)), suspend and resume
+have never been tested once
+([#64](https://github.com/Lilium-Linux/solium/issues/64)), there is no way to
+install it ([#66](https://github.com/Lilium-Linux/solium/issues/66)), and a bug
+in here takes the session with it.
+
+[docs/gaps.md](docs/gaps.md) is the whole list rather than the flattering part
+of it.
 
 ## Documentation
 
@@ -129,12 +145,30 @@ it.
 | [docs/shell-boundary.md](docs/shell-boundary.md) | what belongs to the compositor and what to the shell |
 | [docs/roadmap.md](docs/roadmap.md) | epics, in dependency order |
 | [docs/beta.md](docs/beta.md) | what has to be true before a public preview |
+| [docs/gaps.md](docs/gaps.md) | everything not built yet, exhaustively |
 | [dev/README.md](dev/README.md) | the knobs and checks it is tested with |
 | `docs/spikes/` | decisions, with the evidence that settled them |
 
-## History
+## Thanks to
 
-Solium began as a Hyprland fork. That work is archived: the fork proved the
-decoration and window-control ideas, and its post-mortem — including why an
-out-of-process QML shell was the wrong architecture — is recorded in the
-`lilium-de` repository. The ideas carried over; none of the code did.
+- **[Smithay](https://github.com/Smithay/smithay)** — Solium is a Smithay
+  compositor, and most of what is hard about being one is Smithay's work rather
+  than this project's: DRM, GBM, libinput, the seat, the protocol
+  implementations. Its example compositor is also the first place to look when
+  something here does not make sense.
+- **[niri](https://github.com/YaLTeR/niri)** — the reference for how a serious
+  Smithay compositor is actually put together, and the answer to more than one
+  "surely this cannot be the way" while reading DRM code. Its scrolling layout
+  is why `lua/scrolling.lua` exists to be compared against.
+- **[Hyprland](https://github.com/hyprwm/Hyprland)** — where this started. Solium
+  began as a Hyprland fork, and that work is archived: it proved the decoration
+  and window-control ideas, and its post-mortem — including why an
+  out-of-process QML shell was the wrong architecture — is in the `lilium-de`
+  repository. The ideas carried over and none of the code did, but the case
+  that a compositor is allowed to be beautiful and configurable at the same
+  time was made there first.
+- **[Quickshell](https://quickshell.outfoxxed.me/)** — the demonstration that a
+  desktop shell can be QML all the way down. Solium hosts QML *inside* the
+  compositor rather than beside it, which is a different answer to the same
+  question, and it is a different answer because Quickshell had already shown
+  what the question was.
