@@ -47,12 +47,27 @@ pub(crate) fn allocate(gbm: &GbmDevice<DrmDeviceFd>, width: i32, height: i32) ->
             GbmBufferFlags::RENDERING,
         )
         .context("allocating a scene buffer")?;
-    // `implicit = true`: this call (unlike `create_buffer_object_with_modifiers`)
-    // predates modifier negotiation, so GBM can hand back a modifier that
-    // doesn't mean anything. Telling smithay it's implicit makes it report
-    // `Modifier::Invalid` instead of that nonsense value — the same thing
-    // `GbmAllocator` does internally when it falls back to this call.
-    let buffer = GbmBuffer::from_bo(bo, true);
+    // `implicit = false`: keep the modifier GBM actually reports.
+    //
+    // This used to be `true`, on the strength of smithay's own doc comment --
+    // "gbm might otherwise give us the underlying or a non-sensical modifier".
+    // Measured wrong on this driver: `gbm_bo_get_modifier` on a plain
+    // `create_buffer_object` (no modifier negotiated) returns a real NVIDIA
+    // block-linear modifier, and forcing it to `Modifier::Invalid` is what
+    // made the C++ side omit the EGL modifier attributes on import, which
+    // this driver then rejects outright --
+    // `glEGLImageTargetTexture2DOES failed 0x502` (GL_INVALID_OPERATION) --
+    // rather than silently falling back to linear. `Invalid` was never a safe
+    // default here; it was a different bug that also imported clean.
+    //
+    // This is not modifier *negotiation* -- there is no candidate-list query
+    // against the render node here, only the modifier this one legacy call
+    // happened to pick. It works because that happens to be what this driver
+    // wants when asked for a renderable buffer with no constraints. A future
+    // driver where that is not true would need `create_buffer_object_with_modifiers`
+    // fed by an actual queried list, which needs an EGL display this module
+    // does not have.
+    let buffer = GbmBuffer::from_bo(bo, false);
     let dmabuf = buffer.export().context("exporting the scene buffer")?;
     Ok(Target {
         dmabuf,
@@ -63,7 +78,25 @@ pub(crate) fn allocate(gbm: &GbmDevice<DrmDeviceFd>, width: i32, height: i32) ->
 
 impl Target {
     /// What the QML host needs to import this: fd, stride, modifier, fourcc.
+    ///
+    /// The returned fd is borrowed from `self.dmabuf` for the duration of the
+    /// `solium_qml_scene_new_gpu` call it is handed to: EGL dup's what it needs
+    /// at import (`eglCreateImageKHR` takes its own reference), so the caller
+    /// must not let it outlive that one call, and must not close it itself --
+    /// closing it would close `self.dmabuf`'s own fd out from under `Target`.
     pub(crate) fn as_ffi(&self) -> Result<(RawFd, i32, u64, u32)> {
+        // A real (non-`Invalid`) modifier can describe a multi-plane layout,
+        // which taking plane 0 alone and ignoring the rest would hand to Qt as
+        // if it were the whole image -- wrong pixels, not a crash, and nothing
+        // in the return value would say why. Argb8888 from `allocate` is
+        // single-plane on every driver this has been measured against, so this
+        // is a should-never-happen guard, not a format we expect to hit.
+        let planes = self.dmabuf.num_planes();
+        if planes != 1 {
+            return Err(anyhow!(
+                "the scene buffer has {planes} planes, not the 1 as_ffi assumes"
+            ));
+        }
         let fd = self
             .dmabuf
             .handles()
@@ -105,5 +138,15 @@ mod tests {
     fn an_absurd_size_is_refused() {
         assert!(!size_is_sane(20_000, 20_000));
         assert!(size_is_sane(2560, 1440));
+    }
+
+    /// 20000 and 2560 both sit far from `MAX_SIDE`, so an off-by-one in the
+    /// comparison would pass unnoticed. Only a test at the boundary itself
+    /// checks the boundary.
+    #[test]
+    fn the_cap_is_inclusive_of_max_side_and_no_further() {
+        assert!(size_is_sane(super::MAX_SIDE, super::MAX_SIDE));
+        assert!(!size_is_sane(super::MAX_SIDE + 1, super::MAX_SIDE));
+        assert!(!size_is_sane(super::MAX_SIDE, super::MAX_SIDE + 1));
     }
 }
