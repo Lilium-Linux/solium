@@ -114,6 +114,17 @@ modes.register("tiling", tiling)
 -- The compositor changed how much room windows get -- a decoration that
 -- reserves a different amount, most likely. The slots are unchanged; what
 -- fits inside them is not, so the arithmetic is redone.
+-- A monitor arrived or went away.
+--
+-- `apply` walks the monitors that exist, so a window on one that has gone is
+-- in a tree nothing iterates: it keeps a slot that is now off every
+-- screen, and it comes back on that screen when the monitor does. `adopt` is
+-- already the function that re-homes a window whose monitor changed -- it was
+-- only ever called when the mode was switched on.
+sol.on("monitors", function()
+    tiling.adopt()
+end)
+
 sol.on("layout", function()
     tiling.apply()
 end)

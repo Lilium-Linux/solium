@@ -1040,9 +1040,9 @@ impl State {
         // rectangle in the global space and simply is not on any screen, so
         // the layout is asked to place everything again rather than being told
         // about the one that moved.
-        self.solium.place_outputs();
-        self.solium.trigger_relayout();
-        self.solium.redraw = true;
+        // Everything a monitor change has to do, in the one call both backends
+        // make. See `Solium::settle_monitors`.
+        self.solium.settle_monitors();
         for screen in &mut self.screens {
             screen.owed = true;
         }

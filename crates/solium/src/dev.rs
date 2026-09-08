@@ -51,6 +51,29 @@ pub(crate) fn outputs() -> usize {
         .clamp(1, 4)
 }
 
+/// When to take a nested monitor away, and when to give it back.
+///
+/// ```sh
+/// SOLIUM_OUTPUTS_AT="5000:1,9000:2"
+/// ```
+///
+/// `<ms>:<count>` pairs. Exists because the half of hotplug that has broken
+/// twice on real hardware is not the DRM half -- it is what the *layout* does
+/// with a window whose monitor has gone, and that half has nothing to do with
+/// cables. A window on a monitor that disappears is in a tree nothing
+/// iterates, keeps a slot that is off every screen, and comes back on that
+/// screen when the monitor returns. All of which happens identically nested,
+/// where it can be captured frame by frame with nobody reaching behind a desk.
+pub(crate) fn outputs_at() -> Vec<(Duration, usize)> {
+    parse_list("SOLIUM_OUTPUTS_AT", |value| {
+        value
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .map(|count| count.clamp(1, 4))
+    })
+}
+
 pub(crate) fn capture_interval() -> Duration {
     millis("SOLIUM_CAPTURE_INTERVAL").unwrap_or(Duration::from_millis(16))
 }
