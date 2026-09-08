@@ -660,6 +660,35 @@ static bool import_dmabuf_texture(SoliumQmlScene *scene, int dmabuf_fd, int stri
     return true;
 }
 
+/*
+ * Store the frame the way the rest of the world stores an image: row 0 on top.
+ *
+ * Qt Quick renders through QRhi, and on OpenGL QRhi leaves a texture render
+ * target in the framebuffer's own orientation — origin bottom-left, so the
+ * scene's *top* row lands in the buffer's *last* row. That is correct and
+ * conventional for a texture Qt is going to sample itself. It is wrong for this
+ * one, which is a dmabuf the compositor imports: a dmabuf is top-down unless it
+ * carries DRM_FORMAT_MOD/Y_INVERT saying otherwise, ours does not, and every
+ * consumer of it — smithay's importer, a screencopy client, a later KMS plane —
+ * reads row 0 as the top. Without this the shell is drawn upside down.
+ *
+ * Measured, not assumed: with this off, a four-quadrant probe scene read back
+ * from an independent EGL context has its QML top half in the buffer's bottom
+ * half, exactly and only mirrored. See dev/README.md.
+ *
+ * Done here rather than in the compositor because both of the Rust-side levers
+ * are worse. Smithay's `y_inverted` texture flag negates the texture matrix's
+ * y row without the matching translation, which samples outside the texture;
+ * and a `Transform::Flipped180` on the render element mirrors within the
+ * element's *logical* size while the source rectangle is in device pixels, so
+ * it is right at scale 1 and wrong on every scaled monitor. Orientation belongs
+ * to whoever fills the buffer.
+ */
+static void mirror_for_the_compositor(QQuickRenderTarget *target)
+{
+    target->setMirrorVertically(true);
+}
+
 extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int width, int height,
                                                     int dmabuf_fd, int stride,
                                                     unsigned long long modifier,
@@ -715,6 +744,7 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int wi
     QQuickRenderTarget target =
         QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
     target.setDevicePixelRatio(scene->scale);
+    mirror_for_the_compositor(&target);
     scene->window->setRenderTarget(target);
 
     const char *reason = nullptr;
@@ -834,6 +864,7 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
         QQuickRenderTarget target =
             QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
         target.setDevicePixelRatio(scale);
+        mirror_for_the_compositor(&target);
         scene->window->setRenderTarget(target);
         scene->dirty = true;
         return;
@@ -1014,6 +1045,51 @@ static int fence_after_render()
     return fence_fd;
 }
 
+/*
+ * Tell Qt the truth about whose context is current, when it has it wrong.
+ *
+ * This is the other half of the fact solium_qml_scene_free already documents,
+ * and it is the one that decides whether the second frame draws at all.
+ *
+ * QOpenGLContext::currentContext() is a thread-local Qt sets in its own
+ * makeCurrent. The compositor takes the thread back with a raw eglMakeCurrent —
+ * it has to; it is not a Qt program — and Qt never sees that, so the
+ * thread-local goes stale rather than null. QRhiGles2::ensureContext() then
+ * asks exactly that question, believes its context is already current, skips
+ * the makeCurrent it needs, and issues the whole frame against whatever context
+ * really is current: the compositor's. Nothing fails. beginFrame, sync, render
+ * and endFrame all return, the fence is real and signals, and the dmabuf stays
+ * empty, because the FBO and texture names Qt drew through mean something else
+ * — or nothing — in the compositor's context.
+ *
+ * Measured on this machine, and it is not subtle once you know where to look:
+ * with the compositor's context current across a render the buffer reads back
+ * as 16384 zero bytes and with Qt's it reads back as the frame, byte for byte
+ * identical to the software path. The first frame after a scene is built works
+ * either way, because initialize() left Qt's context current and nothing has
+ * taken it yet, which is exactly why a one-frame probe cannot see this.
+ *
+ * doneCurrent() is the supported way to say it: it releases the context and
+ * clears the thread-local, so ensureContext() below finds no current context
+ * and makes its own current properly. It also releases the *compositor's*
+ * context from this thread, which is fine and expected — the compositor
+ * restores its own context after every call in here, because Qt's teardown
+ * leaves none current anyway.
+ */
+static void clear_stale_current_context(const SoliumQmlScene *scene)
+{
+    QOpenGLContext *believed = QOpenGLContext::currentContext();
+    if (believed == nullptr) {
+        return;
+    }
+    // Genuinely current: this is the frame right after initialize(), or a
+    // second render with nothing in between. Nothing to correct.
+    if (scene->egl_context != EGL_NO_CONTEXT && eglGetCurrentContext() == scene->egl_context) {
+        return;
+    }
+    believed->doneCurrent();
+}
+
 extern "C" int solium_qml_scene_render_gpu(SoliumQmlScene *scene, int *fence_fd)
 {
     if (scene == nullptr || fence_fd == nullptr) {
@@ -1030,6 +1106,10 @@ extern "C" int solium_qml_scene_render_gpu(SoliumQmlScene *scene, int *fence_fd)
     if (!scene->dirty) {
         return SOLIUM_QML_UNCHANGED;
     }
+
+    // Before anything that touches the RHI, and above all before beginFrame,
+    // which is where Qt decides whether it needs its context back.
+    clear_stale_current_context(scene);
 
     // polish, begin, sync, render, end — and here beginFrame/endFrame *are*
     // required, which is the exact inverse of the software path above. They

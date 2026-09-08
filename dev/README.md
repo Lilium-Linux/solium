@@ -536,6 +536,42 @@ Three things worth knowing before running it on a TTY:
   SOLIUM_QML_GPU=1 QT_FORCE_STDERR_LOGGING=1 ./target/debug/solium
   ```
 
+* **A one-frame probe cannot see the bug that matters.** Qt's
+  `QOpenGLContext::currentContext()` is a thread-local Qt sets in its own
+  `makeCurrent`. The compositor takes the thread back with a raw
+  `eglMakeCurrent`, which Qt never sees, so that thread-local goes *stale rather
+  than null* — and `QRhiGles2::ensureContext()` reads exactly it, concludes its
+  context is already current, and issues the whole frame against whichever
+  context really is: the compositor's.
+
+  Nothing fails when this happens. `beginFrame`, `sync`, `render` and `endFrame`
+  all return, the fence is a real `sync_file` and signals in under a
+  millisecond, and the dmabuf stays full of zeros. Measured on a 64x64 scene:
+  16384 of 16384 bytes zero with the compositor's context current across the
+  render, 0 of 16384 bytes wrong with Qt's. The *first* frame after a scene is
+  built works either way, because `initialize()` left Qt's context current and
+  nothing has taken it yet — so a probe that builds a scene, renders once and
+  reads the buffer passes while every frame after it draws nothing.
+
+  `clear_stale_current_context` in `host.cpp` is the fix: `doneCurrent()` on
+  whatever Qt believes is current, when EGL says otherwise. `surface.rs`'s
+  `restore` is the other half, and neither works without the other.
+
+* **A GPU scene's buffer is not stored the way you would guess.** QRhi leaves an
+  OpenGL texture render target in the framebuffer's own orientation, origin
+  bottom-left, so the scene's *top* row lands in the buffer's *last* row. A
+  dmabuf is top-down unless it says otherwise and ours does not, so the shell
+  comes out upside down. `host.cpp` calls
+  `QQuickRenderTarget::setMirrorVertically` on every GPU render target for that
+  reason — including the one rebuilt inside `solium_qml_scene_resize`, which is
+  easy to miss.
+
+  Do not try to correct it on the compositor's side. Smithay's `y_inverted`
+  texture flag negates the texture matrix's y row without the matching
+  translation, and a `Transform::Flipped180` on the render element mirrors
+  within the element's *logical* size while its source rectangle is in device
+  pixels — right at scale 1, wrong on every scaled monitor.
+
 ## Checking an animation frame by frame
 
 ```sh

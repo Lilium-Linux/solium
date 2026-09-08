@@ -1076,6 +1076,13 @@ impl State {
 
         let (device, notifier) = DrmDevice::new(fd.clone(), true).context("initialising DRM")?;
         let gbm = GbmDevice::new(fd).context("creating the GBM device")?;
+        // The buffers QML scenes render into come from here too, on this
+        // backend and only on this one. Said as soon as the device exists
+        // rather than beside the renderer below, because a scene built in
+        // between would find no allocator and refuse for the rest of its life
+        // — and the reason this is a global at all is that scenes are built
+        // from places that never see this function.
+        crate::qml::set_allocator(gbm.clone());
 
         // SAFETY: the GBM device outlives the display; both are moved into the
         // compositor below.

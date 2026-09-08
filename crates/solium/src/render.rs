@@ -53,11 +53,15 @@ render_elements! {
     /// backdrop, which has to be a real element rather than a clear colour
     /// because the lock client's surface is composited on top of it.
     Solid = smithay::backend::renderer::element::solid::SolidColorRenderElement,
-    /// A whole monitor, already drawn into a texture of its own.
+    /// Something already drawn into a texture of its own.
     ///
-    /// Only the nested backend's multi-monitor mode produces these: there is
-    /// one window and several screens to put in it. On the hardware a monitor
-    /// is a scanout buffer and never an element. See `offscreen::Screens`.
+    /// Two things produce these and they have nothing in common but the shape.
+    /// The nested backend's multi-monitor mode draws a whole monitor into one,
+    /// because there is one window and several screens to put in it — on the
+    /// hardware a monitor is a scanout buffer and never an element; see
+    /// `offscreen::Screens`. And a shell surface on the GPU path is a texture
+    /// too: Qt rendered it into a buffer the compositor allocated, so there is
+    /// nothing to upload and nothing that is a memory buffer. See `surface.rs`.
     Screen = smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>,
 }
 
@@ -231,8 +235,11 @@ fn scene(
         return;
     };
     held.set_int("waited", waited);
+    // Already an `Element`: a shell surface is a memory buffer on the software
+    // path and a texture on the GPU one, and which of the two it is is its own
+    // business rather than this function's.
     if let Some(element) = held.element(renderer, area, now, alpha, scale) {
-        elements.push(Element::Chrome(element));
+        elements.push(element);
     }
     // A scene animates on its own clock and damages nothing, so the next frame
     // has to be asked for or it stops where it stands -- mid-fade, most of all.
@@ -706,7 +713,7 @@ fn scripted(
             1.0,
             scale,
         ) {
-            drawn.push(Element::Chrome(element));
+            drawn.push(element);
         }
     }
     drawn
