@@ -766,6 +766,39 @@ static void clear_stale_current_context(const SoliumQmlScene *scene)
     believed->doneCurrent();
 }
 
+/*
+ * Give the thread back with *no* GL context current on it.
+ *
+ * QQuickRenderControl::initialize() makes Qt's context current and never puts
+ * anything back, so building a GPU scene left Qt holding a thread the
+ * compositor also uses. Undoing that was the caller's job — and a caller with
+ * no renderer to hand could not do it at all. ShellSurface::new is exactly
+ * that: it is reached from a client attaching, with no frame in sight and
+ * nothing to restore *to*. An obligation only some callers can discharge is not
+ * an obligation, it is a bug waiting for the third call site.
+ *
+ * So it is discharged here, and the postcondition of building a GPU scene is
+ * the same as the postcondition of freeing one: nothing is current.
+ *
+ * "Nothing current" and not "the compositor's context current", because this
+ * file has no way to name the compositor's context and does not need one. The
+ * danger was never an empty thread; it is somebody *else's* context on it.
+ * Every GlesRenderer operation re-binds its own context before it touches GL —
+ * import, bind, render, wait, copy, with_context, all of them — so an empty
+ * thread costs one eglMakeCurrent and nothing else. The single call that is not
+ * smithay's, our own EGLFence::import, sits after an explicit restore in
+ * surface.rs, which is where it belongs and where it is visible.
+ */
+static void release_the_thread(const SoliumQmlScene *scene)
+{
+    if (!scene_context_is_current(scene)) {
+        return;
+    }
+    if (QOpenGLContext *context = QOpenGLContext::currentContext()) {
+        context->doneCurrent();
+    }
+}
+
 extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int width, int height,
                                                     int dmabuf_fd, int stride,
                                                     unsigned long long modifier,
@@ -800,8 +833,9 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int wi
     // The RHI path *requires* initialize(); the software path forbids it. This
     // is the one line where the two genuinely diverge, and it also has the side
     // effect the whole GPU design hangs off: it makes Qt's own context current
-    // on this thread, which is what the import below needs and what the
-    // compositor has to undo afterwards before its next eglMakeCurrent.
+    // on this thread, which is what the import below needs. It is given back at
+    // the bottom of this function — see release_the_thread — so a caller with no
+    // renderer to restore is not left holding a thread Qt has taken.
     if (!scene->control->initialize()) {
         qWarning("QQuickRenderControl::initialize failed — Qt could not bring up "
                  "an RHI on this platform plugin, so the GPU path is not available");
@@ -827,9 +861,14 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int wi
     const char *reason = nullptr;
     if (!load_component(scene, qml_path, initial_json, &reason)) {
         qWarning("solium_qml_scene_new_gpu: %s", reason != nullptr ? reason : "the QML did not load");
+        // Not released first: the free path takes the thread back itself, and
+        // finding Qt's own context current is the *good* case for it — the one
+        // ordering in which the texture can be deleted explicitly.
         solium_qml_scene_free(scene);
         return nullptr;
     }
+    // Last, after everything that needed Qt's context has had it.
+    release_the_thread(scene);
     return scene;
 }
 
