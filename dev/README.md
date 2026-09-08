@@ -202,6 +202,15 @@ their own: a configuration reload is something people do at a desk many times
 an evening, and unplugging a monitor is something they do once. The path that
 gets exercised is the one that works.
 
+The first hardware test failed, and how it failed is worth keeping: the uevent
+arrived three times, `the connectors changed` is in the log three times, and
+nothing else happened. `get_connector` was being asked with `force_probe =
+false`, so the kernel handed back the answer it had cached before the cable
+moved. The uevent is the kernel saying *come and look*; a compositor that comes
+and looks at its own notes learns nothing. There is now a log line for exactly
+that shape -- `the connectors changed and the set of screens did not` -- because
+from the log it was indistinguishable from the event never arriving.
+
 What to watch for, because these are the ways it goes wrong quietly: a
 `wl_output` that stays in `wayland-info` after the monitor is gone; windows
 left on a screen nobody can see; a bar that does not come back when the monitor
