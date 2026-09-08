@@ -14,6 +14,7 @@ mod decoration;
 mod dev;
 mod idle;
 mod input;
+mod keymap;
 mod layer;
 mod lock;
 mod mat4;

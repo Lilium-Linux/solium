@@ -47,7 +47,7 @@ use.
 | | why |
 |---|---|
 | [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | there is none. A preview nobody can install is a preview nobody tries |
-| [#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout | US QWERTY and nothing else. A second person who does not write English cannot use this at all, which is what "blocking" means |
+| ~~[#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout~~ | **done.** In `config.keyboard`, with the repeat rate — which was the part that genuinely could not be changed. The layout could always be set through `XKB_DEFAULT_LAYOUT`; this entry said otherwise and was wrong |
 | ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | **done.** A pipeline per monitor, one global space, layouts and workspaces per screen |
 | ~~[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI~~ | **done.** Scale per monitor, chrome rasterised at it, chosen from the panel's dpi |
 | ~~[#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture~~ | **done.** `wlr-screencopy`, so grim, wf-recorder and the portal all work |

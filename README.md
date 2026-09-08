@@ -121,14 +121,10 @@ against GLES directly, so a Vulkan backend stays a contained change later.
 
 Alpha. It runs on hardware and is used to develop itself, which is the only
 test that counts for a compositor. It is not something to depend on yet, and
-the honest reasons are: the keyboard layout cannot be changed from US QWERTY
-([#53](https://github.com/Lilium-Linux/solium/issues/53)), a monitor plugged in
-mid-session is not picked up
-([#43](https://github.com/Lilium-Linux/solium/issues/43)), suspend and resume
-have never been tested once
-([#64](https://github.com/Lilium-Linux/solium/issues/64)), there is no way to
-install it ([#66](https://github.com/Lilium-Linux/solium/issues/66)), and a bug
-in here takes the session with it.
+the honest reasons are: a monitor plugged in mid-session is not picked up
+([#43](https://github.com/Lilium-Linux/solium/issues/43)), suspend and resume have never been tested once
+([#64](https://github.com/Lilium-Linux/solium/issues/64)), there is no way to install it ([#66](https://github.com/Lilium-Linux/solium/issues/66)), and a bug in
+here takes the session with it.
 
 [docs/gaps.md](docs/gaps.md) is the whole list rather than the flattering part
 of it.

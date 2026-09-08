@@ -109,6 +109,9 @@ pub(crate) struct Snapshot {
     pub(crate) windows: Vec<WindowInfo>,
     /// Every monitor, in the order the compositor holds them.
     pub(crate) monitors: Vec<MonitorInfo>,
+    /// The keyboard, for `sol.keyboard()` and for a shell that wants to draw
+    /// a layout indicator.
+    pub(crate) keyboard: crate::keymap::State,
     /// The active monitor's work area — what `sol.monitor()` answers.
     ///
     /// Kept as its own field rather than found in `monitors` every time,
@@ -171,6 +174,8 @@ pub(crate) enum Command {
     Reload,
     /// Where the monitors are, relative to each other.
     Monitors(crate::monitor::Arrangement),
+    /// Which layouts the keyboard has, which is live, and how keys repeat.
+    Keyboard(crate::keymap::Request),
     /// Show or hide the Developer Tweaks panel.
     TweaksToggle,
     /// Move and resize a window for real — the layout's authority, not a
@@ -796,6 +801,87 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 windows.set(index + 1, entry)?;
             }
             Ok(windows)
+        })?,
+    )?;
+
+    // The keyboard: which layouts exist, which is live, how keys repeat.
+    //
+    // Reads with no argument and configures with a table, the same shape as
+    // `sol.monitors` below. Switching layout is `sol.keyboard{ active = 2 }`
+    // rather than a second function, because "which layout is live" is a
+    // property of the keyboard and not a different subject.
+    //
+    // Every key is optional and an absent one is left alone -- so a binding
+    // that switches layout does not quietly reset the repeat rate somebody
+    // configured, and a configuration that says nothing about the keyboard
+    // leaves the `XKB_DEFAULT_*` environment in force.
+    sol.set(
+        "keyboard",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let Some(options) = options else {
+                let keyboard = snapshot(lua)?.keyboard;
+                let table = lua.create_table()?;
+                let layouts = lua.create_table()?;
+                for (index, name) in keyboard.layouts.iter().enumerate() {
+                    layouts.set(index + 1, name.clone())?;
+                }
+                table.set("layouts", layouts)?;
+                table.set("active", keyboard.active)?;
+                table.set("repeat_rate", keyboard.repeat_rate)?;
+                table.set("repeat_delay", keyboard.repeat_delay)?;
+                return Ok(Value::Table(table));
+            };
+
+            let text =
+                |key: &str| -> mlua::Result<Option<String>> { options.get::<Option<String>>(key) };
+            let rules = text("rules")?;
+            let model = text("model")?;
+            let layout = text("layout")?;
+            let variant = text("variant")?;
+            let keyboard_options = text("options")?;
+
+            // A keymap is compiled only when a script named one of its parts.
+            // Recompiling to change the active layout would throw away the
+            // modifier state with it, and recompiling on every reload would
+            // make every client rebuild its xkb state for nothing.
+            let names = [&rules, &model, &layout, &variant, &keyboard_options];
+            let keymap = names.iter().any(|name| name.is_some()).then(|| {
+                crate::keymap::Keymap {
+                    rules: rules.clone().unwrap_or_default(),
+                    model: model.clone().unwrap_or_default(),
+                    layout: layout.clone().unwrap_or_default(),
+                    variant: variant.clone().unwrap_or_default(),
+                    // `None`, not `Some("")`. An empty string is a real
+                    // instruction to xkb meaning "no options at all", which is
+                    // not the same as "whatever the environment says".
+                    options: keyboard_options.clone().filter(|it| !it.is_empty()),
+                }
+            });
+
+            let rate = options.get::<Option<i32>>("repeat_rate")?;
+            let delay = options.get::<Option<i32>>("repeat_delay")?;
+            let repeat = match (rate, delay) {
+                (None, None) => None,
+                // One given and not the other keeps the other as it is, which
+                // is what every other key in this table does.
+                (rate, delay) => Some((
+                    rate.unwrap_or(crate::keymap::REPEAT_RATE),
+                    delay.unwrap_or(crate::keymap::REPEAT_DELAY),
+                )),
+            };
+
+            let request = crate::keymap::Request {
+                keymap,
+                repeat,
+                active: options.get::<Option<usize>>("active")?,
+            };
+            if request == crate::keymap::Request::default() {
+                return Ok(Value::Nil);
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Keyboard(request.clone()));
+            })?;
+            Ok(Value::Nil)
         })?,
     )?;
 
@@ -1815,6 +1901,7 @@ mod tests {
         assert!(!scripts.has_binding("super+tab"));
 
         let snapshot = Snapshot {
+            keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
                 id: 7,
                 rect: Rect {

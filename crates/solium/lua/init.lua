@@ -12,6 +12,7 @@ sol.decoration(config.decoration)
 sol.loading(config.loading)
 -- Where the monitors go. Applied on reload too, so moving a screen in the
 -- configuration is `super+shift+r` rather than logging out.
+sol.keyboard(config.keyboard)
 sol.monitors(config.monitors)
 
 -- Only reachable when the compositor was started with --debug-mode, but the
@@ -126,6 +127,26 @@ sol.log("solium configuration loaded")
 -- Show or hide the Developer Tweaks panel. Nothing without --debug-mode.
 sol.bind("super+shift+d", function()
     sol.tweaks_toggle()
+end)
+
+-- Cycle the keyboard layout, when the configuration lists more than one.
+--
+-- xkb can do this by itself -- `options = "grp:alt_shift_toggle"` in
+-- `config.keyboard` -- and that keeps working. This exists because it is
+-- discoverable: it appears in `solium --check` beside every other binding,
+-- and it does not require knowing that xkb has an option called `grp`.
+--
+-- Silent with one layout rather than an error, because that is the common
+-- case and a binding that complains about the configuration every time it is
+-- pressed is worse than one that does nothing.
+sol.bind("super+shift+k", function()
+    local keyboard = sol.keyboard()
+    if #keyboard.layouts < 2 then
+        return
+    end
+    local next_layout = keyboard.active % #keyboard.layouts + 1
+    sol.keyboard({ active = next_layout })
+    sol.log("keyboard layout: " .. keyboard.layouts[next_layout])
 end)
 
 -- Read this file again, without ending the session. Edit anything -- a

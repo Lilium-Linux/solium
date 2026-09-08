@@ -124,6 +124,43 @@ you do not otherwise have is which application you are waiting for.
     SOLIUM_LOADING=mine        # ~/.config/solium/qml/loading/mine.qml
     SOLIUM_LOADING=~/mine.qml  # anywhere
 
+### Your keyboard
+
+```lua
+keyboard = {
+    layout  = "us,ua",
+    options = "grp:alt_shift_toggle",
+},
+```
+
+The first layout is the one you start in. `super+shift+k` cycles them and so
+does Alt+Shift, because `grp:` options are implemented inside the keymap and
+work without the compositor being involved — the binding exists so that the
+feature is discoverable from `solium --check` rather than from knowing xkb.
+
+`variant` takes one per layout in the same order, blank for plain:
+`layout = "us,ua", variant = ",dvorak"` is ordinary US and Ukrainian Dvorak.
+`options` also carries `compose:ralt`, which is the nearest thing to an input
+method until [#26](https://github.com/Lilium-Linux/solium/issues/26) lands.
+
+Leaving a name out means "whatever the session already said": an empty name
+makes xkbcommon read `XKB_DEFAULT_LAYOUT` and its siblings, which is where a
+display manager puts it. So a machine already configured elsewhere keeps
+working, and writing it here takes precedence.
+
+The repeat rate is the compositor's own — no environment variable reaches it,
+and before this it could not be changed at all:
+
+```lua
+keyboard = {
+    repeat_rate  = 40,   -- repeats per second. 25 by default
+    repeat_delay = 350,  -- milliseconds before repeating starts. 200
+},
+```
+
+`sol.keyboard()` reads all of it back — the layout names, which is active, and
+the repeat settings — which is how a bar draws a layout indicator.
+
 ### Your monitors
 
 The compositor cannot work out which screen is on the left. The kernel reports

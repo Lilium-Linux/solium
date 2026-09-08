@@ -114,7 +114,7 @@ compositor and does not come back.
 | | why it stops someone |
 |---|---|
 | ~~[#27](https://github.com/Lilium-Linux/solium/issues/27) session lock~~ | **done.** `ext-session-lock-v1`. It locks before the lock program draws, and stays locked if that program dies |
-| [#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout | every session is US QWERTY and nothing can change it. Most of the world cannot type their own language |
+| ~~[#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout~~ | **done.** `config.keyboard`, plus the repeat rate, which was the part with no way round it |
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) IME | no CJK, no compose key, no emoji picker. Unusable for most of the world's writers |
 | [#55](https://github.com/Lilium-Linux/solium/issues/55) virtual-keyboard | the other half of an on-screen keyboard, which is what a phone is |
 | [#56](https://github.com/Lilium-Linux/solium/issues/56) window rules | nothing matches on `app_id`. The first thing anybody configures |

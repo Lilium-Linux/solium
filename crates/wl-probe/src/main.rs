@@ -24,6 +24,7 @@ use std::time::Duration;
 use wayland_client::protocol::{
     wl_buffer::WlBuffer,
     wl_compositor::WlCompositor,
+    wl_keyboard::{self, WlKeyboard},
     wl_output::{self, WlOutput},
     wl_pointer::{self, WlPointer},
     wl_registry,
@@ -90,6 +91,12 @@ struct Probe {
     /// went idle again" is the claim, and only the sequence carries it.
     idle_events: Vec<&'static str>,
     seat: Option<WlSeat>,
+    /// The layouts named in the keymap the compositor sent, in order, and
+    /// which one is active. The only way a client can find out: the keymap
+    /// arrives as a file descriptor and nothing else describes it.
+    layouts: Vec<String>,
+    active_layout: Option<u32>,
+    repeat: Option<(i32, i32)>,
     /// Where the compositor said the pointer was, in the surface's own
     /// coordinates. The one number a client cannot check any other way: a
     /// compositor that reports the wrong place has buttons that miss.
@@ -180,6 +187,50 @@ impl Probe {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::layouts_in_keymap_text;
+
+    const TWO: &str = "\
+xkb_keymap {
+xkb_types \"complete\" {
+\ttype \"ONE_LEVEL\" {
+\t\tlevel_name[1]= \"Any\";
+\t};
+};
+xkb_symbols \"pc_ua_us_2_inet(evdev)\" {
+\tname[1]=\"Ukrainian\";
+\tname[2]=\"English (Dvorak)\";
+};
+};";
+
+    /// In group order, and a variant is simply part of the name -- which is
+    /// the whole reason this reads the group names rather than the section's.
+    #[test]
+    fn layouts_in_group_order() {
+        assert_eq!(
+            layouts_in_keymap_text(TWO),
+            ["Ukrainian", "English (Dvorak)"]
+        );
+    }
+
+    /// `xkb_types` is full of `level_name[1]= "Any"`. A looser match reports
+    /// the modifier levels as keyboard layouts, which is why the scan is
+    /// confined to the symbols section.
+    #[test]
+    fn modifier_levels_are_not_layouts() {
+        assert!(!layouts_in_keymap_text(TWO).iter().any(|it| it == "Any"));
+    }
+
+    #[test]
+    fn a_keymap_that_names_nothing() {
+        assert_eq!(
+            layouts_in_keymap_text("xkb_keymap {};"),
+            Vec::<String>::new()
+        );
+    }
+}
+
 fn main() {
     let connection = match Connection::connect_to_env() {
         Ok(connection) => connection,
@@ -217,6 +268,20 @@ fn main() {
         let seconds: u64 = hold.trim().parse().unwrap_or(20);
         show_windows(&connection, &mut queue, &mut probe, seconds);
         return;
+    }
+
+    // Watch for layout changes. Its own mode because it needs something else
+    // to do the switching, and because it deliberately sits still.
+    if let Ok(seconds) = std::env::var("WL_PROBE_KEYBOARD")
+        && let Ok(seconds) = seconds.trim().parse::<u64>()
+    {
+        match watch_keyboard(&connection, &mut queue, &mut probe, seconds) {
+            Ok(()) => return,
+            Err(reason) => {
+                eprintln!("wl-probe: {reason}");
+                std::process::exit(1);
+            }
+        }
     }
 
     // Go idle, be held awake, go idle again. Not part of the ordinary run: it
@@ -288,6 +353,34 @@ fn main() {
             None => {
                 println!("  MISSING {wanted}");
                 failures.push(format!("{wanted} is not advertised"));
+            }
+        }
+    }
+
+    println!();
+    match (probe.layouts.is_empty(), probe.repeat) {
+        (true, _) => {
+            println!("keyboard: the compositor sent no keymap");
+            failures.push("no keymap arrived on wl_keyboard".to_owned());
+        }
+        (false, repeat) => {
+            let active = probe.active_layout.unwrap_or(0) as usize;
+            let named: Vec<String> = probe
+                .layouts
+                .iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    if index == active {
+                        format!("[{name}]")
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
+            println!("keyboard layouts: {}", named.join(" "));
+            match repeat {
+                Some((rate, delay)) => println!("keyboard repeat: {rate}/s after {delay}ms"),
+                None => println!("keyboard repeat: never told (wl_seat below version 4)"),
             }
         }
     }
@@ -1090,6 +1183,81 @@ fn tempfile_rs() -> std::fs::File {
     file
 }
 
+/// Map a window, take focus, and report every layout change that arrives.
+///
+/// `WL_PROBE_KEYBOARD=<seconds>`. The compositor switching its own active
+/// layout is one claim and the client being *told* is a different one, and
+/// only the second matters -- a layout that changed and was not announced is a
+/// keyboard that types the wrong letters. A client only hears about it through
+/// `wl_keyboard.modifiers`, and only while it has focus, so this maps a window
+/// first and holds it.
+fn watch_keyboard(
+    connection: &Connection,
+    queue: &mut wayland_client::EventQueue<Probe>,
+    probe: &mut Probe,
+    seconds: u64,
+) -> Result<(), String> {
+    let handle = queue.handle();
+    let (Some(compositor), Some(shm), Some(wm_base)) = (
+        probe.compositor.clone(),
+        probe.shm.clone(),
+        probe.wm_base.clone(),
+    ) else {
+        return Err("no compositor, shm or xdg_wm_base".to_owned());
+    };
+
+    let surface = compositor.create_surface(&handle, ());
+    let xdg = wm_base.get_xdg_surface(&surface, &handle, ());
+    let toplevel = xdg.get_toplevel(&handle, ());
+    toplevel.set_title("wl-probe keyboard".to_owned());
+    surface.commit();
+    for _ in 0..50 {
+        settle(connection, queue, probe)?;
+        if probe.configured {
+            break;
+        }
+    }
+    let buffer = solid_buffer(&shm, &handle, 320, 200);
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage(0, 0, i32::MAX, i32::MAX);
+    surface.commit();
+    settle(connection, queue, probe)?;
+
+    println!();
+    println!("layouts: {}", probe.layouts.join(", "));
+    let started = probe.active_layout;
+    println!("active at the start: {:?}", started);
+    println!("watching for {seconds}s — switch the layout now");
+
+    let mut seen: Vec<u32> = started.into_iter().collect();
+    let until = std::time::Instant::now() + Duration::from_secs(seconds);
+    while std::time::Instant::now() < until {
+        settle(connection, queue, probe)?;
+        if let Some(active) = probe.active_layout
+            && !seen.contains(&active)
+        {
+            let name = probe
+                .layouts
+                .get(active as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("group {active}"));
+            println!("told the active layout is now {active} ({name})");
+            seen.push(active);
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+
+    toplevel.destroy();
+    xdg.destroy();
+    surface.destroy();
+    if seen.len() < 2 {
+        return Err(format!(
+            "the active layout never changed as far as this client was told (saw {seen:?})"
+        ));
+    }
+    Ok(())
+}
+
 /// Go idle, be held awake, and go idle again.
 ///
 /// Run with `WL_PROBE_IDLE=1`. The two protocols this exercises are only
@@ -1528,6 +1696,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
             "wl_seat" => {
                 let seat: WlSeat = registry.bind(name, version.min(5), handle, ());
                 seat.get_pointer(handle, ());
+                seat.get_keyboard(handle, ());
                 state.seat = Some(seat);
             }
             "zxdg_decoration_manager_v1" => {
@@ -1655,6 +1824,123 @@ impl Dispatch<ExtIdleNotificationV1, ()> for Probe {
     }
 }
 delegate_noop!(Probe: ignore WlSeat);
+
+impl Dispatch<WlKeyboard, ()> for Probe {
+    fn event(
+        probe: &mut Self,
+        _keyboard: &WlKeyboard,
+        event: wl_keyboard::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        match event {
+            // The keymap is a file descriptor holding XKB text, and it is the
+            // only place a client can learn what layouts it has. No event
+            // names them, so the file has to be read and parsed -- which is
+            // also the only way to check a compositor's keyboard
+            // configuration from the outside.
+            wl_keyboard::Event::Keymap { fd, size, .. } => {
+                probe.layouts = layouts_in_keymap(fd, size as usize);
+            }
+            wl_keyboard::Event::Modifiers { group, .. } => probe.active_layout = Some(group),
+            wl_keyboard::Event::RepeatInfo { rate, delay } => probe.repeat = Some((rate, delay)),
+            _ => {}
+        }
+    }
+}
+
+/// Read the keymap the compositor sent and pull the layout names out of it.
+///
+/// XKB text names its layouts in the `xkb_symbols` section, as a `+`-joined
+/// recipe like `pc+us+ua:2+inet(evdev)`. Parsing that is unlovely and it is
+/// what the information is: there is no protocol event that says "you have
+/// these two layouts", so every client that shows a layout indicator does
+/// this or does without.
+fn layouts_in_keymap(fd: std::os::fd::OwnedFd, size: usize) -> Vec<String> {
+    // `read_at`, not `read`. The compositor's own file offset is wherever it
+    // left it -- at the end, having just written the keymap -- and the fd
+    // carries that offset with it, so a plain `read` returns zero bytes and
+    // looks exactly like a compositor that sent nothing. The protocol tells
+    // clients to mmap this, which is why every real toolkit works and this
+    // did not; `read_at` is the same thing without a dependency.
+    use std::os::unix::fs::FileExt as _;
+    let file = std::fs::File::from(fd);
+    let mut bytes = vec![0u8; size];
+    let read = file.read_at(&mut bytes, 0).unwrap_or(0);
+    let mut text = String::new();
+    bytes.truncate(read);
+    while bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    text.push_str(&String::from_utf8_lossy(&bytes));
+
+    // `WL_PROBE_KEYMAP=<path>` writes it out. A keymap is the compositor's
+    // most opaque answer -- tens of thousands of lines behind a file
+    // descriptor -- and "the layouts look right" is a different claim from
+    // "here is what it sent".
+    if let Ok(path) = std::env::var("WL_PROBE_KEYMAP")
+        && std::fs::write(&path, &text).is_ok()
+    {
+        println!("keymap written to {path} ({} bytes)", text.len());
+    }
+    layouts_in_keymap_text(&text)
+}
+
+/// The layout names a keymap declares, in group order.
+///
+/// From the `name[N]="..."` lines inside the compiled `xkb_symbols` section,
+/// which is the one place in a keymap that names layouts unambiguously and in
+/// the language a person reads: `"Ukrainian"`, `"English (Dvorak)"`.
+///
+/// Two wrong turns are worth recording, because both looked right.
+///
+/// The section's own name is a recipe -- `pc_ua_us_2_inet(evdev)_group(alt_shift_toggle)`
+/// -- and parsing it is a trap: the separator is `_`, the options' arguments
+/// contain `_` themselves, the group index arrives as a bare token because
+/// `us:2` is written `us_2`, and a layout with a variant (`us(dvorak)`) cannot
+/// be told from an option (`inet(evdev)`) without a list of every option group
+/// xkb has, which would rot.
+///
+/// The second was `name[Group1]=`, which is what `xkbcomp` writes and what
+/// every example online shows. libxkbcommon writes `name[1]=`. The difference
+/// is invisible until you read a keymap this compositor actually sent, which
+/// is what `WL_PROBE_KEYMAP` is for.
+///
+/// Confined to the symbols section on purpose: `xkb_types` is full of
+/// `level_name[1]= "Any"`, and a looser match reports the modifier levels as
+/// keyboard layouts.
+fn layouts_in_keymap_text(text: &str) -> Vec<String> {
+    let mut layouts: Vec<(usize, String)> = Vec::new();
+    let mut in_symbols = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("xkb_") {
+            in_symbols = trimmed.starts_with("xkb_symbols");
+            continue;
+        }
+        if !in_symbols {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("name[") else {
+            continue;
+        };
+        let Some((index, rest)) = rest.split_once(']') else {
+            continue;
+        };
+        let Ok(index) = index.parse::<usize>() else {
+            continue;
+        };
+        let Some(name) = rest.split('"').nth(1) else {
+            continue;
+        };
+        if !layouts.iter().any(|(seen, _)| *seen == index) {
+            layouts.push((index, name.to_owned()));
+        }
+    }
+    layouts.sort_by_key(|(index, _)| *index);
+    layouts.into_iter().map(|(_, name)| name).collect()
+}
 
 impl Dispatch<WlPointer, ()> for Probe {
     fn event(
