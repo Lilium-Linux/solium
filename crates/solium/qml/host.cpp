@@ -937,16 +937,32 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
     // the guard passed and the delete ran against the compositor's context,
     // causing the exact corruption this comment describes.
     //
-    // Note this is asked *after* clear_stale_current_context above, so in the
-    // ordinary ordering it is false by construction: no context is current, and
-    // the name is left for the teardown below. That is the intended outcome and
-    // not an accident of ordering — the alternative is a raw eglMakeCurrent
-    // behind Qt's back to reclaim one integer that dies moments later anyway.
+    // Note this is asked *after* clear_stale_current_context above, which is
+    // what makes the three cases below the only three, and which one you land
+    // in is a property of the ordering rather than of anything going wrong:
     //
-    // When the check fails the texture name is left alone. It is not leaked for
-    // the life of the process: GL objects belong to their context, and Qt's
-    // context is destroyed a few lines below with the render control, which
-    // reclaims it. The warning is about the caller's contract, not about memory.
+    //   * Qt's own context current. The frame after initialize(), or a free
+    //     that follows a render with nothing in between. Delete it here.
+    //
+    //   * Nothing current. What every production free looks like: after a
+    //     render, clear_stale_current_context released the thread; after a
+    //     resize rebuild, release_the_thread did it when the *new* scene was
+    //     built and Qt's thread-local was already null. The name is left for
+    //     the teardown a few lines below, which destroys the context it belongs
+    //     to and reclaims it. Nothing is wrong and nothing is said.
+    //
+    //   * Some third context current, with Qt believing nothing is. That is the
+    //     one a caller can actually get wrong, and the only one worth a word.
+    //
+    // The middle case used to warn, on the strength of a message that asserted
+    // "another context on the thread" when the thread was in fact empty, and
+    // advised making the scene's context current around a call that has already
+    // taken the thread back by the time it runs. It fired on 100% of frees that
+    // followed a render or a rebuild — which is 100% of frees a session makes —
+    // and Task 6 would have made that per-frame.
+    //
+    // Either way the texture name is not leaked for the life of the process: GL
+    // objects belong to their context, and Qt's is destroyed below.
     if (scene->texture != 0) {
         if (scene_context_is_current(scene)) {
             QOpenGLContext *context = QOpenGLContext::currentContext();
@@ -954,11 +970,11 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
                 context->functions()->glDeleteTextures(1, &scene->texture);
                 scene->texture = 0;
             }
-        } else {
-            qWarning("a GPU scene was freed with another context on the thread, so "
-                     "texture %u was left for Qt's own teardown to reclaim rather "
-                     "than deleted here. Nothing leaks; the render control below "
-                     "destroys the context the name belongs to.",
+        } else if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
+            qWarning("a GPU scene was freed with a third GL context current — not "
+                     "its own and not none — so texture %u was left for Qt's "
+                     "teardown to reclaim. Nothing leaks, but the thread was not "
+                     "in either state this path is written for.",
                      scene->texture);
         }
     }
