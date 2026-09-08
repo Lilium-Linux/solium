@@ -117,6 +117,30 @@ answer is in the frames — the desktop, then one frame of the compositor's own
 backdrop between the lock and the client's first buffer, then the client's
 colour, and nothing of the session anywhere in between.
 
+`WL_PROBE_IDLE=1` runs the whole idle sequence against a real window: go idle
+on a short timeout, take an inhibitor and come back, hold it through more than
+the timeout and stay awake, drop it and go idle again. The sequence is the
+check, not any one event in it — a compositor that advertises the inhibitor and
+ignores it passes the first step, and the third step looks exactly like a
+compositor whose timer stopped. Two more, both opt-in because of what they do:
+
+    WL_PROBE_IDLE_LOCK=1      lock the session with the inhibitor still held.
+                              It must go idle anyway: a player left running
+                              behind a lock screen would otherwise keep the
+                              machine awake all night showing a lock screen.
+    WL_PROBE_IDLE_HIDDEN=8    hold an inhibitor and wait for something else to
+                              hide the window. Pair it with a workspace switch:
+
+        SOLIUM_TRIGGER_AT="6000:super+2" ./target/debug/solium &
+        WL_PROBE_IDLE=1 WL_PROBE_IDLE_HIDDEN=8 WAYLAND_DISPLAY=wayland-1 \
+            ./target/debug/wl-probe
+
+That last one earned itself on the first run. The compositor was asking whether
+the window's *slot* was on a monitor, and a workspace switch does not move a
+window's slot — it slides the window away from it with a presentation
+transform. So a video on a workspace nobody was looking at went on holding the
+machine awake, and no amount of reading the inhibitor code would have shown it.
+
 `SOLIUM_DRAG_AT` fires during a lock too, and that combination is worth keeping:
 it is what found that a locked screen would still let a drag resize a window
 underneath it. The window was measured before the lock and after the unlock,

@@ -51,9 +51,10 @@ one global coordinate space, arranged from the configuration or guessed left to
 right. Every layout runs per screen, and the pointer crosses between them.
 
 Protocols: `xdg-shell`, `wlr-layer-shell`, `wlr-screencopy`, `ext-session-lock`,
-`xdg-decoration`, `xdg-output`, `xdg-activation`, `wp-viewporter`,
-`wp-fractional-scale`, `wp-presentation`, `linux-dmabuf`, `relative-pointer`,
-`pointer-constraints`, `primary-selection`, `xwayland-shell`.
+`ext-idle-notify`, `idle-inhibit`, `xdg-decoration`, `xdg-output`,
+`xdg-activation`, `wp-viewporter`, `wp-fractional-scale`, `wp-presentation`,
+`linux-dmabuf`, `relative-pointer`, `pointer-constraints`, `primary-selection`,
+`xwayland-shell`.
 
 Screenshots, recording and screen sharing all come from `wlr-screencopy`, so
 `grim`, `wf-recorder` and `xdg-desktop-portal-wlr` work — which is what a
@@ -66,6 +67,18 @@ locked and blank rather than falling open. While locked nothing of the session
 sees input — no bindings, no window under the pointer, no titlebars, and
 `Ctrl+Alt+Backspace` will not end the session. Switching virtual terminal still
 works, deliberately: whoever can press it is standing at the machine.
+
+`ext-idle-notify` is what makes that happen on its own rather than only when
+asked: `swayidle` and anything like it can run the locker after so long with
+nobody at the machine. `idle-inhibit` is the other half — a video player, a
+presentation or a game says "not now" and the screen stays up. An inhibitor
+counts only while its window is actually drawn, so one on a workspace you are
+not looking at stops holding the machine awake, and nothing at all holds it
+awake behind a lock screen.
+
+Solium does not blank or dim a screen itself; it reports idleness and leaves
+the policy to whatever you run. Turning a monitor off wants
+`wlr-output-power-management`, which is not here yet.
 
 Not yet: IME. Everything known is on the issue tracker, prioritised by whether
 an application can be used at all without it rather than by how hard it is.

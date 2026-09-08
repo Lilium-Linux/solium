@@ -142,6 +142,16 @@ pub(crate) struct Solium {
     /// The shell's way in: bars, docks, wallpapers and notification areas are
     /// ordinary clients that anchor to an output edge. See `layer.rs`.
     pub(crate) layer_shell_state: WlrLayerShellState,
+    /// Registers `ext_idle_notifier_v1`, and `zwp_idle_inhibit_manager_v1`
+    /// beside it. See `idle.rs` for why those two are one feature.
+    #[expect(dead_code, reason = "holds the global; dropping it would remove it")]
+    pub(crate) idle_state: crate::idle::IdleState,
+    #[expect(dead_code, reason = "holds the global; dropping it would remove it")]
+    pub(crate) idle_inhibit_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
+    /// Who is waiting to be told nobody is here, and who is stopping us
+    /// deciding that.
+    pub(crate) idle: crate::idle::Idle,
+
     /// Registers `ext_session_lock_manager_v1`: the lock screen. See `lock.rs`.
     pub(crate) session_lock_state: SessionLockManagerState,
     /// Set while the session is locked, and the single thing every other part
@@ -553,6 +563,9 @@ impl Solium {
             fractional_scale_state: FractionalScaleManagerState::new::<Self>(&display_handle),
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
+            idle_state: crate::idle::IdleState::new::<Self>(&display_handle),
+            idle_inhibit_state: crate::idle::inhibit_state(&display_handle),
+            idle: crate::idle::Idle::default(),
             session_lock_state: crate::lock::state(&display_handle),
             lock: None,
             seat_state,
@@ -2609,6 +2622,68 @@ impl Solium {
             keyboard.set_focus(self, Some(surface.clone()), SERIAL_COUNTER.next_serial());
             self.focus_selection(Some(&surface));
         }
+    }
+
+    /// Whether anything is holding the machine awake.
+    ///
+    /// An inhibitor applies while its surface is visible, and the protocol
+    /// leaves "visible" to us. Two answers here are worth stating outright:
+    ///
+    /// * A window whose slot is off every monitor does not count. That is what
+    ///   a workspace switch does to the windows it hides, so a video paused on
+    ///   another workspace stops holding the screen on -- which is what anyone
+    ///   would expect and what the protocol means.
+    /// * **Nothing counts while the session is locked.** Otherwise a player
+    ///   left running behind a lock screen keeps the machine awake all night
+    ///   displaying a lock screen, which is the exact opposite of what both
+    ///   features are for.
+    pub(crate) fn idle_inhibited(&self) -> bool {
+        if self.lock.is_some() {
+            return false;
+        }
+        // Collected first: `inhibiting` borrows `self.idle` and the visibility
+        // test borrows the rest of `self`.
+        self.idle
+            .inhibiting()
+            .any(|surface| self.surface_is_visible(surface))
+    }
+
+    /// Whether a surface belongs to a window that is drawn somewhere.
+    ///
+    /// Against where the window is **drawn**, not where it lives. Those are
+    /// different rectangles and the difference is the whole question: a
+    /// workspace switch does not move a window's slot, it slides the window
+    /// away from it with a presentation transform, so a window on a workspace
+    /// nobody is looking at still has its slot squarely on a monitor. Asking
+    /// the slot said such a window was visible, and a video paused on another
+    /// workspace went on holding the machine awake. Found by hiding one and
+    /// waiting.
+    ///
+    /// Being the drawn rect also settles the cases that have not arrived yet
+    /// in the same breath: a thumbnail in overview is visible, and a window
+    /// minimised to nothing (#30) will not be.
+    ///
+    /// Windows only. A layer surface could hold an inhibitor too, and if one
+    /// ever does this is where it would be answered -- but a bar is not what
+    /// asks to keep the machine awake, and guessing at the semantics for a
+    /// case with no client behind it is how a wrong answer gets written down.
+    fn surface_is_visible(&self, surface: &WlSurface) -> bool {
+        let now = self.clock.now();
+        self.panes.iter().any(|pane| {
+            pane.client().is_some_and(|window| {
+                window
+                    .wl_surface()
+                    .is_some_and(|owned| owned.as_ref() == surface)
+                    && self.pane_outer(pane).is_some_and(|outer| {
+                        let drawn = present::frame(pane, outer, now).rect;
+                        self.space.outputs().any(|output| {
+                            self.space
+                                .output_geometry(output)
+                                .is_some_and(|geometry| geometry.to_f64().overlaps(drawn))
+                        })
+                    })
+            })
+        })
     }
 
     /// Give the selection to nobody, for the moments where the keyboard has

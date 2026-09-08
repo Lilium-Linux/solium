@@ -72,6 +72,12 @@ pub(crate) fn handle<B: InputBackend>(
     region: Rectangle<i32, Logical>,
     event: InputEvent<B>,
 ) {
+    // Somebody is here. Every event, in one place, because the alternative is
+    // eleven places and the twelfth device added later. Device-added and
+    // -removed events are deliberately included: plugging a mouse in is a
+    // person at the machine.
+    state.idle.stir(state.clock.now());
+
     match event {
         InputEvent::Keyboard { event } => keyboard(state, event),
         InputEvent::PointerMotion { event } => pointer_relative(state, event),

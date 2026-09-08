@@ -33,10 +33,17 @@ use wayland_client::protocol::{
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, delegate_noop};
+use wayland_protocols::ext::idle_notify::v1::client::{
+    ext_idle_notification_v1::{self, ExtIdleNotificationV1},
+    ext_idle_notifier_v1::ExtIdleNotifierV1,
+};
 use wayland_protocols::ext::session_lock::v1::client::{
     ext_session_lock_manager_v1::ExtSessionLockManagerV1,
     ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
     ext_session_lock_v1::{self, ExtSessionLockV1},
+};
+use wayland_protocols::wp::idle_inhibit::zv1::client::{
+    zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
 };
 use wayland_protocols::wp::presentation_time::client::{
     wp_presentation::{self, WpPresentation},
@@ -76,6 +83,12 @@ struct Probe {
     layer_shell: Option<ZwlrLayerShellV1>,
     screencopy: Option<ZwlrScreencopyManagerV1>,
     session_lock: Option<ExtSessionLockManagerV1>,
+    idle_notifier: Option<ExtIdleNotifierV1>,
+    idle_inhibit: Option<ZwpIdleInhibitManagerV1>,
+    /// Every `idled`/`resumed` in order, so a check can assert on the
+    /// *sequence* and not just the final state -- "it went idle, came back and
+    /// went idle again" is the claim, and only the sequence carries it.
+    idle_events: Vec<&'static str>,
     seat: Option<WlSeat>,
     /// Where the compositor said the pointer was, in the surface's own
     /// coordinates. The one number a client cannot check any other way: a
@@ -206,6 +219,19 @@ fn main() {
         return;
     }
 
+    // Go idle, be held awake, go idle again. Not part of the ordinary run: it
+    // deliberately does nothing for several seconds, and a gate that sits
+    // still is a gate people stop running.
+    if std::env::var_os("WL_PROBE_IDLE").is_some() {
+        match watch_idle(&connection, &mut queue, &mut probe) {
+            Ok(()) => return,
+            Err(reason) => {
+                eprintln!("wl-probe: {reason}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Lock the session and hold it. Separate from the ordinary run rather than
     // part of it, because a check that locks the screen in the middle of a
     // gate is a check that locks the screen of whoever ran the gate.
@@ -249,6 +275,8 @@ fn main() {
         "zwlr_layer_shell_v1",
         "zwlr_screencopy_manager_v1",
         "ext_session_lock_manager_v1",
+        "ext_idle_notifier_v1",
+        "zwp_idle_inhibit_manager_v1",
     ] {
         let version = probe
             .globals
@@ -1062,6 +1090,214 @@ fn tempfile_rs() -> std::fs::File {
     file
 }
 
+/// Go idle, be held awake, and go idle again.
+///
+/// Run with `WL_PROBE_IDLE=1`. The two protocols this exercises are only
+/// correct together, so it checks them together, as one sequence:
+///
+///   1. ask to be told after a short timeout, touch nothing, and be told;
+///   2. take an inhibitor on a mapped window, and be told we are back;
+///   3. hold it through more than the timeout, and be told nothing;
+///   4. drop it, and be told again.
+///
+/// Steps 2 and 4 are the ones that matter. A compositor that advertises the
+/// inhibitor and ignores it passes step 1 and step 3 looks identical to a
+/// compositor whose timer simply stopped -- so the check is the whole
+/// sequence, not any one event in it.
+fn watch_idle(
+    connection: &Connection,
+    queue: &mut wayland_client::EventQueue<Probe>,
+    probe: &mut Probe,
+) -> Result<(), String> {
+    let handle = queue.handle();
+    let (Some(compositor), Some(shm), Some(wm_base), Some(notifier), Some(inhibit_manager)) = (
+        probe.compositor.clone(),
+        probe.shm.clone(),
+        probe.wm_base.clone(),
+        probe.idle_notifier.clone(),
+        probe.idle_inhibit.clone(),
+    ) else {
+        return Err("the idle protocols are advertised and would not bind".to_owned());
+    };
+    let Some(seat) = probe.seat.clone() else {
+        return Err("no wl_seat, so there is nothing to be idle on".to_owned());
+    };
+
+    // Short, because this runs in a gate. Long enough that one slow frame
+    // cannot make the compositor look late.
+    let timeout_ms: u32 = 700;
+    let timeout = Duration::from_millis(u64::from(timeout_ms));
+
+    println!();
+    // A window first: an inhibitor applies while its surface is *visible*, so
+    // a check that takes one on an unmapped surface is asking the compositor
+    // to be wrong.
+    let surface = compositor.create_surface(&handle, ());
+    let xdg = wm_base.get_xdg_surface(&surface, &handle, ());
+    let toplevel = xdg.get_toplevel(&handle, ());
+    toplevel.set_title("wl-probe idle".to_owned());
+    surface.commit();
+    for _ in 0..50 {
+        settle(connection, queue, probe)?;
+        if probe.configured {
+            break;
+        }
+    }
+    if !probe.configured {
+        return Err("the compositor never configured the window".to_owned());
+    }
+    let buffer = solid_buffer(&shm, &handle, 320, 200);
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage(0, 0, i32::MAX, i32::MAX);
+    surface.commit();
+    settle(connection, queue, probe)?;
+
+    let notification = notifier.get_idle_notification(timeout_ms, &seat, &handle, ());
+    probe.idle_events.clear();
+
+    let wait = |probe: &mut Probe,
+                queue: &mut wayland_client::EventQueue<Probe>,
+                want: usize,
+                how_long: Duration|
+     -> Result<(), String> {
+        let until = std::time::Instant::now() + how_long;
+        while std::time::Instant::now() < until && probe.idle_events.len() < want {
+            settle(connection, queue, probe)?;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    };
+
+    // 1. Nobody is touching anything, so this should arrive.
+    wait(probe, queue, 1, timeout * 4)?;
+    if probe.idle_events.first() != Some(&"idled") {
+        return Err(format!(
+            "waited {}ms past a {timeout_ms}ms timeout and was never told the seat went idle \
+             (events: {:?})",
+            timeout.as_millis() * 4,
+            probe.idle_events
+        ));
+    }
+    println!("idled after {timeout_ms}ms with nobody at the keyboard");
+
+    // 2. The veto. A player asks to stay awake, and the answer should be
+    //    immediate -- inhibition is not "start the timer again", it is "you
+    //    are not idle".
+    let inhibitor = inhibit_manager.create_inhibitor(&surface, &handle, ());
+    wait(probe, queue, 2, timeout * 2)?;
+    if probe.idle_events.get(1) != Some(&"resumed") {
+        return Err(format!(
+            "an inhibitor was taken on a visible window and the seat stayed idle (events: {:?})",
+            probe.idle_events
+        ));
+    }
+    println!("resumed as soon as a visible window asked to stay awake");
+
+    // 3. And it holds. This is the step that would catch an inhibitor the
+    //    compositor accepted and then forgot about one frame later.
+    wait(probe, queue, 3, timeout * 3)?;
+    if probe.idle_events.len() != 2 {
+        return Err(format!(
+            "the inhibitor was held for {}ms and the seat went idle anyway (events: {:?})",
+            timeout.as_millis() * 3,
+            probe.idle_events
+        ));
+    }
+    println!(
+        "held awake for {}ms while the inhibitor was up",
+        timeout.as_millis() * 3
+    );
+
+    // 4. And releasing it puts things back, rather than leaving the seat awake
+    //    for good.
+    inhibitor.destroy();
+    wait(probe, queue, 3, timeout * 4)?;
+    if probe.idle_events.get(2) != Some(&"idled") {
+        return Err(format!(
+            "the inhibitor was dropped and the seat never went idle again (events: {:?})",
+            probe.idle_events
+        ));
+    }
+    println!("idled again once the inhibitor was dropped");
+
+    // 5. And an inhibitor stops counting behind a lock screen. A player left
+    //    running would otherwise keep the machine awake all night showing a
+    //    lock screen, which is what neither feature is for. Opt-in, because it
+    //    locks the screen of whoever ran it.
+    if std::env::var_os("WL_PROBE_IDLE_LOCK").is_some()
+        && let Some(manager) = probe.session_lock.clone()
+    {
+        let inhibitor = inhibit_manager.create_inhibitor(&surface, &handle, ());
+        wait(probe, queue, 4, timeout * 2)?;
+        if probe.idle_events.get(3) != Some(&"resumed") {
+            return Err(format!(
+                "took an inhibitor again and the seat stayed idle (events: {:?})",
+                probe.idle_events
+            ));
+        }
+
+        let lock = manager.lock(&handle, ());
+        settle(connection, queue, probe)?;
+        if !probe.locked {
+            return Err("the compositor did not confirm the lock".to_owned());
+        }
+        // The inhibitor is still held, and deliberately not touched. The
+        // window behind the lock screen has not gone anywhere; it has stopped
+        // being visible, and that is the whole claim.
+        wait(probe, queue, 5, timeout * 4)?;
+        let idled_behind_the_lock = probe.idle_events.get(4) == Some(&"idled");
+        lock.unlock_and_destroy();
+        inhibitor.destroy();
+        connection.flush().ok();
+        settle(connection, queue, probe)?;
+        if !idled_behind_the_lock {
+            return Err(format!(
+                "a window kept holding the machine awake behind a lock screen (events: {:?})",
+                probe.idle_events
+            ));
+        }
+        println!("idled behind a lock screen even with the inhibitor still held");
+    }
+
+    // 6. And a window the compositor has moved off every screen stops holding
+    //    the machine awake, which is what a workspace switch does to the
+    //    windows it hides. The compositor has to do the moving, so this waits
+    //    while something else -- `SOLIUM_TRIGGER_AT` with a workspace binding
+    //    -- does it. See dev/README.md for the pair of commands.
+    if let Ok(seconds) = std::env::var("WL_PROBE_IDLE_HIDDEN")
+        && let Ok(seconds) = seconds.trim().parse::<u64>()
+    {
+        let inhibitor = inhibit_manager.create_inhibitor(&surface, &handle, ());
+        let before = probe.idle_events.len();
+        wait(probe, queue, before + 1, timeout * 2)?;
+        if probe.idle_events.get(before) != Some(&"resumed") {
+            return Err(format!(
+                "took an inhibitor again and the seat stayed idle (events: {:?})",
+                probe.idle_events
+            ));
+        }
+        println!("holding an inhibitor for {seconds}s — hide this window now");
+        wait(probe, queue, before + 2, Duration::from_secs(seconds))?;
+        let idled_while_hidden = probe.idle_events.get(before + 1) == Some(&"idled");
+        inhibitor.destroy();
+        connection.flush().ok();
+        if !idled_while_hidden {
+            return Err(format!(
+                "a window moved off every screen kept holding the machine awake \
+                 (events: {:?})",
+                probe.idle_events
+            ));
+        }
+        println!("idled once the window was no longer on any screen");
+    }
+
+    notification.destroy();
+    toplevel.destroy();
+    xdg.destroy();
+    surface.destroy();
+    Ok(())
+}
+
 /// Lock the session, hold it, and let it go.
 ///
 /// Run with `WL_PROBE_LOCK=<seconds>`. This is the only lock client on the
@@ -1283,6 +1519,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
             "ext_session_lock_manager_v1" => {
                 state.session_lock = Some(registry.bind(name, version.min(1), handle, ()));
             }
+            "ext_idle_notifier_v1" => {
+                state.idle_notifier = Some(registry.bind(name, version.min(2), handle, ()));
+            }
+            "zwp_idle_inhibit_manager_v1" => {
+                state.idle_inhibit = Some(registry.bind(name, version.min(1), handle, ()));
+            }
             "wl_seat" => {
                 let seat: WlSeat = registry.bind(name, version.min(5), handle, ());
                 seat.get_pointer(handle, ());
@@ -1392,6 +1634,26 @@ delegate_noop!(Probe: ignore XdgToplevel);
 delegate_noop!(Probe: ignore ZwlrLayerShellV1);
 delegate_noop!(Probe: ignore ZwlrScreencopyManagerV1);
 delegate_noop!(Probe: ignore ExtSessionLockManagerV1);
+delegate_noop!(Probe: ignore ExtIdleNotifierV1);
+delegate_noop!(Probe: ignore ZwpIdleInhibitManagerV1);
+delegate_noop!(Probe: ignore ZwpIdleInhibitorV1);
+
+impl Dispatch<ExtIdleNotificationV1, ()> for Probe {
+    fn event(
+        probe: &mut Self,
+        _notification: &ExtIdleNotificationV1,
+        event: ext_idle_notification_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_idle_notification_v1::Event::Idled => probe.idle_events.push("idled"),
+            ext_idle_notification_v1::Event::Resumed => probe.idle_events.push("resumed"),
+            _ => {}
+        }
+    }
+}
 delegate_noop!(Probe: ignore WlSeat);
 
 impl Dispatch<WlPointer, ()> for Probe {

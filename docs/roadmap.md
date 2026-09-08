@@ -112,7 +112,7 @@ compositor and does not come back.
 |---|---|
 | ~~[#27](https://github.com/Lilium-Linux/solium/issues/27) session lock~~ | **done.** `ext-session-lock-v1`. It locks before the lock program draws, and stays locked if that program dies |
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) IME | no CJK, no compose key, no emoji picker. Unusable for most of the world's writers |
-| [#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit | the screen blanks during a film or a presentation |
+| ~~[#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit~~ | **done**, with `ext-idle-notify` beside it — the two are one feature. Blanking policy is still nobody's: see `wlr-output-power-management` |
 | [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | a laptop lid, a dock, a monitor's power switch. "Restart your session" is not an answer |
 | [#24](https://github.com/Lilium-Linux/solium/issues/24) cursor-shape | clients fall back today, so it costs nothing — until one does not |
 | [#50](https://github.com/Lilium-Linux/solium/issues/50) foreign-toplevel | a dock cannot list windows or switch to them, so Lilium's own shell cannot have a task switcher |

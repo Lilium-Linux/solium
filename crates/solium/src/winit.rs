@@ -718,6 +718,11 @@ pub(crate) fn run() -> Result<()> {
             state.redraw = true;
         }
         state.popups.cleanup();
+        // Who has been idle long enough to be told about it. Once a frame
+        // rather than on a timer: both loops wake at least every 16 ms, and
+        // a notification that arrives up to one frame late is a notification
+        // about somebody having left the room.
+        crate::idle::settle(&mut state);
         if let Err(err) = state.display_handle.flush_clients() {
             tracing::warn!(?err, "flushing clients failed");
         }
