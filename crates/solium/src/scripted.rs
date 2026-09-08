@@ -93,6 +93,13 @@ pub(crate) struct Declaration {
     pub(crate) on: On,
     /// The property bag, already JSON.
     pub(crate) properties: String,
+    /// Whether the pointer reaches it.
+    ///
+    /// Off by default, and that is the safe default rather than the tidy one:
+    /// a full-screen background surface that took the pointer would swallow
+    /// every click on the desktop, and the symptom would be "windows stopped
+    /// responding" rather than anything mentioning wallpapers.
+    pub(crate) interactive: bool,
 }
 
 /// A declaration, plus what has been rasterised for it.
@@ -121,6 +128,38 @@ impl Surface {
 
     pub(crate) fn layer(&self) -> Layer {
         self.declared.layer
+    }
+
+    pub(crate) fn interactive(&self) -> bool {
+        self.declared.interactive
+    }
+
+    /// Offer the pointer to this surface's instance on one monitor.
+    ///
+    /// Returns whether it was inside. A surface that takes the pointer stops
+    /// it reaching anything underneath, which is what makes a button a button.
+    pub(crate) fn pointer(
+        &mut self,
+        output: &Output,
+        area: Rectangle<i32, Logical>,
+        x: f64,
+        y: f64,
+        pressed: Option<bool>,
+    ) -> bool {
+        self.instance(output)
+            .is_some_and(|instance| instance.pointer(area, x, y, pressed))
+    }
+
+    /// Whatever the scene asked for since it was last looked at.
+    ///
+    /// The same one-way channel the window frames and the tweaks panel use:
+    /// QML sets `action`, the compositor takes it and clears it, so a press is
+    /// acted on once. Asked of every monitor's instance because the press
+    /// landed on exactly one of them and this does not know which.
+    pub(crate) fn taken_action(&mut self) -> Option<String> {
+        self.instances
+            .values_mut()
+            .find_map(crate::surface::ShellSurface::taken_action)
     }
 
     /// Where this surface goes on one monitor, if it goes there at all.

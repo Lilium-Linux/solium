@@ -240,11 +240,6 @@ pub(crate) struct Solium {
     /// arriving — what draws it, how long it waits, whether it takes a place
     /// in the layout. A script's, not the compositor's. See `Command::Loading`.
     pub(crate) loading: crate::script::Loading,
-    /// The Developer Tweaks panel, when `--debug-mode` asked for one.
-    pub(crate) tweaks: Option<crate::surface::ShellSurface>,
-    /// Whether it is on screen. Hiding keeps the scene alive, so showing it
-    /// again is a flag rather than a rebuild.
-    pub(crate) tweaks_shown: bool,
     /// Which frame the pointer was last over, so the one it leaves can be
     /// told. QML hover is positional: a frame never told the pointer left
     /// stays lit forever.
@@ -381,7 +376,6 @@ pub(crate) struct Solium {
     ///
     /// The compositor ships no shell and invents none: `SOLIUM_SHELL_SCENE`
     /// names a QML file to host, and without it there is nothing here.
-    pub(crate) shell: Option<crate::surface::ShellSurface>,
 
     /// Set while a focus change is being reported to scripts.
     ///
@@ -570,8 +564,6 @@ impl Solium {
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
             loading: crate::script::Loading::default(),
-            tweaks: None,
-            tweaks_shown: true,
             hovered_frame: None,
             closing: HashMap::new(),
             asked: HashMap::new(),
@@ -622,7 +614,6 @@ impl Solium {
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
             published_windows: String::new(),
-            shell: None,
             focusing: false,
             pending_drop: None,
             pending_resize: None,
@@ -1591,10 +1582,6 @@ impl Solium {
                         // layout's arithmetic and only the layout can redo it.
                         self.trigger_relayout();
                     }
-                }
-                Command::TweaksToggle => {
-                    self.tweaks_shown = !self.tweaks_shown;
-                    self.redraw = true;
                 }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
                 Command::Reload => self.request = Some(Request::Reload),
@@ -2914,45 +2901,10 @@ impl Solium {
         self.apply(outcome);
     }
 
-    /// The shell surface, built on first use from `SOLIUM_SHELL_SCENE`.
-    pub(crate) fn shell(&mut self) -> Option<&mut crate::surface::ShellSurface> {
-        if self.shell.is_none() {
-            let scene = std::env::var_os("SOLIUM_SHELL_SCENE")?;
-            // One scene, on the primary monitor. A shell that wants a bar on
-            // every screen writes layer surfaces, one per output, which is the
-            // supported route and the reason `new_layer_surface` honours the
-            // output a client names — this is the in-process development
-            // affordance, and giving it a screen each would be building the
-            // multi-monitor shell the compositor has no business owning.
-            //
-            // The primary monitor and not the active one, for the same reason
-            // a dock goes there: a bar that moves screens when the pointer
-            // does is a bar nobody asked to move.
-            let output = self.primary_output()?;
-            let area = self.work_area_on(&output)?;
-            let name = output.name();
-            // What shell components ask for about the screen they are on.
-            let properties = format!(
-                "{{\"screenInfo\":{{\"name\":\"{name}\",\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"scale\":1}}}}",
-                area.loc.x, area.loc.y, area.size.w, area.size.h
-            );
-            match crate::surface::ShellSurface::new(scene.into(), &properties) {
-                Ok(surface) => self.shell = Some(surface),
-                Err(err) => {
-                    tracing::error!(?err, "the shell scene would not load");
-                    return None;
-                }
-            }
-        }
-        self.shell.as_mut()
-    }
-
     /// The Developer Tweaks panel, built on first use.
     ///
     /// A second shell surface rather than anything new: it is QML hosted in
     /// the compositor, which is a thing that already exists here. What it
-    /// offers comes from the scripts, so the panel is a list of whatever
-    /// `tweaks.lua` declares.
     /// Declare a surface, or replace one of the same name.
     ///
     /// Re-declaring something identical keeps its rasterisations, because
@@ -2983,6 +2935,91 @@ impl Solium {
         }
     }
 
+    /// Offer the pointer to the scripted surfaces above the windows, or below.
+    ///
+    /// Two calls rather than one, and the split is the same one
+    /// wlr-layer-shell makes: a bar at `top` gets the click before the window
+    /// under it, and a dock at `bottom` gets it only if no window wanted it.
+    /// Without the split an interactive background would swallow every click
+    /// on the desktop, and the symptom would be "windows stopped responding"
+    /// rather than anything mentioning wallpapers.
+    ///
+    /// Returns whether one took it.
+    pub(crate) fn surface_pointer(
+        &mut self,
+        above_windows: bool,
+        location: Point<f64, Logical>,
+        pressed: Option<bool>,
+    ) -> bool {
+        if self.surfaces.iter().all(|surface| !surface.interactive()) {
+            return false;
+        }
+        let Some(output) = monitor::at(&self.space, location) else {
+            return false;
+        };
+        let Some(geometry) = self.space.output_geometry(&output) else {
+            return false;
+        };
+        let primary = self.primary_output();
+
+        // Topmost first, so a surface drawn over another gets the press.
+        let order = if above_windows {
+            [crate::scripted::Layer::Overlay, crate::scripted::Layer::Top]
+        } else {
+            [
+                crate::scripted::Layer::Bottom,
+                crate::scripted::Layer::Background,
+            ]
+        };
+
+        for layer in order {
+            let candidates: Vec<(usize, Rectangle<i32, Logical>)> = self
+                .surfaces
+                .iter()
+                .enumerate()
+                .filter(|(_, surface)| surface.interactive() && surface.layer() == layer)
+                .filter_map(|(index, surface)| {
+                    Some((index, surface.area_on(&output, geometry, primary.as_ref())?))
+                })
+                .collect();
+            for (index, area) in candidates {
+                let Some(surface) = self.surfaces.get_mut(index) else {
+                    continue;
+                };
+                if surface.pointer(&output, area, location.x, location.y, pressed) {
+                    self.redraw = true;
+                    self.settle_surfaces();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Act on whatever a scripted surface asked for.
+    ///
+    /// The scene sets `action`, this takes it and hands it to whoever is
+    /// listening, by surface name. A panel's buttons therefore live entirely
+    /// in the script that declared it -- which is what turned the Developer
+    /// Tweaks panel from a compositor feature into `lua/tweaks.lua`.
+    pub(crate) fn settle_surfaces(&mut self) {
+        let mut asked: Vec<(String, String)> = Vec::new();
+        for surface in &mut self.surfaces {
+            if let Some(action) = surface.taken_action() {
+                asked.push((surface.name().to_owned(), action));
+            }
+        }
+        for (name, action) in asked {
+            let snapshot = self.snapshot();
+            let Some(mut scripts) = self.scripts.take() else {
+                return;
+            };
+            let outcome = scripts.surface_action(&name, &action, snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
+        }
+    }
+
     /// Drop the rasterisations belonging to monitors that are no longer there.
     ///
     /// Each is a full-screen image held for a screen that has gone -- on a
@@ -2993,62 +3030,6 @@ impl Solium {
         for surface in &mut self.surfaces {
             surface.keep_only(&live);
         }
-    }
-
-    pub(crate) fn tweaks_panel(&mut self) -> Option<&mut crate::surface::ShellSurface> {
-        if !crate::dev::debug_mode() {
-            return None;
-        }
-        if self.tweaks.is_none() {
-            let entries = self
-                .scripts
-                .as_ref()
-                .and_then(super::script::Scripts::tweaks)
-                .unwrap_or_else(|| "[]".to_owned());
-            let source =
-                std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/tweaks.qml"));
-            let properties = format!("{{\"entries\":{entries}}}");
-            match crate::surface::ShellSurface::new(source, &properties) {
-                Ok(panel) => self.tweaks = Some(panel),
-                Err(err) => {
-                    tracing::error!(?err, "the Developer Tweaks panel would not load");
-                    return None;
-                }
-            }
-        }
-        self.tweaks.as_mut()
-    }
-
-    /// Where the panel sits, or `None` when there is not one to show.
-    ///
-    /// The single gate: drawing and input both ask for the area, so hidden is
-    /// hidden for both without either of them knowing why.
-    pub(crate) fn tweaks_area(&self) -> Option<Rectangle<i32, Logical>> {
-        if !self.tweaks_shown || !crate::dev::debug_mode() {
-            return None;
-        }
-        let area = self.work_area()?;
-        let width = 320.min((area.size.w / 3).max(200));
-        Some(Rectangle::new(
-            (area.loc.x + area.size.w - width, area.loc.y).into(),
-            (width, area.size.h).into(),
-        ))
-    }
-
-    /// Act on whatever the panel was pressed for.
-    pub(crate) fn settle_tweaks(&mut self) {
-        let Some(panel) = self.tweaks.as_mut() else {
-            return;
-        };
-        let Some(id) = panel.taken_action() else {
-            return;
-        };
-        let Some(mut scripts) = self.scripts.take() else {
-            return;
-        };
-        let outcome = scripts.tweak(&id, self.snapshot());
-        self.scripts = Some(scripts);
-        self.apply(outcome);
     }
 
     /// Tell the shell what windows exist.
@@ -3062,7 +3043,16 @@ impl Solium {
         // and app id, and allocates a string per window -- every frame, once
         // something is animating. With no shell hosted that is pure waste, and
         // the ordinary case is no shell hosted.
-        if self.shell.is_none() {
+        // Only when a foreign shell is hosted. The list is for the Quickshell
+        // compatibility layer -- `ToplevelManager.toplevels` and friends -- and
+        // building it walks every window, asks each for its title and app id,
+        // and allocates a string per window, every time anything changes.
+        //
+        // This used to test whether the in-process shell existed, which stopped
+        // meaning anything the moment the shell became an ordinary scripted
+        // surface: a wallpaper is one of those, and there is always a
+        // wallpaper.
+        if std::env::var_os("SOLIUM_SHELL_SCENE").is_none() {
             return;
         }
         let focused = self.focused_window();
@@ -3145,6 +3135,22 @@ impl Solium {
     /// hardware one cannot drift -- which matters more here than usual,
     /// because the hardware path needs a cable to exercise and the nested one
     /// does not.
+    /// The screens are known: tell the scripts, once, at startup.
+    ///
+    /// Scripts load before the monitors exist -- on the hardware backend they
+    /// load before the GPU is even opened -- so a script that computes where
+    /// to put something computes it against nothing. The Developer Tweaks
+    /// panel did exactly that and came out 200x0 pixels, which is a panel that
+    /// is there and invisible.
+    ///
+    /// The same call a hotplug makes, deliberately: "the monitors are not what
+    /// you last knew" covers both, and having one event rather than a
+    /// `startup` and a `changed` means a script cannot handle one and forget
+    /// the other.
+    pub(crate) fn monitors_ready(&mut self) {
+        self.settle_monitors();
+    }
+
     pub(crate) fn settle_monitors(&mut self) {
         self.place_outputs();
         self.prune_surfaces();

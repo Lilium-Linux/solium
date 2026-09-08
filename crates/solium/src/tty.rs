@@ -382,6 +382,9 @@ pub(crate) fn run() -> Result<()> {
     }
 
     let drm_events = state.open_gpu(&seat_name)?;
+    // The scripts loaded before the GPU was open, so this is the first moment
+    // one can be told where the monitors are. See `Solium::monitors_ready`.
+    state.solium.monitors_ready();
     state.input = Some(start_input(&mut event_loop, &state.session, &seat_name)?);
 
     // The vblank is what paces rendering: a frame is drawn when the last one

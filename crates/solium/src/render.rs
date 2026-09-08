@@ -366,22 +366,6 @@ pub(crate) fn elements(
         return elements;
     }
 
-    // The shell, when one is hosted: above the windows, below the pointer.
-    // Only on the monitor it was built for; see `Solium::shell`.
-    if let Some(area) = state.work_area()
-        && area.overlaps(screen)
-        && let Some(shell) = state.shell()
-        && let Some(element) = shell.element(
-            renderer,
-            smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
-            now,
-            1.0,
-            scale,
-        )
-    {
-        elements.push(Element::Chrome(element));
-    }
-
     // Scripted surfaces at the top layer: above the windows, and below the
     // client surfaces on the same layer -- a real bar covers a scripted one,
     // because the client was installed on purpose.
@@ -429,22 +413,6 @@ pub(crate) fn elements(
         now,
         scale,
     ));
-
-    // The Developer Tweaks panel, above everything: it is a tool for looking
-    // at what the compositor is doing, so nothing should be able to cover it.
-    if let Some(area) = state.tweaks_area()
-        && area.overlaps(screen)
-        && let Some(panel) = state.tweaks_panel()
-        && let Some(element) = panel.element(
-            renderer,
-            smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
-            now,
-            1.0,
-            scale,
-        )
-    {
-        elements.push(Element::Chrome(element));
-    }
 
     for (pane, window) in state.on_screen() {
         let Some(global) = state.pane_outer_of(pane) else {

@@ -41,9 +41,59 @@ end
 
 table.insert(entries, { id = "reload", label = "Reload configuration", group = "Session" })
 
-sol.tweaks(entries)
+-- The panel itself. It used to be a compositor feature -- an accessor on the
+-- state, an area function, its own pointer routing, its own `--debug-mode`
+-- gate and a `TweaksToggle` command. It is now `sol.surface` like anything
+-- else, and the compositor has no idea what a tweak is.
+--
+-- Down the right-hand side of the monitor you are looking at, over the
+-- windows, taking clicks.
+local tweaks = { shown = true }
 
-sol.on_tweak(function(id)
+function tweaks.area()
+    local screen = sol.monitor()
+    local width = math.max(200, math.min(320, screen.w / 3))
+    return { x = screen.x + screen.w - width, y = screen.y, w = width, h = screen.h }
+end
+
+function tweaks.apply()
+    if not tweaks.shown then
+        sol.surface("tweaks", false)
+        return
+    end
+    sol.surface("tweaks", {
+        scene = "tweaks.qml",
+        layer = "overlay",
+        on = tweaks.area(),
+        interactive = true,
+        properties = { entries = entries },
+    })
+end
+
+function tweaks.toggle()
+    tweaks.shown = not tweaks.shown
+    tweaks.apply()
+end
+
+-- Only with `--debug-mode`, which is the same gate as before -- it just lives
+-- here now rather than in the compositor.
+--
+-- Placed on the `monitors` event rather than here, because *here* is too
+-- early: scripts load before the screens are known, so a rect computed now is
+-- computed against zeros. That event fires once at startup and again whenever
+-- a monitor arrives or leaves, which is exactly when this needs redoing.
+if sol.debug_mode() then
+    sol.on("monitors", tweaks.apply)
+end
+
+sol.on("surface", function(name, id)
+    if name ~= "tweaks" then
+        return
+    end
+    tweaks.handle(id)
+end)
+
+function tweaks.handle(id)
     local kind, name = id:match("^(%a+):(.+)$")
 
     if kind == "decoration" then
@@ -98,4 +148,6 @@ sol.on_tweak(function(id)
             },
         })
     end
-end)
+end
+
+return tweaks

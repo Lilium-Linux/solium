@@ -21,6 +21,7 @@ sol.monitors(config.monitors)
 -- The wallpaper is a script like any other mode: `sol.surface` and a QML
 -- file, and nothing in the compositor knows what a wallpaper is.
 require("wallpaper")
+require("shell")
 
 require("tweaks")
 
@@ -130,7 +131,7 @@ sol.log("solium configuration loaded")
 -- window tilts while it is sucked in.
 -- Show or hide the Developer Tweaks panel. Nothing without --debug-mode.
 sol.bind("super+shift+d", function()
-    sol.tweaks_toggle()
+    require("tweaks").toggle()
 end)
 
 -- Cycle the keyboard layout, when the configuration lists more than one.
