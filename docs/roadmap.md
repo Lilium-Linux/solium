@@ -101,7 +101,10 @@ it. A compositor is complete when a person can use it all day without meeting
 something it cannot do, and that is a different list — mostly protocols, mostly
 unglamorous, and each one invisible until the day it is missing.
 
-Three tiers, and the order matters more than the contents.
+Three tiers, and the order matters more than the contents. This is the
+*prioritised* view; **[docs/gaps.md](gaps.md)** is the exhaustive one — every
+protocol not implemented and every non-protocol gap, whether or not it is worth
+doing soon.
 
 ### 1. Things a desktop cannot do without
 
