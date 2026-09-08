@@ -34,6 +34,10 @@ use wayland_protocols::wp::presentation_time::client::{
     wp_presentation::{self, WpPresentation},
     wp_presentation_feedback::{self, WpPresentationFeedback},
 };
+use wayland_protocols::xdg::decoration::zv1::client::{
+    zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+    zxdg_toplevel_decoration_v1::{self, Mode as DecorationMode, ZxdgToplevelDecorationV1},
+};
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::{self, XdgSurface},
     xdg_toplevel::XdgToplevel,
@@ -63,6 +67,7 @@ struct Probe {
     wm_base: Option<XdgWmBase>,
     layer_shell: Option<ZwlrLayerShellV1>,
     screencopy: Option<ZwlrScreencopyManagerV1>,
+    decorations: Option<ZxdgDecorationManagerV1>,
     presentation: Option<WpPresentation>,
     /// What a capture told us to allocate, and how it went.
     shot: Option<Shot>,
@@ -164,6 +169,21 @@ fn main() {
             eprintln!("wl-probe: the compositor stopped talking: {err}");
             std::process::exit(2);
         }
+    }
+
+    // Two windows to look at: one the compositor decorates, one that says it
+    // will decorate itself. Optionally one of them then asks for the screen.
+    //
+    // This exists because the things worth photographing here -- a
+    // server-side frame beside a client-side one, and what entering fullscreen
+    // looks like frame by frame -- need a client that will do exactly that on
+    // cue. Real applications will not: Firefox attaches to whatever instance
+    // is already running, and Electron takes half a minute to start and then
+    // argues about Vulkan.
+    if let Ok(hold) = std::env::var("WL_PROBE_WINDOWS") {
+        let seconds: u64 = hold.trim().parse().unwrap_or(20);
+        show_windows(&connection, &mut queue, &mut probe, seconds);
+        return;
     }
 
     // Connect, learn what is there, and leave -- with no surface of any kind.
@@ -288,6 +308,99 @@ fn main() {
             println!("wl-probe: FAIL — {failure}");
         }
         std::process::exit(1);
+    }
+}
+
+/// Map two windows -- one decorated by the compositor, one not -- and hold
+/// them up to be looked at.
+///
+/// `WL_PROBE_WINDOWS=<seconds>` holds them; `WL_PROBE_FULLSCREEN=1` makes the
+/// first one ask for the screen a second in, which is what makes the
+/// transition photographable.
+fn show_windows(
+    connection: &Connection,
+    queue: &mut wayland_client::EventQueue<Probe>,
+    probe: &mut Probe,
+    seconds: u64,
+) {
+    let handle = queue.handle();
+    let (Some(compositor), Some(shm), Some(wm_base)) = (
+        probe.compositor.clone(),
+        probe.shm.clone(),
+        probe.wm_base.clone(),
+    ) else {
+        eprintln!("wl-probe: the compositor would not hand over the basics");
+        return;
+    };
+
+    let mut windows = Vec::new();
+    for (index, own_frame) in [(0, false), (1, true)] {
+        let surface = compositor.create_surface(&handle, ());
+        let xdg = wm_base.get_xdg_surface(&surface, &handle, ());
+        let toplevel = xdg.get_toplevel(&handle, ());
+        toplevel.set_title(if own_frame {
+            "client-side — draws its own frame".to_owned()
+        } else {
+            "server-side — the compositor's frame".to_owned()
+        });
+        toplevel.set_app_id(format!("wl-probe-{index}"));
+
+        // The half that matters: one of them tells the compositor it will
+        // decorate itself, which is what an Electron or GTK application does.
+        let decoration = probe.decorations.as_ref().map(|manager| {
+            let decoration = manager.get_toplevel_decoration(&toplevel, &handle, ());
+            decoration.set_mode(if own_frame {
+                DecorationMode::ClientSide
+            } else {
+                DecorationMode::ServerSide
+            });
+            decoration
+        });
+        surface.commit();
+        windows.push((surface, toplevel, decoration));
+    }
+
+    // Configured before anything is attached: a toplevel may not draw until it
+    // has been told a size once.
+    for _ in 0..60 {
+        if settle(connection, queue, probe).is_err() {
+            return;
+        }
+        if probe.configured {
+            break;
+        }
+    }
+
+    // Something with an obvious edge, so the frame around it is easy to see
+    // and a size change is easy to measure.
+    for (surface, _, _) in &windows {
+        let buffer = solid_buffer(&shm, &handle, 520, 360);
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage(0, 0, i32::MAX, i32::MAX);
+        surface.commit();
+    }
+    for _ in 0..10 {
+        let _ = settle(connection, queue, probe);
+    }
+    println!("two windows up: one server-side, one client-side");
+
+    let fullscreen = std::env::var_os("WL_PROBE_FULLSCREEN").is_some();
+    let until = std::time::Instant::now() + Duration::from_secs(seconds);
+    let mut asked = false;
+    let start = std::time::Instant::now();
+    while std::time::Instant::now() < until {
+        if fullscreen && !asked && start.elapsed() >= Duration::from_secs(1) {
+            if let Some((_, toplevel, _)) = windows.first() {
+                println!("asking for fullscreen");
+                toplevel.set_fullscreen(None);
+            }
+            asked = true;
+        }
+        // Redraw whatever we were configured to, so a resize is honoured.
+        if queue.roundtrip(probe).is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
     }
 }
 
@@ -926,6 +1039,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
             "zwlr_screencopy_manager_v1" => {
                 state.screencopy = Some(registry.bind(name, version.min(3), handle, ()));
             }
+            "zxdg_decoration_manager_v1" => {
+                state.decorations = Some(registry.bind(name, version.min(1), handle, ()));
+            }
             "wp_presentation" => {
                 state.presentation = Some(registry.bind(name, version.min(1), handle, ()));
             }
@@ -1026,6 +1142,22 @@ delegate_noop!(Probe: ignore WlBuffer);
 delegate_noop!(Probe: ignore XdgToplevel);
 delegate_noop!(Probe: ignore ZwlrLayerShellV1);
 delegate_noop!(Probe: ignore ZwlrScreencopyManagerV1);
+delegate_noop!(Probe: ignore ZxdgDecorationManagerV1);
+
+impl Dispatch<ZxdgToplevelDecorationV1, ()> for Probe {
+    fn event(
+        _state: &mut Self,
+        _decoration: &ZxdgToplevelDecorationV1,
+        event: zxdg_toplevel_decoration_v1::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event {
+            println!("  decoration mode: {mode:?}");
+        }
+    }
+}
 
 impl Dispatch<ZwlrScreencopyFrameV1, ()> for Probe {
     fn event(
