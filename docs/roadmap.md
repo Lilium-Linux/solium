@@ -114,7 +114,12 @@ compositor and does not come back.
 | | why it stops someone |
 |---|---|
 | ~~[#27](https://github.com/Lilium-Linux/solium/issues/27) session lock~~ | **done.** `ext-session-lock-v1`. It locks before the lock program draws, and stays locked if that program dies |
+| [#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout | every session is US QWERTY and nothing can change it. Most of the world cannot type their own language |
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) IME | no CJK, no compose key, no emoji picker. Unusable for most of the world's writers |
+| [#55](https://github.com/Lilium-Linux/solium/issues/55) virtual-keyboard | the other half of an on-screen keyboard, which is what a phone is |
+| [#56](https://github.com/Lilium-Linux/solium/issues/56) window rules | nothing matches on `app_id`. The first thing anybody configures |
+| [#54](https://github.com/Lilium-Linux/solium/issues/54) output power | nothing can turn a screen off, which is what an idle timeout is for on a laptop |
+| [#63](https://github.com/Lilium-Linux/solium/issues/63) multi-GPU | a monitor on the second card cannot be driven at all — which is docking an ordinary laptop |
 | ~~[#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit~~ | **done**, with `ext-idle-notify` beside it — the two are one feature. Blanking policy is still nobody's: see `wlr-output-power-management` |
 | [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | a laptop lid, a dock, a monitor's power switch. "Restart your session" is not an answer |
 | [#24](https://github.com/Lilium-Linux/solium/issues/24) cursor-shape | clients fall back today, so it costs nothing — until one does not |
@@ -136,8 +141,10 @@ and all of it decides whether the thing is trustworthy.
 |---|---|
 | [#33](https://github.com/Lilium-Linux/solium/issues/33) the per-window leak | ~5 MB and ~1 descriptor per window, measured nested. Whether it is real on hardware is untested |
 | [#48](https://github.com/Lilium-Linux/solium/issues/48) the seat flake | two sessions in twenty-five got no input devices and were stopped by the watchdog |
-| a hardware soak | the compositor has never run unattended for hours on a real session |
-| packaging | there is none, and a preview nobody can install is a preview nobody tries |
+| [#65](https://github.com/Lilium-Linux/solium/issues/65) a hardware soak | the compositor has never run unattended for hours on a real session |
+| [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | there is none, and a preview nobody can install is a preview nobody tries |
+| [#64](https://github.com/Lilium-Linux/solium/issues/64) suspend and resume | never tested once. A laptop that cannot be closed and opened is not a laptop |
+| [#83](https://github.com/Lilium-Linux/solium/issues/83) portals | screen sharing is reasoning, not evidence: nothing has been run end to end |
 
 ### 3. The part that is not parity
 
