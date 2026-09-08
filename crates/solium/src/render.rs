@@ -49,6 +49,10 @@ render_elements! {
     /// A surface drawn straight, with no rescale wrapper: the offscreen pass
     /// draws at real size, so there is nothing to scale.
     Window2 = WaylandSurfaceRenderElement<GlesRenderer>,
+    /// A flat colour. The only thing that draws one is the lock screen's
+    /// backdrop, which has to be a real element rather than a clear colour
+    /// because the lock client's surface is composited on top of it.
+    Solid = smithay::backend::renderer::element::solid::SolidColorRenderElement,
     /// A whole monitor, already drawn into a texture of its own.
     ///
     /// Only the nested backend's multi-monitor mode produces these: there is
@@ -313,6 +317,53 @@ pub(crate) fn elements(
     // window should not have somebody's mouse in it.
     if with_cursor {
         elements.extend(cursor(state, renderer, output_scale, scale, shift));
+    }
+
+    // Locked, so this is the whole frame. Everything below here belongs to the
+    // session -- windows, bars, the shell, the tweaks panel -- and none of it
+    // is drawn. Returning early is the point: a filter further down is
+    // something a later change can slip past, and what slips past is somebody
+    // else's screen.
+    //
+    // The backdrop goes on unconditionally, underneath, even when the client
+    // has a surface here. A lock surface that is translucent, smaller than the
+    // monitor, or simply has not painted yet would otherwise leave the desktop
+    // visible through the gap, and a gap is exactly what this protocol exists
+    // to rule out.
+    //
+    // Note that this is also what a *capture* of a locked screen gets:
+    // screencopy goes through the same function, so a client recording the
+    // screen sees the lock screen and not what is behind it.
+    if let Some(lock) = state.lock.as_ref() {
+        if let Some(output) = state.output_for(screen)
+            && let Some(surface) = lock.surface_for(&output)
+        {
+            elements.extend(
+                render_elements_from_surface_tree::<
+                    GlesRenderer,
+                    WaylandSurfaceRenderElement<GlesRenderer>,
+                >(
+                    renderer,
+                    surface.wl_surface(),
+                    (0, 0),
+                    output_scale,
+                    1.0,
+                    Kind::Unspecified,
+                )
+                .into_iter()
+                .map(Element::Window2),
+            );
+        }
+        elements.push(Element::Solid(
+            smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
+                lock.blank(),
+                smithay::utils::Rectangle::from_size(screen.size).to_physical_precise_round(scale),
+                CommitCounter::default(),
+                crate::lock::BLANK,
+                Kind::Unspecified,
+            ),
+        ));
+        return elements;
     }
 
     // The shell, when one is hosted: above the windows, below the pointer.

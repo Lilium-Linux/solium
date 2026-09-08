@@ -33,6 +33,11 @@ use wayland_client::protocol::{
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, delegate_noop};
+use wayland_protocols::ext::session_lock::v1::client::{
+    ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+    ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
+    ext_session_lock_v1::{self, ExtSessionLockV1},
+};
 use wayland_protocols::wp::presentation_time::client::{
     wp_presentation::{self, WpPresentation},
     wp_presentation_feedback::{self, WpPresentationFeedback},
@@ -70,11 +75,18 @@ struct Probe {
     wm_base: Option<XdgWmBase>,
     layer_shell: Option<ZwlrLayerShellV1>,
     screencopy: Option<ZwlrScreencopyManagerV1>,
+    session_lock: Option<ExtSessionLockManagerV1>,
     seat: Option<WlSeat>,
     /// Where the compositor said the pointer was, in the surface's own
     /// coordinates. The one number a client cannot check any other way: a
     /// compositor that reports the wrong place has buttons that miss.
     pointer_at: Vec<(f64, f64)>,
+    /// Whether the compositor said the session is locked, and whether it
+    /// refused. Exactly one of these is the answer to "did the lock take".
+    locked: bool,
+    lock_refused: bool,
+    /// Each lock surface the compositor configured, by output name and size.
+    lock_surfaces: Vec<(String, u32, u32)>,
     decorations: Option<ZxdgDecorationManagerV1>,
     presentation: Option<WpPresentation>,
     /// What a capture told us to allocate, and how it went.
@@ -194,6 +206,20 @@ fn main() {
         return;
     }
 
+    // Lock the session and hold it. Separate from the ordinary run rather than
+    // part of it, because a check that locks the screen in the middle of a
+    // gate is a check that locks the screen of whoever ran the gate.
+    if let Ok(hold) = std::env::var("WL_PROBE_LOCK") {
+        let seconds: u64 = hold.trim().parse().unwrap_or(10);
+        match lock_the_session(&connection, &mut queue, &mut probe, seconds) {
+            Ok(()) => return,
+            Err(reason) => {
+                eprintln!("wl-probe: {reason}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Connect, learn what is there, and leave -- with no surface of any kind.
     //
     // This exists to be a client lifecycle with no window in it. `super+return`
@@ -222,6 +248,7 @@ fn main() {
         "zxdg_decoration_manager_v1",
         "zwlr_layer_shell_v1",
         "zwlr_screencopy_manager_v1",
+        "ext_session_lock_manager_v1",
     ] {
         let version = probe
             .globals
@@ -976,9 +1003,26 @@ fn solid_buffer(
     width: i32,
     height: i32,
 ) -> WlBuffer {
+    // Opaque mid-blue, premultiplied — anything non-zero, so the compositor is
+    // presenting a real frame rather than nothing.
+    tinted_buffer(shm, handle, width, height, [0x80, 0x50, 0x20, 0xff])
+}
+
+/// The same, in a colour of the caller's choosing.
+///
+/// Worth the parameter because the whole point of some of these checks is
+/// telling whose pixels are on screen: the lock screen has to be a colour
+/// nothing else in the compositor draws, or a screenshot proves nothing.
+fn tinted_buffer(
+    shm: &wl_shm::WlShm,
+    handle: &QueueHandle<Probe>,
+    width: i32,
+    height: i32,
+    pixel: [u8; 4],
+) -> WlBuffer {
     let stride = width * 4;
     let size = stride * height;
-    let file = tempfile(size as usize);
+    let file = tempfile(size as usize, pixel);
     let pool = shm.create_pool(file.as_fd(), size, handle, ());
     pool.create_buffer(
         0,
@@ -992,12 +1036,9 @@ fn solid_buffer(
 }
 
 /// An anonymous file of `size` bytes, filled with an opaque colour.
-fn tempfile(size: usize) -> std::fs::File {
+fn tempfile(size: usize, pixel: [u8; 4]) -> std::fs::File {
     use std::io::{Seek as _, Write as _};
     let mut file = tempfile_rs();
-    // Opaque mid-blue, premultiplied — anything non-zero, so the compositor is
-    // presenting a real frame rather than nothing.
-    let pixel = [0x80u8, 0x50, 0x20, 0xff];
     let row: Vec<u8> = pixel.iter().copied().cycle().take(size).collect();
     file.write_all(&row).ok();
     file.flush().ok();
@@ -1019,6 +1060,182 @@ fn tempfile_rs() -> std::fs::File {
         .unwrap_or_else(|err| panic!("wl-probe: could not make a buffer file: {err}"));
     std::fs::remove_file(&path).ok();
     file
+}
+
+/// Lock the session, hold it, and let it go.
+///
+/// Run with `WL_PROBE_LOCK=<seconds>`. This is the only lock client on the
+/// machine, and without one the protocol cannot be checked at all: the
+/// compositor cannot lock itself, and every question worth asking about a lock
+/// screen -- does the desktop stop being visible, do bindings stop firing,
+/// does a monitor with no surface go blank rather than clear -- is a question
+/// about what a *second* process can see.
+///
+/// It deliberately does not draw a password field. What it draws is a flat
+/// colour, chosen to be nothing like the compositor's own backdrop, so a
+/// screenshot answers "whose pixels are these" without anyone having to guess.
+fn lock_the_session(
+    connection: &Connection,
+    queue: &mut wayland_client::EventQueue<Probe>,
+    probe: &mut Probe,
+    seconds: u64,
+) -> Result<(), String> {
+    let handle = queue.handle();
+    let (Some(compositor), Some(shm), Some(manager)) = (
+        probe.compositor.clone(),
+        probe.shm.clone(),
+        probe.session_lock.clone(),
+    ) else {
+        return Err("ext_session_lock_manager_v1 is not advertised".to_owned());
+    };
+    if probe.outputs.is_empty() {
+        return Err("no outputs to lock".to_owned());
+    }
+
+    println!();
+    let lock = manager.lock(&handle, ());
+    settle(connection, queue, probe)?;
+    if probe.lock_refused {
+        return Err("the compositor refused the lock (finished)".to_owned());
+    }
+    if !probe.locked {
+        return Err("the compositor neither confirmed nor refused the lock".to_owned());
+    }
+    println!("locked: the compositor confirmed before any surface existed");
+
+    // One surface per monitor, and on purpose one *fewer* than that when asked.
+    // A lock screen that covers the monitor it was told about and leaves the
+    // other showing the desktop is the failure this protocol exists to
+    // prevent, and it is invisible unless something deliberately declines to
+    // cover a screen. `WL_PROBE_LOCK_SKIP=<name>` is that.
+    let skip = std::env::var("WL_PROBE_LOCK_SKIP").ok();
+    let screens: Vec<(WlOutput, String)> = probe
+        .outputs
+        .iter()
+        .filter(|screen| skip.as_deref() != Some(screen.name.as_str()))
+        .map(|screen| (screen.output.clone(), screen.name.clone()))
+        .collect();
+
+    let mut surfaces = Vec::new();
+    for (output, name) in &screens {
+        let surface = compositor.create_surface(&handle, ());
+        let locked = lock.get_lock_surface(&surface, output, &handle, name.clone());
+        // No commit yet. A lock surface may not attach a buffer before its
+        // first configure, and the size to attach is in that configure.
+        surfaces.push((surface, locked, name.clone()));
+    }
+
+    for turn in 0..50 {
+        if turn == 10 {
+            eprintln!("wl-probe: still waiting for the lock surfaces to be configured…");
+        }
+        settle(connection, queue, probe)?;
+        if probe.lock_surfaces.len() >= screens.len() {
+            break;
+        }
+    }
+    if probe.lock_surfaces.len() < screens.len() {
+        return Err(format!(
+            "{} of {} lock surfaces were configured",
+            probe.lock_surfaces.len(),
+            screens.len()
+        ));
+    }
+
+    for (surface, _, name) in &surfaces {
+        let Some((width, height)) = probe
+            .lock_surfaces
+            .iter()
+            .find(|(each, _, _)| each == name)
+            .map(|(_, width, height)| (*width, *height))
+        else {
+            continue;
+        };
+        // Bright green, and nothing else in this compositor is bright green.
+        let buffer = tinted_buffer(
+            &shm,
+            &handle,
+            width as i32,
+            height as i32,
+            [0x20, 0xc0, 0x40, 0xff],
+        );
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage_buffer(0, 0, width as i32, height as i32);
+        surface.commit();
+        println!("lock surface on {name}: {width}x{height}");
+    }
+    if let Some(name) = skip.as_deref() {
+        println!(
+            "lock surface on {name}: none, deliberately — it should be blank, not the desktop"
+        );
+    }
+
+    settle(connection, queue, probe)?;
+    println!("holding the lock for {seconds}s — the desktop must not be visible anywhere");
+    let until = std::time::Instant::now() + Duration::from_secs(seconds);
+    while std::time::Instant::now() < until {
+        settle(connection, queue, probe)?;
+        std::thread::sleep(Duration::from_millis(80));
+    }
+
+    // The only legitimate way out. Destroying the lock object *without* this
+    // must leave the session locked, which is the other half of the protocol
+    // and is checked by `WL_PROBE_LOCK_ABANDON=1` below.
+    if std::env::var_os("WL_PROBE_LOCK_ABANDON").is_some() {
+        println!("leaving without unlocking — the session must stay locked and blank");
+        connection.flush().ok();
+        return Ok(());
+    }
+    lock.unlock_and_destroy();
+    connection.flush().ok();
+    queue
+        .roundtrip(probe)
+        .map_err(|err| format!("the compositor stopped talking: {err}"))?;
+    println!("unlocked");
+    Ok(())
+}
+
+impl Dispatch<ExtSessionLockV1, ()> for Probe {
+    fn event(
+        probe: &mut Self,
+        _lock: &ExtSessionLockV1,
+        event: ext_session_lock_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_session_lock_v1::Event::Locked => probe.locked = true,
+            // Not an error to receive: it is how a compositor says another
+            // client already holds the lock. It *is* an error to ignore --
+            // after `finished` the session is not locked and never will be by
+            // this client.
+            ext_session_lock_v1::Event::Finished => probe.lock_refused = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtSessionLockSurfaceV1, String> for Probe {
+    fn event(
+        probe: &mut Self,
+        surface: &ExtSessionLockSurfaceV1,
+        event: ext_session_lock_surface_v1::Event,
+        name: &String,
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        if let ext_session_lock_surface_v1::Event::Configure {
+            serial,
+            width,
+            height,
+        } = event
+        {
+            surface.ack_configure(serial);
+            probe.lock_surfaces.retain(|(each, _, _)| each != name);
+            probe.lock_surfaces.push((name.clone(), width, height));
+        }
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
@@ -1062,6 +1279,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
             }
             "zwlr_screencopy_manager_v1" => {
                 state.screencopy = Some(registry.bind(name, version.min(3), handle, ()));
+            }
+            "ext_session_lock_manager_v1" => {
+                state.session_lock = Some(registry.bind(name, version.min(1), handle, ()));
             }
             "wl_seat" => {
                 let seat: WlSeat = registry.bind(name, version.min(5), handle, ());
@@ -1171,6 +1391,7 @@ delegate_noop!(Probe: ignore WlBuffer);
 delegate_noop!(Probe: ignore XdgToplevel);
 delegate_noop!(Probe: ignore ZwlrLayerShellV1);
 delegate_noop!(Probe: ignore ZwlrScreencopyManagerV1);
+delegate_noop!(Probe: ignore ExtSessionLockManagerV1);
 delegate_noop!(Probe: ignore WlSeat);
 
 impl Dispatch<WlPointer, ()> for Probe {

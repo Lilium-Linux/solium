@@ -97,6 +97,32 @@ Every bar and dock was told the pointer was at `0,0` no matter where it really
 was — so every button on every panel would have missed, and the one at the
 top-left corner would have swallowed every click.
 
+`WL_PROBE_LOCK=<seconds>` locks the session, covers every monitor in a green
+nothing else draws, holds it, and unlocks. Kept out of the ordinary run on
+purpose: a check that locks the screen partway through a gate is a check that
+locks the screen of whoever ran the gate. Two knobs:
+
+    WL_PROBE_LOCK_SKIP=DP-2   give every monitor a lock surface except that
+                              one. It must go blank, not show the desktop —
+                              and with one lock surface per screen that is
+                              the only failure the picture can distinguish.
+    WL_PROBE_LOCK_ABANDON=1   leave without unlocking, as a crashed lock
+                              program would. The session must stay locked.
+
+There is no lock client installed on this machine, so without this there is no
+way to exercise the protocol at all: a compositor cannot lock itself, and every
+question worth asking about a lock screen is a question about what a *second*
+process can see. Point `SOLIUM_CAPTURE` at a directory while it runs and the
+answer is in the frames — the desktop, then one frame of the compositor's own
+backdrop between the lock and the client's first buffer, then the client's
+colour, and nothing of the session anywhere in between.
+
+`SOLIUM_DRAG_AT` fires during a lock too, and that combination is worth keeping:
+it is what found that a locked screen would still let a drag resize a window
+underneath it. The window was measured before the lock and after the unlock,
+which is the only way that bug is visible — while locked, nothing of it is on
+screen to see.
+
 `clipboard-check.sh` runs its X11 half in a container, because the host has no
 `xclip` and cannot install one. **Run it more than once.** The bug it was
 written for failed about one time in three, so a single green run proves

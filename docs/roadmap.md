@@ -110,7 +110,7 @@ compositor and does not come back.
 
 | | why it stops someone |
 |---|---|
-| [#27](https://github.com/Lilium-Linux/solium/issues/27) session lock | you cannot walk away from the machine. Not a gap — a reason not to log in |
+| ~~[#27](https://github.com/Lilium-Linux/solium/issues/27) session lock~~ | **done.** `ext-session-lock-v1`. It locks before the lock program draws, and stays locked if that program dies |
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) IME | no CJK, no compose key, no emoji picker. Unusable for most of the world's writers |
 | [#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit | the screen blanks during a film or a presentation |
 | [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | a laptop lid, a dock, a monitor's power switch. "Restart your session" is not an answer |

@@ -445,7 +445,21 @@ pub(crate) fn run() -> Result<()> {
         // "contents unknown", and the tracker then redraws everything every
         // frame and reports damage every frame — an idle compositor that never
         // stops rendering, which is exactly what it was doing.
-        let age = backend.buffer_age().unwrap_or(0);
+        //
+        // Zero while locked, which asks for the whole screen every time. A
+        // damage-tracked frame only redraws what changed and trusts the rest
+        // of the buffer to still hold the previous frame -- and the buffers in
+        // a swapchain outlive the lock, so one of them holds a picture of the
+        // desktop from before it. Getting the age wrong by one anywhere in the
+        // loop would put that picture back on screen through the gaps in the
+        // damage, which is the one thing a lock screen may never do. A locked
+        // screen is static, so the whole cost of this is a full redraw on the
+        // handful of frames a lock screen ever draws.
+        let age = if state.lock.is_some() {
+            0
+        } else {
+            backend.buffer_age().unwrap_or(0)
+        };
 
         // Before the frame is decided: a drag that moved since the last one is
         // applied once, here, however many times the mouse reported it. See

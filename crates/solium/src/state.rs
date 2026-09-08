@@ -27,7 +27,10 @@ use smithay::{
     backend::{allocator::dmabuf::Dmabuf, renderer::utils::on_commit_buffer_handler},
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_layer_shell,
     delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
-    desktop::{LayerSurface, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
+    desktop::{
+        LayerSurface, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output,
+        utils::under_from_surface_tree,
+    },
     input::{
         Seat, SeatHandler, SeatState,
         pointer::{CursorImageStatus, Focus, GrabStartData},
@@ -61,6 +64,7 @@ use smithay::{
             request_primary_client_selection, set_primary_focus, set_primary_selection,
         },
         selection::{SelectionHandler, SelectionSource, SelectionTarget},
+        session_lock::SessionLockManagerState,
         shell::{
             wlr_layer::{
                 Layer, LayerSurface as WlrLayerSurface, LayerSurfaceConfigure, LayerSurfaceData,
@@ -138,6 +142,15 @@ pub(crate) struct Solium {
     /// The shell's way in: bars, docks, wallpapers and notification areas are
     /// ordinary clients that anchor to an output edge. See `layer.rs`.
     pub(crate) layer_shell_state: WlrLayerShellState,
+    /// Registers `ext_session_lock_manager_v1`: the lock screen. See `lock.rs`.
+    pub(crate) session_lock_state: SessionLockManagerState,
+    /// Set while the session is locked, and the single thing every other part
+    /// of the compositor checks before it draws or delivers anything.
+    ///
+    /// `Some` means locked, whether or not the client has managed to put
+    /// anything on screen -- see `lock.rs` for why that asymmetry is the
+    /// safe one.
+    pub(crate) lock: Option<crate::lock::Lock>,
 
     pub(crate) space: Space<Window>,
 
@@ -540,6 +553,8 @@ impl Solium {
             fractional_scale_state: FractionalScaleManagerState::new::<Self>(&display_handle),
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
+            session_lock_state: crate::lock::state(&display_handle),
+            lock: None,
             seat_state,
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),
             pending_captures: Vec::new(),
@@ -1776,6 +1791,12 @@ impl Solium {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(Window, Rectangle<i32, Logical>)> {
+        // Locked, so there is no window under the pointer however many are
+        // still mapped. Everything built on this -- click to focus, focus
+        // follows mouse, drag, resize -- stops at once, in one place.
+        if self.lock.is_some() {
+            return None;
+        }
         let now = self.clock.now();
         self.panes.iter().rev().find_map(|pane| {
             let window = pane.client()?;
@@ -1804,6 +1825,23 @@ impl Solium {
         // The monitor under the point, not the first one: a layer map's
         // geometry is in its own output's coordinates, so asking the wrong
         // output hit-tests the right strip on the wrong screen.
+        // Locked: the only surface anyone may point at is the lock screen's,
+        // and on a monitor it has not covered, none at all. Returning early
+        // rather than filtering afterwards is deliberate -- a later `return`
+        // that forgets the check is a click landing in the session.
+        if let Some(lock) = self.lock.as_ref() {
+            let output = monitor::at(&self.space, location)?;
+            let geometry = self.space.output_geometry(&output)?;
+            let surface = lock.surface_for(&output)?;
+            return under_from_surface_tree(
+                surface.wl_surface(),
+                location - geometry.loc.to_f64(),
+                (0, 0),
+                WindowSurfaceType::ALL,
+            )
+            .map(|(surface, offset)| (surface, (geometry.loc + offset).to_f64()));
+        }
+
         if let Some(output) = monitor::at(&self.space, location)
             && let Some(geometry) = self.space.output_geometry(&output)
             && let Some((surface, origin)) =
@@ -1860,6 +1898,12 @@ impl Solium {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(crate::pane::PaneId, Option<Window>, Point<f64, Logical>)> {
+        // A titlebar is the compositor's own surface, so it would otherwise
+        // still take clicks with the session locked -- close and maximise
+        // included.
+        if self.lock.is_some() {
+            return None;
+        }
         let now = self.clock.now();
 
         self.panes.iter().rev().find_map(|pane| {
@@ -2094,7 +2138,7 @@ impl Solium {
     /// that is where focus would land the moment you moved; the topmost
     /// otherwise. Called where a window went, and only when nothing has focus,
     /// so it cannot argue with a script that has just chosen one.
-    fn settle_focus(&mut self) {
+    pub(crate) fn settle_focus(&mut self) {
         if self.focused_window().is_some() {
             return;
         }
@@ -2535,6 +2579,44 @@ impl Solium {
 
     /// Point the seat's selections at whoever holds focus.
     ///
+    /// Point the keyboard at the lock screen.
+    ///
+    /// The surface on the monitor the pointer is on, so that on a two-monitor
+    /// desk the password goes into the field the user is looking at; any
+    /// surface otherwise, because typing into the wrong screen's lock dialog
+    /// still beats typing into nothing.
+    ///
+    /// The lock client is given the selection like any other focused client.
+    /// Withholding it would look like caution and buy none: any client that
+    /// can take focus can already read the clipboard, so the only thing the
+    /// restriction would achieve is breaking paste from a password manager.
+    pub(crate) fn focus_lock(&mut self) {
+        let Some(lock) = self.lock.as_ref() else {
+            return;
+        };
+        let here = self
+            .active_output()
+            .and_then(|output| lock.surface_for(&output))
+            .map(|surface| surface.wl_surface().clone());
+        let Some(surface) = here.or_else(|| {
+            lock.surfaces()
+                .next()
+                .map(|surface| surface.wl_surface().clone())
+        }) else {
+            return;
+        };
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+            self.focus_selection(Some(&surface));
+        }
+    }
+
+    /// Give the selection to nobody, for the moments where the keyboard has
+    /// gone somewhere that is not a client -- or nowhere at all.
+    pub(crate) fn clear_selection_focus(&mut self) {
+        self.focus_selection(None);
+    }
+
     /// A client may only read a selection while it holds the seat's data
     /// device focus, and that is a separate thing from keyboard focus. Set one
     /// and not the other and every paste hangs forever: the client asks for
