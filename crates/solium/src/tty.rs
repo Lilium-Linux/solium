@@ -351,25 +351,28 @@ pub(crate) fn run() -> Result<()> {
         active: true,
     };
 
-    // Whether this session actually owns the seat, said plainly and early.
+    // Whether the seat has been handed over yet.
     //
-    // Without it, the compositor comes up looking entirely healthy: it opens
-    // the GPU, enumerates both monitors, picks modes and CRTCs, starts
-    // XWayland, and logs all of it -- and then nothing appears on the screen
-    // and no key does anything, because it never became DRM master and
-    // libinput was never handed a device. The only sign is a Smithay warning
-    // buried a hundred lines up. Twenty-five runs on this machine went that
-    // way before anyone noticed, and two of them were reported as working.
+    // An inactive session gets no input devices, and the input watchdog then
+    // stops the compositor twenty seconds later for a reason that has nothing
+    // to do with input. Worth saying up front, because the rest of start-up
+    // looks perfectly healthy: the GPU opens, the connectors are enumerated,
+    // modes and CRTCs are chosen, XWayland starts.
     //
-    // A session that is inactive at start-up is not necessarily doomed --
-    // libseat may enable it a moment later, and `ActivateSession` takes master
-    // then -- so this is a warning and not a refusal.
+    // A warning and not a refusal: libseat can enable a session a moment after
+    // it is created, and most runs on this machine do get their devices about
+    // five seconds in.
+    //
+    // Note this says nothing about DRM master. Smithay warns "unable to become
+    // drm master, assuming unprivileged mode" on every run here, and on a
+    // modern kernel that is noise -- the kernel grants modeset to a session
+    // with no other master, and Smithay skips the error deliberately. Reading
+    // that warning as a failure cost an afternoon and produced a wrong issue.
     if !state.session.is_active() {
         tracing::warn!(
-            "this session does not own the seat yet: no DRM master and no input devices. \
-             usually it means something else still holds seat0 -- a desktop session that \
-             has not gone inactive, or a shell that belongs to one. `loginctl list-sessions` \
-             shows which session is active."
+            "the seat has not been handed over yet, so there are no input devices. if this \
+             does not resolve in a few seconds, something else still holds seat0 -- \
+             `loginctl list-sessions` shows which session is active."
         );
     }
 
