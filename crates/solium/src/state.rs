@@ -1075,6 +1075,21 @@ impl Solium {
         self.panes.mapped(window, slot, self.clock.now()).get()
     }
 
+    /// A pane for a surface that places itself: a menu, a tooltip, a drag icon.
+    ///
+    /// Unmanaged, so no layout ever sees it, and bare, so it never grows a
+    /// titlebar. Both matter: without the first, dragging a text selection out
+    /// of an application reflows the whole desktop to make room for the drag
+    /// icon; without the second, a tooltip gets a title bar.
+    pub(crate) fn take_unmanaged_pane(&mut self, window: Window) {
+        let slot = self.real_geometry(&window).unwrap_or_default();
+        let id = self.panes.mapped(window, slot, self.clock.now());
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.unmanage();
+        }
+        self.decorations.set_bare(id);
+    }
+
     /// Which process a client belongs to, as the kernel reports it.
     ///
     /// The compositor's own view of who is on the other end of the socket, not
@@ -1272,6 +1287,13 @@ impl Solium {
                 // window that takes no slot until it is really there is a
                 // setting, because which of the two reads better is taste.
                 if pane.client().is_none() && !self.loading.reserves_a_slot {
+                    return None;
+                }
+                // A menu, a tooltip, a drag icon. On screen and under the
+                // pointer, but not a window: a layout given one reserves a
+                // slot for it and reflows the desktop around something that
+                // will be gone in a moment.
+                if !pane.managed() {
                     return None;
                 }
                 let outer = self.pane_outer(pane)?;
@@ -2232,14 +2254,26 @@ impl Solium {
     }
 
     /// The same, for a caller that already knows which pane it means.
+    /// How much room this pane's frame takes.
+    ///
+    /// The fallback is for a pane whose decoration has not been *built* yet --
+    /// reserving the room from the first frame is what stops a window changing
+    /// shape the moment its frame appears. It must not apply to a pane that
+    /// will never have one: a client drawing its own decorations, an
+    /// override-redirect menu, or `decoration = "none"`. Those got a
+    /// titlebar's worth of blank space above them with no titlebar in it,
+    /// which is what an Electron application looked like here.
     pub(crate) fn insets_of(&self, id: crate::pane::PaneId) -> Insets {
-        self.decorations.get(id).map_or(
-            Insets {
-                top: TITLEBAR_HEIGHT,
-                ..Insets::NONE
-            },
-            super::decoration::Decoration::insets,
-        )
+        if let Some(decoration) = self.decorations.get(id) {
+            return decoration.insets();
+        }
+        if self.decorations.is_bare(id) {
+            return Insets::NONE;
+        }
+        Insets {
+            top: TITLEBAR_HEIGHT,
+            ..Insets::NONE
+        }
     }
 
     /// Raise a window and give it the keyboard.
@@ -3136,6 +3170,122 @@ impl XdgShellHandler for Solium {
 
     fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
 
+    /// A window asking for the whole screen.
+    ///
+    /// Not the same as maximised, and the difference is the whole point: a
+    /// maximised window fills the *work area* and keeps its frame, a
+    /// fullscreen one covers the monitor edge to edge with no frame and no
+    /// bar over it. A video player, a game, a presentation. Without this the
+    /// request was ignored entirely — the client had asked, been told nothing,
+    /// and drew its own idea of fullscreen inside a titlebar.
+    ///
+    /// The monitor the window is on, not the active one: a video sent
+    /// fullscreen on the second screen must not jump to whichever screen the
+    /// pointer is over.
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        wl_output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
+    ) {
+        let Some(window) = self.window_for(surface.wl_surface()) else {
+            return;
+        };
+        let Some(id) = self.panes.id_of(&window) else {
+            return;
+        };
+        let output = wl_output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .or_else(|| {
+                self.real_geometry(&window)
+                    .and_then(|real| self.output_of(real))
+            })
+            .or_else(|| self.active_output());
+        let Some(screen) = output.and_then(|output| self.space.output_geometry(&output)) else {
+            return;
+        };
+
+        // Where to come back to, kept before anything moves. The same slot
+        // `restore` holds for a maximised window, and for the same reason: a
+        // rect that was stored is a rect that comes back exactly, where one
+        // recomputed afterwards is a guess.
+        if let Some(real) = self.real_geometry(&window)
+            && let Some(decoration) = self.decorations.get_mut(id)
+            && decoration.restore.is_none()
+        {
+            decoration.restore = Some(real);
+        }
+
+        // The whole monitor, and no frame over it. Marked bare rather than
+        // having its decoration destroyed, so leaving fullscreen can build it
+        // again from the style that is current then.
+        self.decorations.remove(id);
+        self.decorations.set_bare(id);
+
+        surface.with_pending_state(|state| {
+            state.states.set(xdg_toplevel::State::Fullscreen);
+            state.size = Some(screen.size);
+        });
+        if surface.is_initial_configure_sent() {
+            surface.send_pending_configure();
+        }
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.set_slot(screen);
+        }
+        self.space.map_element(window, screen.loc, true);
+        self.redraw = true;
+        tracing::debug!(?screen, "a window went fullscreen");
+    }
+
+    /// And asking for it back.
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        let Some(window) = self.window_for(surface.wl_surface()) else {
+            return;
+        };
+        let Some(id) = self.panes.id_of(&window) else {
+            return;
+        };
+
+        surface.with_pending_state(|state| {
+            state.states.unset(xdg_toplevel::State::Fullscreen);
+            state.size = None;
+        });
+        if surface.is_initial_configure_sent() {
+            surface.send_pending_configure();
+        }
+
+        // The frame comes back unless the client draws its own, which is what
+        // `is_bare` cannot tell us on its own -- so the decoration mode is
+        // asked again rather than assumed.
+        let client_side =
+            surface.with_pending_state(|state| state.decoration_mode) == Some(Mode::ClientSide);
+        if !client_side {
+            self.decorations.unset_bare(id);
+            let size = self
+                .real_geometry(&window)
+                .map_or((TITLEBAR_HEIGHT * 20, TITLEBAR_HEIGHT * 15), |real| {
+                    (real.size.w, real.size.h)
+                });
+            self.decorations.insert(id, size.0, size.1);
+        }
+
+        if let Some(back) = self
+            .decorations
+            .get_mut(id)
+            .and_then(|decoration| decoration.restore.take())
+        {
+            surface.with_pending_state(|state| state.size = Some(back.size));
+            surface.send_pending_configure();
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.set_slot(back);
+            }
+            self.space.map_element(window, back.loc, true);
+        }
+        self.trigger_relayout();
+        self.redraw = true;
+        tracing::debug!("a window left fullscreen");
+    }
+
     /// A client asking to be dragged — what client-side decorations send when
     /// their own titlebar is grabbed.
     fn move_request(&mut self, surface: ToplevelSurface, seat: WlSeat, serial: Serial) {
@@ -3319,7 +3469,11 @@ impl Solium {
             let height = real.map_or(TITLEBAR_HEIGHT * 15, |real| real.size.h);
             self.decorations.insert(id, width, height);
         } else {
+            // Bare on purpose, not merely undecorated: the difference is
+            // whether `insets_of` still reserves room for a frame that is
+            // coming. For a client drawing its own, none is.
             self.decorations.remove(id);
+            self.decorations.set_bare(id);
         }
 
         // The client has to learn its mode before it draws, or it decides for

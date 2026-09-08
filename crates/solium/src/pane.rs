@@ -122,6 +122,19 @@ pub(crate) struct Pane {
     /// rather than on the client's window so that it can exist before the
     /// window does, and survive the window arriving.
     drawn: crate::present::Slot,
+    /// Whether a layout may place this, and whether it counts as a window.
+    ///
+    /// False for an X11 override-redirect surface — a menu, a tooltip, a drag
+    /// icon. Those say "do not manage me" and they mean it: they place
+    /// themselves, they are gone in a moment, and a layout that treats one as
+    /// a window reserves a slot for it and reflows the desktop around a
+    /// tooltip. Dragging a text selection out of an application did exactly
+    /// that.
+    ///
+    /// They are still panes, because they are on screen and under the pointer
+    /// and every path that asks what is on screen asks for panes. What they
+    /// are not is *windows*.
+    managed: bool,
 }
 
 impl Pane {
@@ -146,6 +159,7 @@ impl Pane {
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
+            managed: true,
         }
     }
 
@@ -163,7 +177,18 @@ impl Pane {
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
+            managed: true,
         }
+    }
+
+    /// Whether a layout may place this pane and count it as a window.
+    pub(crate) const fn managed(&self) -> bool {
+        self.managed
+    }
+
+    /// Mark this pane as one that places itself. See the field.
+    pub(crate) const fn unmanage(&mut self) {
+        self.managed = false;
     }
 
     /// How this pane is being drawn. `present` is the only thing that reads it.
