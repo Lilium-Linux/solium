@@ -796,14 +796,388 @@ git commit -m "qml: sample the buffer Qt rendered, fenced, with our context rest
 
 ---
 
-### Task 6: Prove it on hardware
+### Task 6: Resize a GPU scene without rebuilding it
+
+**Files:**
+- Modify: `crates/solium/qml/host.cpp`
+- Modify: `crates/solium/qml/host.h`
+- Modify: `crates/solium/src/qml.rs`
+- Modify: `crates/solium/src/surface.rs`
+- Modify: `dev/wirecheck/main.rs`
+
+**Interfaces:**
+- Consumes: `Target`, `target::allocate`, `Scene::gpu`, `scene_context_is_current`.
+- Produces: `Scene::rebind(&mut self, target: Target, width: i32, height: i32, scale: f64) -> Result<()>`, and `solium_qml_scene_rebind` on the C side.
+
+`render_on_gpu` currently answers a size change by calling `build(...)` — a
+fresh `QQuickRenderControl`, a fresh `QOpenGLContext`, a fresh `QRhi`, a fresh
+GBM allocation and a recompiled QML tree. `render.rs` sizes a pane's scene from
+an *animating* rect, so that whole stack is constructed and destroyed at frame
+rate for the length of every window animation.
+
+The cost is the smaller half. The rebuilt QML tree is a new object tree, so
+every animation, transition and stored property inside the scene restarts from
+zero on every frame it is resized. A scene that animates while its window
+animates does not run slowly — it never advances. That is a correctness
+problem, not a performance one, and it is why this task comes before the
+decoration conversion rather than after it: decorations are the scenes that
+resize.
+
+Only the *buffer* genuinely cannot be resized. Everything above it can stay.
+
+- [ ] **Step 1: Write the failing check**
+
+In `dev/wirecheck/main.rs`, add a case that proves the object tree survives a
+resize. The QML holds a counter that only a fresh tree resets:
+
+```rust
+    // A scene that counts its own frames. A rebuild produces a new object tree
+    // and the count restarts; a true in-place resize carries it across.
+    let scene = build_gpu_scene(FIXTURE_COUNTER, 256, 256)?;
+    for _ in 0..5 {
+        scene.render_gpu()?;
+    }
+    let before = scene.property_int("frames")?;
+    scene.rebind(target::allocate(gbm, 384, 384)?, 384, 384, 1.0)?;
+    scene.render_gpu()?;
+    let after = scene.property_int("frames")?;
+    ensure!(
+        after > before,
+        "the QML tree was rebuilt by a resize: frames went {before} -> {after}, \
+         so every animation in a resizing scene restarts every frame"
+    );
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+```bash
+cd /home/kotoxik/personal_projects/solium && dev/gate.sh wirecheck
+```
+
+Expected: FAIL — `rebind` does not exist yet. Add it as `todo!()` only if the
+build needs it to get to a running failure, and never leave a `todo!()` behind:
+the workspace lints deny it.
+
+- [ ] **Step 3: Add `solium_qml_scene_rebind` to the host**
+
+The scale-only branch of `solium_qml_scene_resize` already does everything a
+full resize needs except swapping the texture underneath it. Take that shape and
+give it a new buffer.
+
+In `host.h`, beside the other GPU entry points:
+
+```c
+/* Point an existing GPU scene at a different buffer.
+ *
+ * Everything above the buffer — the render control, the RHI, the QML object
+ * tree and its animation state — is kept. Only the EGLImage and the texture
+ * are replaced, which is the whole of what a dmabuf's fixed size forces.
+ *
+ * `width` and `height` are device pixels and must match the new buffer.
+ * Returns false and leaves the scene on its previous buffer on failure, so a
+ * surface whose resize failed keeps drawing last frame's picture. */
+bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, int stride,
+                             unsigned long long modifier, unsigned int fourcc,
+                             int width, int height, double scale);
+```
+
+In `host.cpp`:
+
+```cpp
+extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, int stride,
+                                        unsigned long long modifier, unsigned int fourcc,
+                                        int width, int height, double scale)
+{
+    if (scene == nullptr || !scene->gpu || width <= 0 || height <= 0 || dmabuf_fd < 0) {
+        return false;
+    }
+    if (scale <= 0.0) {
+        scale = 1.0;
+    }
+
+    // Qt's thread-local may name Qt's context while the compositor's is the one
+    // actually current — see clear_stale_current_context. Everything below
+    // issues GL, so the thread has to be honestly Qt's first.
+    clear_stale_current_context(scene);
+    if (!scene->control->initialize()) {
+        qWarning("solium_qml_scene_rebind: could not make the scene's context current");
+        return false;
+    }
+
+    // Import first, release second. An import that fails leaves the scene whole
+    // and still drawing, which is the difference between a dropped frame and a
+    // black window.
+    const EGLImageKHR previous_image = scene->egl_image;
+    const GLuint previous_texture = scene->texture;
+    scene->egl_image = EGL_NO_IMAGE_KHR;
+    scene->texture = 0;
+
+    if (!import_dmabuf_texture(scene, dmabuf_fd, stride, modifier, fourcc)) {
+        scene->egl_image = previous_image;
+        scene->texture = previous_texture;
+        qWarning("solium_qml_scene_rebind: the new buffer would not import, "
+                 "staying on the old one");
+        return false;
+    }
+
+    if (previous_image != EGL_NO_IMAGE_KHR && scene->egl_display != EGL_NO_DISPLAY) {
+        static PFNEGLDESTROYIMAGEKHRPROC destroy_image =
+            reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
+                eglGetProcAddress("eglDestroyImageKHR"));
+        if (destroy_image != nullptr) {
+            destroy_image(scene->egl_display, previous_image);
+        }
+    }
+    if (previous_texture != 0 && scene_context_is_current(scene)) {
+        QOpenGLContext *context = QOpenGLContext::currentContext();
+        if (context != nullptr) {
+            context->functions()->glDeleteTextures(1, &previous_texture);
+        }
+    }
+
+    scene->width = width;
+    scene->height = height;
+    scene->scale = scale;
+
+    const int logical_width = qMax(1, qRound(width / scale));
+    const int logical_height = qMax(1, qRound(height / scale));
+    scene->window->setGeometry(0, 0, logical_width, logical_height);
+    if (scene->root != nullptr) {
+        scene->root->setWidth(logical_width);
+        scene->root->setHeight(logical_height);
+    }
+
+    QQuickRenderTarget target =
+        QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
+    target.setDevicePixelRatio(scale);
+    mirror_for_the_compositor(&target);
+    scene->window->setRenderTarget(target);
+    scene->dirty = true;
+    return true;
+}
+```
+
+Then replace the refusal in `solium_qml_scene_resize` — the `qWarning` about a
+GPU scene not being resizable in place — with a pointer to this function, since
+it is now false as written:
+
+```cpp
+        if (width != scene->width || height != scene->height) {
+            qWarning("solium_qml_scene_resize cannot change a GPU scene's pixel "
+                     "size (%dx%d to %dx%d): it has no buffer to change it to. "
+                     "Use solium_qml_scene_rebind with one.",
+                     scene->width, scene->height, width, height);
+            return;
+        }
+```
+
+- [ ] **Step 4: Add `Scene::rebind`**
+
+In `qml.rs`, beside `gpu`:
+
+```rust
+    /// Move this scene onto a different buffer, keeping everything above it.
+    ///
+    /// The QML object tree survives, which is the point: rebuilding it restarts
+    /// every animation inside the scene, and a pane's scene is resized on every
+    /// frame of a window animation.
+    pub(crate) fn rebind(
+        &mut self,
+        target: target::Target,
+        width: i32,
+        height: i32,
+        scale: f64,
+    ) -> Result<()> {
+        let plane = target.as_ffi()?;
+        // SAFETY: `scene` is ours and live, and `plane` borrows a buffer that
+        // outlives this call.
+        #[expect(unsafe_code, reason = "handing Qt a buffer we allocated")]
+        let ok = unsafe {
+            ffi::solium_qml_scene_rebind(
+                self.scene,
+                plane.fd,
+                plane.stride,
+                plane.modifier,
+                plane.fourcc,
+                width,
+                height,
+                scale,
+            )
+        };
+        if !ok {
+            bail!("Qt would not rebind the scene onto a {width}x{height} buffer");
+        }
+        // Held only after the host has taken its own reference, so a failed
+        // rebind leaves the previous target in place and still being drawn.
+        self.target = Some(target);
+        Ok(())
+    }
+```
+
+- [ ] **Step 5: Use it from `render_on_gpu`**
+
+In `surface.rs`, replace the rebuild:
+
+```rust
+        if self.size != size {
+            // Only the buffer's size is fixed. Rebuilding the scene around a
+            // new one would restart every animation in it, once per frame, for
+            // as long as the window is animating.
+            let gbm = qml::allocator()
+                .context("this backend has no GBM device, so it cannot resize a GPU scene")?;
+            let target = qml::target::allocate(gbm, size.0.max(1), size.1.max(1))?;
+            self.scene.rebind(target, size.0.max(1), size.1.max(1), scale)?;
+            self.size = size;
+            self.backing = Backing::Gpu(None);
+            self.damage.reset();
+        } else {
+            self.scene.resize(size.0, size.1, scale);
+        }
+```
+
+`Backing::Gpu(None)` still clears the imported texture: the compositor's side
+of the dmabuf is a different import and genuinely is a new buffer.
+
+- [ ] **Step 6: Run the check**
+
+```bash
+cd /home/kotoxik/personal_projects/solium && dev/gate.sh wirecheck
+```
+
+Expected: PASS, and the frame counter carries across the resize.
+
+Then confirm it is a real check by reverting Step 5 to `build(...)` and running
+again. Expected: FAIL. Report both runs. A check that passes either way proves
+nothing.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/solium/qml/host.cpp crates/solium/qml/host.h \
+        crates/solium/src/qml.rs crates/solium/src/surface.rs dev/wirecheck/main.rs
+git commit -m "qml: resize a GPU scene onto a new buffer instead of rebuilding it"
+```
+
+---
+
+### Task 7: Put the cursor and the decorations on the GPU path
+
+**Files:**
+- Modify: `crates/solium/src/cursor.rs:58`
+- Modify: `crates/solium/src/decoration.rs:197`
+- Modify: `crates/solium/src/main.rs:150`
+
+**Interfaces:**
+- Consumes: `Scene::gpu_sized`, `Scene::rebind`, `qml::on_gpu`, `surface::build`.
+- Produces: nothing new. This is the task that makes `SOLIUM_QML_GPU=1` a
+  desktop rather than a wallpaper.
+
+Task 5 converted `surface.rs`. Two other places build scenes and neither was
+converted, so on a GPU host they hit the refusal at `host.cpp:435` — "this
+process came up on the GPU scene graph and a software scene cannot" — and
+return `nullptr`.
+
+The result today, with the knob on: no window frames and no cursor. Not a
+degraded desktop, an absent one. The hardware task below cannot observe what it
+is written to observe until this lands.
+
+- [ ] **Step 1: Write the failing check**
+
+In `dev/wirecheck/main.rs`, assert that a GPU host builds every kind of scene
+the compositor actually builds:
+
+```rust
+    // Every scene the compositor builds, on a GPU host. Before this task the
+    // cursor and the decoration went down solium_qml_scene_new, which a GPU
+    // host refuses outright — so the knob produced a desktop with no frames
+    // and no pointer, and nothing in the log said which scenes were missing.
+    for (what, path, w, h) in [
+        ("cursor", CURSOR_QML, 64, 64),
+        ("decoration", DECORATION_QML, 640, 480),
+    ] {
+        let scene = build_like_the_compositor(path, w, h)
+            .with_context(|| format!("a GPU host could not build the {what} scene"))?;
+        scene.render_gpu()?;
+    }
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+```bash
+cd /home/kotoxik/personal_projects/solium && dev/gate.sh wirecheck
+```
+
+Expected: FAIL, with the `qWarning` from `host.cpp:435` in the output.
+
+- [ ] **Step 3: Route both through the path-aware constructor**
+
+`surface.rs`'s `build` already reads which path Qt came up on. It is the only
+correct way to construct a scene and it should not be private to one module.
+Move it to `qml.rs` as `Scene::for_host(source, width, height, properties)`,
+leave `surface::build` delegating to it, and use it from both sites.
+
+`cursor.rs:58` becomes:
+
+```rust
+        // `SIZE` square, and the cursor is the one scene that is never resized
+        // — so on the GPU path its buffer is allocated once and kept.
+        let scene = qml::Scene::for_host(&qml_path(), SIZE, SIZE, None)?;
+```
+
+`decoration.rs:197` becomes:
+
+```rust
+        let mut scene = qml::Scene::for_host(path, width.max(1), height.max(1), None)?;
+```
+
+`main.rs:150` validates a QML file for `--check` and runs before any host is
+started, so it stays on the software constructor. Say so where it sits:
+
+```rust
+    // `--check` never starts a GPU host, so this is a software scene by
+    // construction rather than by preference.
+```
+
+- [ ] **Step 4: Give the decoration's resize the same treatment as Task 6**
+
+A decoration resizes with its window, which is the case Task 6 exists for.
+Find the size-change path in `decoration.rs` and route it through
+`Scene::rebind` when `qml::on_gpu()`, exactly as `surface.rs` does. If it
+currently calls `Scene::resize` unconditionally, that call now warns on every
+window resize instead of working — the host refuses a pixel-size change and
+says so — so this step is not optional.
+
+- [ ] **Step 5: Run the check and the gate**
+
+```bash
+cd /home/kotoxik/personal_projects/solium && dev/gate.sh
+```
+
+Expected: the whole gate passes, wirecheck included.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add crates/solium/src/cursor.rs crates/solium/src/decoration.rs \
+        crates/solium/src/main.rs crates/solium/src/qml.rs crates/solium/src/surface.rs \
+        dev/wirecheck/main.rs
+git commit -m "qml: build the cursor and the decorations on whichever path Qt came up on"
+```
+
+---
+
+### Task 8: Prove it on hardware
 
 **Files:**
 - Modify: `dev/README.md`
+- Modify: `crates/solium/src/dev.rs`
 
 **Interfaces:**
 - Consumes: everything above.
 - Produces: a recorded finding, and the knob's default decided.
+
+This is the only task that needs a person at a free TTY. Everything it looks
+for is something no harness can assert from inside a nested session.
 
 - [ ] **Step 1: Run on a TTY with the knob on**
 
@@ -813,10 +1187,37 @@ From a free TTY (`Ctrl+Alt+F3`), not from inside a session:
 SOLIUM_QML_GPU=1 ./target/debug/solium --tty
 ```
 
-Expected: the desktop comes up. Window frames and the wallpaper draw. The log
-says `QML on the GPU`.
+Expected: the desktop comes up. The wallpaper draws, window frames draw, and
+the cursor is a cursor. All three only became possible in Task 7 — before it a
+GPU host refused every software scene, so the frames and the pointer were
+simply absent.
 
-- [ ] **Step 2: Look for the failure this is most likely to have**
+Use a **debug** build. There is no `[profile.release]` in `Cargo.toml`, so
+`debug-assertions` is off in release and `qml::no_frame_in_flight`'s
+`debug_assert_eq!` is compiled out — a release TTY run gets only the latched
+log line, which says something happened once and then never again.
+
+- [ ] **Step 2: Read Qt's own diagnostics, not only the pixels**
+
+Task 5 established that this failure is not silent from Qt's side. With the
+buffer wiped, a scene rendering into the wrong context emits:
+
+```
+Framebuffer incomplete: 0x8cd6
+Failed to build texture render target for QQuickRenderTarget
+QQuickWindow: No render target
+```
+
+Nothing was looking for those. Look now:
+
+```bash
+journalctl --user -b 0 -o cat | grep -iE 'QQuick|Framebuffer|render target|GlesFrame|no_frame_in_flight'
+```
+
+Expected: nothing. Any hit names the defect directly and is worth more than
+any amount of pixel comparison.
+
+- [ ] **Step 3: Look for the failure this is most likely to have**
 
 A missing or wrong fence shows as intermittent corruption rather than a crash,
 so it must be looked for deliberately rather than waited for. With a terminal
@@ -848,18 +1249,36 @@ EOF
 
 Expected: no lines printed. Any output is a torn read and the fence is wrong.
 
-- [ ] **Step 3: Record the finding and decide the default**
+Compare neighbours rather than a stored golden frame. The shell draws a clock,
+so a golden frame reports a false regression on the next calendar day — a
+pre-task commit was measured disagreeing with *itself* by 1122 bytes across a
+day boundary.
+
+- [ ] **Step 4: Confirm the gate ran rather than skipped**
+
+`dev/gate.sh` runs `dev/wirecheck` on the host and skips *visibly* when there
+is no render node or `SOLIUM_GATE_NO_GPU` is set — but a skip still leaves the
+gate green.
+
+```bash
+dev/gate.sh 2>&1 | grep -iE 'wirecheck|skipped'
+```
+
+Expected: the run, not `skipped: no /dev/dri/renderD128`. This is the first
+box where `crates/solium/src/tty.rs`'s frame-in-flight mark runs for real.
+
+- [ ] **Step 5: Record the finding and decide the default**
 
 Append to `dev/README.md` under `## QML on the GPU`: whether it worked, the
-frame-pacing numbers from the log with and without, and whether tearing was
-found.
+frame-pacing numbers from the log with and without, whether tearing was found,
+and whether anything from Step 2 appeared.
 
 If it is clean, flip the default: `qml_gpu()` returns `true` unless
 `SOLIUM_QML_SOFTWARE` is set, and say so in the same paragraph. If it is not
 clean, leave the knob off and record what was seen — the plan below it does not
 depend on the default, only on the path existing.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add dev/README.md crates/solium/src/dev.rs
