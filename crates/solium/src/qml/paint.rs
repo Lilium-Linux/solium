@@ -55,6 +55,20 @@ pub(crate) struct Placement {
     pub(crate) kind: Kind,
 }
 
+/// A picture Qt has drawn, ready to be put on screen.
+///
+/// The size travels with the texture because after a rebind that failed the two
+/// no longer agree with what the caller asked for, and the *texture's* size is
+/// the one every use of it has to state. See [`Gpu::sample`].
+#[derive(Debug)]
+pub(crate) struct Sampled {
+    /// The scene's dmabuf, imported into the compositor's context.
+    pub(crate) texture: GlesTexture,
+    /// The pixel size of the buffer that texture names — **not** the size the
+    /// caller asked for, when a rebind has failed and the scene is frozen.
+    pub(crate) size: (i32, i32),
+}
+
 /// One scene's buffer, as the compositor sees it.
 ///
 /// Owns the imported texture and the damage that goes with it, and nothing
@@ -63,8 +77,15 @@ pub(crate) struct Placement {
 /// thing drawing into it.
 #[derive(Debug)]
 pub(crate) struct Gpu {
-    /// The dmabuf imported as a texture, kept so an idle frame costs no import.
-    texture: Option<GlesTexture>,
+    /// The imported texture and the size of the buffer it names, kept so an
+    /// idle frame costs no import.
+    ///
+    /// One field and not two, because the pair is the invariant: a texture
+    /// whose size is stated from somewhere else is how a stale texture comes to
+    /// be sampled outside itself. It is replaced only when a *new* import has
+    /// succeeded, which is what stops one failed import from hiding a scene —
+    /// see [`Gpu::take`].
+    shown: Option<Sampled>,
     /// Stable for the life of the scene, so the damage tracker sees one element
     /// moving and changing rather than a new one every frame.
     id: Id,
@@ -77,12 +98,14 @@ pub(crate) struct Gpu {
     /// permanently new, which repaints its whole area on every frame anything
     /// else draws.
     damage: DamageBag<i32, BufferCoords>,
-    /// The pixel size of the buffer the scene is **actually** on.
+    /// The pixel size of the buffer the **scene** is on.
     ///
-    /// Not the size the caller last asked for. After a rebind that failed the
-    /// two differ, and this is the one the texture is: see [`Gpu::element`].
-    size: (i32, i32),
-    /// Whether the last rebind failed and has already been reported.
+    /// Moves only when a rebind succeeds, so after one that failed it still
+    /// names the buffer Qt is drawing into — which is what makes the freeze
+    /// safe. It is compared against `shown`'s size rather than assumed equal to
+    /// it: between a successful rebind and a successful import they differ.
+    bound: (i32, i32),
+    /// Whether the last render failed and has already been reported.
     ///
     /// A rebind that fails once fails every frame after — the size it is
     /// retried at does not change — so without this a driver that will not
@@ -96,35 +119,40 @@ impl Gpu {
     ///
     /// The size is the caller's to state because it is the caller that built
     /// the scene, and the two are not always the same: a shell surface and a
-    /// window frame are both built at a placeholder size and rebound to their
-    /// real one on the first frame — passing `(0, 0)` is how they say so.
+    /// window frame are both built at 1x1 and rebound to their real size on the
+    /// first frame — passing `(0, 0)` is how they say so.
     pub(crate) fn new(size: (i32, i32)) -> Self {
         Self {
-            texture: None,
+            shown: None,
             id: Id::new(),
             damage: DamageBag::default(),
-            size,
+            bound: size,
             stale: false,
         }
     }
 
-    /// Render the scene at `size` device pixels and hand back an element.
+    /// Render the scene at `size` device pixels and hand back what Qt drew.
     ///
     /// Three things happen in this order and none of them are optional. Qt
     /// renders; the compositor's EGL context goes back on this thread; Qt's
     /// fence is waited for. The second is why the Qt half is one call rather
     /// than inline — see [`restore`] — and the third is why the fence is
-    /// imported rather than dropped.
+    /// imported rather than dropped: sampling a buffer that is still being
+    /// written is a race that surfaces as garbage on maybe one frame in several
+    /// hundred, which is the hardest possible thing to attribute.
+    ///
+    /// The `Sampled` carries its own size, and it can be smaller than `size`:
+    /// that is a frozen scene, and [`Gpu::render`] is where the freeze is
+    /// argued.
     ///
     /// Subject to [`super::no_frame_in_flight`], through every call it makes.
-    pub(crate) fn element(
+    pub(crate) fn sample(
         &mut self,
         scene: &mut Scene,
         renderer: &mut GlesRenderer,
         size: (i32, i32),
         scale: f64,
-        placement: Placement,
-    ) -> Option<TextureRenderElement<GlesTexture>> {
+    ) -> Option<&Sampled> {
         let rendered = self.render(scene, size, scale);
         // Unconditional, and underneath every way out of the call above,
         // including the paths that failed. Rendering leaves Qt's context on the
@@ -138,9 +166,6 @@ impl Gpu {
         }
 
         match rendered {
-            // `None` is "Qt had nothing new to draw", so the texture already in
-            // hand is this frame's picture and no import and no wait are owed.
-            Ok(None) => {}
             Ok(Some(fence)) => {
                 // A fence inside the `Some` is the driver's; without one the
                 // host has already waited on the CPU with `glFinish` and the
@@ -154,37 +179,46 @@ impl Gpu {
                     tracing::warn!(?err, "could not wait for Qt's fence; skipping a frame");
                     return None;
                 }
-                // Re-imported every frame rather than once: `import_dmabuf` is
-                // cached on the buffer and re-binds the EGLImage to the same
-                // texture name, which is what makes what Qt just wrote visible
-                // to our context.
-                let Some(buffer) = scene.buffer() else {
-                    tracing::warn!("a GPU scene has no buffer to sample");
-                    return None;
-                };
-                match renderer.import_dmabuf(buffer, None) {
-                    Ok(texture) => {
-                        // Whole-buffer damage, because Qt does not say what it
-                        // repainted and the buffer is the same one every frame.
-                        self.damage.add([Rectangle::from_size(self.size.into())]);
-                        self.texture = Some(texture);
-                    }
-                    Err(err) => {
-                        tracing::warn!(?err, "could not import a scene's buffer");
-                        return None;
-                    }
+                self.take(scene, renderer);
+            }
+            // Qt had nothing new to draw, so the texture in hand is normally
+            // this frame's picture already and no import and no wait are owed.
+            //
+            // Normally, and not always. An import that failed left `shown`
+            // naming a *different* buffer from the one the scene is now on, and
+            // `render_gpu` has already spent the dirty flag on the frame it
+            // rendered into it. Nothing will set that flag again — a pointer
+            // has no animation and nothing writes its properties — so without
+            // this the scene is never imported again and never drawn again: one
+            // transient `import_dmabuf` failure and the picture is gone for the
+            // session, which is the exact outcome the freeze above exists to
+            // rule out.
+            //
+            // Safe precisely because Qt said "up to date": the buffer holds a
+            // finished frame, so importing it now needs no fence and asks
+            // nothing of Qt.
+            Ok(None) => {
+                if self
+                    .shown
+                    .as_ref()
+                    .is_none_or(|held| held.size != self.bound)
+                {
+                    self.take(scene, renderer);
                 }
             }
             // The picture in hand is the last one Qt drew, and it is still the
             // truest thing available: see `render` for why that is drawn rather
-            // than dropped.
+            // than dropped. No recovery import here, unlike the arm above — a
+            // render that *failed* says nothing about what is in the buffer,
+            // and a rebind that succeeded before it means the buffer may be one
+            // Qt has never drawn into at all.
             Err(err) => {
                 if !self.stale {
                     self.stale = true;
                     tracing::warn!(
                         ?err,
                         asked = ?size,
-                        holding = ?self.size,
+                        holding = ?self.bound,
                         "a GPU scene did not render; drawing the last frame it managed. Said \
                          once per scene until it renders again"
                     );
@@ -192,19 +226,66 @@ impl Gpu {
             }
         }
 
+        self.shown.as_ref()
+    }
+
+    /// Import the scene's buffer, replacing what is shown only if that worked.
+    ///
+    /// Re-imported rather than kept: `import_dmabuf` is cached on the buffer and
+    /// re-binds the EGLImage to the same texture name, which is what makes what
+    /// Qt just wrote visible to our context.
+    fn take(&mut self, scene: &Scene, renderer: &mut GlesRenderer) {
+        let Some(buffer) = scene.buffer() else {
+            tracing::warn!("a GPU scene has no buffer to sample");
+            return;
+        };
+        match renderer.import_dmabuf(buffer, None) {
+            Ok(texture) => {
+                // Whole-buffer damage, because Qt does not say what it
+                // repainted and the buffer is the same one every frame.
+                self.damage.add([Rectangle::from_size(self.bound.into())]);
+                self.shown = Some(Sampled {
+                    texture,
+                    size: self.bound,
+                });
+            }
+            // Deliberately leaves `shown` alone. The previous texture is a real
+            // picture of a buffer that still exists — the scene owns it — so
+            // keeping it is a stale frame, and clearing it is a scene that
+            // never draws again. The arm above is what gets out of it.
+            Err(err) => tracing::warn!(?err, "could not import a scene's buffer"),
+        }
+    }
+
+    /// Render the scene at `size` device pixels and hand back an element.
+    ///
+    /// [`Gpu::sample`] with a `TextureRenderElement` around it, which is what
+    /// every caller but the pointer wants. The pointer needs the pixels rather
+    /// than the texture — see `cursor.rs`.
+    pub(crate) fn element(
+        &mut self,
+        scene: &mut Scene,
+        renderer: &mut GlesRenderer,
+        size: (i32, i32),
+        scale: f64,
+        placement: Placement,
+    ) -> Option<TextureRenderElement<GlesTexture>> {
+        let (texture, held) = {
+            let shown = self.sample(scene, renderer, size, scale)?;
+            (shown.texture.clone(), shown.size)
+        };
         // The whole buffer in its **own** pixels, which after a failed rebind
-        // is not `size`: `self.size` is what the texture in hand actually is,
-        // and stating anything else here samples outside it. The element maps
-        // that onto `placement.size` logical pixels, so a frozen scene is
-        // stretched into the geometry it should have had rather than cropped
-        // to a corner of it.
-        let texture = self.texture.as_ref()?;
-        let source = Rectangle::from_size((f64::from(self.size.0), f64::from(self.size.1)).into());
+        // is not `size`: `held` is what the texture in hand actually is, and
+        // stating anything else here samples outside it. The element maps that
+        // onto `placement.size` logical pixels, so a frozen scene is stretched
+        // into the geometry it should have had rather than cropped to a corner
+        // of it.
+        let source = Rectangle::from_size((f64::from(held.0), f64::from(held.1)).into());
         Some(TextureRenderElement::from_texture_with_damage(
             self.id.clone(),
             renderer.context_id(),
             placement.position,
-            texture.clone(),
+            texture,
             1,
             Transform::Normal,
             Some(placement.alpha),
@@ -227,7 +308,7 @@ impl Gpu {
         size: (i32, i32),
         scale: f64,
     ) -> Result<Option<Option<OwnedFd>>> {
-        if self.size != size {
+        if self.bound != size {
             // A dmabuf cannot be resized, so changing size means a new buffer —
             // and *only* a new buffer. Rebuilding the scene around one builds a
             // new QML object tree, which restarts every animation, transition
@@ -241,9 +322,9 @@ impl Gpu {
             // host's contract is that the scene stays whole and stays on the
             // buffer it already has — the import runs before the release — so
             // the texture in hand is still a real picture, just the wrong size.
-            // `self.size` is therefore left naming the buffer that texture
-            // really is, and `element` draws it stretched into the new
-            // geometry.
+            // `self.bound` is therefore left naming the buffer Qt is really
+            // drawing into, `shown` keeps the size of the one it was imported
+            // from, and `element` draws that stretched into the new geometry.
             //
             // The alternative was in place until this task and it was chosen by
             // omission rather than on purpose: propagate, draw nothing, and the
@@ -257,16 +338,21 @@ impl Gpu {
             // is visibly wrong and gets reported; absent chrome reads as a
             // crash and gets rebooted.
             //
-            // `self.size` is not advanced on failure, so the next frame asks
+            // `self.bound` is not advanced on failure, so the next frame asks
             // for the same thing again: an allocation that failed because the
             // GPU was momentarily full heals itself without anything having to
             // notice.
             scene.rebind_sized(size.0, size.1, scale)?;
-            self.size = size;
-            // The compositor's side of the dmabuf is a separate import of a
-            // genuinely different buffer, so the texture in hand names the old
-            // one and nothing in the new one is the old one's.
-            self.texture = None;
+            self.bound = size;
+            // The texture in hand is *not* cleared here, and that is the whole
+            // of F4: it names the old buffer, which the scene still owns, so it
+            // is a stale picture rather than a dangling one — and `shown`
+            // carries its size, so nothing samples outside it. Clearing it
+            // would mean an import that then failed left the scene with nothing
+            // to draw and no dirty flag left to earn a retry with.
+            //
+            // Nothing in the new buffer is the old buffer's, so no damage
+            // recorded against it means anything.
             self.damage.reset();
         } else {
             // Only the ratio can have moved; the pixel size is the buffer's and

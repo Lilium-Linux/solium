@@ -96,6 +96,40 @@ here; what stops that regressing is that `Scene::gpu_sized` and
 `Scene::with_properties` are now private to `qml.rs` and `Scene::for_host` is the
 only way in from outside it.
 
+**The pointer's route: the dmabuf read back and uploaded as memory.** The one
+scene that does not reach the screen as a texture. smithay reaches a DRM cursor
+plane only through `RenderElement::underlying_storage`, whose two variants are
+`Wayland` and `Memory` (`renderer/element/mod.rs:103-109`); a
+`TextureRenderElement` implements none and inherits `None`, so
+`copy_element_to_cursor_bo` gives up on its first line and so does the pixman
+fallback. A GPU pointer drawn as a texture loses the plane silently, and every
+pointer motion on a TTY becomes a full composite and page flip. So `cursor.rs`
+lets Qt draw into the dmabuf and then reads it straight back into a
+`MemoryRenderBuffer`.
+
+That hangs on a claim nobody had checked: what `copy_framebuffer` hands back is
+byte-identical to what `import_memory` is given on the software path. Three
+conventions meet there — Qt's render target, which `mirror_for_the_compositor`
+flips; smithay's readback; and `MemoryRenderBuffer`'s top-down rows — and two of
+them cancelling is not the same as all three agreeing. Checked against the known
+picture directly and then through an element built from it.
+
+It sits **before** the frame loop, deliberately, and reads the first frame: that
+is the one frame every configuration of this harness draws correctly, so this
+case fails only on its own defect. Reading a buffer the frame loop had already
+found wrong would make it fail on the loop's defect and report it as a readback
+fault — and an all-zero buffer, which is what the render control leaves, is
+called out separately and sent back to the frame comparison rather than
+described as a flipped or swizzled one.
+
+It also prints what the round trip costs, because the whole argument for the
+route is that the pointer pays it once per size per change rather than per
+frame. Measured here: **~60 µs**, and near enough the same at 24x24 (63.5 µs) as
+at 48x48 (59.8 µs) and 64x64 (65.4 µs), so it is the round trip and not the
+pixels. If that were ever milliseconds, the cache in `cursor.rs` would not be
+enough and the design would need revisiting — which is why the number is printed
+rather than remembered.
+
 **The first rebind, on a scene that has never rendered.** The shape production is
 actually in, and the one the resize case above cannot reach — it renders five
 frames first. Nothing on screen does: `ShellSurface::new` builds at 1x1 with its
@@ -211,8 +245,18 @@ WIRECHECK_HOST_CPP="$PWD/host-control.cpp" cargo build --target-dir target-contr
 ```
 
 Expect `DESTROYED in our context by freeing the resized scene: [('b', 1),
-('f', 1), ('r', 1), ('b', 2), ('f', 2), ('r', 2), ('b', 3)]`, of which buffers
-**1 and 2** appear in the pre-Qt census. Measured identical in 6 of 6 runs.
+('f', 1), ('r', 1), ('b', 2), ('r', 2), ('b', 3)]`, of which buffers **1 and 2**
+appear in the pre-Qt census. Measured identical in 5 of 5 runs.
+
+That list was seven objects until the pointer's readback case was added above it
+— `('f', 2)` is no longer among them — and the reason is worth knowing rather
+than being surprised by later. What Qt's deferred deletes destroy depends on
+which integers the compositor's own objects happen to have been given by the
+time the free runs, and any case added before this one shifts that. So **the
+list is illustrative and the emptiness is the assertion**: the harness fails on
+`!lost.is_empty()`, not on a particular set. Re-measure it after adding a case
+here rather than treating a changed list as a finding. The pre-Qt census below
+has not moved.
 
 Two of them and not three, and that distinction is the whole value of the line.
 The pre-Qt census is `[('b', 1), ('b', 2), ('p', 3), ('p', 4), ('p', 5),
@@ -271,11 +315,24 @@ Expect `frame 2: 10240 of 16384 bytes differ from the reference`, 10240 being
 the reference's exact non-zero byte count — Qt issues the frame against the
 compositor's context and writes nothing, so what is read back is the wipe.
 
-That line is the expectation, not the exit. The frame loop only compares; `worst`
-is checked at the very end of the run, and under this control the run does not
-get there — measured, it stops at the resize case with `the resize left GL error
-0x501 in the compositor's context`, which is the same defect one probe further
-down. Read the `frame 2:` line, not the last line.
+That line is the expectation, not the exit: the frame loop only records, and
+`worst` is checked at the very end of the run.
+
+It used to stop well before that, at the resize case, with `the resize left GL
+error 0x501 in the compositor's context` — and that was the harness's fault, not
+the control's. `glGetError` pops one error per call, and none of the four probes
+drained before the operation they were probing, so an error generated hundreds
+of lines earlier was reported against the rebind and the reader was sent to code
+that is fine. Each probed operation is now bracketed: `drain_gl_errors` empties
+the queue immediately before it and prints anything it found as *not* the
+operation's, and the probe reads once immediately after. Under this control the
+run now prints `GL error(s) ["0x501"] already pending BEFORE the rebind` and
+`glGetError after it: 0x0`, and goes on to fail where it should, on `the GPU
+path does not match the software path`.
+
+Dormant on this machine in the passing configuration — 3 of 3 runs drain
+nothing — so this is an instrument that was wrong rather than one that was
+failing.
 
 That control only works *because* of the wipe. `quadrants.qml` paints an
 unchanging picture, so before the wipe existed the dmabuf still held frame 1's
@@ -335,9 +392,12 @@ animation assertion has to fail on its own:
 WIRECHECK_STOP_THE_CLOCK=1 ./target/debug/wirecheck   # must fail
 ```
 
-Expect `a running animation did not survive the resize: `spin` went 80 -> 80`,
-with `the counter reads 6` on the line above it — the counter passing is half the
-point, since it is what shows the two instruments are independent.
+Expect `` `spin` went 80 -> 80 across a rebind and a frame the clock was
+deliberately stopped for``, with `the counter reads 6` on the line above it — the
+counter passing is half the point, since it is what shows the two instruments are
+independent. The message is a different one from the unticked case's on purpose:
+saying "across a ticked frame" under a control whose whole content is that the
+frame was *not* ticked is the harness lying about its own run.
 
 **The resize control** needs no copy of anything, because what it inverts is a
 choice and not a line of C++. `WIRECHECK_REBUILD_ON_RESIZE=1` answers the resize
