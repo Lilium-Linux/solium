@@ -59,9 +59,11 @@ unsafe extern "C" {
     fn solium_qml_scene_resize(scene: *mut c_void, width: c_int, height: c_int, scale: f64);
     fn solium_qml_scene_free(scene: *mut c_void);
 
-    fn wirecheck_qt_believes_it_has_the_thread() -> c_int;
+    fn wirecheck_belief_names_scene(scene: *mut c_void) -> c_int;
+    fn wirecheck_egl_agrees_with(scene: *mut c_void) -> c_int;
 
     fn join_readback(
+        node: *const c_char,
         dmabuf_fd: c_int,
         w: c_int,
         h: c_int,
@@ -216,6 +218,30 @@ fn wait_for(renderer: &mut GlesRenderer, fence: OwnedFd) -> Result<()> {
     renderer
         .wait(&SyncPoint::from(imported))
         .map_err(|err| anyhow!("waiting on Qt's fence: {err}"))
+}
+
+/// Clear the scene's buffer to transparent, through the compositor's renderer.
+///
+/// `glFinish` rather than a fence: this has to have landed before Qt is asked
+/// to draw over it, and the point of the wipe is defeated by racing it.
+fn wipe(renderer: &mut GlesRenderer, buffer: &smithay::backend::allocator::dmabuf::Dmabuf, side: i32) -> Result<()> {
+    let mut buffer = buffer.clone();
+    {
+        let mut framebuffer = renderer
+            .bind(&mut buffer)
+            .map_err(|err| anyhow!("binding the scene buffer to wipe it: {err}"))?;
+        let mut frame = renderer
+            .render(&mut framebuffer, (side, side).into(), Transform::Normal)
+            .map_err(|err| anyhow!("wiping: {err}"))?;
+        frame
+            .clear(Color32F::TRANSPARENT, &[Rectangle::from_size((side, side).into())])
+            .map_err(|err| anyhow!("clearing: {err}"))?;
+        let _ = frame.finish().map_err(|err| anyhow!("finishing the wipe: {err}"))?;
+    }
+    renderer
+        .with_context(|gl| unsafe { gl.Finish() })
+        .map_err(|err| anyhow!("finishing the wipe: {err}"))?;
+    Ok(())
 }
 
 /// Draw one element into a fresh offscreen texture and read the pixels back.
@@ -501,11 +527,24 @@ fn main() -> Result<()> {
     // display of joincheck's making, versus smithay's.
     {
         let mut raw = vec![0u8; (pixels * pixels * 4) as usize];
-        let rc = unsafe { join_readback(fd, pixels, pixels, stride, modifier, fourcc, raw.as_mut_ptr()) };
-        println!(
-            "  INDEPENDENT display reading the same fd: rc={rc}, {} of {} bytes non-zero",
-            raw.iter().filter(|b| **b != 0).count(), raw.len()
-        );
+        let node_c = CString::new(node.as_str())?;
+        let rc = unsafe {
+            join_readback(node_c.as_ptr(), fd, pixels, pixels, stride, modifier, fourcc, raw.as_mut_ptr())
+        };
+        let nonzero = raw.iter().filter(|b| **b != 0).count();
+        println!("  INDEPENDENT display reading the same fd: rc={rc}, {nonzero} of {} bytes non-zero", raw.len());
+        // Checked, not printed. This is the only control separating "the
+        // compositor cannot see these pixels" from "there are no pixels", and a
+        // printed rc=-1 on a box whose render node enumerates differently
+        // degrades it to nothing while the run still exits 0.
+        if rc != 0 {
+            return Err(anyhow!("the independent readback failed with rc={rc}"));
+        }
+        if nonzero == 0 {
+            return Err(anyhow!(
+                "an independent EGL display sees nothing in the buffer Qt reported rendering"
+            ));
+        }
         // That call left *its* context current. Take the thread back.
         restore(&renderer)?;
     }
@@ -589,6 +628,21 @@ fn main() -> Result<()> {
         .unwrap_or(3);
     let mut worst = 0usize;
     for frame in 2..=frames {
+        // Wipe the buffer first, and this is the whole reason the comparison
+        // below means anything.
+        //
+        // `quadrants.qml` paints an unchanging picture, and a frame Qt issues
+        // against the *compositor's* context writes nothing at all -- so
+        // without this the dmabuf still holds the previous frame's identical
+        // pixels and the comparison reads zero. "Qt did not write" and "Qt
+        // wrote the same thing again" are the same measurement. That is exactly
+        // how this control came to pass with the render-path fix reverted.
+        //
+        // Cleared through the compositor's own renderer, which is also a small
+        // proof in itself: if these pixels survive to the comparison, nothing
+        // wrote over them.
+        wipe(&mut renderer, &scene_target.dmabuf, pixels)?;
+
         // Make the scene dirty without changing what it lays out to: a scale
         // change and back leaves the same geometry and the same picture.
         unsafe { solium_qml_scene_resize(scene, pixels, pixels, scale * 2.0) };
@@ -645,6 +699,12 @@ fn main() -> Result<()> {
             return Err(anyhow!("the second scene would not build"));
         }
         println!("  built; no render at all");
+        // Put the compositor's context back before the free. It still takes
+        // `clear_stale_current_context`'s null-belief early return -- nothing
+        // rendered, so Qt has no belief -- but it puts the census either side
+        // of a *live* compositor context, which is the one state no other case
+        // here exercises.
+        restore(&renderer)?;
         unsafe { solium_qml_scene_free(scene2) };
         restore(&renderer)?;
         let after = gl_names(&mut renderer, 64)?;
@@ -732,16 +792,25 @@ fn main() -> Result<()> {
         wait_for(&mut renderer, unsafe { OwnedFd::from_raw_fd(fd3) })?;
     }
 
-    // The precondition, asserted rather than assumed. Without a stale belief
-    // QRhiGles2::ensureContext() makes its context current properly and the
-    // teardown is safe with or without the fix, so a run that gets here with Qt
-    // believing nothing is a run that tests nothing.
-    let believes = unsafe { wirecheck_qt_believes_it_has_the_thread() };
-    println!("  Qt still believes it holds the thread: {}", believes == 1);
-    if believes != 1 {
+    // The precondition, asserted rather than assumed, and asserted about *this*
+    // scene rather than about the existence of a belief.
+    //
+    // Both halves are needed. A belief naming some other live scene is safe --
+    // ensureContext() compares it against its own ctx and corrects -- and a
+    // belief that EGL agrees with is not stale at all. Only "Qt thinks it has
+    // the thread, for this scene, and it does not" makes the teardown skip its
+    // makeCurrent, which is the thing under test.
+    let names = unsafe { wirecheck_belief_names_scene(scene) };
+    let egl_agrees = unsafe { wirecheck_egl_agrees_with(scene) };
+    println!(
+        "  precondition: Qt's belief names this scene = {}, EGL agrees = {} (want true/false)",
+        names == 1,
+        egl_agrees == 1
+    );
+    if names != 1 || egl_agrees != 0 {
         return Err(anyhow!(
-            "precondition lost: Qt holds no stale belief, so this case cannot \
-             distinguish the fix from its absence"
+            "precondition lost: Qt's belief is not a stale one about this scene, \
+             so this case cannot distinguish the fix from its absence"
         ));
     }
 

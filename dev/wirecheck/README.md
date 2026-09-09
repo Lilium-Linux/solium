@@ -56,46 +56,84 @@ diffed. A third census is taken **before Qt is started at all**, so anything
 destroyed that appears in it is unambiguously the compositor's.
 
 The census is the assertion and it was not the first thing tried. Guard textures
-drawn and compared across the free passed with the bug present *and* absent,
-because Qt's deferred releases for this scene were buffers and a framebuffer,
-not textures — a texture-only check cannot see a `glDeleteBuffers`. The guards
-are still here, because they are the check that would catch a `glDeleteTextures`,
-but they are the illustration and the census is the proof.
+drawn and compared across the free once passed with the bug present *and*
+absent, because Qt's deferred releases for that scene were buffers and a
+framebuffer and a texture-only check cannot see a `glDeleteBuffers`. They do
+catch it today — the buffer wipe leaves more of the compositor's objects in the
+collision range — but that is luck about which integers collide, not a property
+to rely on. The guards are the illustration; the census is the proof.
+
+The free-path case also asserts its own precondition, through
+`wirecheck_belief_names_scene`: Qt's thread-local must name *this* scene's
+context and EGL must disagree. Neither half alone is enough. A null belief is
+safe with or without the fix, and so is a belief naming a different live scene,
+because `ensureContext()` compares it against its own `ctx` and corrects. The
+first version of that guard asked only whether *some* belief existed and passed
+with the fix reverted.
 
 ## Negative controls
 
-A harness that passes both ways proves nothing. Build a deliberately broken
-`host.cpp` and point the crate at it:
+A harness that passes both ways proves nothing, and this one has been in that
+state four times. `clear_stale_current_context` has two call sites and each
+guards a different defect, so there are two controls and both are worth running
+after any change here.
 
-Keep the copy inside the repository. The build runs in the container, which
+Keep the copies inside the repository. The build runs in the container, which
 mounts `$HOME` and nothing else, so a control under `/tmp` compiles to
-`fatal error: no such file`.
+`fatal error: no such file`. Both filenames and both target directories are
+gitignored.
+
+**The teardown control** — drop the call in `solium_qml_scene_free`, leaving the
+one in `solium_qml_scene_render_gpu`:
 
 ```sh
 cd dev/wirecheck
-# Drop the clear_stale_current_context call from solium_qml_scene_free only,
-# leaving the one in solium_qml_scene_render_gpu, so this isolates the teardown.
 awk '/^extern "C" void solium_qml_scene_free/ {f=1}
      /^extern "C" void solium_qml_scene_resize/ {f=0}
      f && /clear_stale_current_context\(scene\);/ {print "    /* control */"; next}
      {print}' ../../crates/solium/qml/host.cpp > host-control.cpp
 
 WIRECHECK_HOST_CPP="$PWD/host-control.cpp" cargo build --target-dir target-control
-./target-control/debug/wirecheck
+./target-control/debug/wirecheck        # must fail
 ```
 
-`host-control.cpp` and `target-control/` are both gitignored.
+Expect `DESTROYED by Qt's teardown, in our context: [('b', 1), ('f', 1),
+('r', 1), ('b', 2), ('f', 2)]`, of which buffers 1 and 2 appear in the pre-Qt
+census, and most of the guard textures clobbered outright.
 
-Expect it to fail, naming the compositor's own GL buffers 1 and 2 as destroyed
-by Qt's teardown. Removing the call in `solium_qml_scene_render_gpu` instead
-gives the other one: every frame reads back as zeros while `render_gpu` returns
-success and a fence that signals.
+**The render control** — drop the call in `solium_qml_scene_render_gpu` instead:
+
+```sh
+awk '/^extern "C" int solium_qml_scene_render_gpu/ {f=1}
+     f && /clear_stale_current_context\(scene\);/ {print "    /* control */"; f=0; next}
+     {print}' ../../crates/solium/qml/host.cpp > host-control-render.cpp
+
+WIRECHECK_HOST_CPP="$PWD/host-control-render.cpp" cargo build --target-dir target-control-render
+./target-control-render/debug/wirecheck  # must fail
+```
+
+Expect `frame 2: 10240 of 16384 bytes differ from the reference`, 10240 being
+the reference's exact non-zero byte count — Qt issues the frame against the
+compositor's context and writes nothing, so what is read back is the wipe.
+
+That control only works *because* of the wipe. `quadrants.qml` paints an
+unchanging picture, so before the wipe existed the dmabuf still held frame 1's
+identical pixels and the comparison read zero: "Qt did not write" and "Qt wrote
+the same thing" were the same measurement, and this control exited 0 with the
+defect present. Do not remove the wipe, and do not make the probe scene static
+in a way that survives it.
+
+Verify the substitution took, rather than assuming the rebuild noticed:
+
+```sh
+diff ../../crates/solium/qml/host.cpp host-control.cpp   # exactly one line
+```
 
 ## Knobs
 
 | | |
 |---|---|
-| `argv[1]` | render node, default `/dev/dri/renderD128` |
+| `argv[1]` | render node, default `/dev/dri/renderD128`; honoured by the independent readback too, which used to hardcode it |
 | `WIRECHECK_SCALE`, `WIRECHECK_LOGICAL` | the scale and logical size to run at |
 | `WIRECHECK_FRAMES` | how many frames after the first, default 3 |
 | `WIRECHECK_QML` | the scene to render, default `quadrants.qml` beside this file |
