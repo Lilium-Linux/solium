@@ -53,6 +53,16 @@ the picture at the new size, through the same reference comparison as above,
 because a rebind that returned true and left Qt on the *old* texture would carry
 the counter across perfectly.
 
+That byte comparison is **not** a second check on the render path, and it is
+worth knowing before anyone trims the frame loop on the strength of it. Measured
+under the render control: the resize case reports `0 of 65536 bytes differ` and
+passes, three runs of three, while the frame loop above it reports `frame 2:
+10240 of 16384 bytes differ` and fails the run. It cannot see that defect and it
+is right not to — `release_the_thread` at the end of a rebind leaves the thread
+empty, so the `beginFrame` after one correctly takes it whether or not
+`solium_qml_scene_render_gpu` clears a stale belief first. The frame loop is
+still the only thing that catches it.
+
 **A scene built and freed without ever rendering.** The path that reaches
 `clear_stale_current_context`'s null-thread-local early return. It used to be
 the hot path by accident, when every resize built one scene and freed another;
@@ -72,10 +82,17 @@ destroyed that appears in it is unambiguously the compositor's.
 The census is the assertion and it was not the first thing tried. Guard textures
 drawn and compared across the free once passed with the bug present *and*
 absent, because Qt's deferred releases for that scene were buffers and a
-framebuffer and a texture-only check cannot see a `glDeleteBuffers`. They do
-catch it today — the buffer wipe leaves more of the compositor's objects in the
-collision range — but that is luck about which integers collide, not a property
-to rely on. The guards are the illustration; the census is the proof.
+framebuffer and a texture-only check cannot see a `glDeleteBuffers`.
+
+Do not read them as an expectation. Whether a guard is visibly clobbered depends
+on Qt's deferred deletes colliding with the integers the compositor's own
+textures happen to have been given, and that is not stable run to run. Measured
+in the configuration where the teardown control reaches C-1
+(`WIRECHECK_KEEP_RESIZED_SCENE=1`, below): **0 of 6 runs** clobbered any guard,
+while all 6 failed on the census with the identical five objects. So a control
+run showing `0 of 8` guards touched is not a control that has stopped working —
+the census is what says so, and it said so every time. The guards are an
+illustration of what the damage means; the census is the proof that it happened.
 
 The free-path case also asserts its own precondition, through
 `wirecheck_belief_names_scene`: Qt's thread-local must name *this* scene's
@@ -113,17 +130,35 @@ WIRECHECK_HOST_CPP="$PWD/host-control.cpp" cargo build --target-dir target-contr
 
 Expect `DESTROYED in our context by freeing the resized scene: [('b', 1),
 ('f', 1), ('r', 1), ('b', 2), ('f', 2), ('r', 2), ('b', 3)]`, of which buffers
-1, 2 and 3 appear in the pre-Qt census.
+1, 2 and 3 appear in the pre-Qt census. Measured identical in 6 of 6 runs.
 
-That is the resize case failing, not C-1 — the resized scene is freed in exactly
-C-1's ordering, so it reaches the same defect first and the run stops there. The
-census around that free exists for this reason as much as its own: C-1's `before`
-snapshot is taken *after* that block, so damage done there would be invisible to
-it. Removing that case, or making its free benign, would hand C-1 a wrecked
-baseline and a clean diff. With it gone the run reaches C-1 and reports
-`DESTROYED by Qt's teardown, in our context: [('b', 1), ('f', 1), ('r', 1),
-('b', 2), ('f', 2)]` plus most of the guard textures clobbered outright, which is
-the same evidence with the guards attached.
+That is the **resize case** failing, not C-1: the resized scene is freed in
+exactly C-1's ordering, so it reaches the same defect first and the run stops
+there — C-1 was not reached in any of those 6 runs. Run the control a second
+time with the free skipped, so C-1 executes its own instrument:
+
+```sh
+WIRECHECK_KEEP_RESIZED_SCENE=1 ./target-control/debug/wirecheck   # must fail
+```
+
+Expect `DESTROYED by Qt's teardown, in our context: [('b', 1), ('f', 1),
+('r', 1), ('b', 2), ('f', 2)]`, `...of which existed before Qt was started, so
+are certainly ours: [('b', 1), ('b', 2)]` — measured identical in 6 of 6 runs,
+with **0 of 8 guard textures clobbered in any of them**. Both runs matter and
+they check different things: the first that the defect is caught, the second
+that C-1's own census, precondition assertion and guards still execute at all.
+Without the knob they only ever run in the passing state, where a regression in
+the instrument would be invisible.
+
+Two things this measurement settled, against what was written here first:
+
+* C-1 does **not** need the resize case's census to protect its baseline. With
+  that free skipped, C-1's diff is the full five objects, not a clean one. The
+  census in the resize case earns its place by catching the damage where it
+  happens; the earlier claim that C-1 would otherwise diff clean was reasoned,
+  not run, and is wrong.
+* "Most of the guard textures clobbered outright" was also reasoned. See the
+  paragraph on the guards above: it reproduces sometimes and not here.
 
 **The render control** — drop the call in `solium_qml_scene_render_gpu` instead:
 
@@ -180,6 +215,7 @@ call, and that is one line under a size comparison.
 | `WIRECHECK_QML` | the scene to render, default `quadrants.qml` beside this file |
 | `WIRECHECK_HOST_CPP` | a different `host.cpp`, for the controls above |
 | `WIRECHECK_REBUILD_ON_RESIZE` | rebuild the scene on a resize instead of rebinding it — the resize control above |
+| `WIRECHECK_KEEP_RESIZED_SCENE` | do not free the resized scene, so the teardown control reaches C-1 |
 | `WIRECHECK_RESTORE_EARLY=0` | skip the restore after `scene_new_gpu` |
 | `WIRECHECK_LATE_RENDERER`, `WIRECHECK_SEPARATE_GBM` | build the renderer after Qt, or on its own device |
 
