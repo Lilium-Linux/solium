@@ -65,6 +65,16 @@ mod ffi {
         ) -> *mut Scene;
         pub(super) fn solium_qml_scene_render_gpu(scene: *mut Scene, fence_fd: *mut c_int)
         -> c_int;
+        pub(super) fn solium_qml_scene_rebind(
+            scene: *mut Scene,
+            dmabuf_fd: c_int,
+            stride: c_int,
+            modifier: c_ulonglong,
+            fourcc: c_uint,
+            width: c_int,
+            height: c_int,
+            scale: f64,
+        ) -> bool;
         pub(super) fn solium_qml_set_windows(json: *const c_char);
         pub(super) fn solium_qml_clear_cache();
         pub(super) fn solium_qml_scene_new_with(
@@ -804,11 +814,12 @@ impl Scene {
 
     /// A GPU scene of `width` by `height` device pixels, buffer and all.
     ///
-    /// The size is fixed for the life of the scene, which is why this and not a
-    /// `resize` is how a surface changes size on the GPU path: the buffer is
-    /// allocated here, a dmabuf cannot grow, and `solium_qml_scene_resize`
-    /// refuses a pixel-size change rather than swapping the texture for a paint
-    /// device and moving the scene back onto the CPU behind the caller's back.
+    /// A dmabuf cannot grow, so a size change means a new buffer — but only the
+    /// buffer. [`Scene::rebind_sized`] is how a surface changes size on this
+    /// path; this is only how it gets its first one. `solium_qml_scene_resize`
+    /// still refuses a pixel-size change, because it has no buffer to change it
+    /// to and falling through would swap the texture for a paint device and move
+    /// the scene back onto the CPU behind the caller's back.
     ///
     /// Fails on a backend that set no allocator — the nested one — which is the
     /// only honest answer there: Qt is on the GPU, so a software scene is not
@@ -826,6 +837,95 @@ impl Scene {
         })?;
         let target = target::allocate(gbm, width, height)?;
         Self::gpu(qml_path, width, height, target, initial)
+    }
+
+    /// Move this scene onto a different buffer, keeping everything above it.
+    ///
+    /// The QML object tree survives, which is the point: rebuilding it restarts
+    /// every animation inside the scene, and a pane's scene is resized on every
+    /// frame of a window animation. A scene rebuilt per resize does not animate
+    /// slowly, it never advances.
+    ///
+    /// The `Target` is moved in for the same reason [`Scene::gpu`] moves one in:
+    /// the compositor samples this buffer, and tying its life to the scene's is
+    /// the only arrangement where the thing being read cannot be freed while
+    /// something is drawing into it. The previous one is dropped only once the
+    /// host has taken the new one, so a rebind that failed leaves the scene on
+    /// the buffer it was already drawing into.
+    ///
+    /// Leaves **no** GL context current on this thread, as building a scene and
+    /// freeing one do — the host takes the thread for the import and gives it
+    /// back. So this is subject to [`no_frame_in_flight`], asserted here.
+    #[expect(unsafe_code, reason = "handing Qt a buffer we allocated")]
+    pub(crate) fn rebind(
+        &mut self,
+        target: target::Target,
+        width: i32,
+        height: i32,
+        scale: f64,
+    ) -> Result<()> {
+        no_frame_in_flight("rebinding a GPU scene");
+        if self.target.is_none() {
+            return Err(anyhow!("a software scene has no buffer to rebind"));
+        }
+        // Answered here rather than a frame later in a host warning about a
+        // texture that is the wrong size, for the same reason `gpu` answers it:
+        // this is where both sizes are in scope.
+        if (target.width, target.height) != (width, height) {
+            return Err(anyhow!(
+                "a {width}x{height} scene cannot render into a {}x{} buffer",
+                target.width,
+                target.height
+            ));
+        }
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let (fd, stride, modifier, fourcc) = target.as_ffi()?;
+
+        // SAFETY: `self.scene` is non-null for the lifetime of `self`. The fd is
+        // borrowed for the length of the call and nothing more — EGL takes its
+        // own reference inside `eglCreateImageKHR` — and `target` outlives the
+        // call either way, by being moved into `self` below or dropped after it.
+        let ok = unsafe {
+            ffi::solium_qml_scene_rebind(
+                self.scene,
+                fd,
+                stride,
+                c_ulonglong::from(modifier),
+                c_uint::from(fourcc),
+                width,
+                height,
+                scale,
+            )
+        };
+        if !ok {
+            // No error string, as with `gpu`: every way this fails is a property
+            // of the driver or of Qt, and the host has already written the EGL
+            // or GL code to the warning log.
+            return Err(anyhow!(
+                "Qt would not rebind the scene onto a {width}x{height} buffer"
+            ));
+        }
+        // Held only after the host has taken its own reference, so a failed
+        // rebind leaves the previous target in place and still being drawn. The
+        // assignment is what drops the old one.
+        self.target = Some(target);
+        self.size = (width, height);
+        self.scale = scale;
+        Ok(())
+    }
+
+    /// Move this scene onto a fresh buffer of `width` by `height` device pixels.
+    ///
+    /// [`Scene::rebind`] with the allocation done for it, the same way
+    /// [`Scene::gpu_sized`] stands in for [`Scene::gpu`]. A caller that wants a
+    /// differently sized scene has no business knowing what GBM is — see
+    /// `ALLOCATOR`.
+    pub(crate) fn rebind_sized(&mut self, width: i32, height: i32, scale: f64) -> Result<()> {
+        let gbm = allocator().ok_or_else(|| {
+            anyhow!("this backend has no GBM device, so it cannot resize a GPU scene")
+        })?;
+        let target = target::allocate(gbm, width, height)?;
+        self.rebind(target, width, height, scale)
     }
 
     /// The buffer this scene renders into, on the GPU path.
@@ -882,6 +982,11 @@ impl Scene {
     /// every monitor and is drawn with as many real pixels as that monitor has.
     /// The alternative — laying out in device pixels — makes every hardcoded
     /// size in every QML file mean something different per monitor.
+    ///
+    /// On a GPU scene only `scale` can change here: the pixel size is the
+    /// buffer's and this call has no buffer to change it to. The host refuses a
+    /// pixel-size change rather than fall through. [`Scene::rebind_sized`] is
+    /// the other half.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn resize(&mut self, width: i32, height: i32, scale: f64) {
         let scale = if scale > 0.0 { scale } else { 1.0 };

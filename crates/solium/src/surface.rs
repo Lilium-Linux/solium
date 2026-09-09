@@ -454,19 +454,31 @@ impl ShellSurface {
         self.reload_if_changed(now);
 
         if self.size != size {
-            // A dmabuf cannot be resized and a GPU scene's pixel size is its
-            // buffer's, so changing size means a new buffer and a new scene.
-            // The old one is dropped by the assignment, after the new one
-            // exists, which is what leaves a surface whose rebuild failed still
-            // drawing last frame's picture rather than nothing at all.
-            self.scene = build(&self.source, &self.properties, size.0, size.1)?;
+            // A dmabuf cannot be resized, so changing size means a new buffer —
+            // and *only* a new buffer. Rebuilding the scene around one builds a
+            // new QML object tree, which restarts every animation, transition
+            // and stored property in it; a pane's scene is sized from an
+            // *animating* rectangle, so that happened once per frame for the
+            // length of every window animation and no animation inside a
+            // resizing scene ever advanced. That was a correctness bug wearing
+            // a performance bug's clothes.
+            //
+            // A rebind that fails leaves the scene on the buffer it already
+            // has, so a surface whose resize failed keeps drawing last frame's
+            // picture rather than nothing at all — the same property the
+            // rebuild had, for the same reason.
+            self.scene.rebind_sized(size.0, size.1, scale)?;
             self.size = size;
+            // The compositor's side of the dmabuf is a separate import of a
+            // genuinely different buffer, so the texture in hand names the old
+            // one and nothing in the new one is the old one's.
             self.backing = Backing::Gpu(None);
             self.damage.reset();
+        } else {
+            // Only the ratio can have moved; the pixel size is the buffer's and
+            // `solium_qml_scene_resize` refuses to change it.
+            self.scene.resize(size.0, size.1, scale);
         }
-        // Only the ratio can have moved; the pixel size is the buffer's and the
-        // host refuses to change it.
-        self.scene.resize(size.0, size.1, scale);
         self.scene.render_gpu()
     }
 }
