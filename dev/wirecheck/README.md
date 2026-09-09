@@ -20,6 +20,10 @@ runs:
       → EGLFence::import → Renderer::wait → import_dmabuf
       → TextureRenderElement::draw into an offscreen target → read back
 
+That sequence lives in `crates/solium/src/qml/paint.rs`, which is where the
+wallpaper, the window frames and the pointer all reach it from — the harness
+runs the same order by hand because nothing here links the compositor crate.
+
 It needs a GPU and a Qt installation at run time, which is why it is here and
 not a `#[test]`. It sets the `QT_QPA_EGLFS_*` environment itself, the same way
 `qml::keep_qt_off_the_hardware` does, so it opens the render node and never the
@@ -52,6 +56,67 @@ tree remembers, so a fresh tree hands back the declared default; and then with
 the picture at the new size, through the same reference comparison as above,
 because a rebind that returned true and left Qt on the *old* texture would carry
 the counter across perfectly.
+
+**And a running animation keeps running across it.** The counter is a proxy and
+was always only a proxy: a tree that survived with every animation reset to its
+`from:` carries the counter across perfectly and is still the bug. So
+`quadrants.qml` also holds a `NumberAnimation` on `spin`, the harness advances
+the compositor's clock with `solium_qml_tick` once per frame the way
+`render::prepare` does, and the case asserts `spin` is *larger* after the rebind
+than before it. Two instrument checks go with it, because a property that never
+moves reads the same number twice whichever way the rebind went: `spin` must be
+non-zero before the rebind (or nothing was animating and nothing was ticking),
+and `WIRECHECK_STOP_THE_CLOCK` below is its negative control.
+
+Measured at scale 1: `spin` reads 80 after five ticked frames and 96 after the
+rebind and one more. Under `WIRECHECK_REBUILD_ON_RESIZE` it reads 80 -> 0, which
+is printed in that control's own failure message.
+
+**Every scene the compositor builds, on a GPU host.** The compositor's real
+`qml/cursor.qml` and `qml/decorations/top.qml`, built through
+`solium_qml_scene_new_gpu` and rendered. Before Task 7 those two went down the
+*software* constructor, which a GPU host refuses outright — so `SOLIUM_QML_GPU=1`
+gave a desktop with a wallpaper on it and no window frames and no pointer, each
+refusal logged by its own caller as its own unrelated failure.
+
+The files themselves and not a stand-in, because what is in question is whether
+*these* come up under the RHI scene graph: `cursor.qml` draws through
+`QtQuick.Shapes` with the curve renderer and `top.qml` lays out text and an
+animated `Behavior`, none of which the four flat rectangles in `quadrants.qml`
+touch. What it cannot check is the picture — there is no reference for a titlebar
+here, and inventing one would assert today's design system rather than the path
+— so it wipes the buffer through the compositor's own renderer first and asks
+whether anything came back. That proves Qt built the component, brought up an
+RHI for it, imported *our* dmabuf and wrote into it. It proves nothing about
+what it drew.
+
+It does **not** stand in for the defect on the Rust side. Nothing in this binary
+links the compositor crate, so which constructor `cursor.rs` calls is invisible
+here; what stops that regressing is that `Scene::gpu_sized` and
+`Scene::with_properties` are now private to `qml.rs` and `Scene::for_host` is the
+only way in from outside it.
+
+**The first rebind, on a scene that has never rendered.** The shape production is
+actually in, and the one the resize case above cannot reach — it renders five
+frames first. Nothing on screen does: `ShellSurface::new` builds at 1x1 with its
+size recorded as `(0, 0)`, and a `Decoration` is built at the client's size and
+has to end up on the *outer* rect at the monitor's scale. Both take the rebind
+branch on their very first frame, with `QQuickRenderControl::initialize()` the
+only thing that has ever made the scene's context current — so `take_the_thread`
+is working from what the *build* recorded, and the thread-local
+`clear_stale_current_context` reasons about is either null or another scene's.
+Checked with the same reference comparison as the resize case, because a rebind
+that returned true and left Qt on the 1x1 texture would sail past a non-zero
+check.
+
+Neither of those two cases frees its scenes. That is deliberate: a free with the
+compositor's context current is C-1's own ordering, so freeing here would reach
+that defect before C-1's census is taken — and under the teardown control with
+`WIRECHECK_KEEP_RESIZED_SCENE` set it would stop the run in the resize case's
+place, putting C-1 back to only ever executing in the passing state. Nothing is
+leaked past the run; Qt keeps its own reference to each buffer and the process is
+about to exit. Verified: with those cases in place, the teardown control still
+reaches C-1 and C-1 still reports the identical five objects.
 
 That byte comparison is **not** a second check on the render path, and it is
 worth knowing before anyone trims the frame loop on the strength of it. Measured
@@ -206,6 +271,12 @@ Expect `frame 2: 10240 of 16384 bytes differ from the reference`, 10240 being
 the reference's exact non-zero byte count — Qt issues the frame against the
 compositor's context and writes nothing, so what is read back is the wipe.
 
+That line is the expectation, not the exit. The frame loop only compares; `worst`
+is checked at the very end of the run, and under this control the run does not
+get there — measured, it stops at the resize case with `the resize left GL error
+0x501 in the compositor's context`, which is the same defect one probe further
+down. Read the `frame 2:` line, not the last line.
+
 That control only works *because* of the wipe. `quadrants.qml` paints an
 unchanging picture, so before the wipe existed the dmabuf still held frame 1's
 identical pixels and the comparison read zero: "Qt did not write" and "Qt wrote
@@ -255,6 +326,19 @@ with a comment, and neither is a string literal, so nothing distinguishes the
 two binaries by content. The timestamp is what answers "was this built from what
 is on disk now".
 
+**The animation control** needs no copy of anything either.
+`WIRECHECK_STOP_THE_CLOCK=1` leaves the rebind alone and simply stops ticking
+from the rebind onward, so the tree is kept, the counter still counts, and the
+animation assertion has to fail on its own:
+
+```sh
+WIRECHECK_STOP_THE_CLOCK=1 ./target/debug/wirecheck   # must fail
+```
+
+Expect `a running animation did not survive the resize: `spin` went 80 -> 80`,
+with `the counter reads 6` on the line above it — the counter passing is half the
+point, since it is what shows the two instruments are independent.
+
 **The resize control** needs no copy of anything, because what it inverts is a
 choice and not a line of C++. `WIRECHECK_REBUILD_ON_RESIZE=1` answers the resize
 the way `render_on_gpu` used to — a new scene on the new buffer, the old one
@@ -282,6 +366,7 @@ call, and that is one line under a size comparison.
 | `WIRECHECK_QML` | the scene to render, default `quadrants.qml` beside this file |
 | `WIRECHECK_HOST_CPP` | a different `host.cpp`, for the controls above |
 | `WIRECHECK_REBUILD_ON_RESIZE` | rebuild the scene on a resize instead of rebinding it — the resize control above |
+| `WIRECHECK_STOP_THE_CLOCK` | stop ticking from the rebind onward — the animation control above |
 | `WIRECHECK_KEEP_RESIZED_SCENE` | do not free the resized scene, so the teardown control reaches C-1 |
 | `WIRECHECK_RESTORE_EARLY=0` | skip the restore after `scene_new_gpu` |
 | `WIRECHECK_NO_RESTORE` | skip *every* restore of the compositor's context, not only the early one |

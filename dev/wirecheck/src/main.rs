@@ -70,6 +70,7 @@ unsafe extern "C" {
     fn solium_qml_scene_set_int(scene: *mut c_void, name: *const c_char, value: c_int);
     fn solium_qml_scene_get_int(scene: *mut c_void, name: *const c_char) -> c_int;
     fn solium_qml_scene_free(scene: *mut c_void);
+    fn solium_qml_tick(elapsed_ms: i64);
 
     fn wirecheck_belief_names_scene(scene: *mut c_void) -> c_int;
     fn wirecheck_egl_agrees_with(scene: *mut c_void) -> c_int;
@@ -236,17 +237,17 @@ fn wait_for(renderer: &mut GlesRenderer, fence: OwnedFd) -> Result<()> {
 ///
 /// `glFinish` rather than a fence: this has to have landed before Qt is asked
 /// to draw over it, and the point of the wipe is defeated by racing it.
-fn wipe(renderer: &mut GlesRenderer, buffer: &smithay::backend::allocator::dmabuf::Dmabuf, side: i32) -> Result<()> {
+fn wipe(renderer: &mut GlesRenderer, buffer: &smithay::backend::allocator::dmabuf::Dmabuf, w: i32, h: i32) -> Result<()> {
     let mut buffer = buffer.clone();
     {
         let mut framebuffer = renderer
             .bind(&mut buffer)
             .map_err(|err| anyhow!("binding the scene buffer to wipe it: {err}"))?;
         let mut frame = renderer
-            .render(&mut framebuffer, (side, side).into(), Transform::Normal)
+            .render(&mut framebuffer, (w, h).into(), Transform::Normal)
             .map_err(|err| anyhow!("wiping: {err}"))?;
         frame
-            .clear(Color32F::TRANSPARENT, &[Rectangle::from_size((side, side).into())])
+            .clear(Color32F::TRANSPARENT, &[Rectangle::from_size((w, h).into())])
             .map_err(|err| anyhow!("clearing: {err}"))?;
         let _ = frame.finish().map_err(|err| anyhow!("finishing the wipe: {err}"))?;
     }
@@ -303,6 +304,33 @@ fn draw_and_read(
     Ok(pixels)
 }
 
+/// Read a dmabuf straight back, with no element and no draw in between.
+///
+/// Import it as a texture, bind that as a framebuffer, copy it out. What it
+/// answers is "is there anything in this buffer", which is the whole question
+/// for a scene whose picture this harness has no reference for.
+fn read_dmabuf(
+    renderer: &mut GlesRenderer,
+    buffer: &smithay::backend::allocator::dmabuf::Dmabuf,
+    w: i32,
+    h: i32,
+) -> Result<Vec<u8>> {
+    let mut texture = renderer
+        .import_dmabuf(buffer, None)
+        .map_err(|err| anyhow!("import_dmabuf for a readback: {err}"))?;
+    let framebuffer = renderer
+        .bind(&mut texture)
+        .map_err(|err| anyhow!("binding a buffer to read it back: {err}"))?;
+    let mapping = renderer
+        .copy_framebuffer(&framebuffer, Rectangle::from_size((w, h).into()), Fourcc::Argb8888)
+        .map_err(|err| anyhow!("copying a buffer to read it back: {err}"))?;
+    drop(framebuffer);
+    Ok(renderer
+        .map_texture(&mapping)
+        .map_err(|err| anyhow!("mapping: {err}"))?
+        .to_vec())
+}
+
 fn element_for(
     renderer: &GlesRenderer,
     texture: GlesTexture,
@@ -330,6 +358,33 @@ fn element_for(
 /// The counter `quadrants.qml` carries, as the object tree currently holds it.
 fn frames_of(scene: *mut c_void) -> i32 {
     unsafe { solium_qml_scene_get_int(scene, c"frames".as_ptr()) }
+}
+
+/// A compositor frame's worth of time, near enough. The exact figure does not
+/// matter; that the clock moves by a fixed amount each time does.
+const FRAME_MS: i64 = 16;
+
+/// Advance the compositor's clock, which is the only thing that moves a QML
+/// animation in this process.
+///
+/// `render::prepare` calls this once per frame for the whole process. Nothing
+/// in this harness did until the animation assertion in the resize case needed
+/// one: an animation that is never advanced never changes, so "did it move
+/// across the rebind" asked of an unticked scene is a question about a clock
+/// that never ran, and would have answered "no" for the wrong reason.
+fn tick(clock: &mut i64, by: i64) {
+    *clock += by;
+    unsafe { solium_qml_tick(*clock) };
+}
+
+/// Where `quadrants.qml`'s running animation has got to.
+///
+/// Read out of the object tree, like `frames`, and for a stronger reason: a
+/// rebuilt tree does not merely forget a number, it starts a *new* animation
+/// from its declared `from:`. So a tree that was replaced reads back near zero
+/// however long the clock has been running.
+fn spin_of(scene: *mut c_void) -> i32 {
+    unsafe { solium_qml_scene_get_int(scene, c"spin".as_ptr()) }
 }
 
 /// Advance that counter by one, and hand back what it now reads.
@@ -383,6 +438,8 @@ fn main() -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(64);
     let skip_restore = std::env::var_os("WIRECHECK_NO_RESTORE").is_some();
+    // The compositor's clock, advanced by hand. See `tick`.
+    let mut clock: i64 = 0;
     #[allow(clippy::cast_possible_truncation)]
     let pixels = ((f64::from(logical) * scale).round() as i32).max(1);
     println!(
@@ -682,7 +739,7 @@ fn main() -> Result<()> {
         // Cleared through the compositor's own renderer, which is also a small
         // proof in itself: if these pixels survive to the comparison, nothing
         // wrote over them.
-        wipe(&mut renderer, &scene_target.dmabuf, pixels)?;
+        wipe(&mut renderer, &scene_target.dmabuf, pixels, pixels)?;
 
         poke(scene, pixels, scale);
         let mut fd2: c_int = -1;
@@ -750,6 +807,10 @@ fn main() -> Result<()> {
 
         for frame in 1..=5 {
             bump(counting);
+            // The clock, as `render::prepare` advances it: once per frame, for
+            // the whole process. Without it the animation below stands still
+            // and proves nothing either way.
+            tick(&mut clock, FRAME_MS);
             poke(counting, pixels, scale);
             let mut fd: c_int = -1;
             let rendered = unsafe { solium_qml_scene_render_gpu(counting, &raw mut fd) };
@@ -764,7 +825,11 @@ fn main() -> Result<()> {
             }
         }
         let before = frames_of(counting);
-        println!("  {pixels}x{pixels}, five frames rendered; the tree's counter reads {before}");
+        let spun_before = spin_of(counting);
+        println!(
+            "  {pixels}x{pixels}, five frames rendered; the tree's counter reads {before}, \
+             its animation reads {spun_before}"
+        );
         // The instrument, checked before what it measures. A `frames` property
         // that did not exist on the root item would read 0 every time and be
         // written 1 every time, and the comparison below would then fail for a
@@ -775,6 +840,18 @@ fn main() -> Result<()> {
                  cannot tell a rebuilt tree from a kept one"
             ));
         }
+        // And the same question of the animation, which has its own ways to be
+        // blind: a `spin` property that was not animated, or an animation the
+        // driver never advanced because nothing ticked, both read 0 forever --
+        // and 0 is a number every later reading is trivially greater than or
+        // equal to. Asserted here so "it moved across the rebind" is a claim
+        // about an animation that was running in the first place.
+        if spun_before <= 0 {
+            return Err(anyhow!(
+                "the animation did not run: five ticked frames left `spin` at {spun_before}, \
+                 so this case cannot tell a restarted animation from a continuing one"
+            ));
+        }
 
         // The new buffer, wiped through the compositor's own renderer before Qt
         // is asked for a frame in it -- the same reason the frame loop wipes. A
@@ -783,7 +860,7 @@ fn main() -> Result<()> {
         // back".
         let large = target::allocate(&gbm, big_pixels, big_pixels)
             .context("the resize case's second buffer")?;
-        wipe(&mut renderer, &large.dmabuf, big_pixels)?;
+        wipe(&mut renderer, &large.dmabuf, big_pixels, big_pixels)?;
         let (fd5, stride5, modifier5, fourcc5) = large.as_ffi().context("as_ffi")?;
 
         // The negative control for this case, kept rather than run once and
@@ -857,6 +934,21 @@ fn main() -> Result<()> {
         // No poke: a rebind leaves the scene dirty by itself, having changed
         // both the geometry and the target.
         bump(counting);
+        // The animation check's own negative control, and it needs one for the
+        // reason every instrument here needs one: `spin` is read out of QML, and
+        // a property that never moves reads the same number twice whether the
+        // tree survived or not. With the clock stopped from here on, the tree is
+        // kept and the counter still counts -- so the counter check below passes
+        // -- and the animation assertion must fail on its own. A run where it
+        // does not is a run where it was never testing anything.
+        if std::env::var_os("WIRECHECK_STOP_THE_CLOCK").is_some() {
+            println!(
+                "  !! WIRECHECK_STOP_THE_CLOCK: not ticking past the rebind, so the animation \
+                 assertion below must fail by itself"
+            );
+        } else {
+            tick(&mut clock, FRAME_MS);
+        }
         let mut fd6: c_int = -1;
         let rendered = unsafe { solium_qml_scene_render_gpu(counting, &raw mut fd6) };
         restore(&renderer)?;
@@ -869,11 +961,29 @@ fn main() -> Result<()> {
             wait_for(&mut renderer, unsafe { OwnedFd::from_raw_fd(fd6) })?;
         }
         let after = frames_of(counting);
-        println!("  after the resize and one more frame, the counter reads {after}");
+        let spun_after = spin_of(counting);
+        println!(
+            "  after the resize and one more frame, the counter reads {after} and the \
+             animation reads {spun_after}"
+        );
         if after <= before {
             return Err(anyhow!(
                 "the QML tree was rebuilt by a resize: frames went {before} -> {after}, so \
-                 every animation in a resizing scene restarts on every frame it is resized"
+                 every animation in a resizing scene restarts on every frame it is resized \
+                 (and this one did: `spin` went {spun_before} -> {spun_after})"
+            ));
+        }
+        // The counter is a proxy; this is the thing itself. A tree that
+        // survived with every animation reset to its `from:` would carry the
+        // counter across perfectly and still be the bug -- a decoration is
+        // sized from an animating rectangle for the length of every window
+        // animation, so "the tree was kept" is only worth anything if what was
+        // running in it kept running.
+        if spun_after <= spun_before {
+            return Err(anyhow!(
+                "a running animation did not survive the resize: `spin` went \
+                 {spun_before} -> {spun_after} across a rebind and a ticked frame, so an \
+                 animation inside a resizing scene stands still"
             ));
         }
 
@@ -967,6 +1077,219 @@ fn main() -> Result<()> {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Every scene the compositor builds, on a GPU host.
+    //
+    // Before Task 7 the cursor and the window frames went down
+    // `solium_qml_scene_new_with`, which a GPU host refuses outright -- one
+    // scene graph per process, and Qt picked the other one. So `SOLIUM_QML_GPU=1`
+    // produced a desktop with a wallpaper on it and no window frames and no
+    // pointer, each refusal logged by its own caller as its own unrelated
+    // failure and nothing anywhere saying that a whole class of scene was
+    // missing.
+    //
+    // The compositor's *real* QML, not a stand-in: what this is checking is
+    // that these particular files come up under the RHI scene graph, and a
+    // `Rectangle` of our own would come up under anything. `cursor.qml` draws
+    // through `QtQuick.Shapes` with the curve renderer and `top.qml` lays out
+    // text and an animated `Behavior`, neither of which the four flat rectangles
+    // in `quadrants.qml` exercise at all.
+    //
+    // What it cannot do is check the picture: there is no reference for a
+    // titlebar here and inventing one would be asserting today's design system
+    // rather than the path. So it wipes the buffer through the compositor's own
+    // renderer first and asks whether anything at all came back -- which does
+    // prove Qt built the component, brought up an RHI for it, imported *our*
+    // dmabuf and wrote into it, and proves nothing whatever about what it drew.
+    println!("\n=== every scene the compositor builds, on a GPU host ===");
+    // Kept alive to the end of the run rather than freed, and deliberately.
+    //
+    // A free with the compositor's context current is C-1's own ordering, so
+    // freeing anything here would reach that defect *before* C-1's census is
+    // taken -- and under the teardown control, with WIRECHECK_KEEP_RESIZED_SCENE
+    // set to let C-1 run its own instrument, this would stop the run in the
+    // resize case's place and C-1 would go back to only ever executing in the
+    // passing state. Nothing is leaked past the run; Qt keeps its own reference
+    // to each buffer, and the process is about to exit.
+    let mut kept_scenes: Vec<*mut c_void> = Vec::new();
+    // The buffers with them: a `Target` closes its dmabuf fd when it drops, and
+    // a scene that is still alive is still pointed at one.
+    let mut kept_buffers: Vec<target::Target> = Vec::new();
+    for (what, file, w, h) in [
+        ("cursor", "crates/solium/qml/cursor.qml", 64, 64),
+        ("decoration", "crates/solium/qml/decorations/top.qml", 640, 480),
+    ] {
+        let path = CString::new(repo().join(file).as_os_str().as_encoded_bytes())?;
+        let buffer = target::allocate(&gbm, w, h)
+            .with_context(|| format!("the {what} scene's buffer"))?;
+        wipe(&mut renderer, &buffer.dmabuf, w, h)?;
+        let (fd, stride, modifier, fourcc) = buffer.as_ffi().context("as_ffi")?;
+        let built = unsafe {
+            solium_qml_scene_new_gpu(
+                path.as_ptr(),
+                w,
+                h,
+                fd,
+                stride,
+                modifier,
+                fourcc,
+                std::ptr::null(),
+            )
+        };
+        restore(&renderer)?;
+        if built.is_null() {
+            return Err(anyhow!(
+                "a GPU host could not build the {what} scene ({file}); with the compositor's \
+                 own QML this is the refusal at host.cpp's software constructor, which is what \
+                 a desktop with no frames and no pointer looks like from in here"
+            ));
+        }
+        unsafe { solium_qml_scene_resize(built, w, h, scale) };
+        tick(&mut clock, FRAME_MS);
+        let mut fd7: c_int = -1;
+        let rendered = unsafe { solium_qml_scene_render_gpu(built, &raw mut fd7) };
+        restore(&renderer)?;
+        if rendered != 1 {
+            return Err(anyhow!(
+                "the {what} scene returned {rendered} from render_gpu"
+            ));
+        }
+        if fd7 >= 0 {
+            wait_for(&mut renderer, unsafe { OwnedFd::from_raw_fd(fd7) })?;
+        }
+        let raw = read_dmabuf(&mut renderer, &buffer.dmabuf, w, h)?;
+        let nonzero = raw.iter().filter(|byte| **byte != 0).count();
+        println!(
+            "  {what} ({w}x{h}, {file}): built, rendered, {nonzero} of {} bytes non-zero",
+            raw.len()
+        );
+        if nonzero == 0 {
+            return Err(anyhow!(
+                "the {what} scene rendered into a buffer this wiped first and left it empty"
+            ));
+        }
+        kept_scenes.push(built);
+        kept_buffers.push(buffer);
+    }
+
+    // ------------------------------------------------------------------
+    // The first rebind, on a scene that has never rendered.
+    //
+    // The shape production is actually in, and the one the resize case above
+    // cannot reach: it renders five frames before it rebinds. Nothing on screen
+    // does. `ShellSurface::new` builds at 1x1 with its size recorded as (0, 0),
+    // because the real size is not known until something asks for a frame; a
+    // `Decoration` is built at the client's size and has to end up on the
+    // *outer* rect at the monitor's scale, which is two numbers that arrive
+    // with the first draw. Both take the rebind branch on their very first
+    // frame, with `QQuickRenderControl::initialize()` the only thing that has
+    // ever made this scene's context current.
+    //
+    // Worth its own case because the rebind's preconditions are not obviously
+    // met there. `take_the_thread` needs the scene's `qt_context` and
+    // `qt_surface`, and `clear_stale_current_context` is reasoning about a
+    // thread-local Qt sets when it renders -- on this path it has never
+    // rendered, so that belief is either null or another scene's.
+    println!("\n=== the first rebind, on a scene that has never rendered ===");
+    {
+        let placeholder = target::allocate(&gbm, 1, 1).context("the 1x1 placeholder buffer")?;
+        let (fd8, stride8, modifier8, fourcc8) = placeholder.as_ffi().context("as_ffi")?;
+        let fresh = unsafe {
+            solium_qml_scene_new_gpu(
+                qml.as_ptr(),
+                1,
+                1,
+                fd8,
+                stride8,
+                modifier8,
+                fourcc8,
+                std::ptr::null(),
+            )
+        };
+        restore(&renderer)?;
+        if fresh.is_null() {
+            return Err(anyhow!("the 1x1 scene would not build"));
+        }
+        println!("  built 1x1; no render, no resize, straight to the rebind");
+
+        let real = target::allocate(&gbm, pixels, pixels).context("the first real buffer")?;
+        // Wiped for the same reason every other case here wipes: a fresh GBM
+        // allocation is not reliably zeroed, and "Qt drew this" must not be the
+        // same measurement as "this is what the allocator handed back".
+        wipe(&mut renderer, &real.dmabuf, pixels, pixels)?;
+        let (fd9, stride9, modifier9, fourcc9) = real.as_ffi().context("as_ffi")?;
+        let ok = unsafe {
+            solium_qml_scene_rebind(
+                fresh, fd9, stride9, modifier9, fourcc9, pixels, pixels, scale,
+            )
+        };
+        restore(&renderer)?;
+        if !ok {
+            return Err(anyhow!(
+                "a scene that has never rendered would not rebind from 1x1 onto \
+                 {pixels}x{pixels} -- which is the first frame of every shell surface and \
+                 every window frame on this path"
+            ));
+        }
+        // The same probe the resize case takes after its rebind, and with the
+        // same limit: it cannot prove the releases went to the right context --
+        // a GL delete against the wrong one destroys whatever that context calls
+        // N and returns cleanly, which is what the censuses below are for. What
+        // it catches is a delete that actually faulted, which would otherwise
+        // sit in the queue until the teardown probe at the end and be read as
+        // Qt's.
+        let gl_error = renderer
+            .with_context(|gl| unsafe { gl.GetError() })
+            .map_err(|err| anyhow!("with_context after the first rebind: {err}"))?;
+        println!("  rebound onto {pixels}x{pixels}; glGetError after it: 0x{gl_error:x}");
+        if gl_error != 0 {
+            return Err(anyhow!(
+                "the first rebind left GL error 0x{gl_error:x} in the compositor's context"
+            ));
+        }
+
+        tick(&mut clock, FRAME_MS);
+        let mut fd10: c_int = -1;
+        let rendered = unsafe { solium_qml_scene_render_gpu(fresh, &raw mut fd10) };
+        restore(&renderer)?;
+        if rendered != 1 {
+            return Err(anyhow!(
+                "the first frame after a never-rendered scene's rebind: render_gpu returned \
+                 {rendered}"
+            ));
+        }
+        if fd10 >= 0 {
+            wait_for(&mut renderer, unsafe { OwnedFd::from_raw_fd(fd10) })?;
+        }
+        // And it is the *new* buffer being drawn, at the new size. Through the
+        // same reference comparison as everything else here rather than an
+        // absolute orientation: a rebind that returned true and left Qt on the
+        // 1x1 texture would sail past a non-zero check.
+        let texture = renderer
+            .import_dmabuf(&real.dmabuf, None)
+            .map_err(|err| anyhow!("import_dmabuf on the first rebind's buffer: {err}"))?;
+        let element = element_for(&renderer, texture, (pixels, pixels), (logical, logical), scale);
+        let got = draw_and_read(&mut renderer, &element, pixels, pixels, scale)?;
+        let (bad, _) = differing(&reference, &got);
+        println!("  the picture after it vs the software path: {bad} of {} bytes differ", reference.len());
+        if bad != 0 {
+            return Err(anyhow!(
+                "a scene rebound before it had ever rendered does not draw its new buffer: \
+                 {bad} of {} bytes differ from the software path",
+                reference.len()
+            ));
+        }
+        // Kept alive, for the reason the case above states.
+        kept_scenes.push(fresh);
+        kept_buffers.push(real);
+        kept_buffers.push(placeholder);
+    }
+    println!(
+        "  {} scene(s) and {} buffer(s) left alive so C-1 below keeps its baseline",
+        kept_scenes.len(),
+        kept_buffers.len()
+    );
 
     // ------------------------------------------------------------------
     // Built and freed without ever being rendered.
