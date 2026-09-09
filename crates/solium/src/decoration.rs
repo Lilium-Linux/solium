@@ -220,9 +220,30 @@ pub(crate) struct Decoration {
 impl Decoration {
     fn new(path: &std::path::Path, width: i32, height: i32) -> Result<Self> {
         qml::start()?;
-        // Built at the client's size first, because what it reserves is a
+        // Built before it can be asked anything, because what it reserves is a
         // property of the scene and there is no scene to ask until it exists.
-        let mut scene = qml::Scene::for_host(path, width.max(1), height.max(1), None)?;
+        //
+        // At the client's size on the software path, where the scene is about
+        // to be laid out at the outer rect anyway and a `QImage` of either size
+        // costs the same to throw away. **At 1x1 on the GPU path**, which
+        // `ShellSurface::new` does for the same reason: a GPU scene's buffer is
+        // a GBM allocation, the first `frame` call rebinds onto the outer rect
+        // in the monitor's pixels regardless, and building at the client size
+        // means ~3.9 MB allocated, handed to Qt, imported and freed again for
+        // every window that opens.
+        //
+        // Nothing is lost by it. The insets are read once here and never
+        // re-read, and the scene is then laid out at a size that is not this
+        // one either, so a decoration whose insets depended on its size has
+        // already been getting an answer computed from the wrong size on both
+        // paths — they are constants by contract, and every decoration that
+        // ships declares them as literals.
+        let built = if qml::on_gpu() {
+            (1, 1)
+        } else {
+            (width.max(1), height.max(1))
+        };
+        let mut scene = qml::Scene::for_host(path, built.0, built.1, None)?;
         let insets = Insets {
             top: scene.get_int("insetTop").max(0),
             right: scene.get_int("insetRight").max(0),
@@ -234,6 +255,7 @@ impl Decoration {
         let overlay = scene.get_bool("overlay") || !insets.any();
         let on_gpu = qml::on_gpu();
         if !on_gpu {
+            // The software half of the size decision above.
             // ...and then grown to the whole outer rect, which is what it
             // draws: the client area within it is simply left transparent.
             // At 1x, because the insets were just read from a scene laid out
@@ -245,9 +267,7 @@ impl Decoration {
             // Skipped entirely on the GPU path, and not as an optimisation: a
             // GPU scene's pixel size *is* its buffer's, so the host refuses to
             // change it here and would say so in a warning for every window
-            // that ever opened. The first `frame` call rebinds the scene onto a
-            // buffer of the outer rect in the pixels of the monitor it landed
-            // on — a size that is not known in here anyway.
+            // that ever opened.
             scene.resize(
                 (width + insets.horizontal()).max(1),
                 (height + insets.vertical()).max(1),

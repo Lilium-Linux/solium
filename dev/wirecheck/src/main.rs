@@ -206,6 +206,42 @@ fn gl_names(renderer: &mut GlesRenderer, upto: u32) -> Result<Vec<(char, u32)>> 
         .map_err(|err| anyhow!("gl_names: {err}"))
 }
 
+/// Empty the GL error queue, and say what was in it.
+///
+/// `glGetError` pops **one** error per call and clears it, so a probe that does
+/// not drain first reports whatever the last few hundred lines happened to
+/// leave behind and attributes it to the operation it is sitting under. That is
+/// not hypothetical: under the render control the queue already holds 0x501
+/// before the rebind, and the probe after the rebind reported it as the
+/// rebind's -- failing the run with a message naming code that is fine and
+/// sending the reader there.
+///
+/// So each probed operation is bracketed: drain to zero immediately before it,
+/// read once immediately after it. Anything the drain finds is printed rather
+/// than fatal -- it belongs to something further up, and failing here would be
+/// the same misattribution in the other direction.
+fn drain_gl_errors(renderer: &mut GlesRenderer, before: &str) -> Result<()> {
+    let found = renderer
+        .with_context(|gl| {
+            let mut found = Vec::new();
+            // Bounded: a context that never returns GL_NO_ERROR would otherwise
+            // spin here for ever, which is a worse failure than a missed error.
+            for _ in 0..32 {
+                let error = unsafe { gl.GetError() };
+                if error == 0 {
+                    break;
+                }
+                found.push(format!("0x{error:x}"));
+            }
+            found
+        })
+        .map_err(|err| anyhow!("draining GL errors: {err}"))?;
+    if !found.is_empty() {
+        println!("  !! GL error(s) {found:?} already pending BEFORE {before}; drained, not theirs");
+    }
+    Ok(())
+}
+
 fn open_gbm(path: &str) -> Result<GbmDevice<DrmDeviceFd>> {
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -617,6 +653,7 @@ fn main() -> Result<()> {
         );
     }
 
+    drain_gl_errors(&mut renderer, "import_dmabuf")?;
     let texture = renderer
         .import_dmabuf(&scene_target.dmabuf, None)
         .map_err(|err| anyhow!("import_dmabuf: {err}"))?;
@@ -715,6 +752,92 @@ fn main() -> Result<()> {
         );
     } else {
         println!("  the two paths produce the identical frame");
+    }
+
+    // ------------------------------------------------------------------
+    // The pointer's route: Qt's dmabuf, read back and uploaded as memory.
+    //
+    // The one scene that does *not* reach the screen as a texture. smithay
+    // reaches a DRM cursor plane only through `RenderElement::underlying_storage`,
+    // whose two variants are `Wayland` and `Memory`; a `TextureRenderElement`
+    // has none, so a GPU pointer drawn as a texture silently loses the plane and
+    // every pointer motion becomes a full composite and page flip. So `cursor.rs`
+    // lets Qt draw into the dmabuf -- it must, a GPU host refuses software scenes
+    // -- and then reads it straight back into a `MemoryRenderBuffer`.
+    //
+    // That hangs on a claim nobody had checked: that what `copy_framebuffer`
+    // hands back is byte-identical to what `import_memory` would have been given
+    // on the software path. Three conventions meet there -- Qt's render target,
+    // which `mirror_for_the_compositor` flips; smithay's readback; and
+    // `MemoryRenderBuffer`'s top-down rows -- and two of them cancelling is not
+    // the same as all three agreeing. Asserted twice: against the known picture
+    // directly, and then through an element built from it.
+    println!("\n=== the pointer's route: the dmabuf read back and uploaded as memory ===");
+    {
+        // The first frame's picture, which is the one every configuration of
+        // this harness draws correctly -- placed here rather than after the
+        // frame loop for that reason. Reading a buffer the loop above had
+        // already found wrong would make this case fail on the loop's defect
+        // and name it as a readback fault.
+        let raw = read_dmabuf(&mut renderer, &scene_target.dmabuf, pixels, pixels)?;
+        let want = expected_argb(pixels, pixels);
+        let (bad, first) = differing(&want, &raw);
+        println!(
+            "  the readback vs the known picture, byte for byte: {bad} of {} bytes differ",
+            want.len()
+        );
+        // An *empty* buffer is not this case's defect and must not be reported
+        // as one. It means nothing wrote into the dmabuf, which is a render-path
+        // failure -- the render control produces exactly that -- and a message
+        // here about flipped or swizzled bytes would send the reader to the one
+        // place the fault is not. The same misattribution the glGetError probes
+        // had, in a different instrument.
+        if bad != 0 && raw.iter().all(|byte| *byte == 0) {
+            return Err(anyhow!(
+                "the scene's buffer is empty: nothing has written into it, so there is nothing \
+                 for the pointer's route to read back. That is a render-path failure and not a \
+                 readback one -- read the frame comparison above this line, not this message"
+            ));
+        }
+        if bad != 0 {
+            let i = first.unwrap_or(0);
+            return Err(anyhow!(
+                "reading a scene's dmabuf back does not give the bytes the software path \
+                 uploads: {bad} of {} bytes differ, first at {i} (want {:?} got {:?}) -- so a \
+                 pointer read back this way is flipped, swizzled or padded",
+                want.len(),
+                &want[i - i % 4..i - i % 4 + 4],
+                &raw[i - i % 4..i - i % 4 + 4],
+            ));
+        }
+
+        // And through the element, which is what actually reaches the screen.
+        let uploaded = renderer
+            .import_memory(&raw, Fourcc::Argb8888, (pixels, pixels).into(), false)
+            .map_err(|err| anyhow!("import_memory on the readback: {err}"))?;
+        let element = element_for(&renderer, uploaded, (pixels, pixels), (logical, logical), scale);
+        let drawn = draw_and_read(&mut renderer, &element, pixels, pixels, scale)?;
+        let (bad, _) = differing(&reference, &drawn);
+        println!("  and drawn through an element: {bad} of {} bytes differ", reference.len());
+        if bad != 0 {
+            return Err(anyhow!(
+                "the pointer's readback route does not draw what the software path draws: \
+                 {bad} of {} bytes differ",
+                reference.len()
+            ));
+        }
+
+        // What it costs, because the whole argument for this route is that the
+        // pointer pays it once per size per change rather than once per frame.
+        // A number here is what stops that being a guess: if it were milliseconds
+        // the cache would not be enough and the design would need revisiting.
+        const RUNS: u32 = 50;
+        let started = std::time::Instant::now();
+        for _ in 0..RUNS {
+            let _ = read_dmabuf(&mut renderer, &scene_target.dmabuf, pixels, pixels)?;
+        }
+        let each = started.elapsed() / RUNS;
+        println!("  import + bind + copy_framebuffer + map, {pixels}x{pixels}: {each:?} each");
     }
 
     // Frames 2..N: the steady state, and the only ordering the compositor is
@@ -876,6 +999,7 @@ fn main() -> Result<()> {
         // the level the harness actually measures, which is the host entry
         // point. What `surface.rs` still owns is the *choice* between the two,
         // and that is one line under a size comparison.
+        drain_gl_errors(&mut renderer, "the rebind")?;
         let rebuild = std::env::var_os("WIRECHECK_REBUILD_ON_RESIZE").is_some();
         let ok = if rebuild {
             println!("  !! WIRECHECK_REBUILD_ON_RESIZE: rebuilding the scene instead of rebinding");
@@ -941,13 +1065,14 @@ fn main() -> Result<()> {
         // kept and the counter still counts -- so the counter check below passes
         // -- and the animation assertion must fail on its own. A run where it
         // does not is a run where it was never testing anything.
-        if std::env::var_os("WIRECHECK_STOP_THE_CLOCK").is_some() {
+        let ticked = std::env::var_os("WIRECHECK_STOP_THE_CLOCK").is_none();
+        if ticked {
+            tick(&mut clock, FRAME_MS);
+        } else {
             println!(
                 "  !! WIRECHECK_STOP_THE_CLOCK: not ticking past the rebind, so the animation \
                  assertion below must fail by itself"
             );
-        } else {
-            tick(&mut clock, FRAME_MS);
         }
         let mut fd6: c_int = -1;
         let rendered = unsafe { solium_qml_scene_render_gpu(counting, &raw mut fd6) };
@@ -980,11 +1105,25 @@ fn main() -> Result<()> {
         // animation, so "the tree was kept" is only worth anything if what was
         // running in it kept running.
         if spun_after <= spun_before {
-            return Err(anyhow!(
-                "a running animation did not survive the resize: `spin` went \
-                 {spun_before} -> {spun_after} across a rebind and a ticked frame, so an \
-                 animation inside a resizing scene stands still"
-            ));
+            // Two whole messages rather than one with a clause spliced into it,
+            // because they are two different findings: under the control this
+            // is the instrument working, and saying "across a ticked frame"
+            // when the frame was deliberately not ticked is the harness lying
+            // about its own run.
+            return Err(if ticked {
+                anyhow!(
+                    "a running animation did not survive the resize: `spin` went \
+                     {spun_before} -> {spun_after} across a rebind and a ticked frame, so an \
+                     animation inside a resizing scene stands still"
+                )
+            } else {
+                anyhow!(
+                    "`spin` went {spun_before} -> {spun_after} across a rebind and a frame the \
+                     clock was deliberately stopped for. This is WIRECHECK_STOP_THE_CLOCK, the \
+                     animation assertion's own negative control: failing here is what it is \
+                     for, and the counter passing above it is the other half"
+                )
+            });
         }
 
         // And it is drawing the new buffer, at the new size. Through the same
@@ -1219,6 +1358,7 @@ fn main() -> Result<()> {
         // same measurement as "this is what the allocator handed back".
         wipe(&mut renderer, &real.dmabuf, pixels, pixels)?;
         let (fd9, stride9, modifier9, fourcc9) = real.as_ffi().context("as_ffi")?;
+        drain_gl_errors(&mut renderer, "the first rebind")?;
         let ok = unsafe {
             solium_qml_scene_rebind(
                 fresh, fd9, stride9, modifier9, fourcc9, pixels, pixels, scale,
@@ -1444,6 +1584,7 @@ fn main() -> Result<()> {
     }
 
     println!("  freeing the scene with the compositor's context current");
+    drain_gl_errors(&mut renderer, "Qt's teardown")?;
     unsafe { solium_qml_scene_free(scene) };
     restore(&renderer)?;
 
