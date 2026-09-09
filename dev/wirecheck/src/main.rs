@@ -57,6 +57,18 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn solium_qml_scene_render_gpu(scene: *mut c_void, fence_fd: *mut c_int) -> c_int;
     fn solium_qml_scene_resize(scene: *mut c_void, width: c_int, height: c_int, scale: f64);
+    fn solium_qml_scene_rebind(
+        scene: *mut c_void,
+        dmabuf_fd: c_int,
+        stride: c_int,
+        modifier: u64,
+        fourcc: c_uint,
+        width: c_int,
+        height: c_int,
+        scale: f64,
+    ) -> bool;
+    fn solium_qml_scene_set_int(scene: *mut c_void, name: *const c_char, value: c_int);
+    fn solium_qml_scene_get_int(scene: *mut c_void, name: *const c_char) -> c_int;
     fn solium_qml_scene_free(scene: *mut c_void);
 
     fn wirecheck_belief_names_scene(scene: *mut c_void) -> c_int;
@@ -313,6 +325,35 @@ fn element_for(
         None,
         Kind::Unspecified,
     )
+}
+
+/// The counter `quadrants.qml` carries, as the object tree currently holds it.
+fn frames_of(scene: *mut c_void) -> i32 {
+    unsafe { solium_qml_scene_get_int(scene, c"frames".as_ptr()) }
+}
+
+/// Advance that counter by one, and hand back what it now reads.
+///
+/// Deliberately round-trips through the QML item rather than counting here: the
+/// count is *stored in the object tree and nowhere else*, so a tree that was
+/// rebuilt hands back the property's declared default and the count restarts at
+/// zero. Counting on this side would survive a rebuild and measure nothing,
+/// which is the failure mode this whole harness keeps finding in itself.
+fn bump(scene: *mut c_void) -> i32 {
+    let next = frames_of(scene) + 1;
+    unsafe { solium_qml_scene_set_int(scene, c"frames".as_ptr(), next) };
+    next
+}
+
+/// Make a scene dirty without changing what it lays out to.
+///
+/// A scale change and back leaves the same geometry and the same picture, so
+/// what follows is a render of an unchanged scene rather than of a different
+/// one. `solium_qml_scene_render_gpu` returns SOLIUM_QML_UNCHANGED otherwise
+/// and never touches the buffer.
+fn poke(scene: *mut c_void, pixels: i32, scale: f64) {
+    unsafe { solium_qml_scene_resize(scene, pixels, pixels, scale * 2.0) };
+    unsafe { solium_qml_scene_resize(scene, pixels, pixels, scale) };
 }
 
 fn differing(a: &[u8], b: &[u8]) -> (usize, Option<usize>) {
@@ -643,10 +684,7 @@ fn main() -> Result<()> {
         // wrote over them.
         wipe(&mut renderer, &scene_target.dmabuf, pixels)?;
 
-        // Make the scene dirty without changing what it lays out to: a scale
-        // change and back leaves the same geometry and the same picture.
-        unsafe { solium_qml_scene_resize(scene, pixels, pixels, scale * 2.0) };
-        unsafe { solium_qml_scene_resize(scene, pixels, pixels, scale) };
+        poke(scene, pixels, scale);
         let mut fd2: c_int = -1;
         let rendered = unsafe { solium_qml_scene_render_gpu(scene, &raw mut fd2) };
         restore(&renderer)?;
@@ -668,16 +706,254 @@ fn main() -> Result<()> {
     }
 
     // ------------------------------------------------------------------
+    // A resize that keeps the object tree.
+    //
+    // `render_on_gpu` used to answer a size change by rebuilding the scene --
+    // a fresh QQuickRenderControl, a fresh QOpenGLContext, a fresh QRhi, a
+    // fresh GBM allocation, a recompiled QML tree and, since C-1, a full Qt
+    // teardown as well. The cost was the smaller half of it. A rebuilt scene is
+    // a *new object tree*, so every animation, transition and stored property
+    // inside it restarts from zero -- and a pane's scene is sized from an
+    // *animating* rectangle, so that happened on every frame of every window
+    // animation. A scene that animates while its window animates did not run
+    // slowly; it never advanced.
+    //
+    // Two assertions, and neither is worth having alone. The counter carrying
+    // across says the object tree survived. The picture being right at the new
+    // size says the scene is drawing into the *new* buffer -- a rebind that
+    // returned true and left Qt on the old texture would carry the counter
+    // across perfectly.
+    println!("\n=== a GPU scene resized onto a new buffer, in place ===");
+    {
+        let big_logical = logical * 2;
+        let big_pixels = pixels * 2;
+        let small =
+            target::allocate(&gbm, pixels, pixels).context("the resize case's first buffer")?;
+        let (fd4, stride4, modifier4, fourcc4) = small.as_ffi().context("as_ffi")?;
+        let mut counting = unsafe {
+            solium_qml_scene_new_gpu(
+                qml.as_ptr(),
+                pixels,
+                pixels,
+                fd4,
+                stride4,
+                modifier4,
+                fourcc4,
+                std::ptr::null(),
+            )
+        };
+        if counting.is_null() {
+            return Err(anyhow!("the resize case's scene would not build"));
+        }
+        restore(&renderer)?;
+        unsafe { solium_qml_scene_resize(counting, pixels, pixels, scale) };
+
+        for frame in 1..=5 {
+            bump(counting);
+            poke(counting, pixels, scale);
+            let mut fd: c_int = -1;
+            let rendered = unsafe { solium_qml_scene_render_gpu(counting, &raw mut fd) };
+            restore(&renderer)?;
+            if rendered != 1 {
+                return Err(anyhow!(
+                    "the resize case's frame {frame}: render_gpu returned {rendered}"
+                ));
+            }
+            if fd >= 0 {
+                wait_for(&mut renderer, unsafe { OwnedFd::from_raw_fd(fd) })?;
+            }
+        }
+        let before = frames_of(counting);
+        println!("  {pixels}x{pixels}, five frames rendered; the tree's counter reads {before}");
+        // The instrument, checked before what it measures. A `frames` property
+        // that did not exist on the root item would read 0 every time and be
+        // written 1 every time, and the comparison below would then fail for a
+        // reason with nothing to do with resizing.
+        if before != 5 {
+            return Err(anyhow!(
+                "the counter did not count: five frames left it at {before}, so this case \
+                 cannot tell a rebuilt tree from a kept one"
+            ));
+        }
+
+        // The new buffer, wiped through the compositor's own renderer before Qt
+        // is asked for a frame in it -- the same reason the frame loop wipes. A
+        // fresh GBM allocation is not reliably zeroed, and "Qt drew this" must
+        // not be the same measurement as "this is what the allocator handed
+        // back".
+        let large = target::allocate(&gbm, big_pixels, big_pixels)
+            .context("the resize case's second buffer")?;
+        wipe(&mut renderer, &large.dmabuf, big_pixels)?;
+        let (fd5, stride5, modifier5, fourcc5) = large.as_ffi().context("as_ffi")?;
+
+        // The negative control for this case, kept rather than run once and
+        // thrown away. With WIRECHECK_REBUILD_ON_RESIZE set, the resize is
+        // answered the way `render_on_gpu` used to answer it -- a new scene on
+        // the new buffer, the old one freed after it exists -- and the counter
+        // check below must then fail. A check that passes either way proves
+        // nothing, and this harness has been in that state four times.
+        //
+        // It has to live here rather than in `surface.rs`. Nothing in this
+        // binary links the compositor crate, so reverting `render_on_gpu` to
+        // `build(...)` changes nothing that this runs; the control has to be at
+        // the level the harness actually measures, which is the host entry
+        // point. What `surface.rs` still owns is the *choice* between the two,
+        // and that is one line under a size comparison.
+        let rebuild = std::env::var_os("WIRECHECK_REBUILD_ON_RESIZE").is_some();
+        let ok = if rebuild {
+            println!("  !! WIRECHECK_REBUILD_ON_RESIZE: rebuilding the scene instead of rebinding");
+            let replacement = unsafe {
+                solium_qml_scene_new_gpu(
+                    qml.as_ptr(),
+                    big_pixels,
+                    big_pixels,
+                    fd5,
+                    stride5,
+                    modifier5,
+                    fourcc5,
+                    std::ptr::null(),
+                )
+            };
+            if replacement.is_null() {
+                return Err(anyhow!("the control's replacement scene would not build"));
+            }
+            unsafe { solium_qml_scene_free(counting) };
+            counting = replacement;
+            unsafe { solium_qml_scene_resize(counting, big_pixels, big_pixels, scale) };
+            true
+        } else {
+            unsafe {
+                solium_qml_scene_rebind(
+                    counting, fd5, stride5, modifier5, fourcc5, big_pixels, big_pixels, scale,
+                )
+            }
+        };
+        restore(&renderer)?;
+        if !ok {
+            return Err(anyhow!(
+                "solium_qml_scene_rebind refused a {big_pixels}x{big_pixels} buffer"
+            ));
+        }
+        println!(
+            "  {} onto a {big_pixels}x{big_pixels} buffer",
+            if rebuild { "rebuilt" } else { "rebound" }
+        );
+
+        // No poke: a rebind leaves the scene dirty by itself, having changed
+        // both the geometry and the target.
+        bump(counting);
+        let mut fd6: c_int = -1;
+        let rendered = unsafe { solium_qml_scene_render_gpu(counting, &raw mut fd6) };
+        restore(&renderer)?;
+        if rendered != 1 {
+            return Err(anyhow!(
+                "the frame after the rebind: render_gpu returned {rendered}"
+            ));
+        }
+        if fd6 >= 0 {
+            wait_for(&mut renderer, unsafe { OwnedFd::from_raw_fd(fd6) })?;
+        }
+        let after = frames_of(counting);
+        println!("  after the resize and one more frame, the counter reads {after}");
+        if after <= before {
+            return Err(anyhow!(
+                "the QML tree was rebuilt by a resize: frames went {before} -> {after}, so \
+                 every animation in a resizing scene restarts on every frame it is resized"
+            ));
+        }
+
+        // And it is drawing the new buffer, at the new size. Through the same
+        // comparison the rest of this harness uses rather than an absolute
+        // orientation: the identical picture uploaded with `import_memory` and
+        // drawn through identical element parameters, so whatever convention
+        // the offscreen target has cancels.
+        let big_reference_texture = renderer
+            .import_memory(
+                &expected_argb(big_pixels, big_pixels),
+                Fourcc::Argb8888,
+                (big_pixels, big_pixels).into(),
+                false,
+            )
+            .map_err(|err| anyhow!("the resized reference: {err}"))?;
+        let big_reference_element = element_for(
+            &renderer,
+            big_reference_texture,
+            (big_pixels, big_pixels),
+            (big_logical, big_logical),
+            scale,
+        );
+        let big_reference = draw_and_read(
+            &mut renderer,
+            &big_reference_element,
+            big_pixels,
+            big_pixels,
+            scale,
+        )?;
+        let big_texture = renderer
+            .import_dmabuf(&large.dmabuf, None)
+            .map_err(|err| anyhow!("import_dmabuf on the resized buffer: {err}"))?;
+        let big_element = element_for(
+            &renderer,
+            big_texture,
+            (big_pixels, big_pixels),
+            (big_logical, big_logical),
+            scale,
+        );
+        let big_got =
+            draw_and_read(&mut renderer, &big_element, big_pixels, big_pixels, scale)?;
+        let (big_bad, _) = differing(&big_reference, &big_got);
+        println!(
+            "  the resized picture vs the software path: {big_bad} of {} bytes differ",
+            big_reference.len()
+        );
+        if big_bad != 0 {
+            return Err(anyhow!(
+                "a scene rebound onto a {big_pixels}x{big_pixels} buffer does not draw it: \
+                 {big_bad} of {} bytes differ from the software path",
+                big_reference.len()
+            ));
+        }
+
+        // Freed in the dangerous ordering, with the compositor's context
+        // current, and censused either side of it. Not for its own sake -- C-1
+        // below is the case for that -- but so C-1 starts from an undamaged
+        // baseline: its census is taken after this block, and anything wrecked
+        // here would be invisible to it.
+        restore(&renderer)?;
+        let live_before_free = gl_names(&mut renderer, 64)?;
+        unsafe { solium_qml_scene_free(counting) };
+        restore(&renderer)?;
+        let live_after_free = gl_names(&mut renderer, 64)?;
+        let lost: Vec<_> = live_before_free
+            .iter()
+            .filter(|it| !live_after_free.contains(it))
+            .collect();
+        println!("  DESTROYED in our context by freeing the resized scene: {lost:?}");
+        if !lost.is_empty() {
+            return Err(anyhow!(
+                "freeing the resized scene destroyed {} of the compositor's GL objects",
+                lost.len()
+            ));
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Built and freed without ever being rendered.
     //
-    // The path a resize rebuild takes for the scene it is replacing, and the
-    // one that reaches `clear_stale_current_context`'s `believed == nullptr`
-    // early return: `release_the_thread` left the thread empty when this scene
-    // was built, and Qt's thread-local was never set because nothing rendered.
-    // The branch is correct -- a null thread-local means Qt holds no stale
-    // belief, so `ensureContext()` will make its context current properly on
-    // the way out -- but neither of the two runs above ever takes it, and Task
-    // 6 makes it run on every frame.
+    // The free path that reaches `clear_stale_current_context`'s
+    // `believed == nullptr` early return: `release_the_thread` left the thread
+    // empty when this scene was built, and Qt's thread-local was never set
+    // because nothing rendered. The branch is correct -- a null thread-local
+    // means Qt holds no stale belief, so `ensureContext()` will make its
+    // context current properly on the way out -- but it is the one branch
+    // neither the frame loop nor C-1 ever takes.
+    //
+    // It used to be the hot path by accident: a resize rebuilt the scene, so
+    // every frame of every animation built one scene and freed another. It is
+    // not any more, which is why this case has to exist deliberately. The
+    // render side of the same branch still runs on its own -- a rebind gives
+    // the thread back, so the render right after one finds a null belief -- and
+    // that is the resize case above.
     println!("\n=== a scene built and freed without ever rendering ===");
     {
         let unrendered = target::allocate(&gbm, pixels, pixels).context("second buffer")?;
@@ -781,8 +1057,7 @@ fn main() -> Result<()> {
     // build-and-free above tears a context down, and a context destructor
     // clears the thread-local. Getting that ordering by luck is how the first
     // version of this test came to pass with the bug present.
-    unsafe { solium_qml_scene_resize(scene, pixels, pixels, scale * 2.0) };
-    unsafe { solium_qml_scene_resize(scene, pixels, pixels, scale) };
+    poke(scene, pixels, scale);
     let mut fd3: c_int = -1;
     if unsafe { solium_qml_scene_render_gpu(scene, &raw mut fd3) } != 1 {
         return Err(anyhow!("the pre-free render failed"));

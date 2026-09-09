@@ -41,9 +41,23 @@ safe under bugs the rest are not, because `initialize()` left Qt's context
 current and nothing has taken it yet. Every one-frame probe this project has
 written passed while the second frame was broken.
 
-**A scene built and freed without ever rendering.** What a resize rebuild does to
-the scene it replaces, and the path that reaches
-`clear_stale_current_context`'s null-thread-local early return.
+**A resize keeps the QML object tree.** `solium_qml_scene_rebind` puts a scene on
+a new buffer without rebuilding it, and the cost of the alternative was never
+mainly the allocation: a rebuilt scene is a *new object tree*, so every
+animation, transition and stored property in it restarts from zero. A pane is
+sized from an animating rectangle, so that happened once per frame for the
+length of every window animation — an animation restarted every frame never
+advances. Asserted with a counter `quadrants.qml` holds and nothing outside the
+tree remembers, so a fresh tree hands back the declared default; and then with
+the picture at the new size, through the same reference comparison as above,
+because a rebind that returned true and left Qt on the *old* texture would carry
+the counter across perfectly.
+
+**A scene built and freed without ever rendering.** The path that reaches
+`clear_stale_current_context`'s null-thread-local early return. It used to be
+the hot path by accident, when every resize built one scene and freed another;
+now that a resize does neither, this case is the only thing that takes it on the
+free side.
 
 **A scene freed with the compositor's context current** — the ordering the rest
 of the harness cannot produce, since building the replacement first leaves the
@@ -97,9 +111,19 @@ WIRECHECK_HOST_CPP="$PWD/host-control.cpp" cargo build --target-dir target-contr
 ./target-control/debug/wirecheck        # must fail
 ```
 
-Expect `DESTROYED by Qt's teardown, in our context: [('b', 1), ('f', 1),
-('r', 1), ('b', 2), ('f', 2)]`, of which buffers 1 and 2 appear in the pre-Qt
-census, and most of the guard textures clobbered outright.
+Expect `DESTROYED in our context by freeing the resized scene: [('b', 1),
+('f', 1), ('r', 1), ('b', 2), ('f', 2), ('r', 2), ('b', 3)]`, of which buffers
+1, 2 and 3 appear in the pre-Qt census.
+
+That is the resize case failing, not C-1 — the resized scene is freed in exactly
+C-1's ordering, so it reaches the same defect first and the run stops there. The
+census around that free exists for this reason as much as its own: C-1's `before`
+snapshot is taken *after* that block, so damage done there would be invisible to
+it. Removing that case, or making its free benign, would hand C-1 a wrecked
+baseline and a clean diff. With it gone the run reaches C-1 and reports
+`DESTROYED by Qt's teardown, in our context: [('b', 1), ('f', 1), ('r', 1),
+('b', 2), ('f', 2)]` plus most of the guard textures clobbered outright, which is
+the same evidence with the guards attached.
 
 **The render control** — drop the call in `solium_qml_scene_render_gpu` instead:
 
@@ -129,6 +153,23 @@ Verify the substitution took, rather than assuming the rebuild noticed:
 diff ../../crates/solium/qml/host.cpp host-control.cpp   # exactly one line
 ```
 
+**The resize control** needs no copy of anything, because what it inverts is a
+choice and not a line of C++. `WIRECHECK_REBUILD_ON_RESIZE=1` answers the resize
+the way `render_on_gpu` used to — a new scene on the new buffer, the old one
+freed after it exists — instead of calling `solium_qml_scene_rebind`:
+
+```sh
+WIRECHECK_REBUILD_ON_RESIZE=1 ./target/debug/wirecheck   # must fail
+```
+
+Expect `the QML tree was rebuilt by a resize: frames went 5 -> 1`. Run it at more
+than one scale; it has been checked at 1, 2 and 1.25.
+
+It is a knob here rather than a revert of `surface.rs` because nothing in this
+binary links the compositor crate: putting `build(...)` back in `render_on_gpu`
+changes nothing this runs. What `surface.rs` still owns is which of the two to
+call, and that is one line under a size comparison.
+
 ## Knobs
 
 | | |
@@ -138,6 +179,7 @@ diff ../../crates/solium/qml/host.cpp host-control.cpp   # exactly one line
 | `WIRECHECK_FRAMES` | how many frames after the first, default 3 |
 | `WIRECHECK_QML` | the scene to render, default `quadrants.qml` beside this file |
 | `WIRECHECK_HOST_CPP` | a different `host.cpp`, for the controls above |
+| `WIRECHECK_REBUILD_ON_RESIZE` | rebuild the scene on a resize instead of rebinding it — the resize control above |
 | `WIRECHECK_RESTORE_EARLY=0` | skip the restore after `scene_new_gpu` |
 | `WIRECHECK_LATE_RENDERER`, `WIRECHECK_SEPARATE_GBM` | build the renderer after Qt, or on its own device |
 

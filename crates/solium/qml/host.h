@@ -83,6 +83,33 @@ SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int width, int he
  */
 int solium_qml_scene_render_gpu(SoliumQmlScene *scene, int *fence_fd);
 
+/* Point an existing GPU scene at a different buffer.
+ *
+ * Everything above the buffer — the render control, the RHI, the QML object
+ * tree and its animation state — is kept. Only the EGLImage and the texture
+ * are replaced, which is the whole of what a dmabuf's fixed size forces.
+ *
+ * That is not a performance note. A rebuilt scene is a *new object tree*, so
+ * every animation, transition and stored property in it restarts from zero —
+ * and a pane's scene is sized from an animating rectangle, so it is resized on
+ * every frame of every window animation. A scene rebuilt per resize does not
+ * animate slowly; it never advances.
+ *
+ * `width` and `height` are device pixels and must match the new buffer;
+ * `scale` is how many of those make a logical one, as in
+ * solium_qml_scene_resize. `dmabuf_fd` is borrowed for the call, exactly as it
+ * is by solium_qml_scene_new_gpu.
+ *
+ * Returns false and leaves the scene on its previous buffer on failure, so a
+ * surface whose resize failed keeps drawing last frame's picture.
+ *
+ * Leaves *no* GL context current on this thread — the same postcondition as
+ * solium_qml_scene_new_gpu and solium_qml_scene_free, so that a caller with no
+ * renderer to restore never has to know which of the three it just called. */
+bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, int stride,
+                             unsigned long long modifier, unsigned int fourcc,
+                             int width, int height, double scale);
+
 /*
  * Load `qml_path` into a scene rendering at `width` x `height`.
  *
@@ -122,7 +149,11 @@ void solium_qml_scene_free(SoliumQmlScene *scene);
  * compositor uploads — and `scale` is how many of those make a logical one, so
  * the scene is laid out in width/scale by height/scale and rasterised at the
  * full size. See the comment on the definition: getting this the wrong way
- * round gives either half-size text or blurry chrome. */
+ * round gives either half-size text or blurry chrome.
+ *
+ * On a GPU scene only `scale` may change here: the pixel size is the buffer's,
+ * and this function has no buffer to change it to. Pass one to
+ * solium_qml_scene_rebind instead. */
 void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int height, double scale);
 
 /*

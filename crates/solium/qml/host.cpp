@@ -63,6 +63,7 @@
 #include <QtGui/QMouseEvent>
 #include <QtGui/QOpenGLContext>
 #include <QtGui/QOpenGLFunctions>
+#include <QtGui/QSurface>
 #include <QtQml/QQmlComponent>
 #include <QtQml/QQmlEngine>
 #include <QtQuick/QQuickItem>
@@ -202,6 +203,18 @@ struct SoliumQmlScene
      * EGL-level question and gets an EGL-level answer. */
     EGLDisplay egl_display = EGL_NO_DISPLAY;
     EGLContext egl_context = EGL_NO_CONTEXT;
+    /* The same two facts at Qt's level, captured at the same moment: the
+     * QOpenGLContext Qt renders with and the surface it was made current
+     * against.
+     *
+     * Kept because taking the thread *back* for this scene needs both, and
+     * neither can be re-derived later. QOpenGLContext::currentContext() is the
+     * thread-local this whole file distrusts, and QOpenGLContext::surface() is
+     * cleared by doneCurrent() — which is exactly the state a rebind is reached
+     * in. See take_the_thread. Both belong to the render control and live as
+     * long as it does, which is longer than any scene of ours. */
+    QOpenGLContext *qt_context = nullptr;
+    QSurface *qt_surface = nullptr;
 };
 
 /*
@@ -657,6 +670,12 @@ static bool import_dmabuf_texture(SoliumQmlScene *scene, int dmabuf_fd, int stri
     scene->egl_image = image;
     scene->egl_display = display;
     scene->egl_context = egl_context;
+    // Qt's own handles on the same thing, recorded here because here is the one
+    // moment they can be trusted: Qt genuinely holds the thread. `surface()` in
+    // particular is not available later — doneCurrent() clears it. See
+    // take_the_thread.
+    scene->qt_context = context;
+    scene->qt_surface = context->surface();
     return true;
 }
 
@@ -808,6 +827,44 @@ static void release_the_thread(const SoliumQmlScene *scene)
     if (QOpenGLContext *context = QOpenGLContext::currentContext()) {
         context->doneCurrent();
     }
+}
+
+/*
+ * Take the thread for this scene's own context, and leave Qt believing it.
+ *
+ * The inverse of release_the_thread, for the one entry point that has to issue
+ * GL outside a frame: solium_qml_scene_rebind. Everywhere else the thread is
+ * taken by Qt itself — initialize() on the way in, QRhiGles2::ensureContext()
+ * inside beginFrame — and the only job left to this file was to give it back.
+ *
+ * Not a raw eglMakeCurrent, which is what "make this context current" would
+ * otherwise mean here. That is precisely the move that creates the stale belief
+ * clear_stale_current_context exists to undo: EGL would say Qt's context and
+ * Qt's thread-local would say nothing, and import_dmabuf_texture needs a live
+ * QOpenGLContext to reach Qt's own function table through. QOpenGLContext::
+ * makeCurrent sets both halves, so afterwards the belief is true and
+ * ensureContext() is right to trust it.
+ *
+ * Not QQuickRenderControl::initialize() either, which is how the *build* path
+ * arrives here with a current context. It would be reusing a constructor for
+ * its side effect: beyond bringing up an RHI that already exists, initialize()
+ * re-runs the scene graph render context's own initialize() and re-emits
+ * sceneGraphInitialized — the scene graph being stood up a second time under a
+ * live item tree. This function exists so that a resize keeps everything above
+ * the buffer, and re-initialising the scene graph is not keeping it. Whether a
+ * second initialize() would even make anything current is Qt's business and
+ * not a thing to depend on.
+ *
+ * Returns false when Qt never held the thread for this scene at all — a
+ * software scene, or a GPU scene whose import failed — which is a caller error
+ * rather than a state to recover from.
+ */
+static bool take_the_thread(const SoliumQmlScene *scene)
+{
+    if (scene->qt_context == nullptr || scene->qt_surface == nullptr) {
+        return false;
+    }
+    return scene->qt_context->makeCurrent(scene->qt_surface);
 }
 
 extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int width, int height,
@@ -1046,8 +1103,9 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
     // for a different monitor ratio.
     if (scene->gpu) {
         if (width != scene->width || height != scene->height) {
-            qWarning("a GPU scene cannot be resized in place (%dx%d to %dx%d): "
-                     "rebuild it on a buffer of the new size",
+            qWarning("solium_qml_scene_resize cannot change a GPU scene's pixel "
+                     "size (%dx%d to %dx%d): it has no buffer to change it to. "
+                     "Use solium_qml_scene_rebind with one.",
                      scene->width, scene->height, width, height);
             return;
         }
@@ -1104,6 +1162,135 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
     target.setDevicePixelRatio(scale);
     scene->window->setRenderTarget(target);
     scene->dirty = true;
+}
+
+/*
+ * Point a GPU scene at a different buffer, and change nothing else.
+ *
+ * The scale-only branch of solium_qml_scene_resize above already does
+ * everything a resize needs except swapping the texture underneath it. This is
+ * that branch with a new buffer put under it, and it is a separate entry point
+ * rather than a fall-through of resize because it takes a buffer and resize
+ * cannot: the compositor allocates, and there is nothing in a
+ * (width, height, scale) call for this function to allocate from.
+ *
+ * Why it is worth the entry point at all is in host.h: the alternative is
+ * rebuilding the scene, and a rebuilt scene is a new object tree whose
+ * animations all restart. A pane is sized from an animating rectangle, so that
+ * happens once per frame for the length of every window animation, and an
+ * animation restarted every frame never advances. This is a correctness fix
+ * that happens to also be much cheaper.
+ */
+extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, int stride,
+                                        unsigned long long modifier, unsigned int fourcc,
+                                        int width, int height, double scale)
+{
+    if (scene == nullptr || !scene->gpu || scene->control == nullptr || width <= 0 ||
+        height <= 0 || stride <= 0 || dmabuf_fd < 0) {
+        qWarning("solium_qml_scene_rebind: not a GPU scene, or %dx%d stride=%d fd=%d is not a "
+                 "buffer",
+                 width, height, stride, dmabuf_fd);
+        return false;
+    }
+    if (scale <= 0.0) {
+        scale = 1.0;
+    }
+
+    // Everything below issues GL, so the thread has to be *honestly* Qt's
+    // first. Nothing here can assume it already is: the compositor took it back
+    // with a raw eglMakeCurrent after the last frame, and Qt's thread-local
+    // still says otherwise — see clear_stale_current_context. Taking it
+    // through QOpenGLContext rather than clearing the stale belief and hoping
+    // something else takes it, because the import needs a live QOpenGLContext
+    // and not merely a current EGL context.
+    if (!take_the_thread(scene)) {
+        qWarning("solium_qml_scene_rebind: could not make the scene's own GL context current");
+        return false;
+    }
+
+    // Import first, release second. An import that fails leaves the scene whole
+    // and still drawing, which is the difference between a dropped frame and a
+    // black window.
+    //
+    // The size goes on the scene *before* the import and comes back off if it
+    // fails, because import_dmabuf_texture sizes the EGLImage from
+    // scene->width and scene->height. Setting them afterwards would import the
+    // new buffer at the *old* size, and nothing is obliged to notice: an fd
+    // carries no dimensions, so EGL_WIDTH and EGL_HEIGHT are the only thing
+    // that says how many rows the image has.
+    const EGLImageKHR previous_image = scene->egl_image;
+    const GLuint previous_texture = scene->texture;
+    const int previous_width = scene->width;
+    const int previous_height = scene->height;
+    scene->egl_image = EGL_NO_IMAGE_KHR;
+    scene->texture = 0;
+    scene->width = width;
+    scene->height = height;
+
+    if (!import_dmabuf_texture(scene, dmabuf_fd, stride, modifier, fourcc)) {
+        scene->egl_image = previous_image;
+        scene->texture = previous_texture;
+        scene->width = previous_width;
+        scene->height = previous_height;
+        qWarning("solium_qml_scene_rebind: the new buffer would not import, "
+                 "staying on the old one");
+        release_the_thread(scene);
+        return false;
+    }
+
+    // The old pair, now that there is a new one. The EGLImage belongs to a
+    // display and the texture to a context — the same split solium_qml_scene_
+    // free explains at length, and for the same reason: a GL name deleted
+    // against the wrong context destroys whatever that context calls N.
+    //
+    // scene_context_is_current is true by construction here, take_the_thread
+    // having just succeeded. It is asked anyway rather than assumed, because
+    // "which context is this name in" is the question this file has one owner
+    // for, and a new call site that answers it by reasoning is how the third
+    // one went wrong.
+    if (previous_image != EGL_NO_IMAGE_KHR && scene->egl_display != EGL_NO_DISPLAY) {
+        static PFNEGLDESTROYIMAGEKHRPROC destroy_image =
+            reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
+                eglGetProcAddress("eglDestroyImageKHR"));
+        if (destroy_image != nullptr) {
+            destroy_image(scene->egl_display, previous_image);
+        }
+    }
+    if (previous_texture != 0 && scene_context_is_current(scene)) {
+        QOpenGLContext *context = QOpenGLContext::currentContext();
+        if (context != nullptr) {
+            GLuint doomed = previous_texture;
+            context->functions()->glDeleteTextures(1, &doomed);
+        }
+    }
+
+    scene->scale = scale;
+
+    // Logical geometry, device-sized target, ratio between them — identical to
+    // the scale-only branch of solium_qml_scene_resize, and see the long
+    // comment there for why it is that way round.
+    const int logical_width = qMax(1, qRound(width / scale));
+    const int logical_height = qMax(1, qRound(height / scale));
+    scene->window->setGeometry(0, 0, logical_width, logical_height);
+    if (scene->root != nullptr) {
+        scene->root->setWidth(logical_width);
+        scene->root->setHeight(logical_height);
+    }
+
+    QQuickRenderTarget target =
+        QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
+    target.setDevicePixelRatio(scale);
+    mirror_for_the_compositor(&target);
+    scene->window->setRenderTarget(target);
+    scene->dirty = true;
+
+    // Nothing current on the way out, which is what building a GPU scene and
+    // freeing one both promise. The three entry points a caller with no
+    // renderer can reach now end the same way, so ShellSurface never has to
+    // know which of them it just called — only render_gpu leaves Qt's context
+    // behind, and it says so.
+    release_the_thread(scene);
+    return true;
 }
 
 /* Advance every animation in the process, once for the whole frame.
