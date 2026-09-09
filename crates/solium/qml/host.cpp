@@ -735,8 +735,14 @@ static void mirror_for_the_compositor(QQuickRenderTarget *target)
  * the recording with the new one, and asking the scene there would compare the
  * old name against the new record — which is true by construction and answers
  * nothing. It asks about the pair it saved instead, through the same rule.
+ *
+ * Context first and display second, so that the call reads in the order the
+ * name does. EGLDisplay and EGLContext are both `void *`, so a transposed call
+ * is not a type error — it would compile, always return false, and silently
+ * skip the texture delete. That is a leak rather than corruption, which makes
+ * it the one outcome of the three here that nothing would ever report.
  */
-static bool context_is_current(EGLDisplay display, EGLContext context)
+static bool context_is_current(EGLContext context, EGLDisplay display)
 {
     return context != EGL_NO_CONTEXT && display != EGL_NO_DISPLAY &&
         eglGetCurrentContext() == context && eglGetCurrentDisplay() == display;
@@ -744,7 +750,7 @@ static bool context_is_current(EGLDisplay display, EGLContext context)
 
 static bool scene_context_is_current(const SoliumQmlScene *scene)
 {
-    return context_is_current(scene->egl_display, scene->egl_context);
+    return context_is_current(scene->egl_context, scene->egl_display);
 }
 
 /*
@@ -1280,7 +1286,7 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
             destroy_image(previous_display, previous_image);
         }
     }
-    if (previous_texture != 0 && context_is_current(previous_display, previous_context)) {
+    if (previous_texture != 0 && context_is_current(previous_context, previous_display)) {
         QOpenGLContext *context = QOpenGLContext::currentContext();
         if (context != nullptr) {
             GLuint doomed = previous_texture;

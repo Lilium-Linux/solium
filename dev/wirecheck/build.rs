@@ -49,6 +49,23 @@ fn main() {
     let host = std::env::var_os("WIRECHECK_HOST_CPP")
         .map(PathBuf::from)
         .unwrap_or_else(|| qml.join("host.cpp"));
+    // Whichever file that turned out to be, and not only the default one at the
+    // top of this function.
+    //
+    // Without this, editing a *control copy* while host.cpp is unchanged
+    // rebuilds nothing: the env var has not changed either, so cargo never
+    // re-runs this script and the old object file is linked. The binary is then
+    // built from a host.cpp that is no longer on disk -- and the check this
+    // README used to prescribe, `diff`ing the two source files, inspects the
+    // files and never the binary, so it reports exactly what you hoped to see.
+    //
+    // Demonstrated rather than theorised: replacing host-control-render.cpp
+    // with a byte-identical copy of host.cpp and rebuilding finished in 0.05s
+    // without compiling anything, `diff` then called the files identical, and
+    // the binary went on failing on a control that was not in its source. It
+    // fires whenever a control's awk expression is edited and host.cpp is not,
+    // which is what adding a control for a new path looks like.
+    println!("cargo:rerun-if-changed={}", host.display());
     build.define(
         "WIRECHECK_HOST_CPP",
         format!("\"{}\"", host.display()).as_str(),

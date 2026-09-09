@@ -834,10 +834,25 @@ fn main() -> Result<()> {
                 "solium_qml_scene_rebind refused a {big_pixels}x{big_pixels} buffer"
             ));
         }
+        // A rebind releases the previous EGLImage and the previous texture, and
+        // this is the probe for what that left behind. It cannot prove the
+        // releases went to the right context -- a GL delete against the wrong
+        // one destroys whatever that context calls N and returns cleanly, which
+        // is the whole reason the census below exists. What it does catch is a
+        // delete that actually faulted, which would otherwise sit in the queue
+        // until the teardown probe at the end of the run and be read as Qt's.
+        let gl_error = renderer
+            .with_context(|gl| unsafe { gl.GetError() })
+            .map_err(|err| anyhow!("with_context after the rebind: {err}"))?;
         println!(
-            "  {} onto a {big_pixels}x{big_pixels} buffer",
+            "  {} onto a {big_pixels}x{big_pixels} buffer; glGetError after it: 0x{gl_error:x}",
             if rebuild { "rebuilt" } else { "rebound" }
         );
+        if gl_error != 0 {
+            return Err(anyhow!(
+                "the resize left GL error 0x{gl_error:x} in the compositor's context"
+            ));
+        }
 
         // No poke: a rebind leaves the scene dirty by itself, having changed
         // both the geometry and the target.
