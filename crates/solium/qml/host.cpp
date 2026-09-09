@@ -949,31 +949,36 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
     // causing the exact corruption this comment describes.
     //
     // Note this is asked *after* clear_stale_current_context above, which is
-    // what makes the three cases below the only three, and which one you land
-    // in is a property of the ordering rather than of anything going wrong:
+    // what makes these the only three states, and which one you land in is a
+    // property of the ordering rather than of anything going wrong:
     //
-    //   * Qt's own context current. The frame after initialize(), or a free
-    //     that follows a render with nothing in between. Delete it here.
+    //   * Qt's own context current. The free right after initialize(), or one
+    //     that follows a render with nothing in between. Delete it here, which
+    //     is the only case where an explicit delete is possible or needed.
     //
-    //   * Nothing current. What every production free looks like: after a
-    //     render, clear_stale_current_context released the thread; after a
-    //     resize rebuild, release_the_thread did it when the *new* scene was
-    //     built and Qt's thread-local was already null. The name is left for
-    //     the teardown a few lines below, which destroys the context it belongs
-    //     to and reclaims it. Nothing is wrong and nothing is said.
+    //   * Nothing current. What most frees look like: after a render,
+    //     clear_stale_current_context released the thread; after a resize
+    //     rebuild, release_the_thread did it when the *new* scene was built.
     //
-    //   * Some third context current, with Qt believing nothing is. That is the
-    //     one a caller can actually get wrong, and the only one worth a word.
+    //   * A third context current — in practice the compositor's — with Qt
+    //     believing nothing is. Reached whenever some *other* scene's teardown
+    //     cleared Qt's thread-local before this scene was freed, which two
+    //     shell surfaces are enough to produce.
     //
-    // The middle case used to warn, on the strength of a message that asserted
-    // "another context on the thread" when the thread was in fact empty, and
-    // advised making the scene's context current around a call that has already
-    // taken the thread back by the time it runs. It fired on 100% of frees that
-    // followed a render or a rebuild — which is 100% of frees a session makes —
-    // and Task 6 would have made that per-frame.
+    // None of the three is a failure and none of them says anything, because
+    // the outcome is the same in all three: the name belongs to a context that
+    // `delete scene->control` destroys a few lines below, and destroying a
+    // context reclaims its objects. Nothing is leaked for the life of the
+    // process in any of them.
     //
-    // Either way the texture name is not leaked for the life of the process: GL
-    // objects belong to their context, and Qt's is destroyed below.
+    // Both of the last two were warned about at some point, and both warnings
+    // were wrong. The first asserted "another context on the thread" when the
+    // thread was empty and fired on every free a session makes. The second was
+    // written for the third state on the theory that it was a caller error, and
+    // dev/wirecheck then produced it in a run where nothing was wrong: the
+    // teardown is safe there precisely *because* Qt's thread-local is null, so
+    // QRhiGles2::ensureContext() finds no current context and makes its own
+    // properly. A null belief is the one thing this whole path can trust.
     if (scene->texture != 0) {
         if (scene_context_is_current(scene)) {
             QOpenGLContext *context = QOpenGLContext::currentContext();
@@ -981,12 +986,6 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
                 context->functions()->glDeleteTextures(1, &scene->texture);
                 scene->texture = 0;
             }
-        } else if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
-            qWarning("a GPU scene was freed with a third GL context current — not "
-                     "its own and not none — so texture %u was left for Qt's "
-                     "teardown to reclaim. Nothing leaks, but the thread was not "
-                     "in either state this path is written for.",
-                     scene->texture);
         }
     }
 
