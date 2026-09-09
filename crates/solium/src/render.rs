@@ -173,6 +173,9 @@ fn chrome(
     };
     let mut animating = false;
     if let Some(decoration) = state.decorations.get_mut(pane) {
+        // Already an `Element`: a frame is a memory buffer on the software
+        // path and a texture on the GPU one, and which of the two it is is the
+        // decoration's own business rather than this function's.
         if let Some(element) = decoration.frame(
             renderer,
             frame.rect,
@@ -181,7 +184,7 @@ fn chrome(
             frame.opacity,
             scale,
         ) {
-            elements.push(Element::Chrome(element));
+            elements.push(element);
         }
         animating = decoration.animating();
     }
@@ -779,11 +782,12 @@ fn cursor(
                 })
                 .collect()
         }
+        // Already an `Element`, as a decoration is: the pointer is a memory
+        // buffer on the software path and a texture on the GPU one.
         CursorImageStatus::Named(_) => state
             .pointer
             .art()
             .and_then(|cursor| cursor.element(renderer, location, scale))
-            .map(Element::Chrome)
             .into_iter()
             .collect(),
     }
@@ -828,7 +832,7 @@ pub(crate) fn flat_window_elements(
             // fade the frame squared.
             && let Some(element) = decoration.frame(renderer, whole, outer.size, &look, 1.0, scale)
         {
-            elements.push(Element::Chrome(element));
+            elements.push(element);
         }
     }
 

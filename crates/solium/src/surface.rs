@@ -12,32 +12,32 @@
 //! docks. A host has no opinions.
 
 use std::{
-    os::fd::OwnedFd,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use smithay::{
     backend::{
         allocator::Fourcc,
-        egl::fence::EGLFence,
         renderer::{
-            ImportDma as _, Renderer as _,
             element::{
-                Id, Kind,
+                Kind,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
-                texture::TextureRenderElement,
             },
-            gles::{GlesRenderer, GlesTexture},
-            sync::SyncPoint,
-            utils::DamageBag,
+            gles::GlesRenderer,
         },
     },
-    utils::{Buffer as BufferCoords, Logical, Rectangle, Transform},
+    utils::{Logical, Rectangle, Transform},
 };
 
-use crate::{qml, render::Element};
+use crate::{
+    qml::{
+        self,
+        paint::{Gpu, Placement},
+    },
+    render::Element,
+};
 
 /// How often the QML is checked for edits.
 ///
@@ -54,12 +54,15 @@ const RELOAD_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug)]
 enum Backing {
     /// Rasterised on the CPU into a shared-memory buffer the compositor
-    /// uploads.
-    Memory(Option<MemoryRenderBuffer>),
+    /// uploads. The size is the buffer's, kept here because it is the memory
+    /// path's alone — on the GPU path the buffer's size is [`Gpu`]'s business.
+    Memory {
+        buffer: Option<MemoryRenderBuffer>,
+        size: (i32, i32),
+    },
     /// Rendered by Qt straight into a dmabuf we allocated, which the compositor
-    /// imports and samples. The buffer belongs to the scene; this is only the
-    /// texture it was imported as, kept so an idle frame costs no import.
-    Gpu(Option<GlesTexture>),
+    /// imports and samples. See `qml::paint`.
+    Gpu(Gpu),
 }
 
 /// One QML scene, hosted by the compositor.
@@ -67,22 +70,6 @@ enum Backing {
 pub(crate) struct ShellSurface {
     scene: qml::Scene,
     backing: Backing,
-    size: (i32, i32),
-    /// Stable for the life of the surface, so the damage tracker sees one
-    /// element moving and changing rather than a new one every frame.
-    ///
-    /// Only the GPU path needs it: a memory element takes its identity from the
-    /// buffer, which lives across frames on its own.
-    id: Id,
-    /// What of the imported texture has changed, in its own pixels.
-    ///
-    /// The GPU path's answer to a question the memory path never has to ask.
-    /// Qt draws into the same buffer every frame, so nothing about the texture
-    /// says whether it holds anything new; without this the element is either
-    /// permanently undamaged — a shell frozen on its first frame — or
-    /// permanently new, which repaints its whole area on every frame anything
-    /// else draws.
-    damage: DamageBag<i32, BufferCoords>,
     source: PathBuf,
     properties: String,
     newest: Option<SystemTime>,
@@ -114,13 +101,17 @@ impl ShellSurface {
         Ok(Self {
             scene,
             backing: if qml::on_gpu() {
-                Backing::Gpu(None)
+                // `(0, 0)` and not the 1x1 the scene really is, so the first
+                // frame takes the rebind branch and lands on a buffer of the
+                // size it is actually drawn at. A 1x1 picture stretched over an
+                // output would otherwise be the first thing on screen.
+                Backing::Gpu(Gpu::new((0, 0)))
             } else {
-                Backing::Memory(None)
+                Backing::Memory {
+                    buffer: None,
+                    size: (0, 0),
+                }
             },
-            size: (0, 0),
-            id: Id::new(),
-            damage: DamageBag::default(),
             source,
             properties: properties.to_owned(),
             newest,
@@ -169,7 +160,7 @@ impl ShellSurface {
     /// The whole scene, because QML cannot apply an edit to a live object
     /// tree. State the shell was holding is lost, which is the honest cost of
     /// reloading.
-    fn reload_if_changed(&mut self, now: Duration) {
+    fn reload_if_changed(&mut self, now: Duration, wanted: (i32, i32)) {
         if now.saturating_sub(self.checked) < RELOAD_INTERVAL {
             return;
         }
@@ -187,30 +178,26 @@ impl ShellSurface {
 
         // 1x1 on the software path, as it always was: the next draw resizes
         // it. A GPU scene cannot be resized -- its pixel size is its buffer's
-        // -- so rebuilding one at 1x1 would only have it rebuilt again at the
-        // real size on the next line of `render_on_gpu`, two whole Qt scenes
-        // and two buffers for one edit. The size is known here.
+        // -- so rebuilding one at 1x1 would only have it rebound again at the
+        // real size on the next line of `Gpu::render`, two whole Qt scenes and
+        // two buffers for one edit. The size the caller is about to ask for is
+        // known here, which is why it is passed in.
         let (width, height) = match self.backing {
-            Backing::Memory(_) => (1, 1),
-            Backing::Gpu(_) => (self.size.0.max(1), self.size.1.max(1)),
+            Backing::Memory { .. } => (1, 1),
+            Backing::Gpu(_) => (wanted.0.max(1), wanted.1.max(1)),
         };
         match build(&self.source, &self.properties, width, height) {
             Ok(scene) => {
                 self.scene = scene;
-                match &mut self.backing {
-                    Backing::Memory(buffer) => {
-                        *buffer = None;
-                        self.size = (0, 0);
-                    }
-                    Backing::Gpu(texture) => {
-                        // A new buffer, so the old texture names the old one.
-                        *texture = None;
-                        self.size = (width, height);
-                        // Nothing in the new buffer is the old buffer's, so no
-                        // damage since then means anything.
-                        self.damage.reset();
-                    }
-                }
+                self.backing = match self.backing {
+                    Backing::Memory { .. } => Backing::Memory {
+                        buffer: None,
+                        size: (0, 0),
+                    },
+                    // A new buffer, so the old texture names the old one and no
+                    // damage recorded against it means anything.
+                    Backing::Gpu(_) => Backing::Gpu(Gpu::new((width, height))),
+                };
                 tracing::info!("shell reloaded");
             }
             // The old scene keeps drawing: an edit that does not parse should
@@ -254,14 +241,33 @@ impl ShellSurface {
         };
         let size = (pixels(area.size.w), pixels(area.size.h));
 
-        if matches!(self.backing, Backing::Gpu(_)) {
-            return self
-                .on_gpu(renderer, area, now, alpha, scale, size)
-                .map(Element::Screen);
+        // Before either path, and before anything is bound: a reload builds a
+        // whole new scene, which on the GPU path takes the thread off to Qt.
+        // See `qml::no_frame_in_flight`.
+        self.reload_if_changed(now, size);
+
+        // Two fields of one struct, borrowed at once: the scene is what
+        // renders and the backing is what holds the result.
+        let Self { scene, backing, .. } = self;
+        match backing {
+            Backing::Gpu(gpu) => gpu
+                .element(
+                    scene,
+                    renderer,
+                    size,
+                    scale,
+                    Placement {
+                        position: (f64::from(area.loc.x) * scale, f64::from(area.loc.y) * scale),
+                        size: area.size,
+                        alpha,
+                        kind: Kind::Unspecified,
+                    },
+                )
+                .map(Element::Screen),
+            Backing::Memory { .. } => self
+                .in_memory(renderer, area, alpha, scale, size)
+                .map(Element::Chrome),
         }
-        self.reload_if_changed(now);
-        self.in_memory(renderer, area, alpha, scale, size)
-            .map(Element::Chrome)
     }
 
     /// The software path, unchanged: Qt rasterises into a `QImage` and the
@@ -284,10 +290,14 @@ impl ShellSurface {
             }
         };
 
-        let resized = self.size != size;
-        let Backing::Memory(slot) = &mut self.backing else {
+        let Backing::Memory {
+            buffer: slot,
+            size: held,
+        } = &mut self.backing
+        else {
             return None;
         };
+        let resized = *held != size;
         if slot.is_none() || resized {
             *slot = Some(MemoryRenderBuffer::new(
                 Fourcc::Argb8888,
@@ -296,7 +306,7 @@ impl ShellSurface {
                 Transform::Normal,
                 None,
             ));
-            self.size = size;
+            *held = size;
         }
         let buffer = slot.as_mut()?;
 
@@ -335,230 +345,16 @@ impl ShellSurface {
         .inspect_err(|err| tracing::warn!(?err, "could not upload the shell surface"))
         .ok()
     }
-
-    /// The GPU path: Qt draws into a buffer we allocated, and we sample it.
-    ///
-    /// Three things have to happen in this order and none of them are optional.
-    /// Qt renders; the compositor's EGL context goes back on this thread;
-    /// Qt's fence is waited for. The second is why the Qt half is one call
-    /// rather than inline — see [`restore`] — and the third is why the fence is
-    /// imported rather than dropped: sampling a buffer that is still being
-    /// written is a race that surfaces as garbage on maybe one frame in
-    /// several hundred, which is the hardest possible thing to attribute.
-    fn on_gpu(
-        &mut self,
-        renderer: &mut GlesRenderer,
-        area: Rectangle<i32, Logical>,
-        now: Duration,
-        alpha: f32,
-        scale: f64,
-        size: (i32, i32),
-    ) -> Option<TextureRenderElement<GlesTexture>> {
-        let rendered = self.render_on_gpu(now, size, scale);
-        // Unconditional, and underneath every way out of the call above,
-        // including the paths that failed. Rendering leaves Qt's context on the
-        // thread; building a scene and freeing one leave none. Neither is a
-        // state the next line can run in — `EGLFence::import` is an
-        // `eglCreateSync` of our own, not smithay's, so nothing will make our
-        // context current for it.
-        if let Err(err) = restore(renderer) {
-            tracing::error!(?err, "the compositor's EGL context could not be restored");
-            return None;
-        }
-        let rendered = match rendered {
-            Ok(rendered) => rendered,
-            Err(err) => {
-                tracing::warn!(?err, "the shell surface did not render on the GPU");
-                return None;
-            }
-        };
-
-        // `None` is "Qt had nothing new to draw", so the texture already in
-        // hand is this frame's picture and no import and no wait are owed.
-        if let Some(fence) = rendered {
-            // A fence inside the `Some` is the driver's; without one the host
-            // has already waited on the CPU with `glFinish` and the frame is
-            // complete, which is a correct answer and not a missing fence.
-            if let Some(fence) = fence
-                && let Err(err) = wait_for(renderer, fence)
-            {
-                // Not drawing this frame is the cheaper wrong answer: sampling
-                // anyway is the race described above.
-                tracing::warn!(?err, "could not wait for Qt's fence; skipping a frame");
-                return None;
-            }
-            // Re-imported every frame rather than once: `import_dmabuf` is
-            // cached on the buffer and re-binds the EGLImage to the same
-            // texture name, which is what makes what Qt just wrote visible to
-            // our context.
-            let imported = match self.scene.buffer() {
-                Some(buffer) => renderer.import_dmabuf(buffer, None),
-                None => {
-                    tracing::warn!("a GPU shell surface has no buffer to sample");
-                    return None;
-                }
-            };
-            match imported {
-                Ok(texture) => {
-                    // Whole-buffer damage, because Qt does not say what it
-                    // repainted and the buffer is the same one every frame.
-                    self.damage
-                        .add([Rectangle::from_size((size.0, size.1).into())]);
-                    self.backing = Backing::Gpu(Some(texture));
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "could not import the shell surface's buffer");
-                    return None;
-                }
-            }
-        }
-
-        let Backing::Gpu(Some(texture)) = &self.backing else {
-            // Reachable only before the first successful render: Qt reported a
-            // scene it has never drawn as up to date, or the import failed and
-            // the next frame will try again.
-            return None;
-        };
-
-        // As on the software path: `src` is the whole buffer in its own pixels,
-        // `size` is the logical destination the output scale takes back up to
-        // exactly those pixels, and the position is physical.
-        let source = Rectangle::from_size((f64::from(size.0), f64::from(size.1)).into());
-        Some(TextureRenderElement::from_texture_with_damage(
-            self.id.clone(),
-            renderer.context_id(),
-            (f64::from(area.loc.x) * scale, f64::from(area.loc.y) * scale),
-            texture.clone(),
-            1,
-            Transform::Normal,
-            Some(alpha),
-            Some(source),
-            Some(area.size),
-            None,
-            self.damage.snapshot(),
-            Kind::Unspecified,
-        ))
-    }
-
-    /// Everything that hands this thread's GL context to Qt, in one place.
-    ///
-    /// Gathered into one call so [`ShellSurface::on_gpu`] can put the context
-    /// back underneath it on every path out, the failures included. Nothing in
-    /// here may touch the renderer.
-    fn render_on_gpu(
-        &mut self,
-        now: Duration,
-        size: (i32, i32),
-        scale: f64,
-    ) -> Result<Option<Option<OwnedFd>>> {
-        self.reload_if_changed(now);
-
-        if self.size != size {
-            // A dmabuf cannot be resized, so changing size means a new buffer —
-            // and *only* a new buffer. Rebuilding the scene around one builds a
-            // new QML object tree, which restarts every animation, transition
-            // and stored property in it; a pane's scene is sized from an
-            // *animating* rectangle, so that happened once per frame for the
-            // length of every window animation and no animation inside a
-            // resizing scene ever advanced. That was a correctness bug wearing
-            // a performance bug's clothes.
-            //
-            // A failed rebind leaves the *scene* whole and still on the buffer
-            // it already has — that is the host's contract, and it is why the
-            // import runs before the release. It is not what this `?` does.
-            //
-            // The error propagates, `on_gpu` logs it and returns `None`, and
-            // the surface contributes no element at all. Not for one frame,
-            // either: `self.size` is assigned only after the rebind succeeds,
-            // so the next frame attempts the same thing and fails the same way.
-            // A rebind that keeps failing is an *invisible* surface, not a
-            // frozen one — and the rebuild this replaced was no different.
-            //
-            // Frozen would be better and it is not one line. The texture in
-            // hand is sized for the old buffer, so drawing it means deciding
-            // what a stale-sized element does inside the new geometry. That is
-            // a behaviour change, and it belongs to the task where decorations
-            // arrive: a decoration that disappears rather than lags is what
-            // makes the right answer obvious.
-            self.scene.rebind_sized(size.0, size.1, scale)?;
-            self.size = size;
-            // The compositor's side of the dmabuf is a separate import of a
-            // genuinely different buffer, so the texture in hand names the old
-            // one and nothing in the new one is the old one's.
-            self.backing = Backing::Gpu(None);
-            self.damage.reset();
-        } else {
-            // Only the ratio can have moved; the pixel size is the buffer's and
-            // `solium_qml_scene_resize` refuses to change it.
-            self.scene.resize(size.0, size.1, scale);
-        }
-        self.scene.render_gpu()
-    }
 }
 
 /// One scene of the given pixel size, on whichever path Qt came up on.
 ///
-/// Not a preference. Qt fixes its scene graph inside `QGuiApplication` and a
-/// host that came up on one backend refuses scenes of the other kind, so this
-/// reads what Qt did rather than deciding anything.
+/// Delegates, and stays here only to carry the shell's properties: the choice
+/// itself belongs to [`qml::Scene::for_host`], because it is the same choice
+/// the window frames and the pointer have to make and three modules each making
+/// it for themselves is the bug that task fixed.
 fn build(source: &Path, properties: &str, width: i32, height: i32) -> Result<qml::Scene> {
-    if qml::on_gpu() {
-        qml::Scene::gpu_sized(source, width, height, Some(properties))
-    } else {
-        qml::Scene::with_properties(source, width, height, Some(properties))
-    }
-}
-
-/// Put the compositor's EGL context back after Qt has had the thread.
-///
-/// `render_gpu` leaves Qt's context on the thread and building or freeing a
-/// scene leaves none, so after any of them the thread is not in a state this
-/// file can make an EGL call in.
-///
-/// Only *this* file, and that distinction is the whole reason this exists as a
-/// deliberate call rather than something the renderer handles. Every entry
-/// point on `GlesRenderer` itself re-binds its context, so between frames an
-/// empty thread costs it one `eglMakeCurrent` and nothing else — a live
-/// `GlesFrame` is the exception, and `qml::no_frame_in_flight` is where that is
-/// spelled out and enforced. What the renderer cannot cover either way is a
-/// call that is not smithay's, and the very next thing here is exactly that:
-/// `EGLFence::import` is an `eglCreateSync` against our display, and it needs a
-/// current context nobody else is going to make for it.
-///
-/// `EGLContext::make_current` is the API. There is no `bind_context`.
-///
-/// This has a matching half on the other side, and neither works alone. An
-/// `eglMakeCurrent` is invisible to Qt — it keeps its own thread-local record of
-/// which context is current — so once this has run, Qt believes it still has the
-/// thread and skips the `makeCurrent` its next call needs. On a render that
-/// draws the frame into our context and leaves the buffer empty; on a *teardown*
-/// it deletes Qt's GL object names out of our context, which are our objects.
-/// See `clear_stale_current_context` in `qml/host.cpp`, which is what makes the
-/// second frame draw and the first free safe.
-#[expect(unsafe_code, reason = "restoring our EGL context after Qt")]
-fn restore(renderer: &GlesRenderer) -> Result<()> {
-    // SAFETY: called on the thread that owns this context, with no other
-    // context of ours in use on it. What makes it unsafe is that the context
-    // could have been destroyed; Qt has its own and does not touch this one.
-    unsafe { renderer.egl_context().make_current() }
-        .map_err(|err| anyhow!("making the compositor's EGL context current again: {err}"))
-}
-
-/// Wait for Qt's frame to land before sampling the buffer it landed in.
-///
-/// `Renderer::wait` takes a `SyncPoint` and not a raw fd, so the fence is
-/// imported first — `EGLFence::import` is the only constructor that takes a
-/// native fence fd. Smithay then inserts it into our context if it can and
-/// blocks the thread on it if it cannot, so a driver with no server-side wait
-/// costs a stall rather than correctness.
-fn wait_for(renderer: &mut GlesRenderer, fence: OwnedFd) -> Result<()> {
-    let imported = {
-        let display = renderer.egl_context().display();
-        EGLFence::import(display, fence).map_err(|err| anyhow!("importing Qt's fence: {err}"))?
-    };
-    renderer
-        .wait(&SyncPoint::from(imported))
-        .map_err(|err| anyhow!("waiting on Qt's fence: {err}"))
+    qml::Scene::for_host(source, width, height, Some(properties))
 }
 
 /// The newest modification time anywhere the shell's QML lives.

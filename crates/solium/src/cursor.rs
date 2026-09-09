@@ -18,18 +18,24 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            ImportMem, Renderer,
             element::{
                 Kind,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
             },
+            gles::GlesRenderer,
         },
     },
     input::pointer::CursorImageStatus,
     utils::{Logical, Point, Rectangle, Transform},
 };
 
-use crate::qml;
+use crate::{
+    qml::{
+        self,
+        paint::{Gpu, Placement},
+    },
+    render::Element,
+};
 
 /// How big the cursor image is, in logical pixels.
 const SIZE: i32 = 24;
@@ -42,24 +48,56 @@ const SIZE: i32 = 24;
 /// almost impossible to see in a screenshot.
 const HOTSPOT: (i32, i32) = (0, 0);
 
+/// How a rasterised pointer reaches the screen.
+///
+/// Not a preference, and not this module's decision: Qt fixes its scene graph
+/// for the life of the process and a host that came up on one backend refuses
+/// scenes of the other kind, so this follows `qml::on_gpu` — see
+/// [`qml::Scene::for_host`], which is where it is actually decided.
+#[derive(Debug)]
+enum Backing {
+    /// Rasterised on the CPU and uploaded. The scale is the one the buffer
+    /// currently holds, so moving the pointer between monitors at different
+    /// scales rasterises again rather than stretching.
+    Memory {
+        buffer: Option<MemoryRenderBuffer>,
+        scale: f64,
+    },
+    /// Drawn by Qt into a dmabuf we allocated, which the compositor samples.
+    /// A scale change is a new buffer, which [`Gpu`] handles by rebinding.
+    Gpu(Gpu),
+}
+
 /// Our own pointer, rasterised once and reused.
 #[derive(Debug)]
 pub(crate) struct Cursor {
     scene: qml::Scene,
-    buffer: Option<MemoryRenderBuffer>,
-    /// The scale the buffer currently holds, so moving the pointer between
-    /// monitors at different scales rasterises again rather than stretching.
-    scale: f64,
+    backing: Backing,
 }
 
 impl Cursor {
     pub(crate) fn new() -> Result<Self> {
         qml::start()?;
-        let scene = qml::Scene::new(&qml_path(), SIZE, SIZE)?;
+        // `SIZE` square to begin with, which at 1x is also the size it stays.
+        // It is *not* a scene that is never resized, whatever its buffer being
+        // one picture might suggest: 24 is 24 *logical* pixels, so the pointer
+        // crossing onto a 2x monitor needs a 48-pixel one and the GPU path
+        // rebinds onto a new buffer to get it. See `Cursor::element`.
+        let scene = qml::Scene::for_host(&qml_path(), SIZE, SIZE, None)?;
         Ok(Self {
             scene,
-            buffer: None,
-            scale: 1.0,
+            backing: if qml::on_gpu() {
+                // The size the scene really is, unlike the shell surfaces:
+                // there is nothing to discover about a pointer's size, so it is
+                // allocated right the first time and only a scale change moves
+                // it.
+                Backing::Gpu(Gpu::new((SIZE, SIZE)))
+            } else {
+                Backing::Memory {
+                    buffer: None,
+                    scale: 1.0,
+                }
+            },
         })
     }
 
@@ -68,16 +106,17 @@ impl Cursor {
     /// `Kind::Cursor` is not decoration: it is what lets the DRM backend put
     /// this on the hardware cursor plane, which moves the pointer without
     /// redrawing the screen behind it.
-    pub(crate) fn element<R>(
+    ///
+    /// Concrete on `GlesRenderer` rather than generic since the GPU path
+    /// arrived, for the reason `ShellSurface::element` gives: taking the
+    /// thread's EGL context back off Qt is `EGLContext::make_current`, and
+    /// nothing on the `Renderer` traits says where the context is.
+    pub(crate) fn element(
         &mut self,
-        renderer: &mut R,
+        renderer: &mut GlesRenderer,
         location: Point<f64, Logical>,
         scale: f64,
-    ) -> Option<MemoryRenderBufferRenderElement<R>>
-    where
-        R: Renderer + ImportMem,
-        R::TextureId: Send + Clone + 'static,
-    {
+    ) -> Option<Element> {
         // 24 logical pixels, whatever the monitor is. On a 2x display that is
         // a 48-pixel image, and drawing the 24-pixel one there would leave a
         // pointer a quarter of the size it should be -- which on a HiDPI panel
@@ -88,10 +127,53 @@ impl Cursor {
             reason = "a cursor is 24 logical pixels"
         )]
         let edge = ((f64::from(SIZE) * scale).round() as i32).max(1);
-        let rescaled = (self.scale - scale).abs() > f64::EPSILON;
+
+        // Physical, and the hotspot is logical, so both go through the scale.
+        let position = (
+            (location.x - f64::from(HOTSPOT.0)) * scale,
+            (location.y - f64::from(HOTSPOT.1)) * scale,
+        );
+
+        // Two fields of one struct, borrowed at once.
+        let Self { scene, backing } = self;
+        match backing {
+            Backing::Gpu(gpu) => gpu
+                .element(
+                    scene,
+                    renderer,
+                    (edge, edge),
+                    scale,
+                    Placement {
+                        position,
+                        // Mapped down to 24 logical pixels, which the output
+                        // scale takes back up to `edge`.
+                        size: (SIZE, SIZE).into(),
+                        alpha: 1.0,
+                        kind: Kind::Cursor,
+                    },
+                )
+                .map(Element::Screen),
+            Backing::Memory { .. } => self
+                .in_memory(renderer, position, edge, scale)
+                .map(Element::Chrome),
+        }
+    }
+
+    /// The software path, unchanged: Qt rasterises into a `QImage` and the
+    /// compositor uploads it.
+    fn in_memory(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        position: (f64, f64),
+        edge: i32,
+        scale: f64,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let Backing::Memory { scale: held, .. } = self.backing else {
+            return None;
+        };
+        let rescaled = (held - scale).abs() > f64::EPSILON;
         if rescaled {
             self.scene.resize(edge, edge, scale);
-            self.scale = scale;
         }
 
         let rendered = match self.scene.render() {
@@ -103,9 +185,17 @@ impl Cursor {
         };
 
         let size = (edge, edge);
-        let fresh = self.buffer.is_none() || rescaled;
+        let Backing::Memory {
+            buffer: slot,
+            scale: held,
+        } = &mut self.backing
+        else {
+            return None;
+        };
+        *held = scale;
+        let fresh = slot.is_none() || rescaled;
         if fresh {
-            self.buffer = Some(MemoryRenderBuffer::new(
+            *slot = Some(MemoryRenderBuffer::new(
                 Fourcc::Argb8888,
                 size,
                 1,
@@ -113,7 +203,7 @@ impl Cursor {
                 None,
             ));
         }
-        let buffer = self.buffer.as_mut()?;
+        let buffer = slot.as_mut()?;
 
         if rendered.changed || fresh {
             let mut context = buffer.render();
@@ -133,12 +223,6 @@ impl Cursor {
                 return None;
             }
         }
-
-        // Physical, and the hotspot is logical, so both go through the scale.
-        let position = (
-            (location.x - f64::from(HOTSPOT.0)) * scale,
-            (location.y - f64::from(HOTSPOT.1)) * scale,
-        );
 
         // The whole buffer in its own pixels, mapped down to 24 logical
         // pixels, which the output scale takes back up to `edge`.

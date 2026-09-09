@@ -147,7 +147,13 @@ fn check_qml(path: Option<String>) -> Result<()> {
         anyhow::bail!("usage: solium --check-qml <file.qml>");
     };
     qml::start()?;
-    match qml::Scene::new(std::path::Path::new(&path), 400, 200) {
+    // `--check-qml` never starts a GPU host, so this is a software scene by
+    // construction rather than by preference — the one caller in the compositor
+    // that is right not to go through `qml::Scene::for_host`. It loads one file
+    // to say whether it parses and then exits; nothing here is ever drawn, and
+    // asking for a dmabuf would make the answer depend on whether the machine
+    // has a render node rather than on the QML being checked.
+    match qml::Scene::software(std::path::Path::new(&path), 400, 200) {
         Ok(_) => {
             println!("ok");
             Ok(())

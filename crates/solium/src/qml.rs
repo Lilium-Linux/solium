@@ -17,6 +17,7 @@
 //! deliberately narrow: a handle, a render call, some setters. Everything Qt is
 //! behind the C ABI.
 
+pub(crate) mod paint;
 mod target;
 
 use std::{
@@ -664,8 +665,47 @@ pub(crate) struct Scene {
 // belongs to the render thread. Not Send, deliberately: sending it elsewhere
 // would put Qt's scene graph on a thread with no current context.
 impl Scene {
-    /// Load a QML file into a scene of the given size.
-    pub(crate) fn new(qml_path: &Path, width: i32, height: i32) -> Result<Self> {
+    /// One scene of the given pixel size, **on whichever path Qt came up on**.
+    ///
+    /// The constructor every scene in the compositor is built through, and the
+    /// only one that is a decision rather than a preference. Qt fixes its scene
+    /// graph inside `QGuiApplication` and a host that came up on one backend
+    /// refuses scenes of the other kind — `host.cpp` says so in as many words,
+    /// at both constructors — so this reads what Qt did rather than choosing
+    /// anything.
+    ///
+    /// It is here, and public to the crate, because it was not. Three modules
+    /// each picked a constructor for themselves and two of them picked the
+    /// software one, so `SOLIUM_QML_GPU=1` produced a desktop with a wallpaper
+    /// and no window frames and no pointer — every scene refused at
+    /// construction, each refusal logged as its own unrelated failure. A
+    /// fourth caller answering this question for itself is the same bug again.
+    ///
+    /// `main.rs`'s `--check-qml` is the one deliberate exception and says so
+    /// where it sits: it validates a file and exits without ever starting a
+    /// host, so its scene is software by construction and not by preference.
+    pub(crate) fn for_host(
+        qml_path: &Path,
+        width: i32,
+        height: i32,
+        initial: Option<&str>,
+    ) -> Result<Self> {
+        if on_gpu() {
+            Self::gpu_sized(qml_path, width, height, initial)
+        } else {
+            Self::with_properties(qml_path, width, height, initial)
+        }
+    }
+
+    /// Load a QML file into a **software** scene, whatever the host is.
+    ///
+    /// Named for what it is rather than `new`, because `new` reads as the
+    /// normal constructor and this one is an exception with exactly one
+    /// legitimate caller: `main.rs`'s `--check-qml`, which validates a file and
+    /// exits without ever starting a host. Anything that will be *drawn* wants
+    /// [`Scene::for_host`], and on a GPU host this scene would be refused at
+    /// construction — see `host.cpp`'s software constructor.
+    pub(crate) fn software(qml_path: &Path, width: i32, height: i32) -> Result<Self> {
         Self::with_properties(qml_path, width, height, None)
     }
 
@@ -675,7 +715,7 @@ impl Scene {
     /// fact is too late and the component never builds. `initial` is a JSON
     /// object.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
-    pub(crate) fn with_properties(
+    fn with_properties(
         qml_path: &Path,
         width: i32,
         height: i32,
@@ -744,7 +784,7 @@ impl Scene {
     ///
     /// `render_gpu` is the one call that does *not* hold to this, and says so.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
-    pub(crate) fn gpu(
+    fn gpu(
         qml_path: &Path,
         width: i32,
         height: i32,
@@ -826,12 +866,7 @@ impl Scene {
     /// available either.
     ///
     /// Leaves no GL context current on this thread, as [`Scene::gpu`] does.
-    pub(crate) fn gpu_sized(
-        qml_path: &Path,
-        width: i32,
-        height: i32,
-        initial: Option<&str>,
-    ) -> Result<Self> {
+    fn gpu_sized(qml_path: &Path, width: i32, height: i32, initial: Option<&str>) -> Result<Self> {
         let gbm = allocator().ok_or_else(|| {
             anyhow!("this backend has no GBM device, so it cannot render QML on the GPU")
         })?;
@@ -857,7 +892,7 @@ impl Scene {
     /// freeing one do — the host takes the thread for the import and gives it
     /// back. So this is subject to [`no_frame_in_flight`], asserted here.
     #[expect(unsafe_code, reason = "handing Qt a buffer we allocated")]
-    pub(crate) fn rebind(
+    fn rebind(
         &mut self,
         target: target::Target,
         width: i32,
@@ -920,7 +955,7 @@ impl Scene {
     /// [`Scene::gpu_sized`] stands in for [`Scene::gpu`]. A caller that wants a
     /// differently sized scene has no business knowing what GBM is — see
     /// `ALLOCATOR`.
-    pub(crate) fn rebind_sized(&mut self, width: i32, height: i32, scale: f64) -> Result<()> {
+    fn rebind_sized(&mut self, width: i32, height: i32, scale: f64) -> Result<()> {
         let gbm = allocator().ok_or_else(|| {
             anyhow!("this backend has no GBM device, so it cannot resize a GPU scene")
         })?;
@@ -934,7 +969,7 @@ impl Scene {
     /// out: the scene owns the buffer, and the arrangement that makes the whole
     /// path safe is that the thing being read cannot outlive the thing drawing
     /// into it.
-    pub(crate) fn buffer(&self) -> Option<&Dmabuf> {
+    fn buffer(&self) -> Option<&Dmabuf> {
         self.target.as_ref().map(|target| &target.dmabuf)
     }
 
@@ -953,7 +988,7 @@ impl Scene {
     /// has to make it current again before the next GL call, or that call fails
     /// somewhere with nothing to do with this one.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
-    pub(crate) fn render_gpu(&mut self) -> Result<Option<Option<OwnedFd>>> {
+    fn render_gpu(&mut self) -> Result<Option<Option<OwnedFd>>> {
         if self.target.is_none() {
             // The host would refuse this too, with a warning. Refusing here
             // says which scene, and says it as an error the caller can carry.
