@@ -1,0 +1,28 @@
+[package]
+name    = "wirecheck"
+version = "0.0.0"
+edition = "2024"
+
+[[bin]]
+name = "wirecheck"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_drm",
+    "backend_gbm",
+    "backend_egl",
+    "renderer_gl",
+    "use_system_lib",
+] }
+
+[build-dependencies]
+cc         = "1"
+pkg-config = "0.3"
+
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 1

@@ -1,5 +1,10 @@
 [workspace]
 members = ["crates/animation", "crates/layout", "crates/solium", "crates/wl-probe"]
+# dev/wirecheck is a hardware harness, not part of the compositor: it needs a
+# GPU and a Qt installation at *run* time and is driven by dev/gate.sh on its
+# own. Excluded so an ordinary `cargo build` at the root does not try to build
+# it, and so its dependency tree stays out of the workspace lockfile.
+exclude = ["dev/wirecheck"]
 resolver = "3"
 
 [workspace.package]
