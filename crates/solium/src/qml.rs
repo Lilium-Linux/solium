@@ -179,9 +179,16 @@ fn allocator() -> Option<&'static GbmDevice<DrmDeviceFd>> {
 
 // How many `GlesFrame`s are alive on this thread.
 //
-// A counter and not a flag because the offscreen pass nests: a warped window is
-// drawn into its own texture, and on the nested backend a whole monitor is
-// drawn into one on top of that.
+// A counter and not a flag, and not because frames nest — they deliberately do
+// not. Every render path in this compositor builds its elements before it binds
+// anything (`offscreen.rs`, `winit.rs`, `tty.rs`, `screencopy.rs` all do), which
+// is the convention this whole invariant rests on.
+//
+// It is a counter because the five marks are five independent RAII guards, and
+// a boolean would be cleared by whichever of them dropped first. Should two ever
+// overlap — which is the situation worth catching, not one to assume away — a
+// flag would go false while a frame was still live and the assertion would stop
+// asserting. A counter is wrong only if it is unbalanced, which `Drop` prevents.
 thread_local! {
     static FRAMES_IN_FLIGHT: Cell<u32> = const { Cell::new(0) };
 }
@@ -245,13 +252,22 @@ pub(crate) fn no_frame_in_flight(what: &str) {
     if live == 0 {
         return;
     }
-    tracing::error!(
-        what,
-        live,
-        "a QML scene was touched inside a live GlesFrame: the compositor's \
-         context is about to be taken off this thread mid-frame, and the GL \
-         calls left in the frame will silently do nothing"
-    );
+    // Once per process. The structural violation this catches would otherwise
+    // be a line per scene, per output, per frame, for as long as the session
+    // lasts — and `debug_assert_eq!` below is compiled out of a release build,
+    // so in release there is nothing to stop the flood. One line says
+    // everything a second would; the point is that the failure is not silent,
+    // not that it is repeated.
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::error!(
+            what,
+            live,
+            "a QML scene was touched inside a live GlesFrame: the compositor's \
+             context is about to be taken off this thread mid-frame, and the GL \
+             calls left in the frame will silently do nothing. Said once."
+        );
+    }
     debug_assert_eq!(
         live, 0,
         "{what} ran inside a live GlesFrame; see qml::no_frame_in_flight"
