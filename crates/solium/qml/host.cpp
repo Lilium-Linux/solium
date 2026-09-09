@@ -728,12 +728,23 @@ static void mirror_for_the_compositor(QQuickRenderTarget *target)
  * against the display that issued it, and the stricter of the two old tests is
  * the one the texture delete needs. Nothing that was safe under the looser test
  * is unsafe under this one.
+ *
+ * Split in two so that the rule has one owner even when the pair being asked
+ * about is not the one currently recorded on the scene. solium_qml_scene_rebind
+ * disposes of the *previous* texture after the import has already overwritten
+ * the recording with the new one, and asking the scene there would compare the
+ * old name against the new record — which is true by construction and answers
+ * nothing. It asks about the pair it saved instead, through the same rule.
  */
+static bool context_is_current(EGLDisplay display, EGLContext context)
+{
+    return context != EGL_NO_CONTEXT && display != EGL_NO_DISPLAY &&
+        eglGetCurrentContext() == context && eglGetCurrentDisplay() == display;
+}
+
 static bool scene_context_is_current(const SoliumQmlScene *scene)
 {
-    return scene->egl_context != EGL_NO_CONTEXT && scene->egl_display != EGL_NO_DISPLAY &&
-        eglGetCurrentContext() == scene->egl_context &&
-        eglGetCurrentDisplay() == scene->egl_display;
+    return context_is_current(scene->egl_display, scene->egl_context);
 }
 
 /*
@@ -1014,8 +1025,8 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
     //     is the only case where an explicit delete is possible or needed.
     //
     //   * Nothing current. What most frees look like: after a render,
-    //     clear_stale_current_context released the thread; after a resize
-    //     rebuild, release_the_thread did it when the *new* scene was built.
+    //     clear_stale_current_context released the thread; after a build or a
+    //     rebind, release_the_thread did, that being their postcondition.
     //
     //   * A third context current — in practice the compositor's — with Qt
     //     believing nothing is. Reached whenever some *other* scene's teardown
@@ -1218,8 +1229,18 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
     // new buffer at the *old* size, and nothing is obliged to notice: an fd
     // carries no dimensions, so EGL_WIDTH and EGL_HEIGHT are the only thing
     // that says how many rows the image has.
+    //
+    // The display and context are saved for the same reason and it is not
+    // symmetry: a successful import overwrites scene->egl_display and
+    // scene->egl_context with the recording it just took, and both releases
+    // below run after that. Asking the *scene* which context its texture is in
+    // would then be comparing the old name against the new record — true by
+    // construction, which is the shape of answer this file has been wrong with
+    // three times. The old pair is what the old name belongs to.
     const EGLImageKHR previous_image = scene->egl_image;
     const GLuint previous_texture = scene->texture;
+    const EGLDisplay previous_display = scene->egl_display;
+    const EGLContext previous_context = scene->egl_context;
     const int previous_width = scene->width;
     const int previous_height = scene->height;
     scene->egl_image = EGL_NO_IMAGE_KHR;
@@ -1238,25 +1259,28 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
         return false;
     }
 
-    // The old pair, now that there is a new one. The EGLImage belongs to a
-    // display and the texture to a context — the same split solium_qml_scene_
-    // free explains at length, and for the same reason: a GL name deleted
-    // against the wrong context destroys whatever that context calls N.
+    // The old pair, now that there is a new one, and released against the
+    // display and context *they* belong to rather than the ones just recorded.
+    // The EGLImage belongs to a display and the texture to a context — the same
+    // split solium_qml_scene_free explains at length, and for the same reason:
+    // a GL name deleted against the wrong context destroys whatever that
+    // context calls N.
     //
-    // scene_context_is_current is true by construction here, take_the_thread
-    // having just succeeded. It is asked anyway rather than assumed, because
-    // "which context is this name in" is the question this file has one owner
-    // for, and a new call site that answers it by reasoning is how the third
-    // one went wrong.
-    if (previous_image != EGL_NO_IMAGE_KHR && scene->egl_display != EGL_NO_DISPLAY) {
+    // The answer is yes today whichever pair is asked about, because a scene's
+    // context can only change when QQuickRenderControl is destroyed and that
+    // takes the scene with it. Asked about the saved pair anyway: "which
+    // context is this name in" is a question this file has one owner for, and
+    // a call site that gets the right answer from the wrong record is exactly
+    // how the third one went wrong.
+    if (previous_image != EGL_NO_IMAGE_KHR && previous_display != EGL_NO_DISPLAY) {
         static PFNEGLDESTROYIMAGEKHRPROC destroy_image =
             reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
                 eglGetProcAddress("eglDestroyImageKHR"));
         if (destroy_image != nullptr) {
-            destroy_image(scene->egl_display, previous_image);
+            destroy_image(previous_display, previous_image);
         }
     }
-    if (previous_texture != 0 && scene_context_is_current(scene)) {
+    if (previous_texture != 0 && context_is_current(previous_display, previous_context)) {
         QOpenGLContext *context = QOpenGLContext::currentContext();
         if (context != nullptr) {
             GLuint doomed = previous_texture;

@@ -463,10 +463,23 @@ impl ShellSurface {
             // resizing scene ever advanced. That was a correctness bug wearing
             // a performance bug's clothes.
             //
-            // A rebind that fails leaves the scene on the buffer it already
-            // has, so a surface whose resize failed keeps drawing last frame's
-            // picture rather than nothing at all — the same property the
-            // rebuild had, for the same reason.
+            // A failed rebind leaves the *scene* whole and still on the buffer
+            // it already has — that is the host's contract, and it is why the
+            // import runs before the release. It is not what this `?` does.
+            //
+            // The error propagates, `on_gpu` logs it and returns `None`, and
+            // the surface contributes no element at all. Not for one frame,
+            // either: `self.size` is assigned only after the rebind succeeds,
+            // so the next frame attempts the same thing and fails the same way.
+            // A rebind that keeps failing is an *invisible* surface, not a
+            // frozen one — and the rebuild this replaced was no different.
+            //
+            // Frozen would be better and it is not one line. The texture in
+            // hand is sized for the old buffer, so drawing it means deciding
+            // what a stale-sized element does inside the new geometry. That is
+            // a behaviour change, and it belongs to the task where decorations
+            // arrive: a decoration that disappears rather than lags is what
+            // makes the right answer obvious.
             self.scene.rebind_sized(size.0, size.1, scale)?;
             self.size = size;
             // The compositor's side of the dmabuf is a separate import of a

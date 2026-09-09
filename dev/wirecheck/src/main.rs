@@ -919,21 +919,37 @@ fn main() -> Result<()> {
         // below is the case for that -- but so C-1 starts from an undamaged
         // baseline: its census is taken after this block, and anything wrecked
         // here would be invisible to it.
-        restore(&renderer)?;
-        let live_before_free = gl_names(&mut renderer, 64)?;
-        unsafe { solium_qml_scene_free(counting) };
-        restore(&renderer)?;
-        let live_after_free = gl_names(&mut renderer, 64)?;
-        let lost: Vec<_> = live_before_free
-            .iter()
-            .filter(|it| !live_after_free.contains(it))
-            .collect();
-        println!("  DESTROYED in our context by freeing the resized scene: {lost:?}");
-        if !lost.is_empty() {
-            return Err(anyhow!(
-                "freeing the resized scene destroyed {} of the compositor's GL objects",
-                lost.len()
-            ));
+        //
+        // Which is exactly why it has to be skippable. This free is C-1's own
+        // ordering, so under the teardown control it reaches the same defect
+        // first and the run stops here -- and then C-1's census, its
+        // precondition assertion and its guard textures only ever execute in
+        // the *passing* state, where a regression in the instrument itself
+        // would be invisible. WIRECHECK_KEEP_RESIZED_SCENE leaves this scene
+        // alive to the end of the process so that control reaches C-1. Nothing
+        // is leaked past the run, and Qt keeps its own reference to the buffer.
+        if std::env::var_os("WIRECHECK_KEEP_RESIZED_SCENE").is_some() {
+            println!(
+                "  !! WIRECHECK_KEEP_RESIZED_SCENE: left alive, so C-1 below runs its own \
+                 instrument under the teardown control"
+            );
+        } else {
+            restore(&renderer)?;
+            let live_before_free = gl_names(&mut renderer, 64)?;
+            unsafe { solium_qml_scene_free(counting) };
+            restore(&renderer)?;
+            let live_after_free = gl_names(&mut renderer, 64)?;
+            let lost: Vec<_> = live_before_free
+                .iter()
+                .filter(|it| !live_after_free.contains(it))
+                .collect();
+            println!("  DESTROYED in our context by freeing the resized scene: {lost:?}");
+            if !lost.is_empty() {
+                return Err(anyhow!(
+                    "freeing the resized scene destroyed {} of the compositor's GL objects",
+                    lost.len()
+                ));
+            }
         }
     }
 
