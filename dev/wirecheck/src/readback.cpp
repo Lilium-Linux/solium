@@ -22,7 +22,7 @@
 
 static constexpr unsigned long long kModifierInvalid = (1ULL << 56) - 1;
 
-extern "C" int join_readback(int dmabuf_fd, int w, int h, int stride,
+extern "C" int join_readback(const char *node, int dmabuf_fd, int w, int h, int stride,
                              unsigned long long modifier, unsigned int fourcc,
                              unsigned char *out)
 {
@@ -37,8 +37,11 @@ extern "C" int join_readback(int dmabuf_fd, int w, int h, int stride,
         return -1;
     }
 
-    int drm = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
-    if (drm < 0) { printf("  readback: no render node\n"); return -2; }
+    // The node the harness was pointed at, not a guess. Hardcoding renderD128
+    // here while main.rs honoured argv[1] meant that on a box enumerating
+    // differently this control quietly failed and the run still passed.
+    int drm = open(node != nullptr ? node : "/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    if (drm < 0) { printf("  readback: cannot open %s\n", node); return -2; }
     gbm_device *gbm = gbm_create_device(drm);
     if (!gbm) { printf("  readback: no gbm device\n"); return -3; }
 
