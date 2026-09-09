@@ -21,17 +21,23 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            ImportMem, Renderer,
             element::{
                 Kind,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
             },
+            gles::GlesRenderer,
         },
     },
     utils::{Buffer as BufferCoords, Logical, Rectangle, Size, Transform},
 };
 
-use crate::qml;
+use crate::{
+    qml::{
+        self,
+        paint::{Gpu, Placement},
+    },
+    render::Element,
+};
 
 /// How tall a window frame is, and so how much of a window's slot is not
 /// client area.
@@ -168,6 +174,24 @@ struct Shown {
     pointer_inside: bool,
 }
 
+/// How a rasterised frame reaches the screen.
+///
+/// Not a preference, and not this module's decision: Qt fixes its scene graph
+/// for the life of the process and a host that came up on one backend refuses
+/// scenes of the other kind, so this follows `qml::on_gpu` — see
+/// [`qml::Scene::for_host`], which is where it is actually decided.
+#[derive(Debug)]
+enum Backing {
+    /// Rasterised on the CPU into a shared-memory buffer the compositor
+    /// uploads, band by band.
+    Memory(Option<MemoryRenderBuffer>),
+    /// Drawn by Qt into a dmabuf we allocated, which the compositor samples. A
+    /// window resize is a new buffer, which [`Gpu`] answers by rebinding rather
+    /// than by rebuilding the scene: a frame rebuilt on every frame of a resize
+    /// is a frame whose own animations never advance.
+    Gpu(Gpu),
+}
+
 /// One window's frame.
 #[derive(Debug)]
 pub(crate) struct Decoration {
@@ -181,7 +205,11 @@ pub(crate) struct Decoration {
     /// client -- a bar floating above the window, a glow across it -- has to
     /// have all of it copied, because anything in it may have moved.
     overlay: bool,
-    buffer: Option<MemoryRenderBuffer>,
+    backing: Backing,
+    /// The device-pixel size the frame was last drawn at.
+    ///
+    /// Kept on both paths, because `client_size` is asked for it while a style
+    /// is being swapped and the answer must not depend on which path this is.
     buffer_size: (i32, i32),
     shown: Shown,
     /// Where the window was before it was maximised. `Some` means maximised —
@@ -194,7 +222,7 @@ impl Decoration {
         qml::start()?;
         // Built at the client's size first, because what it reserves is a
         // property of the scene and there is no scene to ask until it exists.
-        let mut scene = qml::Scene::new(path, width.max(1), height.max(1))?;
+        let mut scene = qml::Scene::for_host(path, width.max(1), height.max(1), None)?;
         let insets = Insets {
             top: scene.get_int("insetTop").max(0),
             right: scene.get_int("insetRight").max(0),
@@ -204,22 +232,41 @@ impl Decoration {
         // A frame with nothing reserved has nowhere else to paint but over
         // the client, so it is an overlay whether it says so or not.
         let overlay = scene.get_bool("overlay") || !insets.any();
-        // ...and then grown to the whole outer rect, which is what it draws:
-        // the client area within it is simply left transparent.
-        // At 1x, because the insets were just read from a scene laid out that
-        // way and the first `frame` call resizes it to the monitor it lands on
-        // anyway. The insets themselves are logical and do not change with the
-        // scale, which is the point of laying QML out in logical units.
-        scene.resize(
-            (width + insets.horizontal()).max(1),
-            (height + insets.vertical()).max(1),
-            1.0,
-        );
+        let on_gpu = qml::on_gpu();
+        if !on_gpu {
+            // ...and then grown to the whole outer rect, which is what it
+            // draws: the client area within it is simply left transparent.
+            // At 1x, because the insets were just read from a scene laid out
+            // that way and the first `frame` call resizes it to the monitor it
+            // lands on anyway. The insets themselves are logical and do not
+            // change with the scale, which is the point of laying QML out in
+            // logical units.
+            //
+            // Skipped entirely on the GPU path, and not as an optimisation: a
+            // GPU scene's pixel size *is* its buffer's, so the host refuses to
+            // change it here and would say so in a warning for every window
+            // that ever opened. The first `frame` call rebinds the scene onto a
+            // buffer of the outer rect in the pixels of the monitor it landed
+            // on — a size that is not known in here anyway.
+            scene.resize(
+                (width + insets.horizontal()).max(1),
+                (height + insets.vertical()).max(1),
+                1.0,
+            );
+        }
         Ok(Self {
             scene,
             insets,
             overlay,
-            buffer: None,
+            backing: if on_gpu {
+                // `(0, 0)` and not the client size the scene really is, so the
+                // first frame takes the rebind branch. What this has to end up
+                // on is the *outer* rect at the monitor's scale, and both of
+                // those arrive with the first draw.
+                Backing::Gpu(Gpu::new((0, 0)))
+            } else {
+                Backing::Memory(None)
+            },
             buffer_size: (0, 0),
             shown: Shown::default(),
             restore: None,
@@ -272,19 +319,20 @@ impl Decoration {
     /// that stayed perfectly solid until the pane was retired, which is a bar
     /// hanging in the air with nothing under it at the exact moment the user is
     /// least willing to forgive one.
-    pub(crate) fn frame<R>(
+    ///
+    /// Concrete on `GlesRenderer` rather than generic since the GPU path
+    /// arrived, for the reason `ShellSurface::element` gives: taking the
+    /// thread's EGL context back off Qt is `EGLContext::make_current`, and
+    /// nothing on the `Renderer` traits says where the context is.
+    pub(crate) fn frame(
         &mut self,
-        renderer: &mut R,
+        renderer: &mut GlesRenderer,
         rect: Rectangle<f64, Logical>,
         outer: Size<i32, Logical>,
         look: &Look<'_>,
         alpha: f32,
         scale: f64,
-    ) -> Option<MemoryRenderBufferRenderElement<R>>
-    where
-        R: Renderer + ImportMem,
-        R::TextureId: Send + Clone + 'static,
-    {
+    ) -> Option<Element> {
         let width = outer.w.max(1);
         let height = outer.h.max(1);
         // QML rasterises in device pixels, so on a 2x monitor a frame drawn at
@@ -301,69 +349,144 @@ impl Decoration {
             let scaled = (f64::from(logical) * scale).round() as i32;
             scaled.max(1)
         };
-        let (buffer_width, buffer_height) = (pixels(width), pixels(height));
-        self.scene.resize(buffer_width, buffer_height, scale);
+        let size = (pixels(width), pixels(height));
 
-        // Compared field by field rather than by building a `Shown`: this runs
-        // for every window of every frame, and the title is the one thing here
-        // that allocates.
+        // Before anything renders, on either path.
+        self.tell(look, width, height);
+
+        let resized = self.buffer_size != size;
+        self.buffer_size = size;
+
+        // The drawn size scales the frame with the window it belongs to.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a frame is at most an output wide"
+        )]
+        let drawn: Size<i32, Logical> = (
+            rect.size.w.round() as i32,
+            rect.size.h.round().max(1.0) as i32,
+        )
+            .into();
+
+        // Physical, which is what the parameter has always been: at 1x a
+        // logical position was the same number and it did not matter.
+        let position = (rect.loc.x * scale, rect.loc.y * scale);
+
+        // Two fields of one struct, borrowed at once: the scene is what
+        // renders and the backing is what holds the result.
+        let Self { scene, backing, .. } = self;
+        match backing {
+            // A window resize is a *rebind* here and not a rebuild, which is
+            // the whole of Task 6: a decoration is sized from an animating
+            // rectangle for the length of every window animation, and a scene
+            // rebuilt once per frame is a scene whose own animations restart
+            // once per frame and therefore never advance. `Gpu` does it.
+            Backing::Gpu(gpu) => gpu
+                .element(
+                    scene,
+                    renderer,
+                    size,
+                    scale,
+                    Placement {
+                        position,
+                        size: drawn,
+                        alpha,
+                        kind: Kind::Unspecified,
+                    },
+                )
+                .map(Element::Screen),
+            Backing::Memory(_) => self
+                .in_memory(renderer, size, resized, position, drawn, alpha, scale)
+                .map(Element::Chrome),
+        }
+    }
+
+    /// Hand the frame everything it is told about its window.
+    ///
+    /// Compared field by field rather than by building a `Shown`: this runs for
+    /// every window of every frame, and the title is the one thing here that
+    /// allocates.
+    fn tell(&mut self, look: &Look<'_>, width: i32, height: i32) {
         let Look {
             title,
             focused,
             pointer_inside,
         } = *look;
-        if self.shown.title != title
-            || self.shown.focused != focused
-            || self.shown.pointer_inside != pointer_inside
+        if self.shown.title == title
+            && self.shown.focused == focused
+            && self.shown.pointer_inside == pointer_inside
         {
-            self.scene.set_string("title", title);
-            self.scene.set_bool("focused", focused);
-            self.scene.set_bool("pointerInside", pointer_inside);
-            // The client's own size, so a decoration can place things against
-            // the window rather than against itself.
-            self.scene
-                .set_int("contentWidth", width - self.insets.horizontal());
-            self.scene
-                .set_int("contentHeight", height - self.insets.vertical());
-            self.shown.title.clear();
-            self.shown.title.push_str(title);
-            self.shown.focused = focused;
-            self.shown.pointer_inside = pointer_inside;
+            return;
         }
+        self.scene.set_string("title", title);
+        self.scene.set_bool("focused", focused);
+        self.scene.set_bool("pointerInside", pointer_inside);
+        // The client's own size, so a decoration can place things against
+        // the window rather than against itself.
+        self.scene
+            .set_int("contentWidth", width - self.insets.horizontal());
+        self.scene
+            .set_int("contentHeight", height - self.insets.vertical());
+        self.shown.title.clear();
+        self.shown.title.push_str(title);
+        self.shown.focused = focused;
+        self.shown.pointer_inside = pointer_inside;
+    }
 
-        let size = (buffer_width, buffer_height);
-        let resized = self.buffer_size != size;
+    /// The software path, unchanged: Qt rasterises into a `QImage` and the
+    /// compositor uploads the bands of it that can have changed.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the placement and the size are the caller's, computed once for both paths"
+    )]
+    fn in_memory(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        size: (i32, i32),
+        resized: bool,
+        position: (f64, f64),
+        drawn: Size<i32, Logical>,
+        alpha: f32,
+        scale: f64,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        self.scene.resize(size.0, size.1, scale);
 
         // The buffer is made *before* the scene is rendered, so the render can
         // be copied straight into it. It used to be the other way round, which
         // meant staging the whole image in a Vec first: a window-sized
         // allocation and copy every frame, 3.9MB of it on an ordinary window,
         // which dwarfed everything else this function does.
-        if self.buffer.is_none() || resized {
-            self.buffer = Some(MemoryRenderBuffer::new(
+        let overlay = self.overlay;
+        let insets = self.insets;
+        let Self {
+            scene,
+            backing: Backing::Memory(slot),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if slot.is_none() || resized {
+            *slot = Some(MemoryRenderBuffer::new(
                 Fourcc::Argb8888,
                 size,
                 1,
                 Transform::Normal,
                 None,
             ));
-            self.buffer_size = size;
         }
 
-        if self.scene.needs_render() || resized {
+        if scene.needs_render() || resized {
             // Only the parts of the frame that can have changed. A titlebar on
             // a 1150x850 window is 4% of it, and the other 96% has nothing in
             // it to copy or upload.
-            let regions = if self.overlay || resized {
+            let regions = if overlay || resized {
                 vec![Rectangle::from_size(size.into())]
             } else {
                 // In buffer pixels, like everything else here: the bands are a
                 // copy optimisation over the image, not a logical rect.
-                self.insets.bands_at(size.0, size.1, scale)
+                insets.bands_at(size.0, size.1, scale)
             };
-            // Split so the scene and the buffer can be borrowed at once: they
-            // are two fields, and the copy needs both.
-            let Self { scene, buffer, .. } = self;
             let rendered = match scene.render() {
                 Ok(rendered) => rendered,
                 Err(err) => {
@@ -372,7 +495,7 @@ impl Decoration {
                 }
             };
             if rendered.changed || resized {
-                let buffer = buffer.as_mut()?;
+                let buffer = slot.as_mut()?;
                 let stride = rendered.stride;
                 let pixels = rendered.pixels;
                 let mut context = buffer.render();
@@ -403,18 +526,7 @@ impl Decoration {
                 }
             }
         }
-        let buffer = self.buffer.as_mut()?;
-
-        // The drawn size scales the frame with the window it belongs to.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a frame is at most an output wide"
-        )]
-        let drawn: Size<i32, Logical> = (
-            rect.size.w.round() as i32,
-            rect.size.h.round().max(1.0) as i32,
-        )
-            .into();
+        let buffer = slot.as_mut()?;
 
         // `src` must be given whenever `size` is. Smithay defaults it to the
         // *drawn* size, which crops the buffer to its top-left corner instead
@@ -424,12 +536,7 @@ impl Decoration {
         //
         // The whole buffer, in its own pixels — the buffer's scale is 1, so
         // its "logical" size is its pixel size.
-        let source =
-            Rectangle::from_size((f64::from(buffer_width), f64::from(buffer_height)).into());
-
-        // Physical, which is what the parameter has always been: at 1x a
-        // logical position was the same number and it did not matter.
-        let position = (rect.loc.x * scale, rect.loc.y * scale);
+        let source = Rectangle::from_size((f64::from(size.0), f64::from(size.1)).into());
 
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
