@@ -21,6 +21,7 @@ pub(crate) mod paint;
 mod target;
 
 use std::{
+    borrow::Cow,
     cell::Cell,
     ffi::{CStr, CString, c_char, c_double, c_int, c_longlong, c_uint, c_ulonglong},
     os::fd::{FromRawFd as _, OwnedFd},
@@ -124,6 +125,116 @@ mod ffi {
             y: c_double,
             pressed: c_int,
         );
+    }
+}
+
+/// The levels `qml/host.h` maps Qt's `QtMsgType` onto.
+///
+/// Ours rather than Qt's, and restated here by hand against the
+/// `SOLIUM_QML_LOG_*` defines in that header. There are four, they are a
+/// severity order, and they are not going to grow; the alternative is a
+/// generated binding for one enum.
+const LOG_DEBUG: c_int = 0;
+const LOG_INFO: c_int = 1;
+const LOG_WARN: c_int = 2;
+const LOG_ERROR: c_int = 3;
+
+/// A string Qt lent us for the length of one message.
+///
+/// `None` for the three a release Qt build leaves null — `file`, `function`,
+/// and any category a hand-built context omitted.
+///
+/// # Safety
+///
+/// `ptr` is null, or points at a NUL-terminated string that stays valid for the
+/// life of the returned value. For a `QMessageLogContext` that is the handler
+/// call and nothing past it, which is why nothing here outlives one.
+#[expect(unsafe_code, reason = "reading a C string the Qt host lent us")]
+unsafe fn borrowed_from_qt<'a>(ptr: *const c_char) -> Option<Cow<'a, str>> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract, discharged by `forward_qt_message` in
+    // `qml/host.cpp` — every pointer it passes is either null or Qt's own.
+    Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy())
+}
+
+/// Qt's entire diagnostic channel, arriving in `tracing`.
+///
+/// The one function in this module that is *called* across the boundary rather
+/// than calling across it. `qml/host.cpp` installs a Qt message handler before
+/// `QGuiApplication` exists and that handler calls this, so QML binding errors,
+/// `console.log`/`console.warn`, and every `qWarning` in Qt and in the host
+/// land in the same log as everything else the compositor says.
+///
+/// Until this existed they landed nowhere anyone would look. Qt's default
+/// handler picks its destination from whether stderr is a console: stderr when
+/// it is, journald when it is not — measured on Fedora's Qt 6.11, both ways.
+/// A TTY session is the first case, so the messages went to the VT the
+/// compositor had just taken, were never in `session.log`, and were never in
+/// the journal either. Four separate silent failures in
+/// `docs/spikes/2026-09-11-ricing-solium.md` inherit from that, three of them
+/// presenting as a white screen.
+///
+/// `category` is carried as a field because it is how a reader tells a QML
+/// binding error from a scene-graph warning, and it costs nothing. `file`,
+/// `line` and `function` are `Option` because a release Qt leaves them empty,
+/// and `tracing` records nothing at all for a `None` — so an ordinary line does
+/// not carry three blank fields to say Qt was built without debug info.
+///
+/// No `target:` override, deliberately: these come out under `solium::qml` like
+/// the rest of this module, so `RUST_LOG=solium=debug` reaches them. Qt's
+/// `QtDebugMsg` — which is where a QML `console.log` arrives — is `debug!`, and
+/// the default filter is `info`, so those need asking for.
+///
+/// Nothing in here may log through anything that could itself reach `qWarning`:
+/// formatting and one macro, and the C++ side holds a per-thread guard behind
+/// that. It may be called from any thread, so nothing here reads a thread-local.
+#[expect(
+    unsafe_code,
+    reason = "the Qt message handler calls this across the C ABI"
+)]
+#[unsafe(no_mangle)]
+extern "C" fn solium_qml_log_from_qt(
+    level: c_int,
+    category: *const c_char,
+    message: *const c_char,
+    file: *const c_char,
+    line: c_int,
+    function: *const c_char,
+) {
+    // SAFETY: `qml/host.cpp`'s `forward_qt_message` passes a QMessageLogContext's
+    // own pointers and the bytes of a QByteArray that outlives the call. All of
+    // them may be null and all of them are read before this returns.
+    let (category, message, file, function) = unsafe {
+        (
+            borrowed_from_qt(category),
+            borrowed_from_qt(message),
+            borrowed_from_qt(file),
+            borrowed_from_qt(function),
+        )
+    };
+    let category = category.unwrap_or(Cow::Borrowed("default"));
+    let message = message.unwrap_or(Cow::Borrowed("(Qt said nothing)"));
+    let file = file.as_deref();
+    let function = function.as_deref();
+    let line = (line > 0).then_some(line);
+
+    macro_rules! forward {
+        ($level:ident) => {
+            tracing::$level!(category = %category, file, line, function, "{message}")
+        };
+    }
+
+    match level {
+        LOG_DEBUG => forward!(debug),
+        LOG_INFO => forward!(info),
+        LOG_ERROR => forward!(error),
+        LOG_WARN => forward!(warn),
+        // A level neither side recognises is this file and `qml/host.h` having
+        // drifted apart. Warn rather than drop: a Qt message is at least a
+        // warning, and the drift is worth seeing.
+        _ => forward!(warn),
     }
 }
 
