@@ -87,6 +87,49 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+/// Qt's diagnostics, for a harness that has no `tracing` in it.
+///
+/// `host.cpp` installs a Qt message handler that calls this, and the compositor
+/// defines it in `crates/solium/src/qml.rs` with one `tracing` macro per level.
+/// Nothing in this binary links that crate, so the symbol has to exist here
+/// too — and it has to *print*, because the render control's entire content is
+/// Qt saying it could not build a render target, and a control whose
+/// diagnostics vanish is a control nobody can read.
+///
+/// The `qt` prefix and the bracketed category are the only difference from what
+/// Qt's own handler used to put on these lines. Nothing in README.md's
+/// expectations reads them: every line quoted there is one this harness prints
+/// about its own assertions.
+#[unsafe(no_mangle)]
+extern "C" fn solium_qml_log_from_qt(
+    level: c_int,
+    category: *const c_char,
+    message: *const c_char,
+    _file: *const c_char,
+    _line: c_int,
+    _function: *const c_char,
+) {
+    // Borrowed for the call and no longer, exactly as host.h says.
+    let borrowed = |ptr: *const c_char| -> String {
+        if ptr.is_null() {
+            return String::new();
+        }
+        // SAFETY: host.cpp passes a QMessageLogContext's own pointers, or the
+        // bytes of a QByteArray that outlives the call.
+        unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    // The SOLIUM_QML_LOG_* values from crates/solium/qml/host.h.
+    let name = match level {
+        0 => "debug",
+        1 => "info",
+        3 => "error",
+        _ => "warn",
+    };
+    eprintln!("qt {name} [{}]: {}", borrowed(category), borrowed(message));
+}
+
 /// This checkout, from where the binary was compiled rather than from where it
 /// happens to be run.
 fn repo() -> std::path::PathBuf {
@@ -120,8 +163,15 @@ fn keep_qt_off_the_hardware(node: &str) -> Result<()> {
         std::env::set_var("QT_QPA_EGLFS_KMS_NO_EVENT_READER_THREAD", "1");
         std::env::set_var("QT_QPA_NO_SIGNAL_HANDLER", "1");
         std::env::set_var("QT_QPA_ENABLE_TERMINAL_KEYBOARD", "1");
-        // Qt's warnings go to journald on Fedora otherwise, which is the whole
-        // diagnostic half of host.cpp invisible. See dev/README.md.
+        // Qt's warnings went to journald on Fedora otherwise, which was the
+        // whole diagnostic half of host.cpp invisible. See dev/README.md.
+        //
+        // Redundant now that host.cpp installs its own message handler and
+        // `solium_qml_log_from_qt` above prints them: Qt's default handler is
+        // the only thing this variable steers, and nothing reaches it any more.
+        // Kept because it covers the window before the handler is installed,
+        // and because a harness that stops printing Qt's own words is a thing
+        // this project should have to decide on rather than inherit.
         std::env::set_var("QT_FORCE_STDERR_LOGGING", "1");
     }
     Ok(())

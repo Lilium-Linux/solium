@@ -54,6 +54,10 @@
 #include <QtCore/QAbstractAnimation>
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
+// qInstallMessageHandler, QMessageLogContext and QtMsgType. Reached through
+// QtGlobal by everything else in here that calls qWarning; named explicitly
+// because this file now *installs* the handler rather than only feeding it.
+#include <QtCore/QtMessageHandler>
 #include <QtCore/QSize>
 #include <QtCore/QUrl>
 #include <QtCore/QVariant>
@@ -218,6 +222,93 @@ struct SoliumQmlScene
 };
 
 /*
+ * Every Qt message, on its way to the compositor's log.
+ *
+ * Qt's own levels onto ours. Nothing else is decided here: the Rust side does
+ * the formatting and calls one `tracing` macro, which is the whole of what a
+ * message handler is allowed to do — see the re-entrancy note below.
+ */
+static void forward_qt_message(QtMsgType type, const QMessageLogContext &context,
+                               const QString &message)
+{
+    /* One message at a time, per thread.
+     *
+     * A handler that logs through anything that can itself log is a warning
+     * that warns about itself, and the recursion is unbounded: it takes the
+     * session rather than producing a line. Nothing on the Rust side can reach
+     * qWarning today — it formats and calls a macro — but "today" is the part
+     * that stops being true, and dropping the inner message is the only exit
+     * that does not need the outer one to finish first.
+     *
+     * Per thread rather than global because qInstallMessageHandler's contract
+     * says the handler may be called from any thread, and a global flag would
+     * silently swallow a second thread's messages rather than a loop. */
+    static thread_local bool forwarding = false;
+    if (forwarding) {
+        return;
+    }
+    forwarding = true;
+
+    int level = SOLIUM_QML_LOG_WARN;
+    switch (type) {
+    case QtDebugMsg:
+        level = SOLIUM_QML_LOG_DEBUG;
+        break;
+    case QtInfoMsg:
+        level = SOLIUM_QML_LOG_INFO;
+        break;
+    case QtWarningMsg:
+        level = SOLIUM_QML_LOG_WARN;
+        break;
+    case QtCriticalMsg:
+    /* Qt aborts as soon as this returns and there is nothing here that could
+     * stop it, nor anything that should try: a qFatal is Qt saying it cannot
+     * continue. Saying it at `error` first is the whole of what is available,
+     * and is the difference between a log that ends mid-sentence and one that
+     * ends with the reason. */
+    case QtFatalMsg:
+        level = SOLIUM_QML_LOG_ERROR;
+        break;
+    }
+
+    /* The QByteArray owns these bytes for exactly as long as the call the Rust
+     * side may read them in. QMessageLogContext's own strings have the same
+     * lifetime and go straight through; `category` is "default" when Qt has no
+     * better answer, and the null check is for a caller that built a context by
+     * hand. */
+    const QByteArray text = message.toUtf8();
+    solium_qml_log_from_qt(level,
+                           context.category != nullptr ? context.category : "default",
+                           text.constData(), context.file, context.line, context.function);
+
+    forwarding = false;
+}
+
+/*
+ * Point Qt's diagnostic channel at the compositor's log, once.
+ *
+ * Everything about this is about being *early*. QGuiApplication's constructor
+ * warns — about platform plugins, about missing fonts, about a display it
+ * cannot open — and a handler installed after it has already lost the messages
+ * that say why the process is about to behave oddly. So both starters open
+ * with this, before their own qputenv and backend calls, and it is idempotent
+ * so that being called from two places is not a thing to reason about.
+ *
+ * The previous handler is dropped rather than kept and chained. Qt's default
+ * one is what this replaces; chaining would print every message twice wherever
+ * that handler prints at all, and where it prints is the problem this fixes.
+ */
+static void route_qt_diagnostics()
+{
+    static bool installed = false;
+    if (installed) {
+        return;
+    }
+    installed = true;
+    qInstallMessageHandler(forward_qt_message);
+}
+
+/*
  * Everything the two starters have in common.
  *
  * Which scene graph to use has to be decided *before* this runs — Qt reads that
@@ -256,6 +347,10 @@ static bool start_common(const char *import_path)
 
 extern "C" int solium_qml_start(const char *import_path)
 {
+    // First, and before the qputenv pair below: those are the last lines in
+    // this process that can run before Qt is capable of saying anything.
+    route_qt_diagnostics();
+
     if (g_app != nullptr) {
         // Already up. If it came up on the GPU this is a caller asking for the
         // other backend, and Qt cannot give it one: say no rather than hand
@@ -281,6 +376,11 @@ extern "C" int solium_qml_start(const char *import_path)
 
 extern "C" int solium_qml_start_gpu(const char *import_path)
 {
+    // First here too, and `QQuickWindow::setGraphicsApi` below is the reason it
+    // is not simply done once inside start_common: that call is Qt API, it
+    // warns when it is made too late, and start_common runs after it.
+    route_qt_diagnostics();
+
     if (g_app != nullptr) {
         return g_gpu_mode ? 1 : 0;
     }

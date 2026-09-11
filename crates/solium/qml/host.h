@@ -15,6 +15,43 @@ extern "C" {
 typedef struct SoliumQmlScene SoliumQmlScene;
 
 /*
+ * Qt's diagnostics, on their way *out* of C++.
+ *
+ * The one declaration in this header that points the other way: the host calls
+ * this, and whoever links the host defines it. `crates/solium/src/qml.rs` does,
+ * with one `tracing` macro per level; `dev/wirecheck` has its own, because it
+ * compiles host.cpp without the compositor crate behind it.
+ *
+ * It is installed as Qt's message handler before QGuiApplication exists, so QML
+ * binding errors, `console.log`/`console.warn`, and Qt's own warnings all
+ * arrive here rather than at Qt's default handler. That handler is not worth
+ * chaining to, and not merely because everything would then be said twice:
+ * measured on this Fedora Qt 6.11, it writes to stderr when stderr is a
+ * console and to journald when it is not. On a TTY session stderr *is* a
+ * console — the VT the compositor is about to take — so every one of these
+ * messages was printed underneath the desktop and reached no log at all.
+ *
+ * The levels below are ours rather than Qt's `QtMsgType`, whose numbering is
+ * Qt's to change and does not run in severity order.
+ *
+ * `category` is Qt's logging category ("default", "qml", "qt.qpa.…"). `file`
+ * and `function` are null and `line` is 0 in a release Qt build, so all three
+ * are optional. None of the pointers outlive the call — a QMessageLogContext's
+ * strings are only valid for the duration of the handler — so an
+ * implementation that keeps anything has to copy it.
+ *
+ * It may be called from any thread: that is `qInstallMessageHandler`'s
+ * contract, whatever this compositor happens to do today.
+ */
+#define SOLIUM_QML_LOG_DEBUG 0
+#define SOLIUM_QML_LOG_INFO 1
+#define SOLIUM_QML_LOG_WARN 2
+#define SOLIUM_QML_LOG_ERROR 3
+
+void solium_qml_log_from_qt(int level, const char *category, const char *message,
+                            const char *file, int line, const char *function);
+
+/*
  * Start Qt. Must be called once, before any scene, and from the thread that
  * will render. Returns 0 on failure.
  *
