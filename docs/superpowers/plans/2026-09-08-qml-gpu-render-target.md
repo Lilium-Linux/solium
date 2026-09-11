@@ -30,6 +30,14 @@ and does not travel with this branch, so what matters for resuming is here.
 their documented output. Nothing is pushed past `origin/qml-gpu-render-target`
 and nothing is merged.
 
+Three things landed after that review, all of them so the hardware session is
+not wasted. Every `warn!`/`error!` inside `Gpu::sample` is now latched one line
+per scene, which matters because the `error!` among them could have flooded the
+journal and taken Step 2's evidence with it. `--check-qml` now starts a software
+host explicitly rather than reading `SOLIUM_QML_GPU`, so it no longer reports
+good QML as broken when run from the session's own shell. And Task 8 below
+carries the thirteen extra steps that had only ever existed in the ledger.
+
 ### Before running Task 8, know these
 
 **The cursor does not take the GPU path, and that is deliberate.** A
@@ -48,6 +56,13 @@ That was decided deliberately: insets are read once at build time and stay
 reserved, so an absent decoration is a window with a hole above it, and an
 absent pointer is indistinguishable from dead input. Stretched chrome is
 visibly wrong and gets reported; absent chrome reads as a crash.
+
+With one limit, which Task 8 Step 7 goes and looks at: it freezes on the last
+frame it *has*. A rebind that fails on a scene's very first frame has no frame
+to freeze on and draws nothing — and every `ShellSurface` starts there, built at
+1×1 with its size recorded as `(0, 0)`. So the guarantee covers a scene that has
+drawn at least once, which is every scene on a working desktop and not every
+scene at start-up.
 
 **The frame invariant is enforced.** No GPU-scene entry point may run while a
 `GlesFrame` is alive — `GlesRenderer::with_context` re-binds, `GlesFrame::with_context`
@@ -1294,6 +1309,11 @@ journalctl --user -b 0 -o cat | grep -iE 'QQuick|Framebuffer|render target|GlesF
 Expected: nothing. Any hit names the defect directly and is worth more than
 any amount of pixel comparison.
 
+**An empty result is not evidence until Step 6 says it is.** If anything on this
+path is failing per frame, journald is dropping lines faster than it is keeping
+them, and the lines it drops are these. Do not conclude anything from a clean
+grep here without running Step 6.
+
 - [ ] **Step 3: Look for the failure this is most likely to have**
 
 A missing or wrong fence shows as intermittent corruption rather than a crash,
@@ -1344,18 +1364,329 @@ dev/gate.sh 2>&1 | grep -iE 'wirecheck|skipped'
 Expected: the run, not `skipped: no /dev/dri/renderD128`. This is the first
 box where `crates/solium/src/tty.rs`'s frame-in-flight mark runs for real.
 
-- [ ] **Step 5: Record the finding and decide the default**
+---
+
+The thirteen steps below accumulated across seven task reviews and, until this
+commit, existed only in the git-ignored SDD ledger — so the one person who has
+to run them had never seen them. They are in priority order.
+
+**Steps 5 to 8 are the ones not to skip.** Between them they are the only
+coverage this branch has for the multi-output rebind thrash, for whether the log
+can be believed at all, for a failure path the plan asserts the behaviour of and
+has never once executed, and for the 1×1 build that every window frame and the
+pointer now start from. The rest are worth whatever time the session has left,
+in the order written.
+
+- [ ] **Step 5: Two monitors at different scales, one window dragged across the bezel and left there**
+
+The worst case on this path, and it is reachable by dragging a window and
+letting go. `render.rs:477` decides by the window's **slot**, so a window
+straddling the bezel is deliberately drawn on *both* outputs — the comment above
+that line says so and argues for it. So `Decoration::frame` runs once per output
+per frame, each time with that output's scale, and `paint.rs:438`'s
+`if self.bound != size` flips between the two sizes on every call.
+
+Every one of those calls therefore takes the rebind branch: a fresh GBM
+allocation, a dmabuf export, an `eglCreateImageKHR`, a render-target swap, a
+full Qt render and an `import_dmabuf` — twice per frame, for as long as the
+window sits there. And `paint.rs:502`'s `damage.reset()` goes with it, so both
+outputs report the window's whole area as damaged every frame.
+
+Set the two scales in the configuration and reload with `super+shift+r`:
+
+```lua
+    monitors = {
+        { name = "DP-1",  scale = 1 },
+        { name = "HDMI-A-1", scale = 2, beside = "DP-1" },
+    },
+```
+
+Watch frame pacing on **both** outputs, not the one with the window's title on
+it. A drop that only shows on the 1x screen is still this.
+
+The pointer is immune and that is worth knowing before it confuses anyone: it
+has a size-keyed cache (`Kept`, `cursor.rs:181`) holding one buffer per device
+size, so it pays two misses in total rather than two per frame. Decorations have
+no equivalent. This is expected behaviour of the branch as it stands, the fix is
+known — the same cache shape, keyed on the `Gpu` rather than on the pointer — and
+it is not in this branch. Record the numbers; do not treat it as a new defect.
+
+- [ ] **Step 6: Before believing any empty journal grep, check for suppression**
+
+```bash
+journalctl --user -b 0 | grep -c 'Suppressed'
+```
+
+Expected: `0`. Anything else means the journal from this run is incomplete and
+Step 2's clean grep proves nothing.
+
+Why it can happen: everything in `Gpu::sample` runs once per scene per output
+per frame, so a failure that does not heal is a four-figure-per-second log — a
+two-monitor desktop with a handful of scenes at 60 Hz is order 1200 lines a
+second, and the EGL-restore site is an `error!`. journald's shipped defaults are
+`RateLimitBurst=10000` per `RateLimitIntervalSec=30s` (this box has no
+`/etc/systemd/journald.conf` and no drop-ins, so those are what is in force), so
+dropping starts within seconds. What gets dropped is *everything else being
+said at the time* — including the Qt diagnostics Step 2 is looking for.
+
+All four of those sites are latched as of this branch — one line per scene until
+it works again — which is what should keep this from happening. This step is how
+you find out whether that held, and it costs one command.
+
+- [ ] **Step 7: Make a rebind fail on purpose and watch it recover**
+
+Nothing in the harness, the test suite or any run so far exercises the
+freeze-stretched-and-retry path at `paint.rs:438-502`. The plan asserts its
+behaviour — see *A failed rebind freezes, stretched, and retries* above — on
+reasoning alone. This is the only opportunity to execute it.
+
+The cheapest lever is a scene wider than `MAX_SIDE` (8192, `qml/target.rs:21`),
+because `target::allocate` refuses it before it touches GBM: the failure is
+exact, reproducible and nothing to do with the driver. A scripted surface takes
+a rect directly, so put one in `config.lua` at a size that is fine, and then
+raise the monitor's scale until `logical × scale` crosses 8192:
+
+```lua
+    -- 3000 logical: fine at scale 1 (3000 px), refused at scale 3 (9000 px).
+    sol.surface("toobig", {
+        scene = "wallpaper.qml",
+        on = { x = 0, y = 0, w = 3000, h = 200 },
+    })
+```
+
+Expected, when the scale goes up: the surface visibly **stretched** — its last
+good 3000-pixel picture drawn into the geometry it should have had — and exactly
+one line per scene:
+
+```
+a GPU scene did not render; drawing the last frame it managed. Said once per scene until it renders again
+```
+
+Put the scale back and it should heal on the next frame, with the warning
+becoming news again if it recurs.
+
+**Check the other half too, because the plan's claim is narrower than it
+reads.** "A failed rebind freezes; it does not go invisible" is true only when
+there is an earlier frame to freeze on. A rebind that fails on a scene's *first*
+frame leaves `shown` as `None` and the surface draws nothing at all — which is
+exactly the state a `ShellSurface` starts in (`surface.rs:99` builds at 1×1 with
+`Gpu::new((0, 0))`, so its first frame always takes the rebind branch). Declare
+the surface at `w = 9000` from the start to see it, and record which of the two
+outcomes the operator actually gets.
+
+- [ ] **Step 8: A decoration and a cursor built at 1×1, and then rebound**
+
+`dev/wirecheck` builds those two QML files at their full size — 640×480 and
+64×64. The compositor does not: `decoration.rs:254` and `surface.rs:99` build at
+1×1 on the GPU path and rebind on the first frame. So a `Text` or a `Shape` that
+does not survive a 1×1 layout, or an inset bound to `width`, is invisible to
+every check on this branch and shows up here for the first time.
+
+Read the insets rather than eyeballing the bar: `insetTop` and `insetLeft` are
+read once, from that 1×1 scene, and the space they reserve does not go away if
+the picture does. The observable is geometric — the client's top edge sits
+exactly under the titlebar, with no strip of wallpaper between them and no bar
+drawn over the client's first rows.
+
+The sharpest version is the same window twice, because the two paths read the
+insets from *different* scenes and would give two different wrong answers:
+
+```bash
+SOLIUM_QML_GPU=1 ./target/debug/solium --tty   # insets from a 1x1 scene
+./target/debug/solium --tty                    # insets from a client-sized one
+```
+
+Expected: identical geometry. A divergence is the *Known and deliberately not
+fixed* item about insets stopping being benign, which needs reporting rather
+than tolerating.
+
+- [ ] **Step 9: Cursor-plane measurement at 1x, 2x *and* 3x**
+
+The readback in `cursor.rs` exists for one reason: to keep the pointer on the
+DRM hardware cursor plane. Whether it does is not observable anywhere but here.
+
+Measure all three scales, because the answer changes between them.
+`try_assign_cursor_plane` refuses any element bigger than the plane — commonly
+64×64 — at `drm/compositor/mod.rs:3043`, and the pointer is 24 *logical* pixels.
+So it is expected to **lose** the plane above about 2.67x: fine at 1x (24) and
+2x (48), refused at 3x (72). Measure it rather than assuming it; the plane size
+is the device's to report.
+
+Direct evidence, at `trace!` on that one target so the synchronous session log
+does not swallow the run:
+
+```bash
+RUST_LOG=warn,smithay::backend::drm::compositor=trace \
+  SOLIUM_QML_GPU=1 ./target/debug/solium --tty
+```
+
+The three lines that matter, all from `drm/compositor/mod.rs`:
+
+```
+element ... too big for cursor plane(s), skipping                     # the size refusal, 3044
+failed to copy element to cursor bo, skipping element on cursor plane # the copy refusal, 3252
+skipping element ... on cursor plane(s), element kind not cursor      # a Kind::Cursor regression, 3033
+```
+
+Do **not** grep for `Can't obtain cursor's underlying storage`. That line is
+real but it is inside the `#[cfg(feature = "renderer_pixman")]` arm at
+`mod.rs:3269`, and `renderer_pixman` is not in our feature list — it cannot be
+printed by this binary, so its absence says nothing.
+
+Then compare pointer-motion cost against the software path on an otherwise still
+desktop. Losing the plane turns every pointer motion into a full composite and
+page flip of the whole output, which is the cost the whole readback exists to
+avoid.
+
+- [ ] **Step 10: A rotated output**
+
+```lua
+    monitors = { { name = "DP-1", transform = 90 } },
+```
+
+A rotated monitor loses the cursor plane on **both** paths:
+`copy_element_to_cursor_bo` gives up unless `output_transform == Transform::Normal`
+(`drm/compositor/mod.rs:4202`). Put one in the pass so that is recorded as
+inherent to smithay rather than misread later as a GPU-path regression.
+
+It is also the only chance to meet a non-normal output at all: `paint.rs:415`
+hardcodes `Transform::Normal` in the element every GPU scene is drawn through,
+and nothing has ever handed it anything else. Look at whether the chrome is
+oriented correctly on the rotated screen, not only at whether the pointer moved
+off the plane.
+
+- [ ] **Step 11: Ten window opens, ten closes, then a style swap**
+
+Volume, on the ordering the C-1 control exists for. Every close frees a GPU
+scene with another scene's belief possibly still on the thread, and until now
+that ordering has only ever been produced one scene at a time by a harness.
+
+Open ten windows, close all ten, then swap the decoration style — `--debug-mode`
+gives the Developer Tweaks panel, which is one keypress per decoration
+(`lua/tweaks.lua:100` calls `sol.decoration(name)`), or put `sol.decoration("border")`
+in the configuration and reload.
+
+Re-run Step 2's grep after each phase rather than once at the end, so a hit can
+be attributed to opening, to closing or to the swap.
+
+- [ ] **Step 12: A window frame at a non-1.0 output scale**
+
+The one combination where all three sizes differ: the rebind size is device
+pixels, the element's `src` rect is the buffer in its own pixels, and `dst` is
+logical. Any two of them can agree while the third is wrong.
+
+```lua
+    monitors = { { name = "DP-1", scale = 1.5 } },
+```
+
+Expected: the titlebar text is *crisp*, not half-resolution and stretched back
+up, and the buttons at the right-hand end of the bar are where they belong — the
+right end is where a `src`/`dst` mismatch shows first and worst.
+
+- [ ] **Step 13: An animation inside a titlebar during a slow drag-resize**
+
+`SOLIUM_DECORATION=pulse`, then grab a window edge and resize it slowly. The
+animation must keep **advancing**, not restart from its `from:` on every frame.
+That is the exact property Task 6 exists for, asserted by `dev/wirecheck` on
+`quadrants.qml`'s `spin`, and a decoration is the first scene to exercise it
+where a person can see it.
+
+The drag is not incidental. There is a standing open item on `main` — animated
+decorations render zero frames, because `render.rs:182` reads
+`decoration.animating()` *after* `frame()` has cleared Qt's dirty flag — so an
+animating decoration asks for no frames of its own. A drag-resize is what keeps
+frames coming, which is what makes this observable at all.
+
+- [ ] **Step 14: Warp and overview, in and out, and a screencopy of a GPU-backed frame**
+
+`super+space` toggles overview and `escape` leaves it (`lua/overview.lua:90-91`).
+Then take a screenshot with any wlr-screencopy client.
+
+`offscreen::capture` (`offscreen.rs:32`) and `screencopy.rs` both bind
+framebuffers around scene work, and neither has run against a real KMS target.
+The failure to look for is not a wrong picture — it is a bind left behind, which
+shows up as the *next* frame being wrong rather than this one.
+
+- [ ] **Step 15: Clean teardown, and does the VT come back**
+
+`Ctrl+Alt+Backspace` (`input/mod.rs:198-212`), then check that the terminal is
+usable: a shell prompt, echoing keys, in text mode.
+
+`qml.rs:505-524` argues that `QT_QPA_NO_SIGNAL_HANDLER` is what stops Qt
+`_exit(1)`ing straight past every Rust destructor — the libseat session, the DRM
+master release, the VT restore. That argument was verified by reading a
+disassembly of `libQt6EglFSDeviceIntegration.so.6.11.1` and has never been
+verified by exiting. A compositor that dies without putting the VT back is how a
+TTY session ends in a reboot, so this is worth doing deliberately rather than
+finding out at the end.
+
+- [ ] **Step 16: Live QML reload — read this before testing it**
+
+`super+shift+r` reloads. `state.rs:2876-2877` implements the rebuild as:
+
+```rust
+                self.decorations.set_style(None);
+                self.decorations.set_style(style);
+```
+
+and `set_style` returns `false` without doing anything when the style it is
+given is the one already in place (`decoration.rs:655`). So when `style` is
+`None`, **both** calls are no-ops and no frame is rebuilt — the QML cache is
+cleared and every window keeps its old scene.
+
+Whether that bites depends on the configuration, so check before concluding.
+The shipped `config.lua` sets `decoration = "top"` and `init.lua:11` passes it
+through unconditionally, so on a stock session the style is `Some("top")` and
+reload does rebuild. It is a no-op exactly when the running configuration never
+named a decoration — the `decoration` key absent or `nil`.
+
+And `SOLIUM_DECORATION` does not rescue it. That variable is read inside
+`qml_path` and `bare` only (`decoration.rs:779`, `:821`); it never sets `style`,
+so it cannot make the pair fire. A session started with `SOLIUM_DECORATION=pulse`
+and a configuration that names no decoration will not pick up edits to
+`pulse.qml`, and that will read exactly like a GPU-path caching bug.
+
+Pre-existing, not this branch, and not to be fixed here — but it will be blamed
+on this branch if it is met without warning.
+
+- [ ] **Step 17: `--check-qml` is safe from this session's shell — and was not**
+
+```bash
+SOLIUM_QML_GPU=1 ./target/debug/solium --check-qml qml/decorations/top.qml
+```
+
+Expected: `ok`.
+
+It used to call `qml::start()`, which honours `SOLIUM_QML_GPU` — so run from the
+shell this session is driven from, with the knob exported, it brought up a *GPU*
+host, and `Scene::software` was then refused by `host.cpp:449`. A perfectly
+valid QML file came back reported as broken, from the one entry point whose
+whole job is to answer that question accurately. It now calls
+`qml::start_software()` (`qml.rs:160`), which takes the decision rather than
+reading it.
+
+If the answer here is not `ok`, check that the binary is this branch's before
+believing it about anything else.
+
+---
+
+- [ ] **Step 18: Record the finding and decide the default**
 
 Append to `dev/README.md` under `## QML on the GPU`: whether it worked, the
 frame-pacing numbers from the log with and without, whether tearing was found,
 and whether anything from Step 2 appeared.
+
+Record Steps 5 to 17 there too, and record the ones that were *not* reached as
+not reached rather than leaving them out — a step nobody ran and a step nobody
+wrote down are indistinguishable afterwards, and this list exists because that
+already happened once.
 
 If it is clean, flip the default: `qml_gpu()` returns `true` unless
 `SOLIUM_QML_SOFTWARE` is set, and say so in the same paragraph. If it is not
 clean, leave the knob off and record what was seen — the plan below it does not
 depend on the default, only on the path existing.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 19: Commit**
 
 ```bash
 git add dev/README.md crates/solium/src/dev.rs
