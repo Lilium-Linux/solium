@@ -1327,19 +1327,47 @@ Failed to build texture render target for QQuickRenderTarget
 QQuickWindow: No render target
 ```
 
-Nothing was looking for those. Look now:
+Nothing was looking for those — and until `870aacc` nothing *could*. Read the
+rest of this step before running the grep; the command has changed and so has
+what an empty result means.
 
 ```bash
-journalctl --user -b 0 -o cat | grep -iE 'QQuick|Framebuffer|render target|GlesFrame|no_frame_in_flight'
+grep -iE 'QQuick|Framebuffer|render target|GlesFrame|no_frame_in_flight' \
+  ~/.local/state/solium/session.log
 ```
 
 Expected: nothing. Any hit names the defect directly and is worth more than
-any amount of pixel comparison.
+any amount of pixel comparison. A hit now carries a `category=` field as well:
+`default` is Qt's own engine and RHI, `qml` is `console.log`/`console.warn`
+from a scene, and the three above are all `default`.
 
-**An empty result is not evidence until Step 6 says it is.** If anything on this
-path is failing per frame, journald is dropping lines faster than it is keeping
-them, and the lines it drops are these. Do not conclude anything from a clean
-grep here without running Step 6.
+**Why it is that file and not `journalctl`, which is what this step said until
+`870aacc`.** Those three lines are Qt's, and before that commit there was no
+`qInstallMessageHandler` in `host.cpp` at all, so they went to Qt's default
+handler. Measured on this Fedora Qt 6.11, that handler picks its destination
+from whether stderr is a console: stderr when it is, journald when it is not.
+A TTY session is the first case — stderr is the VT — so Qt printed these
+underneath the desktop it had just been covered by, and they reached no log of
+any kind. **An empty `journalctl` grep on any build before `870aacc` proved
+nothing whatsoever**, and it looked exactly like a pass.
+
+They now go through `tracing` like everything else the compositor says, which
+for a `--tty` run means stderr *and* `~/.local/state/solium/session.log` —
+`main.rs` prints `logging to …` with the path at startup, so read it off there
+rather than trusting the one above. `journalctl` is still the wrong tool, for
+the ordinary reason: a binary started by hand from a login shell has the VT for
+stderr, and journald never sees it. It is the right tool only if the session
+was started with its output redirected, as in `… --tty 2>&1 | tee /tmp/run.log`
+— in which case grep that file instead, and note that this is the one
+configuration in which the old instruction did work, because Qt chose journald
+whenever stderr was not a console.
+
+**`session.log` is append-only and synchronous, so nothing rate-limits these
+lines.** That is the other half of the change: the caution this step used to
+carry — that journald drops under a per-frame failure and drops exactly these —
+does not apply to a file. Step 6 is still worth running, because a `Suppressed`
+count says whether anything on this box is flooding journald at all, but a clean
+grep here no longer waits on it.
 
 - [ ] **Step 3: Look for the failure this is most likely to have**
 
@@ -1467,27 +1495,48 @@ is `qml::paint::tests`, and it bites: with `Kept::current` made never to report
 a hit, `a_window_across_a_bezel_is_drawn_twice_and_then_not_again` reads
 `left: 200, right: 2`.
 
-- [ ] **Step 6: Before believing any empty journal grep, check for suppression**
+- [ ] **Step 6: Check that nothing is flooding a log, whichever log it lands in**
+
+**This step was rewritten with Step 2 at `870aacc`, and the thing it protects
+has changed.** It used to be Step 2's precondition: journald drops under a flood
+and drops exactly the Qt lines Step 2 greps for, so an empty grep there proved
+nothing until this came back `0`. Step 2 now reads `session.log`, which is a
+file and cannot be rate-limited, so the dependency is gone. What is left is
+worth one command anyway.
 
 ```bash
 journalctl --user -b 0 | grep -c 'Suppressed'
+wc -l ~/.local/state/solium/session.log
 ```
 
-Expected: `0`. Anything else means the journal from this run is incomplete and
-Step 2's clean grep proves nothing.
+Expected: `0` from the first, and a line count in the tens rather than the
+hundreds of thousands from the second.
 
-Why it can happen: everything in `Gpu::sample` runs once per scene per output
-per frame, so a failure that does not heal is a four-figure-per-second log — a
-two-monitor desktop with a handful of scenes at 60 Hz is order 1200 lines a
-second, and the EGL-restore site is an `error!`. journald's shipped defaults are
-`RateLimitBurst=10000` per `RateLimitIntervalSec=30s` (this box has no
-`/etc/systemd/journald.conf` and no drop-ins, so those are what is in force), so
-dropping starts within seconds. What gets dropped is *everything else being
-said at the time* — including the Qt diagnostics Step 2 is looking for.
+Why a flood is possible at all: everything in `Gpu::sample` runs once per scene
+per output per frame, so a failure that does not heal is a four-figure-per-second
+log — a two-monitor desktop with a handful of scenes at 60 Hz is order 1200 lines
+a second, and the EGL-restore site is an `error!`. All four of those sites are
+latched as of this branch — one line per scene until it works again — which is
+what should keep it from happening. The line count is how you find out whether
+that held.
 
-All four of those sites are latched as of this branch — one line per scene until
-it works again — which is what should keep this from happening. This step is how
-you find out whether that held, and it costs one command.
+Two things about where those lines go, both of which the journald reasoning here
+used to get wrong:
+
+- **A compositor started by hand from a TTY writes to no journal at all.** Its
+  stderr is the VT and journald never sees it, so journald's
+  `RateLimitBurst=10000` per `RateLimitIntervalSec=30s` was never in force over
+  the compositor's own output. The `Suppressed` count is worth reading as a
+  statement about *the box*, not about this run — unless the session was started
+  with its output redirected into something journald does read.
+- **`session.log` is opened `O_DSYNC`** (`main.rs`'s `open_log`, and deliberately
+  — a hard reset must not take the last seconds with it). Nothing there is ever
+  dropped; a flood costs a forced disk flush per line instead, which on this path
+  means the failure that caused the flood is also being paid for in frame time.
+  Qt's own messages join that file as of `870aacc`, so a per-frame Qt warning is
+  now a per-frame synchronous write. That is the right trade — they were
+  previously printed to a VT nobody could read — but it is a reason to read the
+  line count rather than only the grep.
 
 - [ ] **Step 7: Make a rebind fail on purpose and watch it recover**
 
@@ -1628,7 +1677,10 @@ gives the Developer Tweaks panel, which is one keypress per decoration
 in the configuration and reload.
 
 Re-run Step 2's grep after each phase rather than once at the end, so a hit can
-be attributed to opening, to closing or to the swap.
+be attributed to opening, to closing or to the swap. Step 2 reads a file that
+only grows, so take a `wc -l ~/.local/state/solium/session.log` between phases
+and grep from there — `tail -n +$mark` — rather than reading the same three
+lines three times and calling the third one new.
 
 - [ ] **Step 12: A window frame at a non-1.0 output scale**
 
@@ -1713,10 +1765,26 @@ on this branch if it is met without warning.
 - [ ] **Step 17: `--check-qml` is safe from this session's shell — and was not**
 
 ```bash
-SOLIUM_QML_GPU=1 ./target/debug/solium --check-qml qml/decorations/top.qml
+SOLIUM_QML_GPU=1 ./target/debug/solium --check-qml crates/solium/qml/decorations/top.qml
 ```
 
-Expected: `ok`.
+Expected: `ok`. Verified on the branch as of `870aacc`, along with
+`cursor.qml` and `probe.qml`.
+
+The path was `qml/decorations/top.qml` until `870aacc` and that is wrong from
+this task's working directory: every other step runs `./target/debug/solium`,
+which only exists at the repository root, and from there the shorter path is
+`No such file or directory` — which reads like a broken binary rather than a
+typo.
+
+One thing that changed underneath this step: a file that *fails* now says why.
+`--check-qml crates/solium/qml/tweaks.qml` used to print only "a required
+property left unset will do this"; it now prints the QML engine's own
+`TypeError: Cannot read property 'length' of undefined` with the file and line
+above it, because Qt's diagnostics reach `tracing` as of `870aacc`. That is the
+consequence of the unset `required property var entries` rather than a second
+defect — but it is the shape of hint this entry point existed to give and never
+could.
 
 It used to call `qml::start()`, which honours `SOLIUM_QML_GPU` — so run from the
 shell this session is driven from, with the knob exported, it brought up a *GPU*
