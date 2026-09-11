@@ -2110,3 +2110,389 @@ mod tests {
         assert!(outcome.commands.is_empty());
     }
 }
+
+/// **The configuration that ships may only ask for things the compositor has.**
+///
+/// `init.lua` asked for an easing called `inOutCubic` and the engine had no
+/// such curve. `parse_easing` warned, fell back to the default, and the session
+/// carried on -- so the genie was quietly the wrong animation for as long as it
+/// took somebody to read a hardware log and notice five identical warnings in
+/// it. Nothing in the gate was looking, because nothing in the gate reads Lua
+/// for anything but syntax: `solium --check` loads the scripts, and a name
+/// inside a binding's body is not looked up until the binding runs.
+///
+/// That is a class rather than an incident. A script names things -- easings,
+/// events, layers, QML scenes, decorations, keys -- and every one of those
+/// lookups either warns and carries on or, in the case of an event and a key,
+/// misses in complete silence. So this walks `lua/*.lua` and resolves each name
+/// through the same function the compositor uses at run time.
+///
+/// **What it cannot see.** Only names written as literals. `shell.lua` takes
+/// its scene from the environment and `workspaces.lua` builds `"super+" ..
+/// index` in a loop; a name assembled at run time is outside this and outside
+/// any static check. Lua comments are stripped, so a documented example that is
+/// deliberately a placeholder -- a path into somebody's home directory -- does
+/// not fail a build.
+#[cfg(test)]
+mod shipped {
+    use super::{Curve, normalise_combo};
+
+    /// The Lua the compositor ships, as `(file, text)`.
+    ///
+    /// From `CARGO_MANIFEST_DIR` rather than a path relative to the process,
+    /// because a test's working directory is the workspace root and this file
+    /// should not have to know that.
+    fn scripts() -> Vec<(String, String)> {
+        let directory = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/lua"));
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, String)> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|end| end == "lua"))
+            .filter_map(|path| {
+                let name = path.file_name()?.to_str()?.to_owned();
+                Some((name, std::fs::read_to_string(&path).ok()?))
+            })
+            .collect();
+        found.sort();
+        // A check that walks an empty directory passes, which is the one way
+        // this could be green and mean nothing at all.
+        assert!(
+            found.len() >= 8,
+            "found {} shipped scripts in {}; the walk is broken, not the scripts",
+            found.len(),
+            directory.display()
+        );
+        found
+    }
+
+    /// One line with its Lua comment removed.
+    ///
+    /// `--` outside a string starts a comment. Tracked rather than searched for
+    /// because `config.lua` has a `"module 'user' not found"` in it and a naive
+    /// cut would one day land inside a string like that one.
+    fn code(line: &str) -> &str {
+        let bytes = line.as_bytes();
+        let mut quoted = false;
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' if quoted => index += 1,
+                b'"' => quoted = !quoted,
+                b'-' if !quoted && bytes.get(index + 1) == Some(&b'-') => return &line[..index],
+                _ => {}
+            }
+            index += 1;
+        }
+        line
+    }
+
+    /// Every double-quoted literal that follows `marker`, with where it was.
+    ///
+    /// `marker` is matched literally and the literal must come next, with only
+    /// spaces between: `easing =` finds `easing = "outCubic"` and `sol.on(`
+    /// finds `sol.on("open", ...)`. Anything else after the marker -- a
+    /// variable, a table, a concatenation -- is skipped rather than guessed at.
+    /// That is the limit this module states up front, and it is why
+    /// `shell.lua`'s `scene = scene` never appears here.
+    fn named(text: &str, marker: &str) -> Vec<(usize, String)> {
+        // An empty marker matches at every position and consumes none of them,
+        // so the walk below would never move. Refused here rather than left to
+        // a caller, because the symptom is a test run that never finishes --
+        // which is how this was found.
+        assert!(!marker.is_empty(), "a marker has to be something");
+        let mut found = Vec::new();
+        for (number, line) in text.lines().enumerate() {
+            let line = code(line);
+            let mut from = 0;
+            while let Some(at) = line[from..].find(marker) {
+                let after = from + at + marker.len();
+                from = after;
+                let rest = line[after..].trim_start_matches(' ');
+                let Some(rest) = rest.strip_prefix('"') else {
+                    continue;
+                };
+                let Some(end) = rest.find('"') else {
+                    continue;
+                };
+                found.push((number + 1, rest[..end].to_owned()));
+            }
+        }
+        found
+    }
+
+    /// Every double-quoted literal in a chunk of Lua, in order.
+    ///
+    /// For a list rather than an assignment: `{ "top", "left", ... }` has no
+    /// marker in front of each item, only in front of the whole thing.
+    fn quoted(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for line in text.lines() {
+            let mut rest = code(line);
+            while let Some(at) = rest.find('"') {
+                let after = &rest[at + 1..];
+                let Some(end) = after.find('"') else {
+                    break;
+                };
+                found.push(after[..end].to_owned());
+                rest = &after[end + 1..];
+            }
+        }
+        found
+    }
+
+    /// Everything in the shipped Lua that follows `marker`, for every file.
+    fn everywhere(marker: &str) -> Vec<(String, usize, String)> {
+        scripts()
+            .into_iter()
+            .flat_map(|(file, text)| {
+                named(&text, marker)
+                    .into_iter()
+                    .map(move |(line, value)| (file.clone(), line, value))
+            })
+            .collect()
+    }
+
+    /// Where the QML that ships lives.
+    fn shipped_qml() -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml"))
+    }
+
+    /// **Every easing the shipped configuration asks for exists.**
+    ///
+    /// The one that did not: `sol.animate({ duration = 520, easing =
+    /// "inOutCubic" })`, in `init.lua` for `super+m` and again in `tweaks.lua`
+    /// for the genie tweak. `Curve::from_name` knew five names and that was not
+    /// one of them, so both fell back to `outCubic` -- a different animation,
+    /// chosen by nobody, announced only in a log line.
+    #[test]
+    fn every_easing_named_is_one_the_engine_has() {
+        let asked = everywhere("easing =");
+        assert!(!asked.is_empty(), "no easings found; the scan is broken");
+        for (file, line, name) in asked {
+            assert!(
+                Curve::from_name(&name).is_some(),
+                "{file}:{line} asks for easing {name:?}, which Curve::from_name cannot read. \
+                 Names: {:?}",
+                Curve::all().map(|(known, _)| known)
+            );
+        }
+    }
+
+    /// **Every event a shipped script listens for is one the compositor sends.**
+    ///
+    /// Worse than an unknown easing, because there is no warning at all:
+    /// `sol.on` puts the handler in a table under whatever name it was given,
+    /// and a name nothing dispatches is a handler that is simply never called.
+    /// A layout that misspells `"monitors"` does not fail -- it stops
+    /// rearranging when a screen is unplugged, which reads as a compositor bug.
+    ///
+    /// The vocabulary is read out of `script.rs` itself rather than listed
+    /// here, because a list is a second copy and two copies of a vocabulary
+    /// drifting apart is the defect this whole module exists for.
+    #[test]
+    fn every_event_listened_for_is_one_that_is_sent() {
+        // The production half of this file. Cut at the first `#[cfg(test)]`
+        // because everything below it -- including this test -- talks *about*
+        // `call_listeners` and would otherwise be counted as calling it.
+        const SOURCE: &str = include_str!("script.rs");
+        let Some(production) = SOURCE.split("#[cfg(test)]").next() else {
+            panic!("script.rs is empty, which cannot be");
+        };
+        let dispatched: Vec<String> = named(production, "call_listeners(sol,")
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+
+        // The scrape has to see every dispatch there is, or it narrows the
+        // vocabulary in silence and this test starts agreeing with anything.
+        // One `call_listeners` is the definition; the rest are calls.
+        let calls = production.matches("call_listeners").count() - 1;
+        assert_eq!(
+            dispatched.len(),
+            calls,
+            "{calls} dispatches in script.rs but only {} are `call_listeners(sol, \"name\")`; \
+             one of them is written some other way and this check cannot see it",
+            dispatched.len()
+        );
+        assert!(
+            calls >= 8,
+            "only {calls} dispatches found; the scan is broken"
+        );
+
+        for (file, line, event) in everywhere("sol.on(") {
+            assert!(
+                dispatched.contains(&event),
+                "{file}:{line} listens for {event:?}, which nothing dispatches. \
+                 Events: {dispatched:?}"
+            );
+        }
+    }
+
+    /// **Every layer a shipped surface names is one that exists.**
+    ///
+    /// `Layer::parse` answers `None` and `unwrap_or_default` turns that into
+    /// `Background`, with no warning anywhere. A bar that asked for `"Top"` and
+    /// got the background is a bar drawn underneath every window on the screen,
+    /// and the symptom is that the bar has vanished.
+    #[test]
+    fn every_layer_named_is_one_that_exists() {
+        let asked = everywhere("layer =");
+        assert!(!asked.is_empty(), "no layers found; the scan is broken");
+        for (file, line, name) in asked {
+            assert!(
+                crate::scripted::Layer::parse(&name).is_some(),
+                "{file}:{line} puts a surface on layer {name:?}, which is not one of \
+                 background, bottom, top, overlay"
+            );
+        }
+    }
+
+    /// **Every QML scene a shipped script names is one that ships.**
+    ///
+    /// Two lookups, because there are two kinds of scene and a script writes
+    /// them the same way: a scripted surface's, found on the QML search path by
+    /// `scripted::find_scene`, and a loading scene's, which is a name under
+    /// `qml/loading`. A scene that is not there is an `ERROR` and a hole in the
+    /// picture -- `sol.surface` says "no such QML scene" and draws nothing.
+    ///
+    /// The resolved path has to land inside the shipped QML directory. Without
+    /// that, a developer with their own `~/.config/solium/qml/wallpaper.qml`
+    /// would have a green test for a file that does not ship.
+    #[test]
+    fn every_scene_named_is_one_that_ships() {
+        let shipped = shipped_qml();
+        let asked = everywhere("scene =");
+        assert!(!asked.is_empty(), "no scenes found; the scan is broken");
+        for (file, line, name) in asked {
+            let surface = crate::scripted::find_scene(&name)
+                .is_some_and(|path| path.starts_with(&shipped) && path.is_file());
+            let loading = shipped
+                .join("loading")
+                .join(format!("{name}.qml"))
+                .is_file();
+            assert!(
+                surface || loading,
+                "{file}:{line} names scene {name:?}, and there is no {name} in \
+                 {} or in its loading directory",
+                shipped.display()
+            );
+        }
+    }
+
+    /// **Every decoration the shipped configuration names is one that ships.**
+    ///
+    /// `decoration.rs`'s `qml_path` turns a bare name into
+    /// `qml/decorations/<name>.qml` with nothing in between checking, so a name
+    /// that is not there is a scene that fails to build once per window -- every
+    /// window undecorated, and a log line each.
+    #[test]
+    fn every_decoration_named_is_one_that_ships() {
+        let decorations = shipped_qml().join("decorations");
+        let asked = everywhere("decoration =");
+        assert!(
+            !asked.is_empty(),
+            "no decorations found; the scan is broken"
+        );
+        for (file, line, name) in asked {
+            // `none` is a real setting and draws no frame at all, deliberately.
+            assert!(
+                name == "none" || decorations.join(format!("{name}.qml")).is_file(),
+                "{file}:{line} asks for decoration {name:?}, and there is no {name}.qml in {}",
+                decorations.display()
+            );
+        }
+    }
+
+    /// **The tweaks panel offers exactly the decorations that ship.**
+    ///
+    /// `tweaks.lua` says so in as many words -- "every decoration that ships,
+    /// so switching between them is one press each" -- and that claim is a
+    /// hand-maintained list beside a directory. Both directions, because both
+    /// fail: a name in the list that is not a file is a button that produces
+    /// undecorated windows, and a file that is not in the list is a decoration
+    /// nobody can reach.
+    #[test]
+    fn the_tweaks_panel_lists_every_decoration_that_ships() {
+        let directory = shipped_qml().join("decorations");
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            panic!("no decorations directory at {}", directory.display());
+        };
+        let mut on_disk: Vec<String> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|end| end == "qml"))
+            .filter_map(|path| Some(path.file_stem()?.to_str()?.to_owned()))
+            .collect();
+        on_disk.sort();
+
+        let Some((_, text)) = scripts().into_iter().find(|(name, _)| name == "tweaks.lua") else {
+            panic!("tweaks.lua does not ship any more; this test is stale, not wrong");
+        };
+        // The list is a Lua array literal spanning two lines, so it is read as
+        // "every string between `local decorations = {` and its `}`".
+        let Some(start) = text.find("local decorations = {") else {
+            panic!("tweaks.lua no longer declares `local decorations = {{`");
+        };
+        let list = &text[start..];
+        let Some(end) = list.find('}') else {
+            panic!("tweaks.lua's decoration list has no closing brace");
+        };
+        let mut offered: Vec<String> = quoted(&list[..end]);
+        offered.sort();
+
+        assert_eq!(
+            offered, on_disk,
+            "the tweaks panel and qml/decorations disagree about what ships"
+        );
+    }
+
+    /// **Every key a shipped script binds is spelled the way a key arrives.**
+    ///
+    /// A binding is a table lookup on a string. `input::combo_for` builds that
+    /// string from `xkb::keysym_get_name` and `normalise_combo` lowercases it,
+    /// so a binding whose key is not that exact spelling is not a binding at
+    /// all -- it is an entry in a table nothing will ever look up, with no
+    /// warning at load and nothing at the press but a `no script has bound
+    /// this` at info.
+    ///
+    /// Round-tripped rather than merely resolved: `keysym_from_name` is
+    /// forgiving and `keysym_get_name` is not, and it is the second one that
+    /// decides what a key is called at run time.
+    ///
+    /// Only the bindings written as literals. `workspaces.lua` builds nine of
+    /// them from a loop counter and they cannot be read from the text -- see
+    /// this module's header, and the report that came with it.
+    #[test]
+    fn every_key_bound_is_spelled_the_way_it_arrives() {
+        use smithay::input::keyboard::xkb;
+
+        let bound = everywhere("sol.bind(");
+        assert!(!bound.is_empty(), "no bindings found; the scan is broken");
+        for (file, line, combo) in bound {
+            let combo = normalise_combo(&combo);
+            let Some(key) = combo.rsplit('+').next() else {
+                continue;
+            };
+            // A combo built by concatenation -- `"super+" .. index` -- reaches
+            // this as a bare `super+` with nothing after it. There is no key
+            // here to check; the header says so.
+            if key.is_empty() {
+                continue;
+            }
+            let keysym = xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE);
+            assert!(
+                keysym != xkb::keysyms::KEY_NoSymbol.into(),
+                "{file}:{line} binds {combo:?}, and xkb has no key called {key:?}"
+            );
+            let canonical = xkb::keysym_get_name(keysym).to_ascii_lowercase();
+            assert_eq!(
+                canonical, key,
+                "{file}:{line} binds {combo:?}, but that key arrives called {canonical:?} -- \
+                 the binding would never fire"
+            );
+        }
+    }
+}
