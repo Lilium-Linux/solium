@@ -210,13 +210,15 @@ impl<K: Copy + PartialEq, T> Kept<K, T> {
 
     /// Keep `value` under `key`, oldest out first.
     ///
-    /// **Eviction drops the value here, and that is the half that matters on
-    /// the GPU path.** What is kept is a `Sampled`, whose `GlesTexture` is the
-    /// last thing holding the `EGLImage` that holds EGL's own reference on the
-    /// GBM buffer object — see [`Gpu::render`], which is where that argument is
-    /// set out. So dropping the entry is what actually returns the 3.9 MB, and
-    /// a cache that moved evicted entries anywhere instead of dropping them
-    /// would keep every buffer it ever made while looking like it had a bound.
+    /// **Eviction drops the value here, and that is the half that decides
+    /// whether the cap means anything.** What [`Gpu`] keeps is a [`Sampled`],
+    /// whose `GlesTexture` is the last thing holding the `EGLImage` that holds
+    /// EGL's own reference on the GBM buffer object — see [`Gpu::render`], where
+    /// that argument is set out in full. So dropping the entry is what actually
+    /// returns the 3.9 MB, and a cache that retired evicted entries anywhere
+    /// instead of dropping them would keep every buffer it ever made while
+    /// looking like it had a bound. `cursor.rs` keeps `MemoryRenderBuffer`s and
+    /// the same is true of them, three orders of magnitude smaller.
     pub(crate) fn push(&mut self, key: K, value: T) {
         self.held.retain(|(held, _)| *held != key);
         // `cap` is at least one, so the list is never empty when this runs.
@@ -312,12 +314,19 @@ struct Complaints {
     rendering: Said,
 }
 
-/// One scene's buffer, as the compositor sees it.
+/// One scene's buffers, as the compositor sees them.
 ///
-/// Owns the imported texture and the damage that goes with it, and nothing
-/// else: the buffer itself belongs to the [`Scene`], which is the arrangement
-/// that makes the whole path safe — the thing being read cannot outlive the
-/// thing drawing into it.
+/// Owns the imported textures and the damage that goes with them, and nothing
+/// else: the buffer Qt is *drawing into* belongs to the [`Scene`], which is the
+/// arrangement that makes the whole path safe — the thing being written cannot
+/// be freed while something is reading it.
+///
+/// Plural since the cache, and that needs saying rather than being inferred
+/// from the field list. A texture here can name a buffer the scene has already
+/// rebound away from, which is safe and is *better* than the alternative:
+/// nothing is drawing into it any more, so the picture cannot change underneath
+/// a reader. [`Gpu::render`] is where that is argued from smithay's ownership
+/// rules rather than asserted.
 #[derive(Debug)]
 pub(crate) struct Gpu {
     /// The last picture that imported, whatever size it was.
@@ -335,16 +344,16 @@ pub(crate) struct Gpu {
     /// is drawn, which is the narrower half of that guarantee and is stated in
     /// the plan. Everything that is *not* a failure is served from `kept`.
     ///
-    /// Normally a second handle on a picture `kept` is also holding, so it
-    /// costs a refcount and no memory. It outlives eviction by design — being
-    /// able to draw the last good frame is the point of it — so the real bound
-    /// on this type is [`KEPT`] buffers plus at most one, and reaching the
-    /// "plus one" needs a third straddled output to have evicted it.
+    /// Normally this is a second handle on a picture `kept` is also holding, so
+    /// it costs a refcount and no memory. It outlives eviction deliberately —
+    /// being able to draw the last good frame is the whole point of it — so the
+    /// true bound on one of these is [`KEPT`] buffers plus at most one, and
+    /// reaching the "plus one" takes a third straddled output evicting it.
     shown: Option<Sampled>,
-    /// One imported picture per size this scene has been asked for.
+    /// One imported picture per [`Drawn`] this scene has been asked for.
     ///
-    /// The fix for the multi-output rebind thrash; [`Kept`] is where the shape
-    /// is argued and [`KEPT`] is where the two is.
+    /// The fix for the multi-output rebind churn; [`Kept`] is where the shape is
+    /// argued and [`KEPT`] is where the two is.
     kept: Kept<Drawn, Sampled>,
     /// Stable for the life of the scene, so the damage tracker sees one element
     /// moving and changing rather than a new one every frame.
