@@ -238,9 +238,20 @@ version.
 by `PaneId` is the same class of latent special case this report is about,
 found independently and already designed out.
 
-What the plans do **not** touch is the presentation transform: z-order, a
-rotation pivot, an output-level transform, more deforms, clipping, tint. Those
-are a different axis and they survive this refactor intact — hence #89.
+What the plans do **not** touch is the presentation transform. Of that, the
+tracker already has more than this report knew: [#87](https://github.com/Lilium-Linux/solium/issues/87)
+covers general deforms *and* per-window colour through fragment effects, and
+its analysis is sharper than the version here — it names the hardcoded phase
+axis, the snapshotted genie slot and the absent shader entry point.
+[#84](https://github.com/Lilium-Linux/solium/issues/84) is adjacent but about
+which of three places owns a window's position, not about depth.
+
+What is left after that is three things nothing asks for, filed as
+[#89](https://github.com/Lilium-Linux/solium/issues/89): **no z-order**, which
+is the one that made the deck come out differently from its design; **rotation
+always about the window's centre** (`warp.rs:142`), which is the cheapest fix
+on any of these lists; and **no output-level transform**, which is the
+difference between modes for windows and modes for the desktop.
 
 And two things in this report get *worse* under the new render path rather
 than better, which is the one place the plans should probably move:
