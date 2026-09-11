@@ -38,6 +38,19 @@ host explicitly rather than reading `SOLIUM_QML_GPU`, so it no longer reports
 good QML as broken when run from the session's own shell. And Task 8 below
 carries the thirteen extra steps that had only ever existed in the ledger.
 
+**Since then: the multi-output rebind churn is fixed, and Step 5 is now a
+verification rather than an expectation.** A window whose slot straddles a bezel
+is drawn on both outputs at both scales, so `Gpu::render`'s `self.bound != size`
+was true on every call and the scene rebound twice a frame for as long as the
+window sat there. `Gpu` now keeps one imported picture per `(pixel size, scale)`,
+capped at two — `Kept` in `crates/solium/src/qml/paint.rs`, which is the
+pointer's own cache from Task 7, lifted out of `cursor.rs` and generalised over
+its key and its cap rather than copied. The pointer keeps its own cache in front
+of it, because that one short-circuits the readback as well and so is not made
+redundant. Decorations, pane loading scenes and scripted shell surfaces all
+reach `Gpu` and all inherit the fix. Coverage is in `qml::paint::tests`, since
+`dev/wirecheck` cannot see `paint.rs` at all.
+
 ### Before running Task 8, know these
 
 **The cursor does not take the GPU path, and that is deliberate.** A
@@ -48,8 +61,10 @@ is shm-only, `try_assign_cursor_plane` has no direct-scanout branch, and
 compiled. Qt still draws the pointer — a GPU host refuses software scenes — and
 the result is read back into a `MemoryRenderBuffer`. That readback costs
 **≈65 µs fixed plus ≈3.7 ns/px**, so ~67 µs at cursor sizes, cached per device
-size. The fixed cost dominates *at cursor sizes only*; at 384×384 the pixel term
-alone is ~540 µs. Do not generalise it.
+size — in `Cursor`'s own `Kept`, which sits in front of `Gpu`'s and is what
+keeps the readback itself off the per-frame path. The fixed cost dominates *at
+cursor sizes only*; at 384×384 the pixel term alone is ~540 µs. Do not
+generalise it.
 
 **A failed rebind freezes, stretched, and retries.** It does not go invisible.
 That was decided deliberately: insets are read once at build time and stay
@@ -96,6 +111,18 @@ and prefer running a control to reasoning about one.
   is all `readonly` literals. The wiring is right; the coverage is not end-to-end.
 - Insets are read from a 1×1 scene on the GPU path and a client-sized one on the
   software path. Benign while every shipped decoration declares them as literals.
+- **The software path still has the multi-output fan-out.** A straddling window
+  makes `Decoration::in_memory` see a different `size` per output, so `resized`
+  is true on every call and its `MemoryRenderBuffer` is reallocated once per
+  output per frame — a `QImage` realloc rather than a GBM round trip, and this
+  is the default path. The `Gpu` cache does not reach it. The same shape is in
+  `ShellSurface::in_memory`. Measure it on hardware before deciding it is worth
+  a second cache; the whole argument for the GPU path is that this is what it
+  replaces.
+- **The cap is two, so three straddled outputs at three distinct scales thrash
+  it** and behave as the branch did before the cache. Deliberate: an entry is a
+  whole window-sized GBM buffer and there is one decoration per window. See
+  `KEPT` in `qml/paint.rs` for the arithmetic.
 
 ### Two open items on `main`, neither started
 
@@ -1371,26 +1398,34 @@ commit, existed only in the git-ignored SDD ledger — so the one person who has
 to run them had never seen them. They are in priority order.
 
 **Steps 5 to 8 are the ones not to skip.** Between them they are the only
-coverage this branch has for the multi-output rebind thrash, for whether the log
-can be believed at all, for a failure path the plan asserts the behaviour of and
-has never once executed, and for the 1×1 build that every window frame and the
-pointer now start from. The rest are worth whatever time the session has left,
-in the order written.
+coverage this branch has for the multi-output rebind cache on real hardware, for
+whether the log can be believed at all, for a failure path the plan asserts the
+behaviour of and has never once executed, and for the 1×1 build that every
+window frame and the pointer now start from. The rest are worth whatever time
+the session has left, in the order written.
 
 - [ ] **Step 5: Two monitors at different scales, one window dragged across the bezel and left there**
 
-The worst case on this path, and it is reachable by dragging a window and
-letting go. `render.rs:477` decides by the window's **slot**, so a window
-straddling the bezel is deliberately drawn on *both* outputs — the comment above
-that line says so and argues for it. So `Decoration::frame` runs once per output
-per frame, each time with that output's scale, and `paint.rs:438`'s
-`if self.bound != size` flips between the two sizes on every call.
+**This step changed: it used to be "expect the churn and record the numbers",
+and the churn is now fixed. It is a verification that it has gone.**
 
-Every one of those calls therefore takes the rebind branch: a fresh GBM
-allocation, a dmabuf export, an `eglCreateImageKHR`, a render-target swap, a
-full Qt render and an `import_dmabuf` — twice per frame, for as long as the
-window sits there. And `paint.rs:502`'s `damage.reset()` goes with it, so both
-outputs report the window's whole area as damaged every frame.
+What it was. `render.rs:477` decides by the window's **slot**, so a window
+straddling the bezel is deliberately drawn on *both* outputs — the comment above
+that line says so and argues for it. `Decoration::frame` therefore runs once per
+output per frame, each time with that output's scale, and `Gpu::render`'s
+`if self.bound != size` flipped between the two sizes on every call. Every one
+of them took the rebind branch: a fresh GBM allocation, a dmabuf export, an
+`eglCreateImageKHR`, a render-target swap, a full Qt render and an
+`import_dmabuf` — twice per frame, for as long as the window sat there — with a
+`damage.reset()` each time, so both outputs reported the window's whole area as
+damaged every frame as well.
+
+What it is now. `Gpu` keeps one imported picture per `(pixel size, scale)` it
+has been asked for, capped at two — `Kept` and `KEPT` in `crates/solium/src/qml/paint.rs`,
+the same container the pointer has used since Task 7 and now shared with it
+rather than copied. A straddling window pays two renders in total instead of two
+per frame, and an idle one pays none. The pane loading scenes and the scripted
+shell surfaces go through the same `Gpu` and inherit it.
 
 Set the two scales in the configuration and reload with `super+shift+r`:
 
@@ -1401,15 +1436,36 @@ Set the two scales in the configuration and reload with `super+shift+r`:
     },
 ```
 
-Watch frame pacing on **both** outputs, not the one with the window's title on
-it. A drop that only shows on the 1x screen is still this.
+Expected: dragging a window across the bezel and **leaving it there** costs
+nothing measurable once it has settled. Watch frame pacing on **both** outputs,
+not the one with the window's title on it — a drop that only shows on the 1x
+screen is still this.
 
-The pointer is immune and that is worth knowing before it confuses anyone: it
-has a size-keyed cache (`Kept`, `cursor.rs:181`) holding one buffer per device
-size, so it pays two misses in total rather than two per frame. Decorations have
-no equivalent. This is expected behaviour of the branch as it stands, the fix is
-known — the same cache shape, keyed on the `Gpu` rather than on the pointer — and
-it is not in this branch. Record the numbers; do not treat it as a new defect.
+Three things worth knowing before reading the result:
+
+- **An animating decoration still renders once per output per frame**, and that
+  is correct rather than a residue of the bug. Qt genuinely has a new picture,
+  and each output genuinely needs it at its own resolution; the cache
+  invalidates on Qt's dirty flag precisely so that it does. What is fixed is the
+  *idle* case, which is the one that lasted for ever. Judge the step with the
+  window settled, not mid-animation.
+- **Three monitors at three distinct scales, one window straddling all three,
+  thrashes the two-entry cache and behaves exactly as the branch did before.**
+  That is the documented cost of the cap and the arithmetic for raising it is at
+  `KEPT`. If the hardware session has three screens, this is worth ten seconds
+  of confirming.
+- **The software path was not changed and still has this shape**, in its own
+  cheaper form: `Decoration::in_memory` reallocates its `MemoryRenderBuffer`
+  once per output per frame for a straddling window, because `buffer_size`
+  is one size and alternates. A `QImage` realloc rather than a GBM round trip,
+  and the default path. Not fixed here because the fix lives in `Gpu`; worth
+  recording if it shows on the 1x screen.
+
+None of this is visible to `dev/wirecheck` — it does not link the compositor
+crate, which is why the defect survived seven task reviews. The in-tree coverage
+is `qml::paint::tests`, and it bites: with `Kept::current` made never to report
+a hit, `a_window_across_a_bezel_is_drawn_twice_and_then_not_again` reads
+`left: 200, right: 2`.
 
 - [ ] **Step 6: Before believing any empty journal grep, check for suppression**
 
@@ -1436,9 +1492,14 @@ you find out whether that held, and it costs one command.
 - [ ] **Step 7: Make a rebind fail on purpose and watch it recover**
 
 Nothing in the harness, the test suite or any run so far exercises the
-freeze-stretched-and-retry path at `paint.rs:438-502`. The plan asserts its
-behaviour — see *A failed rebind freezes, stretched, and retries* above — on
-reasoning alone. This is the only opportunity to execute it.
+freeze-stretched-and-retry path in `Gpu::render` (`paint.rs:697-761`). The plan
+asserts its behaviour — see *A failed rebind freezes, stretched, and retries*
+above — on reasoning alone. This is the only opportunity to execute it.
+
+The cache in front of it does not soften this and does not need a separate look.
+Every way a rebind can fail leaves nothing in `Gpu`'s `kept`, so a failing scene
+misses on every output on every frame and reaches the retry exactly as often as
+it did before — which is also why the latches above it still matter.
 
 The cheapest lever is a scene wider than `MAX_SIDE` (8192, `qml/target.rs:21`),
 because `target::allocate` refuses it before it touches GBM: the failure is
@@ -1549,7 +1610,7 @@ A rotated monitor loses the cursor plane on **both** paths:
 (`drm/compositor/mod.rs:4202`). Put one in the pass so that is recorded as
 inherent to smithay rather than misread later as a GPU-path regression.
 
-It is also the only chance to meet a non-normal output at all: `paint.rs:415`
+It is also the only chance to meet a non-normal output at all: `paint.rs:672`
 hardcodes `Transform::Normal` in the element every GPU scene is drawn through,
 and nothing has ever handed it anything else. Look at whether the chrome is
 oriented correctly on the rotated screen, not only at whether the pointer moved
