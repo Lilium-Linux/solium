@@ -2,7 +2,9 @@
 
 **Date:** 2026-09-11
 **Status:** field report, after building a complete rice. Branch: `rice/prism`.
-Findings filed as [#88](https://github.com/Lilium-Linux/solium/issues/88).
+Findings filed as [#88](https://github.com/Lilium-Linux/solium/issues/88)
+(the four silent failures) and [#89](https://github.com/Lilium-Linux/solium/issues/89)
+(what the transform layer is missing).
 
 ## Why
 
@@ -151,16 +153,107 @@ before `cc` emits the archive. This matters more than an ordinary packaging
 nit: `dev/Containerfile` builds on Fedora, and its own comment says matching
 the host distribution is deliberate. It is the documented build path.
 
+## Special cases still in the compositor
+
+`architecture.md` sets the standard itself: if a mode needs new Rust, the
+transform layer is missing something. By that standard the compositor is
+remarkably clean — searching for the name of any mode in `crates/` finds
+nothing. Wallpaper, overview, workspaces, tiling, scrolling, the tweaks panel
+and the loading window are all script. That is the headline and it should be
+said before the list.
+
+What is left is small, and worth naming while it still is.
+
+**The cursor is its own render path.** `cursor.rs` draws through a
+`MemoryRenderBuffer` with `SIZE` and `HOTSPOT` as constants, placed in
+`render.rs` ahead of everything else. It is QML, but it is not a
+`sol.surface` — so a script cannot replace the pointer, animate it, or give a
+mode its own. Every other thing the compositor draws for its own reasons went
+through `sol.surface`; this one did not.
+
+**Closing a window is not scriptable, and opening one is.** `present.rs`
+hardcodes `CLOSING = 190ms`, `InOutQuad` and a scale of `0.86`. The `open()`
+beside it is an honest fallback whose own comment says `lua/open.lua` normally
+takes over. The asymmetry is the whole point: one half of a window's life is
+configurable and the other is not, for no reason visible in the code.
+
+**`TITLEBAR_HEIGHT` exists twice.** `decoration.rs` holds `32` and
+`Solium/Theme.qml` holds `32`, and the theme's comment already admits the
+duplication. The mechanism to remove it is there — `insetTop` is read back
+from QML — so this is a leftover rather than a design.
+
+**Input policy lives in environment variables.** `form_factor` and
+`drag_modifier` are read once from `SOLIUM_FORM_FACTOR` and
+`SOLIUM_DRAG_MODIFIER`; neither appears in `config.lua`. `RESIZE_BORDER` and
+a minimum window size are constants in `input/resize.rs`. An environment
+variable is not checked by `--check`, is not reloaded by `super+shift+r`, and
+cannot be seen in a configuration — which is most of what a setting is for.
+
+There are sixteen `SOLIUM_*` variables in total. Several are legitimate
+debugging affordances and should stay. But `SHELL_SCENE`, `OUTPUTS`,
+`SHELL_WATCH`, `QML_CURSOR` and the legacy `QML_TITLEBAR` are functionality
+with no other entrance.
+
+**The configuration describes things that do not exist.** `config.lua` has a
+whole `dock` section — `items`, `morph` — and the word appears nowhere in
+`crates/` outside comments. `architecture.md` says every window carries a
+corner radius and a z-order; neither is in the source. This is not laziness,
+it is pace: the configuration was written alongside the intention. It is
+worth a pass before anyone writes a rice against a key that does nothing.
+
 ## What to fix, in order
 
 1. **Route Qt's message handler into `tracing`.** One call in `host.cpp`. It
    would have saved most of a day here and it saves every future ricer the same
-   day. Nothing else on this list comes close for leverage.
+   day. Nothing else on this list comes close for leverage — and it should land
+   *before* the GPU render target, not after, for the reason given below.
 2. **Walk the import path in reverse.** One line, and it unbreaks the
    customisation the ricing guide leads with.
 3. **Expose `z` in `sol.present`.** It unblocks a class of modes rather than
-   one mode.
+   one mode. See #89 for the rest of the transform layer.
 4. **Let `surface.pointer` report whether the scene consumed the press.**
+
+## What the refactor already covers
+
+Written after reading `docs/superpowers/plans/2026-09-08-pane-styles.md`, the
+GPU render target plan beside it, and
+`specs/2026-09-08-pane-styles-design.md` — none of which this report knew
+about while the rice was being built. Several complaints above are already
+answered, and one of them is answered better than it was asked.
+
+**Layers with bleed remove the limitation the glass frame hit.** A decoration
+today cannot draw behind the client or outside the window, which is why
+Prism's frame is a band and nothing else. `behind` / `frame` / `above` plus
+per-side bleed is exactly the missing thing, and "bleed follows the pane's
+stacking" is the right answer to the question it raises.
+
+**Corner radius and shadow are already reserved**, as `client.radius` and
+`client.shadow.blur`, so a style folder written today does not change shape
+when they arrive. The reasoning for deferring them is sharper than the
+complaint: a rounded window stops being opaque, so opaque-region culling and
+subsurface clipping both come into it. "Just expose a radius" was the naive
+version.
+
+**`enum Frame { Pending, None, Styled }`** replacing two parallel tables keyed
+by `PaneId` is the same class of latent special case this report is about,
+found independently and already designed out.
+
+What the plans do **not** touch is the presentation transform: z-order, a
+rotation pivot, an output-level transform, more deforms, clipping, tint. Those
+are a different axis and they survive this refactor intact — hence #89.
+
+And two things in this report get *worse* under the new render path rather
+than better, which is the one place the plans should probably move:
+
+* An intermittent fence failure cannot be bisected the way a white screen can.
+  The plan says a wrong fence "fails intermittently rather than loudly"; with
+  no Qt message handler that is an occasional corrupt frame and an empty log.
+  The handler belongs before the render target, not after it.
+* The software path is staying as the fallback, and `Canvas` almost certainly
+  fails *because of* that path. If it starts working on RHI, a style can be
+  written on one machine and hand a white rectangle to another, silently. That
+  is worth settling while the style format is still being fixed, since which
+  QML is legal is part of the contract.
 
 ## Verdict
 
