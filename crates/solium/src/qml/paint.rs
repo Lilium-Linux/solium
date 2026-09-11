@@ -60,7 +60,12 @@ pub(crate) struct Placement {
 /// The size travels with the texture because after a rebind that failed the two
 /// no longer agree with what the caller asked for, and the *texture's* size is
 /// the one every use of it has to state. See [`Gpu::sample`].
-#[derive(Debug)]
+///
+/// `Clone` is a refcount: a `GlesTexture` is an `Arc<GlesTextureInternal>`, so
+/// two of these naming one picture are two handles and one buffer. [`Gpu`]
+/// holds one in its cache and one as `shown`, and normally they are the same
+/// picture — see [`Gpu::shown`].
+#[derive(Clone, Debug)]
 pub(crate) struct Sampled {
     /// The scene's dmabuf, imported into the compositor's context.
     pub(crate) texture: GlesTexture,
@@ -69,14 +74,180 @@ pub(crate) struct Sampled {
     pub(crate) size: (i32, i32),
 }
 
+/// What makes one drawn picture of a scene different from another.
+///
+/// The pixel size **and** the ratio it was laid out at, because the host is
+/// given both and the picture depends on both: `solium_qml_scene_rebind` sets
+/// the window's geometry to `pixels / scale` and the render target's device
+/// pixel ratio to `scale`, so a 2300-pixel buffer at scale 2 holds a
+/// 1150-logical-wide layout and the same buffer at scale 1 holds a
+/// 2300-logical-wide one. Same buffer, different picture.
+///
+/// Keyed on the pair rather than on the pixels alone because the pixels alone
+/// do not identify it. `pixels = round(logical * scale)`, so for *one* window
+/// the size does determine the scale — but a window that resizes can land on a
+/// pixel size another scale reached a moment ago, and serving that from the
+/// cache would draw a titlebar at half or twice its height. It costs eight
+/// bytes a key to not have to reason about how often that happens.
+///
+/// Exact `f64` equality is the right comparison here and not a tolerance: the
+/// scale is a monitor's configured number, handed down unchanged frame after
+/// frame, so two frames of one output compare identical. A scale that somehow
+/// differed by an ulp would *miss* and pay a rebind, which is the safe
+/// direction to be wrong in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Drawn {
+    /// The size of the buffer, in device pixels.
+    pixels: (i32, i32),
+    /// Device pixels per logical one, which is what the scene was laid out at.
+    scale: f64,
+}
+
+/// How many pictures of one scene are kept at once.
+///
+/// **Two, because two is what a bezel gives you.** The case this exists for is
+/// a window whose slot straddles two monitors at different scales, which is
+/// drawn on both every frame — one entry per output, and there is no third
+/// output for a window to straddle onto without a third monitor.
+///
+/// Deliberately not the pointer's four, and the difference is three orders of
+/// magnitude. A cursor buffer is 24x24x4 = 2.3 KB at 1x, so `cursor.rs` can
+/// afford a generous guard against a script animating an output's scale. A
+/// decoration on an ordinary 1150x850 window is 3.9 MB and there is one
+/// decoration per window: at four entries, ten windows is 156 MB of GBM that
+/// mostly never gets looked at again. Two is 78 MB in the same
+/// worst case, and the realistic number — windows do not usually straddle — is
+/// one entry each.
+///
+/// What it costs when it is too small is *today's behaviour and nothing worse*:
+/// a window straddling three monitors at three distinct scales thrashes a
+/// two-entry cache and rebinds every frame, exactly as it did before this
+/// existed. Raising this constant is the knob, and the price of raising it is
+/// the arithmetic above.
+const KEPT: usize = 2;
+
+/// What a scene has already been drawn at, newest last.
+///
+/// Keyed by what was asked for, because the compositor draws one scene once per
+/// output per frame and each output brings its own scale. `render.rs:477` keeps
+/// a window whose *slot* straddles a bezel on **both** screens, deliberately
+/// and with a comment arguing for it, so a desktop with a 1x and a 2x monitor
+/// asks for 1150x850 and then 2300x1700, alternating, on every frame for as
+/// long as the window sits there.
+///
+/// Without this, every one of those calls took [`Gpu::render`]'s rebind branch:
+/// a GBM allocation, a dmabuf export, an `eglCreateImageKHR`, a Qt
+/// render-target swap, a full Qt render and an `import_dmabuf` — twice a frame,
+/// for ever — and `damage.reset()` with each one, so both outputs repainted the
+/// window's whole area every frame as well. None of it needed any user action
+/// beyond owning two monitors and dragging a window between them.
+///
+/// Generic over what is kept only so the policy can be tested without Qt: what
+/// costs anything here is how often this misses, and that is arithmetic rather
+/// than graphics. Generic over the **key** because the two callers do not agree
+/// on what a size is — a pointer is square and keyed on one edge, a window
+/// frame is not and is keyed on a [`Drawn`]. It was written for the pointer
+/// first and lived in `cursor.rs`; it is here because this is the second
+/// caller and a second copy of it was the thing not to write.
+///
+/// The cap is the caller's for the same reason: see [`KEPT`] here and
+/// `cursor.rs`'s, which differ by three orders of magnitude of buffer.
+#[derive(Debug)]
+pub(crate) struct Kept<K, T> {
+    held: Vec<(K, T)>,
+    /// At least one, whatever the caller says. A cap of zero would mean
+    /// `push` evicting from an empty list, and a cache that cannot hold
+    /// anything is a slower way of having no cache.
+    cap: usize,
+}
+
+impl<K: Copy + PartialEq, T> Kept<K, T> {
+    /// A cache holding at most `cap` pictures.
+    pub(crate) fn keeping(cap: usize) -> Self {
+        Self {
+            held: Vec::new(),
+            cap: cap.max(1),
+        }
+    }
+
+    /// Whether a current picture of `key` is in hand.
+    ///
+    /// **The whole of the rebind decision, and the only place either caller
+    /// makes it.** `fresh` is whether Qt has something new to draw for this
+    /// scene; when it does, everything kept is the *previous* picture and every
+    /// size of it goes at once. One call rather than a `clear` the caller has
+    /// to remember before a `has`, because forgetting it is not a miss — it is
+    /// the monitor nobody is looking at keeping a stale picture for ever, and
+    /// there is no frame on which that corrects itself.
+    ///
+    /// Invalidating on the dirty flag is not a guess about what Qt would have
+    /// done. `solium_qml_scene_render_gpu` returns `SOLIUM_QML_UNCHANGED` under
+    /// exactly `if (!scene->dirty)` (`host.cpp:1476`), so a `false` here means
+    /// the render this skips would have drawn nothing.
+    pub(crate) fn current(&mut self, key: K, fresh: bool) -> bool {
+        if fresh {
+            self.held.clear();
+        }
+        self.held.iter().any(|(held, _)| *held == key)
+    }
+
+    /// The picture kept for `key`, if there is one.
+    pub(crate) fn get(&self, key: K) -> Option<&T> {
+        self.held
+            .iter()
+            .find(|(held, _)| *held == key)
+            .map(|(_, value)| value)
+    }
+
+    /// The same, to lend to something that needs it by `&mut` —
+    /// `MemoryRenderBufferRenderElement::from_buffer` does.
+    pub(crate) fn get_mut(&mut self, key: K) -> Option<&mut T> {
+        self.held
+            .iter_mut()
+            .find(|(held, _)| *held == key)
+            .map(|(_, value)| value)
+    }
+
+    /// Keep `value` under `key`, oldest out first.
+    ///
+    /// **Eviction drops the value here, and that is the half that matters on
+    /// the GPU path.** What is kept is a `Sampled`, whose `GlesTexture` is the
+    /// last thing holding the `EGLImage` that holds EGL's own reference on the
+    /// GBM buffer object — see [`Gpu::render`], which is where that argument is
+    /// set out. So dropping the entry is what actually returns the 3.9 MB, and
+    /// a cache that moved evicted entries anywhere instead of dropping them
+    /// would keep every buffer it ever made while looking like it had a bound.
+    pub(crate) fn push(&mut self, key: K, value: T) {
+        self.held.retain(|(held, _)| *held != key);
+        // `cap` is at least one, so the list is never empty when this runs.
+        while self.held.len() >= self.cap {
+            self.held.remove(0);
+        }
+        self.held.push((key, value));
+    }
+
+    /// How many pictures are being kept.
+    ///
+    /// Nothing in the compositor asks; the cap is only observable from a test.
+    #[cfg(test)]
+    pub(crate) fn count(&self) -> usize {
+        self.held.len()
+    }
+}
+
 /// A complaint that is made once and then held until the thing works again.
 ///
-/// Every failure this module can reach fires from inside [`Gpu::sample`], which
-/// `render.rs` reaches **once per scene per output per frame** — and none of
-/// them heals by itself. A driver that will not allocate, a context that will
+/// Every failure this module can reach fires from inside [`Gpu::refresh`],
+/// which `render.rs` reaches **once per scene per output per frame** — and none
+/// of them heals by itself. A driver that will not allocate, a context that will
 /// not come back and a buffer that will not import all fail identically on the
 /// next frame and the one after, so an unlatched line here is not a log line,
 /// it is the log, at four figures a second.
+///
+/// The cache in front of it does not change that arithmetic, and is not an
+/// excuse to drop a latch. Every one of these failures leaves nothing in
+/// [`Gpu::kept`], so a scene that is failing misses on every output on every
+/// frame and reaches here exactly as often as it did before.
 ///
 /// Which is worse than noise. journald's defaults are `RateLimitBurst=10000`
 /// per `RateLimitIntervalSec=30s`, so a flood of ours starts dropping messages
@@ -149,15 +320,32 @@ struct Complaints {
 /// thing drawing into it.
 #[derive(Debug)]
 pub(crate) struct Gpu {
-    /// The imported texture and the size of the buffer it names, kept so an
-    /// idle frame costs no import.
+    /// The last picture that imported, whatever size it was.
     ///
     /// One field and not two, because the pair is the invariant: a texture
     /// whose size is stated from somewhere else is how a stale texture comes to
     /// be sampled outside itself. It is replaced only when a *new* import has
     /// succeeded, which is what stops one failed import from hiding a scene —
     /// see [`Gpu::take`].
+    ///
+    /// **This is the freeze anchor and that is now its whole job.** A rebind
+    /// that fails leaves the scene on the buffer it already had, and this is
+    /// what [`Gpu::element`] then draws stretched into the geometry the scene
+    /// should have had; on a scene's very first frame it is `None` and nothing
+    /// is drawn, which is the narrower half of that guarantee and is stated in
+    /// the plan. Everything that is *not* a failure is served from `kept`.
+    ///
+    /// Normally a second handle on a picture `kept` is also holding, so it
+    /// costs a refcount and no memory. It outlives eviction by design — being
+    /// able to draw the last good frame is the point of it — so the real bound
+    /// on this type is [`KEPT`] buffers plus at most one, and reaching the
+    /// "plus one" needs a third straddled output to have evicted it.
     shown: Option<Sampled>,
+    /// One imported picture per size this scene has been asked for.
+    ///
+    /// The fix for the multi-output rebind thrash; [`Kept`] is where the shape
+    /// is argued and [`KEPT`] is where the two is.
+    kept: Kept<Drawn, Sampled>,
     /// Stable for the life of the scene, so the damage tracker sees one element
     /// moving and changing rather than a new one every frame.
     id: Id,
@@ -192,6 +380,7 @@ impl Gpu {
     pub(crate) fn new(size: (i32, i32)) -> Self {
         Self {
             shown: None,
+            kept: Kept::keeping(KEPT),
             id: Id::new(),
             damage: DamageBag::default(),
             bound: size,
@@ -199,15 +388,19 @@ impl Gpu {
         }
     }
 
-    /// Render the scene at `size` device pixels and hand back what Qt drew.
+    /// The scene's picture at `size` device pixels, drawing it if it is not
+    /// already in hand.
     ///
-    /// Three things happen in this order and none of them are optional. Qt
-    /// renders; the compositor's EGL context goes back on this thread; Qt's
-    /// fence is waited for. The second is why the Qt half is one call rather
-    /// than inline — see [`restore`] — and the third is why the fence is
-    /// imported rather than dropped: sampling a buffer that is still being
-    /// written is a race that surfaces as garbage on maybe one frame in several
-    /// hundred, which is the hardest possible thing to attribute.
+    /// **Called once per scene per output per frame**, which is the fact the
+    /// whole of this is shaped by. An output asking for a size another output
+    /// already paid for this frame costs a comparison: see [`Kept`] for the
+    /// desktop that made that necessary, and [`Gpu::refresh`] for everything a
+    /// miss owes.
+    ///
+    /// A hit calls neither Qt nor the renderer, so — unlike a miss — it leaves
+    /// the thread exactly as it found it and has nothing to restore. That is
+    /// the same trade `cursor.rs` already makes one layer up, where a hit on
+    /// its own cache does not reach this function at all.
     ///
     /// The `Sampled` carries its own size, and it can be smaller than `size`:
     /// that is a frozen scene, and [`Gpu::render`] is where the freeze is
@@ -221,6 +414,50 @@ impl Gpu {
         size: (i32, i32),
         scale: f64,
     ) -> Option<&Sampled> {
+        let wanted = Drawn {
+            pixels: size,
+            scale,
+        };
+        // `needs_render` is read before anything is drawn, which is the only
+        // moment it means "Qt has something we have not got": `render_gpu`
+        // clears it. `Decoration::frame` has already set this frame's
+        // properties by the time it reaches here, so a retitled or refocused
+        // window is dirty on the first output that asks and every kept size of
+        // it is dropped together.
+        if !self.kept.current(wanted, scene.needs_render()) {
+            self.refresh(scene, renderer, size, scale)?;
+        }
+        // One expression, at the end, and in that order. After a miss that
+        // worked the first arm holds this frame's picture; after one that
+        // failed it holds nothing and `shown` is the last frame the scene
+        // managed, drawn stretched — or `None` on a scene that has never drawn,
+        // which is the case that draws nothing at all.
+        self.kept.get(wanted).or(self.shown.as_ref())
+    }
+
+    /// Everything a miss owes: render, restore, wait on Qt, import.
+    ///
+    /// Three things happen in this order and none of them are optional. Qt
+    /// renders; the compositor's EGL context goes back on this thread; Qt's
+    /// fence is waited for. The second is why the Qt half is one call rather
+    /// than inline — see [`restore`] — and the third is why the fence is
+    /// imported rather than dropped: sampling a buffer that is still being
+    /// written is a race that surfaces as garbage on maybe one frame in several
+    /// hundred, which is the hardest possible thing to attribute.
+    ///
+    /// Split out of [`Gpu::sample`] so that what to hand back is decided in one
+    /// place, at the end, rather than returned from four points inside a
+    /// borrow. `None` here means **draw nothing this frame** and is not the
+    /// same answer as a render that failed: a failed render still has the last
+    /// picture to show, whereas a context that would not come back and a fence
+    /// that would not wait leave nothing this function is willing to sample.
+    fn refresh(
+        &mut self,
+        scene: &mut Scene,
+        renderer: &mut GlesRenderer,
+        size: (i32, i32),
+        scale: f64,
+    ) -> Option<()> {
         let rendered = self.render(scene, size, scale);
         // Unconditional, and underneath every way out of the call above,
         // including the paths that failed. Rendering leaves Qt's context on the
@@ -273,7 +510,7 @@ impl Gpu {
                         }
                     }
                 }
-                self.take(scene, renderer);
+                self.take(scene, renderer, scale);
             }
             // Qt had nothing new to draw, so the texture in hand is normally
             // this frame's picture already and no import and no wait are owed.
@@ -313,7 +550,7 @@ impl Gpu {
                     .as_ref()
                     .is_none_or(|held| held.size != self.bound)
                 {
-                    self.take(scene, renderer);
+                    self.take(scene, renderer, scale);
                 }
             }
             // The picture in hand is the last one Qt drew, and it is still the
@@ -336,7 +573,7 @@ impl Gpu {
             }
         }
 
-        self.shown.as_ref()
+        Some(())
     }
 
     /// Import the scene's buffer, replacing what is shown only if that worked.
@@ -344,7 +581,15 @@ impl Gpu {
     /// Re-imported rather than kept: `import_dmabuf` is cached on the buffer and
     /// re-binds the EGLImage to the same texture name, which is what makes what
     /// Qt just wrote visible to our context.
-    fn take(&mut self, scene: &Scene, renderer: &mut GlesRenderer) {
+    ///
+    /// `scale` is only for the cache key, and it is paired with `self.bound`
+    /// rather than with what the caller asked for so that the key always
+    /// describes the picture actually in hand. The two are the same here —
+    /// [`Gpu::render`] returns `Ok` only with `bound` equal to the size it was
+    /// asked for — and if that ever stopped being true this would *miss* on the
+    /// next lookup and pay a rebind, rather than hand back a picture laid out at
+    /// something else.
+    fn take(&mut self, scene: &Scene, renderer: &mut GlesRenderer, scale: f64) {
         let Some(buffer) = scene.buffer() else {
             self.said.missing.once(|| {
                 tracing::warn!(
@@ -360,10 +605,22 @@ impl Gpu {
                 // Whole-buffer damage, because Qt does not say what it
                 // repainted and the buffer is the same one every frame.
                 self.damage.add([Rectangle::from_size(self.bound.into())]);
-                self.shown = Some(Sampled {
+                let sampled = Sampled {
                     texture,
                     size: self.bound,
-                });
+                };
+                // Both, and the clone is a refcount on one texture. `kept` is
+                // what the next output to ask for this size reads; `shown` is
+                // the anchor a failed rebind falls back to, and it has to
+                // survive this entry being evicted.
+                self.kept.push(
+                    Drawn {
+                        pixels: self.bound,
+                        scale,
+                    },
+                    sampled.clone(),
+                );
+                self.shown = Some(sampled);
             }
             // Deliberately leaves `shown` alone. The previous texture is a real
             // picture — see `Gpu::render` for why it stays valid after the
@@ -424,10 +681,12 @@ impl Gpu {
 
     /// Everything that hands this thread's GL context to Qt, in one place.
     ///
-    /// Gathered into one call so [`Gpu::sample`] can put the context back
-    /// underneath it on every path out, the failures included — `sample` is the
+    /// Gathered into one call so [`Gpu::refresh`] can put the context back
+    /// underneath it on every path out, the failures included — `refresh` is the
     /// caller that restores, and the only one. [`Gpu::element`] was split off
-    /// above it later and goes through `sample` like everything else.
+    /// above it later and goes through `sample` like everything else, and
+    /// `sample` reaches this only on a cache miss: a hit hands Qt nothing and so
+    /// has nothing to take back.
     /// **Nothing in here may touch the renderer.**
     fn render(
         &mut self,
@@ -567,7 +826,217 @@ fn wait_for(renderer: &mut GlesRenderer, fence: OwnedFd) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Said;
+    use super::{Drawn, KEPT, Kept, Said};
+
+    /// An ordinary 1150x850 window, as the two monitors under it see it.
+    ///
+    /// The numbers from the plan's Task 8 Step 5, which is the desktop this
+    /// cache exists for: one window, one `Gpu`, two outputs at scale 1 and
+    /// scale 2, and `Decoration::frame` computing `round(logical * scale)` for
+    /// each of them. They are not the same size and they are not meant to be —
+    /// the whole point of the GPU path is that a 2x monitor gets twice the
+    /// pixels rather than a stretched copy of the 1x one's.
+    const ON_THE_1X: Drawn = Drawn {
+        pixels: (1150, 850),
+        scale: 1.0,
+    };
+    const ON_THE_2X: Drawn = Drawn {
+        pixels: (2300, 1700),
+        scale: 2.0,
+    };
+
+    /// **A window straddling a bezel costs two renders in total, not two a
+    /// frame.**
+    ///
+    /// The regression this cache was added for. `render.rs:477` decides by the
+    /// window's *slot*, so a window dragged between two monitors and left there
+    /// is drawn on both — deliberately, with a comment arguing for it — and
+    /// `Gpu::sample` therefore runs once per output per frame with that
+    /// output's scale. Before the cache, `Gpu::render`'s `self.bound != size`
+    /// was the only thing between those calls and a rebind, and with two sizes
+    /// alternating it was true on **every single one**: a fresh GBM allocation,
+    /// a dmabuf export, an `eglCreateImageKHR`, a Qt render-target swap, a full
+    /// Qt render and an `import_dmabuf`, twice a frame, for as long as the
+    /// window sat there — plus a `damage.reset()` each time, so both outputs
+    /// repainted the window's whole area every frame too.
+    ///
+    /// Both rules are here rather than only the new one, because the number
+    /// this test exists to move is meaningless without the number it moved
+    /// *from*, and a commit message is not somewhere a future reader looks.
+    /// The first half is what `paint.rs` did before this commit, written out;
+    /// the second half calls the production decision itself.
+    ///
+    /// Arithmetic, and it needs neither Qt nor a GPU — which is the only reason
+    /// there is any coverage of this at all. `dev/wirecheck` does not link the
+    /// compositor crate, so `paint.rs` is invisible to it and this defect
+    /// survived seven task reviews.
+    #[test]
+    fn a_window_across_a_bezel_is_drawn_twice_and_then_not_again() {
+        // The rule this replaced: the scene's buffer is one size, so asking for
+        // the other one always means a new buffer.
+        let mut bound = (0, 0);
+        let mut rebinds = 0;
+        for _ in 0..100 {
+            for wanted in [ON_THE_1X, ON_THE_2X] {
+                if bound != wanted.pixels {
+                    rebinds += 1;
+                    bound = wanted.pixels;
+                }
+            }
+        }
+        assert_eq!(
+            rebinds, 200,
+            "the churn this cache exists to stop: two rebinds a frame, for ever"
+        );
+
+        // And the rule now, which is `Kept::current` and is what `Gpu::sample`
+        // asks. `false` throughout because the scene has nothing new to draw:
+        // an idle decorated window is the case, and a decoration that *is*
+        // animating genuinely owes both outputs a fresh picture.
+        let mut kept: Kept<Drawn, u32> = Kept::keeping(KEPT);
+        let mut renders = 0;
+        for frame in 0..100 {
+            for wanted in [ON_THE_1X, ON_THE_2X] {
+                if !kept.current(wanted, false) {
+                    renders += 1;
+                    kept.push(wanted, frame);
+                }
+            }
+        }
+        assert_eq!(
+            renders, 2,
+            "a straddling window was re-rendered after the first frame"
+        );
+        assert!(kept.get(ON_THE_1X).is_some() && kept.get(ON_THE_2X).is_some());
+    }
+
+    /// And when Qt does have something new, **every** size of it goes.
+    ///
+    /// The other direction, and the one whose failure is invisible rather than
+    /// slow: a decoration that keeps the size belonging to the monitor nobody
+    /// is looking at shows a stale title, or a stale focus ring, on that
+    /// monitor for ever. There is no later frame on which that corrects itself,
+    /// because the dirty flag is spent by the first output to render.
+    #[test]
+    fn new_content_drops_the_other_monitor_s_size_too() {
+        let mut kept: Kept<Drawn, u32> = Kept::keeping(KEPT);
+        kept.push(ON_THE_1X, 1);
+        kept.push(ON_THE_2X, 1);
+
+        // The first output of the frame reports the scene fresh and misses.
+        assert!(!kept.current(ON_THE_1X, true));
+        kept.push(ON_THE_1X, 2);
+        // The second one is told nothing is fresh, because rendering for the
+        // first cleared Qt's flag — and it must still miss, or it draws the
+        // frame before last.
+        assert!(
+            !kept.current(ON_THE_2X, false),
+            "the 2x monitor kept a picture from before the change"
+        );
+    }
+
+    /// A picture is identified by its scale as well as its pixels.
+    ///
+    /// The host is handed both — `rebind` sets the window's geometry to
+    /// `pixels / scale` and the target's device pixel ratio to `scale` — so one
+    /// buffer size holds two different pictures at two different scales. A
+    /// window that resizes can land on a pixel size another scale reached a
+    /// moment earlier, and serving that from the cache would draw a titlebar at
+    /// half or twice its proper height.
+    #[test]
+    fn one_pixel_size_at_two_scales_is_two_pictures() {
+        let mut kept: Kept<Drawn, u32> = Kept::keeping(KEPT);
+        let at_one = Drawn {
+            pixels: (2300, 1700),
+            scale: 1.0,
+        };
+        kept.push(ON_THE_2X, 1);
+        assert!(
+            !kept.current(at_one, false),
+            "a scale-2 picture was served to a scale-1 output"
+        );
+    }
+
+    /// The cap, which is two because a bezel has two sides.
+    ///
+    /// Read for exactly what it is: a guard, not an eviction policy anything on
+    /// a working desktop reaches. What it costs when it is too small — three
+    /// monitors, three distinct scales, one window straddling all of them — is
+    /// the behaviour this cache replaced, and not anything worse.
+    #[test]
+    fn the_cap_is_two_and_evicts_the_oldest() {
+        let mut kept: Kept<Drawn, u32> = Kept::keeping(KEPT);
+        let sizes: Vec<Drawn> = (1..=(KEPT + 2))
+            .map(|step| Drawn {
+                #[expect(clippy::cast_possible_truncation, reason = "three small integers")]
+                pixels: (100 * step as i32, 100),
+                scale: 1.0,
+            })
+            .collect();
+        for size in &sizes {
+            kept.push(*size, 0);
+        }
+        assert_eq!(kept.count(), KEPT);
+        assert!(!kept.current(sizes[0], false), "the oldest size was kept");
+        assert!(
+            kept.current(sizes[KEPT + 1], false),
+            "the newest size was dropped"
+        );
+    }
+
+    /// **Eviction drops what it evicts**, rather than moving it somewhere.
+    ///
+    /// The half that decides whether the cap means anything. What is kept here
+    /// is a `Sampled`, and its `GlesTexture` is the last thing holding the
+    /// `EGLImage` that holds EGL's own reference on the GBM buffer object —
+    /// `Gpu::render` sets that argument out in full. So the 3.9 MB comes back
+    /// when, and only when, the entry is dropped; a cache that retired entries
+    /// into a list, or handed them to a caller that kept them, would have a cap
+    /// and no bound.
+    ///
+    /// This asserts the container and not the GL, because the GL needs a
+    /// device. A drop counter is what is checkable here, and it is the thing
+    /// that would actually be got wrong.
+    #[test]
+    fn eviction_drops_the_buffer_rather_than_parking_it() {
+        use std::{cell::Cell, rc::Rc};
+
+        struct Counted(Rc<Cell<u32>>);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        impl std::fmt::Debug for Counted {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("Counted")
+            }
+        }
+
+        let dropped = Rc::new(Cell::new(0));
+        let mut kept: Kept<i32, Counted> = Kept::keeping(2);
+        for size in 1..=5 {
+            kept.push(size, Counted(Rc::clone(&dropped)));
+        }
+        assert_eq!(dropped.get(), 3, "three evictions freed nothing");
+
+        // And re-pushing a size it already holds frees the old one rather than
+        // keeping both under one key.
+        kept.push(5, Counted(Rc::clone(&dropped)));
+        assert_eq!(dropped.get(), 4, "the replaced picture was kept alive");
+
+        drop(kept);
+        assert_eq!(dropped.get(), 6, "dropping the cache kept its buffers");
+    }
+
+    /// A cap of zero would mean evicting from an empty list, and there is no
+    /// sensible thing for a cache that cannot hold anything to do.
+    #[test]
+    fn a_cap_of_zero_still_holds_one() {
+        let mut kept: Kept<i32, u32> = Kept::keeping(0);
+        kept.push(24, 1);
+        assert!(kept.current(24, false));
+    }
 
     /// A failure that does not heal is reached once per scene per output per
     /// frame for the rest of the session -- a frozen GPU scene is exactly that

@@ -33,7 +33,7 @@ use smithay::{
 use crate::{
     qml::{
         self,
-        paint::{Gpu, Said},
+        paint::{Gpu, Kept, Said},
     },
     render::Element,
 };
@@ -55,6 +55,12 @@ const HOTSPOT: (i32, i32) = (0, 0);
 /// here because the key is a pixel size rather than a monitor: a script that
 /// animates an output's scale would otherwise mint a buffer per step and keep
 /// every one of them.
+///
+/// Four rather than the two `qml::paint`'s own [`Kept`] uses, and the reason is
+/// the buffer. A pointer is 24 logical pixels square, so an entry is 2.3 KB at
+/// 1x and 9.2 KB at 2x — a generous guard costs nothing here. A window frame is
+/// a whole window, 3.9 MB of it on an ordinary one, and there is one per
+/// window; see `KEPT` in `qml/paint.rs` for that arithmetic.
 const KEPT: usize = 4;
 
 /// How a rasterised pointer reaches the screen.
@@ -139,7 +145,11 @@ pub(crate) struct Cursor {
     scene: qml::Scene,
     backing: Backing,
     /// One uploadable buffer per device size the pointer has been asked for.
-    buffers: Kept<MemoryRenderBuffer>,
+    ///
+    /// Keyed on one edge because a pointer is square. The window frames use the
+    /// same container keyed on a size *pair*, which is why [`Kept`] is generic
+    /// over its key — see `qml/paint.rs`.
+    buffers: Kept<i32, MemoryRenderBuffer>,
     /// Whether producing a pointer image has already failed and said so.
     ///
     /// One latch for the whole of [`Cursor::fill`] rather than one per `warn!`,
@@ -149,10 +159,10 @@ pub(crate) struct Cursor {
     ///
     /// The shape that needs it: when a GPU rebind persistently fails the scene
     /// freezes on a smaller buffer, [`Cursor::fill`] pushes under that frozen
-    /// size, and so `buffers.has(edge)` misses for that output every frame for
-    /// the rest of the session. The retry is deliberate and right, but it means
-    /// each frame pays a failed allocation and a full readback *and*, without
-    /// this, said so four times.
+    /// size, and so `buffers.current(edge, ..)` misses for that output on every
+    /// frame for the rest of the session. The retry is deliberate and right, but
+    /// it means each frame pays a failed allocation and a full readback *and*,
+    /// without this, said so four times.
     drawing: Said,
     /// And whether turning a finished image into an element has.
     ///
@@ -160,61 +170,6 @@ pub(crate) struct Cursor {
     /// different stage — one of them silencing the other would hide the case
     /// where both are happening.
     uploading: Said,
-}
-
-/// What the pointer has already been drawn at, newest last.
-///
-/// Keyed by device size and not by "the current scale", which is what this was.
-/// `render.rs` builds the pointer for *every* output, deliberately and with a
-/// comment saying so, so a desktop with a 1x and a 2x monitor asks for 24 and
-/// then 48 on every single frame, for ever. With one buffer that meant
-/// re-rasterising twice a frame on the software path — and on the GPU path a GBM
-/// allocation, a dmabuf handed to Qt, an EGLImage, a full re-render of
-/// `cursor.qml` through the curve renderer and an import, twice a frame, with
-/// full damage reported on both outputs each time. None of it needed any user
-/// action beyond owning two monitors.
-///
-/// Generic over what is kept only so the policy can be tested without Qt: what
-/// costs anything here is how often this misses, and that is arithmetic rather
-/// than graphics.
-#[derive(Debug)]
-struct Kept<T> {
-    held: Vec<(i32, T)>,
-}
-
-impl<T> Default for Kept<T> {
-    fn default() -> Self {
-        Self { held: Vec::new() }
-    }
-}
-
-impl<T> Kept<T> {
-    fn has(&self, edge: i32) -> bool {
-        self.held.iter().any(|(size, _)| *size == edge)
-    }
-
-    fn get(&mut self, edge: i32) -> Option<&mut T> {
-        self.held
-            .iter_mut()
-            .find(|(size, _)| *size == edge)
-            .map(|(_, held)| held)
-    }
-
-    /// Everything kept is the previous picture. See `Cursor::element`.
-    fn clear(&mut self) {
-        self.held.clear();
-    }
-
-    /// Oldest out first. [`KEPT`] is four and a desktop uses two, so this is a
-    /// guard against a pathological scale rather than an eviction policy
-    /// anything is expected to reach.
-    fn push(&mut self, edge: i32, value: T) {
-        self.held.retain(|(size, _)| *size != edge);
-        if self.held.len() >= KEPT {
-            self.held.remove(0);
-        }
-        self.held.push((edge, value));
-    }
 }
 
 impl Cursor {
@@ -236,7 +191,7 @@ impl Cursor {
             } else {
                 Backing::Memory
             },
-            buffers: Kept::default(),
+            buffers: Kept::keeping(KEPT),
             drawing: Said::default(),
             uploading: Said::default(),
         })
@@ -270,12 +225,16 @@ impl Cursor {
         )]
         let edge = ((f64::from(SIZE) * scale).round() as i32).max(1);
 
-        // Anything kept is the *previous* picture, and the render below is
-        // about to spend the flag that says so. Cleared before it rather than
-        // after, so the size this frame does not want is re-made when it is
-        // next asked for instead of being served stale for ever.
+        // Anything kept is the *previous* picture when Qt has something new,
+        // and the render below is about to spend the flag that says so. The
+        // invalidation is inside `Kept::current` rather than a `clear` written
+        // out here, so that it cannot be forgotten and so that the window
+        // frames invalidate the same way — see `qml/paint.rs`. It happens
+        // *before* the render for the same reason it always did: the size this
+        // frame does not want has to be re-made when it is next asked for
+        // instead of being served stale for ever.
         //
-        // In practice this fires once, on the first frame: `cursor.qml` has no
+        // In practice it fires once, on the first frame: `cursor.qml` has no
         // animation and nothing writes its properties, so after the pointer has
         // been drawn once it never asks to be drawn again.
         //
@@ -287,22 +246,20 @@ impl Cursor {
         // `set_int`/`set_bool` on it anywhere, unlike a decoration or a pane.
         // So `needs_render` can return true here on frame 1 and never again.
         // The wiring is right and cheap and should stay; what it is not is
-        // exercised. The unit test below covers `Kept::clear` honestly and says
-        // so, but nothing anywhere drives a theme change end to end, so do not
-        // read a green test suite as evidence that a live re-theme repaints the
-        // pointer. It has never been done once.
-        if self.scene.needs_render() {
-            self.buffers.clear();
-        }
-
+        // exercised. The unit tests below cover the invalidation honestly and
+        // say so, but nothing anywhere drives a theme change end to end, so do
+        // not read a green test suite as evidence that a live re-theme repaints
+        // the pointer. It has never been done once.
+        //
         // The size actually in hand, which is `edge` unless a GPU rebind failed
         // and the scene is frozen on a smaller buffer.
-        let held = if self.buffers.has(edge) {
+        let fresh = self.scene.needs_render();
+        let held = if self.buffers.current(edge, fresh) {
             edge
         } else {
             self.fill(renderer, edge, scale)?
         };
-        let buffer = self.buffers.get(held)?;
+        let buffer = self.buffers.get_mut(held)?;
 
         // Physical, and the hotspot is logical, so both go through the scale.
         let position = (
@@ -348,8 +305,8 @@ impl Cursor {
     /// that was actually produced.
     ///
     /// **Every way out of here that is not `Some` runs again next frame**, for
-    /// this output and every other one: nothing was pushed, so `buffers.has` is
-    /// still false. That is deliberate — a GBM allocation that failed because
+    /// this output and every other one: nothing was pushed, so `buffers.current`
+    /// is still false. That is deliberate — a GBM allocation that failed because
     /// the GPU was momentarily full heals itself with nobody having to notice —
     /// and it is why each complaint on the way out goes through `self.drawing`
     /// rather than straight to `warn!`. See [`Said`].
@@ -570,6 +527,16 @@ impl Pointer {
 mod tests {
     use super::{KEPT, Kept};
 
+    /// The pointer's own use of the shared cache, at the pointer's own cap.
+    ///
+    /// These four are unchanged in what they assert. [`Kept`] moved to
+    /// `qml/paint.rs` when the window frames became its second caller, and
+    /// generalising it over the key and the cap changed how it is named and
+    /// constructed here and nothing else: `Kept<u32>` became
+    /// `Kept<i32, u32>`, `Kept::default()` became `Kept::keeping(KEPT)`, the
+    /// `clear`-then-`has` pair became the one `current` call the compositor now
+    /// makes, and `held.len()` became `count()`.
+    ///
     /// The pointer is built for **every** output on every frame -- `render.rs`
     /// says so in as many words and argues for it -- so a desktop with a 1x and
     /// a 2x monitor asks for 24 and then 48, alternating, for as long as the
@@ -582,11 +549,11 @@ mod tests {
     /// need Qt.
     #[test]
     fn two_monitors_at_two_scales_cost_two_fills_and_then_nothing() {
-        let mut kept: Kept<u32> = Kept::default();
+        let mut kept: Kept<i32, u32> = Kept::keeping(KEPT);
         let mut fills = 0;
         for frame in 0..100 {
             for edge in [24, 48] {
-                if !kept.has(edge) {
+                if !kept.current(edge, false) {
                     fills += 1;
                     kept.push(edge, frame);
                 }
@@ -600,42 +567,49 @@ mod tests {
     /// once, or the monitor that is not being looked at keeps the old pointer
     /// for ever.
     ///
-    /// Read this for exactly what it is: `Kept::clear` drops every entry. It is
-    /// **not** end-to-end coverage of a theme change, and there is no such
-    /// coverage anywhere — nothing in the compositor can currently trigger one
-    /// at all, for the reasons set out at the `needs_render` call in
-    /// `Cursor::element`. So this passing says the container forgets when it is
-    /// told to. It says nothing about whether anything ever tells it.
+    /// Read this for exactly what it is: a `current` call told the scene is
+    /// fresh drops every entry. It is **not** end-to-end coverage of a theme
+    /// change, and there is no such coverage anywhere — nothing in the
+    /// compositor can currently trigger one at all, for the reasons set out at
+    /// the `needs_render` call in `Cursor::element`. So this passing says the
+    /// container forgets when it is told to. It says nothing about whether
+    /// anything ever tells it.
     #[test]
     fn clearing_invalidates_every_size() {
-        let mut kept: Kept<u32> = Kept::default();
+        let mut kept: Kept<i32, u32> = Kept::keeping(KEPT);
         kept.push(24, 1);
         kept.push(48, 1);
-        kept.clear();
-        assert!(!kept.has(24) && !kept.has(48));
+        assert!(!kept.current(24, true), "the size asked for survived");
+        assert!(
+            !kept.current(48, false),
+            "the other monitor's size survived"
+        );
     }
 
     /// The cap is a guard against a script animating an output's scale, which
     /// would otherwise mint a buffer per step and keep every one.
     #[test]
     fn the_cap_evicts_the_oldest() {
-        let mut kept: Kept<u32> = Kept::default();
+        let mut kept: Kept<i32, u32> = Kept::keeping(KEPT);
         for edge in 1..=(KEPT as i32 + 2) {
             kept.push(edge, 0);
         }
-        assert_eq!(kept.held.len(), KEPT);
-        assert!(!kept.has(1), "the oldest size was kept");
-        assert!(kept.has(KEPT as i32 + 2), "the newest size was dropped");
+        assert_eq!(kept.count(), KEPT);
+        assert!(!kept.current(1, false), "the oldest size was kept");
+        assert!(
+            kept.current(KEPT as i32 + 2, false),
+            "the newest size was dropped"
+        );
     }
 
     /// Asking for a size already held must not grow the list, or a pointer that
     /// never changes size still evicts everything else eventually.
     #[test]
     fn re_pushing_a_size_replaces_it() {
-        let mut kept: Kept<u32> = Kept::default();
+        let mut kept: Kept<i32, u32> = Kept::keeping(KEPT);
         kept.push(24, 1);
         kept.push(24, 2);
-        assert_eq!(kept.held.len(), 1);
+        assert_eq!(kept.count(), 1);
         assert_eq!(kept.get(24).copied(), Some(2));
     }
 }
