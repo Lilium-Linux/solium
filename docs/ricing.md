@@ -415,8 +415,8 @@ rather than the titlebars.
 
 ### Your own animation feel
 
-Named curves — `linear`, `outCubic`, `outBack`, `inOutQuad`, `spring` — or four
-numbers, which are a cubic bezier's control points:
+Named curves — `linear`, `outCubic`, `outBack`, `inOutQuad`, `inOutCubic`,
+`spring` — or four numbers, which are a cubic bezier's control points:
 
 ```lua
 return {
