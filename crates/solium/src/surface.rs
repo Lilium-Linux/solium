@@ -36,7 +36,7 @@ use crate::{
         self,
         paint::{Gpu, Placement},
     },
-    render::Element,
+    render::{Drawn, Element},
 };
 
 /// How often the QML is checked for edits.
@@ -74,6 +74,15 @@ pub(crate) struct ShellSurface {
     properties: String,
     newest: Option<SystemTime>,
     checked: Duration,
+}
+
+/// A hosted scene animates on a clock of its own and damages nothing the
+/// compositor can see, so a frame it has not been asked for is a frame it does
+/// not get. See [`crate::render::Drawn`] for what that looked like.
+impl crate::render::Painted for ShellSurface {
+    fn still_animating(&self) -> bool {
+        self.scene.needs_render()
+    }
 }
 
 impl ShellSurface {
@@ -222,6 +231,13 @@ impl ShellSurface {
     /// `GlesRenderer::egl_context` — there is nothing on the `Renderer` traits
     /// that says it. `render.rs` keeps the traits; this file is already the
     /// place that knows what a dmabuf and an EGL fence are.
+    ///
+    /// Returns whether the scene is still animating as well as what to draw.
+    /// A scripted surface animates on its own clock exactly as a decoration
+    /// does -- a clock in a bar, a dock icon easing under the pointer, a
+    /// notification sliding in -- and nothing it does damages the screen, so
+    /// the next frame has to be asked for or it stops where it stands. See
+    /// [`crate::render::Drawn`].
     pub(crate) fn element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -229,7 +245,7 @@ impl ShellSurface {
         now: Duration,
         alpha: f32,
         scale: f64,
-    ) -> Option<Element> {
+    ) -> Drawn {
         // In device pixels, as `Decoration::frame` does and for the same
         // reason: QML rasterises in pixels, so a scene drawn at its logical
         // size on a 2x screen is drawn at half that screen's resolution and
@@ -246,28 +262,35 @@ impl ShellSurface {
         // See `qml::no_frame_in_flight`.
         self.reload_if_changed(now, size);
 
-        // Two fields of one struct, borrowed at once: the scene is what
-        // renders and the backing is what holds the result.
-        let Self { scene, backing, .. } = self;
-        match backing {
-            Backing::Gpu(gpu) => gpu
-                .element(
-                    scene,
-                    renderer,
-                    size,
-                    scale,
-                    Placement {
-                        position: (f64::from(area.loc.x) * scale, f64::from(area.loc.y) * scale),
-                        size: area.size,
-                        alpha,
-                        kind: Kind::Unspecified,
-                    },
-                )
-                .map(Element::Screen),
-            Backing::Memory { .. } => self
-                .in_memory(renderer, area, alpha, scale, size)
-                .map(Element::Chrome),
-        }
+        // And before the draw, which is what spends the flag. A scene that has
+        // just been reloaded reads as having something to draw, which it does.
+        Drawn::drawing(self, |this| {
+            // Two fields of one struct, borrowed at once: the scene is what
+            // renders and the backing is what holds the result.
+            let Self { scene, backing, .. } = this;
+            match backing {
+                Backing::Gpu(gpu) => gpu
+                    .element(
+                        scene,
+                        renderer,
+                        size,
+                        scale,
+                        Placement {
+                            position: (
+                                f64::from(area.loc.x) * scale,
+                                f64::from(area.loc.y) * scale,
+                            ),
+                            size: area.size,
+                            alpha,
+                            kind: Kind::Unspecified,
+                        },
+                    )
+                    .map(Element::Screen),
+                Backing::Memory { .. } => this
+                    .in_memory(renderer, area, alpha, scale, size)
+                    .map(Element::Chrome),
+            }
+        })
     }
 
     /// The software path, unchanged: Qt rasterises into a `QImage` and the
