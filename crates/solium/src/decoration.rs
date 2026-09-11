@@ -36,7 +36,7 @@ use crate::{
         self,
         paint::{Gpu, Placement},
     },
-    render::Element,
+    render::{Drawn, Element},
 };
 
 /// How tall a window frame is, and so how much of a window's slot is not
@@ -217,6 +217,17 @@ pub(crate) struct Decoration {
     pub(crate) restore: Option<Rectangle<i32, Logical>>,
 }
 
+/// A decoration animates on its own clock -- a border easing to a new colour, a
+/// bar sliding out, a sheen crossing a titlebar -- and the compositor only draws
+/// when something has damaged the screen. Nothing the client did damaged it, so
+/// unless the frame says it is still moving, rendering stops and the animation
+/// freezes wherever it happened to be.
+impl crate::render::Painted for Decoration {
+    fn still_animating(&self) -> bool {
+        self.scene.needs_render()
+    }
+}
+
 impl Decoration {
     fn new(path: &std::path::Path, width: i32, height: i32) -> Result<Self> {
         qml::start()?;
@@ -320,17 +331,6 @@ impl Decoration {
         )
     }
 
-    /// Whether the frame's own animations still have somewhere to go.
-    ///
-    /// A decoration animates on its own clock -- a border easing to a new
-    /// colour, a bar sliding out, a sheen crossing a titlebar -- and the
-    /// compositor only draws when something has damaged the screen. Nothing
-    /// the client did damaged it, so unless the frame says it is still moving,
-    /// rendering stops and the animation freezes wherever it happened to be.
-    pub(crate) fn animating(&self) -> bool {
-        self.scene.needs_render()
-    }
-
     /// What this frame reserves around its client.
     pub(crate) fn insets(&self) -> Insets {
         self.insets
@@ -357,6 +357,9 @@ impl Decoration {
     /// arrived, for the reason `ShellSurface::element` gives: taking the
     /// thread's EGL context back off Qt is `EGLContext::make_current`, and
     /// nothing on the `Renderer` traits says where the context is.
+    ///
+    /// Returns whether the frame is still animating as well as what to draw,
+    /// and the two come out together on purpose — see [`crate::render::Drawn`].
     pub(crate) fn frame(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -365,7 +368,7 @@ impl Decoration {
         look: &Look<'_>,
         alpha: f32,
         scale: f64,
-    ) -> Option<Element> {
+    ) -> Drawn {
         let width = outer.w.max(1);
         let height = outer.h.max(1);
         // QML rasterises in device pixels, so on a 2x monitor a frame drawn at
@@ -405,33 +408,41 @@ impl Decoration {
         // logical position was the same number and it did not matter.
         let position = (rect.loc.x * scale, rect.loc.y * scale);
 
-        // Two fields of one struct, borrowed at once: the scene is what
-        // renders and the backing is what holds the result.
-        let Self { scene, backing, .. } = self;
-        match backing {
-            // A window resize is a *rebind* here and not a rebuild, which is
-            // the whole of Task 6: a decoration is sized from an animating
-            // rectangle for the length of every window animation, and a scene
-            // rebuilt once per frame is a scene whose own animations restart
-            // once per frame and therefore never advance. `Gpu` does it.
-            Backing::Gpu(gpu) => gpu
-                .element(
-                    scene,
-                    renderer,
-                    size,
-                    scale,
-                    Placement {
-                        position,
-                        size: drawn,
-                        alpha,
-                        kind: Kind::Unspecified,
-                    },
-                )
-                .map(Element::Screen),
-            Backing::Memory(_) => self
-                .in_memory(renderer, size, resized, position, drawn, alpha, scale)
-                .map(Element::Chrome),
-        }
+        // The flag is read here and not after, because the draw below spends
+        // it. `tell` has already run, so a property this frame wrote -- a new
+        // title, a focus change -- counts as something to draw; an animation
+        // step marked by `qml::tick` in `render::prepare` counts too, and that
+        // is the one that keeps the loop going. See `render::Drawn`.
+        Drawn::drawing(self, |this| {
+            // Two fields of one struct, borrowed at once: the scene is what
+            // renders and the backing is what holds the result.
+            let Self { scene, backing, .. } = this;
+            match backing {
+                // A window resize is a *rebind* here and not a rebuild, which
+                // is the whole of Task 6: a decoration is sized from an
+                // animating rectangle for the length of every window
+                // animation, and a scene rebuilt once per frame is a scene
+                // whose own animations restart once per frame and therefore
+                // never advance. `Gpu` does it.
+                Backing::Gpu(gpu) => gpu
+                    .element(
+                        scene,
+                        renderer,
+                        size,
+                        scale,
+                        Placement {
+                            position,
+                            size: drawn,
+                            alpha,
+                            kind: Kind::Unspecified,
+                        },
+                    )
+                    .map(Element::Screen),
+                Backing::Memory(_) => this
+                    .in_memory(renderer, size, resized, position, drawn, alpha, scale)
+                    .map(Element::Chrome),
+            }
+        })
     }
 
     /// Hand the frame everything it is told about its window.

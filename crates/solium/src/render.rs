@@ -65,6 +65,73 @@ render_elements! {
     Screen = smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>,
 }
 
+/// Whether a QML scene still has something new to draw.
+///
+/// **Spent by drawing.** Qt sets the flag when an animation step or a property
+/// write changes the scene, and `Scene::render` — and the GPU path's render —
+/// clear it again. So it only means "still animating" *before* the draw that
+/// takes it. Afterwards it means "did the draw I have just done leave anything
+/// behind", and the answer to that is always no.
+///
+/// Implemented by the two things the compositor draws from QML, which are
+/// otherwise unrelated: a window frame and a scripted surface. It is a trait
+/// rather than an inherent method on each so that [`Drawn::drawing`] can hold
+/// the order for both — and so the tests can drive that order with a stand-in,
+/// which is the only way it can be driven at all. Nothing else should call
+/// this: reaching for it at a call site is how the order goes wrong.
+pub(crate) trait Painted {
+    fn still_animating(&self) -> bool;
+}
+
+/// What one draw produced: the element, and whether there is more to come.
+///
+/// One value out of one call rather than a draw followed by a question, and
+/// that is the entire point of the type. The question used to be a second call
+/// at the call site, made *after* the draw had already spent the flag, so it
+/// always answered no. `state.redraw` was therefore never set, the next frame
+/// was never asked for, and a decoration's own animation advanced only when
+/// something else happened to damage the screen: a pulse that ran while the
+/// mouse moved and stopped dead the moment it did, a tooltip that appeared in
+/// jerks, and — measured, nested, with nothing else on screen — zero frames in
+/// sixty seconds.
+///
+/// Handing the answer back from the draw makes that shape unrepresentable.
+/// There is no second query left to put in the wrong place.
+#[derive(Default)]
+pub(crate) struct Drawn {
+    /// What to put in the frame, if there is anything to put in it.
+    pub(crate) element: Option<Element>,
+    /// Whether the scene still has somewhere to go, read before this draw.
+    pub(crate) animating: bool,
+}
+
+impl Drawn {
+    /// Read the flag, then draw — in that order, once, in one place.
+    ///
+    /// A function taking the draw as a closure rather than two statements at
+    /// each call site, because the order *is* the defect and two statements can
+    /// be written either way round. Here they cannot.
+    ///
+    /// Generic over what is being drawn so that a test can stand in something
+    /// whose flag behaves the way Qt's does — set by the animation tick,
+    /// cleared by the draw — with no renderer and no Qt host. That seam is part
+    /// of the fix and not incidental to it: every real caller needs a live
+    /// `GlesRenderer` and a running Qt, neither of which exists under
+    /// `cargo test`, so before this there was nothing here a test could reach.
+    /// Which is exactly how the shipped order survived for weeks.
+    pub(crate) fn drawing<P: Painted>(
+        painted: &mut P,
+        draw: impl FnOnce(&mut P) -> Option<Element>,
+    ) -> Self {
+        // Before, and it has to stay before. See [`Painted`].
+        let animating = painted.still_animating();
+        Self {
+            element: draw(painted),
+            animating,
+        }
+    }
+}
+
 /// Textures captured for this frame, one per deformed window.
 ///
 /// A deformed window is drawn flat into a texture of its own first. That pass
@@ -176,17 +243,20 @@ fn chrome(
         // Already an `Element`: a frame is a memory buffer on the software
         // path and a texture on the GPU one, and which of the two it is is the
         // decoration's own business rather than this function's.
-        if let Some(element) = decoration.frame(
+        //
+        // And already an answer about whether it is still moving, out of the
+        // same call: asking afterwards is asking the flag the draw just spent.
+        // See [`Drawn`].
+        let drawn = decoration.frame(
             renderer,
             frame.rect,
             outer.size,
             &look,
             frame.opacity,
             scale,
-        ) {
-            elements.push(element);
-        }
-        animating = decoration.animating();
+        );
+        elements.extend(drawn.element);
+        animating = drawn.animating;
     }
     // Ask for another frame while the decoration is still moving. The client
     // has not damaged anything, so without this the next frame never comes and
@@ -241,11 +311,17 @@ fn scene(
     // Already an `Element`: a shell surface is a memory buffer on the software
     // path and a texture on the GPU one, and which of the two it is is its own
     // business rather than this function's.
-    if let Some(element) = held.element(renderer, area, now, alpha, scale) {
-        elements.push(element);
-    }
+    elements.extend(held.element(renderer, area, now, alpha, scale).element);
     // A scene animates on its own clock and damages nothing, so the next frame
     // has to be asked for or it stops where it stands -- mid-fade, most of all.
+    //
+    // Unconditional, and *not* `drawn.animating`, which is the honest answer to
+    // a different question. The fade above is the compositor's own arithmetic
+    // on `now` — `scene_alpha` — and it is applied to the element rather than
+    // inside the scene, so Qt's flag knows nothing about it and would say
+    // "nothing to draw" through the whole of it. A pane only has a scene while
+    // it is waiting for its application or dissolving into one, so this asks
+    // for frames for as long as that lasts and not a moment longer.
     state.redraw = true;
 }
 
@@ -702,6 +778,7 @@ fn scripted(
         .collect();
 
     let mut drawn = Vec::new();
+    let mut animating = false;
     for (index, area) in wanted {
         let Some(surface) = state.surfaces.get_mut(index) else {
             continue;
@@ -709,15 +786,28 @@ fn scripted(
         let Some(instance) = surface.instance(&output) else {
             continue;
         };
-        if let Some(element) = instance.element(
+        let painted = instance.element(
             renderer,
             smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
             now,
             1.0,
             scale,
-        ) {
-            drawn.push(element);
-        }
+        );
+        drawn.extend(painted.element);
+        animating |= painted.animating;
+    }
+    // Ask for another frame while any of them is still moving, exactly as
+    // `chrome` does for a window frame.
+    //
+    // This did not used to be asked at all, which is the same defect one step
+    // further on: a scripted surface got the next frame only when something
+    // unrelated damaged the screen. Everything on `Quickshell.SystemClock` is
+    // the plain case -- a bar whose clock ticks on a `Timer` -- and it cannot
+    // even recover on the next tick, because `qml::tick` is what drains Qt's
+    // event queue and it only runs on a frame that is being drawn. No frame,
+    // no timer; no timer, no reason for a frame.
+    if animating {
+        state.redraw = true;
     }
     drawn
 }
@@ -830,13 +920,22 @@ pub(crate) fn flat_window_elements(
         );
         if let Some(id) = state.panes.id_of(window)
             && let Some(decoration) = state.decorations.get_mut(id)
+        {
             // Fully opaque here: this pass draws the window flat into a
             // texture at its real size, and the warp applies the transform's
             // opacity to the whole texture afterwards. Applying it twice would
             // fade the frame squared.
-            && let Some(element) = decoration.frame(renderer, whole, outer.size, &look, 1.0, scale)
-        {
-            elements.push(element);
+            let drawn = decoration.frame(renderer, whole, outer.size, &look, 1.0, scale);
+            elements.extend(drawn.element);
+            // And this pass owes the next frame just as `chrome` does. It is
+            // the *only* one that does for a deformed window: this is the draw
+            // that spends the scene's flag, and `chrome` skips a window that
+            // came through here. A window left tilted by a script is not
+            // animating in the compositor's sense and nothing else is asking,
+            // so without this a pulse inside a tilted window stops dead.
+            if drawn.animating {
+                state.redraw = true;
+            }
         }
     }
 
@@ -889,7 +988,117 @@ fn ratio(drawn: f64, real: i32) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::ratio;
+    use super::{Drawn, Painted, ratio};
+
+    /// A QML scene's dirty flag and nothing else, with Qt's exact behaviour.
+    ///
+    /// Three lines of state, and every one of them is a fact about the real
+    /// host rather than a convenience:
+    ///
+    /// * `dirty` is `SoliumQmlScene::dirty` in `qml/host.cpp`. Qt raises it
+    ///   from `renderRequested` and `sceneChanged` whenever the scene changes.
+    /// * a draw **clears** it — `solium_qml_scene_render` and the GPU path both
+    ///   end with `scene->dirty = false`. That is the whole mechanism: the flag
+    ///   is spent by drawing, so there is exactly one moment at which it means
+    ///   "still animating", and it is before.
+    /// * `running` is the thing the compositor cannot see. Nothing reports that
+    ///   a `NumberAnimation` has frames left; the only evidence is that the
+    ///   next `qml::tick` marks the scene dirty again.
+    struct Scene {
+        dirty: bool,
+        running: bool,
+        draws: u32,
+    }
+
+    impl Scene {
+        /// A scene with an animation running in it — `decorations/pulse.qml`.
+        const fn animating() -> Self {
+            Self {
+                dirty: true,
+                running: true,
+                draws: 0,
+            }
+        }
+
+        /// One `qml::tick`: the animation driver steps, and a running
+        /// animation has therefore moved and has something new to draw.
+        const fn tick(&mut self) {
+            self.dirty |= self.running;
+        }
+
+        /// One render, which is what spends the flag.
+        const fn draw(&mut self) {
+            self.dirty = false;
+            self.draws += 1;
+        }
+    }
+
+    impl Painted for Scene {
+        fn still_animating(&self) -> bool {
+            self.dirty
+        }
+    }
+
+    /// One compositor frame over one scene, in the order the backends run it.
+    ///
+    /// `render::prepare` ticks every animation in the process; `render::elements`
+    /// then draws the scenes and each draw says whether its scene still has
+    /// somewhere to go. Returns what `chrome` does with that answer, which is
+    /// `state.redraw` — whether there will *be* a next frame.
+    fn one_frame(scene: &mut Scene) -> bool {
+        // render::prepare
+        scene.tick();
+        // render::elements -> chrome -> Decoration::frame
+        Drawn::drawing(scene, |scene| {
+            scene.draw();
+            None
+        })
+        .animating
+    }
+
+    /// **An animating scene keeps asking for the frame after it.**
+    ///
+    /// The regression. A decoration animates on its own clock and damages
+    /// nothing, so the only thing that brings the next frame is this answer.
+    /// Read after the draw it is always false — the draw has just cleared it —
+    /// and the animation then advances only when something *else* happens to
+    /// damage the screen. On the hardware that is a pulse and a hover tooltip
+    /// that run while the mouse is moving and stop dead the instant it stops;
+    /// nested, with nothing else on screen, it was zero frames in sixty
+    /// seconds.
+    ///
+    /// Sixty frames rather than one, because one frame cannot tell a loop that
+    /// keeps going from a loop that stops after the first.
+    #[test]
+    fn an_animating_scene_asks_for_the_frame_after_it() {
+        let mut scene = Scene::animating();
+        for step in 1..=60_u32 {
+            assert!(
+                one_frame(&mut scene),
+                "frame {step} did not ask for another: the animation stops here"
+            );
+        }
+        assert_eq!(scene.draws, 60, "a frame was asked for and not drawn");
+    }
+
+    /// And it stops asking when the animation is over.
+    ///
+    /// One frame later than the animation ends, and that is the right answer
+    /// rather than a tolerated one: the tick that marks nothing is the first
+    /// evidence there was nothing left to mark. One spare frame at the end of
+    /// an animation costs a redraw; the alternative — deciding a frame early —
+    /// is an animation that never draws its last step.
+    #[test]
+    fn a_settled_scene_stops_asking_one_frame_later() {
+        let mut scene = Scene::animating();
+        assert!(one_frame(&mut scene));
+        scene.running = false;
+        assert!(
+            !one_frame(&mut scene),
+            "a scene with nothing left to do kept the compositor drawing"
+        );
+        assert_eq!(scene.draws, 2);
+    }
 
     #[test]
     fn a_window_at_real_size_is_not_scaled() {
