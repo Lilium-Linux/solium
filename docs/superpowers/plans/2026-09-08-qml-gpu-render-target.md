@@ -20,95 +20,81 @@
 - Never launch `claude-desktop` inside Solium while testing.
 
 
-## Where this stands — 2026-09-09
+## Where this stands — 2026-09-09 (evening)
 
-Tasks 1–6 are committed on `qml-gpu-render-target`. **Task 6's review has not
-been dispatched.** The SDD ledger is git-ignored and does not travel with this
-branch, so what it holds that matters for resuming is below.
+**Tasks 1–7 are complete and reviewed. Task 8 is the only one left, and it needs
+a person at a free TTY — it is not dispatchable.** The SDD ledger is git-ignored
+and does not travel with this branch, so what matters for resuming is here.
 
-### Next action
+`dev/gate.sh` passes. All five of `dev/wirecheck`'s negative controls bite with
+their documented output. Nothing is pushed past `origin/qml-gpu-render-target`
+and nothing is merged.
 
-Package `ba05a15..HEAD` and review Task 6 (`ce66cd6`). Four deviations, all
-flagged by the implementer rather than found later:
+### Before running Task 8, know these
 
-1. **Task 6's Step 6 verification could not fail as written.** `dev/wirecheck`
-   does not link the compositor crate — it compiles `host.cpp` from source and
-   drives raw FFI — so `render_on_gpu` is not in the binary and reverting the
-   change left every run byte-identical. Replaced with a permanent knob,
-   `WIRECHECK_REBUILD_ON_RESIZE`, at the level the harness measures.
-2. **`QQuickRenderControl::initialize()` replaced by a new `take_the_thread`.**
-   Re-calling `initialize()` re-runs the render context's `initialize()` and
-   re-emits `sceneGraphInitialized` under a live item tree. Whether the old
-   path made anything current at all rests on `initRhi`'s early return, which
-   could not be read (no Qt sources on that box). **Unverified — settle it at
-   review.** It is the same shape as the stale-thread-local class below.
-3. **`Scene::rebind_sized` added**, mirroring the existing `gpu`/`gpu_sized`
-   pair, because the plan's Step 5 does not compile — `qml::allocator` and
-   `qml::target` are private. Better than widening visibility and putting GBM
-   in `surface.rs`.
-4. **`surface.rs`'s half has no automated check.** Nothing in the gate runs
-   `render_on_gpu`. Reviewed by reading; Task 8 is where it meets hardware.
+**The cursor does not take the GPU path, and that is deliberate.** A
+GPU-rendered pointer cannot reach the DRM hardware cursor plane: smithay's
+`UnderlyingStorage` has only `Wayland` and `Memory` variants, the `Wayland` arm
+is shm-only, `try_assign_cursor_plane` has no direct-scanout branch, and
+`renderer_pixman` is not in our feature list so the pixman fallback is not
+compiled. Qt still draws the pointer — a GPU host refuses software scenes — and
+the result is read back into a `MemoryRenderBuffer`. That readback costs
+**≈65 µs fixed plus ≈3.7 ns/px**, so ~67 µs at cursor sizes, cached per device
+size. The fixed cost dominates *at cursor sizes only*; at 384×384 the pixel term
+alone is ~540 µs. Do not generalise it.
 
-A bug in the plan's own C++ was caught during implementation: it set
-`scene->width`/`height` *after* `import_dmabuf_texture`, which reads exactly
-those for `EGL_WIDTH`/`EGL_HEIGHT`, so it would have imported every resized
-buffer at the old size, silently. Fixed in `ce66cd6`.
+**A failed rebind freezes, stretched, and retries.** It does not go invisible.
+That was decided deliberately: insets are read once at build time and stay
+reserved, so an absent decoration is a window with a hole above it, and an
+absent pointer is indistinguishable from dead input. Stretched chrome is
+visibly wrong and gets reported; absent chrome reads as a crash.
 
-### The thing to be most suspicious of
+**The frame invariant is enforced.** No GPU-scene entry point may run while a
+`GlesFrame` is alive — `GlesRenderer::with_context` re-binds, `GlesFrame::with_context`
+does not, and the latter is what Solium calls. Backed by RAII guards at five
+sites and asserted at four entry points. If it fires on hardware, that is an
+ordering bug, not a false positive.
 
-**`dev/wirecheck` has been in a state where it could not detect its own target
-bug five separate times.** Textures asserted when Qt's deferred releases were
-buffers; structurally unable to produce the unsafe free ordering; a new
-build-then-free case clearing Qt's thread-local and blinding the C-1 case; a
-static reference against an unchanging fixture so "Qt did not write" and "Qt
-wrote the same thing" read identically; and now Task 6's case tripping the
-teardown control earlier so it no longer reaches C-1's guard textures. Every
-time it reported success while measuring nothing.
+**This failure class is not silent from Qt's side.** A scene rendering into the
+wrong context emits `Framebuffer incomplete: 0x8cd6`, `Failed to build texture
+render target for QQuickRenderTarget` and `QQuickWindow: No render target`.
+Nothing was looking for years. Task 8 greps for them.
 
-The pattern is structural, not five accidents: **cases sharing one process keep
-silently changing each other's preconditions.** Treat it as a whole-branch
-review item. The two negative controls — the free path and the render path in
-`clear_stale_current_context` — are documented in `dev/wirecheck/README.md`
-with their expected output, and both must bite, and bite *orthogonally*.
+**Everything so far was measured nested, never on DRM.** Task 8 is the first
+real hardware evidence for the whole path.
 
-### Invariants established by Tasks 5 and 6
+### The harness is the most-corrected thing here
 
-- `solium_qml_scene_new_gpu` and `solium_qml_scene_free` both leave **nothing
-  current** on the thread. `ShellSurface::new` has no renderer to restore to,
-  so the obligation lives in the host rather than at call sites. Safe because
-  every `GlesRenderer` entry point re-binds its own context.
-- **No GPU-scene entry point may run while a `GlesFrame` is alive.** There are
-  two `with_context` methods in smithay: `GlesRenderer::with_context` re-binds,
-  `GlesFrame::with_context` does not, and the latter is the one Solium calls.
-  Enforced by `qml::no_frame_in_flight`, backed by RAII guards at five sites.
-  **Task 7 is where this stops being latent** — a decoration that builds or
-  renders its scene lazily from inside `RenderElement::draw` trips it.
-- **This failure class is not silent from Qt's side.** With the scene buffer
-  wiped, the broken render path emits `Framebuffer incomplete: 0x8cd6`,
-  `Failed to build texture render target for QQuickRenderTarget` and
-  `QQuickWindow: No render target`. Nothing was looking. Task 8 greps for them.
+`dev/wirecheck` has been in a state where it could not see its own target bug,
+or documented an expectation it does not produce, **eight** separate times —
+covering the assertion, the fixture, the preconditions, the documentation, and
+the build graph underneath all of it. Each was found by review, never by the
+harness. Read `dev/wirecheck/README.md` fully before trusting or changing it,
+and prefer running a control to reasoning about one.
+
+### Known and deliberately not fixed
+
+- `client_size()` mixes device and logical pixels (`decoration.rs`), pre-existing.
+- `buffer_size` diverges from `Gpu::size` while a decoration is frozen.
+- `contentWidth`/`contentHeight` go stale across a pure resize.
+- The cursor cache's theme-change invalidation has no trigger today — `Theme.qml`
+  is all `readonly` literals. The wiring is right; the coverage is not end-to-end.
+- Insets are read from a 1×1 scene on the GPU path and a client-sized one on the
+  software path. Benign while every shipped decoration declares them as literals.
 
 ### Two open items on `main`, neither started
 
 - **Animated decorations render zero frames.** `render.rs:182` reads
   `decoration.animating()` *after* `decoration.frame()` rendered, and `frame()`
-  clears Qt's dirty flag — so `state.redraw` is never set and the next frame
-  never comes. Measured at zero frames in 60 s, confirmed three ways. Same
-  class as the bug fixed in `9eeb13b`.
-- **The performance figure justifying this plan is mis-cited.** "About a tenth
-  of a core" is real — commit `14e49d2`, `pulse 1.32s -> 0.78s per 8s` — but it
-  is a whole-compositor number of which ~90% is not QML, it describes a
-  full-width gradient no shipped decoration produces, and the pane-styles spec
-  attributes it to `docs/spikes/2026-09-04-qml-in-compositor.md`, which has
-  never contained it. Measured at decoration geometry it is ~0.74% of a core.
-  **The work is still justified — by the pane-styles load, not by today's.**
-  Three layers per window maximised on a 2560×1440 260 Hz panel costs Qt
-  1.94 ms plus 2.58 ms of serial main-thread memcpy against a 3.846 ms vblank
-  budget, and 41 MB/frame. Rewrite the justification to say that.
-
-Every measurement above was taken **nested in winit, never on DRM**, and three
-adversarial passes rated the numbers *shaky*. Task 8's TTY run settles both the
-hardware validation and this.
+  clears Qt's dirty flag — so `state.redraw` is never set. Measured at zero
+  frames in 60 s, confirmed three ways.
+- **The performance figure justifying this plan is mis-cited.** "About a tenth of
+  a core" is real (commit `14e49d2`) but it is a whole-compositor number of which
+  ~90% is not QML, describing a load no shipped decoration produces; at decoration
+  geometry it is ~0.74%. The work is still justified — by the pane-styles load, not
+  today's: three layers per window maximised on a 2560×1440 260 Hz panel costs Qt
+  1.94 ms plus 2.58 ms of serial main-thread memcpy against a 3.846 ms vblank budget.
+  Rewrite the justification to say that.
 
 ---
 
