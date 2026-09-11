@@ -197,6 +197,22 @@ impl Gpu {
             // Safe precisely because Qt said "up to date": the buffer holds a
             // finished frame, so importing it now needs no fence and asks
             // nothing of Qt.
+            //
+            // That last sentence is load-bearing and its proof is in the C++,
+            // so it is written down here rather than left to be re-derived. The
+            // obvious way this could be wrong is a buffer Qt has never drawn
+            // into: a rebind onto a fresh dmabuf, followed by an `UNCHANGED`
+            // render, would send an *uninitialised* allocation through `take`
+            // and put GBM's leftovers on screen. It cannot happen, because
+            // `solium_qml_scene_rebind` sets `scene->dirty = true`
+            // (`host.cpp:1315`) before its `release_the_thread`, and
+            // `render_gpu` returns `SOLIUM_QML_UNCHANGED` only under
+            // `if (!scene->dirty)` (`host.cpp:1476`). So the first render after
+            // any rebind always draws, and this arm is only ever reached on a
+            // buffer with a finished frame already in it. Anything that moves
+            // that assignment — or makes a rebind leave the flag alone — breaks
+            // this arm silently, in the buffer's contents rather than in a
+            // return value.
             Ok(None) => {
                 if self
                     .shown

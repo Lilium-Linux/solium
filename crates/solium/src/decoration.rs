@@ -238,6 +238,19 @@ impl Decoration {
         // already been getting an answer computed from the wrong size on both
         // paths — they are constants by contract, and every decoration that
         // ships declares them as literals.
+        //
+        // **What did change, and is worth knowing before someone relaxes that
+        // contract.** Before this, both paths read the insets from a
+        // client-sized scene, so a size-dependent inset gave the *same* wrong
+        // answer on each. Now the GPU path reads them from a 1x1 scene and the
+        // software path still reads them from a client-sized one, so it would
+        // give two *different* wrong answers — a window whose frame reserved
+        // one strip of space on a TTY and another under winit, from one QML
+        // file. Benign today, and only because all eight shipped decorations
+        // declare `insetTop`/`Right`/`Bottom`/`Left` and `overlay` as literals.
+        // The day one of them binds an inset to `width` or `height`, this stops
+        // being a shared inaccuracy and becomes a divergence between the two
+        // paths, which is much harder to see: each path is self-consistent.
         let built = if qml::on_gpu() {
             (1, 1)
         } else {

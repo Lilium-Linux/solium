@@ -101,11 +101,15 @@ scene that does not reach the screen as a texture. smithay reaches a DRM cursor
 plane only through `RenderElement::underlying_storage`, whose two variants are
 `Wayland` and `Memory` (`renderer/element/mod.rs:103-109`); a
 `TextureRenderElement` implements none and inherits `None`, so
-`copy_element_to_cursor_bo` gives up on its first line and so does the pixman
-fallback. A GPU pointer drawn as a texture loses the plane silently, and every
-pointer motion on a TTY becomes a full composite and page flip. So `cursor.rs`
-lets Qt draw into the dmabuf and then reads it straight back into a
-`MemoryRenderBuffer`.
+`copy_element_to_cursor_bo` gives up on its first line. And nothing catches it
+underneath: smithay's pixman fallback is behind `#[cfg(feature =
+"renderer_pixman")]`, which is not in the compositor's feature list
+(`crates/solium/Cargo.toml:24-43`), so the arm that compiles is the
+`#[cfg(not(...))]` one at `drm/compositor/mod.rs:3244` and its failure branch is
+a plain `return None`. A GPU pointer drawn as a texture loses the plane
+silently, and every pointer motion on a TTY becomes a full composite and page
+flip. So `cursor.rs` lets Qt draw into the dmabuf and then reads it straight
+back into a `MemoryRenderBuffer`.
 
 That hangs on a claim nobody had checked: what `copy_framebuffer` hands back is
 byte-identical to what `import_memory` is given on the software path. Three
@@ -124,11 +128,38 @@ described as a flipped or swizzled one.
 
 It also prints what the round trip costs, because the whole argument for the
 route is that the pointer pays it once per size per change rather than per
-frame. Measured here: **~60 µs**, and near enough the same at 24x24 (63.5 µs) as
-at 48x48 (59.8 µs) and 64x64 (65.4 µs), so it is the round trip and not the
-pixels. If that were ever milliseconds, the cache in `cursor.rs` would not be
-enough and the design would need revisiting — which is why the number is printed
-rather than remembered.
+frame. The cost is **~65 µs fixed plus 3.5–4 ns per pixel** on this machine —
+fitted over a sweep rather than read off a pair, since one run at two sizes
+cannot separate the two terms:
+
+| size | pixels | each |
+|---|---|---|
+| 24x24 | 576 | 66.9 µs |
+| 48x48 | 2304 | 69.1 µs |
+| 96x96 | 9216 | 110.8 µs |
+| 192x192 | 36864 | 192.3 µs |
+| 384x384 | 147456 | 605.8 µs |
+
+**The pixel term is negligible at cursor sizes and only at cursor sizes.** At
+24x24 it is ~2 µs of ~67, three per cent, so what the pointer pays really is the
+round trip — and the `Kept` cache in `cursor.rs` makes even that once per size
+per change. Read that scoped, because it expires immediately above the pointer:
+at 384x384 the pixel term alone is ~540 µs and the whole call is 606, nine times
+what the cursor pays for its entire readback. "It is the round trip, not the
+pixels" is a claim about 24- and 48-pixel squares, and is not a reason to trim
+the cache.
+
+Set `WIRECHECK_LOGICAL` and `WIRECHECK_SCALE` to move the size this reports, and
+re-run it several times at one size before comparing two: the spread within a
+single size is wider than the gap between 24 and 48. Seven runs each gave
+medians of 68.0 µs at 24x24 and 67.1 at 48x48, with 24x24 spanning 60.2–72.1 and
+48x48 spanning 65.6–80.2. This file previously reported a single run in which
+24x24 (63.5 µs) came out *slower* than 48x48 (59.8 µs) and treated that
+inversion as evidence; it was noise, and at n=1 there was nothing there to read.
+
+If the fixed term were ever milliseconds, the cache would not be enough and the
+design would need revisiting — which is why the number is printed rather than
+remembered.
 
 **The first rebind, on a scene that has never rendered.** The shape production is
 actually in, and the one the resize case above cannot reach — it renders five

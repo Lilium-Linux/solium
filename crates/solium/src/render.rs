@@ -782,8 +782,12 @@ fn cursor(
                 })
                 .collect()
         }
-        // Already an `Element`, as a decoration is: the pointer is a memory
-        // buffer on the software path and a texture on the GPU one.
+        // Already an `Element`, as a decoration is -- but *unlike* a
+        // decoration, the pointer ends in a memory buffer on **both** paths,
+        // and that is the whole point rather than an accident. A memory buffer
+        // is the only thing smithay will put on the DRM cursor plane, so on the
+        // GPU path Qt draws into a dmabuf and `cursor.rs` reads it straight
+        // back out into one. See `cursor::Backing`, where that trade is argued.
         CursorImageStatus::Named(_) => state
             .pointer
             .art()
