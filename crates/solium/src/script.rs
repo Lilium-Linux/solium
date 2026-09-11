@@ -2464,7 +2464,17 @@ mod shipped {
     ///
     /// Only the bindings written as literals. `workspaces.lua` builds nine of
     /// them from a loop counter and they cannot be read from the text -- see
-    /// this module's header, and the report that came with it.
+    /// this module's header.
+    ///
+    /// And it checks the *spelling*, not that the key can be reached. Those are
+    /// not the same question, because `combo_for` names the key from
+    /// `modified_sym` -- the keysym with the modifiers already applied. A letter
+    /// survives that (`shift+q` gives `Q`, which lowercases back to `q`) and a
+    /// digit does not: on a `us` layout `shift+1` arrives as `exclam`, so
+    /// `workspaces.lua`'s `"super+shift+" .. index` binds nine combinations
+    /// nothing will ever produce. Spelled perfectly and unreachable. Fixing it
+    /// means changing which keysym every binding in the compositor is matched
+    /// on, which is not something to do without a keyboard in front of you.
     #[test]
     fn every_key_bound_is_spelled_the_way_it_arrives() {
         use smithay::input::keyboard::xkb;
