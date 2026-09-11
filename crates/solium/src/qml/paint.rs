@@ -69,6 +69,78 @@ pub(crate) struct Sampled {
     pub(crate) size: (i32, i32),
 }
 
+/// A complaint that is made once and then held until the thing works again.
+///
+/// Every failure this module can reach fires from inside [`Gpu::sample`], which
+/// `render.rs` reaches **once per scene per output per frame** — and none of
+/// them heals by itself. A driver that will not allocate, a context that will
+/// not come back and a buffer that will not import all fail identically on the
+/// next frame and the one after, so an unlatched line here is not a log line,
+/// it is the log, at four figures a second.
+///
+/// Which is worse than noise. journald's defaults are `RateLimitBurst=10000`
+/// per `RateLimitIntervalSec=30s`, so a flood of ours starts dropping messages
+/// within seconds — and what it drops is whatever else was being said at the
+/// time, which on this path is the Qt diagnostics the failure is actually
+/// diagnosed from.
+///
+/// The reset is the other half and points the other way: a latch that never
+/// clears turns a *transient* failure into permanent silence, which is the
+/// failure mode of a throttle rather than of a flood.
+///
+/// A type rather than a bare `bool` because there are several of them and
+/// `cursor.rs`'s `read_back` is a free function, so the flag has to travel.
+#[derive(Debug, Default)]
+pub(crate) struct Said(bool);
+
+impl Said {
+    /// Say it, unless it has already been said since the last success.
+    pub(crate) fn once(&mut self, say: impl FnOnce()) {
+        if !self.0 {
+            self.0 = true;
+            say();
+        }
+    }
+
+    /// It worked, so the next failure is news again.
+    pub(crate) fn worked(&mut self) {
+        self.0 = false;
+    }
+}
+
+/// What a scene has already complained about, one latch per failure.
+///
+/// One per site rather than one for the whole of [`Gpu::sample`], because these
+/// fail for unrelated reasons and clear on unrelated successes: under a shared
+/// flag the second thing to go wrong is the one nobody ever hears about. The
+/// same split `cursor.rs` makes between its `drawing` and its `uploading`, and
+/// for the same reason.
+#[derive(Debug, Default)]
+struct Complaints {
+    /// The compositor's EGL context would not come back.
+    ///
+    /// The `error!` of the five and the one that most needs holding: every
+    /// other line in the journal from that point on is downstream of it, so
+    /// this is the flood that buries its own cause.
+    restoring: Said,
+    /// Qt's fence would not import, or would not be waited on.
+    ///
+    /// Cleared only by a wait that succeeded, and deliberately not by a frame
+    /// that needed none: a driver handing a fence out every other frame would
+    /// otherwise re-open the flood at half the rate.
+    waiting: Said,
+    /// The scene had no buffer under it to sample.
+    missing: Said,
+    /// `import_dmabuf` refused the buffer it does have.
+    importing: Said,
+    /// The scene did not render and is being drawn frozen.
+    ///
+    /// A rebind that fails once fails every frame after — the size it is
+    /// retried at does not change — which is the case that put the first latch
+    /// here.
+    rendering: Said,
+}
+
 /// One scene's buffer, as the compositor sees it.
 ///
 /// Owns the imported texture and the damage that goes with it, and nothing
@@ -105,13 +177,9 @@ pub(crate) struct Gpu {
     /// safe. It is compared against `shown`'s size rather than assumed equal to
     /// it: between a successful rebind and a successful import they differ.
     bound: (i32, i32),
-    /// Whether the last render failed and has already been reported.
-    ///
-    /// A rebind that fails once fails every frame after — the size it is
-    /// retried at does not change — so without this a driver that will not
-    /// allocate writes one warning per scene per frame for the rest of the
-    /// session.
-    stale: bool,
+    /// What has already been said about this scene, and is therefore not worth
+    /// saying again until it works. See [`Complaints`].
+    said: Complaints,
 }
 
 impl Gpu {
@@ -127,7 +195,7 @@ impl Gpu {
             id: Id::new(),
             damage: DamageBag::default(),
             bound: size,
-            stale: false,
+            said: Complaints::default(),
         }
     }
 
@@ -160,9 +228,25 @@ impl Gpu {
         // Neither is a state the next line can run in — `EGLFence::import` is
         // an `eglCreateSync` of our own, not smithay's, so nothing will make
         // our context current for it.
-        if let Err(err) = restore(renderer) {
-            tracing::error!(?err, "the compositor's EGL context could not be restored");
-            return None;
+        match restore(renderer) {
+            Ok(()) => self.said.restoring.worked(),
+            Err(err) => {
+                // Latched, and this is the one of the five that most needs it.
+                // A context that will not come back does not come back next
+                // frame either, so this is an `error!` per scene per output per
+                // frame for the rest of the session — and journald drops the
+                // *rest* of the journal to keep up with it, starting with the
+                // Qt diagnostics that say what actually went wrong. See
+                // [`Complaints`].
+                self.said.restoring.once(|| {
+                    tracing::error!(
+                        ?err,
+                        "the compositor's EGL context could not be restored. Said once per scene \
+                         until it is"
+                    );
+                });
+                return None;
+            }
         }
 
         match rendered {
@@ -171,13 +255,23 @@ impl Gpu {
                 // host has already waited on the CPU with `glFinish` and the
                 // frame is complete, which is a correct answer and not a
                 // missing fence.
-                if let Some(fence) = fence
-                    && let Err(err) = wait_for(renderer, fence)
-                {
-                    // Not drawing this frame is the cheaper wrong answer:
-                    // sampling anyway is the race described above.
-                    tracing::warn!(?err, "could not wait for Qt's fence; skipping a frame");
-                    return None;
+                if let Some(fence) = fence {
+                    match wait_for(renderer, fence) {
+                        Ok(()) => self.said.waiting.worked(),
+                        Err(err) => {
+                            // Not drawing this frame is the cheaper wrong
+                            // answer: sampling anyway is the race described
+                            // above.
+                            self.said.waiting.once(|| {
+                                tracing::warn!(
+                                    ?err,
+                                    "could not wait for Qt's fence; skipping a frame. Said once \
+                                     per scene until one is waited for"
+                                );
+                            });
+                            return None;
+                        }
+                    }
                 }
                 self.take(scene, renderer);
             }
@@ -229,16 +323,16 @@ impl Gpu {
             // and a rebind that succeeded before it means the buffer may be one
             // Qt has never drawn into at all.
             Err(err) => {
-                if !self.stale {
-                    self.stale = true;
+                let (asked, holding) = (size, self.bound);
+                self.said.rendering.once(|| {
                     tracing::warn!(
                         ?err,
-                        asked = ?size,
-                        holding = ?self.bound,
+                        ?asked,
+                        ?holding,
                         "a GPU scene did not render; drawing the last frame it managed. Said \
                          once per scene until it renders again"
                     );
-                }
+                });
             }
         }
 
@@ -252,11 +346,17 @@ impl Gpu {
     /// Qt just wrote visible to our context.
     fn take(&mut self, scene: &Scene, renderer: &mut GlesRenderer) {
         let Some(buffer) = scene.buffer() else {
-            tracing::warn!("a GPU scene has no buffer to sample");
+            self.said.missing.once(|| {
+                tracing::warn!(
+                    "a GPU scene has no buffer to sample. Said once per scene until one appears"
+                );
+            });
             return;
         };
+        self.said.missing.worked();
         match renderer.import_dmabuf(buffer, None) {
             Ok(texture) => {
+                self.said.importing.worked();
                 // Whole-buffer damage, because Qt does not say what it
                 // repainted and the buffer is the same one every frame.
                 self.damage.add([Rectangle::from_size(self.bound.into())]);
@@ -266,10 +366,19 @@ impl Gpu {
                 });
             }
             // Deliberately leaves `shown` alone. The previous texture is a real
-            // picture of a buffer that still exists — the scene owns it — so
-            // keeping it is a stale frame, and clearing it is a scene that
-            // never draws again. The arm above is what gets out of it.
-            Err(err) => tracing::warn!(?err, "could not import a scene's buffer"),
+            // picture — see `Gpu::render` for why it stays valid after the
+            // buffer behind it has gone — so keeping it is a stale frame, and
+            // clearing it is a scene that never draws again. The `Ok(None)` arm
+            // in `sample` is what gets out of it.
+            //
+            // Latched: an import refused once is refused every frame after, and
+            // this runs once per scene per output per frame.
+            Err(err) => self.said.importing.once(|| {
+                tracing::warn!(
+                    ?err,
+                    "could not import a scene's buffer. Said once per scene until one imports"
+                );
+            }),
         }
     }
 
@@ -315,9 +424,11 @@ impl Gpu {
 
     /// Everything that hands this thread's GL context to Qt, in one place.
     ///
-    /// Gathered into one call so [`Gpu::element`] can put the context back
-    /// underneath it on every path out, the failures included. **Nothing in
-    /// here may touch the renderer.**
+    /// Gathered into one call so [`Gpu::sample`] can put the context back
+    /// underneath it on every path out, the failures included — `sample` is the
+    /// caller that restores, and the only one. [`Gpu::element`] was split off
+    /// above it later and goes through `sample` like everything else.
+    /// **Nothing in here may touch the renderer.**
     fn render(
         &mut self,
         scene: &mut Scene,
@@ -361,11 +472,30 @@ impl Gpu {
             scene.rebind_sized(size.0, size.1, scale)?;
             self.bound = size;
             // The texture in hand is *not* cleared here, and that is the whole
-            // of F4: it names the old buffer, which the scene still owns, so it
-            // is a stale picture rather than a dangling one — and `shown`
-            // carries its size, so nothing samples outside it. Clearing it
-            // would mean an import that then failed left the scene with nothing
-            // to draw and no dirty flag left to earn a retry with.
+            // of F4: it is a stale picture rather than a dangling one, and
+            // `shown` carries its size, so nothing samples outside it. Clearing
+            // it would mean an import that then failed left the scene with
+            // nothing to draw and no dirty flag left to earn a retry with.
+            //
+            // The scene does **not** still own the buffer that texture names.
+            // This line is on the success path, and `Scene::rebind`'s
+            // `self.target = Some(target)` has just dropped the old `Target`
+            // and with it the old `Dmabuf`. What keeps it safe is the other
+            // end: a `GlesTexture` is an `Arc<GlesTextureInternal>` owning both
+            // the GL texture name and the `EGLImage` it was bound from, and
+            // smithay destroys neither until the last clone drops — we hold
+            // one. The `EGLImage` in turn holds EGL's own reference on the
+            // underlying buffer object, taken inside `eglCreateImageKHR` and
+            // independent of the fds the `Dmabuf` closed, so the pixels stay
+            // allocated and stay ours to read. smithay's only remaining link to
+            // the dropped buffer is `dmabuf_cache: HashMap<WeakDmabuf,
+            // GlesTexture>` (`gles/mod.rs:303`), keyed weakly and swept in
+            // `cleanup()` — so the drop evicts a cache entry and frees nothing
+            // we are still holding.
+            //
+            // Which makes it *better* than the arrangement the old comment
+            // described: nobody is drawing into that buffer any more, so the
+            // frozen picture cannot change underneath us either.
             //
             // Nothing in the new buffer is the old buffer's, so no damage
             // recorded against it means anything.
@@ -377,7 +507,7 @@ impl Gpu {
         }
         let rendered = scene.render_gpu();
         if rendered.is_ok() {
-            self.stale = false;
+            self.said.rendering.worked();
         }
         rendered
     }
@@ -433,4 +563,33 @@ fn wait_for(renderer: &mut GlesRenderer, fence: OwnedFd) -> Result<()> {
     renderer
         .wait(&SyncPoint::from(imported))
         .map_err(|err| anyhow!("waiting on Qt's fence: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Said;
+
+    /// A failure that does not heal is reached once per scene per output per
+    /// frame for the rest of the session -- a frozen GPU scene is exactly that
+    /// -- so the thing worth asserting is that a hundred frames of it cost one
+    /// line and not a hundred. Arithmetic, and it does not need Qt or a GPU.
+    ///
+    /// The reset half matters just as much and in the other direction: a
+    /// latch that never clears turns a *transient* failure into permanent
+    /// silence, which is the failure mode of a throttle rather than of a flood.
+    #[test]
+    fn a_complaint_is_said_once_and_is_news_again_after_a_success() {
+        let mut said = Said::default();
+        let mut lines = 0;
+        for _ in 0..100 {
+            said.once(|| lines += 1);
+        }
+        assert_eq!(lines, 1, "a scene logged once per frame");
+
+        said.worked();
+        for _ in 0..100 {
+            said.once(|| lines += 1);
+        }
+        assert_eq!(lines, 2, "a failure after a success was swallowed");
+    }
 }

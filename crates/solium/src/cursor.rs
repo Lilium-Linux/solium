@@ -31,7 +31,10 @@ use smithay::{
 };
 
 use crate::{
-    qml::{self, paint::Gpu},
+    qml::{
+        self,
+        paint::{Gpu, Said},
+    },
     render::Element,
 };
 
@@ -143,6 +146,13 @@ pub(crate) struct Cursor {
     /// because there is one failure here and the several messages are its
     /// stages: whichever of them is reached first is the one worth reading, and
     /// the ones after it did not run. See [`Said`].
+    ///
+    /// The shape that needs it: when a GPU rebind persistently fails the scene
+    /// freezes on a smaller buffer, [`Cursor::fill`] pushes under that frozen
+    /// size, and so `buffers.has(edge)` misses for that output every frame for
+    /// the rest of the session. The retry is deliberate and right, but it means
+    /// each frame pays a failed allocation and a full readback *and*, without
+    /// this, said so four times.
     drawing: Said,
     /// And whether turning a finished image into an element has.
     ///
@@ -204,40 +214,6 @@ impl<T> Kept<T> {
             self.held.remove(0);
         }
         self.held.push((edge, value));
-    }
-}
-
-/// A complaint that is made once and then held until the thing works again.
-///
-/// Everything in this module fires from inside [`Cursor::element`], which
-/// `render.rs` calls **once per output per frame** — so a `warn!` on a failure
-/// that does not heal by itself is not a log line, it is the log. And the
-/// failures here are exactly that shape. When a GPU rebind persistently fails
-/// the scene freezes on a smaller buffer, [`Cursor::fill`] pushes under that
-/// frozen size, and so `buffers.has(edge)` misses for that output every frame
-/// for the rest of the session: the retry is deliberate and right, but it means
-/// each frame pays a failed allocation and a full readback *and*, without this,
-/// said so four times.
-///
-/// The same discipline [`Gpu`]'s own `stale` flag uses, including the reset: a
-/// transient failure that heals is worth hearing about if it comes back. A type
-/// rather than a bare `bool` because there are two of them and [`read_back`] is
-/// a free function, so the flag has to travel.
-#[derive(Debug, Default)]
-struct Said(bool);
-
-impl Said {
-    /// Say it, unless it has already been said since the last success.
-    fn once(&mut self, say: impl FnOnce()) {
-        if !self.0 {
-            self.0 = true;
-            say();
-        }
-    }
-
-    /// It worked, so the next failure is news again.
-    fn worked(&mut self) {
-        self.0 = false;
     }
 }
 
@@ -404,7 +380,8 @@ impl Cursor {
             }
             Backing::Gpu(gpu) => {
                 // No complaint of ours on this `?`: `Gpu::sample` has its own
-                // `stale` latch and has already said whatever there was to say.
+                // latches — the same `Said` this module uses — and has already
+                // said whatever there was to say.
                 let (texture, size) = {
                     let shown = gpu.sample(scene, renderer, (edge, edge), scale)?;
                     (shown.texture.clone(), shown.size)
@@ -591,7 +568,7 @@ impl Pointer {
 
 #[cfg(test)]
 mod tests {
-    use super::{KEPT, Kept, Said};
+    use super::{KEPT, Kept};
 
     /// The pointer is built for **every** output on every frame -- `render.rs`
     /// says so in as many words and argues for it -- so a desktop with a 1x and
@@ -660,29 +637,5 @@ mod tests {
         kept.push(24, 2);
         assert_eq!(kept.held.len(), 1);
         assert_eq!(kept.get(24).copied(), Some(2));
-    }
-
-    /// A failure that does not heal is reached once per output per frame for
-    /// the rest of the session -- a frozen GPU scene is exactly that -- so the
-    /// thing worth asserting is that a hundred frames of it cost one line and
-    /// not a hundred. Arithmetic, and it does not need Qt or a GPU.
-    ///
-    /// The reset half matters just as much and in the other direction: a
-    /// latch that never clears turns a *transient* failure into permanent
-    /// silence, which is the failure mode of a throttle rather than of a flood.
-    #[test]
-    fn a_complaint_is_said_once_and_is_news_again_after_a_success() {
-        let mut said = Said::default();
-        let mut lines = 0;
-        for _ in 0..100 {
-            said.once(|| lines += 1);
-        }
-        assert_eq!(lines, 1, "the cursor logged once per frame");
-
-        said.worked();
-        for _ in 0..100 {
-            said.once(|| lines += 1);
-        }
-        assert_eq!(lines, 2, "a failure after a success was swallowed");
     }
 }
