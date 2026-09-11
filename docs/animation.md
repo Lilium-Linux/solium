@@ -31,9 +31,11 @@ had.
 
 Sampled from the engine itself rather than drawn to illustrate it, so what is
 plotted is what runs — including the durations, which for a spring are an
-outcome rather than a setting.
+outcome rather than a setting. The picture predates `inOutCubic` and is the one
+curve below it does not show; `dev/preview` plots all of them live from the same
+engine and is the thing to reach for.
 
-Five have names:
+Six have names:
 
 | name | |
 |---|---|
@@ -41,12 +43,18 @@ Five have names:
 | `outCubic` | fast start, soft landing — the default, and right most of the time |
 | `outBack` | overshoots slightly and settles back; for things *appearing* |
 | `inOutQuad` | slow at both ends; for things that *move* rather than appear |
+| `inOutCubic` | the same, harder: a longer wind-up and settle, which reads as weight |
 | `spring` | physical, and settles when it settles rather than on a schedule |
 
 The distinction between `outBack` and `inOutQuad` is the one worth internalising.
 A window arriving wants a little overshoot — it reads as landing. A window
 travelling from one place to another wants easing at both ends — overshoot on
 something that was already on screen reads as a wobble.
+
+`inOutCubic` is `inOutQuad` with more of both ends: it holds back longer at each
+and crosses the middle faster. Reach for it when the distance *is* the point —
+the genie into the dock crosses a whole screen and wants to feel like it — and
+for `inOutQuad` when a window is only moving between two slots.
 
 `spring` ignores `duration` entirely; a spring arrives when it arrives. Its
 parameters (stiffness, damping, mass, initial velocity) are not settable from
