@@ -220,19 +220,30 @@ compositor's own textures happen to have been given, and that collision is not
 stable run to run. The census is: it has been identical in every run of every
 configuration anyone has logged here.
 
-The frequency, since a number is what stops the guessing. Across configurations
-the guards fire in a small minority of runs — measured 2 of 24 — and when they
-do fire it is **6 of 8**, not one or two. In the single configuration this file
-gives an `Expect` for (`WIRECHECK_KEEP_RESIZED_SCENE=1`, below) they have not
-fired at all: 0 of 8 clobbered in 30 of 30 runs on this machine, while all 30
-failed on the census with the identical five objects.
+The frequency, since a number is what stops the guessing. **Sample: 30
+consecutive runs on this machine** of the one configuration this file gives an
+`Expect` for (`WIRECHECK_KEEP_RESIZED_SCENE=1`, below). The guards fired in
+**5 of 30**, and every one of those five fired *completely* — `=> 0 of 8
+compositor textures survived`, `(8 of 8 guard textures visibly clobbered)`. The
+other 25 read `=> 8 of 8 compositor textures survived` and `(0 of 8 …)`. All 30
+failed on the census, with the identical five objects and the identical
+attribution to `[('b', 1), ('b', 2)]`.
+
+Quote the sample size alongside the number, because this number moves. This file
+previously reported 0 of 8 in 30 of 30 here, and **6 of 8** when they fire
+elsewhere, and neither reproduces: the magnitude measured now is all-or-nothing.
+That is not a regression, it is the paragraph above being true. What Qt's
+deferred deletes destroy depends on which integers the compositor's own objects
+happen to have by the time the free runs, and every case added ahead of C-1
+since those runs shifts exactly that. Expect the next case added here to move it
+again — re-measure rather than reasoning from this paragraph.
 
 So neither reading is a finding. A control run reporting `8 of 8 compositor
-textures survived` has **not** stopped working, and one reporting `6 of 8
-visibly clobbered` has **not** found a new bug — it is the same defect, caught
-by an instrument that only sometimes has anything to catch it with. Check the
-census. The guards illustrate what the damage means; the census is the proof
-that it happened.
+textures survived` has **not** stopped working, and one reporting `0 of 8
+compositor textures survived` has **not** found a new bug — it is the same
+defect, caught by an instrument that only sometimes has anything to catch it
+with. Check the census. The guards illustrate what the damage means; the census
+is the proof that it happened.
 
 The free-path case also asserts its own precondition, through
 `wirecheck_belief_names_scene`: Qt's thread-local must name *this* scene's
@@ -294,9 +305,22 @@ The pre-Qt census is `[('b', 1), ('b', 2), ('p', 3), ('p', 4), ('p', 5),
 ('p', 6), ('p', 7), ('p', 8), ('p', 9)]` — invariant across 25 logged runs of
 every configuration. `('p', 3)` is a *program* named 3, and programs and buffers
 are separate GL namespaces, so there is no buffer 3 for Qt to have destroyed:
-`('b', 3)` is Qt's own. Do not hand-count this at all. The harness prints
-`...of which existed before Qt was started, so are certainly ours`, that line is
-the claim, and it reads `[('b', 1), ('b', 2)]`.
+`('b', 3)` is Qt's own.
+
+That comparison is **yours to make in this run**, and the two lines to make it
+from are both printed: the pre-Qt census above, and the `DESTROYED …` list. This
+run does not attribute them for you. It ends:
+
+```
+  DESTROYED in our context by freeing the resized scene: [('b', 1), ('f', 1), ('r', 1), ('b', 2), ('r', 2), ('b', 3)]
+Error: freeing the resized scene destroyed 6 of the compositor's GL objects
+```
+
+and that is the whole of it. The attributed line — `...of which existed before
+Qt was started, so are certainly ours` — is printed at `src/main.rs:1603`, which
+is inside C-1, and this run never reaches C-1. Do not go looking for it here;
+read it off the `WIRECHECK_KEEP_RESIZED_SCENE=1` run below, which does print it,
+against the same unchanged pre-Qt census.
 
 That is the **resize case** failing, not C-1: the resized scene is freed in
 exactly C-1's ordering, so it reaches the same defect first and the run stops
@@ -310,9 +334,10 @@ WIRECHECK_KEEP_RESIZED_SCENE=1 ./target-control/debug/wirecheck   # must fail
 Expect `DESTROYED by Qt's teardown, in our context: [('b', 1), ('f', 1),
 ('r', 1), ('b', 2), ('f', 2)]` and `...of which existed before Qt was started,
 so are certainly ours: [('b', 1), ('b', 2)]` — identical in 30 of 30 runs on
-this machine. The guard line is **not** part of the expectation: it has read
-`8 of 8 compositor textures survived` in all 30, and see the guards paragraph
-above for why that is neither surprising nor a problem.
+this machine. The guard line is **not** part of the expectation: across those
+same 30 it read `8 of 8 compositor textures survived` in 25 and `0 of 8` in 5,
+with nothing in between, and see the guards paragraph above for why either is
+neither surprising nor a problem.
 
 Both runs matter and they check different things: the first that the defect is
 caught, the second that C-1's own census, precondition assertion and guard
@@ -326,10 +351,12 @@ which had been reasoned rather than run:
   With that free skipped, C-1's diff is the full five objects rather than a
   clean one. The resize case's census earns its place by catching the damage
   where it happens, not by shielding C-1.
-* "Most of the guard textures clobbered outright" was right about the magnitude
-  and wrong about the reliability. When the guards fire it really is most of
-  them — 6 of 8 — but they fire in a small minority of runs and in none of the
-  30 measured here.
+* "Most of the guard textures clobbered outright" was right that the guards are
+  unreliable and has now been wrong twice about the magnitude — first "most of
+  them", then "6 of 8". Measured here across 30 runs of this configuration: they
+  fire in 5, and when they fire it is all eight. The reliability half is the
+  durable part; the magnitude is whatever this build's GL name allocation
+  happens to produce.
 
 **The render control** — drop the call in `solium_qml_scene_render_gpu` instead:
 
