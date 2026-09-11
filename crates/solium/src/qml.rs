@@ -132,8 +132,41 @@ mod ffi {
 /// Every scene shares one engine and one import path, which is what makes the
 /// design system a single object rather than a copy per surface — see
 /// `qml/Solium/Theme.qml`.
-#[expect(unsafe_code, reason = "calling into the Qt host")]
+///
+/// Honours `SOLIUM_QML_GPU`, which is what every caller that is going to *draw*
+/// wants. [`start_software`] is for the one that is not.
 pub(crate) fn start() -> Result<()> {
+    start_with(crate::dev::qml_gpu())
+}
+
+/// Start Qt on the **software** scene graph, whatever the knob says.
+///
+/// For `--check-qml`, which loads one QML file to say whether it parses and then
+/// exits. Nothing it builds is ever drawn, so asking for a dmabuf would make the
+/// answer depend on whether the machine has a render node rather than on the QML
+/// being checked.
+///
+/// It exists because [`start`] reads the environment, and a validation entry
+/// point that reads the environment answers a different question depending on
+/// whose shell it is run from. With `SOLIUM_QML_GPU` exported — which is exactly
+/// the state the shell is in during the hardware session that would want this —
+/// `start` brought up a GPU host, and `Scene::software` was then refused by
+/// `host.cpp`'s software constructor: a perfectly good QML file reported as
+/// broken, by the thing whose whole job is to say so accurately.
+///
+/// Not "start with a preference": it *takes* the decision. Qt fixes its scene
+/// graph for the life of the process, so `GPU` is set here and [`on_gpu`] and
+/// any later [`start`] read the same answer.
+pub(crate) fn start_software() -> Result<()> {
+    // If a GPU host is somehow already up this changes nothing and the host
+    // refuses below, loudly — `solium_qml_start` returns 0 rather than handing
+    // back a host that will not do what the caller is about to assume.
+    let _ = GPU.set(false);
+    start_with(false)
+}
+
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+fn start_with(gpu: bool) -> Result<()> {
     let path = import_path();
     let path = PathBuf::from(path);
     let path = CString::new(path.as_os_str().as_encoded_bytes())
@@ -144,7 +177,7 @@ pub(crate) fn start() -> Result<()> {
     // — so the whole decision, availability included, is made inside this
     // `OnceLock` and every later `start()` reads the answer rather than
     // re-asking the question.
-    if crate::dev::qml_gpu() && *GPU.get_or_init(|| start_on_gpu(&path)) {
+    if gpu && *GPU.get_or_init(|| start_on_gpu(&path)) {
         return Ok(());
     }
 
@@ -682,8 +715,8 @@ impl Scene {
     /// fourth caller answering this question for itself is the same bug again.
     ///
     /// `main.rs`'s `--check-qml` is the one deliberate exception and says so
-    /// where it sits: it validates a file and exits without ever starting a
-    /// host, so its scene is software by construction and not by preference.
+    /// where it sits: it starts its host through [`start_software`], so its
+    /// scene is software by construction and not by preference.
     pub(crate) fn for_host(
         qml_path: &Path,
         width: i32,
@@ -702,9 +735,14 @@ impl Scene {
     /// Named for what it is rather than `new`, because `new` reads as the
     /// normal constructor and this one is an exception with exactly one
     /// legitimate caller: `main.rs`'s `--check-qml`, which validates a file and
-    /// exits without ever starting a host. Anything that will be *drawn* wants
-    /// [`Scene::for_host`], and on a GPU host this scene would be refused at
-    /// construction — see `host.cpp`'s software constructor.
+    /// exits. Anything that will be *drawn* wants [`Scene::for_host`], and on a
+    /// GPU host this scene would be refused at construction — see `host.cpp`'s
+    /// software constructor.
+    ///
+    /// Which is why its one caller pairs it with [`start_software`] rather than
+    /// [`start`]. The pairing is the contract: this constructor is only sound in
+    /// a process whose host was brought up software on purpose, and nothing here
+    /// can check that from the inside.
     pub(crate) fn software(qml_path: &Path, width: i32, height: i32) -> Result<Self> {
         Self::with_properties(qml_path, width, height, None)
     }
