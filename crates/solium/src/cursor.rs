@@ -68,11 +68,23 @@ const KEPT: usize = 4;
 /// `Wayland` and `Memory` (`renderer/element/mod.rs:103-109`). A
 /// `TextureRenderElement` implements none, inherits the default `None`, and
 /// `copy_element_to_cursor_bo` gives up on its first line
-/// (`drm/compositor/mod.rs:4190-4193`); so does the pixman fallback
-/// (`mod.rs:3269`). There is no `UnderlyingStorage` a dmabuf-backed texture can
-/// satisfy, so a GPU cursor drawn as a texture turns every pointer motion on a
-/// TTY into a full composite and page flip of the whole output, logged nowhere
-/// above `trace!`.
+/// (`drm/compositor/mod.rs:4190-4193`). There is no `UnderlyingStorage` a
+/// dmabuf-backed texture can satisfy, so a GPU cursor drawn as a texture turns
+/// every pointer motion on a TTY into a full composite and page flip of the
+/// whole output, logged nowhere above `trace!`.
+///
+/// **And there is no fallback underneath it on this build**, which is the half
+/// of that worth stating rather than the half that reassures. smithay does have
+/// a pixman path that renders the element into the cursor buffer when the copy
+/// fails, at `mod.rs:3257-3269` — but it is behind `#[cfg(feature =
+/// "renderer_pixman")]` and `renderer_pixman` is not in our feature list
+/// (`Cargo.toml:24-43`). What compiles here is the `#[cfg(not(...))]` arm at
+/// `mod.rs:3244`, whose failure branch is a `trace!` and a plain `return None`.
+/// So `copy_element_to_cursor_bo` is the only route to the plane in this
+/// binary, and losing it loses the plane outright. (Reading the pixman arm is
+/// still instructive: it asks for `underlying_storage` too, at `mod.rs:3269`,
+/// so it would refuse a texture as well — but a fallback that is not compiled
+/// cannot be the reason anything works.)
 ///
 /// So on the GPU path Qt still draws the pointer — it has to, a GPU host
 /// refuses software scenes — and the result is read straight back out of the
@@ -83,11 +95,33 @@ const KEPT: usize = 4;
 /// a theme change rather than per frame.
 ///
 /// Measured rather than assumed — `dev/wirecheck` runs the round trip and
-/// prints what it costs. On this machine the whole import, bind,
-/// `copy_framebuffer` and map is **~60 µs**, and near enough the same at 24x24
-/// (63.5 µs) as at 48x48 (59.8 µs), so it is the round trip and not the pixels.
-/// It is paid **once per size per change**, not per frame — see the cache
-/// below, which is what makes that true.
+/// prints what it costs. The whole import, bind, `copy_framebuffer` and map, on
+/// this machine, is **~65 µs of fixed cost plus 3.5–4 ns per pixel**. Fitted
+/// over a five-point sweep rather than read off one pair:
+///
+/// ```text
+/// 24x24       576 px     66.9 µs
+/// 48x48      2304 px     69.1 µs
+/// 96x96      9216 px    110.8 µs
+/// 192x192   36864 px    192.3 µs
+/// 384x384  147456 px    605.8 µs
+/// ```
+///
+/// **The pixel term is negligible at cursor sizes and only at cursor sizes**,
+/// and that scope is the load-bearing part. At 24x24 it is ~2 µs of ~67 — three
+/// per cent — so what is being paid really is the round trip, and the cache
+/// below turns even that into once per size per change rather than per frame.
+/// The claim expires almost immediately above the pointer: at 384x384 the pixel
+/// term alone is ~540 µs and the whole call is 606, nine times what the cursor
+/// pays for its entire readback. So do not carry "it is the round trip, not the
+/// pixels" out of this paragraph and use it to justify dropping the cache — it
+/// is a statement about 24- and 48-pixel squares, not about readbacks.
+///
+/// The pair this used to cite — 24x24 at 63.5 µs against 48x48 at 59.8, the
+/// *smaller* size measuring slower — was a single-run artefact and was never
+/// evidence for anything. Seven runs at each size give medians of 68.0 and
+/// 67.1, and the spread within one size (65.6–80.2) is wider than the gap
+/// between the two sizes.
 #[derive(Debug)]
 enum Backing {
     /// Qt rasterises into a `QImage` and we copy out of it.
@@ -103,6 +137,19 @@ pub(crate) struct Cursor {
     backing: Backing,
     /// One uploadable buffer per device size the pointer has been asked for.
     buffers: Kept<MemoryRenderBuffer>,
+    /// Whether producing a pointer image has already failed and said so.
+    ///
+    /// One latch for the whole of [`Cursor::fill`] rather than one per `warn!`,
+    /// because there is one failure here and the several messages are its
+    /// stages: whichever of them is reached first is the one worth reading, and
+    /// the ones after it did not run. See [`Said`].
+    drawing: Said,
+    /// And whether turning a finished image into an element has.
+    ///
+    /// Separate from `drawing`, because it is a different failure at a
+    /// different stage — one of them silencing the other would hide the case
+    /// where both are happening.
+    uploading: Said,
 }
 
 /// What the pointer has already been drawn at, newest last.
@@ -160,6 +207,40 @@ impl<T> Kept<T> {
     }
 }
 
+/// A complaint that is made once and then held until the thing works again.
+///
+/// Everything in this module fires from inside [`Cursor::element`], which
+/// `render.rs` calls **once per output per frame** — so a `warn!` on a failure
+/// that does not heal by itself is not a log line, it is the log. And the
+/// failures here are exactly that shape. When a GPU rebind persistently fails
+/// the scene freezes on a smaller buffer, [`Cursor::fill`] pushes under that
+/// frozen size, and so `buffers.has(edge)` misses for that output every frame
+/// for the rest of the session: the retry is deliberate and right, but it means
+/// each frame pays a failed allocation and a full readback *and*, without this,
+/// said so four times.
+///
+/// The same discipline [`Gpu`]'s own `stale` flag uses, including the reset: a
+/// transient failure that heals is worth hearing about if it comes back. A type
+/// rather than a bare `bool` because there are two of them and [`read_back`] is
+/// a free function, so the flag has to travel.
+#[derive(Debug, Default)]
+struct Said(bool);
+
+impl Said {
+    /// Say it, unless it has already been said since the last success.
+    fn once(&mut self, say: impl FnOnce()) {
+        if !self.0 {
+            self.0 = true;
+            say();
+        }
+    }
+
+    /// It worked, so the next failure is news again.
+    fn worked(&mut self) {
+        self.0 = false;
+    }
+}
+
 impl Cursor {
     pub(crate) fn new() -> Result<Self> {
         qml::start()?;
@@ -180,6 +261,8 @@ impl Cursor {
                 Backing::Memory
             },
             buffers: Kept::default(),
+            drawing: Said::default(),
+            uploading: Said::default(),
         })
     }
 
@@ -219,6 +302,19 @@ impl Cursor {
         // In practice this fires once, on the first frame: `cursor.qml` has no
         // animation and nothing writes its properties, so after the pointer has
         // been drawn once it never asks to be drawn again.
+        //
+        // **And "theme change" has no trigger at all today — it is the shape
+        // this is built for, not something that happens.** `Solium/Theme.qml`
+        // is a `pragma Singleton` whose twenty-one colours are every one of
+        // them a `readonly property` bound to a literal, and nothing in the
+        // compositor writes a property on the cursor scene — there is no
+        // `set_int`/`set_bool` on it anywhere, unlike a decoration or a pane.
+        // So `needs_render` can return true here on frame 1 and never again.
+        // The wiring is right and cheap and should stay; what it is not is
+        // exercised. The unit test below covers `Kept::clear` honestly and says
+        // so, but nothing anywhere drives a theme change end to end, so do not
+        // read a green test suite as evidence that a live re-theme repaints the
+        // pointer. It has never been done once.
         if self.scene.needs_render() {
             self.buffers.clear();
         }
@@ -245,7 +341,7 @@ impl Cursor {
         // before it will use the plane's fast path: it refuses any element
         // whose src and drawn size disagree.
         let source = Rectangle::from_size((f64::from(held), f64::from(held)).into());
-        MemoryRenderBufferRenderElement::from_buffer(
+        let uploaded = MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             position,
             buffer,
@@ -253,20 +349,42 @@ impl Cursor {
             Some(source),
             Some((SIZE, SIZE).into()),
             Kind::Cursor,
-        )
-        .inspect_err(|err| tracing::warn!(?err, "could not upload the cursor"))
-        .ok()
-        .map(Element::Chrome)
+        );
+        match uploaded {
+            Ok(element) => {
+                self.uploading.worked();
+                Some(Element::Chrome(element))
+            }
+            Err(err) => {
+                self.uploading.once(|| {
+                    tracing::warn!(
+                        ?err,
+                        "could not upload the cursor; the pointer will be invisible. Said once \
+                         until it uploads again"
+                    );
+                });
+                None
+            }
+        }
     }
 
     /// Draw the pointer at `edge` pixels and keep the result. Returns the size
     /// that was actually produced.
+    ///
+    /// **Every way out of here that is not `Some` runs again next frame**, for
+    /// this output and every other one: nothing was pushed, so `buffers.has` is
+    /// still false. That is deliberate — a GBM allocation that failed because
+    /// the GPU was momentarily full heals itself with nobody having to notice —
+    /// and it is why each complaint on the way out goes through `self.drawing`
+    /// rather than straight to `warn!`. See [`Said`].
     fn fill(&mut self, renderer: &mut GlesRenderer, edge: i32, scale: f64) -> Option<i32> {
-        // Two fields of one struct, borrowed at once.
+        // Several fields of one struct, borrowed at once.
         let Self {
             scene,
             backing,
             buffers,
+            drawing,
+            ..
         } = self;
         let (pixels, stride, held) = match backing {
             Backing::Memory => {
@@ -274,17 +392,24 @@ impl Cursor {
                 match scene.render() {
                     Ok(rendered) => (Pixels::Borrowed(rendered.pixels), rendered.stride, edge),
                     Err(err) => {
-                        tracing::warn!(?err, "the cursor did not render");
+                        drawing.once(|| {
+                            tracing::warn!(
+                                ?err,
+                                "the cursor did not render. Said once until it renders again"
+                            );
+                        });
                         return None;
                     }
                 }
             }
             Backing::Gpu(gpu) => {
+                // No complaint of ours on this `?`: `Gpu::sample` has its own
+                // `stale` latch and has already said whatever there was to say.
                 let (texture, size) = {
                     let shown = gpu.sample(scene, renderer, (edge, edge), scale)?;
                     (shown.texture.clone(), shown.size)
                 };
-                let read = read_back(renderer, texture, size)?;
+                let read = read_back(renderer, texture, size, drawing)?;
                 let stride = usize::try_from(size.0.max(0)).unwrap_or_default() * 4;
                 (Pixels::Owned(read), stride, size.0)
             }
@@ -305,12 +430,18 @@ impl Cursor {
             Ok(vec![Rectangle::from_size((held, held).into())])
         });
         if copy.is_err() {
-            tracing::warn!("the cursor image was smaller than its buffer");
+            drawing.once(|| {
+                tracing::warn!(
+                    "the cursor image was smaller than its buffer. Said once until one copies \
+                     again"
+                );
+            });
             return None;
         }
         drop(context);
 
         buffers.push(held, buffer);
+        drawing.worked();
         Some(held)
     }
 }
@@ -344,15 +475,28 @@ impl AsRef<[u8]> for Pixels<'_> {
 /// Binds a framebuffer, so it must not run underneath another bind — every
 /// backend builds its elements before it binds anything, which is the same
 /// convention `offscreen::capture` relies on.
+///
+/// `said` is the caller's latch and not this function's own, because the three
+/// failures below are three stages of one operation: the first one reached is
+/// the one worth reading and the rest never ran. Without it this is three
+/// `warn!` per output per frame for the life of the session — see [`Said`].
 fn read_back(
     renderer: &mut GlesRenderer,
     texture: smithay::backend::renderer::gles::GlesTexture,
     size: (i32, i32),
+    said: &mut Said,
 ) -> Option<Vec<u8>> {
     let mut texture = texture;
     let framebuffer = renderer
         .bind(&mut texture)
-        .inspect_err(|err| tracing::warn!(?err, "could not bind the cursor's buffer to read it"))
+        .inspect_err(|err| {
+            said.once(|| {
+                tracing::warn!(
+                    ?err,
+                    "could not bind the cursor's buffer to read it. Said once until it reads again"
+                );
+            });
+        })
         .ok()?;
     let mapping = renderer
         .copy_framebuffer(
@@ -360,7 +504,14 @@ fn read_back(
             Rectangle::from_size(size.into()),
             Fourcc::Argb8888,
         )
-        .inspect_err(|err| tracing::warn!(?err, "could not copy the cursor's buffer"))
+        .inspect_err(|err| {
+            said.once(|| {
+                tracing::warn!(
+                    ?err,
+                    "could not copy the cursor's buffer. Said once until it reads again"
+                );
+            });
+        })
         .ok();
     drop(framebuffer);
     // Whatever happened, leave nothing of ours bound: the next thing to bind is
@@ -369,9 +520,19 @@ fn read_back(
     crate::warp::release_framebuffer(renderer);
     let pixels = renderer
         .map_texture(&mapping?)
-        .inspect_err(|err| tracing::warn!(?err, "could not map the cursor's buffer"))
+        .inspect_err(|err| {
+            said.once(|| {
+                tracing::warn!(
+                    ?err,
+                    "could not map the cursor's buffer. Said once until it reads again"
+                );
+            });
+        })
         .ok()?
         .to_vec();
+    // Not cleared here: `fill` does that, once it has a buffer in hand. A
+    // readback that succeeds and is then rejected by the row copy in `fill` has
+    // still left the pointer undrawn, and is not a success to reset on.
     Some(pixels)
 }
 
@@ -430,7 +591,7 @@ impl Pointer {
 
 #[cfg(test)]
 mod tests {
-    use super::{KEPT, Kept};
+    use super::{KEPT, Kept, Said};
 
     /// The pointer is built for **every** output on every frame -- `render.rs`
     /// says so in as many words and argues for it -- so a desktop with a 1x and
@@ -458,8 +619,16 @@ mod tests {
         assert!(kept.get(24).is_some() && kept.get(48).is_some());
     }
 
-    /// And a theme change has to be able to invalidate every size at once, or
-    /// the monitor that is not being looked at keeps the old pointer for ever.
+    /// And whatever invalidates the pointer has to invalidate *every* size at
+    /// once, or the monitor that is not being looked at keeps the old pointer
+    /// for ever.
+    ///
+    /// Read this for exactly what it is: `Kept::clear` drops every entry. It is
+    /// **not** end-to-end coverage of a theme change, and there is no such
+    /// coverage anywhere — nothing in the compositor can currently trigger one
+    /// at all, for the reasons set out at the `needs_render` call in
+    /// `Cursor::element`. So this passing says the container forgets when it is
+    /// told to. It says nothing about whether anything ever tells it.
     #[test]
     fn clearing_invalidates_every_size() {
         let mut kept: Kept<u32> = Kept::default();
@@ -491,5 +660,29 @@ mod tests {
         kept.push(24, 2);
         assert_eq!(kept.held.len(), 1);
         assert_eq!(kept.get(24).copied(), Some(2));
+    }
+
+    /// A failure that does not heal is reached once per output per frame for
+    /// the rest of the session -- a frozen GPU scene is exactly that -- so the
+    /// thing worth asserting is that a hundred frames of it cost one line and
+    /// not a hundred. Arithmetic, and it does not need Qt or a GPU.
+    ///
+    /// The reset half matters just as much and in the other direction: a
+    /// latch that never clears turns a *transient* failure into permanent
+    /// silence, which is the failure mode of a throttle rather than of a flood.
+    #[test]
+    fn a_complaint_is_said_once_and_is_news_again_after_a_success() {
+        let mut said = Said::default();
+        let mut lines = 0;
+        for _ in 0..100 {
+            said.once(|| lines += 1);
+        }
+        assert_eq!(lines, 1, "the cursor logged once per frame");
+
+        said.worked();
+        for _ in 0..100 {
+            said.once(|| lines += 1);
+        }
+        assert_eq!(lines, 2, "a failure after a success was swallowed");
     }
 }
