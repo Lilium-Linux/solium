@@ -527,14 +527,27 @@ Three things worth knowing before running it on a TTY:
   `QT_QPA_EGLFS_DISABLE_INPUT=1` means eglfs creates no input handlers to
   compete with them.
 
-* **Qt's `qWarning` does not go to stderr on this Fedora build.** It goes to
-  journald, so the whole diagnostic half of the host — every EGL and GL error
-  code the import path prints — is invisible in the terminal and in
-  `session.log`. Set `QT_FORCE_STDERR_LOGGING=1` or you debug blind:
+* **Qt's diagnostics go through `tracing` now, and needed to.** As of `870aacc`
+  `host.cpp` installs a `qInstallMessageHandler` that forwards to
+  `solium_qml_log_from_qt` in `qml.rs`, so QML binding errors, `console.warn`
+  and every `qWarning` in Qt and in the host come out in the compositor's own
+  log with Qt's logging category as a field. `QT_FORCE_STDERR_LOGGING` is no
+  longer needed for any of it.
 
-  ```sh
-  SOLIUM_QML_GPU=1 QT_FORCE_STDERR_LOGGING=1 ./target/debug/solium
-  ```
+  What it was before is worth keeping, because it is why four failures in the
+  rice spike were silent. Qt's default handler picks its destination from
+  whether stderr is a console: **stderr when it is, journald when it is not** —
+  measured both ways on this Fedora Qt 6.11. So a TTY session, where stderr is
+  the VT the compositor has just covered, printed the whole diagnostic half of
+  the host onto a screen nobody could read and into no log at all, while a
+  `2>&1 | tee` run quietly put it in journald where nobody was looking. Neither
+  ever reached `session.log`.
+
+  `RUST_LOG` now gates Qt as well, under the `solium::qml` target like the rest
+  of that module. One consequence: a QML `console.log` is a `QtDebugMsg`, so it
+  needs `RUST_LOG=debug` — **and** `QT_LOGGING_RULES='qml.debug=true'`, because
+  Qt's own category filter drops it before the handler is called. `console.info`
+  and above need neither.
 
 * **A one-frame probe cannot see the bug that matters.** Qt's
   `QOpenGLContext::currentContext()` is a thread-local Qt sets in its own
