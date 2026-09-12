@@ -44,6 +44,49 @@ layout was never disturbed, so there is nothing to restore.
 it to where it lives. That is every "appears from somewhere" animation — a
 window opening, or growing out of a dock icon.
 
+## Moving more than a window
+
+A transform names a **selection**, and a selection can hold things that are not
+windows at all:
+
+```lua
+sol.group("desk-2", {
+    windows  = { 3, 7 },          -- by id
+    surfaces = { "wallpaper-2" }, -- anything sol.surface declared
+    monitors = { "DP-1" },        -- everything drawn on a screen
+    monitor  = "DP-1",            -- which instance of each surface above
+})
+sol.present_group("desk-2", { x = -2560 }, { duration = 300 })
+sol.present_group_clear("desk-2")
+sol.group("desk-2", false)        -- take the name away
+```
+
+One call, one animation, one target. The wallpaper travels because it is *in*
+the selection — the compositor has no idea what a wallpaper is, and does not
+need one.
+
+Three things to know before using it:
+
+**`x` and `y` are a displacement, not a destination.** `sol.present` takes the
+rectangle a window is drawn at; a selection has no rectangle of its own, so
+`{ x = -2560 }` means "a screen to the left of wherever each member already is".
+
+**It composes with each member's own transform.** A window you have also
+`sol.present`ed is drawn at its own rect *plus* its selection's displacement, so
+a window tilted inside a moving desk stays tilted within it. The corollary is
+the one that catches people: a mode handing absolute rectangles to a window in a
+carried selection is placing them **in that selection's space**. That is why
+`overview.lua` shows the desk in front of you rather than every desk at once.
+
+**Membership changes are animated.** A window that leaves one selection for
+another would otherwise have the difference between the two displacements land
+on it in a single frame; instead it is held where it was drawn and animates from
+there, the same rule `sol.present` follows for a window entering a mode. The
+duration is whatever `sol.animate` last set.
+
+A selection naming a window that has closed, or a surface nothing declared,
+simply does not contain it. There is nothing to clean up.
+
 ## What a mode is told
 
 ```lua
@@ -179,6 +222,14 @@ Both are real desktops, and the difference is what you take a workspace to
 *be* — a screenful, or a whole desk. `workspaces.lua` shares every line
 between them: which workspace a monitor shows is looked up by monitor either
 way, and with the setting off every monitor looks up the same entry.
+
+A workspace is a **selection**, one per monitor per workspace, named
+`desk-<n>@<connector>`. `workspaces.lua` declares it from the windows on that
+desk plus that desk's background, and carries it with a single
+`sol.present_group` — which is why a per-workspace wallpaper travels with the
+switch. Set `config.wallpaper` to a list of images to get one; a single image
+belongs to the monitor and stays put, because every desk sharing one picture
+makes a wallpaper that slides indistinguishable from one that does not.
 
 If you keep per-workspace state of your own, key it by monitor as well.
 `monitors.key(workspaces.on(name), name)` is the string `tiling.lua` and

@@ -136,8 +136,21 @@ wallpaper = "~/Pictures/whatever.png",
 layer is drawn *over* this one, so leaving both on means paying to rasterise a
 picture nobody sees.
 
+A **list** gives each workspace its own, and it travels with that workspace:
+
+```lua
+wallpaper = { "~/Pictures/one.png", "~/Pictures/two.png" },
+```
+
+`workspaces.lua` puts each one in the same selection as its desk's windows, so
+one animation carries both and the background stops being left behind when you
+switch. Fewer pictures than workspaces cycles. It costs one screen-sized
+rasterisation per desk you have actually visited, per monitor — which is why one
+image stays one static surface: every desk sharing a picture would make a
+wallpaper that slides pixel-identical to one that does not.
+
 The more interesting part is that **there is no wallpaper in the compositor.**
-`lua/wallpaper.lua` is nine lines and calls one thing:
+`lua/wallpaper.lua` calls one thing:
 
 ```lua
 sol.surface("wallpaper", {

@@ -1198,6 +1198,84 @@ mod desk {
         );
     }
 
+    /// **The slide, drawn.** Set `SOLIUM_DESK_SVG` to a directory and this
+    /// writes `desk-slide.svg` into it: five frames of the switch above, side
+    /// by side, with every rectangle placed by the numbers the test asserts on.
+    ///
+    /// The compositor cannot be started here, so this is the equivalent of
+    /// `crates/effects`' preview page for a mechanism that has no crate of its
+    /// own to preview: the shipped scripts drive the real `Groups`, and what
+    /// comes out is drawn rather than described. An assertion can say two
+    /// numbers are equal; it cannot say the picture is a desk sliding.
+    ///
+    /// ```sh
+    /// SOLIUM_DESK_SVG=$HOME cargo test the_slide_can_be_looked_at
+    /// ```
+    ///
+    /// Silent and passing when the variable is unset, which is every gate run:
+    /// a test that writes files by default is a test that fails in somebody
+    /// else's sandbox.
+    #[test]
+    fn the_slide_can_be_looked_at() {
+        let Some(into) = std::env::var_os("SOLIUM_DESK_SVG") else {
+            return;
+        };
+        let mut scripts = scripts("svg", CONFIG);
+        let mut desktop = Desktop::default();
+        desktop.apply(scripts.startup().commands, Duration::ZERO);
+        let commands = scripts.monitors_changed(snapshot(&[1, 2], 1)).commands;
+        desktop.apply(commands, Duration::ZERO);
+        let commands = scripts.key("super+shift+1", snapshot(&[1, 2], 1)).commands;
+        desktop.apply(commands, Duration::ZERO);
+        let commands = scripts.key("super+shift+2", snapshot(&[1, 2], 2)).commands;
+        desktop.apply(commands, Duration::ZERO);
+        let start = Duration::from_millis(1000);
+        let commands = scripts.key("super+2", snapshot(&[1, 2], 1)).commands;
+        desktop.apply(commands, start);
+
+        const FRAMES: u64 = 5;
+        const GAP: f64 = 120.0;
+        let (screen_w, screen_h) = (WIDTH, 1440.0);
+        let width = (screen_w + GAP) * FRAMES as f64 - GAP;
+        let mut svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {width} {height}\"              width=\"{width}\" height=\"{height}\">\n             <rect width=\"100%\" height=\"100%\" fill=\"#14161c\"/>\n",
+            height = screen_h + 160.0,
+        );
+        for frame in 0..FRAMES {
+            let now = start + Duration::from_millis(frame * 75);
+            let origin = (screen_w + GAP) * frame as f64;
+            // The monitor: everything outside it is off screen, which is the
+            // whole point of the picture.
+            svg.push_str(&format!(
+                "<g transform=\"translate({origin},120)\">\
+                 <clipPath id=\"screen{frame}\">                 <rect width=\"{screen_w}\" height=\"{screen_h}\"/></clipPath>\n                 <text x=\"0\" y=\"-40\" fill=\"#9aa4b2\" font-family=\"monospace\"                  font-size=\"64\">{millis} ms</text>\n                 <g clip-path=\"url(#screen{frame})\">\n",
+                millis = frame * 75,
+            ));
+            for (desk, wall, window) in [(1_usize, "#3b4a6b", "#8fb4ff"), (2, "#6b3b4a", "#ff9fb4")]
+            {
+                let (bx, by) = desktop.background(desk, now);
+                svg.push_str(&format!(
+                    "<rect x=\"{bx}\" y=\"{by}\" width=\"{screen_w}\"                      height=\"{screen_h}\" fill=\"{wall}\"/>\n"
+                ));
+                let (wx, wy) = desktop.window(desk as u64, now);
+                svg.push_str(&format!(
+                    "<rect x=\"{}\" y=\"{}\" width=\"800\" height=\"600\" rx=\"18\"                      fill=\"{window}\" stroke=\"#101218\" stroke-width=\"6\"/>\n",
+                    100.0 + wx,
+                    100.0 + wy,
+                ));
+            }
+            svg.push_str("</g>\n<rect width=\"");
+            svg.push_str(&format!(
+                "{screen_w}\" height=\"{screen_h}\" fill=\"none\" stroke=\"#5a6478\"                  stroke-width=\"8\"/>\n</g>\n"
+            ));
+        }
+        svg.push_str("</svg>\n");
+
+        let path = std::path::Path::new(&into).join("desk-slide.svg");
+        std::fs::write(&path, svg).expect("writing the filmstrip");
+        eprintln!("wrote {}", path.display());
+    }
+
     /// **A single wallpaper is still a single wallpaper, in no selection.**
     ///
     /// The shipped default, and the case that must not start paying for this.
