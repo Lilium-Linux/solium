@@ -1685,6 +1685,10 @@ name = "solium-animation"
 version = "0.0.0"
 
 [[package]]
+name = "solium-effects"
+version = "0.0.0"
+
+[[package]]
 name = "solium-layout"
 version = "0.0.0"
 
