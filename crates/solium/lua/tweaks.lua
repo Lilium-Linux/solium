@@ -139,12 +139,16 @@ function tweaks.handle(id)
         local area = sol.monitor()
         sol.animate({ duration = 520, easing = "inOutCubic" })
         sol.present(window.id, {
-            genie = {
-                x = area.x + area.w / 2 - 60,
-                y = area.y + area.h - 24,
-                width = 120,
-                height = 24,
+            deform = {
+                effect = "genie",
+                axis = "down",
                 spread = config.genie_spread or 1.4,
+                to = {
+                    x = area.x + area.w / 2 - 60,
+                    y = area.y + area.h - 24,
+                    w = 120,
+                    h = 24,
+                },
             },
         })
     end

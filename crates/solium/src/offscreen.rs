@@ -510,22 +510,24 @@ mod tests {
         const FRAMES: u16 = 60;
 
         let outer = window();
-        let rect = crate::present::logical((0.0, 0.0), (1150.0, 850.0));
-        let slot = crate::present::logical((40.0, 1000.0), (64.0, 32.0));
+        let rect =
+            crate::present::for_effects(crate::present::logical((0.0, 0.0), (1150.0, 850.0)));
+        let slot =
+            crate::present::for_effects(crate::present::logical((40.0, 1000.0), (64.0, 32.0)));
 
         let mut scratch: Scratch<u32> = Scratch::default();
         let mut allocations = 0_u32;
         let mut bottom_edge = Vec::new();
 
         for step in 0..=FRAMES {
-            let deform = crate::present::Deform::Genie {
-                slot,
+            let deform = solium_effects::Deform::Genie {
                 progress: f32::from(step) / f32::from(FRAMES),
                 spread: 0.5,
+                axis: solium_effects::Axis::Down,
             };
             // Where the middle of the window's bottom edge is drawn this
             // frame. This is what a warp changes.
-            bottom_edge.push(deform.place(rect, 0.5, 1.0));
+            bottom_edge.push(deform.place(rect, slot, 0.5, 1.0));
 
             // And this is what `capture` asks for, which is not that.
             let size = pixels(outer, 1.0);
