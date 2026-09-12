@@ -28,7 +28,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         color: "transparent"
-        radius: 6
+        radius: 0
         border {
             width: frame.insetTop
             color: frame.focused ? Theme.accent : Theme.edgeInactive

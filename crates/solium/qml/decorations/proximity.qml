@@ -28,7 +28,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         color: "transparent"
-        radius: frame.pointerInside ? 12 : 4
+        radius: 0
         opacity: frame.pointerInside ? 1.0 : 0.45
         border {
             width: frame.pointerInside ? frame.insetTop : 1
@@ -41,7 +41,6 @@ Item {
         // you rather than as a flicker.
         Behavior on border.width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
         Behavior on border.color { ColorAnimation { duration: 160 } }
-        Behavior on radius { NumberAnimation { duration: 220; easing.type: Easing.OutBack } }
         Behavior on opacity { NumberAnimation { duration: 160 } }
     }
 }

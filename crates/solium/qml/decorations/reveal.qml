@@ -39,7 +39,7 @@ Item {
         anchors { left: parent.left; right: parent.right }
         height: frame.barHeight
         color: frame.focused ? Theme.surface : Theme.surfaceInactive
-        radius: 8
+        radius: 0
 
         // Tucked just above the window when hidden, so it comes out from under
         // its own edge instead of materialising.

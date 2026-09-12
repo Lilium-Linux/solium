@@ -41,7 +41,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         color: "transparent"
-        radius: 8
+        radius: 0
         border { width: 1; color: frame.focused ? Theme.edge : Theme.edgeInactive }
     }
 
@@ -53,10 +53,9 @@ Item {
         opacity: frame.pointerInside ? 1.0 : 0.0
         Behavior on opacity { NumberAnimation { duration: 200 } }
 
-        // Concentric rings rather than a radial gradient: the scene is
-        // rasterised in software, where QML's Gradient is linear-only and
-        // ShaderEffect does not run at all. Twelve circles of falling opacity
-        // is a soft edge for the price of twelve circles.
+        // A flat square, not a soft one. Software rasterisation has no radial
+        // gradient and no ShaderEffect, so a glow here meant stacking alpha
+        // discs — which is a lot of blending to say "the pointer is there".
         Item {
             id: glow
 
@@ -67,27 +66,13 @@ Item {
             x: tracker.mouseX
             y: tracker.mouseY
 
-            // Eight rings rather than twelve: each is a full alpha-blended
-            // circle rasterised on the CPU, and the falloff is indisguishable.
-            Repeater {
-                model: 8
-
-                Rectangle {
-                    required property int index
-
-                    readonly property real step: (index + 1) / 8
-
-                    // Radii bunched towards the centre and a constant alpha
-                    // per disc: what makes the middle bright is how many discs
-                    // overlap there, not how opaque any one of them is.
-                    width: 30 + Math.pow(step, 0.7) * 210
-                    height: width
-                    radius: width / 2
-                    x: -width / 2
-                    y: -height / 2
-                    color: Theme.accent
-                    opacity: 0.12
-                }
+            Rectangle {
+                width: 90
+                height: 90
+                x: -width / 2
+                y: -height / 2
+                color: Theme.accent
+                opacity: 0.15
             }
         }
 

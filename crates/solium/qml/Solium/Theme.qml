@@ -9,39 +9,36 @@
 // from the dock into a titlebar keeps its colours because it never left the
 // design system, only the scene it was parented to.
 //
-// The palette is small and quiet on purpose: paper, ink, a hairline, and two
-// tints that appear only under the pointer. A compositor's chrome is the frame
-// around somebody else's work, and a frame that draws attention is doing the
-// wrong job. Anything louder belongs in a rice — which is what `panes/` and
-// `~/.config/solium/qml` are for, and why this file is small enough to replace.
+// **This is not a design. It is a default.** Plain greys, a plain blue, a plain
+// red: what the compositor looks like with nobody having chosen anything. It is
+// meant to be unremarkable, because its job is to show what the compositor does
+// rather than what someone's taste is — and because the first thing a rice does
+// is replace it. `panes/` and `~/.config/solium/qml` are where a look belongs;
+// this file is deliberately small and dull enough to throw away.
 
 pragma Singleton
 import QtQuick
 
 QtObject {
-    // --- paper ----------------------------------------------------------
-    // Two greys and a hairline. Focused and unfocused should be distinguishable
-    // without being read.
+    // --- greys ----------------------------------------------------------
     readonly property color surface: "#ffffff"
-    readonly property color surfaceInactive: "#f4f4f5"
-    readonly property color edge: "#d4d4d8"
-    readonly property color edgeInactive: "#e6e6e9"
+    readonly property color surfaceInactive: "#f0f0f0"
+    readonly property color edge: "#c0c0c0"
+    readonly property color edgeInactive: "#dcdcdc"
 
-    // --- ink ------------------------------------------------------------
-    readonly property color text: "#18181b"
-    readonly property color textDim: "#8b8b93"
+    readonly property color text: "#202020"
+    readonly property color textDim: "#808080"
 
-    // --- tints ----------------------------------------------------------
-    // `accent` marks the one thing on a surface that matters, never more than
-    // one. `warning` and `danger` are the frame buttons and show only under the
-    // pointer, so a titlebar at rest has no colour in it at all.
-    readonly property color accent: "#3b6ea5"
-    readonly property color warning: "#b8860b"
-    readonly property color danger: "#b4413c"
+    readonly property color control: "#c0c0c0"
+    readonly property color controlInactive: "#e0e0e0"
 
-    // A control at rest is a shape rather than a colour.
-    readonly property color control: "#c9c9ce"
-    readonly property color controlInactive: "#dededf"
+    // --- the three colours ----------------------------------------------
+    // Stock blue, amber and red. Nothing is tinted, nothing is neon, and
+    // `warning` and `danger` are only ever shown under the pointer — so a
+    // titlebar at rest has no colour in it at all.
+    readonly property color accent: "#0060c0"
+    readonly property color warning: "#c08000"
+    readonly property color danger: "#c02020"
 
     // --- metrics --------------------------------------------------------
     // The compositor reserves space using its own copy of `titlebarHeight`;
