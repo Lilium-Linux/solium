@@ -108,12 +108,15 @@ pub(crate) enum Content {
 ///
 /// One value rather than two tables. `Decorations` holds `frames` and `bare` as
 /// parallel collections keyed by `PaneId`, and two tables answering one
-/// question can disagree — `Solium::insets_of` checks `frames` first, so a pane
-/// in both has `bare` silently ignored, and nothing tests that.
+/// question can disagree — `Solium::insets_of` checked `frames` first, so a pane
+/// in both had `bare` silently ignored, and nothing tested that.
 ///
-/// **Nothing reads this yet.** It is written beside the tables, which are still
-/// the authority, so that the readers can be moved over one at a time under an
-/// assertion that the two agree. See
+/// **Every reader that wants a fact about a frame now asks this**, rather than
+/// either table: how much room it takes, and whether there is one at all. The
+/// tables are still written, still shadowed onto here after each write, and
+/// `Decorations::agree` checks on every read that they would have given the
+/// same answer. What still asks them is the code that wants the
+/// [`crate::decoration::Decoration`] itself — see the `Styled` arm below. See
 /// `docs/superpowers/plans/2026-09-12-pane-ownership.md`.
 #[derive(Debug, Default)]
 pub(crate) enum Frame {

@@ -105,6 +105,28 @@ fn grown(real: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logica
     )
 }
 
+/// How much room a frame takes around its client.
+///
+/// The whole of what a [`crate::pane::Frame`] means to a layout, in one place
+/// so that every reader of it agrees. The `Pending` arm is the interesting
+/// one: a frame that has not been built *yet* still reserves what one will
+/// want, because a window that changes shape the moment its frame appears is
+/// worse than one that was always the right size. It must not apply to a pane
+/// that will never have a frame — a client drawing its own decorations, an
+/// override-redirect menu, or `decoration = "none"` — which got a titlebar's
+/// worth of blank space above it with no titlebar in it. That is what an
+/// Electron application looked like here.
+const fn insets_for(frame: &crate::pane::Frame) -> Insets {
+    match frame {
+        crate::pane::Frame::Pending => Insets {
+            top: TITLEBAR_HEIGHT,
+            ..Insets::NONE
+        },
+        crate::pane::Frame::None => Insets::NONE,
+        crate::pane::Frame::Styled(insets) => *insets,
+    }
+}
+
 fn to_rect(rectangle: Rectangle<i32, Logical>) -> Rect {
     Rect {
         x: f64::from(rectangle.loc.x),
@@ -767,10 +789,16 @@ impl Solium {
     }
 
     /// Whether the compositor draws this window's frame.
+    ///
+    /// `Styled` and nothing else: a pane whose frame has not been built is not
+    /// decorated *yet*, and one that will never have a frame is not decorated
+    /// at all. Both were "not in `frames`" before and are one arm apart now.
     pub(crate) fn is_decorated(&self, window: &Window) -> bool {
-        self.panes
-            .id_of(window)
-            .is_some_and(|id| self.decorations.contains(id))
+        self.panes.of(window).is_some_and(|pane| {
+            #[cfg(debug_assertions)]
+            self.decorations.agree(pane.id(), pane);
+            matches!(pane.frame(), crate::pane::Frame::Styled(_))
+        })
     }
 
     /// The monitor the user is working on.
@@ -1994,7 +2022,11 @@ impl Solium {
         let now = self.clock.now();
 
         self.panes.iter().rev().find_map(|pane| {
-            if !self.decorations.contains(pane.id()) {
+            #[cfg(debug_assertions)]
+            self.decorations.agree(pane.id(), pane);
+            // Only a built frame has anything to hit. A pane reserving room for
+            // one that has not arrived owns no pixels for a click to land on.
+            if !matches!(pane.frame(), crate::pane::Frame::Styled(_)) {
                 return None;
             }
             let outer = self.pane_outer(pane)?;
@@ -2388,34 +2420,37 @@ impl Solium {
     }
 
     /// The same, for a caller that already knows which pane it means.
-    /// How much room this pane's frame takes.
+    /// How much room this pane's frame takes. See [`insets_for`] for what each
+    /// answer means and why the fallback is a titlebar rather than nothing.
     ///
-    /// The fallback is for a pane whose decoration has not been *built* yet --
-    /// reserving the room from the first frame is what stops a window changing
-    /// shape the moment its frame appears. It must not apply to a pane that
-    /// will never have one: a client drawing its own decorations, an
-    /// override-redirect menu, or `decoration = "none"`. Those got a
-    /// titlebar's worth of blank space above them with no titlebar in it,
-    /// which is what an Electron application looked like here.
+    /// **Asked of the pane, not of the tables.** It is the reader the two
+    /// tables actually hurt — `frames` was checked first, so a pane in both
+    /// had `bare` silently ignored — and now there is one value to check. The
+    /// tables are still written and still shadow onto the pane, so `agree`
+    /// below checks they would have given the same answer.
     pub(crate) fn insets_of(&self, id: crate::pane::PaneId) -> Insets {
-        if let Some(decoration) = self.decorations.get(id) {
-            return decoration.insets();
-        }
-        if self.decorations.is_bare(id) {
-            return Insets::NONE;
-        }
-        Insets {
-            top: TITLEBAR_HEIGHT,
-            ..Insets::NONE
-        }
+        let Some(pane) = self.panes.get(id) else {
+            // No pane, so no frame to ask. The tables outlive their panes
+            // until the next `retain`, and this answers from them so that a
+            // caller holding a retired id gets exactly what it got before.
+            // Every caller reachable today holds a live pane; this is here so
+            // that "no behaviour changed" is a fact rather than a hope. Task 4
+            // deletes it with the tables, and the arm becomes `Insets::NONE`.
+            return insets_for(&self.decorations.frame_of(id));
+        };
+        #[cfg(debug_assertions)]
+        self.decorations.agree(id, pane);
+        insets_for(pane.frame())
     }
 
     /// Copy what the tables now say about this pane onto the pane itself.
     ///
     /// Called immediately after every write to `Decorations`, and it is the
-    /// whole of the shadowing: nothing reads `Pane::frame` yet, so this can
-    /// change no behaviour, and when the readers move over they find an answer
-    /// that has been kept in step all along. It goes away with the tables.
+    /// whole of the shadowing. The readers have moved over, so this is now what
+    /// they read: a writer that forgets to call it leaves a pane disagreeing
+    /// with the tables, and `Decorations::agree` fails on the next read rather
+    /// than letting a window quietly take the wrong shape. It goes away with
+    /// the tables, when the writers set the pane's `Frame` directly.
     ///
     /// Derived from `Decorations` rather than decided here on purpose. The
     /// writers make their choice inside `Decorations` — `insert` alone has
@@ -2504,7 +2539,11 @@ impl Solium {
     ) -> Option<(crate::pane::PaneId, Point<f64, Logical>)> {
         let now = self.clock.now();
         self.panes.iter().rev().find_map(|pane| {
-            if !self.decorations.contains(pane.id()) {
+            #[cfg(debug_assertions)]
+            self.decorations.agree(pane.id(), pane);
+            // Only a built frame is listening. There is no scene to tell about
+            // the pointer until there is one.
+            if !matches!(pane.frame(), crate::pane::Frame::Styled(_)) {
                 return None;
             }
             let outer = self.pane_outer(pane)?;
