@@ -44,6 +44,23 @@ extern "C" int wirecheck_belief_names_scene(void *opaque)
     return egl != nullptr && egl->nativeContext() == scene->egl_context ? 1 : 0;
 }
 
+// Is anything at all in this process animating?
+//
+// `anything_animating` is what `solium_qml_tick` rebases the animation clock on,
+// and it is `static` in host.cpp because nothing outside that file has any
+// business asking. This translation unit *is* that file -- host.cpp is included
+// above, verbatim -- so the harness can reach it without host.cpp growing an
+// entry point for a test's benefit.
+//
+// It is here to keep the appear-animation case from going quiet. That case
+// depends on the process having nothing else animating when it runs, which is
+// true today because it runs first; asserted rather than assumed, so that a
+// case added ahead of it fails loudly instead of making this one vacuous.
+extern "C" int wirecheck_anything_animating()
+{
+    return anything_animating() ? 1 : 0;
+}
+
 // Reported separately from the above so a lost precondition says which half went
 // missing rather than only that it is gone.
 extern "C" int wirecheck_egl_agrees_with(void *opaque)

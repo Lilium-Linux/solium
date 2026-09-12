@@ -94,7 +94,9 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
+#include <algorithm>
 #include <cstring>
+#include <vector>
 
 namespace {
 
@@ -103,20 +105,84 @@ namespace {
  *
  * No Q_OBJECT: nothing here needs signals, slots or properties, so the build
  * needs no moc step.
+ *
+ * What it reports is *not* the compositor's clock, and the difference is the
+ * whole of this class. Qt's contract for `elapsed()` is "the number of
+ * milliseconds since the animations was started" -- QAnimationDriver's own
+ * implementation is `d->running ? d->timer.elapsed() : 0`, with the timer
+ * restarted inside `start()` (qtbase v6.11.2,
+ * src/corelib/animation/qabstractanimation.cpp:826-857). It is time *since
+ * animating began*, not a process clock, and Qt relies on that:
+ *
+ *   When the process goes from having no animations at all to having one,
+ *   `QUnifiedTimer::startTimers` finds its reference time invalid and resets
+ *   the lot -- `lastTick = 0; time.start(); temporalDrift = 0;
+ *   driverStartTime = 0` (ibid. :378-389). The next tick computes
+ *   `delta = elapsed() - lastTick`, so whatever `elapsed()` returns at that
+ *   moment is handed to the newly started animation as its first step.
+ *
+ * Reporting the compositor's uptime there hands a brand new animation the
+ * entire uptime in one step. Measured on this Qt, offscreen, software
+ * adaptation, with the compositor's own loop: reveal.qml's 260ms appear
+ * animation went from y=-34 to y=0 in a single tick, at every uptime from
+ * 640ms to an hour, with or without an idle gap before it. It never played.
+ *
+ * Qt cannot correct for it either, because the correction it has --
+ * `startAnimationDriver` setting `driverStartTime = elapsed()` -- only runs
+ * when the driver is stopped, and this driver is not: `QUnifiedTimer::restart`
+ * -> `localRestart` starts it again whenever no animation is registered, so it
+ * is started once at the first tick of the process and runs for ever after.
+ * Measured here: one start at 16ms, one stop for a single tick when an
+ * animation finished, and a restart immediately after with nothing animating.
+ *
+ * So the origin is kept here instead, and dragged along behind the clock for as
+ * long as the process has nothing animating. `elapsed()` reads 0 across a still
+ * desktop and starts counting from the animation that breaks it, which is what
+ * Qt's own driver would have reported and what its bookkeeping assumes.
+ *
+ * The caller answers "is anything animating"; see `solium_qml_tick`.
+ *
+ * Note what this deliberately does *not* do: it does not clamp the step. While
+ * anything is animating the origin is frozen, so this clock advances exactly
+ * with `Clock::now()` and a frame that arrives late advances every animation by
+ * however long it was late -- a 300ms stall moves a 260ms animation straight to
+ * its end.
+ *
+ * That is correct, and clamping it would be a second and worse defect. The
+ * compositor's own transforms -- `present.rs`, the pane rectangles a decoration
+ * is *drawn on* -- are computed from `now` directly, with no clamp and no
+ * catching up to do. A QML clock that refused to skip would fall behind them on
+ * every hitch and stay behind, which is a titlebar easing at a different rate
+ * from the window it is attached to. Keeping the two in step is the whole
+ * reason this driver is hand-fed rather than left on Qt's own timer; see the
+ * top of this file. An animation starved of frames and then jumping to where
+ * the clock says it should be is the same answer every other animated thing on
+ * the screen gives.
+ *
+ * The origin only ever moves across stretches in which no QML animation exists,
+ * so it cannot introduce that drift either: there is nothing to be in step with
+ * while it slides.
  */
 class CompositorAnimationDriver : public QAnimationDriver
 {
 public:
-    qint64 elapsed() const override { return m_elapsed; }
+    qint64 elapsed() const override { return m_elapsed - m_origin; }
 
-    void advanceTo(qint64 elapsed)
+    void advanceTo(qint64 elapsed, bool anything_animating)
     {
         m_elapsed = elapsed;
+        /* Nothing is animating, so no animation can be measuring from here:
+         * move the origin up and report zero. The moment one starts, the origin
+         * is already where it should be -- the frame it started on. */
+        if (!anything_animating) {
+            m_origin = elapsed;
+        }
         advanceAnimation();
     }
 
 private:
     qint64 m_elapsed = 0;
+    qint64 m_origin = 0;
 };
 
 QGuiApplication *g_app = nullptr;
@@ -220,6 +286,27 @@ struct SoliumQmlScene
     QOpenGLContext *qt_context = nullptr;
     QSurface *qt_surface = nullptr;
 };
+
+namespace {
+
+/*
+ * Every scene in the process.
+ *
+ * The driver's clock is one per process and has to be told whether *anything*
+ * is animating, not whether one scene is — an animation in the dock is as good
+ * a reason to keep the clock running as one in a titlebar, and a clock rebased
+ * while the dock is mid-sweep would jump it. No scene can answer that; only the
+ * set of them can, and this file is the only place the set exists. See
+ * `CompositorAnimationDriver`.
+ *
+ * A raw vector rather than anything cleverer: scenes are created and freed by
+ * hand through the two `_new` entry points and `solium_qml_scene_free`, there
+ * are as many of them as there are decorated windows, and the only operations
+ * are append, erase-one and walk.
+ */
+std::vector<SoliumQmlScene *> g_scenes;
+
+} // namespace
 
 /*
  * Every Qt message, on its way to the compositor's log.
@@ -551,6 +638,9 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
     }
 
     auto *scene = new SoliumQmlScene();
+    // Registered before anything can fail, so that the `solium_qml_scene_free`
+    // on every error path below is also what takes it back out again.
+    g_scenes.push_back(scene);
     scene->width = width > 0 ? width : 1;
     scene->height = height > 0 ? height : 1;
     // A scene is built at 1x and rescaled by `solium_qml_scene_resize` the
@@ -1002,6 +1092,9 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int wi
     }
 
     auto *scene = new SoliumQmlScene();
+    // As in the software constructor: registered first, so the error paths'
+    // `solium_qml_scene_free` is the only place it has to be taken out.
+    g_scenes.push_back(scene);
     scene->gpu = true;
     scene->width = width;
     scene->height = height;
@@ -1062,6 +1155,13 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
     if (scene == nullptr) {
         return;
     }
+
+    // Out of the registry first, before anything below can leave a half-torn
+    // scene in it: the next `solium_qml_tick` walks this list, and a scene whose
+    // root has been deleted would be walked through a dangling pointer. Both
+    // `_new` entry points register on the line after `new`, so a scene is in
+    // here for exactly as long as it exists.
+    g_scenes.erase(std::remove(g_scenes.begin(), g_scenes.end(), scene), g_scenes.end());
 
     // Before any Qt teardown runs, and for the same reason the render path does
     // it — but the stakes here are higher, because teardown *deletes*.
@@ -1423,6 +1523,36 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
     return true;
 }
 
+static bool animation_running(const QObject *item);
+
+/* Is anything at all in this process animating?
+ *
+ * The per-scene question `solium_qml_scene_animating` answers, asked of every
+ * scene, because the animation clock is per process. Short-circuits on the
+ * first scene that says yes, which is the case that matters: when something is
+ * animating this stops at the first window, and when nothing is every scene is
+ * settled and each walk is the cheap one -- a settled reactive.qml is 21
+ * QObjects and 0.6us.
+ *
+ * It is the same walk, and therefore the same trust, as the one the render loop
+ * already gates on. If it were ever wrong the compositor would already have
+ * stopped drawing that scene, so nothing here can be stranded that was not
+ * stranded already.
+ *
+ * A `Timer` is not counted, for the same reason it is not counted below, and
+ * the answer does not change what one does: a Timer is not driven by the
+ * animation driver at all -- it fires out of `processEvents`, off Qt's own
+ * event loop -- so pinning this clock cannot slow one down. Measured: a 100ms
+ * repeating Timer fired 9 times over 960ms of ticked frames, identically with
+ * the clock pinned and unpinned. The gap a running Timer *does* have is
+ * unchanged and is described on `solium_qml_scene_animating`. */
+static bool anything_animating()
+{
+    return std::any_of(g_scenes.begin(), g_scenes.end(), [](const SoliumQmlScene *scene) {
+        return scene != nullptr && scene->root != nullptr && animation_running(scene->root);
+    });
+}
+
 /* Advance every animation in the process, once for the whole frame.
  *
  * The driver and the event loop are one per process, not one per scene, so
@@ -1445,16 +1575,36 @@ extern "C" void solium_qml_tick(long long elapsed_ms)
      * there is frame-critical: component completion, deleteLater, queued
      * notifications. Property changes are delivered synchronously and do not
      * wait for this. So it runs at 60Hz however fast the screen is, which on
-     * a 260Hz monitor is a quarter of the work for the same behaviour. */
-    if (g_driver != nullptr) {
-        g_driver->advanceTo(static_cast<qint64>(elapsed_ms));
-    }
+     * a 260Hz monitor is a quarter of the work for the same behaviour.
+     *
+     * Drained *before* the advance, and that order is measured rather than
+     * incidental. Starting a QML animation does not register it on the spot:
+     * `QAnimationTimer::registerAnimation` queues `startAnimations` through the
+     * event loop (qtbase v6.11.2, qabstractanimation.cpp:659-663), so an
+     * animation a property write started last frame joins the running set only
+     * when this queue is next drained. Drained after the advance, the advance
+     * that follows the write skips it and the first step it takes covers three
+     * frames at once; drained before, it takes the next step with everything
+     * else. Measured on reveal.qml's 260ms appear animation, from a settled
+     * scene: first visible step 33ms in rather than 49ms in, one frame earlier,
+     * and one more frame of the animation actually drawn.
+     *
+     * The 16ms throttle stays. Dropping it -- draining every frame -- was
+     * measured against the same animation and changed nothing at 60Hz: the
+     * queue is drained once per frame either way there, and the throttle only
+     * ever bites on a screen faster than 60Hz, where it is the whole point. */
     if (g_app != nullptr) {
         static long long drained_at = 0;
         if (elapsed_ms - drained_at >= 16 || elapsed_ms < drained_at) {
             drained_at = elapsed_ms;
             QCoreApplication::processEvents();
         }
+    }
+    if (g_driver != nullptr) {
+        /* Asked once for the whole process, and asked *here* rather than
+         * inside the driver, because the driver has no way to reach the
+         * scenes. See `CompositorAnimationDriver` for what the answer is for. */
+        g_driver->advanceTo(static_cast<qint64>(elapsed_ms), anything_animating());
     }
 }
 
@@ -1479,18 +1629,33 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
  * Measured against this Qt (6.11.2, software adaptation, the same driver and
  * the same renderRequested/sceneChanged wiring as below), from a settled scene,
  * on the frame the compositor writes the property that triggers the animation
- * and the three ticks after it:
+ * and the three ticks after it -- dirty, and whether an animation is running:
  *
- *   reveal.qml     pointerInside  dirty false, false, false, true
- *   reactive.qml   pointerInside  dirty false, false, false, true
- *   top.qml        focused        dirty true,  false, false, true
- *   border.qml     focused        dirty true,  false, false, true
- *   proximity.qml  pointerInside  dirty true,  false, false, true
+ *   reveal.qml     pointerInside  false/yes  false/yes  true/yes  true/yes
+ *   reactive.qml   pointerInside  false/yes  true/yes   true/yes  true/yes
+ *   top.qml        focused        true/yes   false/yes  true/yes  true/yes
+ *   border.qml     focused        true/yes   false/yes  true/yes  true/yes
+ *   proximity.qml  pointerInside  true/yes   true/yes   true/yes  true/yes
  *
- * -- with an animation running throughout. Every one of them has at least one
- * clean tick before it has finished, and `reveal` and `reactive` are clean on
- * the very frame that starts them, so on the shipped logic their animation
- * never took a single step unless something unrelated damaged the screen.
+ * Every one of them has at least one clean tick before it has finished, and
+ * `reveal` and `reactive` are clean on the very frame that starts them, so on
+ * the dirty flag alone their animation never took a single step unless
+ * something unrelated damaged the screen.
+ *
+ * That table used to end `true/no` on every row, and the `no` was the whole of
+ * the third defect in this area rather than a healthy animation ending. None of
+ * these animations is shorter than 100ms and `reveal`'s is 260ms; not one of
+ * them can be over three ticks -- 48ms -- after it started. They read `no`
+ * because they had already been advanced past their own end in a single step,
+ * by an animation clock that handed a newly registered animation the
+ * compositor's entire uptime. See `CompositorAnimationDriver`. The rows above
+ * are the same five decorations re-measured with that fixed.
+ *
+ * Which is also the warning: this function and `dirty` together cannot tell an
+ * animation that is *playing* from one that finished in one tick. Both say
+ * exactly what they should in both cases. Whether an animation is advancing at
+ * the right rate is not a question either of them is asked -- dev/wirecheck's
+ * appear case is what asks it.
  *
  * Asked of the scene and not of the process. `QAnimationDriver::isRunning()`
  * looks like the direct answer and is not one: `QAnimationDriver::advanceAnimation`
@@ -1505,9 +1670,14 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
  *
  * `running` on a QQuickAbstractAnimation is exact instead, and per scene.
  * Reached through QObject::inherits so this needs no Qt private headers; the
- * walk short-circuits, and the caller only asks when the scene is clean, which
- * is the only frame the answer can change anything. A settled reactive.qml is
- * 21 QObjects and 0.6 us.
+ * walk short-circuits, and the compositor only asks when the scene is clean,
+ * which is the only frame the answer can change anything. A settled
+ * reactive.qml is 21 QObjects and 0.6 us.
+ *
+ * `anything_animating` asks the same question of every scene at once, for the
+ * animation *clock* rather than for the frame -- see `solium_qml_tick`. Same
+ * walk, same trust: a scene this is wrong about has already stopped being
+ * drawn.
  *
  * What it does not cover: a `Timer`. A scene whose next change is a timer
  * firing -- Quickshell.SystemClock is the one in the tree -- is not animating

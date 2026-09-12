@@ -98,6 +98,21 @@ pub(crate) trait Painted {
     /// starts theirs — so on the dirty flag alone their animation took no step
     /// at all unless something unrelated happened to damage the screen. Which
     /// is "sometimes", and is exactly what it looked like on the hardware.
+    ///
+    /// **What neither of these two can see, and what should not be added
+    /// here.** Together they answer "will a later frame differ from this one",
+    /// and they answer it correctly — but an animation advanced past its own
+    /// end in a single tick satisfies both of them perfectly. `dirty` is
+    /// raised, because the value really did change; this reads `true` on the
+    /// frame the `Behavior` starts and `false` a tick later, because the
+    /// animation really has finished. The loop then asks for exactly the frames
+    /// it should and every one of them shows the final value, which on the
+    /// hardware is a titlebar that does not slide out — it is simply there.
+    /// That was the third defect in this area and all of it was in the
+    /// animation *clock*; see `CompositorAnimationDriver` in `qml/host.cpp`.
+    /// The rate an animation advances at is not a question either of these is
+    /// being asked, and `dev/wirecheck`'s appear case is what asks it, against
+    /// a real Qt, by reading the animated value out of the object tree.
     fn animation_in_flight(&self) -> bool;
 }
 
@@ -1050,11 +1065,29 @@ mod tests {
     ///
     /// | scene | write | +1 | +2 | +3 |
     /// |---|---|---|---|---|
-    /// | `reveal.qml` | `false`/yes | `false`/yes | `false`/yes | `true`/no |
-    /// | `reactive.qml` | `false`/yes | `false`/yes | `false`/yes | `true`/no |
-    /// | `top.qml` | `true`/yes | `false`/yes | `false`/yes | `true`/no |
-    /// | `border.qml` | `true`/yes | `false`/yes | `false`/yes | `true`/no |
-    /// | `proximity.qml` | `true`/yes | `false`/yes | `false`/yes | `true`/no |
+    /// | `reveal.qml` | `false`/yes | `false`/yes | `true`/yes | `true`/yes |
+    /// | `reactive.qml` | `false`/yes | `true`/yes | `true`/yes | `true`/yes |
+    /// | `top.qml` | `true`/yes | `false`/yes | `true`/yes | `true`/yes |
+    /// | `border.qml` | `true`/yes | `false`/yes | `true`/yes | `true`/yes |
+    /// | `proximity.qml` | `true`/yes | `true`/yes | `true`/yes | `true`/yes |
+    ///
+    /// That table used to end `true`/**no** on every row, and re-measuring it is
+    /// the only reason this comment changed: not one of these animations is
+    /// shorter than 100ms, `reveal.qml`'s is 260ms, and none of them can be over
+    /// three ticks — 48ms — after it started. They read `no` because they had
+    /// already been advanced past their own end in one step, by an animation
+    /// clock that handed each newly registered animation the compositor's whole
+    /// uptime (`CompositorAnimationDriver` in `qml/host.cpp` has the mechanism).
+    ///
+    /// Which is worth saying here, in the stand-in, because **the stand-in
+    /// cannot express that defect and should not be made to**. `dirty` and
+    /// `animating` were both correct throughout it; the loop below asked for
+    /// exactly the right frames; every frame drawn showed the finished value.
+    /// A model of two booleans has no room for "at what rate", and a model
+    /// extended until it had room would be a model of Qt's `QUnifiedTimer`
+    /// written in Rust and kept true by hand — which is the same mistake as the
+    /// `dirty |= running` line above, one layer further out.
+    /// `dev/wirecheck`'s appear case asks the rate question of a real Qt.
     struct Scene {
         dirty: bool,
         steps: std::collections::VecDeque<bool>,
@@ -1176,10 +1209,30 @@ mod tests {
     /// the `Behavior` has begun and the property has not moved — nor on any
     /// tick whose interpolated value lands back on the one already there.
     ///
-    /// The pattern here is `reveal.qml`'s, measured: three clean ticks and then
-    /// the one that moves. On the dirty flag alone the loop stops on the first
-    /// of them and the bar never slides out at all; it appears only if the
-    /// pointer happens to keep moving, which is why it was "sometimes".
+    /// The pattern here is `reveal.qml`'s, measured: clean ticks and then one
+    /// that moves. On the dirty flag alone the loop stops on the first of them
+    /// and the bar never slides out at all; it appears only if the pointer
+    /// happens to keep moving, which is why it was "sometimes".
+    ///
+    /// Where those clean ticks come from, since the first reading of them was
+    /// wrong and the wrong reading is the more plausible one: they are not an
+    /// easing curve rounding to the value it already had. Starting a QML
+    /// animation does not register it on the spot —
+    /// `QAnimationTimer::registerAnimation` queues `startAnimations` through the
+    /// event loop (qtbase v6.11.2, `qabstractanimation.cpp:659`) — so it is
+    /// `running` immediately and advancing only from the tick after the
+    /// compositor next drains Qt's queue. `reveal.qml` measures two such ticks
+    /// with the queue drained once a frame; the three here are deliberately not
+    /// a transcript, because the count is the one part of this that is not a
+    /// property of the compositor — it follows from the drain rate — and a test
+    /// pinned to it would fail on a faster screen for no reason. What has to
+    /// hold is that a clean tick, however many there are, still brings the next
+    /// frame.
+    ///
+    /// Nothing is wrong with that head of clean ticks and nothing here should
+    /// try to shorten it; it is worth naming only so the next person does not
+    /// read a clean tick as evidence of an easing curve, which is what the
+    /// first reading of this did.
     #[test]
     fn a_tick_that_moves_nothing_still_asks_for_the_frame_after_it() {
         let mut scene = Scene::animating(&[false, false, false, true]);
