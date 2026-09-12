@@ -11,9 +11,23 @@
 -- something and *that* is the bug to fix -- not this file.
 
 local monitors = require("monitors")
-local workspaces = require("workspaces")
 
 local overview = { active = false }
+
+-- The windows on the desk in front of you, if there are desks.
+--
+-- Asked of `package.loaded` rather than `require`d, deliberately: requiring
+-- `workspaces` here would register nine workspace bindings in a configuration
+-- that had decided not to have workspaces, purely because it wanted overview.
+-- Resolved at the press rather than at load, so the order `init.lua` requires
+-- the two in does not matter.
+local function on_this_desk(windows)
+    local workspaces = package.loaded["workspaces"]
+    if not workspaces then
+        return windows
+    end
+    return workspaces.visible(windows)
+end
 
 local PADDING = 24
 local ENTER = { duration = 260, easing = "outCubic" }
@@ -34,7 +48,7 @@ function overview.enter()
     -- right -- it would be laid out perfectly and drawn where nobody can see
     -- it. Overview is about what is in front of you, which is also what
     -- `tiling` and `scrolling` have always taken it to mean.
-    local windows = workspaces.visible()
+    local windows = on_this_desk(sol.windows())
     if #windows == 0 then
         -- Nothing to show, so nothing is entered: a mode with no way out is
         -- worse than a key that did nothing.
