@@ -20,6 +20,40 @@
 
 ---
 
+## Amended after Task 1 — measured, not assumed
+
+**Drop the `Box`.** `size_of::<Decoration>()` is **248**, and
+`Frame::Styled(Decoration)` inline is **also 248** — the discriminant lands in
+a niche, so inlining is free relative to the decoration itself. Boxing costs an
+allocation to save nothing. Task 4 uses `Styled(Decoration)`.
+
+**`Frame::Styled` carries `Insets` until Task 4, not a `Decoration`.** A
+`Decoration` owns a live Qt scene, is not `Clone`, and `frames` holds the only
+one there is — so while the tables stay authoritative the pane cannot hold one
+without building a second Qt scene per window, which is a behaviour change
+wearing a refactor's clothes. `Insets` is `Copy`, written once at construction,
+and is the only thing `insets_of` ever asks a decoration for.
+
+**The consequence for Task 2:** only the readers that want *insets* can move in
+Task 2. The ones that want the `Decoration` itself — `frame`, `pointer`,
+`on_button`, `take_action`, `restore` — wait for Task 4, when `frames` is
+deleted and the decoration is **moved** in rather than cloned.
+
+**Writers are not at call sites.** All six mutators are methods on
+`Decorations`, which holds `&mut self` and has no access to `Panes`, and
+`insert` alone picks between three outcomes internally. Task 1 therefore
+*derives* the pane's value from the authority afterwards (`shadow_frame` reads
+`frame_of`) rather than reasoning it out a second time beside each writer. Keep
+that shape.
+
+**`Pane::loading` takes six arguments.** Every test snippet below that calls it
+with one is wrong; use the real signature.
+
+**The file lists below omit `state.rs` and `xwayland.rs`,** where all ten
+writer sites live.
+
+---
+
 ## Why
 
 `Decorations` holds `frames: HashMap<PaneId, Decoration>` and `bare:
@@ -177,11 +211,24 @@ fn agree(&self, id: PaneId, pane: &crate::pane::Pane) {
     }
 ```
 
-- [ ] **Step 3: Move every other reader**
+- [ ] **Step 3: Move the readers that want insets**
 
 Find them: `grep -rn "frames\|\.bare" crates/solium/src/`. Each becomes a match
 on `pane.frame()` with the assertion above it. Do not change what any of them
 decides — only where it reads it from.
+
+**Only the insets readers move in this task.** `Frame::Styled` carries `Insets`
+until Task 4 (see *Amended* above), so `frame`, `pointer`, `on_button`,
+`take_action` and `restore` — which want the `Decoration` itself — stay on the
+tables for now. Moving them would mean a second Qt scene per window.
+
+**The assertion checks agreement, not correctness.** Task 1 found two
+pre-existing bugs the shadow reproduces faithfully: a decoration whose QML
+fails to load keeps reserving a titlebar for ever, and `decoration = "none"`
+only takes effect for windows opened afterwards. The tables and the pane agree
+in both cases, and both are wrong together. Do **not** fix them here — a
+refactor that changes no behaviour cannot also change behaviour, or nobody can
+tell which change caused what.
 
 - [ ] **Step 4: Run the gate**
 
