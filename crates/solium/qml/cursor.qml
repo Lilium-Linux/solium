@@ -31,13 +31,23 @@ Item {
         preferredRendererType: Shape.CurveRenderer
 
         // The classic arrow: a tall thin wedge with a tail, as one closed path
-        // so the outline is continuous. Outlined in the dark surface colour and
-        // filled with the text colour, so it stays legible over a light window
-        // and a dark one alike — a cursor that vanishes over half the screen is
+        // so the outline is continuous.
+        //
+        // These two colours are deliberately NOT from `Theme`. Every other
+        // thing the compositor draws sits on a surface the theme owns; the
+        // pointer sits on whatever a client happened to draw, so it has to be
+        // legible against black, against white, and against a photograph. A
+        // white body with a dark outline is the answer every desktop arrived
+        // at, and it is fixed rather than themed for that reason.
+        //
+        // It used to read `Theme.text` over `Theme.surfaceSunken`, which was
+        // the same pair by accident: the palette was dark, so `text` was
+        // near-white. Turning the theme light would have made the pointer black
+        // on black — a cursor that vanishes over half the screen being rather
         // worse than one that does not match.
         ShapePath {
-            fillColor: Theme.text
-            strokeColor: Theme.surfaceSunken
+            fillColor: "#ffffff"
+            strokeColor: "#1c1c1e"
             strokeWidth: 1.6
             joinStyle: ShapePath.RoundJoin
 
