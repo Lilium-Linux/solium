@@ -20,6 +20,7 @@ mod lock;
 mod mat4;
 mod monitor;
 mod offscreen;
+mod pacing;
 mod pane;
 mod present;
 mod qml;

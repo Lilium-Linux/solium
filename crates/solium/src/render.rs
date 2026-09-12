@@ -171,7 +171,21 @@ impl Drawn {
         // true. `||` and not either half, and the order is the cheap question
         // first, since it short-circuits the walk on every frame that is
         // redrawing anyway.
-        let animating = painted.something_new_to_draw() || painted.animation_in_flight();
+        //
+        // Bracketed for `SOLIUM_PACING`, and this is the one place either
+        // question is asked, which is what makes the measurement whole:
+        // `animation_in_flight` walks a scene's QML object tree looking for a
+        // running animation, and it is asked once per scene per output per
+        // frame. ~0.6 µs for a settled 21-object scene is a fine number and a
+        // frightening one, depending entirely on how many scenes there are and
+        // how fast the screen is — so the compositor should be able to say,
+        // rather than have it argued about. The span closes before the draw, or
+        // Qt's rendering would be charged to the census.
+        let animating = {
+            let _census = crate::pacing::span(crate::pacing::Phase::Census);
+            painted.something_new_to_draw() || painted.animation_in_flight()
+        };
+        crate::pacing::scene_asked(animating);
         Self {
             element: draw(painted),
             animating,
@@ -212,6 +226,10 @@ impl Prepared {
 ///
 /// Must run before the backend binds its own buffer; see [`Prepared`].
 pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepared {
+    // Everything here is the compositor's own work, ahead of any output, apart
+    // from the tick below — which is entirely Qt's and is measured separately
+    // for exactly that reason. See `pacing::Phase`.
+    let _prep = crate::pacing::span(crate::pacing::Phase::Prep);
     state.memory_report();
     // Every QML animation in the process, advanced once for this frame --
     // decorations, the cursor, the shell. Whether any scene then has something
@@ -220,7 +238,10 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // Once per *frame* and not once per output: with two monitors, ticking in
     // `elements` would advance every animation twice as fast as the clock, and
     // on monitors of different refresh rates by different amounts.
-    crate::qml::tick(state.clock.now());
+    {
+        let _tick = crate::pacing::span(crate::pacing::Phase::Tick);
+        crate::qml::tick(state.clock.now());
+    }
     // The shell reads the window list; it changes only when windows do.
     state.publish_windows();
 
@@ -423,6 +444,12 @@ pub(crate) fn elements(
     prepared: &Prepared,
     picture: Picture,
 ) -> Vec<Element> {
+    // The compositor's own share of a frame. Qt's share is taken out from
+    // underneath this by the `Census` and `Qml` spans nested inside it, which
+    // is the whole reason the phases are exclusive: a decoration that costs
+    // 7 ms of Qt and a pane walk that costs 7 ms of Rust look identical from
+    // out here and want completely different fixes.
+    let _elements = crate::pacing::span(crate::pacing::Phase::Elements);
     let Picture {
         screen,
         scale,

@@ -1182,6 +1182,24 @@ impl State {
         // are rendering has damaged the *next* frame, not this one.
         self.solium.redraw = false;
 
+        // `SOLIUM_PACING`. Off, everything below is a thread-local load and a
+        // branch; see `pacing.rs`, which argues that trade at 260 Hz.
+        let pace = crate::pacing::frame();
+        // The tightest interval among the monitors being *driven*, not among
+        // the ones this pass gets to draw. One event loop draws both screens,
+        // so a pass that overruns has held every monitor off for the whole of
+        // it, whichever one it was drawing at the time. `Frame::deadline` has
+        // the argument in full; the name is only taken when the knob is on,
+        // because `Output::name` allocates.
+        if pace.on()
+            && let Some(screen) = self
+                .screens
+                .iter()
+                .min_by_key(|screen| frame_interval(&screen.output))
+        {
+            pace.deadline(frame_interval(&screen.output), &screen.output.name());
+        }
+
         // Once per frame and not once per screen: offscreen captures, the QML
         // tick, the window list. See `render::prepare`. It also has to happen
         // before any output's buffer is bound, because it binds framebuffers
@@ -1190,7 +1208,10 @@ impl State {
 
         // Before any output's buffer is bound, for the reason `Prepared` gives:
         // a capture binds a framebuffer of its own.
-        crate::screencopy::settle(&mut self.solium, renderer, &prepared);
+        {
+            let _prep = crate::pacing::span(crate::pacing::Phase::Prep);
+            crate::screencopy::settle(&mut self.solium, renderer, &prepared);
+        }
 
         for index in 0..self.screens.len() {
             // Indexed rather than iterated: building a screen's elements needs
@@ -1247,13 +1268,22 @@ impl State {
             // dropped before the result is matched on. See
             // `qml::no_frame_in_flight`.
             let frame = crate::qml::frame_in_flight();
+            let gles = crate::pacing::span(crate::pacing::Phase::Gles);
             let rendered = screen.compositor.render_frame(
                 renderer,
                 &elements,
                 [0.05, 0.05, 0.06, 1.0],
                 FrameFlags::DEFAULT,
             );
+            drop(gles);
             drop(frame);
+            pace.drew();
+            // The atomic commit, measured apart from the drawing it commits.
+            // They fail and stall for completely unrelated reasons -- one is
+            // the renderer and the driver, the other is the kernel deciding
+            // whether it can put this buffer on that plane -- and a single
+            // number covering both would name the wrong one half the time.
+            let _commit = crate::pacing::span(crate::pacing::Phase::Commit);
             match rendered {
                 Ok(result) if !result.is_empty => match screen.compositor.queue_frame(()) {
                     Ok(()) => {
@@ -1273,7 +1303,11 @@ impl State {
             }
         }
 
-        self.animating = self.solium.settle(now);
+        {
+            let _settle = crate::pacing::span(crate::pacing::Phase::Settle);
+            self.animating = self.solium.settle(now);
+        }
+        pace.finish(self.solium.panes.len());
     }
 
     /// Tell clients the frame reached the screen and they may draw the next.

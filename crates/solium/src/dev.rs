@@ -228,6 +228,25 @@ pub(crate) fn memory_diagnostics() -> bool {
     std::env::var_os("SOLIUM_MEMDIAG").is_some()
 }
 
+/// Whether to say where a frame's time went, on the frames that took too long.
+///
+/// ```sh
+/// SOLIUM_PACING=1
+/// ```
+///
+/// A flag rather than a threshold, because the threshold is not a preference:
+/// it is the monitor's own frame interval, read from its mode. A number named
+/// here would be right for a 260 Hz screen and wrong for the 75 Hz one beside
+/// it, which is the case this compositor actually runs on.
+///
+/// Read exactly once — `pacing::frame` caches it on the first frame — because
+/// this sits on the path that runs at the refresh rate, and by the time the
+/// phases are counted a `getenv` per frame would be a `getenv` per scene per
+/// output per frame. See `pacing.rs`.
+pub(crate) fn pacing() -> bool {
+    std::env::var_os("SOLIUM_PACING").is_some()
+}
+
 /// Whether to show the Developer Tweaks panel.
 ///
 /// `--debug-mode` anywhere in the arguments, so it composes with the backend
