@@ -151,6 +151,32 @@ a pane is, which is what keeps it testable without a session.
 `Deform::from_name` is what scripts bind to, exactly as `Curve::from_name` is,
 and `script::shipped` checks the shipped Lua against both.
 
+### And a transform names a selection
+
+`present::Frame` says how *one* pane is drawn. `group::Shift` says how a **named
+set** of things is drawn — windows, `sol.surface` surfaces, whole monitors —
+and the two compose: a member is drawn at its own transform plus every selection
+it is in.
+
+That is one mechanism rather than three. A whole-screen effect is a selection
+that is an output; a set of windows moving as one is a named set; and a
+workspace is its windows plus its own background, which is why the workspace
+slide stops leaving the wallpaper behind. Nothing in the compositor knows what a
+wallpaper is; it travels because `workspaces.lua` put it in the selection.
+
+Two decisions worth knowing:
+
+**Membership lives on the group**, not in a table keyed by `PaneId` beside the
+panes. A group owns its members and its own in-flight transform and both leave
+when it does, so a selection naming a window that has closed resolves to nothing
+and costs a `u64`. That is the same rule `Pane` follows for its frame, its
+timers and its capture buffer.
+
+**A node in no selection pays nothing.** `Shift::apply` on an identity shift
+returns the frame it was given, and the first thing anything asks is whether any
+selection exists at all. A compositor that routed every window through new
+arithmetic to support a group nobody declared would have made every frame worse.
+
 **Backend independence.** The transform layer talks to Smithay's `Renderer` and
 `Frame` traits, never to GLES directly. Scaling and cross-fading textures is
 unremarkable work that GLES2 does well; the reasons to want Vulkan later are
