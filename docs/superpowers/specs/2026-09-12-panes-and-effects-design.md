@@ -1,192 +1,198 @@
-# Panes and effects: one substrate
+# The scene: panes, surfaces, groups and effects
 
-**Status:** design. Supersedes the scope of
-`2026-09-08-pane-styles-design.md`, which it absorbs rather than replaces —
-every decision in that document still holds, and the parts of it quoted here
-are quoted because they were right.
+**Status:** design. Absorbs `2026-09-08-pane-styles-design.md`, whose decisions
+all still hold, and answers
+[#84](https://github.com/Lilium-Linux/solium/issues/84),
+[#85](https://github.com/Lilium-Linux/solium/issues/85),
+[#87](https://github.com/Lilium-Linux/solium/issues/87) and
+[#89](https://github.com/Lilium-Linux/solium/issues/89) as one thing.
 
-Three things are being built together because they are one thing:
-[#87](https://github.com/Lilium-Linux/solium/issues/87) (deforms and shaders),
-[#89](https://github.com/Lilium-Linux/solium/issues/89) (z-order, pivot,
-output-level transforms), and pane styles (layers with depth and bleed).
+`docs/modes.md` states the standard this design is measured against:
 
-The test of this design is not whether it draws a blur. It is whether the
-*second* effect costs what the first one did.
+> **If a new mode needs new Rust, the transform layer is missing something**,
+> and that missing thing is the bug rather than your mode.
 
-## Why now
+Three modes have now been written against that standard by people who were not
+the author. Each worked, and each came out different from its design. **What
+they could not say is this document's requirements list.**
 
-`architecture.md` sets the standard: if a new mode needs new Rust, the
-transform layer is missing something. A cover-flow switcher was then written
-from outside the project, in Lua only, and it worked — which is the headline
-and should be said first. Searching `crates/` for the name of any mode finds
-nothing. Wallpaper, overview, workspaces, tiling, scrolling and the loading
-window are all script.
+## The evidence
 
-But the mode **came out different from its design**, and the reasons are
-structural rather than missing features:
+**A cover-flow deck** (`rice/prism/deck.lua`, written from outside the project
+in Lua only). Worked. But there is no `z`, so cards had to be spaced until they
+never overlap; and `warp.rs:142` always pivots on the centre, so they could not
+rotate about a near edge. The available workaround for depth is worse than the
+gap: `sol.focus` restacks, so a script can only express depth by moving the
+keyboard — and then a switcher sends focus events to clients as the user scrubs.
 
-* a deck is cards that overlap; there is no `z`, so they had to be spaced
-  apart until they don't
-* cover flow rotates about a card's near edge; `warp.rs:142` always pivots on
-  the centre
-* nothing can move the desktop, so a workspace slide moves windows one at a
-  time and leaves the wallpaper behind
+**Atrium** (#85), not yet written, and deliberately chosen as the hardest test.
+It needs a window at arbitrary scale (there), several windows moving as one
+(not there), stacking from a script (not there), a swap where two windows
+exchange places **along a path** rather than cross-fading (not there), and a
+grab scoped to the strip while the centre stays live (not there).
 
-And the genie exists as a hardcoded enum variant with one arm. It works. It is
-also the proof that the current shape does not scale: the second vertex effect
-would be a second arm, the fifth would be a `match` nobody wants to read, and
-none of them can be tested without a running compositor.
+**Workspaces**, which ship. `workspaces.lua` moves every window individually in
+a loop, and the wallpaper, the bars and the layer surfaces do not come with
+them — because `scripted::Surface` has `name`, `layer`, `pointer` and
+`area_on`, and no transform at all. A surface is **drawn** but not
+**addressable**.
 
-## What is actually missing
+## What is missing, named separately
 
-Three independent gaps. Naming them separately matters, because each has a
-different fix and conflating them is how this becomes a rewrite.
+Four gaps. Each has a different fix, and conflating them is how this becomes a
+rewrite rather than a series of landable stages.
 
-| | absent | what it costs |
+| | absent | costs |
 |---|---|---|
-| **Completeness** | `z`, `pivot` on `Frame` | overlap, hinges, page turns, cover flow |
-| **Scope** | every transform is per-pane | desktop cube, workspace slide, accessibility zoom |
+| **Completeness** | `z`, `pivot`, per-node alpha | overlap, hinges, page turns, a receding strip |
+| **Address** | only panes can be transformed | wallpaper left behind, no groups, no desktop |
+| **Motion** | a transform is a destination | no arcs, no swaps, no paths |
 | **Composition** | one flat element list, one submit | blur, shadows, rounded corners |
 
-The genie needs none of the three. That is precisely why it was buildable as a
-special case, and why the next five effects are not.
+The genie needs none of the four. That is exactly why it was buildable as a
+hardcoded enum arm with one variant — and why the next five effects are not.
 
-## The shape
+## The model
 
-A **node tree per output**, resolved into **passes**.
+**One addressable scene. A transform names a selection. Selections compose.**
+
+That is the whole idea, and everything below is a consequence of it.
+
+### What is addressable
 
 ```
-output                      transform applies to the whole desktop
-  └── pane (z-sorted)       rect, matrix, pivot, deform, opacity
-        ├── layer  behind   may bleed past the pane's rect
-        ├── client          the application's own surface
-        ├── layer  frame
-        └── layer  above
+output          every node drawn on it
+pane            a window and its chrome
+surface         a sol.surface instance: wallpaper, bar, dock, scrim
+layer           one depth within a pane's style
+group           a named set of any of the above
 ```
 
-Three rules hold it together.
+A **group** is not a new kind of thing. It is a name for a selection, and a
+transform on it composes with each member's own. That composition is the point:
+a window individually tilted inside a rotating desktop stays tilted *within* it,
+which is what makes a cube of workspaces different from rotating every window by
+hand and hoping.
 
-### 1. Geometry and pixels are different kinds, on purpose
+```lua
+sol.group("desk-2", { workspace = 2, surfaces = { "wallpaper" } })
+sol.present_group("desk-2", { x = -2560 }, { duration = 300 })
+```
 
-**Vertex deformation is CPU-side and parametric** — a named function with
-parameters, never user code. Two reasons, both hard:
+One call, one animation, one target. The wallpaper comes because it is in the
+selection, not because the compositor knows what a wallpaper is — and it does
+not; `sol.surface` is one primitive doing five jobs and that stays true.
 
-* the damage tracker needs the deformed bounding box before anything is drawn,
-  and a shader cannot tell it one
-* an effect must be testable without a session. `crates/animation` already
-  proves the pattern — an empty `[dependencies]`, unit tests, and a wasm
-  preview page with live sliders. `crates/effects` is the same crate again.
+This single mechanism answers #89's output-level transform (a selection that is
+an output), #85's groups (a named set), and the workspace slide (windows plus
+surfaces), without three features.
 
-**Fragment effects are arbitrary GLSL**, because they do not move the bounding
-box. A bad one is a wrong picture, which is recoverable; a bad vertex function
-would be a wrong damage rect, which is a corrupt screen.
-
-This split is the safety property of the whole design. It is also why a hung
-fragment shader is acceptable risk and a hung vertex function would not be: a
-GPU reset is a driver problem no Rust-side rule can catch, and keeping the
-geometry half in a language where a mistake is a wrong number rather than a
-dead session is what makes the other half affordable.
-
-### 2. An effect declares its inputs, and that is what creates a pass
-
-An effect is `{ name, parameters, inputs }`. Most declare nothing and draw
-inline, exactly as today.
-
-An effect that declares `backdrop` needs what is already composited underneath
-it. The renderer closes the current pass, binds its output as a texture, and
-opens a new one.
-
-That single mechanism is what turns three special cases into three
-declarations:
-
-| effect | inputs | why |
-|---|---|---|
-| wavy border, glow, spikes | — | draws over what is there |
-| rounded corners | `self` | masks the client's own texture |
-| shadow | `self` | derived from the client's silhouette |
-| blur | `backdrop` | samples what is behind |
-
-Without this, blur is not merely unimplemented — it is unrepresentable, because
-a flat element list has nowhere to say "after the things below me, before the
-things above me".
-
-### 3. Identity collapses to today
-
-A pane with no transform, no effect and no bleed emits exactly the element it
-emits now, through exactly the path it takes now. The spike's rule stands and
-is load-bearing:
-
-> The identity case must stay on the existing path. Most windows most of the
-> time are flat and opaque, and a compositor that renders every window through
-> a mesh to support an effect nobody is currently running has made every frame
-> worse to make one frame possible.
-
-Every addition below is opt-in at the node level, and a desktop that opts into
-nothing pays nothing.
-
-## Completing `Frame`
+### What every node carries
 
 ```rust
-pub(crate) struct Frame {
-    rect: Rectangle<f64, Logical>,
+struct Node {
+    rect: Rectangle<f64, Logical>,   // where it lives; still the truth for input
     opacity: f32,
     matrix: Mat4,
-    deform: Option<Deform>,
-    /// Depth. Sorted into the element list; equal values keep list order.
-    z: f32,
-    /// What `matrix` turns about, normalised 0..1 of the rect. `(0.5, 0.5)`
-    /// is the centre, which is what `warp.rs` hardcodes today.
-    pivot: (f32, f32),
+    deform: Option<Deform>,          // vertex, CPU-side, parametric
+    effects: Vec<Effect>,            // fragment, GPU, declares its inputs
+    z: f32,                          // depth. Equal values keep list order
+    pivot: (f32, f32),               // what `matrix` turns about, 0..1 of rect
 }
 ```
 
-`z` is depth and nothing else. It is **not** [#84](https://github.com/Lilium-Linux/solium/issues/84),
-which is about which of three places owns a window's *position*. The available
-workaround today is worse than the gap: `sol.focus` restacks, so a script can
-only express depth by moving the keyboard — and then every switcher sends focus
-events to clients as the user scrubs through it.
+`z` is depth and nothing else. It is **not** #84, which is about which of three
+places owns a window's *position*.
 
 `pivot` cannot be done in `script.rs` alone. Composing `translate(-p) · R ·
 translate(p)` there needs the window's size, and `transform_from` only sees the
 options table — so it would work when a script passed an explicit rect and
-silently do the wrong thing otherwise. It belongs in `warp.rs`, at the two
-lines that currently compute the centre.
+silently do the wrong thing otherwise. It belongs at the two lines in `warp.rs`
+that compute the centre today.
 
-## Scope: transforming more than a pane
+### Hit-testing does not move
 
-A transform today names a pane. It should be able to name a **group**: an
-output, a workspace, an arbitrary set.
+`rect` remains the truth for input. A window drawn in perspective is still
+clicked where the layout put it. The alternative is inverting a projective
+transform per pointer event and then explaining to a script why the window it
+placed is not where clicks land. Modes that need clicks to follow the drawn
+shape already invert their own transform through `to_window_space`; that stays
+their business.
+
+## Motion: paths, not just destinations
+
+`sol.present` takes a destination rectangle, so a window can only ever move in a
+straight line to it. Atrium's swap — the outgoing window travelling out to the
+strip while the incoming one grows from where it sat — is the difference between
+*"it moved"* and *"it was put there"*.
 
 ```lua
-sol.present_group({ output = "DP-1" }, { rotate_y = 20, perspective = 1200 })
+sol.present(id, { rect = centre, via = { arc = 0.4 } }, { duration = 320 })
 ```
 
-The group's transform composes with each member's own, so a window that is
-also individually tilted stays tilted *within* a rotating desktop. That
-composition is the whole point — it is what makes a cube of workspaces
-different from rotating every window by hand and hoping.
+`via` is a named path function with parameters, resolved the same way an easing
+is — `crates/animation` already proves the pattern, and a path is a curve
+through space exactly as an easing is a curve through time. Absent means a
+straight line, which is what every mode does today and what it keeps costing.
 
-**Ruling — the pointer follows a group transform only when the transform says
-so.** Not global. A desktop cube should carry the cursor with it; whole-desktop
-zoom, which is an accessibility feature rather than an effect, should leave it
-where the user's hand thinks it is. One flag, `carries_pointer`, defaulting to
-true for rotations and false for scale-only.
+The same reasoning that keeps vertex deformation parametric applies: a path
+moves the bounding box, so the damage tracker has to be able to ask where it
+will be.
 
-This also finally makes the cursor an ordinary participant. Today it is its own
-render path — `cursor.rs`, with `SIZE` and `HOTSPOT` as constants, placed ahead
-of everything in `render.rs`. Every other thing the compositor draws for its own
-reasons went through `sol.surface`; this one did not, so a script cannot replace
-the pointer, animate it, or give a mode its own.
+## Effects: geometry and pixels are different kinds
 
-## Layers: pane styles, absorbed
+**Vertex deformation is CPU-side and parametric** — a named function with
+parameters, never user code. The damage tracker needs the deformed bounding box
+before anything is drawn, and a shader cannot tell it one. An effect must also
+be testable without a session: `crates/effects` is `crates/animation` again —
+empty `[dependencies]`, unit tests, a wasm preview with live sliders.
+
+**Fragment effects are arbitrary GLSL**, because they do not move the bounding
+box. A bad one is a wrong picture, which is recoverable. A bad vertex function
+would be a wrong damage rect, which is a corrupt screen.
+
+This is also why a hung fragment shader is acceptable risk and a hung vertex
+function would not be: a GPU reset is a driver problem no Rust-side rule can
+catch, and keeping the geometry half in a language where a mistake is a wrong
+number is what makes the other half affordable.
+
+### An effect declares its inputs, and that is what creates a pass
+
+```
+effect { name, parameters, inputs }
+```
+
+Most declare nothing and draw inline, exactly as today. One that declares
+`backdrop` needs what is already composited beneath it: the renderer closes the
+current pass, binds its output as a texture, and opens a new one.
+
+| effect | inputs | why |
+|---|---|---|
+| wavy border, glow, spikes | — | draws over what is there |
+| rounded corners | `self` | masks the node's own texture |
+| shadow | `self` | derived from the node's silhouette |
+| blur | `backdrop` | samples what is behind |
+
+Without this, blur is not merely unimplemented — it is **unrepresentable**,
+because a flat element list has nowhere to say "after the things below me,
+before the things above me".
+
+`offscreen::capture` already renders a node's surface tree into a texture and is
+how `self` is obtained. It currently allocates per frame per warped pane, forty
+lines below a comment explaining why that is hundreds of megabytes a second;
+that is a prerequisite, not a follow-up, because an effect system multiplies it
+by the number of animating nodes.
+
+## Layers and bleed
 
 A pane's appearance is a **style bundle** — a folder under `panes/`, looked up
-user-directory-first by name. `Pane.qml` is the manifest, and it is QML rather
-than Lua deliberately: **style lives in QML, Lua configures the compositor.**
+user-directory-first. `Pane.qml` is the manifest, and it is QML rather than Lua
+deliberately: **style lives in QML, Lua configures the compositor.**
 
 ```qml
 PaneStyle {
     insets.top: 32
+    requires: ["gpu"]
 
     Layer { depth: "behind"; bleed: 200; Glow { anchors.fill: parent } }
     Layer { depth: "frame";  source: "Frame.qml" }
@@ -198,113 +204,117 @@ PaneStyle {
 ```
 
 **Ruling — three depths, not arbitrary nesting.** `behind`, `frame`, `above`.
-Everything named in three months of design fits; nesting is unbounded cost for
-a case nobody has asked for, and it can be added later without breaking the
-format because a layer's depth is a string.
+Everything named in months of design fits; nesting is unbounded cost for a case
+nobody has asked for, and can be added later without breaking the format because
+a depth is a string.
 
-`bleed` is how far past the pane's own rect a layer may paint. Three rules,
-carried unchanged from the pane-styles design because they were right:
+Three rules on bleed, carried unchanged because they were right:
 
 * **Bleed follows the pane's stacking.** A background window's effects do not
-  paint over the window being typed in; a focused window's reach over
-  everything behind it without asking.
+  paint over the window being typed in; a focused window's reach over everything
+  behind it without asking.
 * **Bleed is a promise, not a request.** A layer is clipped to the canvas it
-  declared. Without that, one style can force a full-screen repaint every frame
-  and the cost appears as the whole desktop stuttering with nothing pointing at
-  the cause.
-* **Input stays clipped to the pane's outer rect.** A spike reaching over the
-  next window must not eat that window's clicks. The failure mode of getting
-  this wrong is a neighbour that has silently stopped responding.
+  declared, or one style can force a full-screen repaint every frame and the
+  cost appears as the whole desktop stuttering with nothing naming the cause.
+* **Input stays clipped to the pane's outer rect.** A spike over the next window
+  must not eat that window's clicks. The failure mode is a neighbour that has
+  silently stopped responding.
 
-`client.radius` and `client.shadow` stop being reserved keys and become
-effects with `inputs: self`. The reason they were deferred is unchanged and is
-now handled rather than avoided: a rounded window is no longer fully opaque, so
-opaque-region culling can no longer skip what is behind it. Under this design
-that is a property the node declares, and the renderer's culling reads it —
-rather than a global assumption that quietly stops being true.
+`client.radius` and `client.shadow` stop being reserved keys and become effects
+with `inputs: self`. The reason they were deferred is unchanged and now handled
+rather than avoided: a rounded window is no longer fully opaque, so
+opaque-region culling cannot skip what is behind it. Under this design that is a
+property the node declares and the renderer's culling reads, rather than a
+global assumption that quietly stops being true.
+
+## Input, scoped
+
+`script_grab` is all-or-nothing. Atrium wants the strip to take clicks while the
+centre window stays live, and an interactive `sol.surface` currently swallows
+**every** press inside its rectangle whether or not the QML under the pointer
+wanted it — which is why Prism's dock has to be sized to its contents and
+re-placed on every window open and close.
+
+Both are the same missing thing: a grab, and a surface, should be able to say
+*which* input it wants. The scene already knows whether a `MouseArea` accepted;
+the answer is simply not propagated.
 
 ## The QML contract
 
-The software scene graph does not implement `ShaderEffect`, and `Canvas`
-appears not to paint on it. The GPU path does both. That means **which QML is
-legal currently depends on which machine you are on**, and a style written on
-one hands a white rectangle to another, silently. That is the exact failure the
-rice report is about, one level up.
+The software scene graph does not implement `ShaderEffect`, and `Canvas` appears
+not to paint on it; the GPU path does both. So **which QML is legal depends on
+which machine you are on**, and a style written on one hands a white rectangle
+to another, silently.
 
-**Ruling — a style declares what it requires, and is refused at load when the
-path cannot provide it.**
+**Ruling — a style declares what it requires and is refused at load when the
+path cannot provide it.** `requires: ["gpu"]`, absent meaning portable. The
+alternatives are GPU-only styles (software is still the default, so most people
+get nothing), a lowest-common-denominator subset (caps every author to protect a
+case they may not care about), or silence (what happens today). `requires` is a
+list, so `["gpu", "effects/2"]` is the same mechanism as versioning.
 
-```qml
-PaneStyle {
-    requires: ["gpu"]     // absent means portable
-}
-```
+## What stays cheap
 
-The three alternatives were considered and rejected:
+A node with no transform, no effect and no bleed emits exactly the element it
+emits now, through exactly the path it takes now. The spike's rule is
+load-bearing:
 
-* **GPU-only styles.** Clean, but software is still the default path, so most
-  people get nothing.
-* **A lowest-common-denominator subset.** Caps every author at what the weakest
-  path can do, to protect a case the author may not care about.
-* **Silence.** What happens today.
+> a compositor that renders every window through a mesh to support an effect
+> nobody is currently running has made every frame worse to make one frame
+> possible.
 
-Declaring and failing loudly is the only option that is both portable and
-honest. It also composes with versioning below: `requires` is a list, so
-`["gpu", "effects/2"]` is the same mechanism.
+Every addition above is opt-in per node, and a desktop that opts into nothing
+pays nothing.
 
-## Genie, and the next one
+## Genie, and the one after it
 
-Genie becomes an entry in `crates/effects`: a named vertex function over a
-grid, with parameters, unit tests, and a slider in the preview page.
-`present.rs` stops knowing what a genie is.
-
-Two things it gains in the move, both from #87:
+Genie becomes an entry in `crates/effects`: a named vertex function over a grid,
+with parameters, unit tests and a preview slider. `present.rs` stops knowing what
+a genie is. It gains two things in the move:
 
 * **A morph between two anchors**, not "minimise into a slot". The anchor is an
   identity resolved per frame by the compositor — a pane id, a chrome element —
   not a rect passed from Lua. A rect snapshotted at dispatch aims at where the
   dock icon was 500 ms ago.
 * **The phase axis becomes a parameter.** It is hardcoded to `(1.0 - v)` today,
-  which is why a side dock is inexpressible. Note the grid follows the axis:
-  genie subdivides 48 along `v` and 8 along `u` because `v` is the phase axis,
-  so a parametric axis that left the grid fixed would give a side dock eight
-  steps of phase and a flipbook.
+  which is why a side dock is inexpressible. The grid must follow the axis:
+  genie subdivides 48 along `v` and 8 along `u` *because* `v` is the phase axis,
+  so a parametric axis with a fixed grid gives a side dock eight steps and a
+  flipbook.
 
 Adding *fold*, *curl*, *ripple* or *page-turn* is then a file in that crate.
-That is the whole test of this document.
+**That is the whole test of this document.**
 
-## Versioning, from day one
-
-Once people write styles and effects it is a compatibility surface, and GLES2
-shaders will not survive a Vulkan backend. `requires` carries the version;
-the format's own version is a field in the manifest. This costs one line now
-and is unaddable later.
-
-## What this does not do
+## Out of scope
 
 No IPC and no PipeWire, so **no effect genuinely follows what an application is
 playing**. A rule-driven wave border animates because the rule matched, not
 because music is playing and not on the beat. Real reactivity needs a channel
-into a running compositor, which is its own subsystem and is deliberately not
+into a running compositor; it is its own subsystem and is deliberately not
 started here.
 
-Arbitrary nesting, per-layer insets, and effects on layer-shell surfaces are
-all deferred, and none of them is blocked by anything above.
+Arbitrary layer nesting, per-layer insets, and effects on layer-shell surfaces
+are deferred, and none is blocked by anything above.
 
 ## Order of work
 
-1. **`z` and `pivot`.** Smallest, unblocks the most, and proves the node model
-   against a real mode — the deck already exists to test it.
-2. **`crates/effects`,** with genie moved into it. No new capability; the
-   capability is that the *next* one is cheap.
-3. **Layers with depth and bleed.** The pane-styles plan's Tasks 1–7.
-4. **Passes.** Then `client.radius`, `client.shadow` and blur, which are three
-   declarations against one mechanism.
-5. **Group transforms.** The desktop cube, the workspace slide, the zoom.
-6. **Rules and pane ownership.** The pane-styles plan's Tasks 8–9, last on
+Each stage leaves the compositor running and testable, and each is landable
+alone.
+
+1. **`z`, `pivot`, node alpha.** Smallest, unblocks the most, and the deck
+   already exists to test it against.
+2. **Address: surfaces and groups become transformable.** The workspace slide
+   stops leaving the wallpaper behind, which is a visible win on a shipped mode.
+3. **`crates/effects`,** genie moved into it. No new capability; the capability
+   is that the next one is cheap.
+4. **Paths.** `via`, resolved like an easing.
+5. **`offscreen::capture` caching, then passes.** Then `client.radius`,
+   `client.shadow` and blur, which are three declarations against one mechanism.
+6. **Layers with depth and bleed.** The pane-styles plan's Tasks 1–7.
+7. **Input scoping.** The surface press question and the scoped grab.
+8. **Rules and pane ownership.** The pane-styles plan's Tasks 8–9, last on
    purpose: they touch the most call sites and gain most from knowing the final
    shape.
 
-Each stage leaves the compositor running and testable. Stage 3 without 4 gives
-layered decorations with no client effects; stage 4 without 5 gives blur on a
-desktop that cannot rotate.
+Atrium is the acceptance test. It is not on this list because it should need
+nothing that is not — and if it does, that thing is the next entry.
