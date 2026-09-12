@@ -56,7 +56,7 @@ use std::time::Duration;
 
 use crate::{
     mat4::Mat4,
-    present::{self, Blend, Curve, Frame, Transform},
+    present::{Blend, Curve, Frame, Transform},
     scripted::SurfaceId,
 };
 

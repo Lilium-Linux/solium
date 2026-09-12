@@ -811,6 +811,110 @@ impl Solium {
             .opacity
     }
 
+    /// Turn what a script aimed at into what the compositor holds.
+    ///
+    /// The one place a surface's *name* becomes a [`crate::scripted::SurfaceId`]
+    /// — which is what makes an anchor `Copy` and a `Frame` still cheap to
+    /// blend. A name nobody has declared loses the effect and not the window,
+    /// the same failure an anchor that stops resolving already has, and it says
+    /// so once rather than every frame.
+    fn aimed(&self, deform: &crate::script::Deform) -> Option<present::Deform> {
+        let anchor = match &deform.aim {
+            crate::script::Aim::Rect(rect) => {
+                present::Anchor::Rect(present::logical((rect.x, rect.y), (rect.w, rect.h)))
+            }
+            crate::script::Aim::Window(id) => present::Anchor::Pane(*id),
+            crate::script::Aim::Surface(name) => match self.surfaces.named(name) {
+                Some(id) => present::Anchor::Surface(id),
+                None => {
+                    tracing::warn!(
+                        surface = name,
+                        "no surface by that name to aim at, drawing the window undeformed"
+                    );
+                    return None;
+                }
+            },
+        };
+        Some(present::Deform {
+            effect: deform.effect,
+            anchor,
+        })
+    }
+
+    /// Turn the names a script wrote into the selection the compositor holds.
+    ///
+    /// A surface that has never been declared is dropped rather than interned:
+    /// the id table is what makes an id stable across a redeclaration, and
+    /// feeding it every misspelling a configuration contains would make it grow
+    /// on typos. A group naming a surface that does not exist selects nothing,
+    /// which is what it means.
+    fn selection(&self, asked: &crate::script::Selection) -> crate::group::Selection {
+        let mut members =
+            Vec::with_capacity(asked.windows.len() + asked.surfaces.len() + asked.monitors.len());
+        members.extend(
+            asked
+                .windows
+                .iter()
+                .copied()
+                .map(crate::group::Member::Window),
+        );
+        for name in &asked.surfaces {
+            match self.surfaces.named(name) {
+                Some(id) => members.push(crate::group::Member::Surface(id)),
+                None => tracing::warn!(
+                    surface = name,
+                    "a selection names a surface nothing has declared"
+                ),
+            }
+        }
+        members.extend(
+            asked
+                .monitors
+                .iter()
+                .map(|name| crate::group::Member::Monitor(name.as_str().into())),
+        );
+        crate::group::Selection {
+            members,
+            on: asked.on.as_deref().map(Into::into),
+        }
+    }
+
+    /// Put back the windows a membership change has just moved.
+    ///
+    /// **What happens when membership changes while things are animating**, and
+    /// the reason it is not a jump. A window sent to another workspace leaves
+    /// one selection for another, and the difference between the two shifts
+    /// lands on it between one frame and the next; this displaces its own
+    /// transform by exactly that much, so the frame after the change draws it
+    /// where the frame before did, and animates it home.
+    ///
+    /// Only windows. A surface joining a selection has no transform of its own
+    /// to displace — there is nowhere to put one, and the case it would cover
+    /// (a wallpaper changing desk) is not a thing a desk does. A selection that
+    /// names a monitor is not rebased either: what is on a screen changes
+    /// because the *user* dragged a window across a bezel, which no declaration
+    /// observes.
+    fn keep_displaced(
+        &mut self,
+        displaced: &crate::group::Displaced,
+        now: std::time::Duration,
+        animation: crate::script::AnimationSpec,
+    ) {
+        if displaced.is_empty() {
+            return;
+        }
+        for (id, by) in displaced {
+            let Some(pane) = self.panes.by_script_id(*id) else {
+                continue;
+            };
+            let Some(outer) = self.pane_outer(pane) else {
+                continue;
+            };
+            present::rebase(pane, outer, *by, now, animation.duration, animation.easing);
+        }
+        self.redraw = true;
+    }
+
     /// Turn a deform's anchor into the rectangle it is aimed at *this frame*.
     ///
     /// The compositor half of `crates/effects`. The crate is handed two
@@ -1647,7 +1751,7 @@ impl Solium {
                             |rect| present::logical((rect.x, rect.y), (rect.w, rect.h)),
                         ),
                         opacity: opacity.unwrap_or(1.0),
-                        deform,
+                        deform: deform.and_then(|deform| self.aimed(&deform)),
                     };
                     present::present(
                         pane,
@@ -1756,6 +1860,41 @@ impl Solium {
                 }
                 Command::Surface(surface) => self.declare_surface(*surface),
                 Command::SurfaceGone(name) => self.remove_surface(&name),
+                Command::Group {
+                    name,
+                    selection,
+                    animation,
+                } => {
+                    let displaced = match selection {
+                        Some(selection) => {
+                            let selection = self.selection(&selection);
+                            self.groups.declare(&name, selection, now)
+                        }
+                        None => self.groups.forget(&name, now),
+                    };
+                    self.keep_displaced(&displaced, now, animation);
+                }
+                Command::PresentGroup {
+                    name,
+                    to,
+                    animation,
+                } => {
+                    if !self
+                        .groups
+                        .present(&name, to, now, animation.duration, animation.easing)
+                    {
+                        // Named rather than ignored, for the reason
+                        // `sol.surface` names a scene it cannot find: a
+                        // transform on a selection nobody declared is a typo,
+                        // and a mode that silently does nothing is the hardest
+                        // kind of configuration mistake to find.
+                        tracing::warn!(group = name, "no selection by that name to carry");
+                    }
+                }
+                Command::ClearGroup { name, animation } => {
+                    self.groups
+                        .clear(&name, now, animation.duration, animation.easing);
+                }
                 Command::Monitors(arrangement) => {
                     let was = std::mem::replace(&mut self.arrangement, arrangement);
                     // `enabled = false` on a monitor is an unplug as far as

@@ -136,6 +136,47 @@ impl Default for AnimationSpec {
     }
 }
 
+/// What a deformation is aimed at, in the words a script wrote.
+///
+/// The compositor's own [`crate::present::Anchor`] names a surface with a
+/// number, because it lives inside a `Copy` frame that is blended per node per
+/// frame. A script has no numbers for surfaces and should not be given any, so
+/// the name survives this far and is resolved where the command is applied —
+/// which is also the first place that can see whether the surface exists.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Aim {
+    /// A place. Nothing to track, and honest about it.
+    Rect(Rect),
+    /// A window, by the id a script holds it as.
+    Window(u64),
+    /// A surface a script declared — a dock, a bar, a slot in one.
+    Surface(String),
+}
+
+/// A deformation as a script asked for it: the shape, and what it is aimed at.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Deform {
+    pub(crate) effect: solium_effects::Deform,
+    pub(crate) aim: Aim,
+}
+
+/// Who is in a named selection, in the words a script wrote.
+///
+/// Three lists rather than one of a sum type, because that is how a script
+/// writes it — `{ windows = {...}, surfaces = {...} }` — and turning it into
+/// `crate::group::Member`s is the compositor's half of the same seam `Aim`
+/// crosses.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Selection {
+    pub(crate) windows: Vec<u64>,
+    pub(crate) surfaces: Vec<String>,
+    /// Connector names. Every node drawn on one of these is in the selection.
+    pub(crate) monitors: Vec<String>,
+    /// Narrows the surfaces above to one monitor's instance, because a surface
+    /// declared `on = "every-monitor"` is several things wearing one name.
+    pub(crate) on: Option<String>,
+}
+
 /// Something a script asked the compositor to do.
 #[derive(Clone, Debug)]
 pub(crate) enum Command {
@@ -147,7 +188,29 @@ pub(crate) enum Command {
         /// for one. `None` keeps the window flat and on the cheap path.
         matrix: Option<Mat4>,
         /// A deformation the drawn rect cannot express, such as a genie.
-        deform: Option<crate::present::Deform>,
+        deform: Option<Deform>,
+        animation: AnimationSpec,
+    },
+    /// Name a selection, or take the name away with `None`.
+    ///
+    /// The animation is for the members that *change* selection: a window that
+    /// leaves one desk for another has the difference between the two lands on
+    /// it in one frame, and this is how long it takes to get there. See
+    /// `present::rebase`.
+    Group {
+        name: String,
+        selection: Option<Selection>,
+        animation: AnimationSpec,
+    },
+    /// Carry a named selection, members and all.
+    PresentGroup {
+        name: String,
+        to: crate::group::Shift,
+        animation: AnimationSpec,
+    },
+    /// Carry one back to doing nothing, and stop carrying it.
+    ClearGroup {
+        name: String,
         animation: AnimationSpec,
     },
     Clear {
@@ -1351,6 +1414,81 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // Name a selection: windows, surfaces and whole monitors, under one name.
+    //
+    //     sol.group("desk-2", {
+    //         windows  = { 3, 7 },
+    //         surfaces = { "wallpaper-2" },
+    //         monitor  = "DP-1",
+    //     })
+    //     sol.present_group("desk-2", { x = -2560 }, { duration = 300 })
+    //
+    // **A transform names a selection, and selections compose.** The wallpaper
+    // travels because it is in the selection, not because the compositor knows
+    // what a wallpaper is -- it does not, and `sol.surface` stays one primitive
+    // doing five jobs. A member's own `sol.present` composes with the group's
+    // rather than being replaced by it, so a window tilted inside a moving desk
+    // stays tilted within it.
+    //
+    // `sol.group(name, false)` takes one away. Re-declaring the same name
+    // replaces the membership and keeps the transform, so a mode that rebuilds
+    // its groups every time it runs -- which is every mode -- does not restart
+    // its own animation.
+    sol.set(
+        "group",
+        lua.create_function(|lua, (name, options): (String, Value)| {
+            let selection = match options {
+                Value::Table(options) => Some(selection_from(&options)?),
+                // `false` and `nil` both remove it, the same way `sol.surface`
+                // reads them, so one spelling works for both primitives.
+                _ => None,
+            };
+            with_pending(lua, |pending| {
+                let animation = pending.animation;
+                pending.commands.push(Command::Group {
+                    name: name.clone(),
+                    selection: selection.clone(),
+                    animation,
+                });
+            })
+        })?,
+    )?;
+
+    sol.set(
+        "present_group",
+        lua.create_function(
+            |lua, (name, options, motion): (String, Option<Table>, Option<Table>)| {
+                let to = match options.as_ref() {
+                    Some(options) => shift_from(options)?,
+                    None => crate::group::Shift::NONE,
+                };
+                let (duration, easing) = motion_from(motion.as_ref())?;
+                with_pending(lua, |pending| {
+                    let animation = pending.animation.with(duration, easing);
+                    pending.commands.push(Command::PresentGroup {
+                        name: name.clone(),
+                        to,
+                        animation,
+                    });
+                })
+            },
+        )?,
+    )?;
+
+    sol.set(
+        "present_group_clear",
+        lua.create_function(|lua, (name, motion): (String, Option<Table>)| {
+            let (duration, easing) = motion_from(motion.as_ref())?;
+            with_pending(lua, |pending| {
+                let animation = pending.animation.with(duration, easing);
+                pending.commands.push(Command::ClearGroup {
+                    name: name.clone(),
+                    animation,
+                });
+            })
+        })?,
+    )?;
+
     // Applies to everything queued after it, so a mode sets the feel of a batch
     // once instead of repeating it per window — and every window in that batch
     // is animated by the same clock over the same interval.
@@ -1909,7 +2047,7 @@ impl solium_effects::Params for Given<'_> {
 /// `to` is the **anchor**: what the window is being pulled into, or drawn out
 /// of. See `present::Anchor` for why naming a thing rather than a rectangle is
 /// the point of the key.
-fn deform_from(options: &Table) -> mlua::Result<Option<crate::present::Deform>> {
+fn deform_from(options: &Table) -> mlua::Result<Option<Deform>> {
     let Some(deform) = options.get::<Option<Table>>("deform")? else {
         return Ok(None);
     };
@@ -1931,35 +2069,128 @@ fn deform_from(options: &Table) -> mlua::Result<Option<crate::present::Deform>> 
     };
     let Some(to) = deform.get::<Option<Table>>("to")? else {
         return Err(mlua::Error::runtime(
-            "a deform needs a `to` to aim at: either { window = id } or a rect",
+            "a deform needs a `to` to aim at: { window = id }, { surface = name } or a rect",
         ));
     };
-    Ok(Some(crate::present::Deform {
+    Ok(Some(Deform {
         effect,
-        anchor: anchor_from(&to)?,
+        aim: aim_from(&to)?,
     }))
 }
 
-/// Read a deform's anchor: a window to follow, or a place to aim at.
+/// Read a deform's anchor: a thing to follow, or a place to aim at.
 ///
-/// The window id is the one that matters -- it is resolved on every frame that
-/// draws, so the effect tracks a dock icon or another window as it moves. A
-/// rect aims at somewhere that does not move, such as the bottom edge of a
-/// monitor, and is honest about being a snapshot because there is nothing
+/// The two identities are the ones that matter -- they are resolved on every
+/// frame that draws, so the effect tracks a dock icon or another window as it
+/// moves. A rect aims at somewhere that does not move, such as the bottom edge
+/// of a monitor, and is honest about being a snapshot because there is nothing
 /// there to track.
-fn anchor_from(to: &Table) -> mlua::Result<crate::present::Anchor> {
+fn aim_from(to: &Table) -> mlua::Result<Aim> {
     if let Some(id) = to.get::<Option<u64>>("window")? {
-        return Ok(crate::present::Anchor::Pane(id));
+        return Ok(Aim::Window(id));
+    }
+    if let Some(name) = to.get::<Option<String>>("surface")? {
+        return Ok(Aim::Surface(name));
     }
     let Some(rect) = rect_from(to)? else {
         return Err(mlua::Error::runtime(
-            "a deform's `to` needs either { window = id } or a rect (x, y, w, h)",
+            "a deform's `to` needs { window = id }, { surface = name } or a rect (x, y, w, h)",
         ));
     };
-    Ok(crate::present::Anchor::Rect(crate::present::logical(
-        (rect.x, rect.y),
-        (rect.w, rect.h),
-    )))
+    Ok(Aim::Rect(rect))
+}
+
+/// Read a selection out of a `sol.group` table.
+///
+/// ```lua
+/// sol.group("desk-2", {
+///     windows  = { 3, 7 },
+///     surfaces = { "wallpaper-2" },
+///     monitors = { "DP-1" },      -- everything drawn there
+///     monitor  = "DP-1",          -- which instance of each surface above
+/// })
+/// ```
+///
+/// Every key is optional and an absent one is an empty list, so a selection of
+/// nothing is spellable and does nothing — which is what a mode building one
+/// desk per monitor per workspace produces for the cells that are empty.
+fn selection_from(options: &Table) -> mlua::Result<Selection> {
+    let names = |key: &str| -> mlua::Result<Vec<String>> {
+        match options.get::<Option<Table>>(key)? {
+            Some(list) => list.sequence_values::<String>().collect(),
+            None => Ok(Vec::new()),
+        }
+    };
+    let windows = match options.get::<Option<Table>>("windows")? {
+        Some(list) => list.sequence_values::<u64>().collect::<mlua::Result<_>>()?,
+        None => Vec::new(),
+    };
+    Ok(Selection {
+        windows,
+        surfaces: names("surfaces")?,
+        monitors: names("monitors")?,
+        on: options.get::<Option<String>>("monitor")?,
+    })
+}
+
+/// Read what a selection is carried by out of a `sol.present_group` table.
+///
+/// ```lua
+/// sol.present_group("desk-2", { x = -2560, opacity = 0.4, rotate_y = 8 })
+/// ```
+///
+/// `x` and `y` are a **displacement** and not a destination, which is the one
+/// way this reads differently from `sol.present`: a selection has no rectangle
+/// of its own to be moved to. `rotate_*` and `perspective` are read by the same
+/// `transform_from` a window's own matrix comes from, so the two spell a
+/// rotation identically.
+fn shift_from(options: &Table) -> mlua::Result<crate::group::Shift> {
+    Ok(crate::group::Shift {
+        dx: options.get::<Option<f64>>("x")?.unwrap_or(0.0),
+        dy: options.get::<Option<f64>>("y")?.unwrap_or(0.0),
+        opacity: options.get::<Option<f32>>("opacity")?.unwrap_or(1.0),
+        matrix: transform_from(options)?.unwrap_or(Mat4::IDENTITY),
+    })
+}
+
+/// What a call said about its own timing, before it is laid over the ambient
+/// one `sol.animate` set.
+///
+/// Read outside the pending buffer and applied inside it, because reading a Lua
+/// table can fail and the buffer is held by a closure that cannot. Two options
+/// rather than an `AnimationSpec`, so "said nothing about the easing" and
+/// "asked for the default easing" stay different answers.
+///
+/// `sol.present_group` takes a table of its own because a mode carrying two
+/// selections at different speeds in one dispatch cannot say so with an ambient
+/// setting. Absent, it is the ambient setting, so the two calls feel the same as
+/// every other pair in this file.
+fn motion_from(options: Option<&Table>) -> mlua::Result<(Option<Duration>, Option<Curve>)> {
+    let Some(options) = options else {
+        return Ok((None, None));
+    };
+    Ok((
+        options
+            .get::<Option<u64>>("duration")?
+            .map(Duration::from_millis),
+        easing_from(options)?,
+    ))
+}
+
+impl AnimationSpec {
+    /// This, with whatever a call actually named.
+    const fn with(self, duration: Option<Duration>, easing: Option<Curve>) -> Self {
+        Self {
+            duration: match duration {
+                Some(duration) => duration,
+                None => self.duration,
+            },
+            easing: match easing {
+                Some(easing) => easing,
+                None => self.easing,
+            },
+        }
+    }
 }
 
 /// Read a list of columns out of a Lua table.
@@ -2183,6 +2414,7 @@ mod tests {
                 sol.present(2, { deform = { effect = "genie", to = { window = 9 } } })
                 sol.present(3, { deform = { effect = "nonsense", to = { window = 9 } } })
                 sol.present(4, {})
+                sol.present(5, { deform = { effect = "genie", to = { surface = "dock" } } })
             end)
             "#,
         )
@@ -2190,19 +2422,19 @@ mod tests {
 
         let mut scripts = Scripts::load(&config).expect("loading the test script");
         let outcome = scripts.key("super+1", Snapshot::default());
-        let deforms: Vec<Option<crate::present::Deform>> = outcome
+        let deforms: Vec<Option<Deform>> = outcome
             .commands
             .iter()
             .map(|command| match command {
-                Command::Present { deform, .. } => *deform,
+                Command::Present { deform, .. } => deform.clone(),
                 other => panic!("expected a present command, got {other:?}"),
             })
             .collect();
-        assert_eq!(deforms.len(), 4);
+        assert_eq!(deforms.len(), 5);
 
         assert_eq!(
             deforms[0],
-            Some(crate::present::Deform {
+            Some(Deform {
                 effect: solium_effects::Deform::Genie {
                     // Not named, so the effect's own default: all the way in,
                     // which is what one animates towards.
@@ -2210,26 +2442,138 @@ mod tests {
                     spread: 2.5,
                     axis: solium_effects::Axis::Left,
                 },
-                anchor: crate::present::Anchor::Rect(crate::present::logical(
-                    (10.0, 20.0),
-                    (30.0, 40.0)
-                )),
+                aim: Aim::Rect(Rect {
+                    x: 10.0,
+                    y: 20.0,
+                    w: 30.0,
+                    h: 40.0
+                }),
             })
         );
         assert_eq!(
             deforms[1],
-            Some(crate::present::Deform {
+            Some(Deform {
                 effect: solium_effects::Deform::Genie {
                     progress: 1.0,
                     spread: 1.0,
                     axis: solium_effects::Axis::Down,
                 },
-                anchor: crate::present::Anchor::Pane(9),
+                aim: Aim::Window(9),
             })
         );
         // An effect this build does not have loses the effect, not the window.
         assert_eq!(deforms[2], None);
         assert_eq!(deforms[3], None);
+        // **A surface survives this far as a name.** It becomes a
+        // `scripted::SurfaceId` in `Solium::aimed`, which is the first place
+        // that can see whether there is a surface by that name -- and the id is
+        // what keeps `present::Frame` `Copy`.
+        assert_eq!(
+            deforms[4],
+            Some(Deform {
+                effect: solium_effects::Deform::Genie {
+                    progress: 1.0,
+                    spread: 1.0,
+                    axis: solium_effects::Axis::Down,
+                },
+                aim: Aim::Surface("dock".to_owned()),
+            })
+        );
+    }
+
+    /// **A script names a selection, and both halves of it come back.**
+    ///
+    /// The round trip for the other primitive this file gained: who is in a
+    /// group, and what carrying it means. The displacement is the part worth
+    /// pinning -- `x` on `sol.present_group` is a *delta* where `x` on
+    /// `sol.present` is a destination, because a selection has no rectangle of
+    /// its own to be moved to, and reading it as a destination would put every
+    /// member of every group in the same place.
+    #[test]
+    fn a_script_names_a_selection_and_says_where_to_carry_it() {
+        let directory = std::env::temp_dir().join("solium-script-test-group");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+2", function()
+                sol.animate({ duration = 300, easing = "inOutQuad" })
+                sol.group("desk-2", {
+                    windows = { 3, 7 },
+                    surfaces = { "wallpaper-2" },
+                    monitors = { "DP-1" },
+                    monitor = "DP-1",
+                })
+                sol.present_group("desk-2", { x = -2560, opacity = 0.5 })
+                sol.present_group("desk-1", { y = 40 }, { duration = 90 })
+                sol.present_group_clear("desk-3")
+                sol.group("desk-4", false)
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+2", Snapshot::default());
+        assert_eq!(outcome.commands.len(), 5);
+
+        match &outcome.commands[0] {
+            Command::Group {
+                name,
+                selection: Some(selection),
+                animation,
+            } => {
+                assert_eq!(name, "desk-2");
+                assert_eq!(selection.windows, vec![3, 7]);
+                assert_eq!(selection.surfaces, vec!["wallpaper-2".to_owned()]);
+                assert_eq!(selection.monitors, vec!["DP-1".to_owned()]);
+                assert_eq!(selection.on.as_deref(), Some("DP-1"));
+                // A membership change is animated too, and by the ambient
+                // setting: that is how long a window takes to get back to where
+                // it was looking when it changes desks.
+                assert_eq!(animation.duration, Duration::from_millis(300));
+            }
+            other => panic!("expected a group command, got {other:?}"),
+        }
+
+        match &outcome.commands[1] {
+            Command::PresentGroup {
+                name,
+                to,
+                animation,
+            } => {
+                assert_eq!(name, "desk-2");
+                assert_eq!(to.offset(), (-2560.0, 0.0));
+                assert!((to.opacity - 0.5).abs() < f32::EPSILON);
+                assert_eq!(animation.duration, Duration::from_millis(300));
+                assert_eq!(animation.easing, Curve::InOutQuad);
+            }
+            other => panic!("expected a present_group command, got {other:?}"),
+        }
+
+        // Its own table overrides the ambient duration and keeps the easing.
+        match &outcome.commands[2] {
+            Command::PresentGroup { animation, to, .. } => {
+                assert_eq!(to.offset(), (0.0, 40.0));
+                assert_eq!(animation.duration, Duration::from_millis(90));
+                assert_eq!(animation.easing, Curve::InOutQuad);
+            }
+            other => panic!("expected a present_group command, got {other:?}"),
+        }
+
+        assert!(
+            matches!(&outcome.commands[3], Command::ClearGroup { name, .. } if name == "desk-3")
+        );
+        // `false` removes a selection, the same spelling `sol.surface` takes.
+        assert!(matches!(
+            &outcome.commands[4],
+            Command::Group {
+                name,
+                selection: None,
+                ..
+            } if name == "desk-4"
+        ));
     }
 
     #[test]
