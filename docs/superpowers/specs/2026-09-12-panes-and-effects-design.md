@@ -298,23 +298,67 @@ are deferred, and none is blocked by anything above.
 
 ## Order of work
 
+Three phases, in this order and for this reason: **the machine, then the
+controls, then the things made with it.**
+
+Configuration designed before its mechanism exists describes what somebody
+imagined rather than what was built. `config.lua` already carries a whole
+`dock` section — `items`, `morph` — for a thing that appears nowhere in
+`crates/` outside comments, and `architecture.md` promises a corner radius and
+a z-order that are not in the source. Both were written alongside the
+intention. This order is how the next one is avoided.
+
 Each stage leaves the compositor running and testable, and each is landable
 alone.
 
-1. **`z`, `pivot`, node alpha.** Smallest, unblocks the most, and the deck
-   already exists to test it against.
-2. **Address: surfaces and groups become transformable.** The workspace slide
-   stops leaving the wallpaper behind, which is a visible win on a shipped mode.
-3. **`crates/effects`,** genie moved into it. No new capability; the capability
-   is that the next one is cheap.
-4. **Paths.** `via`, resolved like an easing.
-5. **`offscreen::capture` caching, then passes.** Then `client.radius`,
-   `client.shadow` and blur, which are three declarations against one mechanism.
-6. **Layers with depth and bleed.** The pane-styles plan's Tasks 1–7.
-7. **Input scoping.** The surface press question and the scoped grab.
-8. **Rules and pane ownership.** The pane-styles plan's Tasks 8–9, last on
-   purpose: they touch the most call sites and gain most from knowing the final
-   shape.
+### Phase 1 — the machine
 
-Atrium is the acceptance test. It is not on this list because it should need
-nothing that is not — and if it does, that thing is the next entry.
+1. **Pane ownership.** `docs/superpowers/plans/2026-09-12-pane-ownership.md`.
+   One value answers "does this pane have a frame", and the illegal state stops
+   being representable. Everything below adds state to a pane; this is what
+   stops that becoming five more tables.
+2. **`offscreen::capture` caching.** It allocates a texture per frame per
+   warped pane today, forty lines below a comment explaining that per-frame
+   allocation is hundreds of megabytes a second. A prerequisite rather than a
+   follow-up: an effect system multiplies it by the number of animating nodes.
+3. **`crates/effects`,** with genie moved into it. No new capability — the
+   capability is that the *second* effect is a file rather than a patch to
+   `present.rs`.
+4. **Address: surfaces and groups become transformable.** A transform names a
+   selection. This is one change with two visible results: the workspace slide
+   stops leaving the wallpaper behind, and "the whole screen" and "this
+   workspace" become nameable — which is what a global or per-workspace shader
+   needs before any shader exists.
+5. **Passes, and one effect through them.** An effect declares its inputs; one
+   declaring `backdrop` splits the frame. Land it with **rounded corners** and
+   nothing else — the cheapest effect that declares `self`, and the one that
+   forces the opaque-region question the whole design rests on. One effect
+   proven end to end is what makes the next phase design against a real
+   mechanism.
+6. **`z`, `pivot`, node alpha.** Completes `Frame`. Not a prerequisite for
+   anything above, which is why it sits at the end of the phase rather than the
+   start — but it is what the deck, atrium and any card stack need.
+
+### Phase 2 — the controls
+
+7. **The configuration surface, for every scope at once.** Pane and client are
+   sketched above (`PaneStyle`, `client.radius`, rules by `app_id`). The others
+   are **not designed yet and must be before they are built**: a global screen
+   effect, a per-workspace effect, and a transitional effect on open and close —
+   which has to be distinct in the API from a persistent one, because a
+   permanently-shaded window pays an offscreen pass every frame for its whole
+   life and a dissolve pays it for 300 ms.
+8. **Rules.** Per-pane selection by `app_id`, a slice of #56.
+
+### Phase 3 — the things made with it
+
+9. **Layers with depth and bleed.** The pane-styles plan's Tasks 1–7.
+10. **The effects worth shipping:** shadows, blur, wavy and reactive borders.
+    By this point each is a file in `crates/effects` or a shader named in a
+    style bundle, which is the whole test of this document.
+11. **Input scoping.** The surface press question and the scoped grab.
+12. **`panes/` bundles, and converting the shipped eight.**
+
+Atrium is the acceptance test throughout. It is not a stage because it should
+need nothing that is not already here — and if it does, that thing is the next
+entry.
