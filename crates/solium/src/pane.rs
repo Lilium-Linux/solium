@@ -106,19 +106,31 @@ pub(crate) enum Content {
 
 /// What the compositor draws around this pane's client.
 ///
-/// One value rather than two tables. `Decorations` holds `frames` and `bare` as
-/// parallel collections keyed by `PaneId`, and two tables answering one
-/// question can disagree — `Solium::insets_of` checked `frames` first, so a pane
-/// in both had `bare` silently ignored, and nothing tested that.
+/// One value rather than two tables. `Decorations` held `frames:
+/// HashMap<PaneId, Decoration>` and `bare: HashSet<PaneId>` as parallel
+/// collections keyed by `PaneId`, and two tables answering one question can
+/// disagree — `Solium::insets_of` checked `frames` first, so a pane in both had
+/// `bare` silently ignored, and nothing tested that. There is nowhere left for
+/// that state to be: three arms, one value, and it belongs to the pane it is
+/// drawn around.
 ///
-/// **Every reader that wants a fact about a frame now asks this**, rather than
-/// either table: how much room it takes, and whether there is one at all. The
-/// tables are still written, still shadowed onto here after each write, and
-/// `Decorations::agree` checks on every read that they would have given the
-/// same answer. What still asks them is the code that wants the
-/// [`crate::decoration::Decoration`] itself — see the `Styled` arm below. See
-/// `docs/superpowers/plans/2026-09-12-pane-ownership.md`.
+/// **Every reader asks this**, whether it wants a fact about the frame — how
+/// much room it takes, whether there is one at all — or the live scene itself.
+/// `Decorations` is down to the style a script chose and the code that builds a
+/// [`crate::decoration::Decoration`] from it; what it builds it hands to the
+/// pane. See `docs/superpowers/plans/2026-09-12-pane-ownership.md`.
 #[derive(Debug, Default)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the `Box` it suggests is measured and rejected. `size_of::<Decoration>()` \
+              is 248 and this enum is 248 as well, because the discriminant lands in a \
+              niche inside it -- so inlining is free relative to the decoration itself, \
+              and boxing buys a heap allocation per decorated window and a pointer chase \
+              on every access in order to save nothing. There is one of these per pane, \
+              and the only place panes are moved in bulk is `Panes::sync`, once a frame: \
+              800 bytes per pane rather than 568, or 16 KB of memcpy per frame at twenty \
+              windows instead of 11 KB."
+)]
 pub(crate) enum Frame {
     /// A client is still coming, or its frame has not been built yet. Keep
     /// reserving the insets a frame will want, or the window jumps when it
@@ -128,18 +140,19 @@ pub(crate) enum Frame {
     /// There will never be a frame: the client draws its own, or this is an
     /// override-redirect menu. Not the same as "not yet".
     None,
-    /// Drawn by the compositor, reserving this much around the client.
+    /// Drawn by the compositor, from this scene.
     ///
-    /// The plan has this arm boxing the [`crate::decoration::Decoration`]
-    /// itself, and it cannot yet. `Decorations::frames` still owns that, and a
-    /// `Decoration` is a live Qt scene: there is no second one to put here, and
-    /// building one would be two scenes per window rather than a shadow of one.
+    /// The [`crate::decoration::Decoration`] itself, owned here and nowhere
+    /// else: it is a live Qt scene, is not `Clone`, and there is exactly one
+    /// per decorated window. So it is **moved** in — a second one would be two
+    /// scenes per window, which is a behaviour change wearing a refactor's
+    /// clothes — and it leaves when the pane does, which is the table
+    /// reconciliation this whole change exists to delete.
     ///
-    /// What *can* be shadowed is what the decoration reserves. It is read once
-    /// when the scene is built and never changes, and it is the only thing
-    /// `insets_of` — the reader the disagreement above actually hurts — asks a
-    /// decoration for. The `Decoration` moves in here when the tables go.
-    Styled(crate::decoration::Insets),
+    /// Not boxed. Measured: `size_of::<Decoration>()` is 248 and `Frame` with
+    /// this arm inline is also 248, because the discriminant lands in a niche.
+    /// A `Box` here buys an allocation per decorated window and saves nothing.
+    Styled(crate::decoration::Decoration),
 }
 
 /// A window, as the compositor thinks of one.
@@ -286,15 +299,36 @@ impl Pane {
         &self.frame
     }
 
-    pub(crate) const fn frame_mut(&mut self) -> &mut Frame {
-        &mut self.frame
+    /// This pane's frame scene, if one has been built.
+    pub(crate) const fn decoration(&self) -> Option<&crate::decoration::Decoration> {
+        match &self.frame {
+            Frame::Styled(decoration) => Some(decoration),
+            Frame::Pending | Frame::None => None,
+        }
+    }
+
+    /// The same, to write to: the readers that want the scene itself rather
+    /// than a fact about it — drawing it, giving it the pointer, taking its
+    /// button presses, its pre-maximise rectangle.
+    ///
+    /// The narrowing and not a `frame_mut`, deliberately. Handing out
+    /// `&mut Frame` would let any caller swap a `Styled` for a `None` without
+    /// going through [`crate::decoration::Decorations`] — a second writer of
+    /// the fact this change exists to keep in one place. Everything that
+    /// decides *whether* there is a frame goes through `set_frame`.
+    pub(crate) const fn decoration_mut(&mut self) -> Option<&mut crate::decoration::Decoration> {
+        match &mut self.frame {
+            Frame::Styled(decoration) => Some(decoration),
+            Frame::Pending | Frame::None => None,
+        }
     }
 
     /// Say what is drawn around this pane's client.
     ///
-    /// Called wherever `Decorations` is written, and nowhere else: the two are
-    /// one fact kept in two places until the tables go, and a write to one that
-    /// is not a write to the other is the drift this is here to remove.
+    /// `Decorations`' five mutators are the only callers: they own the policy
+    /// — which QML, whether the style is `none`, whether it loaded — and this
+    /// is where the answer lands. A `Styled` replaced here drops the scene it
+    /// held, which is what makes "the frame leaves with its pane" true.
     pub(crate) fn set_frame(&mut self, frame: Frame) {
         self.frame = frame;
     }

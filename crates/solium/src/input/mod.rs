@@ -35,6 +35,7 @@ use smithay::{
 
 use crate::{
     decoration::Decoration,
+    pane::Pane,
     script,
     state::{Request, Solium},
 };
@@ -552,14 +553,14 @@ fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
         (previous, _) => previous,
     };
     if let Some(id) = left
-        && let Some(decoration) = state.decorations.get_mut(id)
+        && let Some(decoration) = state.panes.get_mut(id).and_then(Pane::decoration_mut)
     {
         decoration.pointer_left();
     }
 
     state.hovered_frame = under.as_ref().map(|(id, _)| *id);
     if let Some((id, local)) = under
-        && let Some(decoration) = state.decorations.get_mut(id)
+        && let Some(decoration) = state.panes.get_mut(id).and_then(Pane::decoration_mut)
     {
         decoration.pointer(local.x, local.y, None);
     }
@@ -626,16 +627,21 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         && let Some((id, window, local)) = state.frame_under(location)
     {
         let pressed = button_state == ButtonState::Pressed;
-        let on_button = state.decorations.get_mut(id).is_some_and(|decoration| {
-            decoration.pointer(local.x, local.y, Some(pressed));
-            decoration.on_button()
-        });
+        let on_button = state
+            .panes
+            .get_mut(id)
+            .and_then(Pane::decoration_mut)
+            .is_some_and(|decoration| {
+                decoration.pointer(local.x, local.y, Some(pressed));
+                decoration.on_button()
+            });
 
         // Acted on release, so a press that lands on the wrong button can be
         // dragged off it and abandoned.
         if let Some(action) = state
-            .decorations
+            .panes
             .get_mut(id)
+            .and_then(Pane::decoration_mut)
             .and_then(Decoration::take_action)
         {
             state.frame_action(id, action);

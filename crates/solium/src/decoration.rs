@@ -12,9 +12,9 @@
 //! window therefore scale, move and animate as one object — in overview a
 //! thumbnail carries its own titlebar — and the client area is never covered.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
-use crate::pane::PaneId;
+use crate::pane::{Frame, Pane, PaneId, Panes};
 
 use anyhow::Result;
 use smithay::{
@@ -336,7 +336,7 @@ impl Decoration {
     }
 
     /// What this frame reserves around its client.
-    pub(crate) fn insets(&self) -> Insets {
+    pub(crate) const fn insets(&self) -> Insets {
         self.insets
     }
 
@@ -633,26 +633,22 @@ impl Decoration {
     }
 }
 
-/// Every decorated window's frame.
+/// How windows are framed: which decoration, and the building of it.
 ///
-/// Keyed by *pane*, not by surface, and *presence means decorated*: a client
-/// that negotiated client-side decorations has no entry, so it draws its own
-/// frame and the compositor draws none. Two frames on one window is what
-/// happens when this is a flag instead of a lookup.
+/// **It holds no frames.** It used to hold two tables keyed by `PaneId` — a
+/// `HashMap<PaneId, Decoration>` and a `HashSet<PaneId>` of panes that would
+/// never have one — which meant a frame outlived its window unless something
+/// remembered to reconcile them, and meant two tables could answer the same
+/// question differently. A frame is now [`crate::pane::Frame`], a field of the
+/// pane it is drawn around, and it leaves when the pane does.
 ///
-/// The key is the pane because a pane outlives the arrival of its surface. A
-/// frame drawn around a window whose application is still starting is the same
-/// frame, with the same animation still running in it, the moment the client
-/// maps — nothing is rebuilt, so nothing restarts or flickers.
+/// So what is left here is the *policy*: which QML file a frame is built from,
+/// and what "built" means when the style says `none` or the file will not load.
+/// Every mutator takes `&mut Panes` and writes its answer onto the pane, which
+/// is why they are still methods here rather than free functions — `insert`
+/// alone picks between four outcomes, and the call site cannot know which.
 #[derive(Debug, Default)]
 pub(crate) struct Decorations {
-    frames: HashMap<PaneId, Decoration>,
-    /// Panes that will never have a frame, as opposed to not having one yet.
-    ///
-    /// A client drawing its own decorations, and an override-redirect menu.
-    /// The distinction exists so `Solium::insets_of` knows whether to keep
-    /// reserving room for a frame that is coming.
-    bare: std::collections::HashSet<PaneId>,
     /// Which decoration to build, as a script named it. `None` is whatever
     /// the environment or the default says.
     style: Option<String>,
@@ -667,7 +663,7 @@ impl Decorations {
     /// negotiates its decoration mode, once -- so dropping them would leave
     /// every open window bare until it was reopened. Rebuilding is what makes
     /// this a live setting a script can change and watch happen.
-    pub(crate) fn set_style(&mut self, style: Option<String>) -> bool {
+    pub(crate) fn set_style(&mut self, panes: &mut Panes, style: Option<String>) -> bool {
         if self.style == style {
             return false;
         }
@@ -676,42 +672,79 @@ impl Decorations {
             // Every frame goes, and the clients are resized to the room they
             // now have -- which the caller does, because it is the one holding
             // the windows.
-            self.frames.clear();
+            //
+            // **`Pending` and not `None`**, which is not what it should be and
+            // is what it was: this was `self.frames.clear()`, and a pane that
+            // is in neither table reserves a titlebar's worth of room for a
+            // frame that is not coming. So `decoration = "none"` only takes
+            // effect for windows opened *after* it -- those go through
+            // `insert`, which marks them properly. That is half of #90, it is
+            // reproduced here deliberately, and the one-word fix belongs in
+            // the commit that fixes it rather than in the one that moved it.
+            let framed: Vec<PaneId> = panes
+                .iter()
+                .filter(|pane| pane.decoration().is_some())
+                .map(Pane::id)
+                .collect();
+            for id in framed {
+                if let Some(pane) = panes.get_mut(id) {
+                    pane.set_frame(Frame::Pending);
+                }
+            }
             return true;
         }
         let path = qml_path(self.style.as_deref());
-        let existing: Vec<(PaneId, (i32, i32))> = self
-            .frames
+        // Measured first and rebuilt after, because each new frame is sized
+        // from the one it replaces. Collected for the same reason the
+        // `frames.iter()` this replaces was: the walk cannot be holding the
+        // panes while the loop writes to them.
+        let existing: Vec<(PaneId, (i32, i32))> = panes
             .iter()
-            .map(|(id, frame)| (*id, frame.client_size()))
+            .filter_map(|pane| Some((pane.id(), pane.decoration()?.client_size())))
             .collect();
         for (id, (width, height)) in existing {
             match Decoration::new(&path, width, height) {
                 Ok(fresh) => {
-                    self.frames.insert(id, fresh);
+                    if let Some(pane) = panes.get_mut(id) {
+                        pane.set_frame(Frame::Styled(fresh));
+                    }
                 }
                 Err(err) => {
                     tracing::error!(?err, "could not load the new decoration, leaving it bare");
-                    self.frames.remove(&id);
+                    if let Some(pane) = panes.get_mut(id) {
+                        pane.set_frame(Frame::Pending);
+                    }
                 }
             }
         }
         true
     }
 
-    pub(crate) fn insert(&mut self, id: PaneId, width: i32, height: i32) {
-        if self.frames.contains_key(&id) {
+    /// Build this pane's frame, unless it has one or the style says not to.
+    pub(crate) fn insert(&mut self, panes: &mut Panes, id: PaneId, width: i32, height: i32) {
+        let Some(pane) = panes.get_mut(id) else {
+            // No pane to give it to. Unreachable from every call site, all of
+            // which hold a live pane -- and the reason a `Decoration` is not
+            // built first and placed after: a frame built for a pane that has
+            // gone is a Qt scene nothing will ever free.
+            return;
+        };
+        if matches!(pane.frame(), Frame::Styled(_)) {
             return;
         }
         if bare(self.style.as_deref()) {
-            self.bare.insert(id);
+            pane.set_frame(Frame::None);
             return;
         }
-        self.bare.remove(&id);
+        // Cleared *before* the build, which is where `self.bare.remove(&id)`
+        // stood. It matters only in the failure arm below, and there it is the
+        // other half of #90: a pane that was bare and whose new frame will not
+        // load ends up `Pending` -- reserving room for a frame that is not
+        // coming -- rather than back where it started. Kept, so that this
+        // commit changes nothing; #90 changes it on purpose.
+        pane.set_frame(Frame::Pending);
         match Decoration::new(&qml_path(self.style.as_deref()), width, height) {
-            Ok(decoration) => {
-                self.frames.insert(id, decoration);
-            }
+            Ok(decoration) => pane.set_frame(Frame::Styled(decoration)),
             Err(err) => {
                 // An undecorated window is worse than a decorated one and much
                 // better than no window.
@@ -720,30 +753,47 @@ impl Decorations {
         }
     }
 
-    /// Drop every frame whose pane has gone.
-    pub(crate) fn retain(&mut self, keep: impl Fn(PaneId) -> bool) {
-        let before = self.frames.len();
-        self.frames.retain(|id, _| keep(*id));
-        self.bare.retain(|id| keep(*id));
-        let dropped = before - self.frames.len();
-        if dropped > 0 {
-            tracing::debug!(dropped, "dropped window frames with their panes");
+    /// This pane will never have a frame: a client drawing its own, or an
+    /// override-redirect menu. Not the same as not having one *yet*, which is
+    /// what decides whether room is still reserved for one.
+    ///
+    /// Unconditional, where `bare.insert(id)` left an existing frame standing.
+    /// The two tables could say "framed" and "bare" at once and nothing could
+    /// act on it: `insets_of` read `frames` first, so `bare` was ignored. No
+    /// caller could reach that state either — each of the three either has a
+    /// pane that has never been framed or calls `remove` on the line above.
+    pub(crate) fn set_bare(&mut self, panes: &mut Panes, id: PaneId) {
+        if let Some(pane) = panes.get_mut(id) {
+            pane.set_frame(Frame::None);
         }
-    }
-
-    /// This pane will never have a frame. See the `bare` field.
-    pub(crate) fn set_bare(&mut self, id: PaneId) {
-        self.bare.insert(id);
     }
 
     /// It may have a frame again — leaving fullscreen, or a client changing
     /// its mind about drawing its own.
-    pub(crate) fn unset_bare(&mut self, id: PaneId) {
-        self.bare.remove(&id);
+    ///
+    /// Back to *pending*, not to a frame: this only lifts the ban, and the
+    /// caller follows it with `insert` to build one. A pane that already has a
+    /// frame keeps it, which is what `bare.remove` did — the scene must not be
+    /// dropped by a call that was never about it.
+    pub(crate) fn unset_bare(&mut self, panes: &mut Panes, id: PaneId) {
+        if let Some(pane) = panes.get_mut(id)
+            && matches!(pane.frame(), Frame::None)
+        {
+            pane.set_frame(Frame::Pending);
+        }
     }
 
-    pub(crate) fn remove(&mut self, id: PaneId) {
-        if self.frames.remove(&id).is_some() {
+    /// Drop this pane's frame, if it has one.
+    ///
+    /// To `Pending` rather than `None`, because that is what `frames.remove`
+    /// left behind: the pane is in neither table, so room is still reserved.
+    /// Both callers follow it with `set_bare`, which is what actually says
+    /// "and none is coming".
+    pub(crate) fn remove(&mut self, panes: &mut Panes, id: PaneId) {
+        if let Some(pane) = panes.get_mut(id)
+            && matches!(pane.frame(), Frame::Styled(_))
+        {
+            pane.set_frame(Frame::Pending);
             tracing::debug!("dropped a window frame");
         }
     }
@@ -751,109 +801,6 @@ impl Decorations {
     /// Which decoration is in use, if a script chose one.
     pub(crate) fn style(&self) -> Option<&str> {
         self.style.as_deref()
-    }
-
-    /// The live scene a pane's frame is drawn from.
-    ///
-    /// The last reason this table is still the authority. A `Decoration` owns
-    /// a Qt scene, which is not `Clone` and of which there is exactly one — so
-    /// the readers that want the decoration *itself* rather than a fact about
-    /// it (drawing it, giving it the pointer, taking its button presses, its
-    /// pre-maximise rectangle) cannot move onto the pane until the decoration
-    /// is **moved** there. That is Task 4. Everything that only wants to know
-    /// what the frame *is* has already gone: see `Solium::insets_of`.
-    pub(crate) fn get_mut(&mut self, id: PaneId) -> Option<&mut Decoration> {
-        self.frames.get_mut(&id)
-    }
-
-    /// How many frames are being kept. For leak diagnostics: this should
-    /// return to what it was once every window is closed.
-    ///
-    /// Deliberately still counting the *table* and not the panes. The two
-    /// agree for every live pane, which is what makes counting panes look
-    /// equivalent — but an entry left behind by a pane that has gone belongs
-    /// to neither, and that entry is the leak this number exists to show.
-    pub(crate) fn len(&self) -> usize {
-        self.frames.len()
-    }
-
-    /// What the tables say this pane's frame is.
-    ///
-    /// The shadow half of the strangler: the value a pane is given after every
-    /// write to `frames` or `bare`, so that the pane's own answer is derived
-    /// from the authority rather than worked out a second time beside it. A
-    /// writer that forgets to call this leaves a pane disagreeing with the
-    /// tables, which is exactly what the next task's assertion is for.
-    ///
-    /// **`frames` is asked first, on purpose.** That is the order
-    /// `Solium::insets_of` reads them in, so a pane in both tables shadows as
-    /// `Styled` here for the same reason it reserves a frame's insets there.
-    /// Reproducing today's precedence is the point; correcting it would be a
-    /// behaviour change wearing a refactor's clothes.
-    pub(crate) fn frame_of(&self, id: PaneId) -> crate::pane::Frame {
-        if let Some(decoration) = self.frames.get(&id) {
-            return crate::pane::Frame::Styled(decoration.insets());
-        }
-        if self.bare.contains(&id) {
-            return crate::pane::Frame::None;
-        }
-        // In neither table. Not yet built -- which includes the two ways that
-        // can be permanent and look temporary: a decoration whose QML would not
-        // load (`insert` logs "leaving it bare" and does not mark it so), and a
-        // window that was already framed when the style became `none`
-        // (`set_style` clears `frames` and marks nothing). Both keep reserving
-        // room for a frame that is not coming. Shadowed as it stands.
-        crate::pane::Frame::Pending
-    }
-
-    /// The tables and the pane must agree about this pane's frame.
-    ///
-    /// The other half of the strangler, and the reason the readers can be
-    /// moved over one at a time instead of all at once: every reader that now
-    /// asks the *pane* checks first that the tables would have said the same,
-    /// so a writer that forgot to shadow is a failed assertion at the moment
-    /// it is read rather than a window with the wrong shape three tasks later.
-    ///
-    /// It checks **agreement, not correctness**. Two of the ways a pane lands
-    /// in neither table are permanent rather than temporary (see `frame_of`),
-    /// and in both the tables and the pane agree and are wrong together. This
-    /// will not catch them, and is not meant to.
-    ///
-    /// Debug-only, and it exists for exactly as long as both answers do: Task
-    /// 4 deletes it with the tables.
-    #[cfg(debug_assertions)]
-    pub(crate) fn agree(&self, id: PaneId, pane: &crate::pane::Pane) {
-        // Named rather than compared as values because `Frame` is not `Eq` --
-        // and should not be, once it owns a `Decoration` -- and because a
-        // failure that reads `"styled" != "none"` says what went wrong.
-        let table = if self.frames.contains_key(&id) {
-            "styled"
-        } else if self.bare.contains(&id) {
-            "none"
-        } else {
-            "pending"
-        };
-        let owned = match pane.frame() {
-            crate::pane::Frame::Styled(_) => "styled",
-            crate::pane::Frame::None => "none",
-            crate::pane::Frame::Pending => "pending",
-        };
-        debug_assert_eq!(table, owned, "pane {id:?} disagrees with the tables");
-
-        // And, for a framed pane, *how much* it reserves. A writer that
-        // replaced one decoration with another and forgot to shadow leaves
-        // both answers reading "styled" and only the numbers apart -- which is
-        // the whole of what `insets_of` returns, so the classification check
-        // above would pass while every layout using it was wrong.
-        if let (Some(decoration), crate::pane::Frame::Styled(insets)) =
-            (self.frames.get(&id), pane.frame())
-        {
-            debug_assert_eq!(
-                decoration.insets(),
-                *insets,
-                "pane {id:?} holds insets the table has moved on from"
-            );
-        }
     }
 }
 
@@ -954,41 +901,90 @@ mod tests {
         assert_eq!(Action::parse(""), None);
     }
 
-    /// A pane with no client and no history. Nothing here builds a
-    /// `Decoration` — that wants a Qt scene, and so a GPU and a display.
-    #[cfg(debug_assertions)]
-    fn undecorated_pane() -> crate::pane::Pane {
-        crate::pane::Pane::loading(
+    /// One pane, with no client and no frame. Nothing here builds a
+    /// `Decoration` — that wants a Qt scene, and so a GPU and a display — so
+    /// what these can reach is every transition that does *not* build one.
+    /// The rest is `dev/wirecheck`'s, and the compositor's.
+    fn one_pane() -> (Panes, PaneId) {
+        let mut panes = Panes::default();
+        let id = panes.open(Pane::loading(
             "kitty",
             None,
             Rectangle::new((0, 0).into(), (300, 200).into()),
             PathBuf::new(),
             None,
             std::time::Duration::ZERO,
-        )
+        ));
+        (panes, id)
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    fn a_pane_nobody_has_decorated_agrees_with_the_empty_tables() {
-        // Both answers read "pending": in neither table, and `Frame::Pending`
-        // by default. The agreeing case has to be asserted too, or the test
-        // below only proves that *something* panics.
-        let pane = undecorated_pane();
-        Decorations::default().agree(pane.id(), &pane);
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "disagrees with the tables")]
-    fn the_assertion_bites_when_a_writer_forgets_to_shadow() {
-        // Exactly what a missed writer looks like: `set_bare` ran, and the
-        // pane was never told. Asserted because a `debug_assert` that cannot
-        // fire and one that never has to are indistinguishable from a green
-        // gate, and this one is the whole safety net under Task 2.
-        let pane = undecorated_pane();
+    fn a_pane_that_will_never_have_a_frame_says_so_rather_than_waiting() {
+        // The distinction the two tables existed to make, and the one that is
+        // easiest to lose in one value: `None` reserves nothing, `Pending`
+        // reserves a titlebar for a frame that is still coming. A menu marked
+        // bare must not sit under a strip of dead space for ever.
+        let (mut panes, id) = one_pane();
         let mut decorations = Decorations::default();
-        decorations.set_bare(pane.id());
-        decorations.agree(pane.id(), &pane);
+        assert!(matches!(
+            panes.get(id).map(Pane::frame),
+            Some(Frame::Pending)
+        ));
+
+        decorations.set_bare(&mut panes, id);
+        assert!(matches!(panes.get(id).map(Pane::frame), Some(Frame::None)));
+
+        // And back to *pending*, not to a frame. `unset_bare` only lifts the
+        // ban; the `insert` that follows it is what builds anything.
+        decorations.unset_bare(&mut panes, id);
+        assert!(matches!(
+            panes.get(id).map(Pane::frame),
+            Some(Frame::Pending)
+        ));
+    }
+
+    #[test]
+    fn dropping_a_frame_nobody_built_leaves_the_pane_where_it_was() {
+        // `remove` was `frames.remove(&id)`, which did not touch `bare`. So a
+        // pane that will never have a frame is still one afterwards -- and the
+        // two callers that mean "and none is coming" say so by calling
+        // `set_bare` on the next line, which is why this must not.
+        let (mut panes, id) = one_pane();
+        let mut decorations = Decorations::default();
+        decorations.set_bare(&mut panes, id);
+        decorations.remove(&mut panes, id);
+        assert!(matches!(panes.get(id).map(Pane::frame), Some(Frame::None)));
+    }
+
+    #[test]
+    fn a_window_opened_while_the_style_is_none_is_bare_from_the_start() {
+        // The half of #90 that works, pinned because the half that does not is
+        // one line away in the same function: a window opened *after*
+        // `decoration = "none"` goes through `insert`, which marks it, while
+        // one already framed when the style changed falls to `Pending` and
+        // keeps reserving room. See `set_style`'s bare arm.
+        if std::env::var_os("SOLIUM_DECORATION").is_some() {
+            // `bare()` reads the environment before the style, so a session
+            // that set it decides this rather than the test does.
+            return;
+        }
+        let (mut panes, id) = one_pane();
+        let mut decorations = Decorations::default();
+        assert!(decorations.set_style(&mut panes, Some("none".to_owned())));
+        decorations.insert(&mut panes, id, 300, 200);
+        assert!(matches!(panes.get(id).map(Pane::frame), Some(Frame::None)));
+    }
+
+    #[test]
+    fn a_style_that_has_not_changed_rebuilds_nothing() {
+        // The early return, which is load-bearing rather than an
+        // optimisation: `reload` calls `set_style(None)` and then
+        // `set_style(style)` precisely to defeat it, and every other caller
+        // relies on it to leave live Qt scenes alone.
+        let (mut panes, _) = one_pane();
+        let mut decorations = Decorations::default();
+        assert!(!decorations.set_style(&mut panes, None));
+        assert!(decorations.set_style(&mut panes, Some("top".to_owned())));
+        assert!(!decorations.set_style(&mut panes, Some("top".to_owned())));
     }
 }
