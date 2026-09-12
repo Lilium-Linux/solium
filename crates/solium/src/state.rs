@@ -367,7 +367,8 @@ pub(crate) struct Solium {
     /// pastes nothing at all.
     pub(crate) primary_selection_state: PrimarySelectionState,
 
-    /// Every decorated window's frame, drawn by us from QML.
+    /// How windows are framed: which QML draws a frame, and the building of
+    /// one. The frames themselves are on the panes they are drawn around.
     pub(crate) decorations: Decorations,
 
     /// What the pointer should look like right now.
@@ -2648,8 +2649,9 @@ impl Solium {
             tracing::info!(program, "gave up on an application that never arrived");
             // Forgotten first, then reported: a layout hearing that a window
             // closed will lay out immediately, and it should not be laying out
-            // around a window that is already gone. Everything else keyed by
-            // the pane goes with it at the next `sync_panes`.
+            // around a window that is already gone. Its frame and its timers
+            // go here with it -- fields of the pane rather than entries in a
+            // table waiting for the next `sync_panes` to sweep them.
             self.panes.remove(id);
             self.trigger_close(id);
         }
