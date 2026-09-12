@@ -736,11 +736,6 @@ impl Decorations {
         self.bare.insert(id);
     }
 
-    /// Whether this pane is deliberately without a frame.
-    pub(crate) fn is_bare(&self, id: PaneId) -> bool {
-        self.bare.contains(&id)
-    }
-
     /// It may have a frame again — leaving fullscreen, or a client changing
     /// its mind about drawing its own.
     pub(crate) fn unset_bare(&mut self, id: PaneId) {
@@ -758,22 +753,28 @@ impl Decorations {
         self.style.as_deref()
     }
 
-    pub(crate) fn get(&self, id: PaneId) -> Option<&Decoration> {
-        self.frames.get(&id)
-    }
-
+    /// The live scene a pane's frame is drawn from.
+    ///
+    /// The last reason this table is still the authority. A `Decoration` owns
+    /// a Qt scene, which is not `Clone` and of which there is exactly one — so
+    /// the readers that want the decoration *itself* rather than a fact about
+    /// it (drawing it, giving it the pointer, taking its button presses, its
+    /// pre-maximise rectangle) cannot move onto the pane until the decoration
+    /// is **moved** there. That is Task 4. Everything that only wants to know
+    /// what the frame *is* has already gone: see `Solium::insets_of`.
     pub(crate) fn get_mut(&mut self, id: PaneId) -> Option<&mut Decoration> {
         self.frames.get_mut(&id)
     }
 
     /// How many frames are being kept. For leak diagnostics: this should
     /// return to what it was once every window is closed.
+    ///
+    /// Deliberately still counting the *table* and not the panes. The two
+    /// agree for every live pane, which is what makes counting panes look
+    /// equivalent — but an entry left behind by a pane that has gone belongs
+    /// to neither, and that entry is the leak this number exists to show.
     pub(crate) fn len(&self) -> usize {
         self.frames.len()
-    }
-
-    pub(crate) fn contains(&self, id: PaneId) -> bool {
-        self.frames.contains_key(&id)
     }
 
     /// What the tables say this pane's frame is.
@@ -803,6 +804,56 @@ impl Decorations {
         // (`set_style` clears `frames` and marks nothing). Both keep reserving
         // room for a frame that is not coming. Shadowed as it stands.
         crate::pane::Frame::Pending
+    }
+
+    /// The tables and the pane must agree about this pane's frame.
+    ///
+    /// The other half of the strangler, and the reason the readers can be
+    /// moved over one at a time instead of all at once: every reader that now
+    /// asks the *pane* checks first that the tables would have said the same,
+    /// so a writer that forgot to shadow is a failed assertion at the moment
+    /// it is read rather than a window with the wrong shape three tasks later.
+    ///
+    /// It checks **agreement, not correctness**. Two of the ways a pane lands
+    /// in neither table are permanent rather than temporary (see `frame_of`),
+    /// and in both the tables and the pane agree and are wrong together. This
+    /// will not catch them, and is not meant to.
+    ///
+    /// Debug-only, and it exists for exactly as long as both answers do: Task
+    /// 4 deletes it with the tables.
+    #[cfg(debug_assertions)]
+    pub(crate) fn agree(&self, id: PaneId, pane: &crate::pane::Pane) {
+        // Named rather than compared as values because `Frame` is not `Eq` --
+        // and should not be, once it owns a `Decoration` -- and because a
+        // failure that reads `"styled" != "none"` says what went wrong.
+        let table = if self.frames.contains_key(&id) {
+            "styled"
+        } else if self.bare.contains(&id) {
+            "none"
+        } else {
+            "pending"
+        };
+        let owned = match pane.frame() {
+            crate::pane::Frame::Styled(_) => "styled",
+            crate::pane::Frame::None => "none",
+            crate::pane::Frame::Pending => "pending",
+        };
+        debug_assert_eq!(table, owned, "pane {id:?} disagrees with the tables");
+
+        // And, for a framed pane, *how much* it reserves. A writer that
+        // replaced one decoration with another and forgot to shadow leaves
+        // both answers reading "styled" and only the numbers apart -- which is
+        // the whole of what `insets_of` returns, so the classification check
+        // above would pass while every layout using it was wrong.
+        if let (Some(decoration), crate::pane::Frame::Styled(insets)) =
+            (self.frames.get(&id), pane.frame())
+        {
+            debug_assert_eq!(
+                decoration.insets(),
+                *insets,
+                "pane {id:?} holds insets the table has moved on from"
+            );
+        }
     }
 }
 
