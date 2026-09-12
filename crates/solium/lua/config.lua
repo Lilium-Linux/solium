@@ -32,6 +32,19 @@ local defaults = {
     --     wallpaper = "~/Pictures/whatever.png",
     --     wallpaper = false,
     --
+    -- A *list* gives each workspace its own background, and it travels with
+    -- that workspace: `workspaces.lua` puts it in the same selection as the
+    -- desk's windows, so one animation carries both and the wallpaper stops
+    -- being left behind when you switch.
+    --
+    --     wallpaper = { "~/Pictures/one.png", "~/Pictures/two.png" },
+    --
+    -- Fewer pictures than workspaces cycles. It costs one screen-sized
+    -- rasterisation per desk you have actually visited, per monitor, which is
+    -- why a single image stays a single static surface: every desk sharing one
+    -- picture makes a wallpaper that slides pixel-identical to one that does
+    -- not, so it would be memory spent on nothing to look at.
+    --
     -- `~` is expanded. The image is cropped to fill the screen rather than
     -- fitted, so nothing is letterboxed.
     --

@@ -11,6 +11,7 @@
 -- something and *that* is the bug to fix -- not this file.
 
 local monitors = require("monitors")
+local workspaces = require("workspaces")
 
 local overview = { active = false }
 
@@ -24,7 +25,16 @@ function overview.enter()
         return
     end
 
-    local windows = sol.windows()
+    -- The desk in front of you, and not every desk at once.
+    --
+    -- A workspace is a *selection* now: its windows are carried a screen away
+    -- by the group they are in, and a window's own transform composes with its
+    -- desk's rather than replacing it. So a grid slot handed to a window on
+    -- workspace 3 is a slot on workspace 3's desk, which is two screens to the
+    -- right -- it would be laid out perfectly and drawn where nobody can see
+    -- it. Overview is about what is in front of you, which is also what
+    -- `tiling` and `scrolling` have always taken it to mean.
+    local windows = workspaces.visible()
     if #windows == 0 then
         -- Nothing to show, so nothing is entered: a mode with no way out is
         -- worse than a key that did nothing.
