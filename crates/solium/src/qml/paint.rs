@@ -478,6 +478,13 @@ impl Gpu {
         size: (i32, i32),
         scale: f64,
     ) -> Option<()> {
+        // Qt's share of the frame on the GPU path, and the driver's underneath
+        // it: a rebind if the size moved, a render, a fence wait and an
+        // `import_dmabuf`. The whole of what a cache miss owes, which is
+        // precisely what is worth being able to see -- see `pacing::Phase::Qml`
+        // and `Kept`, whose entire reason to exist is how expensive this is.
+        let _qml = crate::pacing::span(crate::pacing::Phase::Qml);
+        crate::pacing::scene_rendered();
         let rendered = self.render(scene, size, scale);
         // Unconditional, and underneath every way out of the call above,
         // including the paths that failed. Rendering leaves Qt's context on the
@@ -748,6 +755,11 @@ impl Gpu {
             // for the same thing again: an allocation that failed because the
             // GPU was momentarily full heals itself without anything having to
             // notice.
+            // Counted before the call rather than after it, so a rebind that
+            // *fails* is still counted: it costs the allocation either way, and
+            // a failure repeats on every frame afterwards -- which is exactly
+            // the shape of thing the count is there to make visible.
+            crate::pacing::scene_rebound();
             scene.rebind_sized(size.0, size.1, scale)?;
             self.bound = size;
             // The texture in hand is *not* cleared here, and that is the whole

@@ -1229,12 +1229,20 @@ impl Scene {
     /// are the previous frame's and do not need re-uploading.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn render(&mut self) -> Result<Rendered<'_>> {
+        // Qt's share of the frame, on the software path: the whole of the scene
+        // graph rasterised into a `QImage`. The copy out of that image and the
+        // upload of it are the compositor's and the driver's respectively, and
+        // are measured where they happen -- see `pacing::Phase::Qml`.
+        let _qml = crate::pacing::span(crate::pacing::Phase::Qml);
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
         let status = unsafe { ffi::solium_qml_scene_render(self.scene) };
         if status == 0 {
             return Err(anyhow!("the QML scene failed to render"));
         }
         let changed = status != UNCHANGED;
+        if changed {
+            crate::pacing::scene_rendered();
+        }
 
         let mut stride: c_int = 0;
         // SAFETY: the scene rendered, so its image exists.
