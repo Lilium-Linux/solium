@@ -4258,9 +4258,15 @@ mod tests {
         // asked for, on every side, so that a bar along the left and a border
         // are the same mechanism -- was asserted here against a `Styled` arm
         // carrying a plain `Insets`. That arm carries the `Decoration` itself
-        // now, which is a live Qt scene: there is no way to build one without
-        // a GPU and a display, and so no way to write the case here. It is one
-        // delegation, `decoration.insets()`, and what it delegates to is read
-        // once at construction and never written again.
+        // now, and `Decoration::new` is private to `decoration.rs`, so the case
+        // cannot be written here.
+        //
+        // It *can* be written there, and is: `decoration.rs`'s tests build real
+        // frames. The reason this file does not reach over and do the same is
+        // not that a frame needs a GPU and a display -- it does not, and this
+        // comment said so for a while. It is that `solium_qml_start` assigns
+        // the one `QGuiApplication` without a lock, so the tests that bring Qt
+        // up share a mutex, and that mutex is in the module where they live.
+        // A second, unsynchronised starter in another module is a data race.
     }
 }

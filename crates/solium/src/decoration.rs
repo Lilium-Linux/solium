@@ -901,10 +901,20 @@ mod tests {
         assert_eq!(Action::parse(""), None);
     }
 
-    /// One pane, with no client and no frame. Nothing here builds a
-    /// `Decoration` — that wants a Qt scene, and so a GPU and a display — so
-    /// what these can reach is every transition that does *not* build one.
-    /// The rest is `dev/wirecheck`'s, and the compositor's.
+    /// One pane, with no client and no frame.
+    ///
+    /// A `Decoration` **can** be built from here, which is worth stating
+    /// because it was written down twice that it could not: the claim was that
+    /// a frame wants a Qt scene and so a GPU and a display. It wants Qt, and
+    /// nothing else. `solium_qml_start` brings the software host up on the
+    /// `offscreen` QPA platform with the `software` Quick backend — see
+    /// `qml/host.cpp`, where both are `qputenv`ed before the `QGuiApplication`
+    /// — because no window is ever created and the scene renders into a
+    /// `QImage`. That is the same headless path `--check-qml` uses. Measured in
+    /// the gate's container: `top.qml` builds and reads back `insets.top = 32`.
+    ///
+    /// What is still out of reach here is *drawing* one, which wants a
+    /// `GlesRenderer`. That is `dev/wirecheck`'s, and the compositor's.
     fn one_pane() -> (Panes, PaneId) {
         let mut panes = Panes::default();
         let id = panes.open(Pane::loading(
@@ -916,6 +926,83 @@ mod tests {
             std::time::Duration::ZERO,
         ));
         (panes, id)
+    }
+
+    /// Run a test body on the one thread in this process that touches Qt.
+    ///
+    /// **Not a nicety, and not about racing.** `qml::start`'s own first line
+    /// says Qt has to come up on the thread that renders, and a `QQmlEngine`
+    /// means it: the engine belongs to whichever thread created it, and a scene
+    /// built from it on another one dies on
+    ///
+    /// ```text
+    /// QQmlEngine: Illegal attempt to connect to QQuickMouseArea(…) that is in
+    /// a different thread than the QML engine QQmlEngine(…)
+    /// ```
+    ///
+    /// which is a `qFatal`. Qt aborts, so it is not one test failing — it is
+    /// the whole binary going down on `SIGABRT`, and with no tracing subscriber
+    /// installed the message that says why never reaches anyone. Measured: two
+    /// frames built in two `#[test]`s pass one at a time and abort the run at
+    /// `--test-threads=2`, which is the default.
+    ///
+    /// `cargo test` hands every test an arbitrary worker thread, so the fix is
+    /// not a lock — a lock serialises the work without pinning it — but a
+    /// thread of our own that all of it is handed to. Which is what the
+    /// compositor does: one render thread, and Qt lives on it. Jobs are taken
+    /// one at a time, so this serialises them as well.
+    ///
+    /// A panic is carried back and resumed here, so an assertion inside reads
+    /// as that assertion failing on the test that wrote it.
+    fn on_the_qt_thread(work: impl FnOnce() + Send + 'static) {
+        type Job = Box<dyn FnOnce() + Send>;
+        static QT: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> =
+            std::sync::OnceLock::new();
+
+        let sender = QT.get_or_init(|| {
+            let (sender, receiver) = std::sync::mpsc::channel::<Job>();
+            std::thread::spawn(move || {
+                // Until the channel closes, which is when the process ends.
+                for job in receiver {
+                    job();
+                }
+            });
+            std::sync::Mutex::new(sender)
+        });
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let job: Job = Box::new(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+            // The receiver is on a live test thread waiting on it; there is
+            // nothing useful to do here if it has gone.
+            let _ = done.send(outcome);
+        });
+
+        let sender = sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(sender.send(job).is_ok(), "the Qt thread is gone");
+        drop(sender);
+
+        match finished.recv() {
+            Ok(Ok(())) => (),
+            Ok(Err(panicked)) => std::panic::resume_unwind(panicked),
+            Err(gone) => std::panic::resume_unwind(Box::new(format!(
+                "the Qt thread went without saying why: {gone}"
+            ))),
+        }
+    }
+
+    /// Whether this session has already decided which decoration to use.
+    ///
+    /// `SOLIUM_QML_TITLEBAR` replaces the path outright and `SOLIUM_DECORATION`
+    /// is read before the style, so either one turns a test that builds a frame
+    /// into a test of whatever that variable points at — a file that may not
+    /// exist, or `none`, which builds nothing at all. Tests share a process and
+    /// an environment, so the answer is to stand down rather than to unset it.
+    fn the_environment_has_already_chosen() -> bool {
+        std::env::var_os("SOLIUM_QML_TITLEBAR").is_some()
+            || std::env::var_os("SOLIUM_DECORATION").is_some()
     }
 
     #[test]
@@ -986,5 +1073,185 @@ mod tests {
         assert!(!decorations.set_style(&mut panes, None));
         assert!(decorations.set_style(&mut panes, Some("top".to_owned())));
         assert!(!decorations.set_style(&mut panes, Some("top".to_owned())));
+    }
+
+    #[test]
+    fn a_pane_cannot_be_framed_and_bare_at_once() {
+        // The illegal state, taken through the one mutator that could have
+        // written it, on a pane with a real frame on it.
+        //
+        // It was two tables: `frames: HashMap<PaneId, Decoration>` and `bare:
+        // HashSet<PaneId>`, and nothing stopped a pane being in both.
+        // `insets_of` read `frames` first, so a pane in both was framed and its
+        // `bare` was silently ignored — and `set_bare` was `bare.insert(id)`,
+        // which left an existing frame standing, so this call is exactly how
+        // that state would have been written.
+        //
+        // There is nowhere for it to go now. `Frame` is an enum, a pane holds
+        // one, and the `Frame::None` this writes *drops* the `Decoration` it
+        // replaces. "Still has a scene" and "will never have a frame" cannot
+        // both be true, because they are the same field.
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let (mut panes, id) = one_pane();
+            let mut decorations = Decorations::default();
+            decorations.insert(&mut panes, id, 300, 200);
+            assert!(
+                panes.get(id).and_then(Pane::decoration).is_some(),
+                "the claim is about a pane that really is framed, so building \
+                 one has to have worked -- if this is what failed, Qt did not \
+                 come up, not the thing under test"
+            );
+
+            decorations.set_bare(&mut panes, id);
+
+            assert!(
+                matches!(panes.get(id).map(Pane::frame), Some(Frame::None)),
+                "and marking it bare is unconditional: a frame does not survive \
+                 a call whose whole meaning is that there will never be one"
+            );
+            assert!(
+                panes.get(id).and_then(Pane::decoration).is_none(),
+                "the scene is gone, not standing behind a flag that no reader \
+                 looked at"
+            );
+        });
+    }
+
+    #[test]
+    fn a_reload_rebuilds_a_frame_rather_than_dropping_it() {
+        // What `Solium::reload` does to every window that is open while it runs
+        // — and until now the only thing standing behind it was the comment on
+        // `set_style`. Nothing re-creates a frame on its own: they are built
+        // once, when a client negotiates its decoration mode, so a reload that
+        // *dropped* them instead of rebuilding them would leave every open
+        // window bare until it was reopened. The window that is open during a
+        // reload is the one being worked in.
+        //
+        // The sequence below is `reload`'s, line for line: clear the QML cache,
+        // read the style back, set it to `None` and then to what it was. The
+        // two calls are how it defeats `set_style`'s "nothing changed" guard —
+        // see `a_style_that_has_not_changed_rebuilds_nothing`, which is the
+        // other half of this.
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            // Three panes, because a reload has to leave two of them alone.
+            // Only the first is ever framed.
+            let (mut panes, framed) = one_pane();
+            let slot = Rectangle::new((0, 0).into(), (300, 200).into());
+            let bare_pane = panes.open(Pane::loading(
+                "menu",
+                None,
+                slot,
+                PathBuf::new(),
+                None,
+                std::time::Duration::ZERO,
+            ));
+            let waiting = panes.open(Pane::loading(
+                "firefox",
+                None,
+                slot,
+                PathBuf::new(),
+                None,
+                std::time::Duration::ZERO,
+            ));
+
+            let mut decorations = Decorations::default();
+            assert!(decorations.set_style(&mut panes, Some("top".to_owned())));
+            decorations.insert(&mut panes, framed, 300, 200);
+            // A client drawing its own decorations, or an override-redirect menu.
+            decorations.set_bare(&mut panes, bare_pane);
+            // `waiting` is left as it was born: a client that has not arrived.
+
+            if let Some(decoration) = panes.get_mut(framed).and_then(Pane::decoration_mut) {
+                // What a rendered frame would have left behind, so that the rebuild
+                // below is measured at a real size rather than at the 1x1 a frame
+                // that has never been drawn reports. Realism and not an assertion:
+                // the frame that comes back has its own `buffer_size` of zero
+                // again, so there is nothing here that can read the size it was
+                // rebuilt at.
+                decoration.buffer_size = (300, 200 + TITLEBAR_HEIGHT);
+                // And something only *this* `Decoration` knows, so that "there is
+                // still a frame" can be told apart from "there is still the same
+                // frame". A freshly built one carries `Shown::default()`.
+                decoration.tell(
+                    &Look {
+                        title: "before the reload",
+                        focused: true,
+                        pointer_inside: false,
+                    },
+                    300,
+                    200,
+                );
+            }
+            assert_eq!(
+                panes
+                    .get(framed)
+                    .and_then(Pane::decoration)
+                    .map(|frame| frame.shown.title.as_str()),
+                Some("before the reload"),
+                "the claim is about a pane that really is framed, so building one \
+                 has to have worked -- if this is what failed, Qt did not come up, \
+                 not the thing under test"
+            );
+
+            // `Solium::reload`, from here down.
+            crate::qml::clear_cache();
+            let style = decorations.style().map(ToOwned::to_owned);
+
+            assert!(
+                decorations.set_style(&mut panes, None),
+                "the first of the two"
+            );
+            assert!(
+                panes.get(framed).and_then(Pane::decoration).is_some(),
+                "and the first of the two must not be the call that drops it. \
+                 `None` names the *default* decoration, not the absence of one, so \
+                 this half is a rebuild as well -- if it cleared instead, the call \
+                 below would walk the panes and find nothing left to rebuild, and \
+                 every open window would be bare until it was reopened"
+            );
+
+            assert!(decorations.set_style(&mut panes, style), "and the second");
+
+            assert!(
+                panes.get(framed).and_then(Pane::decoration).is_some(),
+                "a window that was framed before a reload is framed after it"
+            );
+            assert_eq!(
+                panes
+                    .get(framed)
+                    .and_then(Pane::decoration)
+                    .map(|frame| frame.shown.title.as_str()),
+                Some(""),
+                "and it is a different `Decoration`, built from the file as it now \
+                 reads. Rebuilding rather than keeping is the whole point of the \
+                 two calls: a reload that held on to the scenes it already had \
+                 would not show an edited decoration until every window was \
+                 reopened, which is the same defect as dropping them wearing \
+                 better clothes"
+            );
+
+            // The other two panes are what pins the walk. `set_style` filters on
+            // `Pane::decoration()`, and an inverted filter would hand a frame to a
+            // pane that must never have one -- an override-redirect menu with a
+            // titlebar on it -- while still passing every assertion above.
+            assert!(
+                matches!(panes.get(bare_pane).map(Pane::frame), Some(Frame::None)),
+                "a pane that will never have a frame is not given one by a reload"
+            );
+            assert!(
+                matches!(panes.get(waiting).map(Pane::frame), Some(Frame::Pending)),
+                "and a client that has not arrived yet is still waiting, with its \
+                 room still reserved"
+            );
+
+            // Deliberately not asserted: which pane is rebuilt first. That order
+            // was `HashMap`'s and is now the stacking order, and nothing reads it.
+        });
     }
 }
