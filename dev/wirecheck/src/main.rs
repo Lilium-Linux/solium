@@ -70,6 +70,7 @@ unsafe extern "C" {
     fn solium_qml_scene_set_int(scene: *mut c_void, name: *const c_char, value: c_int);
     fn solium_qml_scene_get_int(scene: *mut c_void, name: *const c_char) -> c_int;
     fn solium_qml_scene_free(scene: *mut c_void);
+    fn solium_qml_scene_animating(scene: *const c_void) -> c_int;
     fn solium_qml_tick(elapsed_ms: i64);
 
     fn wirecheck_belief_names_scene(scene: *mut c_void) -> c_int;
@@ -471,6 +472,28 @@ fn tick(clock: &mut i64, by: i64) {
 /// however long the clock has been running.
 fn spin_of(scene: *mut c_void) -> i32 {
     unsafe { solium_qml_scene_get_int(scene, c"spin".as_ptr()) }
+}
+
+/// Whether the host says an animation is running inside this scene.
+///
+/// The compositor's whole animation loop now hangs on this one answer -- a
+/// decoration is drawn again only while `dirty || animating` -- and it is a
+/// claim about *Qt*, not about anything in this repository: that a
+/// `QQuickAbstractAnimation` driven by a `Behavior` or by `NumberAnimation on`
+/// sets its own `running` property, and clears it when it is done. Nothing in
+/// `cargo test` can ask, because asking needs a live Qt.
+///
+/// Checked both ways in this run and that is the whole of its negative control,
+/// so it needs no edited copy of anything: `quadrants.qml` holds an animation
+/// with `loops: Animation.Infinite` and must read 1 for the length of the run,
+/// while `cursor.qml` and `decorations/top.qml` are built and rendered with
+/// nothing written to them and must read 0. A stub answering "yes" fails on the
+/// second, one answering "no" fails on the first, and an answer read off the
+/// process rather than the scene -- `QAnimationDriver::isRunning()`, which is
+/// the obvious wrong answer -- fails on the second too, because by then
+/// `quadrants.qml` has been animating for the whole run.
+fn animating(scene: *mut c_void) -> bool {
+    unsafe { solium_qml_scene_animating(scene.cast_const()) != 0 }
 }
 
 /// Advance that counter by one, and hand back what it now reads.
@@ -1025,6 +1048,20 @@ fn main() -> Result<()> {
                  so this case cannot tell a restarted animation from a continuing one"
             ));
         }
+        // And the host's own answer about the same animation, which is what the
+        // compositor actually gates its frames on. `spin` moving says an
+        // animation ran; this says the scene will *admit* to it on a tick that
+        // moved no pixel, which is the only tick where the answer decides
+        // anything. See `animating` for why the pair of readings here and in
+        // the scene case below is this instrument's negative control.
+        if !animating(counting) {
+            return Err(anyhow!(
+                "`solium_qml_scene_animating` says nothing is animating in a scene whose \
+                 `spin` just moved {spun_before} units under an `Animation.Infinite`. Every \
+                 QML animation in the compositor stops dead one tick after it stops changing \
+                 pixels if this is wrong"
+            ));
+        }
 
         // The new buffer, wiped through the compositor's own renderer before Qt
         // is asked for a frame in it -- the same reason the frame loop wipes. A
@@ -1356,6 +1393,27 @@ fn main() -> Result<()> {
         if nonzero == 0 {
             return Err(anyhow!(
                 "the {what} scene rendered into a buffer this wiped first and left it empty"
+            ));
+        }
+        // The other half of the animation census, and the half that makes it an
+        // instrument rather than a rubber stamp. Neither of these two has been
+        // written to, so neither has a `Behavior` to have started and nothing
+        // in either is animating -- `cursor.qml` has no animation in it at all.
+        // They must read 0 here while `quadrants.qml` reads 1 above, in the
+        // same process, with the same driver, on the same tick budget.
+        //
+        // Which is also what rules out answering this from `QAnimationDriver`:
+        // it is one object for the process, `quadrants.qml` has been animating
+        // since long before this loop, and Qt restarts a hand-advanced driver
+        // on every tick whether or not anything is registered. A process-wide
+        // answer is `true` on this line, for ever, and a compositor gated on it
+        // never sleeps again.
+        if animating(built) {
+            return Err(anyhow!(
+                "`solium_qml_scene_animating` says the {what} scene ({file}) is animating, \
+                 and nothing has written a property on it or declared an animation in it. \
+                 An answer that is always yes keeps every monitor redrawing at full rate \
+                 for as long as the compositor is running"
             ));
         }
         kept_scenes.push(built);

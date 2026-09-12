@@ -96,6 +96,51 @@ here; what stops that regressing is that `Scene::gpu_sized` and
 `Scene::with_properties` are now private to `qml.rs` and `Scene::for_host` is the
 only way in from outside it.
 
+**And whether the host can say that a scene is animating — both ways.**
+`solium_qml_scene_animating`, which is what `render::Drawn` gates the next frame
+on. It is a claim about *Qt* and not about anything in this repository: that a
+`QQuickAbstractAnimation` driven by a `Behavior` or a `NumberAnimation on` sets
+its own `running` property and clears it when it is done. `cargo test` cannot
+ask — asking needs a live Qt — and the compositor's whole animation loop hangs
+on the answer, because Qt's dirty flag means "something changed", which a
+running animation does not do on every tick.
+
+The two readings are taken in one run, in one process, against one driver, and
+**they are this instrument's negative control**: no edited copy of anything is
+needed, because a stub cannot satisfy both. `quadrants.qml` carries an animation
+with `loops: Animation.Infinite` and is asserted to read 1, in the resize case,
+on the same line that already asserts `spin` has moved. `cursor.qml` and
+`decorations/top.qml` are built and rendered in the scene case above with
+nothing written to them, and are asserted to read 0.
+
+Verified by stubbing `solium_qml_scene_animating`'s return in a control copy,
+both ways, with the harness otherwise untouched:
+
+```
+return 1;  ->  Error: `solium_qml_scene_animating` says the cursor scene
+               (crates/solium/qml/cursor.qml) is animating, and nothing has
+               written a property on it or declared an animation in it.
+return 0;  ->  Error: `solium_qml_scene_animating` says nothing is animating in
+               a scene whose `spin` just moved 80 units under an
+               `Animation.Infinite`.
+```
+
+The `cursor.qml` reading is the one that matters most, and it is there to rule
+out a specific wrong answer rather than a hypothetical one.
+`QAnimationDriver::isRunning()` reads like the direct question and is not: a
+driver is one object for the whole process, `quadrants.qml` has been animating
+since long before the scene case runs, and `QAnimationDriver::advanceAnimation`
+ends in `QUnifiedTimer::localRestart`, which starts the driver again whenever it
+is not running **and nothing is registered at all** (qtbase v6.11.2,
+`src/corelib/animation/qabstractanimation.cpp:333`). So a process-wide answer is
+`true` on that line for ever, and a compositor gated on it never sleeps again —
+measured separately at 400 frames of 400, never idle, once anything else damaged
+the screen while an animation was finishing. This case fails on it.
+
+Neither assertion allocates a GL object, so the teardown control's destroyed
+list is unmoved by them: re-measured after adding this case, C-1 still reports
+the same `[('b', 1), ('f', 1), ('r', 1), ('b', 2), ('r', 2), ('b', 3)]`.
+
 **The pointer's route: the dmabuf read back and uploaded as memory.** The one
 scene that does not reach the screen as a texture. smithay reaches a DRM cursor
 plane only through `RenderElement::underlying_storage`, whose two variants are
