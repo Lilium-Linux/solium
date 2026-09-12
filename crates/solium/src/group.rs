@@ -239,6 +239,47 @@ impl Selection {
     }
 }
 
+/// Turn the names a script wrote into the selection the compositor holds.
+///
+/// The one seam between `sol.group`'s strings and [`Member`], and it is a free
+/// function rather than a method on `Solium` because it needs exactly one thing
+/// from the compositor — the name table — and a test proving the shipped
+/// workspace slide carries its wallpaper has to make the same conversion the
+/// compositor makes, not a second one that could drift from it.
+///
+/// A surface that has never been declared is dropped rather than interned: the
+/// name table is what makes an id stable across a redeclaration, and feeding it
+/// every misspelling a configuration contains would make it grow on typos. A
+/// selection naming a surface that does not exist selects nothing, which is what
+/// it means.
+pub(crate) fn selection_of(
+    asked: &crate::script::Selection,
+    surfaces: &crate::scripted::Surfaces,
+) -> Selection {
+    let mut members =
+        Vec::with_capacity(asked.windows.len() + asked.surfaces.len() + asked.monitors.len());
+    members.extend(asked.windows.iter().copied().map(Member::Window));
+    for name in &asked.surfaces {
+        match surfaces.named(name) {
+            Some(id) => members.push(Member::Surface(id)),
+            None => tracing::warn!(
+                surface = name,
+                "a selection names a surface nothing has declared"
+            ),
+        }
+    }
+    members.extend(
+        asked
+            .monitors
+            .iter()
+            .map(|name| Member::Monitor(name.as_str().into())),
+    );
+    Selection {
+        members,
+        on: asked.on.as_deref().map(Into::into),
+    }
+}
+
 /// A named selection, and where it is being carried.
 #[derive(Debug)]
 struct Group {
@@ -843,5 +884,402 @@ mod tests {
             travel: None,
         };
         assert!(group.shift(at(0)).is_identity());
+    }
+}
+
+/// **The shipped workspace slide, driven end to end without a compositor.**
+///
+/// The mechanism above is arithmetic, and arithmetic can be right about a thing
+/// nobody is using. What this module answers is the question the whole item was
+/// ordered for: *does `workspaces.lua` still leave the wallpaper behind?*
+///
+/// So it runs the **real shipped scripts** — `wallpaper.lua` and
+/// `workspaces.lua`, from `lua/`, resolved through the same `package.path` the
+/// compositor sets — against a snapshot of two monitors' worth of windows,
+/// drains the commands they produce, and applies them to a real
+/// [`Groups`] and a real [`crate::scripted::Surfaces`] through
+/// [`selection_of`], which is the same conversion `Solium::apply` makes.
+///
+/// What is *not* here is a renderer: a `Frame` is where a group's shift meets a
+/// window, and `Shift::apply` has its own tests for that. What these prove is
+/// the half no unit test could — that the scripts people actually run name the
+/// wallpaper and the windows in one selection, and carry them with one call.
+#[cfg(test)]
+mod desk {
+    use super::{Groups, Shift, selection_of};
+    use crate::{
+        script::{Command, MonitorInfo, Rect, Scripts, Snapshot, WindowInfo},
+        scripted::Surfaces,
+    };
+    use std::time::Duration;
+
+    /// A configuration and an entry point, written where a test can reach them.
+    ///
+    /// `package.path` is set in the script rather than left to `Scripts::load`,
+    /// which prepends the *developer's* `~/.config/solium` — so on a machine
+    /// with a user configuration this would silently test that instead.
+    fn scripts(name: &str, config: &str) -> Scripts {
+        // A directory per test. `cargo test` runs them in one process on
+        // several threads, and two tests sharing one `config.lua` is one test
+        // reading the other's configuration -- which fails in whichever order
+        // the scheduler picks, so it looks like flakiness rather than sharing.
+        let directory = std::env::temp_dir().join(format!("solium-desk-{name}"));
+        let _ = std::fs::create_dir_all(&directory);
+        std::fs::write(directory.join("config.lua"), config).expect("writing the config");
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {here:?} .. \"/?.lua;\" .. {shipped:?} .. \"/?.lua\"\n\
+                 require(\"wallpaper\")\n\
+                 require(\"workspaces\")\n",
+                here = directory.to_string_lossy(),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        )
+        .expect("writing the entry point");
+        Scripts::load(&entry).expect("loading the shipped scripts")
+    }
+
+    /// Two workspaces in a row, each with its own picture, on one screen.
+    ///
+    /// `spread = 1.0` so the arithmetic below is a screen width exactly and a
+    /// failure reads as a wrong place rather than a wrong number.
+    const CONFIG: &str = r#"
+        return {
+            wallpaper = { "one.png", "two.png" },
+            workspaces = {
+                per_monitor = true,
+                arrangement = "horizontal",
+                columns = 2,
+                rows = 1,
+                spread = 1.0,
+                motion = { duration = 300, easing = "linear" },
+                follow_new_windows = true,
+            },
+        }
+    "#;
+
+    const WIDTH: f64 = 2560.0;
+
+    fn monitor() -> MonitorInfo {
+        MonitorInfo {
+            name: "DP-1".to_owned(),
+            area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: WIDTH,
+                h: 1440.0,
+            },
+            whole: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: WIDTH,
+                h: 1440.0,
+            },
+            scale: 1.0,
+            focused: true,
+            primary: true,
+            transform: "normal".to_owned(),
+        }
+    }
+
+    fn window(id: u64, focused: bool) -> WindowInfo {
+        WindowInfo {
+            id,
+            rect: Rect {
+                x: 100.0,
+                y: 100.0,
+                w: 800.0,
+                h: 600.0,
+            },
+            drawn: Rect::default(),
+            title: format!("window {id}"),
+            focused,
+            monitor: "DP-1".to_owned(),
+        }
+    }
+
+    /// The desktop as a handler sees it, with `focused` holding the keyboard.
+    ///
+    /// Which window is focused is not decoration here: `workspaces.send` sends
+    /// *the focused window*, and that is the only way a test can put one window
+    /// on one desk and another on another.
+    fn snapshot(ids: &[u64], focused: u64) -> Snapshot {
+        Snapshot {
+            windows: ids.iter().map(|id| window(*id, *id == focused)).collect(),
+            monitors: vec![monitor()],
+            work_area: monitor().area,
+            ..Snapshot::default()
+        }
+    }
+
+    /// The compositor's half of a dispatch, less everything that needs a screen.
+    ///
+    /// `Command::Group`, `PresentGroup` and `ClearGroup` are applied exactly as
+    /// `Solium::apply` applies them, through the same `selection_of`. The
+    /// displacement `declare` reports is collected rather than acted on: putting
+    /// a window back where it was is `present::rebase`'s job and needs a pane,
+    /// which is tested where panes exist.
+    #[derive(Default)]
+    struct Desktop {
+        surfaces: Surfaces,
+        groups: Groups,
+        displaced: Vec<(u64, (f64, f64))>,
+    }
+
+    impl Desktop {
+        fn apply(&mut self, commands: Vec<Command>, now: Duration) {
+            for command in commands {
+                match command {
+                    Command::Surface(declared) => {
+                        self.surfaces.declare(*declared);
+                    }
+                    Command::SurfaceGone(name) => {
+                        self.surfaces.remove(&name);
+                    }
+                    Command::Group {
+                        name, selection, ..
+                    } => {
+                        let moved = match selection {
+                            Some(selection) => {
+                                let selection = selection_of(&selection, &self.surfaces);
+                                self.groups.declare(&name, selection, now)
+                            }
+                            None => self.groups.forget(&name, now),
+                        };
+                        self.displaced.extend(moved);
+                    }
+                    Command::PresentGroup {
+                        name,
+                        to,
+                        animation,
+                    } => {
+                        self.groups
+                            .present(&name, to, now, animation.duration, animation.easing);
+                    }
+                    Command::ClearGroup { name, animation } => {
+                        self.groups
+                            .clear(&name, now, animation.duration, animation.easing);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        /// Where a desk's wallpaper is being carried, by the name the shipped
+        /// `wallpaper.lua` gives it.
+        fn background(&self, desk: usize, now: Duration) -> (f64, f64) {
+            let name = format!("wallpaper-{desk}");
+            let id = self
+                .surfaces
+                .named(&name)
+                .unwrap_or_else(|| panic!("the shipped wallpaper.lua declared no {name}"));
+            self.groups.on_surface(id, "DP-1", now).offset()
+        }
+
+        fn window(&self, id: u64, now: Duration) -> (f64, f64) {
+            self.groups.on_window(id, Some("DP-1"), now).offset()
+        }
+    }
+
+    /// **`workspaces.lua` stops leaving the wallpaper behind.**
+    ///
+    /// The acceptance test for this whole item, and the reason it was ordered
+    /// where it was. Two windows, one on each desk, and a wallpaper per desk.
+    /// Switching to workspace 2 must carry desk 1 off to the left — *including
+    /// its background* — and bring desk 2's in from the right, together, at
+    /// every instant and not merely at the end.
+    ///
+    /// Sampled across the animation rather than at its ends, because two things
+    /// animated separately on two clocks agree perfectly at both ends and
+    /// nowhere in between, and "in between" is the whole of what anybody sees.
+    #[test]
+    fn the_shipped_workspace_slide_carries_its_wallpaper() {
+        let mut scripts = scripts("slide", CONFIG);
+        let mut desktop = Desktop::default();
+        // The configuration's own top level: `wallpaper.lua` declaring two
+        // surfaces, one per desk.
+        desktop.apply(scripts.startup().commands, Duration::ZERO);
+        assert!(
+            desktop.surfaces.named("wallpaper-1").is_some()
+                && desktop.surfaces.named("wallpaper-2").is_some(),
+            "a list of images should be one background per desk"
+        );
+
+        // The monitor arrives, which is when the desks can first be built.
+        let commands = scripts.monitors_changed(snapshot(&[1, 2], 1)).commands;
+        desktop.apply(commands, Duration::ZERO);
+        assert!(
+            !desktop.groups.is_empty(),
+            "the shipped workspaces.lua declared no selections at all"
+        );
+
+        // One window pinned to each desk. A window nobody has assigned is on
+        // whatever its monitor is showing, so both would follow the view and
+        // there would be nothing to be left behind.
+        let commands = scripts.key("super+shift+1", snapshot(&[1, 2], 1)).commands;
+        desktop.apply(commands, Duration::ZERO);
+        let commands = scripts.key("super+shift+2", snapshot(&[1, 2], 2)).commands;
+        desktop.apply(commands, Duration::ZERO);
+
+        // And now switch to workspace 2.
+        let at = Duration::from_millis(1000);
+        let outcome = scripts.key("super+2", snapshot(&[1, 2], 1));
+        assert!(
+            outcome.handled,
+            "super+2 is not bound by the shipped scripts"
+        );
+        desktop.apply(outcome.commands, at);
+
+        let mut travelled = false;
+        for step in 0..=10 {
+            let now = at + Duration::from_millis(step * 30);
+            let leaving = desktop.window(1, now);
+            let arriving = desktop.window(2, now);
+            assert_eq!(
+                leaving,
+                desktop.background(1, now),
+                "at {step}/10 the window on desk 1 was at {leaving:?} and its \
+                 wallpaper somewhere else: the slide has left it behind again"
+            );
+            assert_eq!(
+                arriving,
+                desktop.background(2, now),
+                "at {step}/10 desk 2's window and its wallpaper were apart"
+            );
+            travelled |= leaving.0 != 0.0;
+        }
+        assert!(travelled, "nothing moved; this test proves nothing");
+
+        let landed = at + Duration::from_millis(300);
+        assert_eq!(
+            desktop.window(1, landed),
+            (-WIDTH, 0.0),
+            "desk 1 should be exactly one screen to the left"
+        );
+        assert_eq!(
+            desktop.background(1, landed),
+            (-WIDTH, 0.0),
+            "and its wallpaper with it"
+        );
+        assert_eq!(
+            desktop.window(2, landed),
+            (0.0, 0.0),
+            "desk 2 is the one in view"
+        );
+        assert_eq!(desktop.background(2, landed), (0.0, 0.0));
+    }
+
+    /// **Sending a window to another workspace is a membership change, and the
+    /// compositor is told how far it has to be put back.**
+    ///
+    /// `super+shift+2` used to slide, because `workspaces.apply` presented every
+    /// window to an absolute rectangle. As a selection it is a window leaving one
+    /// group for another, and the difference between the two offsets would land
+    /// on it in one frame. The displacement reported here is what
+    /// `present::rebase` spends to keep it looking where it is.
+    #[test]
+    fn sending_a_window_to_another_desk_reports_the_distance_it_has_to_slide() {
+        let mut scripts = scripts("send", CONFIG);
+        let mut desktop = Desktop::default();
+        desktop.apply(scripts.startup().commands, Duration::ZERO);
+        let commands = scripts.monitors_changed(snapshot(&[1], 1)).commands;
+        desktop.apply(commands, Duration::ZERO);
+        desktop.displaced.clear();
+
+        let commands = scripts.key("super+shift+2", snapshot(&[1], 1)).commands;
+        desktop.apply(commands, Duration::from_millis(500));
+        assert_eq!(
+            desktop.displaced,
+            vec![(1, (-WIDTH, 0.0))],
+            "the window has to be held a screen to the left of where its new \
+             desk puts it, and animate from there"
+        );
+    }
+
+    /// **A single wallpaper is still a single wallpaper, in no selection.**
+    ///
+    /// The shipped default, and the case that must not start paying for this.
+    /// One picture behind every desk belongs to the *monitor*, so it does not
+    /// travel — and a slide that carried it would be pixel-identical to one that
+    /// did not, for the price of one screen-sized rasterisation per workspace.
+    #[test]
+    fn one_picture_belongs_to_the_monitor_and_does_not_travel() {
+        let mut scripts = scripts(
+            "one-picture",
+            r#"
+            return {
+                wallpaper = "solium",
+                workspaces = {
+                    per_monitor = true, arrangement = "horizontal",
+                    columns = 2, rows = 1, spread = 1.0,
+                    motion = { duration = 300, easing = "linear" },
+                    follow_new_windows = true,
+                },
+            }
+            "#,
+        );
+        let mut desktop = Desktop::default();
+        desktop.apply(scripts.startup().commands, Duration::ZERO);
+        assert!(
+            desktop.surfaces.named("wallpaper").is_some(),
+            "one image is one surface, under the name it has always had"
+        );
+        assert!(
+            desktop.surfaces.named("wallpaper-1").is_none(),
+            "and no per-desk ones to pay for"
+        );
+
+        let commands = scripts.monitors_changed(snapshot(&[1], 1)).commands;
+        desktop.apply(commands, Duration::ZERO);
+        // Pinned to desk 1, or it would simply follow the view.
+        let commands = scripts.key("super+shift+1", snapshot(&[1], 1)).commands;
+        desktop.apply(commands, Duration::ZERO);
+        let commands = scripts.key("super+2", snapshot(&[1], 1)).commands;
+        desktop.apply(commands, Duration::ZERO);
+
+        let wallpaper = desktop
+            .surfaces
+            .named("wallpaper")
+            .expect("the wallpaper is declared");
+        let landed = Duration::from_millis(300);
+        assert_eq!(
+            desktop
+                .groups
+                .on_surface(wallpaper, "DP-1", landed)
+                .offset(),
+            (0.0, 0.0),
+            "the monitor's own background stayed where it was"
+        );
+        assert_eq!(
+            desktop.window(1, landed),
+            (-WIDTH, 0.0),
+            "and the desk still slid"
+        );
+    }
+
+    /// **The desk in view is carried by nothing at all.**
+    ///
+    /// The cheap path, asserted through the shipped scripts rather than argued:
+    /// `workspaces.lua` clears the selection in front of you rather than
+    /// presenting it at zero, so it is released when it lands and a window on it
+    /// is a window in a group with no transform — which `Shift::apply` returns
+    /// untouched.
+    #[test]
+    fn the_desk_in_view_is_carried_by_nothing() {
+        let mut scripts = scripts("in-view", CONFIG);
+        let mut desktop = Desktop::default();
+        desktop.apply(scripts.startup().commands, Duration::ZERO);
+        let commands = scripts.monitors_changed(snapshot(&[1], 1)).commands;
+        desktop.apply(commands, Duration::ZERO);
+
+        assert_eq!(desktop.window(1, Duration::ZERO), (0.0, 0.0));
+        assert_eq!(
+            desktop.groups.on_window(1, Some("DP-1"), Duration::ZERO),
+            Shift::NONE,
+            "a window on the desk you are looking at must be identical to a \
+             window on a desktop that has never heard of workspaces"
+        );
     }
 }

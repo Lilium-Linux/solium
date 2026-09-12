@@ -698,6 +698,111 @@ mod tests {
         assert!((mapped.y - 150.0).abs() < 1e-6, "got {}", mapped.y);
     }
 
+    /// **A window whose group changed is drawn where it was, and animates.**
+    ///
+    /// The other half of `group::Groups::declare`'s displacement: that says how
+    /// far, this puts it back. Without it, `super+shift+2` — a shipped binding
+    /// that used to slide, because `workspaces.lua` presented every window to an
+    /// absolute rectangle — becomes a teleport the moment a desk is a selection,
+    /// since the difference between two desks' offsets lands on the window
+    /// between one frame and the next.
+    #[test]
+    fn a_window_that_changes_group_starts_where_it_was_drawn() {
+        let real = rect(100, 200, 800, 600);
+        let pane = crate::pane::Pane::loading(
+            "kitty",
+            None,
+            real,
+            std::path::PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
+
+        // It was in no selection; it is now in one that is a screen to the left.
+        let now = Duration::from_millis(500);
+        rebase(
+            &pane,
+            real,
+            (2560.0, 0.0),
+            now,
+            Duration::from_millis(300),
+            Curve::Linear,
+        );
+
+        let start = frame(&pane, real, now);
+        assert_eq!(
+            start.rect.loc.x,
+            100.0 + 2560.0,
+            "its own transform has to hold it a screen to the right of where              its new desk puts it, so the sum is where it already looked"
+        );
+        assert_eq!(start.rect.size, real.to_f64().size, "and not resize it");
+        assert_eq!(
+            frame(&pane, real, Duration::from_millis(650)).rect.loc.x,
+            100.0 + 1280.0,
+            "half way, linearly"
+        );
+        assert_eq!(
+            frame(&pane, real, Duration::from_millis(800)).rect,
+            real.to_f64(),
+            "and home, so the desk's offset is the whole of where it is drawn"
+        );
+        assert!(
+            !settle(&pane, Duration::from_millis(800)),
+            "and then it stops being transformed at all: a window that came              from nowhere goes back to costing nothing"
+        );
+        assert_eq!(
+            frame(&pane, real, Duration::from_millis(900)).rect,
+            real.to_f64()
+        );
+    }
+
+    /// **A rebase keeps the destination a window was already heading for.**
+    ///
+    /// The case that would be silently lost by rebuilding the transform from
+    /// real geometry: a window in a mode — an overview thumbnail, a card in a
+    /// switcher — that changes desk mid-animation is still going to its slot,
+    /// and only the route changes.
+    #[test]
+    fn a_rebase_does_not_throw_away_where_a_window_was_going() {
+        let real = rect(0, 0, 400, 300);
+        let pane = crate::pane::Pane::loading(
+            "kitty",
+            None,
+            real,
+            std::path::PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
+        let slot = Frame::real(rect(1000, 40, 200, 150));
+        present(
+            &pane,
+            real,
+            slot,
+            Duration::ZERO,
+            Duration::from_millis(200),
+            Curve::Linear,
+        );
+
+        rebase(
+            &pane,
+            real,
+            (-500.0, 0.0),
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Curve::Linear,
+        );
+        assert_eq!(
+            frame(&pane, real, Duration::from_millis(100)).rect.loc.x,
+            500.0 - 500.0,
+            "half way to the slot, held 500 to the left of it"
+        );
+        assert_eq!(
+            frame(&pane, real, Duration::from_millis(300)).rect,
+            slot.rect,
+            "and it still arrives at the slot the mode chose"
+        );
+    }
+
     /// **A blend keeps the destination's anchor from the first frame.**
     ///
     /// The shape's parameters are `crates/effects`' business and it has its own

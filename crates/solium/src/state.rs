@@ -841,44 +841,6 @@ impl Solium {
         })
     }
 
-    /// Turn the names a script wrote into the selection the compositor holds.
-    ///
-    /// A surface that has never been declared is dropped rather than interned:
-    /// the id table is what makes an id stable across a redeclaration, and
-    /// feeding it every misspelling a configuration contains would make it grow
-    /// on typos. A group naming a surface that does not exist selects nothing,
-    /// which is what it means.
-    fn selection(&self, asked: &crate::script::Selection) -> crate::group::Selection {
-        let mut members =
-            Vec::with_capacity(asked.windows.len() + asked.surfaces.len() + asked.monitors.len());
-        members.extend(
-            asked
-                .windows
-                .iter()
-                .copied()
-                .map(crate::group::Member::Window),
-        );
-        for name in &asked.surfaces {
-            match self.surfaces.named(name) {
-                Some(id) => members.push(crate::group::Member::Surface(id)),
-                None => tracing::warn!(
-                    surface = name,
-                    "a selection names a surface nothing has declared"
-                ),
-            }
-        }
-        members.extend(
-            asked
-                .monitors
-                .iter()
-                .map(|name| crate::group::Member::Monitor(name.as_str().into())),
-        );
-        crate::group::Selection {
-            members,
-            on: asked.on.as_deref().map(Into::into),
-        }
-    }
-
     /// Put back the windows a membership change has just moved.
     ///
     /// **What happens when membership changes while things are animating**, and
@@ -1867,7 +1829,7 @@ impl Solium {
                 } => {
                     let displaced = match selection {
                         Some(selection) => {
-                            let selection = self.selection(&selection);
+                            let selection = crate::group::selection_of(&selection, &self.surfaces);
                             self.groups.declare(&name, selection, now)
                         }
                         None => self.groups.forget(&name, now),

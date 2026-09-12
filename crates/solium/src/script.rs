@@ -2911,6 +2911,71 @@ mod shipped {
         }
     }
 
+    /// **Every surface a shipped selection names is one a shipped script
+    /// declares.**
+    ///
+    /// `sol.group` is the third place a script writes a surface's name down, and
+    /// the quietest of the three. A name nothing has declared is not an error:
+    /// the selection simply does not contain it, so the group is declared, the
+    /// transform is applied, and the wallpaper stays exactly where it was —
+    /// which is the bug this whole item exists to remove, wearing a typo.
+    ///
+    /// Both halves are read as literals, so what this can see is bounded the way
+    /// the module header says. The shipped desks build their surface names from
+    /// a workspace index (`wallpaper.for_desk`), and a name assembled at run time
+    /// is outside this and outside any static check — so the *membership* side
+    /// may legitimately be empty. What is asserted non-empty is the declaration
+    /// side, which proves the scan itself still works on this corpus; a literal
+    /// written into a group tomorrow is checked against it from that day on.
+    #[test]
+    fn every_surface_a_selection_names_is_one_that_is_declared() {
+        let declared: Vec<String> = everywhere("sol.surface(")
+            .into_iter()
+            .map(|(_, _, name)| name)
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "no `sol.surface` declarations found; the scan is broken"
+        );
+
+        // Every literal inside a `surfaces = { ... }` list, with its file.
+        let mut asked: Vec<(String, usize, String)> = Vec::new();
+        for (file, text) in scripts() {
+            for (line, rest) in surface_lists(&text) {
+                for name in quoted(&rest) {
+                    asked.push((file.clone(), line, name));
+                }
+            }
+        }
+        for (file, line, name) in asked {
+            assert!(
+                declared.contains(&name),
+                "{file}:{line} puts surface {name:?} in a selection, and nothing                  declares one by that name. Declared: {declared:?}"
+            );
+        }
+    }
+
+    /// The text of each `surfaces = { ... }` list in a chunk of Lua, with the
+    /// line it starts on.
+    ///
+    /// A list rather than an assignment, so [`named`] cannot see it: there is no
+    /// marker in front of each item, only in front of the whole thing. Single
+    /// line only, which is how every one of them is written and what the whole
+    /// of this module can see.
+    fn surface_lists(text: &str) -> Vec<(usize, String)> {
+        let mut found = Vec::new();
+        for (number, line) in text.lines().enumerate() {
+            let line = code(line);
+            let Some(at) = line.find("surfaces = {") else {
+                continue;
+            };
+            let rest = &line[at..];
+            let end = rest.find('}').unwrap_or(rest.len());
+            found.push((number + 1, rest[..end].to_owned()));
+        }
+        found
+    }
+
     /// **Every decoration the shipped configuration names is one that ships.**
     ///
     /// `decoration.rs`'s `qml_path` turns a bare name into
