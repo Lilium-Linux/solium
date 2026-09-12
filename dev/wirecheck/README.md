@@ -141,6 +141,76 @@ Neither assertion allocates a GL object, so the teardown control's destroyed
 list is unmoved by them: re-measured after adding this case, C-1 still reports
 the same `[('b', 1), ('f', 1), ('r', 1), ('b', 2), ('r', 2), ('b', 3)]`.
 
+**And whether an animation started from rest actually *runs*.** The question
+both of the readings above are blind to, and the one the hardware was still
+failing after them: an animation advanced past its own end in a single tick
+satisfies `dirty` and `solium_qml_scene_animating` perfectly. `dirty` is raised,
+because the value did change; `animating` is `true` on the frame the `Behavior`
+starts and `false` a tick later, because the animation really has finished. The
+compositor then asks for exactly the frames it should, and every one of them
+shows the final value — a titlebar that does not slide out, it is simply there.
+
+So this case reads the animated value itself. `appear.qml` beside this file is
+one property with a `Behavior` on it, sliding 34 units over 260ms on a linear
+curve, mirrored into an `int` so it can be read back out of the object tree. It
+is settled for forty frames, `pointerInside` is written the way
+`Decoration::tell` writes it, and the twenty readings that follow must include
+at least one strictly between the two ends. Not that it *reaches* its end — it
+does that either way, instantly, which is the bug.
+
+**It has to run first, before any other scene exists**, and that is not a
+stylistic choice. Qt zeroes its animation reference only on the edge from *no*
+animations in the process to one (`QUnifiedTimer::startTimers`, qtbase v6.11.2,
+`src/corelib/animation/qabstractanimation.cpp:378-389`), and `quadrants.qml`'s
+`Animation.Infinite` holds that registry open from the moment it is built until
+the process exits. On any later line the edge never happens, every delta is
+16ms, and this case passes with the defect fully present. The precondition is
+asserted through `wirecheck_anything_animating` rather than left to a comment,
+so a case added ahead of it fails loudly instead of quietly making this one
+vacuous.
+
+It also has to settle for long enough that the clock passes the animation's own
+duration. A harness whose clock starts at zero cannot see this defect at all,
+because the bad delta *is* the clock: the forty settling frames put it at 640ms,
+and a desktop where somebody hovers a window has been up for minutes.
+
+**The clock control** — put the driver back to reporting the compositor's
+uptime, which is a two-line diff and touches nothing else:
+
+```sh
+cd dev/wirecheck
+sed -e 's|return m_elapsed - m_origin;|return m_elapsed; /* control */|' \
+    -e 's|^            m_origin = elapsed;$|            /* control */ (void) anything_animating;|' \
+    ../../crates/solium/qml/host.cpp > host-control-clock.cpp
+
+WIRECHECK_HOST_CPP="$PWD/host-control-clock.cpp" cargo build --target-dir target-control-clock
+./target-control-clock/debug/wirecheck   # must fail
+```
+
+```
+  slid, frame by frame: [-34, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  readings strictly between -34 and 0: 0
+Error: the appear animation never took a step: ... from -34 to 0 with nothing
+in between, over 20 frames of a 260ms animation.
+```
+
+against the shipped file's
+
+```
+  slid, frame by frame: [-34, -30, -28, -26, -24, -21, -19, -17, -15, -13, -11, -9, -7, -5, -3, -1, 0, 0, 0, 0]
+  readings strictly between -34 and 0: 15
+```
+
+Both runs print `scene animating = true` on the frame that writes the property.
+That is the point of printing it: the reading the previous case exists for
+separates nothing here, and neither does `dirty`. The control's scene is
+`running` on that frame and settled one tick later, which is exactly what a
+healthy animation that has just finished looks like — because it has.
+
+The scene is kept alive rather than freed, like the two in the scene case below
+and for the same reason — a free here would reach C-1's defect in C-1's own
+ordering, ahead of C-1's census.
+
 **The pointer's route: the dmabuf read back and uploaded as memory.** The one
 scene that does not reach the screen as a texture. smithay reaches a DRM cursor
 plane only through `RenderElement::underlying_storage`, whose two variants are
@@ -527,7 +597,7 @@ call, and that is one line under a size comparison.
 | `WIRECHECK_SCALE`, `WIRECHECK_LOGICAL` | the scale and logical size to run at |
 | `WIRECHECK_FRAMES` | how many frames after the first, default 3 |
 | `WIRECHECK_QML` | the scene to render, default `quadrants.qml` beside this file |
-| `WIRECHECK_HOST_CPP` | a different `host.cpp`, for the controls above |
+| `WIRECHECK_HOST_CPP` | a different `host.cpp`, for the controls above; `host-control-clock.cpp` beside this file is the appear case's |
 | `WIRECHECK_REBUILD_ON_RESIZE` | rebuild the scene on a resize instead of rebinding it — the resize control above |
 | `WIRECHECK_STOP_THE_CLOCK` | stop ticking from the rebind onward — the animation control above |
 | `WIRECHECK_KEEP_RESIZED_SCENE` | do not free the resized scene, so the teardown control reaches C-1 |

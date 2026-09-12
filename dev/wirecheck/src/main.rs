@@ -68,6 +68,7 @@ unsafe extern "C" {
         scale: f64,
     ) -> bool;
     fn solium_qml_scene_set_int(scene: *mut c_void, name: *const c_char, value: c_int);
+    fn solium_qml_scene_set_bool(scene: *mut c_void, name: *const c_char, value: c_int);
     fn solium_qml_scene_get_int(scene: *mut c_void, name: *const c_char) -> c_int;
     fn solium_qml_scene_free(scene: *mut c_void);
     fn solium_qml_scene_animating(scene: *const c_void) -> c_int;
@@ -75,6 +76,7 @@ unsafe extern "C" {
 
     fn wirecheck_belief_names_scene(scene: *mut c_void) -> c_int;
     fn wirecheck_egl_agrees_with(scene: *mut c_void) -> c_int;
+    fn wirecheck_anything_animating() -> c_int;
 
     fn join_readback(
         node: *const c_char,
@@ -496,6 +498,157 @@ fn animating(scene: *mut c_void) -> bool {
     unsafe { solium_qml_scene_animating(scene.cast_const()) != 0 }
 }
 
+/// Does an animation started from a settled desktop actually *run*, or does it
+/// land on its final value in one step?
+///
+/// The question the compositor's animation clock decides, and the one thing
+/// `solium_qml_scene_animating` cannot answer: a scene can say "yes, animating"
+/// on every tick of an animation that is being advanced 650ms at a time and has
+/// therefore already finished. On the hardware that is a titlebar that
+/// sometimes slides out and sometimes is simply *there*, at its final position,
+/// with no animation at all.
+///
+/// Qt's contract for `QAnimationDriver::elapsed()` is "the number of
+/// milliseconds since the animations was started" -- its own driver returns
+/// `d->running ? d->timer.elapsed() : 0`, restarted inside `start()`. It relies
+/// on that: when the process goes from no animations to one,
+/// `QUnifiedTimer::startTimers` zeroes `lastTick` and `driverStartTime` (qtbase
+/// v6.11.2, `src/corelib/animation/qabstractanimation.cpp:378-389`), so the
+/// first delta a brand new animation is given is whatever `elapsed()` reads
+/// right then. A driver reporting the compositor's uptime hands it the whole
+/// uptime, and any animation shorter than the session is over before its first
+/// drawn frame.
+///
+/// Which is why this has to run **first**, before any other scene exists. The
+/// zeroing happens only on the empty-to-non-empty edge, and `quadrants.qml`'s
+/// `Animation.Infinite` holds the registry open from the moment it is built
+/// until the process exits -- so on any later line the reset never happens, the
+/// deltas are all 16ms, and this case would pass with the defect present. The
+/// precondition is asserted through `wirecheck_anything_animating` rather than
+/// left to this comment.
+///
+/// The assertion is that the value passes *through the middle*. Not that it
+/// reaches its end -- it does that either way, instantly, which is the bug --
+/// and not an exact trajectory, which would be a test of Qt's easing curve.
+/// `appear.qml` slides 34 units over 260ms on a linear curve, so with a 16ms
+/// frame roughly sixteen readings must land strictly between the two ends; one
+/// is enough to prove it interpolated.
+///
+/// The scene is kept alive and handed back rather than freed. Freeing it here
+/// would reach C-1's defect in C-1's own ordering, before C-1's census is
+/// taken, which is the same reason the scene case below keeps its two.
+fn appear_animation(
+    gbm: &GbmDevice<DrmDeviceFd>,
+    renderer: &GlesRenderer,
+    clock: &mut i64,
+) -> Result<(*mut c_void, target::Target)> {
+    println!("\n=== an appear animation, on a desktop where nothing else is moving ===");
+    const SIZE: i32 = 64;
+    let buffer = target::allocate(gbm, SIZE, SIZE).context("the appear scene's buffer")?;
+    let (fd, stride, modifier, fourcc) = buffer.as_ffi().context("as_ffi")?;
+    let path = CString::new(
+        repo()
+            .join("dev/wirecheck/appear.qml")
+            .as_os_str()
+            .as_encoded_bytes(),
+    )?;
+    let scene = unsafe {
+        solium_qml_scene_new_gpu(
+            path.as_ptr(),
+            SIZE,
+            SIZE,
+            fd,
+            stride,
+            modifier,
+            fourcc,
+            std::ptr::null(),
+        )
+    };
+    restore(renderer)?;
+    if scene.is_null() {
+        return Err(anyhow!("a GPU host could not build dev/wirecheck/appear.qml"));
+    }
+
+    // A window that has been sitting there. Forty frames of the compositor
+    // drawing and ticking, which is also what puts the clock past this
+    // animation's own duration -- the defect is invisible below it, and a
+    // harness whose clock starts at zero is a harness that cannot see it. Real
+    // uptime when somebody hovers a window is minutes, not milliseconds.
+    let travel = unsafe { solium_qml_scene_get_int(scene, c"travel".as_ptr()) };
+    for _ in 0..40 {
+        tick(clock, FRAME_MS);
+    }
+    let settled = unsafe { solium_qml_scene_get_int(scene, c"slid".as_ptr()) };
+    println!(
+        "  settled after 40 frames: slid = {settled} of -{travel}..0, clock = {clock}ms, \
+         scene animating = {}",
+        animating(scene)
+    );
+    if settled != -travel {
+        return Err(anyhow!(
+            "the appear scene did not settle at its starting value: slid reads {settled}, \
+             want -{travel}. This case measures an animation from rest and there is no rest"
+        ));
+    }
+    // Both preconditions. The scene's own, and the process's -- which is the one
+    // that decides whether this case is testing anything at all.
+    if animating(scene) || unsafe { wirecheck_anything_animating() } != 0 {
+        return Err(anyhow!(
+            "something in this process is already animating before the appear case writes \
+             anything. Qt zeroes its animation reference only on the edge from no animations \
+             to one, so with the registry already open this case cannot fail however broken \
+             the clock is. A scene built ahead of this one is the way that happens"
+        ));
+    }
+
+    // `Decoration::tell`: the property write that starts the `Behavior`.
+    unsafe { solium_qml_scene_set_bool(scene, c"pointerInside".as_ptr(), 1) };
+    // Read where `Drawn::drawing` reads it, before the draw -- and on the write
+    // frame, which is the frame the shipped code already gets right. Recorded
+    // rather than asserted on its own: it was `true` here both before and after
+    // the fix, so it separates nothing, and printing it is what stops the next
+    // reader assuming this case is about that.
+    println!(
+        "  the frame that writes pointerInside: scene animating = {}, slid = {}",
+        animating(scene),
+        unsafe { solium_qml_scene_get_int(scene, c"slid".as_ptr()) }
+    );
+
+    // Twenty frames is 320ms, comfortably past the 260ms the animation lasts.
+    let mut readings = Vec::new();
+    for _ in 0..20 {
+        tick(clock, FRAME_MS);
+        readings.push(unsafe { solium_qml_scene_get_int(scene, c"slid".as_ptr()) });
+    }
+    println!("  slid, frame by frame: {readings:?}");
+    let midway = readings
+        .iter()
+        .filter(|slid| **slid > -travel && **slid < 0)
+        .count();
+    println!("  readings strictly between -{travel} and 0: {midway}");
+    if midway == 0 {
+        return Err(anyhow!(
+            "the appear animation never took a step: `slid` went {:?}, from -{travel} to 0 \
+             with nothing in between, over {} frames of a {}ms animation. The animation was \
+             advanced past its own end in a single tick, so the bar does not slide out -- it \
+             is simply there. `solium_qml_scene_animating` cannot see this: it says `true` \
+             throughout, which is why the compositor draws exactly the frames it should and \
+             every one of them shows the finished value",
+            readings,
+            readings.len(),
+            260,
+        ));
+    }
+    if readings.last() != Some(&0) {
+        return Err(anyhow!(
+            "the appear animation did not finish: `slid` went {readings:?} and ends at {:?} \
+             rather than 0, so the clock is now advancing too slowly rather than too fast",
+            readings.last()
+        ));
+    }
+    Ok((scene, buffer))
+}
+
 /// Advance that counter by one, and hand back what it now reads.
 ///
 /// Deliberately round-trips through the QML item rather than counting here: the
@@ -635,6 +788,20 @@ fn main() -> Result<()> {
             return Err(anyhow!("start_gpu refused"));
         }
     }
+    // ------------------------------------------------------------------
+    // An appear animation, started on a desktop where nothing else is moving.
+    //
+    // First in the run, and it has to be first: the defect it looks for exists
+    // only while the process has *no* animation registered at all, and the very
+    // next scene built below leaves one running for the rest of the run. See
+    // `appear_animation`, which asserts that precondition rather than trusting
+    // this comment to stay true.
+    // Both bindings are held to the end of the run and neither is read again:
+    // the scene is deliberately not freed (see `appear_animation`), and the
+    // buffer under it closes its dmabuf fd when it drops, so it has to outlive
+    // the scene that is still pointed at it.
+    let (_appearing, _appear_buffer) = appear_animation(&gbm, &renderer, &mut clock)?;
+
     let scene_target = target::allocate(&gbm, pixels, pixels).context("target::allocate")?;
     let (fd, stride, modifier, fourcc) = scene_target.as_ffi().context("as_ffi")?;
     let qml = match std::env::var_os("WIRECHECK_QML") {

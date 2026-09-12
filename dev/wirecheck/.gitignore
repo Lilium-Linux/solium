@@ -3,3 +3,5 @@ target-control
 host-control.cpp
 host-control-render.cpp
 target-control-render
+host-control-clock.cpp
+target-control-clock
