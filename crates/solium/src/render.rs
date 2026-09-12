@@ -253,10 +253,15 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // At *its own monitor's* scale. One frame can span monitors at
         // different scales, and a texture taken at 1x and drawn on a 2x screen
         // is the blur this whole change exists to remove.
+        // The anchor is resolved here too, and not merely tested for presence:
+        // a deform aimed at a pane that has closed draws flat, and capturing a
+        // texture for it would be a megabyte a frame spent on a warp that the
+        // draw below has already decided not to do.
         let wanted = window.as_ref().and_then(|window| {
             let outer = state.outer_geometry(window)?;
             let frame = state.drawn(pane, outer);
-            (!frame.matrix.is_identity() || frame.deform.is_some()).then(|| state.scale_of(outer))
+            (!frame.matrix.is_identity() || state.aimed_at(frame.deform).is_some())
+                .then(|| state.scale_of(outer))
         });
         let Some((window, scale)) = window.zip(wanted) else {
             // Nothing warped means nothing to keep. A pane holds the texture
@@ -699,8 +704,15 @@ pub(crate) fn elements(
         // window is rendered flat into a texture first — frame and popups
         // included — and that texture is bent, so the whole window deforms as
         // one thing instead of the client tilting away from its own titlebar.
-        if (!frame.matrix.is_identity() || frame.deform.is_some())
-            && let Some(mesh) = crate::warp::mesh(frame.rect, frame.matrix, frame.deform, scale)
+        //
+        // The deform's anchor is resolved *here*, on the frame that draws it,
+        // because what it is aimed at moves — see `present::Anchor`. An anchor
+        // that resolves to nothing leaves `aimed` empty, and a window with no
+        // matrix then takes the flat path below as if it had never asked for
+        // an effect.
+        let aimed = state.aimed_at(frame.deform);
+        if (!frame.matrix.is_identity() || aimed.is_some())
+            && let Some(mesh) = crate::warp::mesh(frame.rect, frame.matrix, aimed, scale)
             && let Some(texture) = prepared.texture(&window)
         {
             elements.push(Element::Warped(crate::warp::Warp::new(

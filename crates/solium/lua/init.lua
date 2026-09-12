@@ -119,16 +119,6 @@ end)
 
 sol.log("solium configuration loaded")
 
--- A tilted window, to see the compositor draw one as geometry rather than as
--- a rectangle. `rotate_y` turns it about its own vertical axis and
--- `perspective` is the viewer distance in pixels, which is what makes the far
--- edge recede instead of merely narrowing.
--- Dev: the genie. `genie` names the slot the window is pulled into -- a dock
--- icon's rectangle, once there is a dock -- and the compositor bends the
--- window into it: the rows nearest the slot go first, so it folds like a sheet
--- through a letterbox instead of shrinking. `spread` is how much of it is in
--- motion at once. Composes with a transform: add `rotate_y` here and the
--- window tilts while it is sucked in.
 -- Show or hide the Developer Tweaks panel. Nothing without --debug-mode.
 sol.bind("super+shift+d", function()
     require("tweaks").toggle()
@@ -160,18 +150,32 @@ sol.bind("super+shift+r", function()
     sol.reload()
 end)
 
+-- Dev: the genie. `deform` names an effect from `crates/effects` -- there is
+-- one so far -- and `to` is what the window is pulled into. A rect here
+-- because there is no dock yet; with one, `to = { window = id }` would follow
+-- its icon as the icon moves, which a rect read out of this table cannot.
+--
+-- `axis` is which edge leads, so a dock down the side of the screen is
+-- `"left"` and the compositor turns the mesh to match. `spread` is how much of
+-- the window is in motion at once: 0 pulls it in rigidly, larger values draw
+-- the tail out behind it. Composes with a transform -- add `rotate_y` here and
+-- the window tilts while it is sucked in.
 sol.bind("super+m", function()
     local area = sol.monitor()
     for _, window in ipairs(sol.windows()) do
         if window.focused then
             sol.animate({ duration = 520, easing = "inOutCubic" })
             sol.present(window.id, {
-                genie = {
-                    x = area.x + area.w / 2 - 60,
-                    y = area.y + area.h - 24,
-                    width = 120,
-                    height = 24,
+                deform = {
+                    effect = "genie",
+                    axis = "down",
                     spread = 1.4,
+                    to = {
+                        x = area.x + area.w / 2 - 60,
+                        y = area.y + area.h - 24,
+                        w = 120,
+                        h = 24,
+                    },
                 },
             })
             return
@@ -179,6 +183,10 @@ sol.bind("super+m", function()
     end
 end)
 
+-- A tilted window, to see the compositor draw one as geometry rather than as
+-- a rectangle. `rotate_y` turns it about its own vertical axis and
+-- `perspective` is the viewer distance in pixels, which is what makes the far
+-- edge recede instead of merely narrowing.
 sol.bind("super+g", function()
     for _, window in ipairs(sol.windows()) do
         if window.focused then

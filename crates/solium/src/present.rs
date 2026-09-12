@@ -15,10 +15,12 @@
 //!   per window, per subsystem or per script — separate clocks are how modes
 //!   end up animating at subtly different speeds.
 //!
-//! The *timing* lives in `solium-animation`, a crate with no compositor in it,
-//! so curves and springs can be tested and previewed without launching this.
-//! What stays here is the part that needs a compositor: which rectangle a
-//! window is travelling between.
+//! The *timing* lives in `solium-animation` and the *shapes* in
+//! `solium-effects`, both crates with no compositor in them, so curves,
+//! springs and vertex deformations can be tested and previewed without
+//! launching this. What stays here is the part that needs a compositor: which
+//! rectangle a window is travelling between, and which rectangle an effect is
+//! aimed at this frame.
 
 use std::{cell::RefCell, time::Duration};
 
@@ -83,80 +85,76 @@ pub(crate) fn logical(loc: (f64, f64), size: (f64, f64)) -> Rectangle<f64, Logic
     Rectangle::new(loc.into(), size.into())
 }
 
-/// A deformation a rectangle cannot express.
+/// A rectangle in the form `solium-effects` takes.
 ///
-/// A small enum rather than a callback: a deform has to be blended between two
-/// frames, compared for equality, and named by a script, and a closure does
-/// none of those. Each kind says where a point of the window's unit square
-/// ends up and how finely it needs cutting; everything else -- capture,
-/// projection, damage -- is the same code for all of them.
+/// The one seam between the compositor's typed geometry and a crate that has
+/// no dependencies and therefore no Smithay. It is here rather than in the
+/// crate because the conversion is the compositor's problem in both
+/// directions: nothing in `crates/effects` should be able to name `Logical`.
+pub(crate) fn for_effects(rect: Rectangle<f64, Logical>) -> solium_effects::Rect {
+    solium_effects::Rect::new(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h)
+}
+
+/// What a deformation is aimed at.
+///
+/// **An identity, not a rectangle**, and that is the whole of it. A dock icon
+/// moves: it slides as its neighbours open and close, and it is itself being
+/// animated by the same clock. A rectangle read out of a Lua table when the
+/// binding was pressed aims at where that icon was when the animation started,
+/// so a 500 ms genie lands where the icon used to be — the same drift the
+/// design rules already forbid for mirrors.
+///
+/// So the identity is carried and the compositor resolves it once per frame,
+/// in `Solium::aimed_at`. What can be named is deliberately small: a fixed
+/// place on screen, which does not move and is honest about it, and a pane,
+/// which does. `sol.surface` is not here yet because a surface is not
+/// addressable yet — that is the next stage of the plan, "Address: surfaces
+/// and groups become transformable", and this enum is the seam it lands in.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Deform {
-    /// Pulled into a slot like a sheet through a letterbox: the minimise.
-    ///
-    /// `progress` 0 draws the window where it is, 1 has all of it inside
-    /// `slot`. The rows nearest the slot go first, and that lag is the whole
-    /// effect: it bends the sheet instead of shrinking a rectangle. `spread`
-    /// is how much of the window is in motion at once -- 0 pulls it in
-    /// rigidly, larger values draw the tail out behind it.
-    Genie {
-        slot: Rectangle<f64, Logical>,
-        progress: f32,
-        spread: f32,
-    },
+pub(crate) enum Anchor {
+    /// A fixed rectangle in the global logical space. Snapshotted, because
+    /// there is nothing to resolve: the caller is naming a *place* — the
+    /// bottom edge of a monitor, a corner — rather than a thing.
+    Rect(Rectangle<f64, Logical>),
+    /// A pane, by the id scripts hold it as. Resolved to where it is being
+    /// *drawn*, so a genie aimed at a window that is itself animating follows
+    /// it rather than its layout slot.
+    Pane(u64),
+}
+
+/// A deformation a rectangle cannot express, and what it is aimed at.
+///
+/// The shape itself lives in `solium-effects`, which is a crate precisely so
+/// that adding *fold*, *curl* or *page-turn* is a file with unit tests and a
+/// preview slider rather than another arm of an enum in here. What stays on
+/// this side is the half that needs a compositor: the anchor, and resolving it
+/// every frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Deform {
+    /// The named vertex function and its parameters.
+    pub(crate) effect: solium_effects::Deform,
+    /// Where it is pulling the window to, or out of.
+    pub(crate) anchor: Anchor,
+}
+
+/// A deform with its anchor resolved: what the renderer can actually draw.
+///
+/// Separate from [`Deform`] so the resolution cannot be forgotten — there is
+/// no way to hand `warp::mesh` an unresolved anchor, because it does not take
+/// one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Aimed {
+    pub(crate) effect: solium_effects::Deform,
+    /// The far end of the morph, in logical coordinates, this frame.
+    pub(crate) to: Rectangle<f64, Logical>,
 }
 
 impl Deform {
-    /// Where the point at `(u, v)` of the window's unit square is drawn, in
-    /// logical coordinates. `(0, 0)` is its top left corner.
-    pub(crate) fn place(self, rect: Rectangle<f64, Logical>, u: f64, v: f64) -> (f64, f64) {
-        match self {
-            Self::Genie {
-                slot,
-                progress,
-                spread,
-            } => {
-                let spread = f64::from(spread).max(0.0);
-                // Each row runs its own copy of the animation, the rows
-                // furthest from the slot starting last. Smoothstepped per row,
-                // so the sheet arrives at the slot without a crease.
-                let row =
-                    (f64::from(progress) * (1.0 + spread) - (1.0 - v) * spread).clamp(0.0, 1.0);
-                let eased = row * row * (3.0 - 2.0 * row);
-                (
-                    lerp(
-                        rect.loc.x + u * rect.size.w,
-                        slot.loc.x + u * slot.size.w,
-                        eased,
-                    ),
-                    lerp(
-                        rect.loc.y + v * rect.size.h,
-                        slot.loc.y + v * slot.size.h,
-                        eased,
-                    ),
-                )
-            }
-        }
-    }
-
-    /// Columns and rows the mesh needs to look like a curve rather than a
-    /// fan of flat pieces.
-    pub(crate) fn segments(self) -> (u32, u32) {
-        match self {
-            // Across, the taper is linear in `u`, so a handful only matters
-            // when a matrix is in play too. Down is where the bend lives.
-            Self::Genie { .. } => (8, 48),
-        }
-    }
-
     /// The same deform, doing nothing.
     fn at_rest(self) -> Self {
-        match self {
-            Self::Genie { slot, spread, .. } => Self::Genie {
-                slot,
-                progress: 0.0,
-                spread,
-            },
+        Self {
+            effect: self.effect.at_rest(),
+            anchor: self.anchor,
         }
     }
 
@@ -174,43 +172,18 @@ impl Deform {
         }
     }
 
-    /// Blend towards another deform of the same kind.
+    /// Blend towards another deform.
     ///
-    /// Between different kinds there is no meaningful halfway, so the
-    /// destination wins outright; a script wanting a hand-off animates one out
-    /// and the next one in.
+    /// The parameters blend; the anchor does not. There is no identity half
+    /// way between one dock icon and another, and a rectangle interpolated
+    /// between two of them is a place neither of them is — which is the
+    /// snapshot problem back again, wearing a blend. The destination's anchor
+    /// is what the whole animation aims at, which is what a script asking for
+    /// one means.
     fn mix(self, other: Self, progress: f64) -> Self {
-        match (self, other) {
-            (
-                Self::Genie {
-                    slot: from_slot,
-                    progress: from_progress,
-                    spread: from_spread,
-                },
-                Self::Genie {
-                    slot: to_slot,
-                    progress: to_progress,
-                    spread: to_spread,
-                },
-            ) => Self::Genie {
-                slot: logical(
-                    (
-                        lerp(from_slot.loc.x, to_slot.loc.x, progress),
-                        lerp(from_slot.loc.y, to_slot.loc.y, progress),
-                    ),
-                    (
-                        lerp(from_slot.size.w, to_slot.size.w, progress),
-                        lerp(from_slot.size.h, to_slot.size.h, progress),
-                    ),
-                ),
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "progress and spread are small floats either way"
-                )]
-                progress: lerp(f64::from(from_progress), f64::from(to_progress), progress) as f32,
-                #[expect(clippy::cast_possible_truncation, reason = "as above")]
-                spread: lerp(f64::from(from_spread), f64::from(to_spread), progress) as f32,
-            },
+        Self {
+            effect: self.effect.mix(other.effect, progress),
+            anchor: other.anchor,
         }
     }
 }

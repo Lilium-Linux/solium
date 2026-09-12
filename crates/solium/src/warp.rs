@@ -126,19 +126,26 @@ pub(crate) struct Mesh {
 /// then places that in 3D. Both are optional and they compose, which is what
 /// lets a genie happen to a window that is also tilted.
 ///
+/// The deform arrives with its anchor already resolved to a rectangle — see
+/// `present::Anchor` — because the thing it is aimed at moves, and the frame
+/// being drawn is the only moment its position is known.
+///
 /// Returns `None` when any vertex lands at or behind the viewer: a shape with
 /// one vertex projected from behind is not that shape any more, and drawing it
 /// anyway folds the texture across the screen.
 pub(crate) fn mesh(
     rect: Rectangle<f64, smithay::utils::Logical>,
     matrix: Mat4,
-    deform: Option<crate::present::Deform>,
+    deform: Option<crate::present::Aimed>,
     scale: f64,
 ) -> Option<Mesh> {
+    // The two ends of the morph, in the plain numbers the effects crate takes.
+    let from = crate::present::for_effects(rect);
+    let morph = deform.map(|deform| (deform.effect, crate::present::for_effects(deform.to)));
     // One cell unless a deform asks for more: a matrix alone is exact at the
     // corners, because a projective map takes straight edges to straight
     // edges and the per-vertex `q` carries the rest.
-    let (columns, rows) = deform.map_or((1, 1), crate::present::Deform::segments);
+    let (columns, rows) = morph.map_or((1, 1), |(effect, _)| effect.segments());
     let (centre_x, centre_y) = (
         rect.loc.x + rect.size.w / 2.0,
         rect.loc.y + rect.size.h / 2.0,
@@ -151,9 +158,9 @@ pub(crate) fn mesh(
         let v = f64::from(row) / f64::from(rows);
         for column in 0..=columns {
             let u = f64::from(column) / f64::from(columns);
-            let (x, y) = match deform {
-                Some(deform) => deform.place(rect, u, v),
-                None => (rect.loc.x + u * rect.size.w, rect.loc.y + v * rect.size.h),
+            let (x, y) = match morph {
+                Some((effect, to)) => effect.place(from, to, u, v),
+                None => from.at(u, v),
             };
             #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
             let offset = (((x - centre_x) as f32), ((y - centre_y) as f32));

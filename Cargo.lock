@@ -1675,6 +1675,7 @@ dependencies = [
  "pkg-config",
  "smithay",
  "solium-animation",
+ "solium-effects",
  "solium-layout",
  "tracing",
  "tracing-subscriber",

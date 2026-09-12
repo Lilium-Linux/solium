@@ -719,6 +719,39 @@ impl Solium {
         )
     }
 
+    /// Turn a deform's anchor into the rectangle it is aimed at *this frame*.
+    ///
+    /// The compositor half of `crates/effects`. The crate is handed two
+    /// rectangles and knows nothing about panes — that is what keeps it
+    /// testable without a session — so the identity a script named is resolved
+    /// here, on the frame it is drawn on, and never snapshotted when the
+    /// script ran. A dock icon the user is still opening windows next to is
+    /// somewhere else 500 ms later.
+    ///
+    /// A pane is resolved through [`Self::drawn`] rather than to its layout
+    /// slot, so a genie aimed at a window that is itself animating follows the
+    /// window and not the hole it is leaving. One level deep and no deeper:
+    /// `drawn` reads a pane's own transform and resolves no anchors of its
+    /// own, so two panes aimed at each other cannot recurse.
+    ///
+    /// `None` when the anchor names nothing: the pane has closed, or never
+    /// existed. The caller draws the window flat, which is the failure that
+    /// loses an effect rather than the frame.
+    pub(crate) fn aimed_at(&self, deform: Option<present::Deform>) -> Option<present::Aimed> {
+        let deform = deform?;
+        let to = match deform.anchor {
+            present::Anchor::Rect(rect) => rect,
+            present::Anchor::Pane(id) => {
+                let pane = self.panes.by_script_id(id)?;
+                self.drawn(pane.id(), self.pane_outer(pane)?).rect
+            }
+        };
+        Some(present::Aimed {
+            effect: deform.effect,
+            to,
+        })
+    }
+
     /// Gather the presentation-feedback callbacks committed for this frame.
     ///
     /// Taken *before* the frame is sent, and reported when it has actually been

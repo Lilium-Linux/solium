@@ -1869,30 +1869,97 @@ fn transform_from(options: &Table) -> mlua::Result<Option<Mat4>> {
     Ok(Some(matrix))
 }
 
+/// A Lua table, read as an effect's parameters.
+///
+/// The bridge between `sol.present` and `crates/effects`, which has no
+/// dependencies and so cannot be handed an `mlua::Table`. Each effect asks for
+/// the parameters it has, by name, and defaults the rest -- which is what
+/// makes adding one a file in that crate and nothing here.
+///
+/// A read that errors is reported as absent. `mlua` coerces freely, so the
+/// only way to get an error out of these is a value of a kind that cannot
+/// become a number or a string at all -- a table where a spread should be --
+/// and for that the effect's own default is a better answer than refusing the
+/// whole call.
+struct Given<'a>(&'a Table);
+
+impl solium_effects::Params for Given<'_> {
+    fn number(&self, key: &str) -> Option<f64> {
+        self.0.get::<Option<f64>>(key).ok().flatten()
+    }
+
+    fn word(&self, key: &str) -> Option<String> {
+        self.0.get::<Option<String>>(key).ok().flatten()
+    }
+}
+
 /// Read a deformation out of a `sol.present` options table.
 ///
-/// One key per kind, so a script names the effect rather than describing a
-/// mesh: `genie = { x, y, width, height, progress, spread }`. The rect is the
-/// slot the window is pulled into -- a dock icon's, usually -- and `progress`
-/// defaults to all the way in, since that is what one animates towards.
+/// ```lua
+/// deform = { effect = "genie", axis = "down", spread = 1.4,
+///            to = { x = 600, y = 1040, w = 120, h = 24 } }
+/// ```
+///
+/// The effect is *named* rather than described, and the name is looked up in
+/// the engine rather than matched here -- so an effect added to
+/// `crates/effects` is available to every script the moment it compiles,
+/// exactly as a curve added to `crates/animation` is. Its parameters come out
+/// of the same table and are that effect's business, not this function's.
+///
+/// `to` is the **anchor**: what the window is being pulled into, or drawn out
+/// of. See `present::Anchor` for why naming a thing rather than a rectangle is
+/// the point of the key.
 fn deform_from(options: &Table) -> mlua::Result<Option<crate::present::Deform>> {
-    let Some(genie) = options.get::<Option<Table>>("genie")? else {
+    let Some(deform) = options.get::<Option<Table>>("deform")? else {
         return Ok(None);
     };
-    let number = |name: &str| -> mlua::Result<f64> {
-        genie.get::<Option<f64>>(name).map(|v| v.unwrap_or(0.0))
+    let Some(name) = deform.get::<Option<String>>("effect")? else {
+        return Err(mlua::Error::runtime(
+            "a deform needs an `effect` name, such as { effect = \"genie\" }",
+        ));
     };
-    Ok(Some(crate::present::Deform::Genie {
-        slot: crate::present::logical(
-            (number("x")?, number("y")?),
-            (
-                genie.get::<Option<f64>>("width")?.unwrap_or(1.0),
-                genie.get::<Option<f64>>("height")?.unwrap_or(1.0),
-            ),
-        ),
-        progress: genie.get::<Option<f32>>("progress")?.unwrap_or(1.0),
-        spread: genie.get::<Option<f32>>("spread")?.unwrap_or(1.0),
+    // Warned about and dropped rather than refused, the way an unknown easing
+    // is: a mode naming an effect this build does not have should lose the
+    // effect and not the window. `script::shipped` is what stops one shipping.
+    let Some(effect) = solium_effects::Deform::from_name(&name, &Given(&deform)) else {
+        tracing::warn!(
+            effect = name,
+            known = ?solium_effects::Deform::all().map(|(known, _)| known),
+            "unknown effect, drawing the window undeformed"
+        );
+        return Ok(None);
+    };
+    let Some(to) = deform.get::<Option<Table>>("to")? else {
+        return Err(mlua::Error::runtime(
+            "a deform needs a `to` to aim at: either { window = id } or a rect",
+        ));
+    };
+    Ok(Some(crate::present::Deform {
+        effect,
+        anchor: anchor_from(&to)?,
     }))
+}
+
+/// Read a deform's anchor: a window to follow, or a place to aim at.
+///
+/// The window id is the one that matters -- it is resolved on every frame that
+/// draws, so the effect tracks a dock icon or another window as it moves. A
+/// rect aims at somewhere that does not move, such as the bottom edge of a
+/// monitor, and is honest about being a snapshot because there is nothing
+/// there to track.
+fn anchor_from(to: &Table) -> mlua::Result<crate::present::Anchor> {
+    if let Some(id) = to.get::<Option<u64>>("window")? {
+        return Ok(crate::present::Anchor::Pane(id));
+    }
+    let Some(rect) = rect_from(to)? else {
+        return Err(mlua::Error::runtime(
+            "a deform's `to` needs either { window = id } or a rect (x, y, w, h)",
+        ));
+    };
+    Ok(crate::present::Anchor::Rect(crate::present::logical(
+        (rect.x, rect.y),
+        (rect.w, rect.h),
+    )))
 }
 
 /// Read a list of columns out of a Lua table.
@@ -2277,6 +2344,50 @@ mod shipped {
                 "{file}:{line} asks for easing {name:?}, which Curve::from_name cannot read. \
                  Names: {:?}",
                 Curve::all().map(|(known, _)| known)
+            );
+        }
+    }
+
+    /// **Every effect the shipped configuration asks for exists.**
+    ///
+    /// The easing case above, one layer over. `sol.present` takes `deform = {
+    /// effect = "..." }` and the name is resolved in `crates/effects` rather
+    /// than matched in `script.rs`, which is what makes adding *fold* or
+    /// *curl* a file in that crate — and which also means a misspelling is no
+    /// longer a Lua error but a warning and an undeformed window, seen by
+    /// nobody who was not reading the log.
+    #[test]
+    fn every_effect_named_is_one_the_engine_has() {
+        let asked = everywhere("effect =");
+        assert!(!asked.is_empty(), "no effects found; the scan is broken");
+        for (file, line, name) in asked {
+            assert!(
+                solium_effects::Deform::from_name(&name, &()).is_some(),
+                "{file}:{line} asks for effect {name:?}, which Deform::from_name cannot read. \
+                 Names: {:?}",
+                solium_effects::Deform::all().map(|(known, _)| known)
+            );
+        }
+    }
+
+    /// **And every axis, which is worse when it is wrong.**
+    ///
+    /// An unknown *effect* is at least logged. An unknown parameter cannot be:
+    /// `crates/effects` has no logger by construction, and a word it cannot
+    /// read is indistinguishable there from one nobody wrote — so a genie
+    /// asked to sweep `"downwards"` silently sweeps `down`, which is right
+    /// four times in four and wrong the once somebody puts the dock on the
+    /// left.
+    #[test]
+    fn every_axis_named_is_one_the_engine_has() {
+        let asked = everywhere("axis =");
+        assert!(!asked.is_empty(), "no axes found; the scan is broken");
+        for (file, line, name) in asked {
+            assert!(
+                solium_effects::Axis::from_name(&name).is_some(),
+                "{file}:{line} asks for axis {name:?}, which Axis::from_name cannot read. \
+                 Names: {:?}",
+                solium_effects::Axis::all().map(|(known, _)| known)
             );
         }
     }

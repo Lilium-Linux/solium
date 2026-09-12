@@ -14,6 +14,11 @@ workspace = true
 # without a compositor. See crates/animation/preview.
 solium-animation = { path = "../animation" }
 
+# The vertex deformations -- genie, and whatever comes after it -- as a crate
+# so an effect is a file with unit tests and a preview slider rather than an
+# arm of an enum in `present.rs`. See crates/effects.
+solium-effects = { path = "../effects" }
+
 # The window arrangements, as a crate so the same code that arranges real
 # windows arranges the boxes in the preview. See crates/layout.
 solium-layout = { path = "../layout" }
