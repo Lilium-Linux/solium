@@ -104,12 +104,53 @@ pub(crate) enum Content {
     Leaving { since: Duration },
 }
 
+/// What the compositor draws around this pane's client.
+///
+/// One value rather than two tables. `Decorations` holds `frames` and `bare` as
+/// parallel collections keyed by `PaneId`, and two tables answering one
+/// question can disagree — `Solium::insets_of` checks `frames` first, so a pane
+/// in both has `bare` silently ignored, and nothing tests that.
+///
+/// **Nothing reads this yet.** It is written beside the tables, which are still
+/// the authority, so that the readers can be moved over one at a time under an
+/// assertion that the two agree. See
+/// `docs/superpowers/plans/2026-09-12-pane-ownership.md`.
+#[derive(Debug, Default)]
+pub(crate) enum Frame {
+    /// A client is still coming, or its frame has not been built yet. Keep
+    /// reserving the insets a frame will want, or the window jumps when it
+    /// finally arrives.
+    #[default]
+    Pending,
+    /// There will never be a frame: the client draws its own, or this is an
+    /// override-redirect menu. Not the same as "not yet".
+    None,
+    /// Drawn by the compositor, reserving this much around the client.
+    ///
+    /// The plan has this arm boxing the [`crate::decoration::Decoration`]
+    /// itself, and it cannot yet. `Decorations::frames` still owns that, and a
+    /// `Decoration` is a live Qt scene: there is no second one to put here, and
+    /// building one would be two scenes per window rather than a shadow of one.
+    ///
+    /// What *can* be shadowed is what the decoration reserves. It is read once
+    /// when the scene is built and never changes, and it is the only thing
+    /// `insets_of` — the reader the disagreement above actually hurts — asks a
+    /// decoration for. The `Decoration` moves in here when the tables go.
+    Styled(crate::decoration::Insets),
+}
+
 /// A window, as the compositor thinks of one.
 #[derive(Debug)]
 pub(crate) struct Pane {
     id: PaneId,
     slot: Rectangle<i32, Logical>,
     content: Content,
+    /// What is drawn around this pane's client. See [`Frame`].
+    ///
+    /// A field rather than a lookup, so it leaves with the pane: a frame keyed
+    /// by `PaneId` in a table beside the panes has to be reconciled by hand,
+    /// and one that is not is kept for ever.
+    frame: Frame,
     opened: Duration,
     /// Whether a client mapped *into* this pane rather than creating it.
     ///
@@ -156,6 +197,7 @@ impl Pane {
                 source,
                 scene: scene.map(Box::new),
             },
+            frame: Frame::Pending,
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -174,6 +216,7 @@ impl Pane {
                 scene: None,
                 faded: None,
             },
+            frame: Frame::Pending,
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -210,6 +253,24 @@ impl Pane {
 
     pub(crate) const fn content(&self) -> &Content {
         &self.content
+    }
+
+    /// What is drawn around this pane's client. See [`Frame`].
+    pub(crate) const fn frame(&self) -> &Frame {
+        &self.frame
+    }
+
+    pub(crate) const fn frame_mut(&mut self) -> &mut Frame {
+        &mut self.frame
+    }
+
+    /// Say what is drawn around this pane's client.
+    ///
+    /// Called wherever `Decorations` is written, and nowhere else: the two are
+    /// one fact kept in two places until the tables go, and a write to one that
+    /// is not a write to the other is the drift this is here to remove.
+    pub(crate) fn set_frame(&mut self, frame: Frame) {
+        self.frame = frame;
     }
 
     /// The client's window, if one has arrived.
@@ -724,6 +785,18 @@ mod tests {
             panes.by_script_id(id.get() + 1000).is_none(),
             "an id that no longer exists is not found, not a panic"
         );
+    }
+
+    #[test]
+    fn a_pane_is_pending_until_it_is_told_otherwise() {
+        // The default matters more than it looks: a pane in neither table is
+        // one whose frame has not been built *yet*, and `insets_of` keeps
+        // reserving room for it. A pane that defaulted to `None` would lose
+        // that room and the window would jump when its frame arrived.
+        let mut pane = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
+        assert!(matches!(pane.frame(), Frame::Pending));
+        pane.set_frame(Frame::None);
+        assert!(matches!(pane.frame(), Frame::None));
     }
 
     #[test]

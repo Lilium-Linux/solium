@@ -775,6 +775,35 @@ impl Decorations {
     pub(crate) fn contains(&self, id: PaneId) -> bool {
         self.frames.contains_key(&id)
     }
+
+    /// What the tables say this pane's frame is.
+    ///
+    /// The shadow half of the strangler: the value a pane is given after every
+    /// write to `frames` or `bare`, so that the pane's own answer is derived
+    /// from the authority rather than worked out a second time beside it. A
+    /// writer that forgets to call this leaves a pane disagreeing with the
+    /// tables, which is exactly what the next task's assertion is for.
+    ///
+    /// **`frames` is asked first, on purpose.** That is the order
+    /// `Solium::insets_of` reads them in, so a pane in both tables shadows as
+    /// `Styled` here for the same reason it reserves a frame's insets there.
+    /// Reproducing today's precedence is the point; correcting it would be a
+    /// behaviour change wearing a refactor's clothes.
+    pub(crate) fn frame_of(&self, id: PaneId) -> crate::pane::Frame {
+        if let Some(decoration) = self.frames.get(&id) {
+            return crate::pane::Frame::Styled(decoration.insets());
+        }
+        if self.bare.contains(&id) {
+            return crate::pane::Frame::None;
+        }
+        // In neither table. Not yet built -- which includes the two ways that
+        // can be permanent and look temporary: a decoration whose QML would not
+        // load (`insert` logs "leaving it bare" and does not mark it so), and a
+        // window that was already framed when the style became `none`
+        // (`set_style` clears `frames` and marks nothing). Both keep reserving
+        // room for a frame that is not coming. Shadowed as it stands.
+        crate::pane::Frame::Pending
+    }
 }
 
 /// Where the frame's QML lives.
