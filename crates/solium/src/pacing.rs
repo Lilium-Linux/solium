@@ -158,6 +158,7 @@ struct Slow {
     scenes: u32,
     animating: u32,
     rendered: u32,
+    built: u32,
     rebound: u32,
 }
 
@@ -205,6 +206,10 @@ struct Counters {
     /// How many QML scenes actually re-rendered, rather than being served from
     /// a cache or skipped as clean.
     rendered: Cell<u32>,
+    /// How many QML scenes were *built* — a file compiled and instantiated
+    /// into an object tree. Rare, very expensive, and not only a startup
+    /// event: a window opening builds its decoration.
+    built: Cell<u32>,
     /// How many scenes were rebound onto a new buffer — the expensive,
     /// normally invisible case: a GBM allocation, an `eglCreateImageKHR`, a Qt
     /// render-target swap and a full Qt render.
@@ -241,6 +246,7 @@ thread_local! {
             scenes: Cell::new(0),
             animating: Cell::new(0),
             rendered: Cell::new(0),
+            built: Cell::new(0),
             rebound: Cell::new(0),
             drew: Cell::new(0),
             deadline: Cell::new(Duration::ZERO),
@@ -329,6 +335,7 @@ pub(crate) fn frame() -> Frame {
         counters.scenes.set(0);
         counters.animating.set(0);
         counters.rendered.set(0);
+        counters.built.set(0);
         counters.rebound.set(0);
         counters.drew.set(0);
         counters.deadline.set(Duration::ZERO);
@@ -377,6 +384,21 @@ pub(crate) fn scene_rendered() {
             counters
                 .rendered
                 .set(counters.rendered.get().saturating_add(1));
+        }
+    });
+}
+
+/// A QML scene was built: a file compiled and instantiated into an object tree.
+///
+/// The single most expensive thing Qt is asked to do inside a frame, and not a
+/// startup-only event — a window opening builds its decoration's scene, and a
+/// script can declare a surface whenever it likes. Measured nested at 283 ms
+/// for the first scene of a session, which is 78 frames of a 260 Hz monitor
+/// spent inside one call.
+pub(crate) fn scene_built() {
+    COUNTERS.with(|counters| {
+        if counters.live.get() {
+            counters.built.set(counters.built.get().saturating_add(1));
         }
     });
 }
@@ -498,6 +520,7 @@ impl Frame {
                 scenes: counters.scenes.get(),
                 animating: counters.animating.get(),
                 rendered: counters.rendered.get(),
+                built: counters.built.get(),
                 rebound: counters.rebound.get(),
             };
             if let Ok(mut worst) = counters.worst.try_borrow_mut()
@@ -568,6 +591,7 @@ fn report(worst: &Slow, frames: u64, missed: u64, span: Duration) {
         scenes = worst.scenes,
         animating = worst.animating,
         rendered = worst.rendered,
+        built = worst.built,
         rebound = worst.rebound,
         "PACING"
     );
@@ -741,6 +765,7 @@ mod tests {
             scenes: std::cell::Cell::new(0),
             animating: std::cell::Cell::new(0),
             rendered: std::cell::Cell::new(0),
+            built: std::cell::Cell::new(0),
             rebound: std::cell::Cell::new(0),
             drew: std::cell::Cell::new(0),
             deadline: std::cell::Cell::new(Duration::ZERO),
