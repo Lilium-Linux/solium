@@ -122,7 +122,7 @@ const fn insets_for(frame: &crate::pane::Frame) -> Insets {
             ..Insets::NONE
         },
         crate::pane::Frame::None => Insets::NONE,
-        crate::pane::Frame::Styled(insets) => *insets,
+        crate::pane::Frame::Styled(decoration) => decoration.insets(),
     }
 }
 
@@ -788,11 +788,9 @@ impl Solium {
     /// decorated *yet*, and one that will never have a frame is not decorated
     /// at all. Both were "not in `frames`" before and are one arm apart now.
     pub(crate) fn is_decorated(&self, window: &Window) -> bool {
-        self.panes.of(window).is_some_and(|pane| {
-            #[cfg(debug_assertions)]
-            self.decorations.agree(pane.id(), pane);
-            matches!(pane.frame(), crate::pane::Frame::Styled(_))
-        })
+        self.panes
+            .of(window)
+            .is_some_and(|pane| pane.decoration().is_some())
     }
 
     /// The monitor the user is working on.
@@ -1165,8 +1163,7 @@ impl Solium {
         if let Some(pane) = self.panes.get_mut(id) {
             pane.unmanage();
         }
-        self.decorations.set_bare(id);
-        self.shadow_frame(id);
+        self.decorations.set_bare(&mut self.panes, id);
     }
 
     /// Which process a client belongs to, as the kernel reports it.
@@ -1320,18 +1317,16 @@ impl Solium {
             return false;
         }
 
-        // Everything keyed by a pane goes when the pane does. Keyed by surface
-        // this could not have happened here, because nothing knew the set of
-        // live windows -- so it was done where a window was seen leaving
-        // tidily, and a client that crashed left its frame behind forever.
+        // Nothing to reconcile. A pane's frame and its two timers are fields
+        // of the pane, so `Panes::sync` above took them with the panes it
+        // dropped -- which is the whole point of moving them in.
         //
-        // Only the decoration tables are left. A pane's frame and its two
-        // timers are fields of the pane, so the panes this drops entries for
-        // took those with them -- which is the whole point of moving them in,
-        // and why `closing` and `asked` no longer need a line here.
-        let live: std::collections::HashSet<crate::pane::PaneId> =
-            self.panes.iter().map(Pane::id).collect();
-        self.decorations.retain(|id| live.contains(&id));
+        // What stood here was a `retain` over the decoration tables against
+        // the set of live panes, and before that the same sweep was done where
+        // a window was seen leaving *tidily*: nothing there knew the set of
+        // live windows, so a client that crashed left its frame behind for
+        // ever. A frame that is part of its window cannot be left behind by
+        // either route.
 
         // A window appearing or going is exactly when the keyboard can be left
         // with nowhere to be, and the only moment worth checking.
@@ -1598,10 +1593,7 @@ impl Solium {
                             self.outer_geometry(&window).map(|outer| (window, outer))
                         })
                         .collect();
-                    if self.decorations.set_style(name) {
-                        // Every frame was just rebuilt or dropped, so every
-                        // pane's shadow is stale.
-                        self.shadow_frames();
+                    if self.decorations.set_style(&mut self.panes, name) {
                         for (window, outer) in slots {
                             self.resize_to(&window, outer);
                         }
@@ -2015,13 +2007,9 @@ impl Solium {
         let now = self.clock.now();
 
         self.panes.iter().rev().find_map(|pane| {
-            #[cfg(debug_assertions)]
-            self.decorations.agree(pane.id(), pane);
             // Only a built frame has anything to hit. A pane reserving room for
             // one that has not arrived owns no pixels for a click to land on.
-            if !matches!(pane.frame(), crate::pane::Frame::Styled(_)) {
-                return None;
-            }
+            pane.decoration()?;
             let outer = self.pane_outer(pane)?;
             let drawn = present::frame(pane, outer, now);
             if !drawn.rect.contains(location) {
@@ -2389,8 +2377,9 @@ impl Solium {
 
         let insets = self.frame_insets(window);
         let restore = self
-            .decorations
+            .panes
             .get_mut(id)
+            .and_then(Pane::decoration_mut)
             .map(|decoration| decoration.restore.take());
 
         let (location, size, maximized) = match restore {
@@ -2408,7 +2397,8 @@ impl Solium {
             ),
         };
 
-        if maximized && let Some(decoration) = self.decorations.get_mut(id) {
+        if maximized && let Some(decoration) = self.panes.get_mut(id).and_then(Pane::decoration_mut)
+        {
             decoration.restore = Some(current);
         }
 
@@ -2442,58 +2432,20 @@ impl Solium {
     /// How much room this pane's frame takes. See [`insets_for`] for what each
     /// answer means and why the fallback is a titlebar rather than nothing.
     ///
-    /// **Asked of the pane, not of the tables.** It is the reader the two
-    /// tables actually hurt — `frames` was checked first, so a pane in both
-    /// had `bare` silently ignored — and now there is one value to check. The
-    /// tables are still written and still shadow onto the pane, so `agree`
-    /// below checks they would have given the same answer.
+    /// **Asked of the pane, and there is nothing else to ask.** It is the
+    /// reader the two tables actually hurt — `frames` was checked first, so a
+    /// pane in both had `bare` silently ignored — and a frame is one value on
+    /// one pane now.
+    ///
+    /// An id with no pane reserves nothing. It used to answer from the tables,
+    /// which outlived their panes until the next sweep, so a retired id could
+    /// still be told a titlebar's worth; there is no longer anywhere for that
+    /// answer to come from. No caller can reach it today — every one holds a
+    /// live pane — which is why it is a fallback and not a `debug_assert`.
     pub(crate) fn insets_of(&self, id: crate::pane::PaneId) -> Insets {
-        let Some(pane) = self.panes.get(id) else {
-            // No pane, so no frame to ask. The tables outlive their panes
-            // until the next `retain`, and this answers from them so that a
-            // caller holding a retired id gets exactly what it got before.
-            // Every caller reachable today holds a live pane; this is here so
-            // that "no behaviour changed" is a fact rather than a hope. Task 4
-            // deletes it with the tables, and the arm becomes `Insets::NONE`.
-            return insets_for(&self.decorations.frame_of(id));
-        };
-        #[cfg(debug_assertions)]
-        self.decorations.agree(id, pane);
-        insets_for(pane.frame())
-    }
-
-    /// Copy what the tables now say about this pane onto the pane itself.
-    ///
-    /// Called immediately after every write to `Decorations`, and it is the
-    /// whole of the shadowing. The readers have moved over, so this is now what
-    /// they read: a writer that forgets to call it leaves a pane disagreeing
-    /// with the tables, and `Decorations::agree` fails on the next read rather
-    /// than letting a window quietly take the wrong shape. It goes away with
-    /// the tables, when the writers set the pane's `Frame` directly.
-    ///
-    /// Derived from `Decorations` rather than decided here on purpose. The
-    /// writers make their choice inside `Decorations` — `insert` alone has
-    /// three outcomes, one of which is a QML file that would not load — and a
-    /// call site that worked the answer out a second time would be a second
-    /// authority, which is the thing being removed.
-    ///
-    /// A pane that has gone needs nothing: its frame left with it.
-    pub(crate) fn shadow_frame(&mut self, id: crate::pane::PaneId) {
-        let frame = self.decorations.frame_of(id);
-        if let Some(pane) = self.panes.get_mut(id) {
-            pane.set_frame(frame);
-        }
-    }
-
-    /// The same, for every live pane.
-    ///
-    /// `set_style` rebuilds or drops every frame at once, so there is no one
-    /// pane to name.
-    fn shadow_frames(&mut self) {
-        let live: Vec<crate::pane::PaneId> = self.panes.iter().map(Pane::id).collect();
-        for id in live {
-            self.shadow_frame(id);
-        }
+        self.panes
+            .get(id)
+            .map_or(Insets::NONE, |pane| insets_for(pane.frame()))
     }
 
     /// Raise a window and give it the keyboard.
@@ -2503,6 +2455,15 @@ impl Solium {
     /// number is growing: resident memory alone cannot tell a forgotten
     /// decoration from a Lua heap that never shrinks from an allocator that
     /// simply keeps what it has.
+    ///
+    /// **`decorations` is no longer among them, and not because it was
+    /// redundant.** It counted `Decorations::frames`, and its whole value was
+    /// that an entry there could belong to no pane — which is the leak it was
+    /// added to show. A frame is part of its pane now, so such an entry cannot
+    /// exist and the number cannot be computed; counting framed panes instead
+    /// would put a plausible figure on the line that is blind to exactly the
+    /// thing it was watching for. `windows` is what answers now: a decoration
+    /// that is still held is a pane that is still held.
     pub(crate) fn memory_report(&mut self) {
         if !crate::dev::memory_diagnostics() {
             return;
@@ -2535,7 +2496,6 @@ impl Solium {
             pointer = format!("{pointer_at:?}"),
             focused_inside = format!("{focused_inside:?}"),
             windows = self.panes.len(),
-            decorations = self.decorations.len(),
             lua_kb = self
                 .scripts
                 .as_ref()
@@ -2558,13 +2518,9 @@ impl Solium {
     ) -> Option<(crate::pane::PaneId, Point<f64, Logical>)> {
         let now = self.clock.now();
         self.panes.iter().rev().find_map(|pane| {
-            #[cfg(debug_assertions)]
-            self.decorations.agree(pane.id(), pane);
             // Only a built frame is listening. There is no scene to tell about
             // the pointer until there is one.
-            if !matches!(pane.frame(), crate::pane::Frame::Styled(_)) {
-                return None;
-            }
+            pane.decoration()?;
             let outer = self.pane_outer(pane)?;
             let drawn = present::frame(pane, outer, now);
             if !drawn.rect.contains(location) {
@@ -2642,8 +2598,8 @@ impl Solium {
         // before and after its application arrives -- and it is the *same*
         // frame, keyed by pane, so whatever animation is running in it carries
         // straight through the handover instead of starting again.
-        self.decorations.insert(id, area.size.w, area.size.h);
-        self.shadow_frame(id);
+        self.decorations
+            .insert(&mut self.panes, id, area.size.w, area.size.h);
         // And the frame's share comes off the slot, exactly as it does for a
         // window the layout placed, so the client is sized to the same rect
         // either way.
@@ -2972,16 +2928,15 @@ impl Solium {
             Ok(scripts) => {
                 crate::qml::clear_cache();
                 let style = self.decorations.style().map(ToOwned::to_owned);
-                self.decorations.set_style(None);
-                self.decorations.set_style(style);
-                // After both, not between them. `set_style` *rebuilds* an
-                // existing frame rather than dropping it -- see the comment on
-                // it, and the reason: dropping leaves every open window bare
-                // until it is reopened -- so a window that is framed before a
-                // reload is framed after it, by a different `Decoration` with
-                // its own insets. Shadowing once at the end is what keeps the
-                // pane's answer the *new* frame's rather than the old one's.
-                self.shadow_frames();
+                // Twice, and to the same place it started, to defeat
+                // `set_style`'s "nothing changed" guard. What the second call
+                // does is *rebuild* every existing frame rather than drop it
+                // -- see the comment on it, and the reason: dropping leaves
+                // every open window bare until it is reopened -- so a window
+                // that is framed before a reload is framed after it, by a
+                // different `Decoration` built from the file as it now reads.
+                self.decorations.set_style(&mut self.panes, None);
+                self.decorations.set_style(&mut self.panes, style);
                 self.start_scripts(Some(scripts));
                 self.redraw = true;
                 tracing::info!(config = %path.display(), "configuration reloaded");
@@ -3728,7 +3683,7 @@ impl XdgShellHandler for Solium {
         // rect that was stored is a rect that comes back exactly, where one
         // recomputed afterwards is a guess.
         if let Some(real) = self.real_geometry(&window)
-            && let Some(decoration) = self.decorations.get_mut(id)
+            && let Some(decoration) = self.panes.get_mut(id).and_then(Pane::decoration_mut)
             && decoration.restore.is_none()
         {
             decoration.restore = Some(real);
@@ -3737,9 +3692,14 @@ impl XdgShellHandler for Solium {
         // The whole monitor, and no frame over it. Marked bare rather than
         // having its decoration destroyed, so leaving fullscreen can build it
         // again from the style that is current then.
-        self.decorations.remove(id);
-        self.decorations.set_bare(id);
-        self.shadow_frame(id);
+        //
+        // Except that `remove` on the line below destroys the decoration the
+        // two lines above just wrote `restore` into, so the rect never comes
+        // back. Filed as #92, and left alone here: this commit moved where a
+        // decoration lives, and lifting `restore` onto the pane would fix a
+        // visible bug inside a change whose contract is that nothing changes.
+        self.decorations.remove(&mut self.panes, id);
+        self.decorations.set_bare(&mut self.panes, id);
 
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Fullscreen);
@@ -3779,19 +3739,19 @@ impl XdgShellHandler for Solium {
         let client_side =
             surface.with_pending_state(|state| state.decoration_mode) == Some(Mode::ClientSide);
         if !client_side {
-            self.decorations.unset_bare(id);
+            self.decorations.unset_bare(&mut self.panes, id);
             let size = self
                 .real_geometry(&window)
                 .map_or((TITLEBAR_HEIGHT * 20, TITLEBAR_HEIGHT * 15), |real| {
                     (real.size.w, real.size.h)
                 });
-            self.decorations.insert(id, size.0, size.1);
-            self.shadow_frame(id);
+            self.decorations.insert(&mut self.panes, id, size.0, size.1);
         }
 
         if let Some(back) = self
-            .decorations
+            .panes
             .get_mut(id)
+            .and_then(Pane::decoration_mut)
             .and_then(|decoration| decoration.restore.take())
         {
             surface.with_pending_state(|state| state.size = Some(back.size));
@@ -3987,15 +3947,14 @@ impl Solium {
             let real = window.and_then(|window| self.real_geometry(&window));
             let width = real.map_or(TITLEBAR_HEIGHT * 20, |real| real.size.w);
             let height = real.map_or(TITLEBAR_HEIGHT * 15, |real| real.size.h);
-            self.decorations.insert(id, width, height);
+            self.decorations.insert(&mut self.panes, id, width, height);
         } else {
             // Bare on purpose, not merely undecorated: the difference is
             // whether `insets_of` still reserves room for a frame that is
             // coming. For a client drawing its own, none is.
-            self.decorations.remove(id);
-            self.decorations.set_bare(id);
+            self.decorations.remove(&mut self.panes, id);
+            self.decorations.set_bare(&mut self.panes, id);
         }
-        self.shadow_frame(id);
 
         // The client has to learn its mode before it draws, or it decides for
         // itself and draws a frame we then draw over.
@@ -4276,8 +4235,7 @@ mod tests {
     #[test]
     fn a_frame_reserves_what_it_always_reserved() {
         // The three answers `insets_of` used to assemble from two tables,
-        // now read off one value. Pinned here because Task 4 changes what
-        // `Styled` carries, and none of these numbers may move with it.
+        // now read off one value.
         assert_eq!(
             insets_for(&crate::pane::Frame::Pending),
             Insets {
@@ -4294,17 +4252,13 @@ mod tests {
              titlebar's worth of blank space with no titlebar in it is what \
              an Electron application looked like here"
         );
-        let asked = Insets {
-            top: 4,
-            right: 1,
-            bottom: 2,
-            left: 3,
-        };
-        assert_eq!(
-            insets_for(&crate::pane::Frame::Styled(asked)),
-            asked,
-            "a built frame reserves what its decoration asked for, on every \
-             side: a bar along the left and a border are the same mechanism"
-        );
+        // The third answer -- that a built frame reserves what its decoration
+        // asked for, on every side, so that a bar along the left and a border
+        // are the same mechanism -- was asserted here against a `Styled` arm
+        // carrying a plain `Insets`. That arm carries the `Decoration` itself
+        // now, which is a live Qt scene: there is no way to build one without
+        // a GPU and a display, and so no way to write the case here. It is one
+        // delegation, `decoration.insets()`, and what it delegates to is read
+        // once at construction and never written again.
     }
 }

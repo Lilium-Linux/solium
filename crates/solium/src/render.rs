@@ -307,7 +307,7 @@ fn chrome(
         pointer_inside: state.pointer_over(pane),
     };
     let mut animating = false;
-    if let Some(decoration) = state.decorations.get_mut(pane) {
+    if let Some(decoration) = state.panes.get_mut(pane).and_then(Pane::decoration_mut) {
         // Already an `Element`: a frame is a memory buffer on the software
         // path and a texture on the GPU one, and which of the two it is is the
         // decoration's own business rather than this function's.
@@ -993,7 +993,7 @@ pub(crate) fn flat_window_elements(
             (f64::from(outer.size.w), f64::from(outer.size.h)),
         );
         if let Some(id) = state.panes.id_of(window)
-            && let Some(decoration) = state.decorations.get_mut(id)
+            && let Some(decoration) = state.panes.get_mut(id).and_then(Pane::decoration_mut)
         {
             // Fully opaque here: this pass draws the window flat into a
             // texture at its real size, and the warp applies the transform's
