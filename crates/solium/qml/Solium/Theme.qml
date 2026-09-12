@@ -8,36 +8,46 @@
 // It is also what makes an object able to travel between them: an item lifted
 // from the dock into a titlebar keeps its colours because it never left the
 // design system, only the scene it was parented to.
+//
+// The palette is small and quiet on purpose: paper, ink, a hairline, and two
+// tints that appear only under the pointer. A compositor's chrome is the frame
+// around somebody else's work, and a frame that draws attention is doing the
+// wrong job. Anything louder belongs in a rice — which is what `panes/` and
+// `~/.config/solium/qml` are for, and why this file is small enough to replace.
 
 pragma Singleton
 import QtQuick
 
 QtObject {
-    // --- surfaces -------------------------------------------------------
-    readonly property color surface: "#1b1f29"
-    readonly property color surfaceInactive: "#14171e"
-    readonly property color surfaceSunken: "#0f1218"
-    readonly property color edge: "#2f3849"
-    readonly property color edgeInactive: "#1e232c"
+    // --- paper ----------------------------------------------------------
+    // Two greys and a hairline. Focused and unfocused should be distinguishable
+    // without being read.
+    readonly property color surface: "#ffffff"
+    readonly property color surfaceInactive: "#f4f4f5"
+    readonly property color edge: "#d4d4d8"
+    readonly property color edgeInactive: "#e6e6e9"
 
-    // --- text -----------------------------------------------------------
-    readonly property color text: "#e6e9ef"
-    readonly property color textDim: "#666e7d"
+    // --- ink ------------------------------------------------------------
+    readonly property color text: "#18181b"
+    readonly property color textDim: "#8b8b93"
 
-    // --- accents --------------------------------------------------------
-    readonly property color accent: "#7aa2f7"
-    readonly property color positive: "#9ece6a"
-    readonly property color warning: "#d8a33c"
-    readonly property color danger: "#e05561"
-    readonly property color control: "#39414f"
-    readonly property color controlInactive: "#262b35"
+    // --- tints ----------------------------------------------------------
+    // `accent` marks the one thing on a surface that matters, never more than
+    // one. `warning` and `danger` are the frame buttons and show only under the
+    // pointer, so a titlebar at rest has no colour in it at all.
+    readonly property color accent: "#3b6ea5"
+    readonly property color warning: "#b8860b"
+    readonly property color danger: "#b4413c"
+
+    // A control at rest is a shape rather than a colour.
+    readonly property color control: "#c9c9ce"
+    readonly property color controlInactive: "#dededf"
 
     // --- metrics --------------------------------------------------------
     // The compositor reserves space using its own copy of `titlebarHeight`;
     // this is the value it uses, kept here so a theme cannot silently disagree
     // with the geometry the compositor is laying out.
     readonly property int titlebarHeight: 32
-    readonly property int radius: 6
     readonly property int gap: 9
     readonly property int margin: 12
 
