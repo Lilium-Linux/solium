@@ -248,21 +248,31 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     let mut warps = Vec::new();
 
     for (pane, window) in state.on_screen() {
-        let Some(window) = window else {
+        // What this pane wants capturing at, if it wants capturing at all.
+        //
+        // At *its own monitor's* scale. One frame can span monitors at
+        // different scales, and a texture taken at 1x and drawn on a 2x screen
+        // is the blur this whole change exists to remove.
+        let wanted = window.as_ref().and_then(|window| {
+            let outer = state.outer_geometry(window)?;
+            let frame = state.drawn(pane, outer);
+            (!frame.matrix.is_identity() || frame.deform.is_some()).then(|| state.scale_of(outer))
+        });
+        let Some((window, scale)) = window.zip(wanted) else {
+            // Nothing warped means nothing to keep. A pane holds the texture
+            // it was last captured into between frames -- megabytes of it --
+            // and there is no later frame on which handing it back gets
+            // cheaper, so an overview that warps twenty windows and is then
+            // closed would otherwise leave twenty behind for the session. See
+            // `offscreen::Scratch`.
+            if let Some(pane) = state.panes.get_mut(pane) {
+                pane.scratch_mut().release();
+            }
             continue;
         };
-        let Some(outer) = state.outer_geometry(&window) else {
-            continue;
-        };
-        let frame = state.drawn(pane, outer);
-        if frame.matrix.is_identity() && frame.deform.is_none() {
-            continue;
-        }
-        // Captured at *its own monitor's* scale. One frame can span monitors
-        // at different scales, and a texture taken at 1x and drawn on a 2x
-        // screen is the blur this whole change exists to remove.
-        let scale = state.scale_of(outer);
-        if let Some((texture, _size)) = crate::offscreen::capture(state, renderer, &window, scale) {
+        if let Some((texture, _size)) =
+            crate::offscreen::capture(state, renderer, pane, &window, scale)
+        {
             warps.push((window, texture));
         }
     }
