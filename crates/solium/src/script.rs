@@ -2158,6 +2158,80 @@ mod tests {
         }
     }
 
+    /// **A script names an effect, and what comes back is the engine's.**
+    ///
+    /// The round trip nothing else covers: `crates/effects` has thorough unit
+    /// tests and knows nothing about Lua, and `script::shipped` reads names out
+    /// of files without running them. This is the join -- an effect resolved by
+    /// name, its parameters read through `Given`, and both kinds of anchor.
+    ///
+    /// The anchor is the half worth pinning. `{ window = 9 }` must survive as
+    /// an *identity* all the way to the command, because the moment it becomes
+    /// a rectangle here it is a rectangle measured when the key was pressed.
+    #[test]
+    fn a_script_names_an_effect_and_the_engine_answers() {
+        let directory = std::env::temp_dir().join("solium-script-test-deform");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+1", function()
+                sol.present(1, { deform = { effect = "genie", axis = "left",
+                                            spread = 2.5,
+                                            to = { x = 10, y = 20, w = 30, h = 40 } } })
+                sol.present(2, { deform = { effect = "genie", to = { window = 9 } } })
+                sol.present(3, { deform = { effect = "nonsense", to = { window = 9 } } })
+                sol.present(4, {})
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+1", Snapshot::default());
+        let deforms: Vec<Option<crate::present::Deform>> = outcome
+            .commands
+            .iter()
+            .map(|command| match command {
+                Command::Present { deform, .. } => *deform,
+                other => panic!("expected a present command, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(deforms.len(), 4);
+
+        assert_eq!(
+            deforms[0],
+            Some(crate::present::Deform {
+                effect: solium_effects::Deform::Genie {
+                    // Not named, so the effect's own default: all the way in,
+                    // which is what one animates towards.
+                    progress: 1.0,
+                    spread: 2.5,
+                    axis: solium_effects::Axis::Left,
+                },
+                anchor: crate::present::Anchor::Rect(crate::present::logical(
+                    (10.0, 20.0),
+                    (30.0, 40.0)
+                )),
+            })
+        );
+        assert_eq!(
+            deforms[1],
+            Some(crate::present::Deform {
+                effect: solium_effects::Deform::Genie {
+                    progress: 1.0,
+                    spread: 1.0,
+                    axis: solium_effects::Axis::Down,
+                },
+                anchor: crate::present::Anchor::Pane(9),
+            })
+        );
+        // An effect this build does not have loses the effect, not the window.
+        assert_eq!(deforms[2], None);
+        assert_eq!(deforms[3], None);
+    }
+
     #[test]
     fn a_failing_script_does_not_swallow_the_key() {
         let directory = std::env::temp_dir().join("solium-script-test-error");

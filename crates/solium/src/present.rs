@@ -585,4 +585,46 @@ mod tests {
         assert!((mapped.x - 200.0).abs() < 1e-6, "got {}", mapped.x);
         assert!((mapped.y - 150.0).abs() < 1e-6, "got {}", mapped.y);
     }
+
+    /// **A blend keeps the destination's anchor from the first frame.**
+    ///
+    /// The shape's parameters are `crates/effects`' business and it has its own
+    /// tests for them. What is this file's is the anchor, and what it must not
+    /// do is interpolate: half way between two dock icons is a place neither of
+    /// them is, and aiming at it would put back the stale-rectangle problem
+    /// that naming an identity exists to remove. Animating *out* of one and
+    /// into another is two transforms, which a script can already write.
+    #[test]
+    fn an_anchor_does_not_blend_halfway() {
+        let genie = |progress: f32, pane: u64| Deform {
+            effect: solium_effects::Deform::Genie {
+                progress,
+                spread: 1.0,
+                axis: solium_effects::Axis::Down,
+            },
+            anchor: Anchor::Pane(pane),
+        };
+
+        for progress in [0.0, 0.5, 1.0] {
+            let blended = Deform::blend(Some(genie(1.0, 3)), Some(genie(1.0, 7)), progress);
+            assert_eq!(
+                blended.map(|deform| deform.anchor),
+                Some(Anchor::Pane(7)),
+                "at {progress} the anchor was not the destination's"
+            );
+        }
+
+        // Clearing one still animates back out of it, at the anchor it had:
+        // there is no destination to take one from.
+        let clearing = Deform::blend(Some(genie(1.0, 3)), None, 0.5);
+        assert_eq!(clearing.map(|deform| deform.anchor), Some(Anchor::Pane(3)));
+        assert_eq!(
+            clearing.map(|deform| deform.effect),
+            Some(solium_effects::Deform::Genie {
+                progress: 0.5,
+                spread: 1.0,
+                axis: solium_effects::Axis::Down,
+            })
+        );
+    }
 }
