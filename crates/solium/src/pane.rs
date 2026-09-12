@@ -209,6 +209,19 @@ pub(crate) struct Pane {
     /// and every path that asks what is on screen asks for panes. What they
     /// are not is *windows*.
     managed: bool,
+    /// The texture this pane's warp captures are drawn into, kept across the
+    /// frames of an animation. See [`crate::offscreen::Scratch`].
+    ///
+    /// A field for the reason `frame` and `closing_at` are fields, and with
+    /// rather more at stake: a `HashMap<PaneId, GlesTexture>` beside the panes
+    /// would be a sixth table reconciled by hand, and what an entry nobody
+    /// swept would keep is not a stale boolean but several megabytes of GBM.
+    /// This leaves with its pane.
+    ///
+    /// Empty on a pane nobody is warping, which is all of them on an ordinary
+    /// desktop: `render::prepare` hands it back on the first frame a pane is
+    /// not captured on.
+    scratch: crate::offscreen::Scratch,
 }
 
 /// `dead_code` on the *block*, which is as narrow as this one can be: the lint
@@ -248,6 +261,7 @@ impl Pane {
             adopted: false,
             drawn: crate::present::Slot::default(),
             managed: true,
+            scratch: crate::offscreen::Scratch::default(),
         }
     }
 
@@ -269,6 +283,7 @@ impl Pane {
             adopted: false,
             drawn: crate::present::Slot::default(),
             managed: true,
+            scratch: crate::offscreen::Scratch::default(),
         }
     }
 
@@ -330,6 +345,16 @@ impl Pane {
             Frame::Styled(decoration) => Some(decoration),
             Frame::Pending | Frame::None => None,
         }
+    }
+
+    /// The texture this pane's warp captures are drawn into. See the field and
+    /// [`crate::offscreen::Scratch`].
+    ///
+    /// Only `_mut`, because both things anyone does with it — taking a texture
+    /// for a capture, handing one back when the warp ends — write to it. There
+    /// is nothing to read.
+    pub(crate) const fn scratch_mut(&mut self) -> &mut crate::offscreen::Scratch {
+        &mut self.scratch
     }
 
     /// Say what is drawn around this pane's client.
