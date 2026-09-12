@@ -835,6 +835,20 @@ impl Scene {
         height: i32,
         initial: Option<&str>,
     ) -> Result<Self> {
+        // Qt's, and by a long way the most expensive thing Qt is ever asked to
+        // do in a frame: a QML file read, compiled, instantiated into an object
+        // tree, and on the GPU path a buffer allocated to render it into.
+        //
+        // Measured nested on the first frame of a session, before this was
+        // bracketed: 283 ms, all of it inside `render::elements` and therefore
+        // all of it reported against the compositor. Scenes are not only built
+        // at startup — a window opening builds its decoration, a script can
+        // declare a surface at any moment — so a frame that builds one is a
+        // *stall on a running desktop*, which is very much the shape of thing
+        // "sometimes everything lags" is made of. It should say so in Qt's
+        // column, with `built` beside it.
+        let _qml = crate::pacing::span(crate::pacing::Phase::Qml);
+        crate::pacing::scene_built();
         if on_gpu() {
             Self::gpu_sized(qml_path, width, height, initial)
         } else {
