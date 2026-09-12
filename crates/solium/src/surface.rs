@@ -80,8 +80,12 @@ pub(crate) struct ShellSurface {
 /// compositor can see, so a frame it has not been asked for is a frame it does
 /// not get. See [`crate::render::Drawn`] for what that looked like.
 impl crate::render::Painted for ShellSurface {
-    fn still_animating(&self) -> bool {
+    fn something_new_to_draw(&self) -> bool {
         self.scene.needs_render()
+    }
+
+    fn animation_in_flight(&self) -> bool {
+        self.scene.animation_in_flight()
     }
 }
 

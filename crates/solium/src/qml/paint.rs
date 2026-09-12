@@ -433,6 +433,17 @@ impl Gpu {
         // properties by the time it reaches here, so a retitled or refocused
         // window is dirty on the first output that asks and every kept size of
         // it is dropped together.
+        //
+        // And `needs_render` alone, deliberately, without the
+        // `animation_in_flight` that `render::Drawn` now asks alongside it.
+        // They are two different questions that happen to share a flag. That
+        // one decides whether there will be another *frame*, and has to keep
+        // saying yes through the quiet ticks of an animation that is still
+        // running. This one decides whether the picture in hand is stale, and a
+        // tick that changed no pixel has staled nothing -- invalidating on it
+        // would re-import and re-upload an identical texture on every quiet
+        // tick of every animation, which is the cost this cache exists to
+        // avoid.
         if !self.kept.current(wanted, scene.needs_render()) {
             self.refresh(scene, renderer, size, scale)?;
         }

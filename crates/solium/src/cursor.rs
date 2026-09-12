@@ -238,6 +238,17 @@ impl Cursor {
         // animation and nothing writes its properties, so after the pointer has
         // been drawn once it never asks to be drawn again.
         //
+        // Which is also why the pointer does **not** need
+        // `Scene::animation_in_flight` beside this, and why it is not a
+        // `Painted`. Two separate reasons, and both have to hold: `cursor.qml`
+        // has no animation to run, and the pointer is drawn from pointer
+        // motion, which damages the screen by itself and brings its own frames.
+        // Put an animation in `cursor.qml` and neither reason survives -- it
+        // would advance while the mouse moves and freeze the instant it stopped,
+        // the exact shape `render::Drawn` exists for -- so that change is also a
+        // change here. `needs_render` is the right question in *this* line
+        // regardless: what it guards is a cache of pixels, not a frame.
+        //
         // **And "theme change" has no trigger at all today — it is the shape
         // this is built for, not something that happens.** `Solium/Theme.qml`
         // is a `pragma Singleton` whose twenty-one colours are every one of

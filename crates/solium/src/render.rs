@@ -65,22 +65,40 @@ render_elements! {
     Screen = smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>,
 }
 
-/// Whether a QML scene still has something new to draw.
-///
-/// **Spent by drawing.** Qt sets the flag when an animation step or a property
-/// write changes the scene, and `Scene::render` — and the GPU path's render —
-/// clear it again. So it only means "still animating" *before* the draw that
-/// takes it. Afterwards it means "did the draw I have just done leave anything
-/// behind", and the answer to that is always no.
+/// The two questions that together mean "will a later frame differ from this
+/// one", asked of a QML scene.
 ///
 /// Implemented by the two things the compositor draws from QML, which are
 /// otherwise unrelated: a window frame and a scripted surface. It is a trait
 /// rather than an inherent method on each so that [`Drawn::drawing`] can hold
-/// the order for both — and so the tests can drive that order with a stand-in,
-/// which is the only way it can be driven at all. Nothing else should call
-/// this: reaching for it at a call site is how the order goes wrong.
+/// the order and the combination for both — and so the tests can drive them
+/// with a stand-in, which is the only way they can be driven at all. Nothing
+/// else should call these: reaching for one at a call site is how the order
+/// goes wrong, and reaching for only one is how the answer goes wrong.
 pub(crate) trait Painted {
-    fn still_animating(&self) -> bool;
+    /// Qt's dirty flag: has something the scene renders actually changed.
+    ///
+    /// **Spent by drawing.** Qt sets it when an animation step or a property
+    /// write changes the scene, and `Scene::render` — and the GPU path's
+    /// render — clear it again. So it only means anything *before* the draw
+    /// that takes it. Afterwards it means "did the draw I have just done leave
+    /// anything behind", and the answer to that is always no.
+    fn something_new_to_draw(&self) -> bool;
+
+    /// Whether an animation in the scene is still running.
+    ///
+    /// The half the dirty flag cannot answer, and the residual defect after
+    /// `Drawn` was introduced. Qt raises `dirty` on a *change*, and a running
+    /// animation does not produce one every tick: the tick that starts a
+    /// `Behavior` has not moved the property yet, and an interpolation between
+    /// two nearby values spends several ticks landing on the value it already
+    /// had. Measured against Qt 6.11.2 from a settled scene, every shipped
+    /// decoration has at least one clean tick before its animation finishes,
+    /// and `reveal.qml` and `reactive.qml` are clean on the very frame that
+    /// starts theirs — so on the dirty flag alone their animation took no step
+    /// at all unless something unrelated happened to damage the screen. Which
+    /// is "sometimes", and is exactly what it looked like on the hardware.
+    fn animation_in_flight(&self) -> bool;
 }
 
 /// What one draw produced: the element, and whether there is more to come.
@@ -97,6 +115,9 @@ pub(crate) trait Painted {
 ///
 /// Handing the answer back from the draw makes that shape unrepresentable.
 /// There is no second query left to put in the wrong place.
+///
+/// The flag alone was still the wrong *question*, which is a separate defect
+/// from asking the right one too late; see [`Painted::animation_in_flight`].
 #[derive(Default)]
 pub(crate) struct Drawn {
     /// What to put in the frame, if there is anything to put in it.
@@ -124,7 +145,18 @@ impl Drawn {
         draw: impl FnOnce(&mut P) -> Option<Element>,
     ) -> Self {
         // Before, and it has to stay before. See [`Painted`].
-        let animating = painted.still_animating();
+        //
+        // Both questions, because neither one is the whole answer. The flag
+        // misses every tick of an animation that did not move a rendered
+        // property, which includes the tick that starts one. The animation
+        // census misses a change that is not an animation at all -- a new
+        // title, a colour with no `Behavior` on it -- and it also misses the
+        // last tick of an animation, which finishes *and* leaves the final
+        // value to be drawn: the census reads false there while the flag reads
+        // true. `||` and not either half, and the order is the cheap question
+        // first, since it short-circuits the walk on every frame that is
+        // redrawing anyway.
+        let animating = painted.something_new_to_draw() || painted.animation_in_flight();
         Self {
             element: draw(painted),
             animating,
@@ -990,40 +1022,69 @@ fn ratio(drawn: f64, real: i32) -> f64 {
 mod tests {
     use super::{Drawn, Painted, ratio};
 
-    /// A QML scene's dirty flag and nothing else, with Qt's exact behaviour.
+    /// A QML scene's two answers, with Qt's exact behaviour.
     ///
-    /// Three lines of state, and every one of them is a fact about the real
-    /// host rather than a convenience:
+    /// Every field is a fact about the real host rather than a convenience:
     ///
     /// * `dirty` is `SoliumQmlScene::dirty` in `qml/host.cpp`. Qt raises it
-    ///   from `renderRequested` and `sceneChanged` whenever the scene changes.
+    ///   from `renderRequested` and `sceneChanged` — which fire when a property
+    ///   the scene *renders* changes value, and not otherwise.
     /// * a draw **clears** it — `solium_qml_scene_render` and the GPU path both
     ///   end with `scene->dirty = false`. That is the whole mechanism: the flag
-    ///   is spent by drawing, so there is exactly one moment at which it means
-    ///   "still animating", and it is before.
-    /// * `running` is the thing the compositor cannot see. Nothing reports that
-    ///   a `NumberAnimation` has frames left; the only evidence is that the
-    ///   next `qml::tick` marks the scene dirty again.
+    ///   is spent by drawing, so there is exactly one moment at which it can be
+    ///   read, and it is before.
+    /// * `steps` is the animation itself: one entry per remaining tick, saying
+    ///   whether *that* tick moves something the scene renders. It is a list
+    ///   and not a countdown because the two are not the same shape, and
+    ///   assuming they were is the defect this file now carries a test for: an
+    ///   animation ticks on every frame and only sometimes changes a pixel.
+    ///   This stand-in previously read `dirty |= running`, which is that wrong
+    ///   assumption written down, and it is why the first fix here passed its
+    ///   own tests with the bug still in it.
+    /// * `solium_qml_scene_animating` is `!steps.is_empty()` — an animation is
+    ///   running for as long as it has ticks left, whatever they do.
+    ///
+    /// The measured shape from Qt 6.11.2, for a settled decoration on the frame
+    /// the compositor writes the property that triggers it and the three ticks
+    /// after (`dirty`/animation running):
+    ///
+    /// | scene | write | +1 | +2 | +3 |
+    /// |---|---|---|---|---|
+    /// | `reveal.qml` | `false`/yes | `false`/yes | `false`/yes | `true`/no |
+    /// | `reactive.qml` | `false`/yes | `false`/yes | `false`/yes | `true`/no |
+    /// | `top.qml` | `true`/yes | `false`/yes | `false`/yes | `true`/no |
+    /// | `border.qml` | `true`/yes | `false`/yes | `false`/yes | `true`/no |
+    /// | `proximity.qml` | `true`/yes | `false`/yes | `false`/yes | `true`/no |
     struct Scene {
         dirty: bool,
-        running: bool,
+        steps: std::collections::VecDeque<bool>,
         draws: u32,
     }
 
     impl Scene {
-        /// A scene with an animation running in it — `decorations/pulse.qml`.
-        const fn animating() -> Self {
+        /// A scene whose animation moves something on the ticks that are
+        /// `true` and nothing on the ticks that are `false`.
+        fn animating(steps: &[bool]) -> Self {
             Self {
-                dirty: true,
-                running: true,
+                dirty: false,
+                steps: steps.iter().copied().collect(),
                 draws: 0,
             }
         }
 
-        /// One `qml::tick`: the animation driver steps, and a running
-        /// animation has therefore moved and has something new to draw.
-        const fn tick(&mut self) {
-            self.dirty |= self.running;
+        /// An animation that moves the picture on every one of its ticks — the
+        /// easy case, and the only one the previous stand-in could express.
+        fn moving(ticks: usize) -> Self {
+            Self::animating(&vec![true; ticks])
+        }
+
+        /// One `qml::tick`: the driver steps every animation in the process,
+        /// and this one marks the scene dirty only if the step it took changed
+        /// something that gets rendered.
+        fn tick(&mut self) {
+            if let Some(moved) = self.steps.pop_front() {
+                self.dirty |= moved;
+            }
         }
 
         /// One render, which is what spends the flag.
@@ -1031,11 +1092,19 @@ mod tests {
             self.dirty = false;
             self.draws += 1;
         }
+
+        fn settled(&self) -> bool {
+            self.steps.is_empty()
+        }
     }
 
     impl Painted for Scene {
-        fn still_animating(&self) -> bool {
+        fn something_new_to_draw(&self) -> bool {
             self.dirty
+        }
+
+        fn animation_in_flight(&self) -> bool {
+            !self.steps.is_empty()
         }
     }
 
@@ -1056,9 +1125,26 @@ mod tests {
         .animating
     }
 
+    /// Run the compositor's loop until it goes idle, or give up.
+    ///
+    /// The loop and not a frame, because the defect is a loop that stops: a
+    /// frame happens only because the frame before it asked for one, and
+    /// nothing else on screen is damaging anything. `None` means it never went
+    /// idle, which is its own failure and the one the rejected fix produced.
+    fn until_idle(scene: &mut Scene, limit: u32) -> Option<u32> {
+        let mut frames = 0;
+        while frames < limit {
+            frames += 1;
+            if !one_frame(scene) {
+                return Some(frames);
+            }
+        }
+        None
+    }
+
     /// **An animating scene keeps asking for the frame after it.**
     ///
-    /// The regression. A decoration animates on its own clock and damages
+    /// The first regression. A decoration animates on its own clock and damages
     /// nothing, so the only thing that brings the next frame is this answer.
     /// Read after the draw it is always false — the draw has just cleared it —
     /// and the animation then advances only when something *else* happens to
@@ -1071,7 +1157,7 @@ mod tests {
     /// keeps going from a loop that stops after the first.
     #[test]
     fn an_animating_scene_asks_for_the_frame_after_it() {
-        let mut scene = Scene::animating();
+        let mut scene = Scene::moving(60);
         for step in 1..=60_u32 {
             assert!(
                 one_frame(&mut scene),
@@ -1081,7 +1167,51 @@ mod tests {
         assert_eq!(scene.draws, 60, "a frame was asked for and not drawn");
     }
 
-    /// And it stops asking when the animation is over.
+    /// **A tick that changes no pixels still has to bring the next frame.**
+    ///
+    /// The residual, and the case that survived the fix above because nothing
+    /// could express it: the old stand-in raised `dirty` on every tick of a
+    /// running animation, which is not what Qt does. Qt raises it on a
+    /// *change*, and an animation produces none on the tick that starts it —
+    /// the `Behavior` has begun and the property has not moved — nor on any
+    /// tick whose interpolated value lands back on the one already there.
+    ///
+    /// The pattern here is `reveal.qml`'s, measured: three clean ticks and then
+    /// the one that moves. On the dirty flag alone the loop stops on the first
+    /// of them and the bar never slides out at all; it appears only if the
+    /// pointer happens to keep moving, which is why it was "sometimes".
+    #[test]
+    fn a_tick_that_moves_nothing_still_asks_for_the_frame_after_it() {
+        let mut scene = Scene::animating(&[false, false, false, true]);
+        let frames = until_idle(&mut scene, 100);
+        assert!(
+            scene.settled(),
+            "the loop stopped after {frames:?} frames with {} ticks of the animation left: \
+             it is frozen there for good, because nothing else is going to damage the screen",
+            scene.steps.len()
+        );
+        assert_eq!(
+            frames,
+            Some(5),
+            "four ticks of animation and one to notice it is over"
+        );
+    }
+
+    /// And a quiet stretch in the *middle* of one, which is the same defect
+    /// wherever it lands: a colour easing between two nearby values spends
+    /// several ticks rounding to the value it already had.
+    #[test]
+    fn a_quiet_stretch_in_the_middle_does_not_end_the_animation() {
+        let mut scene = Scene::animating(&[true, true, false, false, false, false, true, true]);
+        until_idle(&mut scene, 100);
+        assert!(
+            scene.settled(),
+            "the animation stopped {} ticks short, mid-way through",
+            scene.steps.len()
+        );
+    }
+
+    /// **And it stops asking when the animation is over.**
     ///
     /// One frame later than the animation ends, and that is the right answer
     /// rather than a tolerated one: the tick that marks nothing is the first
@@ -1090,14 +1220,58 @@ mod tests {
     /// is an animation that never draws its last step.
     #[test]
     fn a_settled_scene_stops_asking_one_frame_later() {
-        let mut scene = Scene::animating();
-        assert!(one_frame(&mut scene));
-        scene.running = false;
-        assert!(
-            !one_frame(&mut scene),
+        let mut scene = Scene::moving(1);
+        assert_eq!(
+            until_idle(&mut scene, 100),
+            Some(2),
             "a scene with nothing left to do kept the compositor drawing"
         );
         assert_eq!(scene.draws, 2);
+    }
+
+    /// **An animation that ends must let the compositor sleep.**
+    ///
+    /// The risk the fix above creates, and the reason the obvious answer was
+    /// not taken. `QAnimationDriver::isRunning()` reads like "does Qt have a
+    /// running animation" and is not: `advanceAnimation` ends in
+    /// `QUnifiedTimer::localRestart`, which starts the driver again whenever it
+    /// is not running and no animation is registered at all (qtbase v6.11.2,
+    /// `src/corelib/animation/qabstractanimation.cpp:333`). Measured against
+    /// this Qt: gated on `isRunning()`, with the screen damaged for eight
+    /// frames after the animation started — a pointer still moving, which is
+    /// usually *why* it started — the loop drew 400 frames of 400 and never
+    /// went idle. A stuck animation traded for a compositor that never sleeps
+    /// is a worse bug, not a fix.
+    ///
+    /// So: within two frames of the last tick, and never more.
+    #[test]
+    fn an_animation_that_ends_stops_the_loop() {
+        for ticks in [1_usize, 2, 8, 60] {
+            let mut scene = Scene::moving(ticks);
+            let frames = until_idle(&mut scene, 10_000);
+            assert_eq!(
+                frames,
+                Some(u32::try_from(ticks).unwrap_or(u32::MAX) + 1),
+                "an animation of {ticks} ticks did not let the loop go idle right after it"
+            );
+        }
+    }
+
+    /// And a frame drawn for some unrelated reason, once it is over, must not
+    /// start the loop up again.
+    ///
+    /// The latch test. Anything that answers "is this animating" from
+    /// process-wide state rather than from this scene passes every test above
+    /// and fails this one, because the pointer moving over a window is exactly
+    /// the frame that would re-arm it.
+    #[test]
+    fn a_frame_drawn_for_another_reason_does_not_restart_a_finished_animation() {
+        let mut scene = Scene::moving(3);
+        assert!(until_idle(&mut scene, 100).is_some());
+        assert!(
+            !one_frame(&mut scene),
+            "a frame the pointer asked for left the compositor asking for more"
+        );
     }
 
     #[test]
