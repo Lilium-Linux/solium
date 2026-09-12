@@ -4,7 +4,8 @@
 -- it is a script that sets a target rect per window and lets the compositor's
 -- one animation clock get them there. The app switcher is this with a row
 -- instead of a grid, peek is this with one window at the cursor, and the
--- icon-to-window genie is this with an icon rect as the starting point.
+-- icon-to-window genie is this with a dock icon named as the thing the window
+-- comes out of.
 --
 -- If any of those ever needs new Rust, the transform layer is missing
 -- something and *that* is the bug to fix -- not this file.

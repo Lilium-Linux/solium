@@ -335,9 +335,9 @@ is exact.
 
 That file is also the architecture's proof, and its comment says so — the app
 switcher is that with a row instead of a grid, peek is it with one window at the
-cursor, and the icon-to-window genie is it with an icon rect as the starting
-point. If any of those ever needs new Rust, the transform layer is missing
-something.
+cursor, and the icon-to-window genie is it with a dock icon named as the thing
+the window comes out of. If any of those ever needs new Rust, the transform
+layer is missing something.
 
 ## Worth knowing
 

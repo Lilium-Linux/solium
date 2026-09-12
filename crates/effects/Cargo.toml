@@ -16,6 +16,15 @@ workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# The file is `src/bin/preview.rs`, mirroring `solium-animation`'s, but the
+# *binary* cannot also be called `preview`: two bin targets of that name in one
+# workspace write to one `target/debug/preview`, which cargo warns about on
+# every build and says may become a hard error. Renaming the file instead would
+# hide the mirror; renaming the output does not.
+[[bin]]
+name = "effects-preview"
+path = "src/bin/preview.rs"
+
 # Deliberately empty, and for a harder reason than `solium-animation`'s. An
 # effect must be testable without a session -- that is half of why vertex
 # deformation is parametric Rust rather than a shader -- so this crate may not
