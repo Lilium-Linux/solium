@@ -61,6 +61,17 @@ end
 -- The images in force, as a list. One entry means one static wallpaper.
 local images = {}
 
+-- How many per-desk names to take away before declaring any.
+--
+-- A surface belongs to the compositor until something removes it *by name*, and
+-- it survives `super+shift+r` -- that is what makes a reload cheap. So going
+-- from three pictures to one would otherwise leave `wallpaper-2` and
+-- `wallpaper-3` on screen, carried by desks that still exist, with nothing left
+-- that knows their names. A reload rebuilds this file's state along with the
+-- rest of Lua, so the count from last time is not available to sweep by and a
+-- bound is. Removing a name nothing declared does nothing and costs nothing.
+local MAX_DESKS = 16
+
 local function declare(name, source)
     sol.surface(name, {
         scene = "wallpaper.qml",
@@ -93,7 +104,7 @@ function wallpaper.apply(setting)
     -- picture and several on a reload does not leave the other arrangement's
     -- surfaces behind it.
     sol.surface("wallpaper", false)
-    for index = 1, #images do
+    for index = 1, MAX_DESKS do
         sol.surface("wallpaper-" .. index, false)
     end
     images = {}
