@@ -901,6 +901,52 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_cannot_be_both_styled_and_bare() {
+        // Not a runtime check. `Frame` is an enum and a pane holds exactly one,
+        // so "styled *and* bare" cannot be written down — this test exists to
+        // say that out loud, and to fail if a second source of truth ever comes
+        // back.
+        //
+        // It could be written down before. `Decorations` held `frames:
+        // HashMap<PaneId, Decoration>` and `bare: HashSet<PaneId>`, a pane
+        // could be in both, and `Solium::insets_of` read `frames` first — so
+        // such a pane was framed and its `bare` was silently ignored, and
+        // nothing tested it.
+        //
+        // The match below is the assertion, and it is the part that would stop
+        // compiling: it is exhaustive over `Frame`, so an arm meaning "framed,
+        // but also bare" has to come here and be given an answer to the one
+        // question everything else asks. What is checked at run time is that
+        // both accessors derive their answer from that same single field.
+        // `decoration.rs`'s `a_pane_cannot_be_framed_and_bare_at_once` takes
+        // the same claim through `set_bare` — the mutator that used to leave a
+        // frame standing — on a pane with a real `Decoration` on it.
+        let mut pane = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
+        for frame in [Frame::Pending, Frame::None] {
+            pane.set_frame(frame);
+            let styled = match pane.frame() {
+                Frame::Styled(_) => true,
+                Frame::Pending | Frame::None => false,
+            };
+            assert_eq!(
+                pane.decoration().is_some(),
+                styled,
+                "whether there is a scene is the frame, not a second opinion \
+                 about it"
+            );
+            assert_eq!(
+                pane.decoration_mut().is_some(),
+                styled,
+                "and writing to it reaches the same value reading it does"
+            );
+        }
+
+        // `Styled` is not among them because building one needs Qt, which this
+        // module has no business starting. It is covered where a frame can
+        // actually be built, in `decoration.rs`.
+    }
+
+    #[test]
     fn a_pane_has_no_timers_until_somebody_asks_it_to_close() {
         let mut pane = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
         assert!(pane.closing_at().is_none());
