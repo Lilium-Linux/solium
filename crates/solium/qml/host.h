@@ -215,6 +215,17 @@ int solium_qml_scene_render(SoliumQmlScene *scene);
 int solium_qml_scene_dirty(const SoliumQmlScene *scene);
 
 /*
+ * Whether an animation inside this scene is still running.
+ *
+ * Not the same question as solium_qml_scene_dirty, and the compositor needs
+ * both: a running animation leaves the scene clean on any tick that does not
+ * move a rendered property, including the tick that starts it. See the long
+ * note at the definition for what was measured, and for why
+ * QAnimationDriver::isRunning() is not the answer.
+ */
+int solium_qml_scene_animating(const SoliumQmlScene *scene);
+
+/*
  * The pixels of the last render: premultiplied ARGB32, `*stride` bytes per row.
  *
  * Owned by the scene and valid until the next render or resize.

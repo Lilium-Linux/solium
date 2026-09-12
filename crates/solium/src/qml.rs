@@ -119,6 +119,7 @@ mod ffi {
         );
         pub(super) fn solium_qml_scene_get_bool(scene: *const Scene, name: *const c_char) -> c_int;
         pub(super) fn solium_qml_scene_dirty(scene: *const Scene) -> c_int;
+        pub(super) fn solium_qml_scene_animating(scene: *const Scene) -> c_int;
         pub(super) fn solium_qml_scene_pointer(
             scene: *mut Scene,
             x: c_double,
@@ -1186,18 +1187,38 @@ impl Scene {
         unsafe { ffi::solium_qml_scene_resize(self.scene, width, height, scale) }
     }
 
-    /// Advance QML animations to a point on the compositor's clock.
-    ///
-    /// Not Qt's clock: there is one clock here, and a QML animation running on
-    /// a second one would drift against every transform beside it.
-    #[expect(unsafe_code, reason = "calling into the Qt host")]
     /// Whether Qt has anything new to draw for this scene.
     ///
     /// Qt reports it through `renderRequested` and `sceneChanged`; asking is a
     /// flag read, so a screen of idle frames costs a comparison each.
+    ///
+    /// **Not the same question as [`Self::animation_in_flight`].** Qt raises
+    /// this when a property that is actually rendered changes value, which a
+    /// running animation does not do on every tick — so a scene can be clean
+    /// and still be moving. Reading this alone as "still animating" is what
+    /// froze decorations part-way through.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn needs_render(&self) -> bool {
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
         unsafe { ffi::solium_qml_scene_dirty(self.scene) != 0 }
+    }
+
+    /// Whether an animation inside this scene is still running.
+    ///
+    /// The other half of "will a later frame look different from this one",
+    /// and the half [`Self::needs_render`] cannot answer: the tick that starts
+    /// a `Behavior` has not moved anything yet, and an interpolation between
+    /// two nearby values spends several ticks landing on the number it already
+    /// had. Both are clean ticks in the middle of a live animation.
+    ///
+    /// Per scene, and deliberately not `QAnimationDriver::isRunning()` — which
+    /// is process-wide *and* reads true for ever once anything has animated.
+    /// `qml/host.cpp`'s `solium_qml_scene_animating` has the measurements and
+    /// the line of Qt that does it.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn animation_in_flight(&self) -> bool {
+        // SAFETY: `self.scene` is non-null for the lifetime of `self`.
+        unsafe { ffi::solium_qml_scene_animating(self.scene) != 0 }
     }
 
     /// Render the scene if it has changed, then hand back its pixels.

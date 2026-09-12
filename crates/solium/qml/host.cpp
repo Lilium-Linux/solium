@@ -1464,6 +1464,80 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
     return (scene != nullptr && scene->dirty) ? 1 : 0;
 }
 
+/*
+ * Is any animation inside this scene still running?
+ *
+ * A different question from `dirty`, and the compositor needs both. `dirty`
+ * means "Qt has something new to draw", which is raised only when a property
+ * that is actually rendered changes value. A running animation does not change
+ * one every tick: the tick that *starts* a `Behavior` has not moved the
+ * property yet, and an interpolation between two nearby values spends several
+ * ticks rounding to the number it already had. On those ticks the scene is
+ * clean while the animation is very much alive, and a compositor that reads
+ * `dirty` as "still animating" stops drawing and never advances it again.
+ *
+ * Measured against this Qt (6.11.2, software adaptation, the same driver and
+ * the same renderRequested/sceneChanged wiring as below), from a settled scene,
+ * on the frame the compositor writes the property that triggers the animation
+ * and the three ticks after it:
+ *
+ *   reveal.qml     pointerInside  dirty false, false, false, true
+ *   reactive.qml   pointerInside  dirty false, false, false, true
+ *   top.qml        focused        dirty true,  false, false, true
+ *   border.qml     focused        dirty true,  false, false, true
+ *   proximity.qml  pointerInside  dirty true,  false, false, true
+ *
+ * -- with an animation running throughout. Every one of them has at least one
+ * clean tick before it has finished, and `reveal` and `reactive` are clean on
+ * the very frame that starts them, so on the shipped logic their animation
+ * never took a single step unless something unrelated damaged the screen.
+ *
+ * Asked of the scene and not of the process. `QAnimationDriver::isRunning()`
+ * looks like the direct answer and is not one: `QAnimationDriver::advanceAnimation`
+ * ends in `QUnifiedTimer::restart` -> `localRestart`, which starts the driver
+ * again whenever it is not running, *including when no animation is registered*
+ * (qtbase v6.11.2, src/corelib/animation/qabstractanimation.cpp:333-349). Qt's
+ * own stop is queued, so the driver reads stopped for exactly one tick and
+ * running for every tick after it, for ever. Measured here: with the screen
+ * being damaged for eight frames after the animation starts -- a pointer still
+ * moving, which is usually *why* it started -- a compositor gated on
+ * `isRunning()` drew 400 frames of 400 and never went idle again.
+ *
+ * `running` on a QQuickAbstractAnimation is exact instead, and per scene.
+ * Reached through QObject::inherits so this needs no Qt private headers; the
+ * walk short-circuits, and the caller only asks when the scene is clean, which
+ * is the only frame the answer can change anything. A settled reactive.qml is
+ * 21 QObjects and 0.6 us.
+ *
+ * What it does not cover: a `Timer`. A scene whose next change is a timer
+ * firing -- Quickshell.SystemClock is the one in the tree -- is not animating
+ * by this answer and will not be given the frame its timer needs to fire on,
+ * because `solium_qml_tick` is what drains the event queue and only runs on a
+ * frame that is drawn. Counting running Timers here would fix that and would
+ * also pin the compositor at full rate for as long as any clock exists, which
+ * is the wrong trade; what that wants is a wake-up deadline, not a busy loop.
+ */
+static bool animation_running(const QObject *item)
+{
+    if (item->inherits("QQuickAbstractAnimation") && item->property("running").toBool()) {
+        return true;
+    }
+    for (const QObject *child : item->children()) {
+        if (animation_running(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+extern "C" int solium_qml_scene_animating(const SoliumQmlScene *scene)
+{
+    if (scene == nullptr || scene->root == nullptr) {
+        return 0;
+    }
+    return animation_running(scene->root) ? 1 : 0;
+}
+
 extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)
 {
     if (scene == nullptr || scene->control == nullptr || scene->image.isNull()) {

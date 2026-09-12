@@ -223,8 +223,12 @@ pub(crate) struct Decoration {
 /// unless the frame says it is still moving, rendering stops and the animation
 /// freezes wherever it happened to be.
 impl crate::render::Painted for Decoration {
-    fn still_animating(&self) -> bool {
+    fn something_new_to_draw(&self) -> bool {
         self.scene.needs_render()
+    }
+
+    fn animation_in_flight(&self) -> bool {
+        self.scene.animation_in_flight()
     }
 }
 
