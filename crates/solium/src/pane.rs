@@ -27,15 +27,6 @@
 //!
 //! See `docs/spikes/2026-09-06-window-provider.md` for the order the migration
 //! goes in and why it goes in that order.
-#![expect(
-    dead_code,
-    reason = "steps 4 and 5 of the migration bring the loading half into use: \
-              adopting a client by its process, drawing a pane that has none \
-              yet, and keeping one on screen while it leaves. Per-item is not \
-              an option -- dead_code reports a whole impl block at one span, \
-              so an expect on one method cannot match it."
-)]
-
 use std::{path::PathBuf, time::Duration};
 
 use smithay::{
@@ -64,6 +55,13 @@ impl PaneId {
 
 /// What is inside a pane.
 #[derive(Debug)]
+#[expect(
+    dead_code,
+    reason = "steps 4 and 5 of the window-provider migration bring the loading half \
+              into use: `Loading::source` is read by whatever draws a pane whose \
+              client has not arrived, and `Leaving` is constructed by whatever keeps \
+              one on screen while it goes. See the module docs."
+)]
 pub(crate) enum Content {
     /// Asked for, not arrived. The compositor draws it, from `source`.
     Loading {
@@ -213,6 +211,17 @@ pub(crate) struct Pane {
     managed: bool,
 }
 
+/// `dead_code` on the *block*, which is as narrow as this one can be: the lint
+/// reports every unused method of an impl in a single diagnostic at the impl's
+/// own span, so an `expect` on the method it names cannot match it. `content`
+/// and `leave` are the two, and they are the same window-provider migration the
+/// `Content` arms above are waiting for.
+#[expect(
+    dead_code,
+    reason = "steps 4 and 5 of the window-provider migration call `content` and \
+              `leave`: reading what a pane is showing, and keeping one on screen \
+              while its client goes. See the module docs."
+)]
 impl Pane {
     /// A pane for an application that has been asked for and has not arrived.
     pub(crate) fn loading(
