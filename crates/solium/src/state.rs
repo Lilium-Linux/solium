@@ -1144,6 +1144,7 @@ impl Solium {
             pane.unmanage();
         }
         self.decorations.set_bare(id);
+        self.shadow_frame(id);
     }
 
     /// Which process a client belongs to, as the kernel reports it.
@@ -1301,6 +1302,10 @@ impl Solium {
         // this could not have happened here, because nothing knew the set of
         // live windows -- so it was done where a window was seen leaving
         // tidily, and a client that crashed left its frame behind forever.
+        //
+        // Nothing to shadow here: a `Pane::frame` is a field of the pane, so
+        // the panes this drops entries for took their own answer with them.
+        // That is the whole point of moving it in.
         let live: std::collections::HashSet<crate::pane::PaneId> =
             self.panes.iter().map(Pane::id).collect();
         self.decorations.retain(|id| live.contains(&id));
@@ -1573,6 +1578,9 @@ impl Solium {
                         })
                         .collect();
                     if self.decorations.set_style(name) {
+                        // Every frame was just rebuilt or dropped, so every
+                        // pane's shadow is stale.
+                        self.shadow_frames();
                         for (window, outer) in slots {
                             self.resize_to(&window, outer);
                         }
@@ -2402,6 +2410,38 @@ impl Solium {
         }
     }
 
+    /// Copy what the tables now say about this pane onto the pane itself.
+    ///
+    /// Called immediately after every write to `Decorations`, and it is the
+    /// whole of the shadowing: nothing reads `Pane::frame` yet, so this can
+    /// change no behaviour, and when the readers move over they find an answer
+    /// that has been kept in step all along. It goes away with the tables.
+    ///
+    /// Derived from `Decorations` rather than decided here on purpose. The
+    /// writers make their choice inside `Decorations` — `insert` alone has
+    /// three outcomes, one of which is a QML file that would not load — and a
+    /// call site that worked the answer out a second time would be a second
+    /// authority, which is the thing being removed.
+    ///
+    /// A pane that has gone needs nothing: its frame left with it.
+    pub(crate) fn shadow_frame(&mut self, id: crate::pane::PaneId) {
+        let frame = self.decorations.frame_of(id);
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.set_frame(frame);
+        }
+    }
+
+    /// The same, for every live pane.
+    ///
+    /// `set_style` rebuilds or drops every frame at once, so there is no one
+    /// pane to name.
+    fn shadow_frames(&mut self) {
+        let live: Vec<crate::pane::PaneId> = self.panes.iter().map(Pane::id).collect();
+        for id in live {
+            self.shadow_frame(id);
+        }
+    }
+
     /// Raise a window and give it the keyboard.
     /// Report what the compositor is holding, once a second, when asked.
     ///
@@ -2545,6 +2585,7 @@ impl Solium {
         // frame, keyed by pane, so whatever animation is running in it carries
         // straight through the handover instead of starting again.
         self.decorations.insert(id, area.size.w, area.size.h);
+        self.shadow_frame(id);
         // And the frame's share comes off the slot, exactly as it does for a
         // window the layout placed, so the client is sized to the same rect
         // either way.
@@ -2875,6 +2916,14 @@ impl Solium {
                 let style = self.decorations.style().map(ToOwned::to_owned);
                 self.decorations.set_style(None);
                 self.decorations.set_style(style);
+                // After both, not between them. `set_style` *rebuilds* an
+                // existing frame rather than dropping it -- see the comment on
+                // it, and the reason: dropping leaves every open window bare
+                // until it is reopened -- so a window that is framed before a
+                // reload is framed after it, by a different `Decoration` with
+                // its own insets. Shadowing once at the end is what keeps the
+                // pane's answer the *new* frame's rather than the old one's.
+                self.shadow_frames();
                 self.start_scripts(Some(scripts));
                 self.redraw = true;
                 tracing::info!(config = %path.display(), "configuration reloaded");
@@ -3632,6 +3681,7 @@ impl XdgShellHandler for Solium {
         // again from the style that is current then.
         self.decorations.remove(id);
         self.decorations.set_bare(id);
+        self.shadow_frame(id);
 
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Fullscreen);
@@ -3678,6 +3728,7 @@ impl XdgShellHandler for Solium {
                     (real.size.w, real.size.h)
                 });
             self.decorations.insert(id, size.0, size.1);
+            self.shadow_frame(id);
         }
 
         if let Some(back) = self
@@ -3886,6 +3937,7 @@ impl Solium {
             self.decorations.remove(id);
             self.decorations.set_bare(id);
         }
+        self.shadow_frame(id);
 
         // The client has to learn its mode before it draws, or it decides for
         // itself and draws a frame we then draw over.

@@ -202,6 +202,7 @@ impl XwmHandler for Solium {
             }
             if let Some(id) = self.panes.id_of(&element) {
                 self.decorations.remove(id);
+                self.shadow_frame(id);
             }
             self.space.unmap_elem(&element);
         }
