@@ -154,6 +154,25 @@ pub(crate) struct Pane {
     /// by `PaneId` in a table beside the panes has to be reconciled by hand,
     /// and one that is not is kept for ever.
     frame: Frame,
+    /// When this pane's close request goes out, once it has finished leaving.
+    ///
+    /// A *deadline*, not a start: `Solium::close_pane` animates the window
+    /// away first and asks the client afterwards, and this is the moment
+    /// "afterwards" arrives. `None` for a window nobody has asked to close.
+    ///
+    /// A field for the reason `frame` is one — `Solium::closing` was a
+    /// `HashMap<PaneId, Duration>` beside the panes, and an entry whose pane
+    /// had gone stayed until something remembered to sweep it. This one leaves
+    /// with its pane.
+    closing_at: Option<Duration>,
+    /// When this pane's client was asked to close.
+    ///
+    /// A close is a request. A client may put up "are you sure?" and stay, and
+    /// nothing in the protocol says so — the only evidence is the window still
+    /// being here a moment later. `None` once that moment has passed and the
+    /// window has either gone or been brought back. See
+    /// `Solium::settle_refused`.
+    asked_at: Option<Duration>,
     opened: Duration,
     /// Whether a client mapped *into* this pane rather than creating it.
     ///
@@ -201,6 +220,8 @@ impl Pane {
                 scene: scene.map(Box::new),
             },
             frame: Frame::Pending,
+            closing_at: None,
+            asked_at: None,
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -220,6 +241,8 @@ impl Pane {
                 faded: None,
             },
             frame: Frame::Pending,
+            closing_at: None,
+            asked_at: None,
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -274,6 +297,38 @@ impl Pane {
     /// is not a write to the other is the drift this is here to remove.
     pub(crate) fn set_frame(&mut self, frame: Frame) {
         self.frame = frame;
+    }
+
+    /// When this pane's close request goes out. See the field.
+    pub(crate) const fn closing_at(&self) -> Option<Duration> {
+        self.closing_at
+    }
+
+    /// This pane is on its way out; `due` is when to tell its client so.
+    pub(crate) const fn begin_closing(&mut self, due: Duration) {
+        self.closing_at = Some(due);
+    }
+
+    /// The request has gone out, or there is nothing left to ask.
+    pub(crate) const fn stop_closing(&mut self) {
+        self.closing_at = None;
+    }
+
+    /// When this pane's client was asked to close. See the field.
+    pub(crate) const fn asked_at(&self) -> Option<Duration> {
+        self.asked_at
+    }
+
+    /// The client has been asked to close, at `at`. Whether the request
+    /// actually went out is deliberately not recorded: a window we could not
+    /// even ask is the one most in need of being waited for.
+    pub(crate) const fn mark_asked(&mut self, at: Duration) {
+        self.asked_at = Some(at);
+    }
+
+    /// Stop waiting on an answer that was never going to come in words.
+    pub(crate) const fn forget_asked(&mut self) {
+        self.asked_at = None;
     }
 
     /// The client's window, if one has arrived.
@@ -800,6 +855,90 @@ mod tests {
         assert!(matches!(pane.frame(), Frame::Pending));
         pane.set_frame(Frame::None);
         assert!(matches!(pane.frame(), Frame::None));
+    }
+
+    #[test]
+    fn a_pane_has_no_timers_until_somebody_asks_it_to_close() {
+        let mut pane = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
+        assert!(pane.closing_at().is_none());
+        assert!(pane.asked_at().is_none());
+
+        // The sequence `close_pane` and `settle_closing` put a window through:
+        // leave, then ask, then wait to see whether it went.
+        pane.begin_closing(Duration::from_millis(190));
+        assert_eq!(pane.closing_at(), Some(Duration::from_millis(190)));
+        pane.stop_closing();
+        pane.mark_asked(Duration::from_millis(190));
+        assert!(pane.closing_at().is_none(), "the request has gone out");
+        assert_eq!(
+            pane.asked_at(),
+            Some(Duration::from_millis(190)),
+            "and it is still being waited on"
+        );
+        pane.forget_asked();
+        assert!(pane.asked_at().is_none());
+    }
+
+    #[test]
+    fn a_closing_timer_goes_when_the_pane_does() {
+        // Why the timers moved in. They were `HashMap<PaneId, Duration>`
+        // beside the panes, and an entry whose pane had gone stayed there
+        // until `sync_panes` remembered to sweep it. There is no longer
+        // anything to remember.
+        let mut panes = Panes::default();
+        let id = panes.open(Pane::loading(
+            "kitty",
+            None,
+            slot(),
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        ));
+        if let Some(pane) = panes.get_mut(id) {
+            pane.begin_closing(Duration::from_millis(10));
+            pane.mark_asked(Duration::from_millis(4));
+        }
+        assert_eq!(
+            panes.get(id).and_then(Pane::closing_at),
+            Some(Duration::from_millis(10))
+        );
+
+        assert!(panes.remove(id));
+        assert!(
+            panes.get(id).is_none(),
+            "and both of its timers went with it; there is nothing left to retain"
+        );
+    }
+
+    #[test]
+    fn a_reconcile_does_not_forget_what_a_pane_was_told() {
+        // `sync` drains the list and rebuilds it. A timer that did not ride
+        // along would be a window told to close and then never asked -- which
+        // is the failure the old `retain` lines could not have caused and a
+        // move like this one can.
+        let mut panes = Panes::default();
+        let id = panes.open(Pane::loading(
+            "kitty",
+            None,
+            slot(),
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        ));
+        if let Some(pane) = panes.get_mut(id) {
+            pane.begin_closing(Duration::from_millis(10));
+            pane.mark_asked(Duration::from_millis(4));
+        }
+
+        panes.sync(&[], Duration::from_secs(1));
+        assert_eq!(
+            panes.get(id).and_then(Pane::closing_at),
+            Some(Duration::from_millis(10))
+        );
+        assert_eq!(
+            panes.get(id).and_then(Pane::asked_at),
+            Some(Duration::from_millis(4))
+        );
     }
 
     #[test]
