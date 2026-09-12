@@ -860,23 +860,38 @@ fn scripted(
 
     // Which of them belong on this screen, decided before anything is
     // borrowed mutably to rasterise it.
+    //
+    // **Carried before culled.** A surface's declared placement says where it
+    // lives; the selection it is in says where it is drawn, and a wallpaper
+    // belonging to a workspace a screen away is declared on this monitor and
+    // drawn nowhere near it. Culling on the declared rectangle would rasterise
+    // a full-screen scene per desk, every frame, for pictures nobody can see —
+    // and culling after `instance` would still build them. So the order here is
+    // load-bearing: place, carry, cull, and only then ask for a rasterisation.
     let wanted: Vec<(
-        usize,
+        crate::scripted::SurfaceId,
         smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+        f32,
     )> = state
         .surfaces
         .iter()
-        .enumerate()
-        .filter(|(_, surface)| surface.layer() == layer)
-        .filter_map(|(index, surface)| {
-            Some((index, surface.area_on(&output, geometry, primary.as_ref())?))
+        .filter(|surface| surface.layer() == layer)
+        .filter_map(|surface| {
+            let id = surface.id();
+            let area = state.carried(
+                id,
+                &output,
+                surface.area_on(&output, geometry, primary.as_ref())?,
+            );
+            area.overlaps(screen)
+                .then(|| (id, area, state.carried_alpha(id, &output)))
         })
         .collect();
 
     let mut drawn = Vec::new();
     let mut animating = false;
-    for (index, area) in wanted {
-        let Some(surface) = state.surfaces.get_mut(index) else {
+    for (id, area, alpha) in wanted {
+        let Some(surface) = state.surfaces.get_mut(id) else {
             continue;
         };
         let Some(instance) = surface.instance(&output) else {
@@ -886,7 +901,7 @@ fn scripted(
             renderer,
             smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
             now,
-            1.0,
+            alpha,
             scale,
         );
         drawn.extend(painted.element);

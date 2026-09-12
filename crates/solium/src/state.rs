@@ -177,7 +177,15 @@ pub(crate) struct Solium {
     ///
     /// The wallpaper is one of these and there is nothing in here that knows
     /// that. See `scripted.rs`.
-    pub(crate) surfaces: Vec<crate::scripted::Surface>,
+    pub(crate) surfaces: crate::scripted::Surfaces,
+
+    /// Every selection a script has named, and where each is being carried.
+    ///
+    /// **Not a sixth table keyed by `PaneId`.** A group holds its own members
+    /// and its own transform, so nothing here is keyed by anything and there is
+    /// nothing to reconcile: a selection naming a window that has closed
+    /// resolves to nothing and costs a `u64`. See `group.rs`.
+    pub(crate) groups: crate::group::Groups,
 
     /// The keymap in force, kept so a reload that changes nothing does not
     /// re-send one. See `keymap.rs`.
@@ -608,7 +616,8 @@ impl Solium {
             idle_state: crate::idle::IdleState::new::<Self>(&display_handle),
             idle_inhibit_state: crate::idle::inhibit_state(&display_handle),
             idle: crate::idle::Idle::default(),
-            surfaces: Vec::new(),
+            surfaces: crate::scripted::Surfaces::default(),
+            groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),
             session_lock_state: crate::lock::state(&display_handle),
@@ -715,8 +724,91 @@ impl Solium {
     pub(crate) fn drawn(&self, id: crate::pane::PaneId, real: Rectangle<i32, Logical>) -> Frame {
         self.panes.get(id).map_or_else(
             || Frame::real(real),
-            |pane| present::frame(pane, real, self.clock.now()),
+            |pane| self.drawn_at(pane, real, self.clock.now()),
         )
+    }
+
+    /// The same, for a caller that already holds the pane and the instant.
+    ///
+    /// **The one place a pane's own transform and its groups' are put
+    /// together**, so no caller can ask for one and forget the other. Every
+    /// reader of a drawn rectangle goes through here — the renderer, the hit
+    /// test, the resize edges, the window list a script sees — which is what
+    /// keeps "a workspace you cannot see is one you cannot click into by
+    /// accident" true now that the workspace is a selection rather than a
+    /// transform per window.
+    ///
+    /// Hit-testing follows the *rectangle* and not the matrix, which is
+    /// unchanged: a window drawn in perspective is still clicked where the
+    /// layout put it, and a mode that wants otherwise inverts its own transform
+    /// through `present::to_window_space`.
+    pub(crate) fn drawn_at(
+        &self,
+        pane: &Pane,
+        real: Rectangle<i32, Logical>,
+        now: std::time::Duration,
+    ) -> Frame {
+        let frame = present::frame(pane, real, now);
+        if self.groups.is_empty() {
+            return frame;
+        }
+        // Only worked out when a selection has actually named a screen: this is
+        // a geometric search over the outputs, per pane, per frame.
+        let monitor = self
+            .groups
+            .names_monitors()
+            .then(|| self.output_of(real).map(|output| output.name()))
+            .flatten();
+        self.groups
+            .on_window(pane.id().get(), monitor.as_deref(), now)
+            .apply(frame)
+    }
+
+    /// Where one monitor's instance of a scripted surface is actually drawn.
+    ///
+    /// The surface half of [`Self::drawn_at`], and deliberately a rectangle
+    /// rather than a `Frame`: a selection reaches a surface as a displacement
+    /// and an opacity, and no further. A matrix or a deformation on a group
+    /// reaches its *panes* — bending a surface means capturing it into a texture
+    /// first, and a scripted surface is a memory buffer on the software path,
+    /// where there is no texture to bend. That is `offscreen::capture` for
+    /// surfaces, which is a change of its own and not a line of this one.
+    pub(crate) fn carried(
+        &self,
+        id: crate::scripted::SurfaceId,
+        output: &Output,
+        area: Rectangle<i32, Logical>,
+    ) -> Rectangle<i32, Logical> {
+        if self.groups.is_empty() {
+            return area;
+        }
+        let (dx, dy) = self
+            .groups
+            .on_surface(id, &output.name(), self.clock.now())
+            .offset();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a displacement on this desktop, in logical pixels"
+        )]
+        let moved = Rectangle::new(
+            (
+                area.loc.x + dx.round() as i32,
+                area.loc.y + dy.round() as i32,
+            )
+                .into(),
+            area.size,
+        );
+        moved
+    }
+
+    /// How much of a scripted surface a selection is showing.
+    pub(crate) fn carried_alpha(&self, id: crate::scripted::SurfaceId, output: &Output) -> f32 {
+        if self.groups.is_empty() {
+            return 1.0;
+        }
+        self.groups
+            .on_surface(id, &output.name(), self.clock.now())
+            .opacity
     }
 
     /// Turn a deform's anchor into the rectangle it is aimed at *this frame*.
@@ -744,6 +836,17 @@ impl Solium {
             present::Anchor::Pane(id) => {
                 let pane = self.panes.by_script_id(id)?;
                 self.drawn(pane.id(), self.pane_outer(pane)?).rect
+            }
+            // The monitor in front of the user, and the primary one when there
+            // is no pointer yet. Not "the first output that answers": that is
+            // stable only until somebody plugs a screen in on the other side.
+            present::Anchor::Surface(id) => {
+                let surface = self.surfaces.get(id)?;
+                let output = self.active_output().or_else(|| self.primary_output())?;
+                let geometry = self.space.output_geometry(&output)?;
+                let primary = self.primary_output();
+                let area = surface.area_on(&output, geometry, primary.as_ref())?;
+                self.carried(id, &output, area).to_f64()
             }
         };
         Some(present::Aimed {
@@ -1408,7 +1511,7 @@ impl Solium {
                     return None;
                 }
                 let outer = self.pane_outer(pane)?;
-                let drawn = present::frame(pane, outer, now);
+                let drawn = self.drawn_at(pane, outer, now);
                 Some(WindowInfo {
                     id: pane.id().get(),
                     rect: to_rect(outer),
@@ -1696,7 +1799,7 @@ impl Solium {
             // Against where the window is *drawn*: a window in a mode should be
             // resized by its thumbnail's edge or not at all, never by an edge
             // that is somewhere else on screen.
-            let drawn = present::frame(pane, outer, now).rect;
+            let drawn = self.drawn_at(pane, outer, now).rect;
             let grown = Rectangle::new(
                 (
                     drawn.loc.x.round() as i32 - resize::RESIZE_BORDER,
@@ -1935,7 +2038,7 @@ impl Solium {
         self.panes.iter().rev().find_map(|pane| {
             let window = pane.client()?;
             let outer = self.outer_geometry(window)?;
-            if !present::frame(pane, outer, now).rect.contains(location) {
+            if !self.drawn_at(pane, outer, now).rect.contains(location) {
                 return None;
             }
             Some((window.clone(), self.real_geometry(window)?))
@@ -1992,7 +2095,7 @@ impl Solium {
             let Some(outer) = self.pane_outer(pane) else {
                 continue;
             };
-            let frame = present::frame(pane, outer, now);
+            let frame = self.drawn_at(pane, outer, now);
             if !frame.rect.contains(location) {
                 continue;
             }
@@ -2045,7 +2148,7 @@ impl Solium {
             // one that has not arrived owns no pixels for a click to land on.
             pane.decoration()?;
             let outer = self.pane_outer(pane)?;
-            let drawn = present::frame(pane, outer, now);
+            let drawn = self.drawn_at(pane, outer, now);
             if !drawn.rect.contains(location) {
                 return None;
             }
@@ -2180,6 +2283,10 @@ impl Solium {
         for pane in self.panes.iter() {
             animating |= present::settle(pane, now);
         }
+        // And the selections, which animate on the same clock and damage
+        // nothing either. Not folded into the loop above: a group is not a
+        // pane, and one that has landed has to be released exactly once.
+        animating |= self.groups.settle(now);
         // A window that has finished leaving is told to close; until then the
         // session counts as animating so the frames keep coming.
         animating |= self.settle_closing(now);
@@ -2556,7 +2663,7 @@ impl Solium {
             // the pointer until there is one.
             pane.decoration()?;
             let outer = self.pane_outer(pane)?;
-            let drawn = present::frame(pane, outer, now);
+            let drawn = self.drawn_at(pane, outer, now);
             if !drawn.rect.contains(location) {
                 return None;
             }
@@ -2831,7 +2938,7 @@ impl Solium {
                     .wl_surface()
                     .is_some_and(|owned| owned.as_ref() == surface)
                     && self.pane_outer(pane).is_some_and(|outer| {
-                        let drawn = present::frame(pane, outer, now).rect;
+                        let drawn = self.drawn_at(pane, outer, now).rect;
                         self.space.outputs().any(|output| {
                             self.space
                                 .output_geometry(output)
@@ -3009,25 +3116,13 @@ impl Solium {
     /// everything: without that check a `super+shift+r` that changed a gap
     /// would re-decode every wallpaper on every monitor.
     pub(crate) fn declare_surface(&mut self, declared: crate::scripted::Declaration) {
-        if let Some(existing) = self
-            .surfaces
-            .iter_mut()
-            .find(|each| each.name() == declared.name)
-        {
-            if existing.declared == declared {
-                return;
-            }
-            *existing = crate::scripted::Surface::new(declared);
-        } else {
-            self.surfaces.push(crate::scripted::Surface::new(declared));
+        if self.surfaces.declare(declared) {
+            self.redraw = true;
         }
-        self.redraw = true;
     }
 
     pub(crate) fn remove_surface(&mut self, name: &str) {
-        let before = self.surfaces.len();
-        self.surfaces.retain(|surface| surface.name() != name);
-        if self.surfaces.len() != before {
+        if self.surfaces.remove(name) {
             self.redraw = true;
         }
     }
@@ -3070,17 +3165,22 @@ impl Solium {
         };
 
         for layer in order {
-            let candidates: Vec<(usize, Rectangle<i32, Logical>)> = self
+            // Where each of them is *drawn*, not merely where it was declared:
+            // a surface carried off by a group is not under the pointer either,
+            // which is the same rule a window follows. Without it, a wallpaper
+            // that slid away with its workspace goes on eating clicks on the
+            // workspace that replaced it.
+            let candidates: Vec<(crate::scripted::SurfaceId, Rectangle<i32, Logical>)> = self
                 .surfaces
                 .iter()
-                .enumerate()
-                .filter(|(_, surface)| surface.interactive() && surface.layer() == layer)
-                .filter_map(|(index, surface)| {
-                    Some((index, surface.area_on(&output, geometry, primary.as_ref())?))
+                .filter(|surface| surface.interactive() && surface.layer() == layer)
+                .filter_map(|surface| {
+                    let area = surface.area_on(&output, geometry, primary.as_ref())?;
+                    Some((surface.id(), self.carried(surface.id(), &output, area)))
                 })
                 .collect();
-            for (index, area) in candidates {
-                let Some(surface) = self.surfaces.get_mut(index) else {
+            for (id, area) in candidates {
+                let Some(surface) = self.surfaces.get_mut(id) else {
                     continue;
                 };
                 if surface.pointer(&output, area, location.x, location.y, pressed) {
@@ -3101,7 +3201,7 @@ impl Solium {
     /// Tweaks panel from a compositor feature into `lua/tweaks.lua`.
     pub(crate) fn settle_surfaces(&mut self) {
         let mut asked: Vec<(String, String)> = Vec::new();
-        for surface in &mut self.surfaces {
+        for surface in self.surfaces.iter_mut() {
             if let Some(action) = surface.taken_action() {
                 asked.push((surface.name().to_owned(), action));
             }
@@ -3124,7 +3224,7 @@ impl Solium {
     /// largest thing the compositor allocates.
     fn prune_surfaces(&mut self) {
         let live: Vec<String> = self.space.outputs().map(Output::name).collect();
-        for surface in &mut self.surfaces {
+        for surface in self.surfaces.iter_mut() {
             surface.keep_only(&live);
         }
     }
