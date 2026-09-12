@@ -21,7 +21,6 @@ use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
-use std::collections::HashMap;
 
 use smithay::{
     backend::{allocator::dmabuf::Dmabuf, renderer::utils::on_commit_buffer_handler},
@@ -266,14 +265,11 @@ pub(crate) struct Solium {
     /// told. QML hover is positional: a frame never told the pointer left
     /// stays lit forever.
     pub(crate) hovered_frame: Option<crate::pane::PaneId>,
-    /// Windows on their way out, and when to tell them so. See `close_pane`.
-    closing: HashMap<crate::pane::PaneId, std::time::Duration>,
-    /// Windows that have been asked to close, and when they were asked.
-    ///
-    /// A close is a request. A client may put up "are you sure?" and stay, and
-    /// nothing in the protocol says so -- the only evidence is the window
-    /// still being here. See `settle_refused`.
-    asked: HashMap<crate::pane::PaneId, std::time::Duration>,
+    // A window on its way out, and one that has been asked to close and not
+    // gone, used to be two `HashMap<PaneId, Duration>` here. They are
+    // `Pane::closing_at` and `Pane::asked_at` now: a timer about one window is
+    // part of that window, and leaves with it rather than waiting to be swept
+    // out of a table beside it. See `close_pane` and `settle_refused`.
     /// When the last memory report went out; see `memory_report`.
     pub(crate) reported_at: std::time::Duration,
     /// XWayland's window manager, once XWayland has started. `None` means no
@@ -587,8 +583,6 @@ impl Solium {
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
             loading: crate::script::Loading::default(),
             hovered_frame: None,
-            closing: HashMap::new(),
-            asked: HashMap::new(),
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
@@ -1331,14 +1325,13 @@ impl Solium {
         // live windows -- so it was done where a window was seen leaving
         // tidily, and a client that crashed left its frame behind forever.
         //
-        // Nothing to shadow here: a `Pane::frame` is a field of the pane, so
-        // the panes this drops entries for took their own answer with them.
-        // That is the whole point of moving it in.
+        // Only the decoration tables are left. A pane's frame and its two
+        // timers are fields of the pane, so the panes this drops entries for
+        // took those with them -- which is the whole point of moving them in,
+        // and why `closing` and `asked` no longer need a line here.
         let live: std::collections::HashSet<crate::pane::PaneId> =
             self.panes.iter().map(Pane::id).collect();
         self.decorations.retain(|id| live.contains(&id));
-        self.closing.retain(|id, _| live.contains(id));
-        self.asked.retain(|id, _| live.contains(id));
 
         // A window appearing or going is exactly when the keyboard can be left
         // with nowhere to be, and the only moment worth checking.
@@ -2071,18 +2064,25 @@ impl Solium {
     /// animating it would mean holding a snapshot of every window on the
     /// chance that it might be the next to leave.
     pub(crate) fn close_pane(&mut self, id: crate::pane::PaneId) {
-        if self.closing.contains_key(&id) {
-            return;
-        }
+        // The pane is looked up before the "already leaving" guard rather than
+        // after it, which the `closing` map could not do. Same answer either
+        // way: an id with no pane returned early on the second check before
+        // and returns early on the first one now, and a pane already on its
+        // way out must not have its animation restarted.
         let Some(pane) = self.panes.get(id) else {
             return;
         };
+        if pane.closing_at().is_some() {
+            return;
+        }
         let Some(outer) = self.pane_outer(pane) else {
             return;
         };
         let now = self.clock.now();
         present::close(pane, outer, now);
-        self.closing.insert(id, now + present::CLOSING);
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.begin_closing(now + present::CLOSING);
+        }
         self.redraw = true;
     }
 
@@ -2091,17 +2091,21 @@ impl Solium {
     /// Returns whether any window is still on its way out, so the backend
     /// keeps drawing until they are gone.
     pub(crate) fn settle_closing(&mut self, now: std::time::Duration) -> bool {
-        if self.closing.is_empty() {
-            return false;
-        }
+        // Over the panes rather than over a map of timers, so a pane that has
+        // gone cannot be visited at all. It could be before, between a
+        // `Panes::remove` and the `sync_panes` that swept the map after it --
+        // and every reader that found such an entry did nothing with it but
+        // remove it, so nothing observable turned on that window.
         let due: Vec<crate::pane::PaneId> = self
-            .closing
+            .panes
             .iter()
-            .filter(|(_, at)| now >= **at)
-            .map(|(id, _)| *id)
+            .filter(|pane| pane.closing_at().is_some_and(|at| now >= at))
+            .map(Pane::id)
             .collect();
         for id in due {
-            self.closing.remove(&id);
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.stop_closing();
+            }
             let Some(window) = self.panes.get(id).and_then(Pane::client).cloned() else {
                 // Nothing to ask. A window whose application never arrived is
                 // gone when we say it is, which is the one case where closing
@@ -2132,9 +2136,16 @@ impl Solium {
             // than whether the window is still here a moment later, and a
             // window we could not even ask is the one most in need of coming
             // back.
-            self.asked.insert(id, now);
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.mark_asked(now);
+            }
         }
-        !self.closing.is_empty()
+        // Asked after the loop, not before it: `trigger_close` runs a script,
+        // and a script that closes another window during it starts a timer
+        // this answer has to count. That was true of `!self.closing.is_empty()`
+        // in the same position, and is the reason this is a second pass rather
+        // than a flag gathered during the first.
+        self.panes.iter().any(|pane| pane.closing_at().is_some())
     }
 
     /// Retire transforms that have landed, and say whether anything still
@@ -2296,22 +2307,30 @@ impl Solium {
     ///
     /// Returns whether anything is still being waited on.
     pub(crate) fn settle_refused(&mut self, now: std::time::Duration) -> bool {
-        if self.asked.is_empty() {
-            return false;
-        }
         /// Long enough that a client which is closing is not interrupted part
         /// way; short enough that coming back reads as an answer to the press
         /// rather than as a window reappearing by itself.
         const GRACE: std::time::Duration = std::time::Duration::from_millis(400);
 
+        // Over the panes, for the reason `settle_closing` is: a window that
+        // has gone is a window that answered, and there is nothing left of it
+        // to bring back.
         let due: Vec<crate::pane::PaneId> = self
-            .asked
+            .panes
             .iter()
-            .filter(|(_, at)| now.saturating_sub(**at) >= GRACE)
-            .map(|(id, _)| *id)
+            .filter(|pane| {
+                pane.asked_at()
+                    .is_some_and(|at| now.saturating_sub(at) >= GRACE)
+            })
+            .map(Pane::id)
             .collect();
         for id in due {
-            self.asked.remove(&id);
+            // Stopped waiting first, then acted on -- the same order the map
+            // did it in, so a pane that goes while this runs is not waited on
+            // for ever.
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.forget_asked();
+            }
             let Some(pane) = self.panes.get(id) else {
                 continue;
             };
@@ -2331,7 +2350,7 @@ impl Solium {
             );
             self.redraw = true;
         }
-        !self.asked.is_empty()
+        self.panes.iter().any(|pane| pane.asked_at().is_some())
     }
 
     /// Act on a frame button.
