@@ -30,6 +30,38 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
+/// A surface's identity, as everything that is not a script holds it.
+///
+/// **A number rather than the name the script wrote**, and the reason is one
+/// type away: `present::Frame` is `Copy`, and so is everything reachable from
+/// it — the anchor a deformation aims at lives inside one, a `Frame` is copied
+/// out of a `RefCell` and blended for every animating node on every frame, and
+/// the slot it lives in is `RefCell<Option<Transform<Frame>>>`. A
+/// `Box<str>` in there is a heap allocation in the value the render loop copies
+/// per node per frame, paid by every window so that one of them can name a
+/// dock. Four bytes is not.
+///
+/// The other way out was to make `Frame` clone-not-copy, which is the same cost
+/// arrived at by a longer route, through `present.rs`, `render.rs`, `state.rs`
+/// and `script.rs`.
+///
+/// Assigned by [`Surfaces`] and **stable across a redeclaration**: running the
+/// configuration again replaces a surface with an equal one, and a genie aimed
+/// at the dock should not stop being aimed at it because `super+shift+r` was
+/// pressed. Never reused, for the reason `PaneId` is never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SurfaceId(u32);
+
+impl SurfaceId {
+    /// For tests in other modules, which need an id without a live surface
+    /// behind it. Nothing outside a test should be inventing one of these:
+    /// [`Surfaces::id_of`] is where they come from.
+    #[cfg(test)]
+    pub(crate) const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+}
+
 use smithay::{
     output::Output,
     utils::{Logical, Rectangle},
@@ -106,6 +138,9 @@ pub(crate) struct Declaration {
 #[derive(Debug)]
 pub(crate) struct Surface {
     pub(crate) declared: Declaration,
+    /// What names this to anything that cannot hold a `String`. See
+    /// [`SurfaceId`].
+    id: SurfaceId,
     /// One rasterisation per monitor it is drawn on, keyed by connector name.
     ///
     /// Per monitor because a `ShellSurface` caches one rasterisation at one
@@ -115,11 +150,16 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
-    pub(crate) fn new(declared: Declaration) -> Self {
+    pub(crate) fn new(declared: Declaration, id: SurfaceId) -> Self {
         Self {
             declared,
+            id,
             instances: HashMap::new(),
         }
+    }
+
+    pub(crate) const fn id(&self) -> SurfaceId {
+        self.id
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -209,6 +249,96 @@ impl Surface {
     pub(crate) fn keep_only(&mut self, live: &[String]) {
         self.instances
             .retain(|monitor, _| live.iter().any(|name| name == monitor));
+    }
+}
+
+/// Every surface a script has declared, and the names they answer to.
+///
+/// A wrapper around what used to be a plain `Vec<Surface>`, and it earns the
+/// wrapping by holding the one thing a `Vec` cannot: **the name table**. A
+/// script names a surface with a string; a `present::Anchor` and a
+/// `group::Member` have to name one with something `Copy`. Keeping the
+/// assignment beside the surfaces is what makes an id stable across a surface
+/// being replaced, which a monotonic counter inside `Surface::new` would not be.
+///
+/// The table only grows, and what it grows by is names a *configuration* wrote
+/// down: one entry per distinct surface name the session has ever seen, a few
+/// bytes each. It is not fed by anything a client or a running program can
+/// drive.
+#[derive(Debug, Default)]
+pub(crate) struct Surfaces {
+    live: Vec<Surface>,
+    /// Every name ever declared, in id order. The index *is* the id.
+    names: Vec<Box<str>>,
+}
+
+impl Surfaces {
+    /// The id for a name, assigning one if this is the first time it has been
+    /// seen. Only the declaration path should intern; everything else asks
+    /// [`Self::named`] and accepts that a name nobody declared names nothing.
+    fn intern(&mut self, name: &str) -> SurfaceId {
+        if let Some(id) = self.named(name) {
+            return id;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "one entry per distinct surface name a configuration has written; \
+                      four billion of them is not a case"
+        )]
+        let id = SurfaceId(self.names.len() as u32);
+        self.names.push(name.into());
+        id
+    }
+
+    /// What a name means, or nothing if no surface has ever had it.
+    pub(crate) fn named(&self, name: &str) -> Option<SurfaceId> {
+        self.names
+            .iter()
+            .position(|each| &**each == name)
+            .and_then(|index| u32::try_from(index).ok())
+            .map(SurfaceId)
+    }
+
+    /// Declare a surface, or replace the one with that name.
+    ///
+    /// Returns whether anything changed, so a configuration that is re-read
+    /// without being edited does not throw away every rasterisation it has.
+    pub(crate) fn declare(&mut self, declared: Declaration) -> bool {
+        let id = self.intern(&declared.name);
+        match self.live.iter_mut().find(|each| each.id == id) {
+            Some(existing) if existing.declared == declared => false,
+            Some(existing) => {
+                *existing = Surface::new(declared, id);
+                true
+            }
+            None => {
+                self.live.push(Surface::new(declared, id));
+                true
+            }
+        }
+    }
+
+    /// Take one away, by name. Returns whether there was one.
+    pub(crate) fn remove(&mut self, name: &str) -> bool {
+        let before = self.live.len();
+        self.live.retain(|surface| surface.name() != name);
+        before != self.live.len()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Surface> {
+        self.live.iter()
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Surface> {
+        self.live.iter_mut()
+    }
+
+    pub(crate) fn get_mut(&mut self, id: SurfaceId) -> Option<&mut Surface> {
+        self.live.iter_mut().find(|surface| surface.id == id)
+    }
+
+    pub(crate) fn get(&self, id: SurfaceId) -> Option<&Surface> {
+        self.live.iter().find(|surface| surface.id == id)
     }
 }
 

@@ -106,10 +106,8 @@ pub(crate) fn for_effects(rect: Rectangle<f64, Logical>) -> solium_effects::Rect
 ///
 /// So the identity is carried and the compositor resolves it once per frame,
 /// in `Solium::aimed_at`. What can be named is deliberately small: a fixed
-/// place on screen, which does not move and is honest about it, and a pane,
-/// which does. `sol.surface` is not here yet because a surface is not
-/// addressable yet — that is the next stage of the plan, "Address: surfaces
-/// and groups become transformable", and this enum is the seam it lands in.
+/// place on screen, which does not move and is honest about it, and two things
+/// that do.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Anchor {
     /// A fixed rectangle in the global logical space. Snapshotted, because
@@ -120,6 +118,17 @@ pub(crate) enum Anchor {
     /// *drawn*, so a genie aimed at a window that is itself animating follows
     /// it rather than its layout slot.
     Pane(u64),
+    /// A surface a script declared — which is where a real dock icon lives.
+    ///
+    /// Resolved to where that surface is drawn on the monitor the user is
+    /// working on, carried by whatever selection it is in. A surface declared
+    /// `on = "every-monitor"` is several things wearing one name and this takes
+    /// the one in front of you, which is the one a window is minimising into.
+    ///
+    /// A [`crate::scripted::SurfaceId`] and not the name the script wrote,
+    /// because this type is inside a [`Frame`] and a `Frame` is `Copy`. That
+    /// type's own documentation has the arithmetic.
+    Surface(crate::scripted::SurfaceId),
 }
 
 /// A deformation a rectangle cannot express, and what it is aimed at.
@@ -246,6 +255,19 @@ impl Frame {
         self
     }
 
+    /// The same frame, moved. What a group's translation does to a member.
+    pub(crate) fn shifted(self, dx: f64, dy: f64) -> Self {
+        Self {
+            rect: logical(
+                (self.rect.loc.x + dx, self.rect.loc.y + dy),
+                (self.rect.size.w, self.rect.size.h),
+            ),
+            ..self
+        }
+    }
+}
+
+impl Blend for Frame {
     fn blend(self, other: Self, progress: f64) -> Self {
         let mix = |a: f64, b: f64| lerp(a, b, progress);
         Self {
@@ -277,25 +299,68 @@ impl Frame {
     }
 }
 
-/// An in-flight transform: where the window was, where it is going, and when.
+/// Something that can be part-way between two of itself.
+///
+/// Two things are animated by this file's one clock and they are not the same
+/// kind: a [`Frame`], which is how one window is drawn, and a
+/// [`crate::group::Shift`], which is what a transform on a *selection* does to
+/// every member of it. Both want the same three answers — where it was, where
+/// it is going, and whether it has arrived — and getting those answers twice is
+/// how two things animated by "the same clock" end up disagreeing about what
+/// `progress` means at the edges.
+///
+/// So the holder below is generic and this is the one thing it needs.
+pub(crate) trait Blend: Copy {
+    /// This, `progress` of the way toward `other`. `0.0` is `self` exactly.
+    fn blend(self, other: Self, progress: f64) -> Self;
+}
+
+/// An in-flight transform: where it was, where it is going, and when.
 ///
 /// The when is `solium-animation`'s problem; this only knows the two ends.
 #[derive(Clone, Copy, Debug)]
-struct Transform {
-    from: Frame,
-    to: Frame,
+pub(crate) struct Transform<T> {
+    from: T,
+    to: T,
     animation: Animation,
-    /// Drop the transform when it lands, so the window goes back to being drawn
-    /// at real geometry with no per-frame cost. Set when leaving a mode.
+    /// Drop the transform when it lands, so the thing goes back to being drawn
+    /// where it lives with no per-frame cost. Set when leaving a mode.
     release: bool,
 }
 
-impl Transform {
-    fn frame(&self, now: Duration) -> Frame {
+impl<T: Blend> Transform<T> {
+    pub(crate) fn new(
+        from: T,
+        to: T,
+        now: Duration,
+        duration: Duration,
+        easing: Curve,
+        release: bool,
+    ) -> Self {
+        Self {
+            from,
+            to,
+            animation: Animation::new(now, duration, easing),
+            release,
+        }
+    }
+
+    /// The value to use this instant.
+    pub(crate) fn at(&self, now: Duration) -> T {
         self.from.blend(self.to, self.animation.progress(now))
     }
 
-    fn finished(&self, now: Duration) -> bool {
+    /// Where it is headed, for whoever has to start again from here.
+    pub(crate) const fn target(&self) -> T {
+        self.to
+    }
+
+    /// Whether it is dropped on arrival rather than held.
+    pub(crate) const fn releases(&self) -> bool {
+        self.release
+    }
+
+    pub(crate) fn finished(&self, now: Duration) -> bool {
         self.animation.done(now)
     }
 }
@@ -312,7 +377,7 @@ impl Transform {
 /// pane by shared reference. Opaque: the functions below are the only way in.
 #[derive(Debug, Default)]
 pub(crate) struct Slot {
-    transform: RefCell<Option<Transform>>,
+    transform: RefCell<Option<Transform<Frame>>>,
     shown: std::cell::Cell<bool>,
 }
 
@@ -321,7 +386,7 @@ pub(crate) struct Slot {
 /// `try_borrow_mut` rather than `borrow_mut`: a re-entrant borrow would panic,
 /// and a compositor panic takes the session with it. Losing one frame of an
 /// animation is the better failure.
-fn with_slot<T>(pane: &Pane, f: impl FnOnce(&mut Option<Transform>) -> T) -> Option<T> {
+fn with_slot<T>(pane: &Pane, f: impl FnOnce(&mut Option<Transform<Frame>>) -> T) -> Option<T> {
     match pane.drawn().transform.try_borrow_mut() {
         Ok(mut current) => Some(f(&mut current)),
         Err(_) => {
@@ -345,12 +410,7 @@ pub(crate) fn present(
 ) {
     let from = frame(pane, real, now);
     with_slot(pane, |slot| {
-        *slot = Some(Transform {
-            from,
-            to,
-            animation: Animation::new(now, duration, easing),
-            release: false,
-        });
+        *slot = Some(Transform::new(from, to, now, duration, easing, false));
     });
 }
 
@@ -364,19 +424,65 @@ pub(crate) fn clear(
 ) {
     let from = frame(pane, real, now);
     with_slot(pane, |slot| {
-        *slot = Some(Transform {
+        *slot = Some(Transform::new(
             from,
-            to: Frame::real(real),
-            animation: Animation::new(now, duration, easing),
-            release: true,
-        });
+            Frame::real(real),
+            now,
+            duration,
+            easing,
+            true,
+        ));
+    });
+}
+
+/// Keep a pane looking where it is while the transform *around* it changes.
+///
+/// The answer to the one question a selection raises that a single window never
+/// did: **what happens to a window that joins or leaves a group.** A group's
+/// shift is applied on top of a pane's own transform, so a window sent to
+/// another workspace leaves one selection and joins another, and the difference
+/// between the two shifts lands on it in the space of one frame. Without this
+/// it is a jump — `super+shift+2` used to slide, and grouping would have made it
+/// teleport.
+///
+/// `by` is the displacement that has just been applied to it from outside. The
+/// pane is put back that far — so this frame draws it exactly where the last
+/// one did — and animates to wherever it was already headed. That is the same
+/// rule [`present`] follows for a window entering a mode, which is why
+/// re-entering one mid-animation is continuous: **animate from what is on
+/// screen, never from what the books say.**
+///
+/// The destination and the release flag are preserved rather than reset, so a
+/// window that was on its way somewhere under its own transform keeps going
+/// there; only the easing restarts.
+pub(crate) fn rebase(
+    pane: &Pane,
+    real: Rectangle<i32, Logical>,
+    by: (f64, f64),
+    now: Duration,
+    duration: Duration,
+    easing: Curve,
+) {
+    with_slot(pane, |slot| {
+        let (drawn, to, release) = slot.map_or_else(
+            || (Frame::real(real), Frame::real(real), true),
+            |transform| (transform.at(now), transform.target(), transform.releases()),
+        );
+        *slot = Some(Transform::new(
+            drawn.shifted(by.0, by.1),
+            to,
+            now,
+            duration,
+            easing,
+            release,
+        ));
     });
 }
 
 /// The frame to draw this window in. Real geometry when nothing is animating.
 pub(crate) fn frame(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) -> Frame {
     with_slot(pane, |slot| {
-        slot.map_or_else(|| Frame::real(real), |transform| transform.frame(now))
+        slot.map_or_else(|| Frame::real(real), |transform| transform.at(now))
     })
     .unwrap_or_else(|| Frame::real(real))
 }
@@ -390,7 +496,7 @@ pub(crate) fn settle(pane: &Pane, now: Duration) -> bool {
         if !transform.finished(now) {
             return true;
         }
-        if transform.release {
+        if transform.releases() {
             *slot = None;
         }
         false
@@ -423,13 +529,15 @@ pub(crate) fn from(
     easing: Curve,
 ) {
     with_slot(pane, |slot| {
-        *slot = Some(Transform {
-            from: start,
-            to: Frame::real(real),
-            animation: Animation::new(now, duration, easing),
-            // Released on arrival: an opened window is an ordinary window.
-            release: true,
-        });
+        // Released on arrival: an opened window is an ordinary window.
+        *slot = Some(Transform::new(
+            start,
+            Frame::real(real),
+            now,
+            duration,
+            easing,
+            true,
+        ));
     });
 }
 
@@ -440,12 +548,14 @@ pub(crate) fn from(
 pub(crate) fn open(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) {
     let target = Frame::real(real);
     with_slot(pane, |slot| {
-        *slot = Some(Transform {
-            from: target.scaled(0.88).with_opacity(0.0),
-            to: target,
-            animation: Animation::new(now, Duration::from_millis(220), Curve::OutBack),
-            release: true,
-        });
+        *slot = Some(Transform::new(
+            target.scaled(0.88).with_opacity(0.0),
+            target,
+            now,
+            Duration::from_millis(220),
+            Curve::OutBack,
+            true,
+        ));
     });
 }
 
@@ -463,12 +573,14 @@ pub(crate) const CLOSING: Duration = Duration::from_millis(190);
 pub(crate) fn close(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) {
     let from = frame(pane, real, now);
     with_slot(pane, |slot| {
-        *slot = Some(Transform {
+        *slot = Some(Transform::new(
             from,
-            to: from.scaled(0.86).with_opacity(0.0),
-            animation: Animation::new(now, CLOSING, Curve::InOutQuad),
-            release: false,
-        });
+            from.scaled(0.86).with_opacity(0.0),
+            now,
+            CLOSING,
+            Curve::InOutQuad,
+            false,
+        ));
     });
 }
 
@@ -531,21 +643,19 @@ mod tests {
     fn a_transform_starts_where_it_was_and_lands_on_its_target() {
         let from = Frame::real(rect(0, 0, 100, 100));
         let to = Frame::real(rect(500, 400, 50, 50));
-        let transform = Transform {
+        let transform = Transform::new(
             from,
             to,
-            animation: Animation::new(
-                Duration::from_millis(1000),
-                Duration::from_millis(200),
-                Curve::OutCubic,
-            ),
-            release: false,
-        };
+            Duration::from_millis(1000),
+            Duration::from_millis(200),
+            Curve::OutCubic,
+            false,
+        );
 
-        assert_eq!(transform.frame(Duration::from_millis(1000)), from);
-        assert_eq!(transform.frame(Duration::from_millis(1200)), to);
+        assert_eq!(transform.at(Duration::from_millis(1000)), from);
+        assert_eq!(transform.at(Duration::from_millis(1200)), to);
         // Past the end it stays landed rather than overshooting off-screen.
-        assert_eq!(transform.frame(Duration::from_millis(5000)), to);
+        assert_eq!(transform.at(Duration::from_millis(5000)), to);
         assert!(transform.finished(Duration::from_millis(1200)));
         assert!(!transform.finished(Duration::from_millis(1100)));
     }
@@ -553,13 +663,15 @@ mod tests {
     #[test]
     fn a_zero_length_transform_is_immediately_at_its_target() {
         let to = Frame::real(rect(10, 10, 20, 20));
-        let transform = Transform {
-            from: Frame::real(rect(0, 0, 100, 100)),
+        let transform = Transform::new(
+            Frame::real(rect(0, 0, 100, 100)),
             to,
-            animation: Animation::new(Duration::from_millis(500), Duration::ZERO, Curve::OutCubic),
-            release: false,
-        };
-        assert_eq!(transform.frame(Duration::from_millis(500)), to);
+            Duration::from_millis(500),
+            Duration::ZERO,
+            Curve::OutCubic,
+            false,
+        );
+        assert_eq!(transform.at(Duration::from_millis(500)), to);
     }
 
     #[test]

@@ -12,6 +12,7 @@ mod capture;
 mod cursor;
 mod decoration;
 mod dev;
+mod group;
 mod idle;
 mod input;
 mod keymap;
