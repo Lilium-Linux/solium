@@ -953,4 +953,42 @@ mod tests {
         assert_eq!(Action::parse("clos"), None);
         assert_eq!(Action::parse(""), None);
     }
+
+    /// A pane with no client and no history. Nothing here builds a
+    /// `Decoration` — that wants a Qt scene, and so a GPU and a display.
+    #[cfg(debug_assertions)]
+    fn undecorated_pane() -> crate::pane::Pane {
+        crate::pane::Pane::loading(
+            "kitty",
+            None,
+            Rectangle::new((0, 0).into(), (300, 200).into()),
+            PathBuf::new(),
+            None,
+            std::time::Duration::ZERO,
+        )
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_pane_nobody_has_decorated_agrees_with_the_empty_tables() {
+        // Both answers read "pending": in neither table, and `Frame::Pending`
+        // by default. The agreeing case has to be asserted too, or the test
+        // below only proves that *something* panics.
+        let pane = undecorated_pane();
+        Decorations::default().agree(pane.id(), &pane);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "disagrees with the tables")]
+    fn the_assertion_bites_when_a_writer_forgets_to_shadow() {
+        // Exactly what a missed writer looks like: `set_bare` ran, and the
+        // pane was never told. Asserted because a `debug_assert` that cannot
+        // fire and one that never has to are indistinguishable from a green
+        // gate, and this one is the whole safety net under Task 2.
+        let pane = undecorated_pane();
+        let mut decorations = Decorations::default();
+        decorations.set_bare(pane.id());
+        decorations.agree(pane.id(), &pane);
+    }
 }

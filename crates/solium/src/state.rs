@@ -4249,3 +4249,43 @@ delegate_output!(Solium);
 delegate_data_device!(Solium);
 smithay::delegate_primary_selection!(Solium);
 smithay::delegate_xwayland_shell!(Solium);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_reserves_what_it_always_reserved() {
+        // The three answers `insets_of` used to assemble from two tables,
+        // now read off one value. Pinned here because Task 4 changes what
+        // `Styled` carries, and none of these numbers may move with it.
+        assert_eq!(
+            insets_for(&crate::pane::Frame::Pending),
+            Insets {
+                top: TITLEBAR_HEIGHT,
+                ..Insets::NONE
+            },
+            "a frame that has not been built yet still reserves room for one, \
+             or the window changes shape the moment it arrives"
+        );
+        assert_eq!(
+            insets_for(&crate::pane::Frame::None),
+            Insets::NONE,
+            "a pane that will never have a frame reserves nothing -- a \
+             titlebar's worth of blank space with no titlebar in it is what \
+             an Electron application looked like here"
+        );
+        let asked = Insets {
+            top: 4,
+            right: 1,
+            bottom: 2,
+            left: 3,
+        };
+        assert_eq!(
+            insets_for(&crate::pane::Frame::Styled(asked)),
+            asked,
+            "a built frame reserves what its decoration asked for, on every \
+             side: a bar along the left and a border are the same mechanism"
+        );
+    }
+}
