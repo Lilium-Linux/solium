@@ -29,7 +29,7 @@ cargo run -q -p solium-animation --bin preview -- \
     "$wasm/solium_animation.wasm" \
     "$wasm/solium_layout.wasm" > "$animation"
 
-cargo run -q -p solium-effects --bin preview -- \
+cargo run -q -p solium-effects --bin effects-preview -- \
     "$wasm/solium_effects.wasm" > "$effects"
 
 echo "wrote $animation"

@@ -12,6 +12,9 @@
 //! ```sh
 //! dev/preview && xdg-open crates/effects/preview/preview.html
 //! ```
+//!
+//! The binary is `effects-preview` rather than `preview`; `Cargo.toml` says
+//! why.
 
 use std::{io::Write as _, path::PathBuf};
 
@@ -19,7 +22,7 @@ use solium_effects::{Axis, Deform};
 
 fn main() {
     let Some(wasm) = std::env::args_os().nth(1).map(PathBuf::from) else {
-        eprintln!("usage: preview <effects.wasm>");
+        eprintln!("usage: effects-preview <effects.wasm>");
         eprintln!("       run dev/preview instead, which builds it first");
         std::process::exit(2);
     };
