@@ -1,21 +1,37 @@
 #!/usr/bin/env bash
 #
-# Build the animation preview: mock windows animated by the engine itself.
+# Build the preview pages: mock windows driven by the engines themselves.
 #
-# Two steps, because the page embeds the engines. The animation curves and the
-# window arrangements are both compiled to WebAssembly and called from the page,
-# so what you tune in a browser is the code that moves and arranges real
-# windows — a copy in JavaScript would drift the first time either side changed,
-# invisibly.
+# Two pages, because they answer different questions. The animation page is
+# about *when* — curves, springs, and the arrangements a mode moves windows
+# between. The effects page is about *shape* — where a vertex of a window goes,
+# at a given progress, for a named deformation.
+#
+# Each embeds its engines as WebAssembly and calls them from the page, so what
+# you tune in a browser is the code that moves, arranges and bends real
+# windows — a copy in JavaScript would drift the first time either side
+# changed, invisibly.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-out="$root/crates/animation/preview/preview.html"
+animation="$root/crates/animation/preview/preview.html"
+effects="$root/crates/effects/preview/preview.html"
+wasm="$root/target/wasm32-unknown-unknown/release"
 
-cargo build -p solium-animation -p solium-layout --target wasm32-unknown-unknown --release
+# `--lib`, because only the engines are wanted for the browser. Without it
+# cargo also builds each crate's `preview` *binary* for wasm — two of them, both
+# called `preview`, which collide on one output path and warn about it; and
+# neither is ever run, because the page builders below run on this machine.
+cargo build --lib -p solium-animation -p solium-effects -p solium-layout \
+    --target wasm32-unknown-unknown --release
+
 cargo run -q -p solium-animation --bin preview -- \
-    "$root/target/wasm32-unknown-unknown/release/solium_animation.wasm" \
-    "$root/target/wasm32-unknown-unknown/release/solium_layout.wasm" > "$out"
+    "$wasm/solium_animation.wasm" \
+    "$wasm/solium_layout.wasm" > "$animation"
 
-echo "wrote $out"
-echo "open it with: xdg-open $out"
+cargo run -q -p solium-effects --bin preview -- \
+    "$wasm/solium_effects.wasm" > "$effects"
+
+echo "wrote $animation"
+echo "wrote $effects"
+echo "open them with: xdg-open $animation $effects"
