@@ -1,8 +1,11 @@
 -- Developer Tweaks: what the panel offers, and what each entry does.
 --
--- The panel is a list of whatever is declared here. Adding one is adding a
--- line to `entries` and a branch to the handler — there is nothing to rebuild
--- and nothing in the compositor that knows what any of these mean.
+-- The panel is a list of whatever reaches `entries`. Adding one is a line here
+-- and a branch in the handler — there is nothing to rebuild and nothing in the
+-- compositor that knows what any of these mean. The styles are the exception
+-- and only in where the *names* come from: they are discovered rather than
+-- written down, because a list of them written down here is a list that goes
+-- stale the first time somebody authors one.
 --
 -- Only shown when the compositor is started with `--debug-mode`.
 
@@ -17,13 +20,29 @@ local function focused()
     return nil
 end
 
--- Every decoration that ships, so switching between them is one press each.
-local decorations = { "top", "left", "bottom", "border", "reactive", "proximity",
-                      "reveal", "pulse" }
-
+-- Every style this machine can draw, so switching between them is one press
+-- each. Asked for rather than listed: this used to be an array of the eight
+-- names that shipped, which meant a style you wrote yourself was never in the
+-- panel however correct it was. `sol.decorations()` walks the directories the
+-- compositor resolves against, so a bundle dropped into
+-- ~/.config/solium/qml/panes/ is here after one super+shift+r.
+--
+-- Two groups, because they are two kinds of thing: a bundle is a folder with
+-- layers and bleed, a file is one QML file and one layer. Worth telling apart
+-- while you are authoring the former.
+--
+-- One entry per name, and that is the compositor's doing rather than this
+-- loop's: a name resolves to exactly one style — a bundle before a file, the
+-- user's before the one that ships — and `sol.decorations()` has already
+-- applied that order. So the panel cannot show a `top` that a press resolves
+-- somewhere else.
 local entries = {}
-for _, name in ipairs(decorations) do
-    table.insert(entries, { id = "decoration:" .. name, label = name, group = "Decoration" })
+for _, style in ipairs(sol.decorations()) do
+    table.insert(entries, {
+        id = "decoration:" .. style.name,
+        label = style.name,
+        group = style.kind == "bundle" and "Pane style" or "Decoration",
+    })
 end
 
 -- Presentation: what a window can be drawn as, without moving it.
@@ -49,6 +68,15 @@ table.insert(entries, { id = "reload", label = "Reload configuration", group = "
 -- Down the right-hand side of the monitor you are looking at, over the
 -- windows, taking clicks.
 local tweaks = { shown = true }
+
+-- The model the panel is handed, on the module rather than hidden in an
+-- upvalue. There is no way to look at this compositor's panel without a free
+-- VT, so this is how you check what it would show:
+--
+--   SOLIUM_LUA_INIT=... solium --check   -- with a script that prints it
+--
+-- which is the whole list, after discovery, in display order.
+tweaks.entries = entries
 
 function tweaks.area()
     local screen = sol.monitor()

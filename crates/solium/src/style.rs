@@ -177,8 +177,40 @@ pub(crate) struct Style {
 /// does with `qml/` and for the same reason: there is no install step in this
 /// tree yet, so a path fixed at build time is at least true of the build that
 /// fixed it. Both move together on the day there is one.
-fn shipped() -> PathBuf {
+pub(crate) fn shipped() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes"))
+}
+
+/// `panes/` under the user's QML directory, if they have one.
+///
+/// A style bundle is QML and belongs beside the design system it imports — a
+/// `Solium/Theme.qml` dropped in there is already what `Theme.titlebarHeight`
+/// resolves to inside a bundle's `Pane.qml`, so splitting the two across
+/// different roots would mean a style and the theme it is written against could
+/// come from different places.
+fn user_panes() -> Option<PathBuf> {
+    crate::qml::user_qml_dir().map(|dir| dir.join("panes"))
+}
+
+/// The directories a bare name is looked for in, nearest first.
+///
+/// One ordered list rather than a sequence of `if`s, because [`resolve`] is no
+/// longer its only reader. `decoration::catalogue` walks these to say what can
+/// be *offered*, and the two have to agree: a panel listing a style that a
+/// press then resolves somewhere else is the one thing a discovered list can
+/// get wrong that a hand-written one could not.
+fn places(user: Option<&Path>) -> Vec<PathBuf> {
+    let mut places: Vec<PathBuf> = user.map(Path::to_path_buf).into_iter().collect();
+    places.push(shipped());
+    places
+}
+
+/// Every directory a bundle is looked for in on this machine, nearest first.
+///
+/// The listing's half of the agreement above: whoever enumerates bundles walks
+/// exactly what [`find`] would have searched.
+pub(crate) fn directories() -> Vec<PathBuf> {
+    places(user_panes().as_deref())
 }
 
 /// Where a style bundle called `name` is, or `None`.
@@ -209,26 +241,15 @@ fn resolve(name: &str, user: Option<&Path>) -> Option<PathBuf> {
     if name.contains('/') {
         return Some(PathBuf::from(name));
     }
-    if let Some(candidate) = user.map(|dir| dir.join(name))
-        && candidate.is_dir()
-    {
-        return Some(candidate);
-    }
-    let own = shipped().join(name);
-    own.is_dir().then_some(own)
+    places(user)
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_dir())
 }
 
 /// Where the bundle called `name` is on this machine, or `None`.
-///
-/// `panes/` under the user's QML directory, because a style bundle is QML and
-/// belongs beside the design system it imports — a `Solium/Theme.qml` dropped
-/// in there is already what `Theme.titlebarHeight` resolves to inside a
-/// bundle's `Pane.qml`, so splitting the two across different roots would mean
-/// a style and the theme it is written against could come from different
-/// places.
 pub(crate) fn find(name: &str) -> Option<PathBuf> {
-    let user = crate::qml::user_qml_dir().map(|dir| dir.join("panes"));
-    resolve(name, user.as_deref())
+    resolve(name, user_panes().as_deref())
 }
 
 /// Every term `requires` can name in this build, for a refusal to list.

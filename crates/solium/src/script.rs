@@ -1364,6 +1364,30 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // Everything `sol.decoration` could be handed, discovered from the
+    // directories the compositor actually resolves against rather than from a
+    // list kept in Lua. Same principle as `parse_easing`: the names come from
+    // the machinery, so a style someone writes is offerable the moment it
+    // exists and `lua/tweaks.lua` has nothing to edit.
+    //
+    // `{ name = "...", kind = "bundle" | "file" }` per entry, sorted, bundles
+    // first, and each name appearing once -- the shadowing is already applied,
+    // so a script can offer the list as it stands without implying a choice
+    // the compositor would not make.
+    sol.set(
+        "decorations",
+        lua.create_function(|lua, ()| {
+            let list = lua.create_table()?;
+            for (index, offered) in crate::decoration::available().into_iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("name", offered.name)?;
+                entry.set("kind", offered.kind.as_str())?;
+                list.set(index + 1, entry)?;
+            }
+            Ok(list)
+        })?,
+    )?;
+
     // A table, so adding a setting later does not change the call. Anything
     // left out keeps its default rather than being reset -- `config.lua` is
     // merged from the user's own file and may well carry only one key.
@@ -2982,9 +3006,28 @@ mod shipped {
     /// `qml/decorations/<name>.qml` with nothing in between checking, so a name
     /// that is not there is a scene that fails to build once per window -- every
     /// window undecorated, and a log line each.
+    ///
+    /// Resolved through `decoration::ships` rather than by joining `.qml` onto
+    /// the name here, which is this module's own rule -- "resolves each name
+    /// through the same function the compositor uses at run time" -- and which
+    /// this test was the one exception to. It matters now rather than as a
+    /// tidy-up: since Task 3 a name may equally be a **bundle** under `panes/`,
+    /// and a hand-joined `<name>.qml` would fail the first shipped script to
+    /// name one. That was recorded against Task 7 as something to remember
+    /// while moving files; going through the resolver means there is nothing
+    /// to remember.
     #[test]
     fn every_decoration_named_is_one_that_ships() {
-        let decorations = shipped_qml().join("decorations");
+        let ships = crate::decoration::ships();
+        // The walk before anything is decided by it: a catalogue that came back
+        // empty would pass every name below by having no opinion, which is the
+        // one way this can be green and mean nothing.
+        assert!(
+            ships.len() >= 8,
+            "this build offers {} styles, which is fewer than the eight decorations \
+             in the tree -- the walk is broken, not the configuration",
+            ships.len()
+        );
         let asked = everywhere("decoration =");
         assert!(
             !asked.is_empty(),
@@ -2993,54 +3036,15 @@ mod shipped {
         for (file, line, name) in asked {
             // `none` is a real setting and draws no frame at all, deliberately.
             assert!(
-                name == "none" || decorations.join(format!("{name}.qml")).is_file(),
-                "{file}:{line} asks for decoration {name:?}, and there is no {name}.qml in {}",
-                decorations.display()
+                name == "none" || ships.iter().any(|offered| offered.name == name),
+                "{file}:{line} asks for decoration {name:?}, and this build ships no style \
+                 of that name -- it ships {:?}",
+                ships
+                    .iter()
+                    .map(|offered| offered.name.as_str())
+                    .collect::<Vec<_>>()
             );
         }
-    }
-
-    /// **The tweaks panel offers exactly the decorations that ship.**
-    ///
-    /// `tweaks.lua` says so in as many words -- "every decoration that ships,
-    /// so switching between them is one press each" -- and that claim is a
-    /// hand-maintained list beside a directory. Both directions, because both
-    /// fail: a name in the list that is not a file is a button that produces
-    /// undecorated windows, and a file that is not in the list is a decoration
-    /// nobody can reach.
-    #[test]
-    fn the_tweaks_panel_lists_every_decoration_that_ships() {
-        let directory = shipped_qml().join("decorations");
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            panic!("no decorations directory at {}", directory.display());
-        };
-        let mut on_disk: Vec<String> = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|end| end == "qml"))
-            .filter_map(|path| Some(path.file_stem()?.to_str()?.to_owned()))
-            .collect();
-        on_disk.sort();
-
-        let Some((_, text)) = scripts().into_iter().find(|(name, _)| name == "tweaks.lua") else {
-            panic!("tweaks.lua does not ship any more; this test is stale, not wrong");
-        };
-        // The list is a Lua array literal spanning two lines, so it is read as
-        // "every string between `local decorations = {` and its `}`".
-        let Some(start) = text.find("local decorations = {") else {
-            panic!("tweaks.lua no longer declares `local decorations = {{`");
-        };
-        let list = &text[start..];
-        let Some(end) = list.find('}') else {
-            panic!("tweaks.lua's decoration list has no closing brace");
-        };
-        let mut offered: Vec<String> = quoted(&list[..end]);
-        offered.sort();
-
-        assert_eq!(
-            offered, on_disk,
-            "the tweaks panel and qml/decorations disagree about what ships"
-        );
     }
 
     /// **Every key a shipped script binds is spelled the way a key arrives.**
