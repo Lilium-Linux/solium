@@ -1625,10 +1625,14 @@ fn main() -> Result<()> {
         // never sleeps again.
         if animating(built) {
             return Err(anyhow!(
-                "`solium_qml_scene_animating` says the {what} scene ({file}) is animating, \
-                 and nothing has written a property on it or declared an animation in it. \
-                 An answer that is always yes keeps every monitor redrawing at full rate \
-                 for as long as the compositor is running"
+                "`solium_qml_scene_animating` says the {what} scene ({file}) is animating. \
+                 Nothing here has started one: this scene declares no animation of its own, \
+                 and the only properties written to it are `insetTop` and `title`, which \
+                 carry no `Behavior`. So either the host is answering yes to everything -- \
+                 and an answer that is always yes keeps every monitor redrawing at full \
+                 rate for as long as the compositor is running -- or a `Behavior` was added \
+                 to one of those two in the QML, which is a real animation and wants \
+                 writing before the first tick rather than after it"
             ));
         }
         kept_scenes.push(built);
