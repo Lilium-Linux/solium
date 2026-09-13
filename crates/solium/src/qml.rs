@@ -118,6 +118,12 @@ mod ffi {
             value: c_int,
         );
         pub(super) fn solium_qml_scene_get_bool(scene: *const Scene, name: *const c_char) -> c_int;
+        pub(super) fn solium_qml_scene_layer_count(scene: *const Scene) -> c_int;
+        pub(super) fn solium_qml_scene_layer_field(
+            scene: *const Scene,
+            index: c_int,
+            field: *const c_char,
+        ) -> *const c_char;
         pub(super) fn solium_qml_scene_dirty(scene: *const Scene) -> c_int;
         pub(super) fn solium_qml_scene_animating(scene: *const Scene) -> c_int;
         pub(super) fn solium_qml_scene_pointer(
@@ -1323,6 +1329,13 @@ impl Scene {
     }
 
     /// Read a whole-number property from the scene's root.
+    ///
+    /// `name` is a property *path*: `insetTop` and `insets.top` both work. A
+    /// grouped property is a child object held in a property, and reaching
+    /// into one used to be impossible here — `QObject::property` takes a name
+    /// and looked the whole dotted string up in one piece, so `insets.top`
+    /// resolved to nothing and read back as a perfectly plausible 0. See the
+    /// note on `solium_qml_scene_get_int` in `qml/host.h`.
     #[expect(unsafe_code, reason = "as above")]
     pub(crate) fn get_int(&mut self, name: &str) -> i32 {
         let Ok(name) = std::ffi::CString::new(name) else {
@@ -1350,6 +1363,42 @@ impl Scene {
         };
         // SAFETY: `name` outlives the call.
         unsafe { ffi::solium_qml_scene_get_bool(self.scene, name.as_ptr()) != 0 }
+    }
+
+    /// How many layers the style at this scene's root declares.
+    ///
+    /// `-1` when the root is not a `PaneStyle` at all, which is a different
+    /// answer from `0`: a bundle whose `Pane.qml` declares the wrong root
+    /// object has to be told apart from one that declares the right root and
+    /// forgot to put any layers in it. See `crate::style::load`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn layer_count(&self) -> i32 {
+        // SAFETY: `self.scene` is non-null for the lifetime of `self`.
+        unsafe { ffi::solium_qml_scene_layer_count(self.scene) }
+    }
+
+    /// One field of one layer, as the string QML holds it as.
+    ///
+    /// `None` when the layer has no such property — which is also what an item
+    /// in `layers` that is not a `Layer` reports, since the property is a
+    /// `list<Item>` and accepts any `Item`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn layer_field(&self, index: usize, field: &str) -> Option<String> {
+        let field = CString::new(field).ok()?;
+        let index = c_int::try_from(index).ok()?;
+        // SAFETY: `field` outlives the call.
+        let value = unsafe { ffi::solium_qml_scene_layer_field(self.scene, index, field.as_ptr()) };
+        if value.is_null() {
+            return None;
+        }
+        // SAFETY: non-null means the host stored a NUL-terminated string that
+        // stays valid until the next call on this thread, and it is copied
+        // here before anything else can make one.
+        Some(
+            unsafe { CStr::from_ptr(value) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 
     /// Pointer input in scene coordinates. `None` is motion.
@@ -1397,6 +1446,80 @@ impl std::fmt::Debug for Scene {
             .field("size", &self.size)
             .field("gpu", &self.target.is_some())
             .finish()
+    }
+}
+
+/// The one thread in a test process that is allowed to touch Qt.
+///
+/// Here rather than in whichever module first needed it, because the rule it
+/// encodes belongs to the QML engine: it is the test-time half of [`start`]'s
+/// "must happen on the thread that renders". `decoration` and `style` both
+/// build scenes in their tests and both go through this.
+#[cfg(test)]
+pub(crate) mod qt_test {
+    /// Run a test body on the one thread in this process that touches Qt.
+    ///
+    /// **Not a nicety, and not about racing.** [`super::start`]'s own first
+    /// line says Qt has to come up on the thread that renders, and a
+    /// `QQmlEngine` means it: the engine belongs to whichever thread created
+    /// it, and a scene built from it on another one dies on
+    ///
+    /// ```text
+    /// QQmlEngine: Illegal attempt to connect to QQuickMouseArea(…) that is in
+    /// a different thread than the QML engine QQmlEngine(…)
+    /// ```
+    ///
+    /// which is a `qFatal`. Qt aborts, so it is not one test failing — it is
+    /// the whole binary going down on `SIGABRT`, and with no tracing subscriber
+    /// installed the message that says why never reaches anyone. Measured: two
+    /// frames built in two `#[test]`s pass one at a time and abort the run at
+    /// `--test-threads=2`, which is the default.
+    ///
+    /// `cargo test` hands every test an arbitrary worker thread, so the fix is
+    /// not a lock — a lock serialises the work without pinning it — but a
+    /// thread of our own that all of it is handed to. Which is what the
+    /// compositor does: one render thread, and Qt lives on it. Jobs are taken
+    /// one at a time, so this serialises them as well.
+    ///
+    /// A panic is carried back and resumed here, so an assertion inside reads
+    /// as that assertion failing on the test that wrote it.
+    pub(crate) fn on_the_qt_thread(work: impl FnOnce() + Send + 'static) {
+        type Job = Box<dyn FnOnce() + Send>;
+        static QT: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> =
+            std::sync::OnceLock::new();
+
+        let sender = QT.get_or_init(|| {
+            let (sender, receiver) = std::sync::mpsc::channel::<Job>();
+            std::thread::spawn(move || {
+                // Until the channel closes, which is when the process ends.
+                for job in receiver {
+                    job();
+                }
+            });
+            std::sync::Mutex::new(sender)
+        });
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let job: Job = Box::new(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+            // The receiver is on a live test thread waiting on it; there is
+            // nothing useful to do here if it has gone.
+            let _ = done.send(outcome);
+        });
+
+        let sender = sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(sender.send(job).is_ok(), "the Qt thread is gone");
+        drop(sender);
+
+        match finished.recv() {
+            Ok(Ok(())) => (),
+            Ok(Err(panicked)) => std::panic::resume_unwind(panicked),
+            Err(gone) => std::panic::resume_unwind(Box::new(format!(
+                "the Qt thread went without saying why: {gone}"
+            ))),
+        }
     }
 }
 

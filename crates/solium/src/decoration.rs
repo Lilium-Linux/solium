@@ -891,6 +891,11 @@ fn shellexpand(path: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Everything Qt-touching in this file's tests goes through this. It moved
+    /// to `qml` when `style` needed it too — the rule it encodes is the QML
+    /// engine's thread affinity, which is not a fact about decorations.
+    use crate::qml::qt_test::on_the_qt_thread;
+
     #[test]
     fn button_names_map_to_actions() {
         assert_eq!(Action::parse("close"), Some(Action::Close));
@@ -926,71 +931,6 @@ mod tests {
             std::time::Duration::ZERO,
         ));
         (panes, id)
-    }
-
-    /// Run a test body on the one thread in this process that touches Qt.
-    ///
-    /// **Not a nicety, and not about racing.** `qml::start`'s own first line
-    /// says Qt has to come up on the thread that renders, and a `QQmlEngine`
-    /// means it: the engine belongs to whichever thread created it, and a scene
-    /// built from it on another one dies on
-    ///
-    /// ```text
-    /// QQmlEngine: Illegal attempt to connect to QQuickMouseArea(…) that is in
-    /// a different thread than the QML engine QQmlEngine(…)
-    /// ```
-    ///
-    /// which is a `qFatal`. Qt aborts, so it is not one test failing — it is
-    /// the whole binary going down on `SIGABRT`, and with no tracing subscriber
-    /// installed the message that says why never reaches anyone. Measured: two
-    /// frames built in two `#[test]`s pass one at a time and abort the run at
-    /// `--test-threads=2`, which is the default.
-    ///
-    /// `cargo test` hands every test an arbitrary worker thread, so the fix is
-    /// not a lock — a lock serialises the work without pinning it — but a
-    /// thread of our own that all of it is handed to. Which is what the
-    /// compositor does: one render thread, and Qt lives on it. Jobs are taken
-    /// one at a time, so this serialises them as well.
-    ///
-    /// A panic is carried back and resumed here, so an assertion inside reads
-    /// as that assertion failing on the test that wrote it.
-    fn on_the_qt_thread(work: impl FnOnce() + Send + 'static) {
-        type Job = Box<dyn FnOnce() + Send>;
-        static QT: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> =
-            std::sync::OnceLock::new();
-
-        let sender = QT.get_or_init(|| {
-            let (sender, receiver) = std::sync::mpsc::channel::<Job>();
-            std::thread::spawn(move || {
-                // Until the channel closes, which is when the process ends.
-                for job in receiver {
-                    job();
-                }
-            });
-            std::sync::Mutex::new(sender)
-        });
-
-        let (done, finished) = std::sync::mpsc::channel();
-        let job: Job = Box::new(move || {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
-            // The receiver is on a live test thread waiting on it; there is
-            // nothing useful to do here if it has gone.
-            let _ = done.send(outcome);
-        });
-
-        let sender = sender
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(sender.send(job).is_ok(), "the Qt thread is gone");
-        drop(sender);
-
-        match finished.recv() {
-            Ok(Ok(())) => (),
-            Ok(Err(panicked)) => std::panic::resume_unwind(panicked),
-            Err(gone) => std::panic::resume_unwind(Box::new(format!(
-                "the Qt thread went without saying why: {gone}"
-            ))),
-        }
     }
 
     /// Whether this session has already decided which decoration to use.
