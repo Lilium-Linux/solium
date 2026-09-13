@@ -773,7 +773,85 @@ the `render_elements!` block in `render.rs` (call it `Rounded`, beside
 argument list above is from the plan's author reading the type, not from
 compiling it, and it is the one thing here most likely to need a comma moved.
 
-- [ ] **Step 5: Run the tests, then see them fail**
+- [ ] **Step 5: Tell every layer the radius**
+
+A rounded client inside a square border looks broken, and the two numbers have
+to agree. This is the same problem `insets` already solved and it gets the same
+answer: the style declares it once, and the compositor tells every layer.
+
+**The split is not arbitrary — it falls out of who drew the pixels.** The
+client's are the application's, so the compositor masks them with a fragment
+program, which is this whole plan. A layer's are Qt's, and Qt rounds a
+rectangle with one property; building a GPU pass to do what `Rectangle.radius`
+does for free would be absurd. So the compositor rounds the client, QML rounds
+itself, and the only thing that has to cross the seam is the number.
+
+In `crates/solium/src/decoration.rs`, beside the four inset writes at
+`decoration.rs:1040`:
+
+```rust
+        // What the client is being masked to, so a layer can match it. A
+        // rounded client inside a square border is the failure this prevents,
+        // and it is one number declared once -- exactly why `insets` lives on
+        // `PaneStyle` and not on `Layer`.
+        //
+        // LOGICAL pixels, the same as every other value a layer is told.
+        // `pass.rs` converts to physical for the shader; nothing QML sees is
+        // ever in device pixels.
+        scene.set_int(
+            "clientRadius",
+            style
+                .effects
+                .iter()
+                .find(|effect| !effect.is_none_effect())
+                .map_or(0, |effect| effect.radius() as i32),
+        );
+```
+
+A layer's content declares it the way it declares `insetTop` — a layer's
+content owns the property contract, which is why a `source:` file and not an
+inline `Layer {}` is what receives these:
+
+```qml
+Rectangle {
+    property int clientRadius: 0     // set by the compositor
+    radius: clientRadius + 2         // hug the client's curve from outside
+}
+```
+
+A style wanting a rounded border round a *square* client declares no
+`client.radius` and sets its own `radius` — and pays for no pass, which is the
+point.
+
+- [ ] **Step 6: Pin it**
+
+In `decoration.rs`'s `mod tests`, beside `a_delegated_layer_is_told_the_styles_insets`
+— which is the worked example of asserting a compositor-set property through a
+*derived* binding, because `set_int` followed by `get_int` on the same name
+passes whether or not the scene ever saw it:
+
+```rust
+    /// A layer is told what the client is being masked to, so a border can
+    /// match the curve instead of squaring it off.
+    ///
+    /// Read back through a derived property for the same reason the inset test
+    /// does: `set_int` then `get_int` on one name is a round trip through the
+    /// compositor's own map and would pass on a scene that never loaded.
+    #[test]
+    fn a_layer_is_told_the_clients_radius() {
+        // … build a style with `effects: vec![Effect::rounded(12.0)]` and a
+        // delegated layer whose QML declares
+        //     property int clientRadius: 0
+        //     readonly property int sawRadius: clientRadius * 10
+        // then assert `sawRadius == 120`.
+    }
+```
+
+and a second asserting a style with no effects tells the layer `0`. Mutate
+`map_or(0, …)` to `map_or(99, …)` and watch the second fail; delete the
+`set_int` and watch both.
+
+- [ ] **Step 7: Run the tests, then see them fail**
 
 ```bash
 dev/gate.sh
@@ -781,11 +859,11 @@ dev/gate.sh
 
 Expected: PASS. Then mutate `needs_pass` to return `None` unconditionally → `a_pane_with_a_radius_asks_for_a_capture` fails. Revert.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add crates/solium/src/render.rs crates/solium/src/state.rs crates/solium/src/pass.rs
-git commit -m "render: a client with a radius is drawn from its own texture"
+git add crates/solium/src/render.rs crates/solium/src/state.rs crates/solium/src/pass.rs crates/solium/src/decoration.rs
+git commit -m "render: a client with a radius is drawn from its own texture, and its layers are told"
 ```
 
 ---
