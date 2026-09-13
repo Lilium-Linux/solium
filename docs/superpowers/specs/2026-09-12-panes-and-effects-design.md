@@ -348,14 +348,14 @@ alone.
 
 ### Phase 2 — the controls
 
-7. **The configuration surface, for every scope at once.** Pane and client are
+8. **The configuration surface, for every scope at once.** Pane and client are
    sketched above (`PaneStyle`, `client.radius`, rules by `app_id`). The others
    are **not designed yet and must be before they are built**: a global screen
    effect, a per-workspace effect, and a transitional effect on open and close —
    which has to be distinct in the API from a persistent one, because a
    permanently-shaded window pays an offscreen pass every frame for its whole
    life and a dissolve pays it for 300 ms.
-8. **Rules.** Per-pane selection by `app_id`, a slice of #56.
+9. **Rules.** Per-pane selection by `app_id`, a slice of #56.
 
 ### Phase 3 — the things made with it
 
