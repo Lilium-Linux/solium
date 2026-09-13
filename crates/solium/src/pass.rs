@@ -31,7 +31,7 @@ use smithay::{
         },
         utils::{CommitCounter, OpaqueRegions},
     },
-    utils::{Buffer as BufferCoords, Physical, Rectangle, Scale, Size, Transform},
+    utils::{Buffer as BufferCoords, Physical, Point, Rectangle, Scale, Size, Transform},
 };
 use solium_effects::fragment::{Effect, Inputs, RADIUS_UNIFORM, ROUNDED_CORNERS, SIZE_UNIFORM};
 
@@ -177,6 +177,28 @@ pub(crate) fn opaque_inside(
             .into(),
         (w, h).into(),
     )
+}
+
+/// One element's opaque regions in the space it was drawn into.
+///
+/// An element states its opaque regions **relative to itself** and its geometry
+/// relative to what it was drawn into, so the two are summed. It is the same
+/// sum smithay's damage tracker does (`damage/mod.rs:530,580`) and the same one
+/// [`opaque_of`] exists to *avoid* doing twice -- which is why it is a named
+/// function with a test of its own rather than a closure at its one call site.
+///
+/// Getting it wrong here is safe, unlike getting it wrong there: a region put
+/// in the wrong place fails to cover the capture, [`covers`] answers false, and
+/// the window claims nothing. That is why this is low stakes, not why it is
+/// fine.
+pub(crate) fn placed(
+    loc: Point<i32, Physical>,
+    regions: impl IntoIterator<Item = Rectangle<i32, Physical>>,
+) -> impl Iterator<Item = Rectangle<i32, Physical>> {
+    regions.into_iter().map(move |mut region| {
+        region.loc += loc;
+        region
+    })
 }
 
 /// Whether `regions` leave no part of a `size`-sized rectangle uncovered.
@@ -735,6 +757,13 @@ mod tests {
         let opaque = opaque_inside(rect, 40.0);
         assert_eq!(opaque.size.w, 0);
         assert_eq!(opaque.size.h, 0);
+        // The location as well as the size, because the brief's two assertions
+        // leave it free: an empty rect is harmless wherever it is, but nothing
+        // else here pins the `loc` arithmetic on the degenerate path, and a
+        // rect that is empty only by its size is one `max(0)` away from being
+        // a claim somewhere arbitrary.
+        assert_eq!(opaque.loc.x, 40);
+        assert_eq!(opaque.loc.y, 40);
     }
 
     /// Rounded **up**, and the whole test is the direction.
@@ -827,6 +856,43 @@ mod tests {
         );
     }
 
+    /// **Stretched more on one axis than the other, which is the case that
+    /// tells `max` from `min`.**
+    ///
+    /// Every other magnification here is uniform, and under `sx == sy` the four
+    /// wrong implementations -- `min`, `sx` alone, `sy` alone, and the right
+    /// one -- are indistinguishable. So this is the only test in the module
+    /// that fails when `.max(` becomes `.min(`, and the reason `widen` takes
+    /// the larger of the two is written down as a value rather than as prose.
+    ///
+    /// Reachable: `sol.present(id, {w, h})` reads `w` and `h` separately and
+    /// clamps neither (`script.rs`), so `{w = 2 * w, h = h}` is `sx = 2,
+    /// sy = 1`. With `min` the inset would be `ceil(r)` where the horizontal
+    /// arc needs `ceil(2r)`, and a column `r` wide down each corner would be
+    /// claimed opaque -- last-frame garbage, and the window's own output
+    /// written with blending off.
+    #[test]
+    fn a_window_stretched_on_one_axis_insets_by_the_wider_of_the_two() {
+        let wide = Size::<i32, Physical>::from((400, 200));
+        let stretched = Rectangle::<i32, Physical>::new((0, 0).into(), (800, 200).into());
+        assert_eq!(
+            opaque_of(stretched, wide, 20.0, 1.0, true),
+            Some(Rectangle::new((40, 40).into(), (720, 120).into())),
+            "the horizontal arc doubled, so 40 is the inset on every side"
+        );
+        // And the same the other way up. Without it, `widen = sx` -- the
+        // horizontal ratio alone -- passes the case above and every other test
+        // in this module, and a window stretched vertically would claim a row
+        // `r` deep across each corner. Found by mutation, not by reading.
+        let tall = Size::<i32, Physical>::from((200, 400));
+        let stood_up = Rectangle::<i32, Physical>::new((0, 0).into(), (200, 800).into());
+        assert_eq!(
+            opaque_of(stood_up, tall, 20.0, 1.0, true),
+            Some(Rectangle::new((40, 40).into(), (120, 720).into())),
+            "the vertical arc doubled, and the inset has to follow that axis too"
+        );
+    }
+
     /// A half-faded window is opaque nowhere, and the damage tracker will not
     /// work that out on its own.
     ///
@@ -900,16 +966,76 @@ mod tests {
             "NaN compares false against every bound and must not fall through \
              to an inset of zero, which would claim the whole rectangle"
         );
+        // The bound is exact rather than approximate -- `smoothstep(-0.5, 0.5,
+        // away)` is 0 at `away == -0.5` and not merely close to it -- so both
+        // sides of it are asserted rather than just the far side. 0.4 alone
+        // leaves every threshold in (0.4, 0.5] passing, and each of those is a
+        // window claimed opaque that the shader has faded.
+        assert_eq!(opaque_of(dst, texture, 0.49, 1.0, true), None);
         assert!(opaque_of(dst, texture, 0.5, 1.0, true).is_some());
     }
 
+    /// The sum `capture_client` makes before it asks [`covers`] anything.
+    ///
+    /// Stated as a case that is covered **only** if the shift happens and only
+    /// if it is an addition: the region says (0, 0) and the element sits at
+    /// (0, 50), so leaving the sum out, subtracting instead of adding, or
+    /// shifting the size rather than the location each leaves the bottom half
+    /// of the capture uncovered.
+    #[test]
+    fn an_elements_opaque_regions_are_moved_to_where_it_was_drawn() {
+        let size = Size::<i32, Physical>::from((100, 100));
+        let half = Rectangle::<i32, Physical>::new((0, 0).into(), (100, 50).into());
+        assert_eq!(
+            placed(Point::from((10, 20)), [half]).collect::<Vec<_>>(),
+            vec![Rectangle::new((10, 20).into(), (100, 50).into())],
+            "the location moves and the size does not"
+        );
+        assert!(
+            covers(
+                size,
+                placed(Point::from((0, 0)), [half]).chain(placed(Point::from((0, 50)), [half]))
+            ),
+            "a top half and a bottom half cover the capture once each is put \
+             where its element was drawn"
+        );
+        assert!(
+            !covers(size, [half, half]),
+            "and do not if the second is left where it says it is"
+        );
+    }
+
+    /// The lines of `ROUNDED_CORNERS` that [`away`] is transcribed from, and
+    /// the threshold it is compared against.
+    ///
+    /// **Without this the transcription is a second opinion, which is the one
+    /// thing it claims not to be.** Editing the distance field in
+    /// `fragment.rs` would otherwise leave every assertion below green while
+    /// the shader cut a different shape from the one this file insets against
+    /// -- and the failure would be invisible until a screen. `fragment.rs` has
+    /// its own copy of this idea and pins three of these five; the two it does
+    /// not are `half_size`, which decides where the corner circles sit, and
+    /// the `smoothstep`, which is the entire reason the bound below is `-0.5`
+    /// and not `0.0`.
+    ///
+    /// Whole lines rather than `contains`, for `fragment.rs`'s reason: every
+    /// name in this shader is a substring of something else legitimately in it.
+    const FIELD: [&str; 5] = [
+        "vec2 half_size = tex_size * 0.5;",
+        "float r = min(corner_radius, min(half_size.x, half_size.y));",
+        "vec2 p = abs(v_coords * tex_size - half_size) - (half_size - vec2(r));",
+        "float away = length(max(p, 0.0)) - r;",
+        "gl_FragColor = colour * (1.0 - smoothstep(-0.5, 0.5, away));",
+    ];
+
     /// `ROUNDED_CORNERS`'s distance field, evaluated in Rust.
     ///
-    /// Transcribed from the four lines of `fragment.rs` that compute it, so
-    /// that the claim this file makes is checked against the program that
-    /// actually cuts the corners rather than against a second opinion about
-    /// geometry. `point` is `v_coords * tex_size`: the fragment's position in
-    /// the texture's own pixels.
+    /// Transcribed from the lines of `fragment.rs` that compute it -- named in
+    /// [`FIELD`] and asserted still to be there, so that the claim this file
+    /// makes is checked against the program that actually cuts the corners
+    /// rather than against a second opinion about geometry. `point` is
+    /// `v_coords * tex_size`: the fragment's position in the texture's own
+    /// pixels.
     fn away(point: (f64, f64), texture: Size<i32, Physical>, radius: f64) -> f64 {
         let half = (f64::from(texture.w) * 0.5, f64::from(texture.h) * 0.5);
         let r = radius.min(half.0.min(half.1));
@@ -939,6 +1065,14 @@ mod tests {
     /// *outside* the shape, which is the thing that made the inset necessary.
     #[test]
     fn the_shader_leaves_everything_this_file_claims_alone() {
+        for line in FIELD {
+            assert!(
+                ROUNDED_CORNERS.lines().any(|source| source.trim() == line),
+                "`{line}` is no longer in the shader, so `away` below is a \
+                 transcription of a program that is not the one being run"
+            );
+        }
+
         let texture = Size::<i32, Physical>::from((300, 200));
         let radius = 20.0_f64;
 

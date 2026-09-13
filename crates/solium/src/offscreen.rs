@@ -159,6 +159,35 @@ fn pixels(outer: Size<i32, Logical>, scale: f64) -> Size<i32, Physical> {
         .into()
 }
 
+/// The same, rounded the way the **surfaces** round.
+///
+/// [`pixels`] ceils, which never leaves the warp short of a row, and the warp
+/// keeps it. [`capture_client`] cannot, and the reason has nothing to do with
+/// rows: it is that a third party measures the same window and has to agree.
+///
+/// `WaylandSurfaceRenderElement::opaque_regions` sizes a surface's opaque
+/// region with `to_i32_round` (`element/surface.rs:353-356`), and
+/// `render::elements` places the drawn rect with `to_physical_precise_round`.
+/// A capture sized with `ceil` is, at a fractional scale, one pixel wider than
+/// both — 1149 logical at 1.25 is 1437 against 1436 — and that last column is a
+/// column no surface ever claims and no surface ever draws into. `covers` then
+/// answers false, `opaque_of` answers `None`, and **every rounded window on
+/// that output silently gives up its opaque region for good**: Task 5's
+/// behaviour reverts to Task 4's on exactly the machines a fractional scale is
+/// ordinary on, with nothing on screen to say so.
+///
+/// Rounding here makes all three `round(logical * scale)` — the same function
+/// of the same numbers, so they agree by construction rather than by luck. It
+/// also removes the sub-pixel squeeze `render::elements` recorded when the
+/// texture was the wider of the two, rather than documenting it a second time.
+///
+/// `.max(1)` for [`pixels`]' reason: a driver refuses a zero-sized allocation,
+/// and `round` reaches zero half a pixel sooner than `ceil` does.
+fn client_pixels(outer: Size<i32, Logical>, scale: f64) -> Size<i32, Physical> {
+    let rounded: Size<i32, Physical> = outer.to_physical_precise_round(scale);
+    (rounded.w.max(1), rounded.h.max(1)).into()
+}
+
 /// Draw `window` flat at its real size, frame and all, into a texture.
 ///
 /// Returns the texture and the size it was drawn at, so a caller can map
@@ -229,7 +258,10 @@ pub(crate) fn capture_client(
     scale: f64,
 ) -> Option<(GlesTexture, Size<i32, Physical>, bool)> {
     let real = state.real_geometry(window)?;
-    let size = pixels(real.size, scale);
+    // Rounded and not ceiled, and it is the `opaque` below that needs it: see
+    // [`client_pixels`], where the one-pixel disagreement it avoids is spelled
+    // out.
+    let size = client_pixels(real.size, scale);
 
     let elements = crate::render::client_elements(renderer, window, scale);
     if elements.is_empty() {
@@ -242,23 +274,17 @@ pub(crate) fn capture_client(
     // Asked before the draw, and of the elements rather than of the texture: a
     // texture cannot be asked what it contains without reading it back.
     //
-    // `+ loc` because an element states its opaque regions relative to itself
-    // and its geometry relative to what it is drawn into, which here is the
-    // capture. That is the same sum smithay's own damage tracker does
-    // (`damage/mod.rs:530,580`), and getting it wrong is a claim about the
-    // wrong part of the window.
+    // `pass::placed` is the sum, and it is a named function rather than a
+    // closure so that the direction of it is pinned by a test: this diff calls
+    // the same sum fatal one file over.
     let output_scale = Scale::from(scale);
     let opaque = crate::pass::covers(
         size,
         elements.iter().flat_map(|element| {
-            let loc = element.geometry(output_scale).loc;
-            element
-                .opaque_regions(output_scale)
-                .into_iter()
-                .map(move |mut region| {
-                    region.loc += loc;
-                    region
-                })
+            crate::pass::placed(
+                element.geometry(output_scale).loc,
+                element.opaque_regions(output_scale),
+            )
         }),
     );
     let texture = into_scratch(state, renderer, pane, size, &elements, scale)?;
@@ -527,7 +553,7 @@ mod tests {
 
     use smithay::utils::{Logical, Physical, Size};
 
-    use super::{KEPT, Scratch, pixels};
+    use super::{KEPT, Scratch, client_pixels, pixels};
 
     /// An ordinary window, the same one `qml::paint`'s tests measure and the
     /// one both caps are argued from: 1150 x 850 x 4 = 3.9 MB.
@@ -787,5 +813,45 @@ mod tests {
     fn a_window_with_no_size_still_asks_for_a_pixel() {
         assert_eq!(pixels((0, 0).into(), 1.0), Size::from((1, 1)));
         assert_eq!(pixels((1, 1).into(), 0.1), Size::from((1, 1)));
+        // `round` reaches zero half a pixel sooner than `ceil` does, so the
+        // client capture needs the same floor and needs it more often.
+        assert_eq!(client_pixels((0, 0).into(), 1.0), Size::from((1, 1)));
+        assert_eq!(client_pixels((1, 1).into(), 0.4), Size::from((1, 1)));
+    }
+
+    /// **The client capture rounds, and the warp still ceils.**
+    ///
+    /// Not a preference between two roundings: `pass::covers` asks whether the
+    /// client's surfaces covered the capture, and a surface's opaque region is
+    /// sized with `to_i32_round` (`element/surface.rs:353-356`). A capture one
+    /// pixel wider than that has a column no surface claims and no surface
+    /// draws into, so `covers` is false, `opaque_of` is `None`, and every
+    /// rounded window on a fractional-scale output gives up its opaque region
+    /// permanently -- Task 5 reverting to Task 4 with nothing on screen to say
+    /// so.
+    ///
+    /// 1149 at 1.25 is the case `render::elements` records: 1436.25, which
+    /// ceils to 1437 and rounds to 1436. Both are asserted, in one test,
+    /// because the bug is the *difference* between them and a test of either
+    /// alone would not have caught it.
+    ///
+    /// What this cannot check is the thing that matters: whether a real
+    /// client's real opaque regions then cover a real capture. Nothing here
+    /// can build one. It pins that the two functions agree on the number, which
+    /// is the half that was wrong.
+    #[test]
+    fn the_client_capture_is_measured_the_way_a_surface_measures_itself() {
+        let width: Size<i32, Logical> = (1149, 850).into();
+        assert_eq!(pixels(width, 1.25).w, 1437, "the warp still ceils");
+        assert_eq!(
+            client_pixels(width, 1.25).w,
+            1436,
+            "and the client capture rounds, as `render::elements` and \
+             `WaylandSurfaceRenderElement::opaque_regions` both do"
+        );
+        // Where there is nothing to disagree about, they agree.
+        for scale in [1.0, 2.0] {
+            assert_eq!(pixels(width, scale), client_pixels(width, scale));
+        }
     }
 }

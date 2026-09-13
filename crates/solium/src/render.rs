@@ -1011,18 +1011,26 @@ pub(crate) fn elements(
                     // the surfaces below would have used rather than a second
                     // rounding of it.
                     //
-                    // **The texture can be up to one physical pixel larger
-                    // than this, at a fractional scale**, and that is not a
-                    // defect to hunt when the arc looks a fraction short on a
-                    // HiDPI screen. `offscreen::pixels` sizes the capture with
-                    // `.ceil()`; this rounds. At 1149 logical by 1.25 that is
-                    // 1437 against 1436, so the whole texture is squeezed into
-                    // one pixel less and the corner lands marginally inside
-                    // where the arithmetic says. The warp path has had the
-                    // same seam since it was written and nobody has seen it.
-                    // Recorded because the symptom -- "the radius is slightly
-                    // wrong, but only on the 1.25x monitor" -- is exactly what
-                    // a scale bug looks like, and this is not one.
+                    // **The texture is measured the same way this is, and that
+                    // is deliberate.** This rounds and
+                    // `offscreen::client_pixels` rounds. The warp's
+                    // `offscreen::pixels` ceils and still does, so the two
+                    // differ at a fractional scale: 1149 logical by 1.25 is
+                    // 1437 against 1436.
+                    //
+                    // An earlier version of this comment recorded that
+                    // difference on the client path and called it invisible --
+                    // a corner landing marginally inside where the arithmetic
+                    // says, not a defect to hunt. That was true about the
+                    // geometry and wrong about everything else, which is why
+                    // the sizing changed rather than the comment. `pass::
+                    // covers` asks whether the client's surfaces covered the
+                    // capture; a surface's opaque region is sized with
+                    // `to_i32_round`; a capture one pixel wider therefore has a
+                    // column nothing ever claims, and the window gave up its
+                    // opaque region for good on exactly the outputs a
+                    // fractional scale is ordinary on. `client_pixels` carries
+                    // the rest of it.
                     let dst = smithay::utils::Rectangle::new(
                         origin,
                         client.size.to_physical_precise_round(scale),
