@@ -63,6 +63,15 @@ render_elements! {
     /// too: Qt rendered it into a buffer the compositor allocated, so there is
     /// nothing to upload and nothing that is a memory buffer. See `surface.rs`.
     Screen = smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>,
+    /// A client drawn from a texture of its own, *through a fragment program*.
+    ///
+    /// The one thing `Screen` above cannot be. `TextureRenderElement` has no
+    /// constructor that takes a program — checked against
+    /// `element/texture.rs` — so an effect that masks the node's own pixels
+    /// needs an element carrying one. See `pass::Rounded`, and `warp::Warp`
+    /// beside it, which is the other element written here for the same kind of
+    /// reason.
+    Rounded = crate::pass::Rounded,
 }
 
 /// The two questions that together mean "will a later frame differ from this
@@ -193,18 +202,31 @@ impl Drawn {
     }
 }
 
-/// Textures captured for this frame, one per deformed window.
+/// Textures captured for this frame: one per deformed window, and one per
+/// window whose style masks its client.
 ///
-/// A deformed window is drawn flat into a texture of its own first. That pass
-/// binds a framebuffer, so it cannot happen while the output's buffer is
-/// already bound: it leaves GL pointing at the texture, and the whole frame --
+/// Such a window is drawn into a texture of its own first. That pass binds a
+/// framebuffer, so it cannot happen while the output's buffer is already
+/// bound: it leaves GL pointing at the texture, and the whole frame --
 /// including the deformed window -- lands there instead of on screen, which
 /// looks exactly like a compositor that has frozen. So captures happen in
 /// their own pass, before the backend binds anything, and `elements` only
 /// spends what this collected.
+///
+/// **That is why a pass is not run from inside the `Piece::Client` arm**, which
+/// is where the decision about it is made and would be the obvious place to
+/// run it. `elements` is called with the output already bound on the nested
+/// backend (`winit.rs`) and inside `offscreen::Screens::draw`; a bind
+/// underneath a bind is the frozen-compositor failure above.
+///
+/// Two lists rather than one keyed by kind, because they are different things:
+/// a warp keeps only a texture, and a masked client keeps a texture, the size
+/// it was captured at, a radius in physical pixels and the program to draw it
+/// through. See [`crate::pass::Pass`].
 #[derive(Default)]
 pub(crate) struct Prepared {
     warps: Vec<(Window, GlesTexture)>,
+    passes: Vec<(Window, crate::pass::Pass)>,
 }
 
 impl Prepared {
@@ -220,9 +242,24 @@ impl Prepared {
             .find(|(each, _)| each == window)
             .map(|(_, texture)| texture.clone())
     }
+
+    /// The pass captured for `window`, if its style asked for one.
+    ///
+    /// `None` for every window on a machine nobody has styled, and it is the
+    /// answer that keeps the ordinary client on the path it has always taken.
+    /// Borrowed rather than cloned for the same reason `texture` is lent: one
+    /// capture is placed once per output the window is on.
+    fn pass(&self, window: &Window) -> Option<&crate::pass::Pass> {
+        self.passes
+            .iter()
+            .find(|(each, _)| each == window)
+            .map(|(_, pass)| pass)
+    }
 }
 
-/// Capture a texture for every window whose transform is not a rectangle.
+/// Capture a texture for every window that cannot be drawn from its surfaces
+/// where they are: one whose transform is not a rectangle, and one whose style
+/// masks its client.
 ///
 /// Must run before the backend binds its own buffer; see [`Prepared`].
 pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepared {
@@ -246,43 +283,118 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     state.publish_windows();
 
     let mut warps = Vec::new();
+    let mut passes = Vec::new();
 
     for (pane, window) in state.on_screen() {
-        // What this pane wants capturing at, if it wants capturing at all.
-        //
-        // At *its own monitor's* scale. One frame can span monitors at
-        // different scales, and a texture taken at 1x and drawn on a 2x screen
-        // is the blur this whole change exists to remove.
-        // The anchor is resolved here too, and not merely tested for presence:
-        // a deform aimed at a pane that has closed draws flat, and capturing a
-        // texture for it would be a megabyte a frame spent on a warp that the
-        // draw below has already decided not to do.
-        let wanted = window.as_ref().and_then(|window| {
-            let outer = state.outer_geometry(window)?;
-            let frame = state.drawn(pane, outer);
-            (!frame.matrix.is_identity() || state.aimed_at(frame.deform).is_some())
-                .then(|| state.scale_of(outer))
-        });
-        let Some((window, scale)) = window.zip(wanted) else {
-            // Nothing warped means nothing to keep. A pane holds the texture
-            // it was last captured into between frames -- megabytes of it --
-            // and there is no later frame on which handing it back gets
-            // cheaper, so an overview that warps twenty windows and is then
-            // closed would otherwise leave twenty behind for the session. See
-            // `offscreen::Scratch`.
+        // Nothing captured means nothing to keep. A pane holds the texture it
+        // was last captured into between frames -- megabytes of it -- and
+        // there is no later frame on which handing it back gets cheaper, so an
+        // overview that warps twenty windows and is then closed would
+        // otherwise leave twenty behind for the session. See
+        // `offscreen::Scratch`.
+        let release = |state: &mut Solium| {
             if let Some(pane) = state.panes.get_mut(pane) {
                 pane.scratch_mut().release();
             }
+        };
+        let Some(window) = window else {
+            release(state);
             continue;
         };
-        if let Some((texture, _size)) =
-            crate::offscreen::capture(state, renderer, pane, &window, scale)
-        {
-            warps.push((window, texture));
+        let Some(outer) = state.outer_geometry(&window) else {
+            release(state);
+            continue;
+        };
+        // The anchor is resolved here, and not merely tested for presence: a
+        // deform aimed at a pane that has closed draws flat, and capturing a
+        // texture for it would be a megabyte a frame spent on a warp that
+        // `elements` has already decided not to do.
+        let frame = state.drawn(pane, outer);
+        // At *its own monitor's* scale, in both branches below. One frame can
+        // span monitors at different scales, and a texture taken at 1x and
+        // drawn on a 2x screen is the blur this whole change exists to remove
+        // -- and, for a pass, the radius that is right on one screen and wrong
+        // on the other.
+        if !frame.matrix.is_identity() || state.aimed_at(frame.deform).is_some() {
+            let scale = state.scale_of(outer);
+            if let Some((texture, _size)) =
+                crate::offscreen::capture(state, renderer, pane, &window, scale)
+            {
+                warps.push((window, texture));
+            }
+            continue;
         }
+
+        // Flat, so its style may still want its client masked. Asked *after*
+        // the warp branch and never as well as it, because both want the one
+        // texture a pane keeps and at different sizes -- and because a
+        // deformed window loses its effects for the length of the deform, the
+        // same recorded limit its bleed already has. See
+        // `flat_window_elements`.
+        if let Some(pass) = client_pass(state, renderer, pane, &window, outer) {
+            passes.push((window, pass));
+            continue;
+        }
+        release(state);
     }
 
-    Prepared { warps }
+    Prepared { warps, passes }
+}
+
+/// Capture and prepare this pane's client pass, if its style asked for one.
+///
+/// `None` is the answer for every window on a machine nobody has styled, and
+/// it is the answer that costs nothing: `needs_pass` on an empty slice, and
+/// out.
+///
+/// Every later `None` is a refusal to make a window worse than it was --
+/// a shader that would not compile, a client with nothing mapped yet -- and
+/// each of them leaves the client drawn square through the path it has always
+/// taken, rather than not drawn at all.
+fn client_pass(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: crate::pane::PaneId,
+    window: &Window,
+    outer: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+) -> Option<crate::pass::Pass> {
+    // Copied out before anything borrows the state mutably: the capture below
+    // wants `&mut Solium`, and the effects are reached *through* the pane.
+    // `Effect` is `Copy` and a style declares at most one, so this is a vector
+    // of nought or one -- and `Vec::new()` for the empty case, which is every
+    // window on an unstyled machine, allocates nothing.
+    let declared: Vec<solium_effects::fragment::Effect> = state
+        .panes
+        .get(pane)
+        .and_then(Pane::decoration)
+        .map(crate::decoration::Decoration::effects)
+        .unwrap_or_default()
+        .to_vec();
+    let Some(effect) = crate::pass::needs_pass(&declared) else {
+        // Said out loud rather than skipped. `needs_pass` answering `None` for
+        // `Inputs::Backdrop` is right -- there is nothing composited beneath a
+        // node for this renderer to sample -- but a blur that silently renders
+        // as no blur looks like a style that failed to load and is never
+        // reported as a compositor bug. See `fragment::Inputs::Backdrop`.
+        if let Some(refused) = crate::pass::refused(&declared) {
+            state.programs.refuse(refused);
+        }
+        return None;
+    };
+    let scale = state.scale_of(outer);
+    // The program first, and the capture only if there is one: a driver that
+    // cannot build this shader should cost someone their rounded corners, not
+    // an offscreen pass per window per frame to draw a texture through nothing.
+    //
+    // Compiled here rather than at the draw because this is between frames --
+    // `prepare` runs before any output is bound -- which is the one place
+    // `compile_custom_texture_shader`'s `make_current` is safe. `Programs`
+    // says why at length, and the borrow checker enforces it.
+    let program = state.programs.rounded(renderer)?.clone();
+    let (texture, size) = crate::offscreen::capture_client(state, renderer, pane, window, scale)?;
+    Some(crate::pass::Pass::new(
+        texture, size, effect, scale, program,
+    ))
 }
 
 /// Everything to draw this frame, topmost first.
@@ -868,6 +980,43 @@ pub(crate) fn elements(
                     }
                 }
 
+                // An effect that reads the node's own pixels cannot be an
+                // element laid over the client, because it needs the client's
+                // pixels before it can draw. So the client's surfaces were
+                // rendered into a texture of their own in `prepare`, and that
+                // texture is drawn here, through the effect's program, in
+                // their place -- one element where there were several.
+                //
+                // The popups above are deliberately outside this: a popup is
+                // its own window, reaching past the client's rectangle, and
+                // masking it to the client's corners would cut the corners off
+                // a menu.
+                //
+                // **Everything below this branch is the path every unstyled
+                // window takes and is untouched: no capture, no bind, no
+                // program, no extra element.** `Prepared::pass` answering
+                // `None` -- which it does for every window whose style
+                // declares no effect, because `prepare` put nothing in the
+                // list -- is what keeps it that way.
+                if let Some(pass) = prepared.pass(&window) {
+                    // The client's drawn rectangle, which is not the texture's
+                    // size: a window being animated smaller is captured at its
+                    // real size and drawn into less of the screen. The corner
+                    // therefore shrinks with the window, which is what it
+                    // should do -- the mask is in the texture's own space.
+                    //
+                    // Built from `origin` rather than converting `client`
+                    // whole, so the element's position is the *same* number
+                    // the surfaces below would have used rather than a second
+                    // rounding of it.
+                    let dst = smithay::utils::Rectangle::new(
+                        origin,
+                        client.size.to_physical_precise_round(scale),
+                    );
+                    elements.push(Element::Rounded(pass.at(dst, frame.opacity)));
+                    return;
+                }
+
                 // A surface's top-left is not the window's. A client that draws
                 // its own decorations puts its drop shadow *outside* the window
                 // geometry and tells us so through `set_window_geometry`;
@@ -1165,6 +1314,21 @@ pub(crate) fn flat_window_elements(
                 chrome(state, renderer, elements, pane, depth, drawing);
             }
         }
+        // **A deformed window loses its client effects too, for the same
+        // reason and with the same shape as the bleed above.** No pass is run
+        // here, so a window with a `client.radius` has square corners for the
+        // length of a genie and rounded ones the moment it lands.
+        //
+        // It is not an oversight and it is not one line. A pass needs a
+        // texture of the client alone, and the texture it would be drawn into
+        // is the one this function is filling -- so the pane would need two,
+        // where `offscreen::Scratch` deliberately keeps one and the arithmetic
+        // for why is written out on `KEPT`. The honest fix is the same fix the
+        // bleed needs: capture at the decoration's widest canvas and map the
+        // mesh over it, which is `capture`'s change and not this one's.
+        //
+        // What it costs meanwhile is visible but is not wrong pixels, which is
+        // the same trade the bleed already makes.
         Piece::Client => {
             if let Some(surface) = window
                 .toplevel()
@@ -1192,6 +1356,46 @@ pub(crate) fn flat_window_elements(
         }
     });
     elements
+}
+
+/// One window's **client**, flat, at the origin and its real size.
+///
+/// What `offscreen::capture_client` draws into the texture a fragment program
+/// then masks. The client and nothing else: no frame, no layers, no popups,
+/// and the reason for each is on `capture_client` — briefly, a layer's pixels
+/// are Qt's and Qt rounds itself, and a popup is its own window and must not
+/// be clipped to the one it belongs to.
+///
+/// At the origin because the texture *is* the client's own space; where it
+/// lands on screen is `elements`' business, exactly as the warp's is.
+///
+/// Takes no `&Solium` — unlike [`flat_window_elements`], which needs the pane
+/// for its layers — which is why the capture around it can hold the state
+/// mutably while this runs.
+pub(crate) fn client_elements(
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    scale: f64,
+) -> Vec<Element> {
+    // A surface's top-left is not the window's: a client drawing its own
+    // decorations puts its shadow outside the geometry and says so through
+    // `set_window_geometry`. Drawing the tree at the origin would put the
+    // shadow where the window belongs and push the window down and right by
+    // its width — the Firefox defect `elements` records — and here it would
+    // also mask the wrong rectangle. So the tree is offset the same way, which
+    // makes the texture exactly the window's geometry rect and clips the
+    // shadow off it.
+    let origin = smithay::utils::Point::<i32, smithay::utils::Logical>::from((
+        -window.geometry().loc.x,
+        -window.geometry().loc.y,
+    ))
+    .to_physical_precise_round(scale);
+    // Fully opaque, like the warp's capture and for the same reason: the
+    // element drawn from this texture applies the pane's opacity to the whole
+    // of it afterwards, so fading here as well would fade it squared.
+    let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+        window.render_elements(renderer, origin, Scale::from(scale), 1.0);
+    surfaces.into_iter().map(Element::Window2).collect()
 }
 
 /// Drawn size over real size, guarding the degenerate case.
