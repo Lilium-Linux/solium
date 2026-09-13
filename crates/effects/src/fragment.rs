@@ -23,11 +23,27 @@ pub enum Inputs {
     /// Declared here and implemented nowhere. It is what blur needs, and
     /// naming it is most of why this enum exists -- an effect system whose
     /// vocabulary cannot express blur has decided blur is impossible rather
-    /// than unimplemented. The renderer refuses it for now and says so.
+    /// than unimplemented.
+    ///
+    /// Nothing constructs it yet. Whatever plans the passes must refuse it out
+    /// loud rather than let it fall through to drawing inline: a blur that
+    /// silently renders as no blur looks like a style that failed to load, and
+    /// nobody reports that as a compositor bug.
     Backdrop,
 }
 
-/// The corner radius a rounded-corner program takes, in physical pixels.
+/// The corner radius a rounded-corner program takes, in **physical** pixels.
+///
+/// [`Effect::radius`] is in **logical** pixels, and this is the other side of
+/// that seam. A style says `radius: 12` because that is what someone types
+/// into a `Pane.qml`, and a style should not have to know a monitor's scale;
+/// the shader measures in texture pixels throughout and knows nothing else.
+///
+/// **Whoever sets this uniform does the multiply by the output scale** --
+/// `crates/solium/src/pass.rs`, not this crate and not the shader. The two
+/// numbers are equal on a scale-1 output, which is why getting it wrong looks
+/// perfect on the machine it was written on and shows up only on a HiDPI
+/// screen.
 pub const RADIUS_UNIFORM: &str = "corner_radius";
 
 /// The texture's size in physical pixels.
@@ -40,7 +56,7 @@ pub const SIZE_UNIFORM: &str = "tex_size";
 
 /// Rounded corners, as a fragment program over the node's own texture.
 ///
-/// Smithay's contract for a TEXTURE program, read from `shaders/mod.rs:125`
+/// Smithay's contract for a TEXTURE program, read from `shaders/mod.rs`
 /// rather than from the doc comment on `compile_custom_texture_shader`, which
 /// is wrong about the first of these:
 ///
@@ -49,40 +65,89 @@ pub const SIZE_UNIFORM: &str = "tex_size";
 /// * the source supplies its own `#version 100`. `texture_program` does not
 ///   prepend one, and the built-in `texture.frag` carries its own. (The
 ///   *pixel* program is the one where smithay prepends it.)
+/// * it is compiled **three times**, not once, and has to behave under each
+///   set of `#define`s. See `the_shader_handles_every_variant_smithay_compiles_it_into`,
+///   and `texture.frag`, which is the model this mirrors.
 ///
 /// `alpha` is Smithay's; `corner_radius` and `tex_size` are ours. A texture
 /// program gets no `size` uniform -- only a pixel program does.
 /// The distance field is the standard rounded-box one: fold the coordinate
 /// into one quadrant, and measure from the centre of that corner's circle.
-/// Antialiased over one pixel with `smoothstep`, because a hard cut on a
-/// curve is a staircase.
 pub const ROUNDED_CORNERS: &str = r"#version 100
 
 //_DEFINES_
 
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
 precision mediump float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
 uniform sampler2D tex;
+#endif
+
 uniform float alpha;
 uniform float corner_radius;
 uniform vec2 tex_size;
 varying vec2 v_coords;
 
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
 void main() {
     vec4 colour = texture2D(tex, v_coords);
+
+#if defined(NO_ALPHA)
+    // Forced opaque rather than sampled. The X byte of an XRGB8888 buffer is
+    // undefined, so a client that leaves it at zero draws a fully invisible
+    // window if it is multiplied in -- and XRGB8888 is the ordinary opaque
+    // case, not an exotic one. Smithay picks this variant itself, from the
+    // buffer's format.
+    colour = vec4(colour.rgb, 1.0) * alpha;
+#else
+    // Every channel, not just alpha: a wayland surface is PREMULTIPLIED, so
+    // colour and alpha have to be scaled together or a faded edge comes out
+    // too bright. Smithay's own texture.frag does `color * alpha` for the
+    // same reason.
+    colour = colour * alpha;
+#endif
+
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        colour = vec4(0.0, 0.2, 0.0, 0.2) + colour * 0.8;
+#endif
 
     // Into pixels, then into one corner's quadrant: abs() folds all four
     // corners onto one, so the distance field is written once rather than
     // four times. `v_coords` is `(tex_matrix * position).xy`, which for a
     // whole texture runs 0..1 -- see smithay's texture.vert.
+    //
+    // Clamped to the shorter half, and the field is written in terms of the
+    // clamp. Unclamped, a radius past min(w,h)/2 pushes each corner circle's
+    // centre outside the rectangle and the field calls every fragment of the
+    // short edge outside: a 300x200 window at radius 150 loses its whole top
+    // and bottom rows instead of degrading to a stadium. Nothing upstream
+    // clamps -- Effect::rounded(1e9) is accepted and is not a none-effect.
     vec2 half_size = tex_size * 0.5;
-    vec2 p = abs(v_coords * tex_size - half_size) - (half_size - vec2(corner_radius));
-    float away = length(max(p, 0.0)) - corner_radius;
+    float r = min(corner_radius, min(half_size.x, half_size.y));
+    vec2 p = abs(v_coords * tex_size - half_size) - (half_size - vec2(r));
+    float away = length(max(p, 0.0)) - r;
 
-    // Every channel, not just alpha: a wayland surface is PREMULTIPLIED, so
-    // colour and alpha have to be scaled together or a faded edge comes out
-    // too bright. Smithay's own texture.frag does `color * alpha` for the
-    // same reason.
-    gl_FragColor = colour * alpha * (1.0 - smoothstep(-0.5, 0.5, away));
+    // The mask goes last, after the tint. The tint ADDS a constant, so a
+    // fragment masked to zero before it would be painted back in and the cut
+    // corners would reappear in green whenever debug flags are on.
+    //
+    // The one-unit smoothstep is not a one-*pixel* antialias: `away` is in
+    // texture pixels, so the softened band is one screen pixel wide only when
+    // the texture is drawn at 1:1. Magnified it is a visible blur, minified it
+    // aliases. The scale-correct form is smoothstep(-w, w, away) with
+    // w = fwidth(away), which under #version 100 needs
+    // GL_OES_standard_derivatives; until that extension is requested, this
+    // buys a soft edge at native scale and a wrong-width one everywhere else.
+    gl_FragColor = colour * (1.0 - smoothstep(-0.5, 0.5, away));
 }
 ";
 
@@ -94,7 +159,11 @@ pub enum Effect {
 }
 
 impl Effect {
-    /// Rounded corners at `radius` logical pixels.
+    /// Rounded corners at `radius` **logical** pixels.
+    ///
+    /// Logical because this is the number a style writes, and a style does not
+    /// know what scale the window will land on. [`RADIUS_UNIFORM`] is where it
+    /// becomes physical, and says who multiplies.
     #[must_use]
     pub const fn rounded(radius: f64) -> Self {
         Self::Rounded { radius }
@@ -108,7 +177,8 @@ impl Effect {
         }
     }
 
-    /// The radius, in logical pixels.
+    /// The radius, in **logical** pixels. [`RADIUS_UNIFORM`] is the physical
+    /// one, and the conversion between them is the caller's.
     #[must_use]
     pub const fn radius(&self) -> f64 {
         match self {
@@ -129,7 +199,7 @@ impl Effect {
     /// point: NaN is incomparable, so `r <= 0.0` on its own would call it an
     /// effect and buy an offscreen pass to draw nothing.
     #[must_use]
-    pub fn is_none_effect(&self) -> bool {
+    pub const fn is_none_effect(&self) -> bool {
         match self {
             Self::Rounded { radius } => *radius <= 0.0 || radius.is_nan(),
         }
@@ -139,6 +209,20 @@ impl Effect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether the shader has this exact line, ignoring indentation.
+    ///
+    /// A whole line rather than `contains`, everywhere, because every name in
+    /// this shader is a substring of something else that is legitimately
+    /// present. `contains(RADIUS_UNIFORM)` passes for `RADIUS_UNIFORM =
+    /// "radius"`, since `corner_radius` contains it; `contains(SIZE_UNIFORM)`
+    /// passes for `"size"`, which is the *pixel* program's uniform name that
+    /// this module exists to work around; and `contains("//_DEFINES")` passes
+    /// for the wrong marker, which is a prefix of the right one. All three
+    /// compile. All three fail only on a GPU, silently.
+    fn has_line(wanted: &str) -> bool {
+        ROUNDED_CORNERS.lines().any(|line| line.trim() == wanted)
+    }
 
     /// An effect that reads nothing draws inline; one that reads `self` needs
     /// the node rendered to a texture first. That distinction is the whole
@@ -184,14 +268,8 @@ mod tests {
     /// here and compiled for real in wirecheck.
     #[test]
     fn the_shader_is_shaped_the_way_smithay_actually_requires() {
-        // Whole line, not `contains`: `contains("//_DEFINES")` is true of the
-        // WRONG spelling too, because it is a prefix of the right one. That
-        // near-miss is the bug this test exists to catch, so matching a
-        // substring here would make the test agree with the defect.
         assert!(
-            ROUNDED_CORNERS
-                .lines()
-                .any(|line| line.trim() == "//_DEFINES_"),
+            has_line("//_DEFINES_"),
             "smithay replaces a line that is exactly `//_DEFINES_` with its #defines"
         );
         assert!(
@@ -199,11 +277,83 @@ mod tests {
             "texture_program does NOT prepend a version -- the built-in \
              texture.frag carries its own, and so must this"
         );
-        assert!(ROUNDED_CORNERS.contains(RADIUS_UNIFORM));
+
+        // The declaration line, built from the constant, so the name the
+        // compositor will pass to `UniformName::new` and the name the shader
+        // declares cannot drift apart. See `has_line` for why not `contains`.
+        for declaration in [
+            format!("uniform float {RADIUS_UNIFORM};"),
+            format!("uniform vec2 {SIZE_UNIFORM};"),
+        ] {
+            assert!(
+                has_line(&declaration),
+                "the shader has no `{declaration}`, so GetUniformLocation \
+                 returns -1 and the uniform is silently never set"
+            );
+        }
+    }
+
+    /// **Smithay compiles this shader three times, not once.**
+    ///
+    /// `shaders/mod.rs` builds a variant for each of `&[]`, `&[NO_ALPHA]` and
+    /// `&[EXTERNAL]` eagerly, and `variant_for_format` picks between them per
+    /// texture: variant 1 for any known format with `has_alpha == false`,
+    /// variant 2 whenever the format is `None`, which is how an external
+    /// texture arrives. Neither is exotic -- XRGB8888 is the ordinary opaque
+    /// window, and a hardware-decoded video surface binds
+    /// `TEXTURE_EXTERNAL_OES`.
+    ///
+    /// A shader that ignores the defines compiles perfectly and then
+    /// misbehaves on a GPU: an XRGB window drawn with its undefined X byte as
+    /// alpha is *invisible*, and an external texture read through a
+    /// `sampler2D` is *black*. `texture.frag` is the model this mirrors.
+    #[test]
+    fn the_shader_handles_every_variant_smithay_compiles_it_into() {
+        for required in [
+            "#if defined(NO_ALPHA)",
+            "#if defined(EXTERNAL)",
+            "#extension GL_OES_EGL_image_external : require",
+            "uniform samplerExternalOES tex;",
+            "uniform sampler2D tex;",
+        ] {
+            assert!(
+                has_line(required),
+                "no `{required}`: one of smithay's three variants would draw wrong"
+            );
+        }
+        // And the NO_ALPHA arm has to *do* something. A branch that takes the
+        // same path under a different name satisfies every assertion above and
+        // still draws an invisible window.
         assert!(
-            ROUNDED_CORNERS.contains(SIZE_UNIFORM),
-            "a texture program gets no `size` uniform from smithay; only a \
-             pixel program does, so this one has to declare its own"
+            ROUNDED_CORNERS.contains("vec4(colour.rgb, 1.0)"),
+            "NO_ALPHA has to replace the alpha channel, not sample it"
+        );
+    }
+
+    /// **A radius larger than the window degrades to a stadium; it does not
+    /// eat the window.**
+    ///
+    /// Nothing upstream clamps: `Effect::rounded(1e9)` is accepted and is not
+    /// a none-effect. Unclamped, `half_size - vec2(r)` goes negative on the
+    /// short axis, every fragment of the short edge reports `away >= 0`, and a
+    /// 300x200 window at radius 150 loses its top and bottom rows outright.
+    #[test]
+    fn a_radius_larger_than_the_window_cannot_erode_it() {
+        assert!(
+            has_line(&format!(
+                "float r = min({RADIUS_UNIFORM}, min(half_size.x, half_size.y));"
+            )),
+            "the radius is used unclamped, so a large one erodes the window"
+        );
+        // And nothing walks around the clamp: the raw uniform may be mentioned
+        // exactly twice -- once to declare it, once to clamp it -- and both
+        // halves of the distance field are written in terms of the clamped
+        // copy. A third mention is a bypass.
+        assert_eq!(
+            ROUNDED_CORNERS.matches(RADIUS_UNIFORM).count(),
+            2,
+            "`{RADIUS_UNIFORM}` is used somewhere other than its declaration \
+             and the clamp, so part of the distance field is unclamped"
         );
     }
 }
