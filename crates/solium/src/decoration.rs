@@ -1212,6 +1212,186 @@ mod tests {
     /// engine's thread affinity, which is not a fact about decorations.
     use crate::qml::qt_test::on_the_qt_thread;
 
+    /// A bundle written into a directory of its own, as `style`'s tests do.
+    ///
+    /// Cleared first, because these are named after the test and the process
+    /// and a second run of the same test in the same binary would otherwise
+    /// find its own leftovers.
+    fn fixture(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("solium-layers-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        for (file, body) in files {
+            std::fs::write(dir.join(file), body).expect("writing a bundle file");
+        }
+        dir
+    }
+
+    /// Three inline layers, one flat opaque colour each, at all three depths.
+    ///
+    /// Inline on purpose: a delegated layer is a file of its own and would have
+    /// separate scenes whether or not anything hid anything, so it cannot tell
+    /// the two failures apart. These three share one `Pane.qml`.
+    const THREE_COLOURS: &str = r##"
+        import QtQuick
+        import Solium
+
+        PaneStyle {
+            Layer {
+                depth: "behind"; name: "under"
+                Rectangle { anchors.fill: parent; color: "#ff0000" }
+            }
+            Layer {
+                depth: "frame"; name: "bar"
+                Rectangle { anchors.fill: parent; color: "#00ff00" }
+            }
+            Layer {
+                depth: "above"; name: "over"
+                Rectangle { anchors.fill: parent; color: "#0000ff" }
+            }
+        }
+    "##;
+
+    /// The pixel in the middle of a rendered layer, as `(r, g, b, a)`.
+    ///
+    /// Premultiplied ARGB32 little-endian, which is `B G R A` in memory — the
+    /// format `qml/host.cpp` fills its `QImage` with and the one the compositor
+    /// blends, so this reads the same bytes the screen would get.
+    fn middle(layer: &mut LayerScene, size: (i32, i32)) -> (u8, u8, u8, u8) {
+        let rendered = layer.scene.render().expect("the layer renders");
+        let x = usize::try_from(size.0 / 2).unwrap_or(0) * 4;
+        let y = usize::try_from(size.1 / 2).unwrap_or(0);
+        let at = y * rendered.stride + x;
+        let pixel = rendered
+            .pixels
+            .get(at..at + 4)
+            .expect("a pixel in the middle of the layer");
+        (pixel[2], pixel[1], pixel[0], pixel[3])
+    }
+
+    /// **Each layer is its own picture, and it holds only its own layer.**
+    ///
+    /// The claim the whole feature rests on, taken as far as a test without a
+    /// GPU can take it: three layers written into one `Pane.qml`, built through
+    /// the real `style::load` and the real `Decoration::from_style`, rasterised
+    /// by the real Qt, and read back as pixels.
+    ///
+    /// It separates the two ways `PaneStyle.showOneLayer` can be wrong, and both
+    /// have been run as controls against this test:
+    ///
+    /// * **Hidden but never parented** — the shape the plan's `visible:` binding
+    ///   would have left, since items in a `list<Item>` are not in the scene
+    ///   graph at all. Measured: `[(0,0,0,0), (0,0,0,0), (0,0,0,0)]`, three
+    ///   transparent pictures.
+    /// * **Parented but never hidden** — every scene carries all three layers.
+    ///   Measured: the readback above reads `[true, true, true]` for the scene
+    ///   built for layer 0, which is a client sandwiched between two copies of
+    ///   one picture.
+    ///
+    /// Red, green and blue, one per scene, is the only reading that is neither,
+    /// which is why the colours are flat and opaque rather than anything
+    /// prettier.
+    #[test]
+    fn every_layer_is_its_own_scene_and_draws_only_itself() {
+        on_the_qt_thread(|| {
+            let dir = fixture("colours", &[("Pane.qml", THREE_COLOURS)]);
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let size = (40, 30);
+            let mut decoration =
+                Decoration::from_style(&style, size.0, size.1).expect("three scenes");
+
+            assert_eq!(decoration.layers.len(), 3, "one scene per declared layer");
+            let depths: Vec<Depth> = decoration.layers.iter().map(|it| it.depth).collect();
+            assert_eq!(
+                depths,
+                [Depth::Behind, Depth::Frame, Depth::Above],
+                "in declaration order, which is not stacking order"
+            );
+
+            // Which layer each scene believes it is drawing, straight out of
+            // the object tree. Three separate `PaneStyle` instances, each with
+            // exactly one of its three children shown.
+            for (index, layer) in decoration.layers.iter().enumerate() {
+                let shown: Vec<Option<String>> = (0..3)
+                    .map(|which| layer.scene.layer_field(which, "visible"))
+                    .collect();
+                let expected: Vec<Option<String>> = (0..3)
+                    .map(|which| Some((which == index).to_string()))
+                    .collect();
+                assert_eq!(
+                    shown, expected,
+                    "the scene built for layer {index} shows the wrong children"
+                );
+            }
+
+            if crate::qml::on_gpu() {
+                // A GPU scene is built at 1x1 and rendered into a dmabuf; there
+                // is no `QImage` to read a pixel out of and nothing here can
+                // bind a texture. The readback above still holds on both paths,
+                // and `dev/wirecheck` is where the GPU pictures are checked.
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+
+            let colours: Vec<(u8, u8, u8, u8)> = decoration
+                .layers
+                .iter_mut()
+                .map(|layer| middle(layer, size))
+                .collect();
+            assert_eq!(
+                colours,
+                [(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255)],
+                "each layer's scene must hold that layer and nothing else -- all \
+                 transparent means nothing was parented, and three blues mean \
+                 every scene drew all three of them"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// The layers of one depth, newest on top, and the others left out.
+    ///
+    /// `layer_elements` and `layers_at` share one selection — [`at`] — so this
+    /// pins the depth filter and the within-depth order for both. Later
+    /// declared draws on top, which is QML's own rule for siblings, and the
+    /// element list is topmost first.
+    #[test]
+    fn one_depth_is_walked_backwards_and_the_others_are_left_alone() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "two-at-one-depth",
+                &[(
+                    "Pane.qml",
+                    r#"
+                    import QtQuick
+                    import Solium
+
+                    PaneStyle {
+                        Layer { depth: "frame";  name: "under-bar" }
+                        Layer { depth: "above";  name: "over" }
+                        Layer { depth: "frame";  name: "over-bar" }
+                    }
+                    "#,
+                )],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let decoration = Decoration::from_style(&style, 40, 30).expect("three scenes");
+
+            let names = |depth| decoration.layers_at(depth).collect::<Vec<_>>();
+            assert_eq!(
+                names(Depth::Frame),
+                ["over-bar", "under-bar"],
+                "declared second at this depth, so drawn on top, so first in a \
+                 list that is topmost first"
+            );
+            assert_eq!(names(Depth::Above), ["over"]);
+            assert!(names(Depth::Behind).is_empty());
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
     #[test]
     fn button_names_map_to_actions() {
         assert_eq!(Action::parse("close"), Some(Action::Close));

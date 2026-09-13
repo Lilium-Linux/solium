@@ -1158,6 +1158,7 @@ fn ratio(drawn: f64, real: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{Drawn, Painted, ratio};
+    use crate::qml::qt_test::on_the_qt_thread;
 
     /// A QML scene's two answers, with Qt's exact behaviour.
     ///
@@ -1447,6 +1448,73 @@ mod tests {
             !one_frame(&mut scene),
             "a frame the pointer asked for left the compositor asking for more"
         );
+    }
+
+    /// **The client is drawn between two layers the same style produced.**
+    ///
+    /// The claim this whole feature exists for, and an ordering claim — so the
+    /// evidence is the list itself. `pane_pieces` is the walk the compositor
+    /// runs, `PANE_ORDER` is the order it runs it in, and `Decoration` here is a
+    /// real one: the shipped `panes/example/` bundle, read by the real
+    /// `style::load` and built into three real Qt scenes by
+    /// `Decoration::from_style`. What is stood in for is the *element*, because
+    /// making one needs a `GlesRenderer` and `cargo test` has no GPU — so the
+    /// closure records a layer's name where the compositor's records a texture.
+    ///
+    /// Everything that can be wrong about the order is in the part that runs
+    /// here: which depth goes first, which layers a depth has, and where the
+    /// client falls among them.
+    ///
+    /// The control is `PANE_ORDER` itself. Moving `Piece::Client` to the front
+    /// gives `["<client>", "spikes", "bar", "glow"]` and fails on the first
+    /// assertion; swapping `Above` and `Behind` gives `["glow", "bar",
+    /// "<client>", "spikes"]` and fails on the last two, which are there
+    /// because the flat list alone does not say which side of the client each
+    /// name was supposed to be on.
+    #[test]
+    fn a_client_is_drawn_between_two_layers_of_its_own_style() {
+        on_the_qt_thread(|| {
+            let dir =
+                std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes/example"));
+            let style = crate::style::load(dir).expect("the shipped example loads");
+            let decoration =
+                crate::decoration::Decoration::from_style(&style, 300, 200).expect("three scenes");
+
+            let mut order: Vec<&str> = Vec::new();
+            super::pane_pieces(&mut order, |into, piece| match piece {
+                super::Piece::Layers(depth) => into.extend(decoration.layers_at(depth)),
+                super::Piece::Client => into.push("<client>"),
+            });
+
+            assert_eq!(
+                order,
+                ["spikes", "bar", "<client>", "glow"],
+                "topmost first: `above`, `frame`, the client, `behind`"
+            );
+
+            // Said again as the relation, because the flat list above is also
+            // satisfied by an order that happens to spell the same names.
+            let place = |name| {
+                order
+                    .iter()
+                    .position(|each| *each == name)
+                    .expect("every layer of the example is in the list")
+            };
+            assert!(
+                place("spikes") < place("<client>"),
+                "`above` must be over the client -- it is the half of this that \
+                 a single decoration file could never do"
+            );
+            assert!(
+                place("<client>") < place("glow"),
+                "`behind` must be under the client, which is the other half"
+            );
+            assert!(
+                place("bar") < place("<client>"),
+                "and a `frame` layer still covers the client, as a decoration \
+                 always has"
+            );
+        });
     }
 
     #[test]
