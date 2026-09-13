@@ -305,6 +305,40 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             release(state);
             continue;
         };
+        // **A pane no monitor shows is not captured**, and this is the same
+        // question `elements` asks one screen at a time before it draws
+        // anything: `!global.overlaps(screen)`, the containment rule that
+        // makes a workspace switch work. A hidden workspace is not unmapped,
+        // it is *parked a screen away*, so without this every window on every
+        // workspace is captured on every frame for as long as the session
+        // lasts -- and `release` below never fires either, because the capture
+        // keeps succeeding.
+        //
+        // It was survivable while a capture meant a warp: a window is deformed
+        // for the length of an animation and then stops. A `client.radius` is
+        // permanent, so twelve windows across three workspaces became twelve
+        // full-window offscreen renders a frame and ~47 MB of `Scratch` held
+        // for the session, a third of it for windows nothing ever draws. The
+        // arithmetic on `offscreen::KEPT` is written against the transient
+        // case and says so.
+        //
+        // **The slot, through the same `pane_outer_of` call `elements` makes,
+        // and not the `outer` above.** They differ in exactly two places and
+        // the slot is the safer of the two in both: `pane_geometry` falls back
+        // to the layout's rectangle for a window that has mapped without a
+        // size yet -- where `outer_geometry` is a zero-size rect that overlaps
+        // nothing and would be culled while `elements` went on to draw it --
+        // and `insets_of` grows by the decoration's insets where
+        // `frame_insets` gives an undecorated window none. Being wrong in that
+        // direction is a blank corner rather than a slow one, so the question
+        // is asked of the rectangle `elements` will ask it of.
+        if !state
+            .pane_outer_of(pane)
+            .is_some_and(|slot| state.on_any_output(slot))
+        {
+            release(state);
+            continue;
+        }
         // The anchor is resolved here, and not merely tested for presence: a
         // deform aimed at a pane that has closed draws flat, and capturing a
         // texture for it would be a megabyte a frame spent on a warp that

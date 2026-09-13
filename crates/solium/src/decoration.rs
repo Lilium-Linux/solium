@@ -991,9 +991,12 @@ impl Backing {
 /// The radius a layer of this style should hug, in logical pixels.
 ///
 /// Zero when the style declares no effect that masks the client, which is
-/// every shipped bundle and every style nobody has touched. A style wanting a
-/// rounded border around a *square* client declares no `client.radius` and
-/// sets its own `radius` — and pays for no pass, which is the point.
+/// thirteen of the fourteen shipped bundles and every style nobody has
+/// touched; `panes/rounded/` is the one that declares a radius, and
+/// `panes/example/` writes `0` on purpose to show the key costs nothing. A
+/// style wanting a rounded border around a *square* client declares no
+/// `client.radius` and sets its own `radius` — and pays for no pass, which is
+/// the point.
 ///
 /// The *first* effect that is really an effect, which is the same choice
 /// `pass::needs_pass` makes and is made here again rather than shared with it:

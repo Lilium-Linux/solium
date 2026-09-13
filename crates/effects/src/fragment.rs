@@ -65,9 +65,15 @@ pub const SIZE_UNIFORM: &str = "tex_size";
 /// * the source supplies its own `#version 100`. `texture_program` does not
 ///   prepend one, and the built-in `texture.frag` carries its own. (The
 ///   *pixel* program is the one where smithay prepends it.)
-/// * it is compiled **three times**, not once, and has to behave under each
-///   set of `#define`s. See `the_shader_handles_every_variant_smithay_compiles_it_into`,
-///   and `texture.frag`, which is the model this mirrors.
+/// * it is compiled **six times**, not once, and has to behave under each set
+///   of `#define`s. Three define sets -- `&[]`, `&[NO_ALPHA]`, `&[EXTERNAL]`
+///   -- and `texture_program` links each of them *twice*, once plain and once
+///   with `DEBUG_FLAGS` chained on (`shaders/mod.rs:122-141`). Three is the
+///   number of variants `variant_for_format` picks between; six is the number
+///   that have to compile, and a shader that only builds without the debug
+///   define fails at renderer construction and takes the session with it. See
+///   `the_shader_handles_every_variant_smithay_compiles_it_into`, and
+///   `texture.frag`, which is the model this mirrors.
 ///
 /// `alpha` is Smithay's; `corner_radius` and `tex_size` are ours. A texture
 /// program gets no `size` uniform -- only a pixel program does.
