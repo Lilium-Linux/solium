@@ -20,8 +20,9 @@
 // compositor. It also means a simple style is one file with inline layers and
 // a complex one is a folder, with no format to migrate between.
 //
-// `style::load` reads `insets`, `requires` and the Layer children; `client` is
-// still reserved and read by nobody.
+// `style::load` reads `insets`, `requires`, the Layer children and
+// `client.radius`, which becomes an effect on the client's own texture.
+// `client.shadow` is still reserved and read by nobody.
 //
 // The same file is loaded twice over, for two different jobs. As a *manifest*
 // it is built at 1x1, asked what it declares and never drawn — `layerIndex`
@@ -76,10 +77,15 @@ Item {
     // style says it would merely *like* something.
     property list<string> requires: []
 
-    // Reserved. Declared now so a style folder written today does not change
-    // shape when client treatment is built — both of these become effects
-    // that declare `inputs: self`, and neither is expressible until a frame
-    // can be split into passes. The compositor ignores them.
+    // What is done to the client's own surface, rather than around it.
+    //
+    // `radius` is read: `style::load` turns a non-zero one into an effect
+    // declaring `inputs: self`. Zero is *no effect* and not an effect that
+    // rounds by nothing — the difference is an offscreen pass per window per
+    // frame, so a style that leaves this alone costs exactly what it did
+    // before the property existed. `shadow` is the same shape and is still
+    // reserved: it derives from the node's silhouette rather than masking it,
+    // and nothing draws it yet.
     property ClientTreatment client: ClientTreatment {}
 
     // The Layer children, in declaration order. Read by the compositor.

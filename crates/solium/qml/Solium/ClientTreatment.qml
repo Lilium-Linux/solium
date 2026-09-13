@@ -1,9 +1,14 @@
 // What is done to the client's own surface, as opposed to around it.
 //
-// Reserved, and unread. Both of these become effects that declare `inputs:
-// self` — they mask or derive from the node's own texture — and neither is
-// expressible until a frame can be split into passes. See the spec's
-// *Effects* section.
+// `radius` is read. `style::load` turns a non-zero one into an effect that
+// declares `inputs: self`, because it masks the node's own texture. Zero is
+// *no effect* rather than an effect that rounds by nothing: the difference is
+// an offscreen pass per window per frame, and every shipped style leaves this
+// alone.
+//
+// `shadow` is still reserved. It is the same shape — it derives from the
+// node's own texture rather than masking it — and nothing draws it yet. See
+// the spec's *Effects* section.
 //
 // They are declared here rather than left out because a rounded window is the
 // one piece of the design that is not additive: it stops the client being
