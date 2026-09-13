@@ -1,19 +1,25 @@
 // The style bundle format, written out once so there is something to read.
 //
-// Nothing loads this. It is here because `PaneStyle` and `Layer` are a format
-// before they are a feature, and a format with no instance of it is a set of
-// property declarations nobody has tried to write against. It exercises every
-// property both types have — all three depths, both spellings of `bleed`,
-// inline content and delegated content, `insets`, `requires`, and the reserved
-// `client` group — so that
+// It is here because `PaneStyle` and `Layer` are a format before they are a
+// feature, and a format with no instance of it is a set of property
+// declarations nobody has tried to write against. It exercises every property
+// both types have — all three depths, both spellings of `bleed`, inline content
+// and delegated content, `insets`, `requires`, and the reserved `client` group
+// — so that
 //
 //     solium --check-qml crates/solium/qml/panes/example/Pane.qml
 //
 // says `ok` about the whole surface rather than about one corner of it.
 //
+// **It draws.** `decoration = "example"` — or `SOLIUM_DECORATION=example` —
+// frames every window with this, which is what a name that is a folder under
+// `panes/` means. It is also what two tests build a real `Decoration` out of:
+// `render`'s ordering test and `style`'s reading test both come here, so this
+// file is the fixture as well as the documentation.
+//
 // It is deliberately not a copy of a shipped decoration: `decorations/top.qml`
-// still ships and is still the one being drawn, and a second copy of it living
-// here would drift from the original with nothing to notice.
+// still ships and is still what `decoration = "top"` draws, and a second copy
+// of it living here would drift from the original with nothing to notice.
 
 import QtQuick
 import Solium
