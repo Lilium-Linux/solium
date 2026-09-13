@@ -1831,6 +1831,99 @@ mod tests {
         });
     }
 
+    /// **The pointer arrives in each layer's own canvas, and a leave stays
+    /// outside it.**
+    ///
+    /// `x` and `y` come from `Solium::decorated_under` and `frame_under`, both
+    /// of which measure from the pane's outer corner. A bleeding layer's scene
+    /// no longer starts there, so without the shift every button in it would be
+    /// `bleedLeft` to the right of where the pointer really was — the close
+    /// button lighting up while the pointer is over the maximise one, which is
+    /// a decoration that works and is one button out.
+    ///
+    /// The leave is the other half and points the other way, which is why both
+    /// are in one test: `(-1, -1)` shifted by a 30x40 bleed is `(29, 39)`, a
+    /// point comfortably inside a 90x160 canvas, so a border lit by proximity
+    /// would light on the frame the pointer left the window and stay lit for
+    /// the rest of the session.
+    ///
+    /// Both controls run:
+    ///
+    /// | control | measured |
+    /// |---|---|
+    /// | `pointer` not shifted | the scene reads the pointer at `(5, 7)`, 30 and 40 short |
+    /// | `pointer_left` shifted the same way `pointer` is | still hovered after the pointer left |
+    ///
+    /// Task 6 is what *clips* input to the pane — though note that both callers
+    /// already gate on `drawn.rect.contains(location)`, the pane's own outer
+    /// rect, so a spike over a neighbour does not reach this function at all.
+    #[test]
+    fn the_pointer_arrives_in_the_layers_own_canvas() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "pointer",
+                &[(
+                    "Pane.qml",
+                    r#"
+                    import QtQuick
+                    import Solium
+
+                    PaneStyle {
+                        id: pane
+
+                        insets.top: 32
+                        // Where the scene thinks the pointer is, in its own
+                        // coordinates -- which are the canvas's.
+                        property int atX: Math.round(hit.mouseX)
+                        property int atY: Math.round(hit.mouseY)
+                        onButton: hit.containsMouse
+
+                        Layer {
+                            depth: "frame"; name: "buttons"
+                            bleed: { "left": 30, "top": 40 }
+
+                            MouseArea {
+                                id: hit
+                                anchors.fill: parent
+                                hoverEnabled: true
+                            }
+                        }
+                    }
+                    "#,
+                )],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+
+            // 5 across and 7 down from the **pane's** top-left corner, which is
+            // what both input paths hand over.
+            decoration.pointer(5.0, 7.0, None);
+            let scene = &mut decoration.layers[0].scene;
+            assert_eq!(
+                (scene.get_int("atX"), scene.get_int("atY")),
+                (35, 47),
+                "the scene is laid out on a canvas that starts 30 left and 40 \
+                 above the window, so a point 5 across and 7 down from the \
+                 window is 35 and 47 in the picture -- (5, 7) is every button \
+                 in this layer being 30 pixels to the right of where it is"
+            );
+            assert!(
+                decoration.on_button(),
+                "and it really is over the area, not merely reporting numbers"
+            );
+
+            decoration.pointer_left();
+            assert!(
+                !decoration.on_button(),
+                "a leave is sent raw: (-1, -1) shifted by this layer's bleed is \
+                 (29, 39), which is inside its canvas, so the window would stay \
+                 hovered for the rest of its life"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
     /// What bounds a whole pane on screen: the union, not the sum.
     ///
     /// Read by the off-screen cull in `render::elements`, which is the one
