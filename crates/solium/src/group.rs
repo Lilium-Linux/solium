@@ -166,8 +166,10 @@ impl Blend for Shift {
 /// One thing a selection can name.
 ///
 /// The vocabulary from the design's table, less the two that are not addressable
-/// yet: a *layer* within a pane's style has no layers to name until Phase 3, and
-/// a group naming another group is recursion nobody has asked for.
+/// yet. A *layer* within a pane's style now exists — a style bundle declares
+/// them and `Decoration` holds one scene each — but naming one still needs a way
+/// to say *which* pane's, which no selection can spell; and a group naming
+/// another group is recursion nobody has asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Member {
     /// A window, by the id scripts hold it as.

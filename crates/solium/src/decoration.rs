@@ -1392,6 +1392,53 @@ mod tests {
         });
     }
 
+    /// **A name that is a folder under `panes/` reaches its layers.**
+    ///
+    /// The one link between the setting and everything above: `build` is what
+    /// `insert` and `set_style` both call, and without this test `from_style`
+    /// is reachable from tests and from nowhere else.
+    ///
+    /// Both directions, because the useful claim is the *order* of the lookup
+    /// rather than either half of it. `example` is a bundle and becomes three
+    /// layers; `top` is not one and stays the single QML file a decoration has
+    /// always been, at `frame`, which is what makes Task 7's conversion a move
+    /// of files rather than a change of setting.
+    #[test]
+    fn a_name_that_is_a_bundle_builds_its_layers() {
+        if the_environment_has_already_chosen() {
+            // `build` reads `SOLIUM_DECORATION` before the argument, so a
+            // session that set it decides this rather than the test does.
+            return;
+        }
+        on_the_qt_thread(|| {
+            let plain = build(Some("top"), 300, 200).expect("the shipped decoration builds");
+            assert_eq!(plain.layers.len(), 1, "one QML file is one layer");
+            assert_eq!(plain.layers[0].depth, Depth::Frame);
+            assert_eq!(
+                plain.insets().top,
+                TITLEBAR_HEIGHT,
+                "and its insets still come from the scene, not from a style"
+            );
+
+            let bundle = build(Some("example"), 300, 200).expect("the shipped example builds");
+            // Guarded for the reason `style`'s `find_reaches_the_shipped_example`
+            // is: a user bundle called `example` is entitled to win, that is the
+            // feature, and then the shipped file's three layers are the wrong
+            // assertion.
+            let shipped = crate::style::find("example")
+                == Some(PathBuf::from(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/qml/panes/example"
+                )));
+            if shipped {
+                let depths: Vec<Depth> = bundle.layers.iter().map(|it| it.depth).collect();
+                assert_eq!(depths, [Depth::Behind, Depth::Frame, Depth::Above]);
+            } else {
+                assert!(!bundle.layers.is_empty(), "a user bundle is still a bundle");
+            }
+        });
+    }
+
     #[test]
     fn button_names_map_to_actions() {
         assert_eq!(Action::parse("close"), Some(Action::Close));
