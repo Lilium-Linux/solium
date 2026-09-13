@@ -15,6 +15,13 @@
 //
 // Plain rotated rectangles rather than `Canvas` or `ShaderEffect`, so that the
 // bundle stays portable and can honestly declare `requires: []`.
+//
+// **`bleedTop` is still this file's own default and nothing sets it yet.** A
+// layer's canvas is the pane's outer rect until Task 5 grows it, so today this
+// scene is the window's size and the strip above the window does not exist: the
+// diamonds are drawn 48px inside the top edge rather than straddling it. That is
+// the one visible difference between what this file describes and what
+// `decoration = "example"` currently draws.
 
 import QtQuick
 import Solium
