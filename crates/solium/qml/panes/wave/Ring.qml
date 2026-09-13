@@ -52,6 +52,71 @@ Item {
     // up changes what fills this list and nothing else in the file.
     property var levels: []
 
+    // Where to look for them. A plain file, rewritten whole by whatever is
+    // producing the numbers -- see cava-feed.sh beside this file.
+    //
+    // A *file* and not the FIFO cava writes directly, because reading a FIFO
+    // means blocking until a writer shows up, and the thread this would block
+    // is the one the compositor draws every window on. A file read either
+    // finds bytes or does not, and a missing one is the same as silence.
+    readonly property string feedPath: "file:///tmp/solium-audio"
+
+    // Polled rather than pushed, because nothing in QML can be woken by a
+    // file changing.
+    //
+    // **This only fires while something is animating**, and that is not a
+    // detail: the compositor drains Qt's event queue inside `solium_qml_tick`,
+    // which runs on frames it draws -- so a `Timer` in a settled scene never
+    // fires at all. The rings' own `NumberAnimation` is what keeps frames
+    // coming, and both are bound to `focused`. An unfocused window stops
+    // reading the file, which is the behaviour wanted anyway.
+    Timer {
+        interval: 40
+        repeat: true
+        running: ring.focused
+        onTriggered: ring.readFeed()
+    }
+
+    function readFeed() {
+        const request = new XMLHttpRequest();
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE) {
+                return;
+            }
+            // No file, no reader, no producer: fall back to the sine rather
+            // than to a flat line. A missing helper should look like a style
+            // that is not wired up, not like one that is broken.
+            const body = request.responseText;
+            if (!body) {
+                ring.levels = [];
+                return;
+            }
+            const parsed = [];
+            for (const field of body.trim().split(/[;,\s]+/)) {
+                const value = parseFloat(field);
+                if (!isNaN(value)) {
+                    // 0..100 in, -0.3..1.2 out, through a square root.
+                    //
+                    // Not linear, and that is from looking at it: a spectrum
+                    // sits low almost all the time -- a bar over 40 is a beat,
+                    // not a normal reading -- so a straight 0..100 -> -1..1 map
+                    // leaves the border tucked flat against the window and
+                    // twitching, which is what the first version did. The root
+                    // lifts the quiet half without clipping the loud one.
+                    //
+                    // The -0.3 floor is silence: slightly inside the resting
+                    // radius, so a paused track looks calm rather than gone.
+                    const level = Math.max(0, Math.min(1, value / 100));
+                    parsed.push(Math.max(-1, Math.min(1.2,
+                        -0.3 + 1.5 * Math.sqrt(level))));
+                }
+            }
+            ring.levels = parsed;
+        };
+        request.open("GET", ring.feedPath);
+        request.send();
+    }
+
     // The wave's height at `t` (0..1) round the loop.
     //
     // `periods` must be a whole number in the fallback, or the sine does not
@@ -62,14 +127,19 @@ Item {
         if (bars === 0) {
             return Math.sin(t * periods * 2 * Math.PI + phase);
         }
-        // Sampled around the loop and wrapped, so the first and last bar are
-        // neighbours rather than a cut -- the loop has no ends to be an edge.
-        const at = t * bars + phase * bars / (2 * Math.PI);
-        const i = Math.floor(at);
+        // **Mirrored**, not wrapped: the spectrum runs bass-to-treble down one
+        // half of the loop and back up the other. Two reasons, both from
+        // looking at it. A spectrum is bass-heavy, so wrapping it once puts
+        // every large bar in one short arc and leaves three quarters of the
+        // border flat. And bar 0 next to bar N is a cut -- silence against a
+        // beat -- where mirroring closes the loop on itself with no join at
+        // all, which is the same reason the sine's period count is whole.
+        const turn = ((t + phase / (2 * Math.PI)) % 1 + 1) % 1;
+        const fold = turn < 0.5 ? turn * 2 : (1 - turn) * 2;
+        const at = fold * (bars - 1);
+        const i = Math.min(bars - 2, Math.floor(at));
         const f = at - i;
-        const a = ring.levels[((i % bars) + bars) % bars];
-        const b = ring.levels[(((i + 1) % bars) + bars) % bars];
-        return a + (b - a) * f;
+        return ring.levels[i] + (ring.levels[i + 1] - ring.levels[i]) * f;
     }
 
     // A point `t` (0..1) of the way round a rounded rectangle by arc length,
@@ -133,9 +203,9 @@ Item {
     // one to `depth: "above"` in Pane.qml is what layering buys, and it is one
     // line when a style wants it.
     readonly property var rings: [
-        { reach: 30, swell: 15, periods: 18, duration: 7400, ink: Theme.text },
-        { reach: 20, swell: 12, periods: 22, duration: 5600, ink: Theme.accent },
-        { reach: 10, swell: 8,  periods: 26, duration: 4300, ink: Theme.edge }
+        { reach: 28, swell: 24, periods: 18, duration: 7400, ink: Theme.text },
+        { reach: 19, swell: 18, periods: 22, duration: 5600, ink: Theme.accent },
+        { reach: 10, swell: 13, periods: 26, duration: 4300, ink: Theme.edge }
     ]
 
     Repeater {
