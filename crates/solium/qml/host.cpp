@@ -68,8 +68,16 @@
 #include <QtGui/QOpenGLContext>
 #include <QtGui/QOpenGLFunctions>
 #include <QtGui/QSurface>
+#include <QtQml/QJSValue>
 #include <QtQml/QQmlComponent>
 #include <QtQml/QQmlEngine>
+#include <QtQml/QQmlListReference>
+// The one thing in here that resolves a property *path*. QObject::property
+// takes a name and nothing else, so `insets.top` — a grouped property, which is
+// a child QObject held in a property — is unreachable through it. No new
+// dependency: QtQml is already linked for QQmlComponent and QQmlEngine above,
+// and build.rs already puts its include directory on the path.
+#include <QtQml/QQmlProperty>
 #include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickRenderControl>
 #include <QtQuick/QQuickRenderTarget>
@@ -1893,21 +1901,103 @@ extern "C" void solium_qml_scene_set_int(SoliumQmlScene *scene, const char *name
 }
 
 /* How much of the window a decoration reserves is the decoration's decision,
- * so it is read back from QML rather than configured beside it. */
+ * so it is read back from QML rather than configured beside it.
+ *
+ * Through QQmlProperty and not QObject::property, which is the whole of what
+ * makes `insets.top` readable — see the long note in host.h. Both spellings go
+ * through the same call: a dotted path is not a special case here, it is what
+ * this constructor already handles, and a flat name is the one-segment case of
+ * it. */
 extern "C" int solium_qml_scene_get_int(const SoliumQmlScene *scene, const char *name)
 {
-    if (scene == nullptr || scene->root == nullptr) {
+    if (scene == nullptr || scene->root == nullptr || name == nullptr) {
         return 0;
     }
-    return scene->root->property(name).toInt();
+    return QQmlProperty(scene->root, QString::fromUtf8(name)).read().toInt();
 }
 
 extern "C" int solium_qml_scene_get_bool(const SoliumQmlScene *scene, const char *name)
 {
-    if (scene == nullptr || scene->root == nullptr) {
+    if (scene == nullptr || scene->root == nullptr || name == nullptr) {
         return 0;
     }
-    return scene->root->property(name).toBool() ? 1 : 0;
+    return QQmlProperty(scene->root, QString::fromUtf8(name)).read().toBool() ? 1 : 0;
+}
+
+/* The Layer children of a PaneStyle, in declaration order.
+ *
+ * `default property list<Item> layers` becomes a QQmlListProperty in the
+ * metaobject, and QQmlListReference is how one is read from C++. Note that the
+ * items in it are *not* visually parented — `root->childItems()` is empty on a
+ * PaneStyle — so this list is the only way to reach them. That is correct for a
+ * manifest that is never drawn, and it is why enumerating children would find
+ * nothing. */
+static QList<QObject *> style_layers(const SoliumQmlScene *scene)
+{
+    QList<QObject *> out;
+    if (scene == nullptr || scene->root == nullptr) {
+        return out;
+    }
+    const QQmlListReference list(scene->root, "layers");
+    if (!list.isValid()) {
+        return out;
+    }
+    out.reserve(list.count());
+    for (qsizetype i = 0; i < list.count(); ++i) {
+        out.append(list.at(i));
+    }
+    return out;
+}
+
+extern "C" int solium_qml_scene_layer_count(const SoliumQmlScene *scene)
+{
+    if (scene == nullptr || scene->root == nullptr) {
+        return -1;
+    }
+    /* Not "has no layers": has no `layers` *property*, or one that is not a
+     * list. Either way the root is not a PaneStyle, and that is a different
+     * answer from a PaneStyle declaring none. */
+    const QQmlListReference list(scene->root, "layers");
+    if (!list.isValid()) {
+        return -1;
+    }
+    return static_cast<int>(style_layers(scene).count());
+}
+
+extern "C" const char *solium_qml_scene_layer_field(const SoliumQmlScene *scene, int index,
+                                                    const char *field)
+{
+    const QList<QObject *> layers = style_layers(scene);
+    if (index < 0 || index >= layers.count() || field == nullptr) {
+        return nullptr;
+    }
+    QVariant value = layers.at(index)->property(field);
+
+    /* A QML `var` property — which is what `bleed` is — hands back its value
+     * wrapped in a QJSValue rather than as the plain variant, so the type
+     * switch below has to be made against the unwrapped one. Without this the
+     * map arm never fires and `{ "top": 48 }` stringifies to nothing. */
+    if (value.metaType().id() == qMetaTypeId<QJSValue>()) {
+        value = value.value<QJSValue>().toVariant();
+    }
+    if (!value.isValid()) {
+        return nullptr;
+    }
+
+    /* Valid until the next call on this thread. A thread-local rather than a
+     * field on the scene because this takes a const scene, and because the
+     * caller copies the bytes before it does anything else — see
+     * `Scene::layer_field`. */
+    static thread_local QByteArray held;
+    if (value.typeId() == QMetaType::QVariantMap) {
+        /* A JSON round-trip, so `bleed` arrives the same way whether it was
+         * written as a number or as an object and Rust has one parser. */
+        held = QJsonDocument(QJsonObject::fromVariantMap(value.toMap()))
+                   .toJson(QJsonDocument::Compact);
+    } else {
+        held = value.toString().toUtf8();
+    }
+    return held.constData();
 }
 
 extern "C" void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed)

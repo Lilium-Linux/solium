@@ -30,6 +30,19 @@ mod screencopy;
 mod script;
 mod scripted;
 mod state;
+// Reading a style bundle, and nothing that uses one yet: finding a bundle by
+// name is Task 3 of the pane-styles plan and rendering its layers is Task 4, so
+// for now the only caller is this module's own tests. The exemption is lifted
+// in the test build, which is what keeps "unused" honest rather than blanket.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the style loader; `style::find` (Task 3) and \
+                  `Decoration::from_style` (Task 4) are what call it"
+    )
+)]
+mod style;
 mod surface;
 mod synth;
 mod tty;

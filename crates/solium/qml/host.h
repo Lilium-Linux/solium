@@ -246,10 +246,52 @@ const char *solium_qml_scene_take_string(SoliumQmlScene *scene, const char *name
 void solium_qml_scene_set_string(SoliumQmlScene *scene, const char *name, const char *value);
 void solium_qml_scene_set_bool(SoliumQmlScene *scene, const char *name, int value);
 void solium_qml_scene_set_int(SoliumQmlScene *scene, const char *name, int value);
+
+/* Read a whole-number property.
+ *
+ * `name` is a property *path*, not only a property name: `insetTop` and
+ * `insets.top` both work, and the difference is why this goes through
+ * QQmlProperty rather than QObject::property. QObject::property looks the whole
+ * string up in the metaobject in one piece, so a dotted path finds nothing,
+ * hands back an invalid QVariant, and `toInt()` turns that into a perfectly
+ * plausible 0 — a style reserving 32 pixels at the top read back as reserving
+ * none, with no error anywhere and the client drawn over its own titlebar. A
+ * grouped property is a child QObject held in a property, and walking to it is
+ * exactly what QQmlProperty does. Every shipped decoration reads flat names
+ * (`insetTop`), so nothing noticed until `PaneStyle.insets` arrived.
+ *
+ * A path that resolves to nothing still reads 0, as it always has.
+ */
 int solium_qml_scene_get_int(const SoliumQmlScene *scene, const char *name);
 
-/* Read a bool property. Non-clearing: this is state QML owns and we observe. */
+/* Read a bool property. Non-clearing: this is state QML owns and we observe.
+ * Path-aware, exactly as solium_qml_scene_get_int is and for the same reason. */
 int solium_qml_scene_get_bool(const SoliumQmlScene *scene, const char *name);
+
+/* How many Layer children the style declares.
+ *
+ * -1 if the root is not a PaneStyle, which is how a bundle with the wrong root
+ * object is reported: no `layers` property, or one that is not a list. 0 is a
+ * PaneStyle that declares no layers — a different complaint, and the caller's
+ * to make.
+ */
+int solium_qml_scene_layer_count(const SoliumQmlScene *scene);
+
+/* One field of one layer, as a string. "depth", "bleed", "source", "name".
+ *
+ * `bleed` comes back as a bare number or as a JSON object, because that is how
+ * it is written: `bleed: 24` and `bleed: { "top": 48 }` are both legal and the
+ * QML property is a `var`. Normalising it to JSON here means the Rust side has
+ * one parser rather than a QVariant type switch reproduced across the ABI.
+ *
+ * NULL when the layer has no such property, which is also how an Item that is
+ * not a Layer is reported — `layers` is a `list<Item>` and accepts any Item.
+ *
+ * The returned pointer is valid until the next call to this function on this
+ * thread, and the caller copies it.
+ */
+const char *solium_qml_scene_layer_field(const SoliumQmlScene *scene, int index,
+                                         const char *field);
 
 /* Pointer input, in scene coordinates. `pressed`: 1 down, 0 up, -1 motion. */
 void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed);
