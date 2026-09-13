@@ -2989,6 +2989,17 @@ mod tests {
     /// one: `available` and `style::find` are both pure directory walks, and it
     /// is `chosen()` -- deliberately not called here -- that reads
     /// `SOLIUM_DECORATION`.
+    ///
+    /// **The case it was run against, since a consistency check between two
+    /// functions that share a directory list can easily be vacuous.** An empty
+    /// `qml/panes/top/` makes it fail with "`top` is offered as a single file,
+    /// but `style::find` resolves it to ...". That is not contrived: `find`
+    /// accepts any *directory* for a bare name, while [`offered_by`] requires a
+    /// `Pane.qml`, so a bundle whose manifest is missing or misspelled is
+    /// offered as the single-file decoration it shadows and then draws neither.
+    /// The asymmetry is `find`'s and it is Task 3's deliberate choice -- a path
+    /// is taken as given so `load` can name what it could not read -- so this
+    /// watches it rather than changing it.
     #[test]
     fn what_the_panel_offers_is_what_a_press_resolves() {
         let offered = available();
