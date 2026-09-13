@@ -521,9 +521,17 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
                  {wanted:?}. Each wrong answer names a different cause, so read the \
                  numbers: a flat [255, 255, 255, 255] -- or any solid colour that is \
                  not the picture -- means something writes `gl_FragColor` AFTER the \
-                 mask does; half alpha means `tex_size` never reached the program; \
-                 nothing at all means the picture did not; the right colour in the \
-                 wrong order means a channel swap on the way in or out"
+                 mask does; half alpha means EITHER uniform never reached the \
+                 program -- an unset `tex_size` puts every fragment on the \
+                 boundary, and an unset `corner_radius` clamps `r` to 0 which \
+                 does the same, and the two are byte-identical here, so check \
+                 BOTH `Uniform::new` calls above rather than one. Note they are \
+                 THIS file's, not the compositor's: nothing here runs \
+                 `pass::Rounded::draw`, so a wrong uniform there is invisible \
+                 to this case and always has been; nothing at all means the \
+                 picture did not reach the \
+                 program; the right colour in the wrong order means a channel \
+                 swap on the way in or out"
             ));
         }
 
@@ -531,9 +539,20 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
         //
         // Four and not one, because `abs()` folding the coordinate into a single
         // quadrant is what draws all four from one expression -- a field written
-        // for the top-left only passes at (0, 0). It is also the check that
-        // `corner_radius` arrived: an unset uniform is 0, the clamp makes `r` 0,
-        // and then nothing is cut anywhere and every one of these is opaque.
+        // for the top-left only passes at (0, 0).
+        //
+        // It is NOT the check that `corner_radius` arrived, which this comment
+        // used to claim: an unset radius makes `r` 0, which puts the whole
+        // texture on the boundary, so the middle assertion above fires first
+        // and this one is never reached. Measured, not reasoned -- dropping
+        // either uniform reds with the identical message, which is why that
+        // message now names both.
+        //
+        // What an unset radius does, for the record, since it is not what the
+        // obvious guess says: `r` is 0, so `p` is exactly zero at every point
+        // and `away` is 0 everywhere -- which is the smoothstep's midpoint, so
+        // the whole texture comes back at alpha 127. Not opaque, not cut. The
+        // middle assertion sees that first.
         for (x, y) in [
             (0, 0),
             (SIDE - 1, 0),
@@ -544,8 +563,12 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
             if corner[3] != 0 {
                 return Err(anyhow!(
                     "the {what} variant left the corner at ({x}, {y}) at alpha {} \
-                     rather than cutting it. A radius of 0 -- which is what an \
-                     unset `corner_radius` uniform is -- cuts nothing anywhere",
+                     rather than cutting it. Reaching here means the middle of \
+                     the texture was right, so the uniforms arrived and the \
+                     field is being evaluated -- what is wrong is its SHAPE. A \
+                     field written for one quadrant rather than folded with \
+                     `abs()` is the case this catches: it cuts (0, 0) and \
+                     leaves the other three",
                     corner[3]
                 ));
             }
