@@ -81,9 +81,21 @@ refusal logged by its own caller as its own unrelated failure.
 
 The files themselves and not a stand-in, because what is in question is whether
 *these* come up under the RHI scene graph: `cursor.qml` draws through
-`QtQuick.Shapes` with the curve renderer and `top.qml` lays out text and an
-animated `Behavior`, none of which the four flat rectangles in `quadrants.qml`
-touch. What it cannot check is the picture — there is no reference for a titlebar
+`QtQuick.Shapes` with the curve renderer and `panes/top/Frame.qml` puts glyphs
+through a text atlas, neither of which the four flat rectangles in
+`quadrants.qml` touch. The byte count cannot see the glyphs — they are drawn
+inside an opaque band — so what it measures is the band, and the glyph path is
+exercised rather than asserted.
+
+A pane layer has to be **dressed** before it draws at all. Since Task 7 a
+style's insets live in its `Pane.qml` and are written onto each layer, so a
+`Frame.qml` built standalone has `insetTop` at 0 — a bar of no height, with the
+title centred in it and the hairline on top of it. Measured, that left 544 of
+1228800 bytes non-zero against 81920 before the conversion, so the check went on
+passing while seeing almost nothing. It now writes `insetTop` and `title` first,
+which is what the compositor writes, and the bar and its glyphs come back.
+
+What it cannot check is the picture — there is no reference for a titlebar
 here, and inventing one would assert today's design system rather than the path
 — so it wipes the buffer through the compositor's own renderer first and asks
 whether anything came back. That proves Qt built the component, brought up an
@@ -110,8 +122,11 @@ The two readings are taken in one run, in one process, against one driver, and
 needed, because a stub cannot satisfy both. `quadrants.qml` carries an animation
 with `loops: Animation.Infinite` and is asserted to read 1, in the resize case,
 on the same line that already asserts `spin` has moved. `cursor.qml` and
-`panes/top/Frame.qml` are built and rendered in the scene case above with
-nothing written to them, and are asserted to read 0.
+`panes/top/Frame.qml` are built and rendered in the scene case above and are
+asserted to read 0. The pane layer *is* written to — it draws nothing
+otherwise, see below — but only on `insetTop` and `title`, neither of which
+carries a `Behavior`. That is the sharper claim, and a `Behavior` added to
+either in `Frame.qml` would red this line.
 
 Verified by stubbing `solium_qml_scene_animating`'s return in a control copy,
 both ways, with the harness otherwise untouched:

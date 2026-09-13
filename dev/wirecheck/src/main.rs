@@ -68,6 +68,7 @@ unsafe extern "C" {
         scale: f64,
     ) -> bool;
     fn solium_qml_scene_set_int(scene: *mut c_void, name: *const c_char, value: c_int);
+    fn solium_qml_scene_set_string(scene: *mut c_void, name: *const c_char, value: *const c_char);
     fn solium_qml_scene_set_bool(scene: *mut c_void, name: *const c_char, value: c_int);
     fn solium_qml_scene_get_int(scene: *mut c_void, name: *const c_char) -> c_int;
     fn solium_qml_scene_free(scene: *mut c_void);
@@ -488,8 +489,9 @@ fn spin_of(scene: *mut c_void) -> i32 {
 /// Checked both ways in this run and that is the whole of its negative control,
 /// so it needs no edited copy of anything: `quadrants.qml` holds an animation
 /// with `loops: Animation.Infinite` and must read 1 for the length of the run,
-/// while `cursor.qml` and `panes/top/Frame.qml` are built and rendered with
-/// nothing written to them and must read 0. A stub answering "yes" fails on the
+/// while `cursor.qml` and `panes/top/Frame.qml` are built and rendered and must
+/// read 0 -- the pane layer is written to, but only on properties carrying no
+/// `Behavior`. See the `dress` block. A stub answering "yes" fails on the
 /// second, one answering "no" fails on the first, and an answer read off the
 /// process rather than the scene -- `QAnimationDriver::isRunning()`, which is
 /// the obvious wrong answer -- fails on the second too, because by then
@@ -1485,9 +1487,26 @@ fn main() -> Result<()> {
     // The compositor's *real* QML, not a stand-in: what this is checking is
     // that these particular files come up under the RHI scene graph, and a
     // `Rectangle` of our own would come up under anything. `cursor.qml` draws
-    // through `QtQuick.Shapes` with the curve renderer and `top.qml` lays out
-    // text and an animated `Behavior`, neither of which the four flat rectangles
-    // in `quadrants.qml` exercise at all.
+    // through `QtQuick.Shapes` with the curve renderer, and `panes/top/Frame.qml`
+    // puts glyphs through a text atlas — neither of which the four flat
+    // rectangles in `quadrants.qml` exercise at all. Note what the *number*
+    // below can see of that: nothing. The glyphs are drawn inside an opaque
+    // band, so a non-zero byte count is identical with a title and without one.
+    // What the count measures is the band; the glyph path is exercised, and a
+    // failure in it would surface as a refusal or a Qt warning rather than as a
+    // smaller number.
+    //
+    // **A pane layer has to be dressed before it draws anything.** Since Task 7
+    // the insets live in the style's `Pane.qml` and are *written* onto each
+    // layer, so a `Frame.qml` built standalone has `insetTop` at its default of
+    // 0: a bar of height zero, the hairline inside it, and the title centred in
+    // it. Measured, that left 544 of 1228800 bytes non-zero — two 13x13 button
+    // circles — where the file had rendered 81920 before the conversion. The
+    // `nonzero == 0` guard below can still fail at 544, so it was not a rubber
+    // stamp, but a control that thin is one theme change away from reddening
+    // the gate for a reason with nothing to do with the GPU path, and this
+    // check has been blinded five separate times already. So the two properties
+    // the compositor would write are written here too. See `dress` below.
     //
     // What it cannot do is check the picture: there is no reference for a
     // titlebar here and inventing one would be asserting today's design system
@@ -1509,9 +1528,9 @@ fn main() -> Result<()> {
     // The buffers with them: a `Target` closes its dmabuf fd when it drops, and
     // a scene that is still alive is still pointed at one.
     let mut kept_buffers: Vec<target::Target> = Vec::new();
-    for (what, file, w, h) in [
-        ("cursor", "crates/solium/qml/cursor.qml", 64, 64),
-        ("pane layer", "crates/solium/qml/panes/top/Frame.qml", 640, 480),
+    for (what, file, w, h, dress) in [
+        ("cursor", "crates/solium/qml/cursor.qml", 64, 64, false),
+        ("pane layer", "crates/solium/qml/panes/top/Frame.qml", 640, 480, true),
     ] {
         let path = CString::new(repo().join(file).as_os_str().as_encoded_bytes())?;
         let buffer = target::allocate(&gbm, w, h)
@@ -1539,6 +1558,27 @@ fn main() -> Result<()> {
             ));
         }
         unsafe { solium_qml_scene_resize(built, w, h, scale) };
+        if dress {
+            // What `LayerScene::build` and `Decoration::tell` write onto a
+            // layer, and the only two this file needs to draw: the band it may
+            // paint in, and something to put in it. 32 is what the shipped
+            // style reserves today; it is a stand-in for the compositor's write
+            // rather than a copy that has to track `Pane.qml`, and any
+            // plausible height would do the same job here. With it, the count
+            // below reads 81920 again -- the figure this file rendered before
+            // the conversion, to the byte.
+            //
+            // Both are animation-safe, which matters because the census below
+            // asserts this scene reads 0. The only `Behavior`s in the file are
+            // on `color` and on `scale`; `color` follows `focused` and `scale`
+            // follows a pressed `MouseArea`, and neither is written here.
+            // Asserted rather than assumed — if this ever did start one, the
+            // `animating` check below is what would say so.
+            unsafe {
+                solium_qml_scene_set_int(built, c"insetTop".as_ptr(), 32);
+                solium_qml_scene_set_string(built, c"title".as_ptr(), c"wirecheck".as_ptr());
+            }
+        }
         tick(&mut clock, FRAME_MS);
         let mut fd7: c_int = -1;
         let rendered = unsafe { solium_qml_scene_render_gpu(built, &raw mut fd7) };
@@ -1563,11 +1603,19 @@ fn main() -> Result<()> {
             ));
         }
         // The other half of the animation census, and the half that makes it an
-        // instrument rather than a rubber stamp. Neither of these two has been
-        // written to, so neither has a `Behavior` to have started and nothing
-        // in either is animating -- `cursor.qml` has no animation in it at all.
-        // They must read 0 here while `quadrants.qml` reads 1 above, in the
-        // same process, with the same driver, on the same tick budget.
+        // instrument rather than a rubber stamp. Nothing in either of these two
+        // is animating: `cursor.qml` has no animation in it at all, and the
+        // pane layer's `Behavior`s are all on properties nothing here writes --
+        // `color` follows `focused`, `scale` follows a pressed `MouseArea`, and
+        // `dress` above sets neither. `insetTop` and `title` carry no
+        // `Behavior`, which is the whole reason those two were the ones chosen
+        // to write. They must read 0 here while `quadrants.qml` reads 1 above,
+        // in the same process, with the same driver, on the same tick budget.
+        //
+        // So this is no longer "nothing has been written to it" -- something
+        // has -- and the claim is the sharper one: what was written starts no
+        // animation. A `Behavior` added to `insetTop` in `Frame.qml` would red
+        // this line, which is a true thing for it to say.
         //
         // Which is also what rules out answering this from `QAnimationDriver`:
         // it is one object for the process, `quadrants.qml` has been animating

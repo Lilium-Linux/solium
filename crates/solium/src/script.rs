@@ -2463,6 +2463,82 @@ mod tests {
         );
     }
 
+    /// **A `user.lua` written before the rename still chooses a style.**
+    ///
+    /// The migration path the `sol.decoration` alias does *not* cover, and the
+    /// one that would have broken quietly. `config.lua` merges the user's table
+    /// over its defaults key by key, so a file setting the old `decoration`
+    /// leaves `pane` at `"top"` -- their choice read, merged, and thrown away,
+    /// with the shipped default on screen and nothing anywhere saying why.
+    ///
+    /// It runs the **shipped** `config.lua`, not a copy: the temporary
+    /// directory holds only `init.lua` and `user.lua`, and `Scripts::load` puts
+    /// that directory ahead of the shipped one on `package.path` -- so
+    /// `require("user")` finds the fixture and `require("config")` finds the
+    /// real thing. That is what makes this a test of the file under review
+    /// rather than of a restatement of it.
+    ///
+    /// Both halves, because they are two edits with one purpose:
+    ///
+    /// * `config.pane` is the old key's value, which is the read-across;
+    /// * `config.decoration` is `nil`, which is the stale key not surviving the
+    ///   merge into the table the compositor reads.
+    ///
+    /// Guarded on a real `~/.config/solium`, which comes *first* on that path:
+    /// a developer with their own `user.lua` would have it answer instead of
+    /// the fixture, and the assertion would then be about their configuration.
+    #[test]
+    fn a_user_file_using_the_old_key_still_chooses_a_style() {
+        let Some(own) = Scripts::user_config_dir() else {
+            return;
+        };
+        if own.join("user.lua").exists() || own.join("config.lua").exists() {
+            // This machine's own configuration would decide it, not the fixture.
+            return;
+        }
+
+        let directory = std::env::temp_dir().join("solium-script-test-old-key");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        std::fs::write(
+            directory.join("user.lua"),
+            "return { decoration = \"border\" }\n",
+        )
+        .expect("writing the fixture user.lua");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            local config = require("config")
+            sol.bind("Super+P", function()
+                sol.pane(config.pane)
+                sol.status(tostring(config.decoration))
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+p", empty_snapshot());
+        assert!(outcome.handled);
+
+        match outcome.commands.as_slice() {
+            [Command::Decoration { name }] => assert_eq!(
+                name.as_deref(),
+                Some("border"),
+                "a user.lua setting the old `decoration` key still names the style"
+            ),
+            other => panic!("expected one style command, got {other:?}"),
+        }
+        assert_eq!(
+            outcome.status.as_deref(),
+            Some("nil"),
+            "and the old key does not survive into the configuration table"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// A snapshot with nothing in it, for the tests that only want a call made.
     fn empty_snapshot() -> Snapshot {
         Snapshot {

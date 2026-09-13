@@ -29,7 +29,7 @@ use crate::{
     style::{Bleed, Depth, LayerSpec, Style},
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -1407,7 +1407,31 @@ fn build(style: Option<&str>, width: i32, height: i32) -> Result<Decoration> {
     // naming a path that has not existed since Task 7.
     let style = Some(style.unwrap_or(DEFAULT_STYLE));
     let Some(dir) = bundle(style) else {
-        return Decoration::new(&qml_path(style), width, height);
+        // Not a bundle, so a single QML file -- and if it is not one of those
+        // either, say so **here**, naming the name that was typed and every
+        // place both halves of the lookup went.
+        //
+        // `qml_path` used to answer this by fabricating
+        // `<shipped>/decorations/<name>.qml` and letting Qt fail on it, which
+        // after Task 7 names a file in a directory that is not in the tree and
+        // says nothing about `panes/`. `style::resolve` answers the same
+        // question the other way -- "a name in no place at all is `None`, which
+        // names the name that was typed" -- and two answers to one question is
+        // what the rest of this commit is organised against. This is the
+        // `resolve` answer, because it is the one that can name the *name*: a
+        // fabricated path names a guess, and the guess was wrong in both
+        // directories at once.
+        let Some(path) = qml_path(style) else {
+            let name = chosen(style).unwrap_or_default();
+            return Err(anyhow!(
+                "no pane style called `{name}`. A style is a folder with a Pane.qml in it; \
+                 this looked for one in [{}], and for a single-file decoration `{name}.qml` \
+                 in [{}]",
+                display_all(&crate::style::directories()),
+                display_all(&decoration_directories()),
+            ));
+        };
+        return Decoration::new(&path, width, height);
     };
     // Through `style::load`, which is the only door: it is what checks
     // `requires` against this process's scene graph, and a second way to
@@ -1698,37 +1722,56 @@ fn environment_names_a_style() -> bool {
 /// SOLIUM_PANE=mine                # ~/.config/solium/qml/decorations/mine.qml
 /// SOLIUM_PANE=~/mine.qml          # anywhere
 /// ```
-fn qml_path(style: Option<&str>) -> PathBuf {
+fn qml_path(style: Option<&str>) -> Option<PathBuf> {
     // The old name still works: it was a path to a titlebar, and it is a path
     // to a decoration now.
     if let Some(path) = std::env::var_os("SOLIUM_QML_TITLEBAR") {
-        return PathBuf::from(path);
+        return Some(PathBuf::from(path));
     }
-    let Some(name) = chosen(style) else {
-        return shipped_decoration("top");
-    };
+    let name = chosen(style)?;
+    // A path is taken as given, existing or not, exactly as `style::resolve`
+    // takes one: the caller typed one location, and an error about that
+    // location is the most useful thing to say about it.
     if name.contains('/') || name.ends_with(".qml") {
-        return PathBuf::from(shellexpand(&name));
+        return Some(PathBuf::from(shellexpand(&name)));
     }
+    // A bare name is a search, and a search that finds nothing answers `None`
+    // rather than a path it made up. `build` is what turns that into a refusal
+    // naming the name and both halves of the lookup.
     let file = format!("{name}.qml");
     decoration_directories()
         .into_iter()
         .map(|dir| dir.join(&file))
         .find(|candidate| candidate.is_file())
-        // Nowhere at all: name the shipped path anyway, so the failure that
-        // follows says where this looked rather than naming nothing.
-        .unwrap_or_else(|| shipped_decoration(&name))
+}
+
+/// A list of directories, for an error that has to say where it went.
+fn display_all(places: &[PathBuf]) -> String {
+    places
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The directories a single-file decoration is looked for in, nearest first.
 ///
 /// A file of the same name in the user's own directory shadows the one that
 /// ships, so `pane = "top"` can mean the user's idea of a top bar -- and since
-/// Task 7 ships nothing here, it is the only way a name resolves to a file at
-/// all. The
-/// same shape as [`crate::style::directories`] and for the same reason: the
-/// lookup above and the listing in [`catalogue`] walk one list, so what the
-/// panel offers is what a press resolves.
+/// Task 7 ships nothing here, that is the only way a name resolves to a file at
+/// all. The same shape as [`crate::style::directories`] and for the same
+/// reason: the lookup above and the listing in [`catalogue`] walk one list, so
+/// what the panel offers is what a press resolves.
+///
+/// **[`shipped_decorations`] stays in the list although this build puts nothing
+/// in it**, and is a directory that is not in the tree. It is kept because
+/// [`places`] and [`ships`] are built from this function and from
+/// [`crate::style::directories`] precisely so there is no second copy of the
+/// search order to drift, and dropping the shipped half here would leave
+/// `ships` walking a kind of place `places` does not. `catalogue` skips a
+/// directory it cannot read, so the cost is one path in one error message
+/// saying where this looked -- which is true, and reads better than an empty
+/// list.
 fn decoration_directories() -> Vec<PathBuf> {
     let mut places: Vec<PathBuf> = qml::user_qml_dir()
         .map(|dir| dir.join("decorations"))
@@ -1755,14 +1798,13 @@ fn bare(style: Option<&str>) -> bool {
     )
 }
 
-/// The single-file decorations that ship with the compositor.
+/// Where a single-file decoration would ship, if one did.
+///
+/// **Empty since Task 7, and not present in the tree.** The eight that lived
+/// here are bundles under `panes/` now. Kept as the bottom of the file lookup
+/// for the reason [`decoration_directories`] gives.
 pub(crate) fn shipped_decorations() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/decorations"))
-}
-
-/// One of the decorations that ship with the compositor, by name.
-fn shipped_decoration(name: &str) -> PathBuf {
-    shipped_decorations().join(format!("{name}.qml"))
 }
 
 /// Expand a leading `~`, since this is read from an environment variable and
@@ -2602,6 +2644,48 @@ mod tests {
             assert_eq!(layer.scene.get_int("sawLeft"), 170);
 
             let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A name that is nowhere names the name, not a path nobody asked for.**
+    ///
+    /// `qml_path` used to fabricate `<shipped>/decorations/<name>.qml` for a
+    /// name it could not find and let Qt fail on opening it. After Task 7 that
+    /// is a file in a directory that is not in the tree, so `pane = "topp"`
+    /// reported a missing `topp.qml` under `qml/decorations` -- a guess, wrong
+    /// in both directions, and with no mention of the `qml/panes` the answer is
+    /// actually in.
+    ///
+    /// `style::resolve` had already answered the same question the other way in
+    /// this same commit, and two answers to one question is what the rest of it
+    /// is organised against. So the refusal now comes from `build`, and says
+    /// the three things worth saying: the name, that a style is a folder with a
+    /// `Pane.qml`, and every directory both halves of the lookup went to.
+    #[test]
+    fn a_name_that_is_nowhere_is_refused_by_name() {
+        if the_environment_has_already_chosen() {
+            // `build` reads `SOLIUM_PANE` before the argument.
+            return;
+        }
+        on_the_qt_thread(|| {
+            let err = build(Some("no-such-style-ships-here"), 300, 200)
+                .expect_err("nothing of that name is anywhere");
+            let said = err.to_string();
+
+            // The name the user typed, as they typed it. The old message had
+            // only a path built out of it.
+            assert!(said.contains("`no-such-style-ships-here`"), "{said}");
+            // **Both halves of the lookup.** This is the assertion the old
+            // behaviour could not have passed: a failure raised by Qt opening a
+            // fabricated `<shipped>/decorations/<name>.qml` names that one path
+            // and nothing else, so `qml/panes` -- where the answer actually is
+            // -- never appeared. Naming `<name>.qml` as a thing that was looked
+            // *for* is fine and is kept; naming it as the thing that failed to
+            // open was the defect.
+            assert!(said.contains("qml/panes"), "{said}");
+            assert!(said.contains("qml/decorations"), "{said}");
+            // And what a style *is*, so the message is actionable on its own.
+            assert!(said.contains("Pane.qml"), "{said}");
         });
     }
 
