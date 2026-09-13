@@ -30,16 +30,26 @@ mod screencopy;
 mod script;
 mod scripted;
 mod state;
-// Reading a style bundle, and nothing that uses one yet: finding a bundle by
-// name is Task 3 of the pane-styles plan and rendering its layers is Task 4, so
-// for now the only caller is this module's own tests. The exemption is lifted
-// in the test build, which is what keeps "unused" honest rather than blanket.
+// Finding a style bundle and reading it, with nothing that *uses* one yet:
+// rendering its layers is Task 4 of the pane-styles plan, and until a frame is
+// built from a `Style` the only caller of any of this is the module's own
+// tests. Task 3 was expected to lift this by having `find` call `load`; it does
+// not, and could not usefully — `find` answers where a bundle is and `load`
+// reads one, and a function composing them would be as unreferenced as either.
+// What lifts it is a caller outside the module.
+//
+// Wider than it looks: rustc treats the exempted items as live roots, so this
+// also covers `Scene::layer_count`, `layer_field` and `string_list` in `qml`,
+// which nothing but `style` calls. Removing it is 19 errors, not one.
+//
+// The exemption is lifted in the test build, which is what keeps "unused"
+// honest rather than blanket.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the style loader; `style::find` (Task 3) and \
-                  `Decoration::from_style` (Task 4) are what call it"
+        reason = "the style loader; `Decoration::from_style` (Task 4) is what \
+                  will call it from outside this module"
     )
 )]
 mod style;
