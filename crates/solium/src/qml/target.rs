@@ -18,7 +18,15 @@ use std::os::fd::{AsRawFd, RawFd};
 ///
 /// A style's `bleed` is author-controlled, so this is the difference between
 /// a typo and 1.6 GB of video memory.
-const MAX_SIDE: i32 = 8192;
+///
+/// Enforced in two places and they are not the same check. Here it is in
+/// **device** pixels and it refuses a buffer, which is the last line and the
+/// only thing it can be — by the time this runs a scene has already been laid
+/// out at that size. The other is [`crate::decoration::canvas`], in **logical**
+/// pixels, where a bleed too large to draw is reduced to one that can be. That
+/// one is also the software path's only guard: it allocates a `QImage` and a
+/// `MemoryRenderBuffer` and never comes here at all.
+pub(crate) const MAX_SIDE: i32 = 8192;
 
 fn size_is_sane(width: i32, height: i32) -> bool {
     width > 0 && height > 0 && width <= MAX_SIDE && height <= MAX_SIDE
