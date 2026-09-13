@@ -340,9 +340,9 @@ Item {
     // The three bands, innermost first. `swell` is how far a full-scale
     // reading in that band pushes the edge out.
     readonly property var bands: [
-        { lo: 0.00, hi: 0.30, swell: 18 },   // bass
-        { lo: 0.28, hi: 0.62, swell: 13 },   // mids
-        { lo: 0.60, hi: 1.00, swell: 9 }     // treble
+        { lo: 0.00, hi: 0.30, swell: 34 },   // bass
+        { lo: 0.28, hi: 0.62, swell: 24 },   // mids
+        { lo: 0.60, hi: 1.00, swell: 16 }    // treble
     ]
 
     // **They STACK rather than sit at their own radii, and that is what stops
@@ -363,8 +363,9 @@ Item {
     // is the only thing that ever pushes a point past the edge.
     //
     // Drawn outermost first, so `count` counts down: 3 bands summed, then 2,
-    // then 1. Full scale in all three is 40, inside the 44 the layer declared,
-    // which is a hard clip.
+    // then 1. Full scale in all three is 74, inside the 80 the layer declared,
+    // which is a hard clip -- a spike past it is cut off square, which looks
+    // exactly as wrong as it sounds.
     readonly property var rings: [
         { count: 3, periods: 26, duration: 4300, ink: Theme.edge },
         { count: 2, periods: 22, duration: 5600, ink: Theme.accent },
