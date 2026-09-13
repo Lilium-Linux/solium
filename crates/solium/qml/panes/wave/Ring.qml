@@ -203,9 +203,9 @@ Item {
     // one to `depth: "above"` in Pane.qml is what layering buys, and it is one
     // line when a style wants it.
     readonly property var rings: [
-        { reach: 28, swell: 24, periods: 18, duration: 7400, ink: Theme.text },
-        { reach: 19, swell: 18, periods: 22, duration: 5600, ink: Theme.accent },
-        { reach: 10, swell: 13, periods: 26, duration: 4300, ink: Theme.edge }
+        { reach: 26, swell: 30, periods: 18, duration: 7400, ink: Theme.text },
+        { reach: 17, swell: 22, periods: 22, duration: 5600, ink: Theme.accent },
+        { reach: 9,  swell: 15, periods: 26, duration: 4300, ink: Theme.edge }
     ]
 
     Repeater {
@@ -240,7 +240,14 @@ Item {
                     path: {
                         const points = [];
                         const spec = band.spec;
-                        const steps = spec.periods * ring.perPeriod;
+                        // Enough points to resolve whatever is driving it.
+                        // The sine needs only `perPeriod` per period; a
+                        // spectrum needs several per BAR or the peaks are
+                        // averaged away into a smooth ripple, which is what
+                        // real music looked like before this line existed.
+                        const bars = ring.levels.length;
+                        const steps = Math.max(spec.periods * ring.perPeriod,
+                                               bars * 6);
                         const x = ring.bleedLeft;
                         const y = ring.bleedTop;
                         const w = ring.paneWidth;
