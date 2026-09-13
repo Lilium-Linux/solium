@@ -124,6 +124,11 @@ mod ffi {
             index: c_int,
             field: *const c_char,
         ) -> *const c_char;
+        pub(super) fn solium_qml_scene_string_at(
+            scene: *const Scene,
+            name: *const c_char,
+            index: c_int,
+        ) -> *const c_char;
         pub(super) fn solium_qml_scene_dirty(scene: *const Scene) -> c_int;
         pub(super) fn solium_qml_scene_animating(scene: *const Scene) -> c_int;
         pub(super) fn solium_qml_scene_pointer(
@@ -1399,6 +1404,38 @@ impl Scene {
                 .to_string_lossy()
                 .into_owned(),
         )
+    }
+
+    /// Every element of a `list<string>` property, in declaration order.
+    ///
+    /// Empty when there is no such property, which is deliberately the same
+    /// answer as an empty list: `PaneStyle.requires` is what this reads, and a
+    /// style that declares nothing and one that declares `[]` are both saying
+    /// *portable*. Where that distinction does matter — `layers` — the count is
+    /// asked for separately and `-1` carries it.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn string_list(&self, name: &str) -> Vec<String> {
+        let Ok(name) = CString::new(name) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for index in 0.. {
+            // SAFETY: `name` outlives the call.
+            let value =
+                unsafe { ffi::solium_qml_scene_string_at(self.scene, name.as_ptr(), index) };
+            if value.is_null() {
+                break;
+            }
+            // SAFETY: non-null means the host stored a NUL-terminated string
+            // that stays valid until the next call on this thread, and it is
+            // copied here before anything else can make one.
+            out.push(
+                unsafe { CStr::from_ptr(value) }
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        out
     }
 
     /// Pointer input in scene coordinates. `None` is motion.

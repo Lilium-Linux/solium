@@ -2000,6 +2000,54 @@ extern "C" const char *solium_qml_scene_layer_field(const SoliumQmlScene *scene,
     return held.constData();
 }
 
+extern "C" const char *solium_qml_scene_string_at(const SoliumQmlScene *scene, const char *name,
+                                                  int index)
+{
+    if (scene == nullptr || scene->root == nullptr || name == nullptr || index < 0) {
+        return nullptr;
+    }
+    /* Through QQmlProperty, so this takes a path for the same reason
+     * solium_qml_scene_get_int does. */
+    QVariant value = QQmlProperty(scene->root, QString::fromUtf8(name)).read();
+
+    /* As in solium_qml_scene_layer_field: a list written in QML can arrive
+     * wrapped in a QJSValue, and every conversion below sees nothing through
+     * one. */
+    if (value.metaType().id() == qMetaTypeId<QJSValue>()) {
+        value = value.value<QJSValue>().toVariant();
+    }
+
+    QVariantList items;
+    if (value.typeId() == QMetaType::QVariantList || value.typeId() == QMetaType::QStringList) {
+        items = value.toList();
+    } else if (value.isValid() && !value.toString().isEmpty()) {
+        /* One value where a list was expected, taken as a list of one.
+         * QVariant::toList() answers an empty list for anything that is not
+         * already a list, and for `requires` that would read as "declares
+         * nothing" -- a requirement silently dropped, which is the exact
+         * failure the property exists to prevent. Being lenient here can only
+         * refuse a style that would otherwise have been loaded wrongly. */
+        items = QVariantList{value};
+    }
+
+    if (index >= items.count()) {
+        return nullptr;
+    }
+
+    /* Valid until the next call on this thread, and copied by the caller --
+     * see `Scene::string_list`. */
+    static thread_local QByteArray held;
+    held = items.at(index).toString().toUtf8();
+    if (held.isEmpty()) {
+        /* QString().toUtf8() is a *null* QByteArray, and what constData()
+         * makes of one depends on a Qt compatibility define. Give an empty
+         * element a byte of its own, so that NULL from this function means
+         * "past the end" and nothing else. */
+        held = QByteArray(1, '\0');
+    }
+    return held.constData();
+}
+
 extern "C" void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed)
 {
     if (scene == nullptr || scene->window == nullptr) {
