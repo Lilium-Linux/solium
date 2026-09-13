@@ -11,6 +11,14 @@
 //
 //     Layer { depth: "behind"; bleed: 200; Glow { anchors.fill: parent } }
 //     Layer { depth: "above";  bleed: { top: 160 }; source: "Spikes.qml" }
+//
+// **There is deliberately no `visible:` binding in here.** An inline layer is
+// hidden by its `PaneStyle` rather than by asking one, because a Layer cannot
+// ask: items assigned to a `list<Item>` get a QObject parent and not a visual
+// one, and QML's `parent` is `parentItem()` — so `parent` is null for every
+// Layer in a PaneStyle and a binding against it is true for all of them.
+// Measured on these two types: `layers` 3, `children` 0. The sibling-hiding is
+// in `PaneStyle.showOneLayer`, which parents as well as hides.
 
 import QtQuick
 
