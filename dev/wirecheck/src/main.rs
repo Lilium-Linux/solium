@@ -27,7 +27,7 @@ use smithay::backend::egl::fence::EGLFence;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{Element as _, Id, Kind, RenderElement};
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture, UniformName, UniformType};
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::{
     Bind as _, Color32F, ExportMem as _, Frame as _, ImportDma as _, ImportMem as _, Offscreen as _,
@@ -1666,6 +1666,42 @@ fn main() -> Result<()> {
         }
         kept_scenes.push(built);
         kept_buffers.push(buffer);
+    }
+
+    // The rounded-corner program, compiled against a real GL context.
+    //
+    // Nothing else in the gate can fail on a bad shader: `cargo test` has no
+    // GPU, and the unit tests can only check that the source is the SHAPE
+    // smithay wants -- that it has a `//_DEFINES_` line, no `#version` of
+    // smithay's own, a declaration for each uniform, and an arm for each of the
+    // three variants. That a driver accepts it is a different question and this
+    // is the only place in the tree that can ask it. The two failures the unit
+    // tests are structurally unable to see are the ones that land here: a link
+    // error, and a `//_DEFINES_` that was never substituted -- which is the
+    // documented-versus-real marker spelling `fragment.rs` warns about, and
+    // which compiles perfectly and then fails to link because the `#define`s it
+    // needed are still a comment.
+    //
+    // Three programs, not one: `compile_custom_texture_shader` builds a variant
+    // for each of `&[]`, `&[NO_ALPHA]` and `&[EXTERNAL]`, so one call here
+    // exercises every `#if defined(..)` arm in the file. A shader that ignored
+    // them would draw an XRGB window invisible and a video surface black.
+    match renderer.compile_custom_texture_shader(
+        solium_effects::fragment::ROUNDED_CORNERS,
+        &[
+            UniformName::new(solium_effects::fragment::RADIUS_UNIFORM, UniformType::_1f),
+            // Ours, because smithay gives a *texture* program no `size`.
+            UniformName::new(solium_effects::fragment::SIZE_UNIFORM, UniformType::_2f),
+        ],
+    ) {
+        Ok(_) => println!("  rounded-corner shader: compiled"),
+        Err(err) => {
+            return Err(anyhow!(
+                "the rounded-corner shader did not compile: {err}. Every window with \
+                 a `client.radius` is drawn square until this builds, and no test \
+                 outside this file can see it -- `cargo test` has no GL context"
+            ));
+        }
     }
 
     // ------------------------------------------------------------------

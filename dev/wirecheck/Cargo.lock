@@ -642,6 +642,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "solium-effects"
+version = "0.0.0"
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -940,6 +944,7 @@ dependencies = [
  "cc",
  "pkg-config",
  "smithay",
+ "solium-effects",
 ]
 
 [[package]]

@@ -63,8 +63,8 @@ set — including its later improvements.
 return { pane = "left" }
 ```
 
-`top`, `left`, `bottom`, `border`, `reactive`, `proximity`, `reveal`, `pulse`.
-Reload and every open window is re-framed.
+`top`, `left`, `bottom`, `border`, `reactive`, `proximity`, `reveal`, `pulse`,
+`rounded`. Reload and every open window is re-framed.
 
 ### No frame at all
 
@@ -92,6 +92,37 @@ frame, or above it. A layer can also `bleed` past the window's edge, which is
 how a border waves or a shadow reaches. A single QML file still works too and
 is still called a decoration; it lives in
 `~/.config/solium/qml/decorations/` and is one layer in the frame.
+
+### Rounded corners
+
+```qml
+// Pane.qml
+client.radius: 12
+```
+
+A style may round the client's own corners. It is the one effect that reads the
+window's *own* pixels, so a pane that declares it is rendered to a texture first
+and then drawn back through a fragment program — one extra pass per frame, for
+that window only. `client.radius: 0` is no effect at all rather than a radius of
+nothing, so a style that does not want it pays for none of this, and twelve of
+the shipped bundles do not want it.
+
+`pane = "rounded"` is one that does, and is there to be looked at. Two things
+in it are worth copying. The radius is in **logical** pixels — the compositor
+multiplies by the monitor's scale, so the corner is the same size on a HiDPI
+screen rather than half of it. And every layer of the style is told the number
+as `clientRadius`, so a bar or a border can hug the same curve:
+
+```qml
+// Frame.qml
+property int clientRadius: 0   // written by the compositor
+radius: clientRadius           // or clientRadius + 2, to hug it from outside
+```
+
+That split is the whole design: the compositor rounds the client, because those
+pixels belong to the application and only a shader can mask them, and QML rounds
+itself, because `Rectangle.radius` is free. A style that wants a rounded border
+around a *square* client sets only its own `radius` and buys no pass at all.
 
 ### What a window shows before its application exists
 
