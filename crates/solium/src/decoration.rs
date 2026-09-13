@@ -829,7 +829,10 @@ impl Decoration {
     /// that spot in every other — and hover state that is never delivered is a
     /// border that stays lit. Deciding which layer *wants* the press needs the
     /// scene to say whether a `MouseArea` accepted it, which the spec's *Input,
-    /// scoped* section is about and which nothing here can answer yet.
+    /// scoped* section is about and which nothing here can answer yet. What
+    /// [`Self::take_action`] does in the meantime is decide which of the layers
+    /// that answered is *believed*, topmost first — a strictly better guess
+    /// than the one underneath, and one that needs nothing new from Qt.
     ///
     /// **Into each layer's own canvas**, which is not the pane's space once a
     /// layer bleeds. `x` and `y` are measured from the pane's top-left corner
@@ -855,6 +858,17 @@ impl Decoration {
     /// Asked of QML rather than worked out from coordinates: QML owns the
     /// button layout, so a copy of it here would be a second authority that
     /// drifts the first time the frame is restyled.
+    ///
+    /// **Order-free, where [`Self::take_action`] is not**, and that is a claim
+    /// about what this question is rather than an omission. It is not "which
+    /// layer owns the press"; it is "is the pointer over a button at all", and
+    /// the caller spends the answer on one decision — whether the press starts
+    /// a window drag. A button on a lower layer is still a button the user can
+    /// see and aim at, through a higher layer that painted nothing over it, so
+    /// answering "no, the topmost layer has none" would drag the window out
+    /// from under a close button. `any` over a set is the same answer in any
+    /// order, so walking this one topmost-first would change how it reads and
+    /// never what it answers — which is why the walk is left exactly as it was.
     pub(crate) fn on_button(&self) -> bool {
         self.layers
             .iter()
@@ -863,20 +877,46 @@ impl Decoration {
 
     /// What a button asked for since the last call, if anything.
     ///
-    /// Every layer is asked even once one has answered, because `take_string`
-    /// is what *clears* the property: a layer left unasked keeps its action and
-    /// fires it on whichever later frame something else happens to ask.
+    /// **Topmost first**, which is [`crate::render::PANE_ORDER`] read from the
+    /// front — the order the compositor draws in — so the layer the user is
+    /// looking at is the one whose press counts. This used to fold over
+    /// declaration order, and declaration order is bottom-to-top (see [`at`]):
+    /// two layers with a button in the same place handed the press to the one
+    /// *underneath*, which is the opposite of what is on screen. A style with a
+    /// single layer has both orders at once, which is why nothing has bitten.
+    ///
+    /// Taken from `PANE_ORDER` rather than restated as a list here, because a
+    /// second ordering is one that can drift from the first and the drift would
+    /// be silent: input precedence and stacking would disagree only for a style
+    /// whose layers contest a point, and only in favour of the layer that
+    /// cannot be seen.
+    ///
+    /// **Every layer is still asked**, even once one has answered, because
+    /// `take_string` is what *clears* the property: a layer left unasked keeps
+    /// its action and fires it on whichever later frame something else happens
+    /// to ask. That is why this collects every answer and then picks, rather
+    /// than stopping at the first — and why
+    /// `a_layer_that_lost_the_press_still_has_its_action_taken` exists to fail
+    /// if the collection is ever turned back into an early return.
     pub(crate) fn take_action(&mut self) -> Option<Action> {
-        let mut action = None;
-        for layer in &mut self.layers {
-            let asked = layer
-                .scene
-                .take_string("action")
-                .as_deref()
-                .and_then(Action::parse);
-            action = action.or(asked);
-        }
-        action
+        let layers = &mut self.layers;
+        // Every answer, topmost first. A press that hit no button pushes
+        // nothing, so the ordinary case allocates nothing either.
+        let mut asked: Vec<Action> = Vec::new();
+        crate::render::pane_pieces(&mut asked, |into, piece| match piece {
+            crate::render::Piece::Layers(depth) => into.extend(
+                at(layers.iter_mut(), depth)
+                    // Driven to the end by `extend`, so the property is cleared
+                    // on every layer of this depth and not only on the winner.
+                    .filter_map(|layer| layer.scene.take_string("action"))
+                    .filter_map(|name| Action::parse(&name)),
+            ),
+            // The client is in the order because the order is the frame's, and
+            // a walk that left it out would be a second list. It has no
+            // property to take.
+            crate::render::Piece::Client => {}
+        });
+        asked.first().copied()
     }
 }
 
@@ -2100,6 +2140,161 @@ mod tests {
                 "a leave is sent raw: (-1, -1) shifted by this layer's bleed is \
                  (29, 39), which is inside its canvas, so the window would stay \
                  hovered for the rest of its life"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// Two layers, each with a button under the same point, one action apiece.
+    ///
+    /// `Decoration::pointer` hands the press to **every** layer, so a style
+    /// whose layers overlap produces more than one answer to "what did the user
+    /// press"; this fixture is the smallest thing that does. The layers are
+    /// declared bottom-first, which is the order a style is written in and the
+    /// order the old fold read, so the two orderings disagree and the returned
+    /// action says which one ran.
+    ///
+    /// `depth` is left to the caller: the same two layers at `behind`/`above`
+    /// exercise [`crate::render::PANE_ORDER`], and both at `frame` exercise
+    /// [`at`]'s within-depth reversal. Nothing else differs between the two
+    /// cases, which is what makes each of them about one ordering.
+    fn contested(lower: &str, upper: &str) -> String {
+        format!(
+            r#"
+            import QtQuick
+            import Solium
+
+            PaneStyle {{
+                id: pane
+
+                // Declared first: the bottom of whichever pair this is, and
+                // the layer a fold over declaration order would believe.
+                Layer {{
+                    depth: "{lower}"; name: "lower"
+                    MouseArea {{ anchors.fill: parent; onPressed: pane.action = "close" }}
+                }}
+                // Declared second: drawn on top, so this is the one the user
+                // is looking at and the one whose press must count.
+                Layer {{
+                    depth: "{upper}"; name: "upper"
+                    MouseArea {{ anchors.fill: parent; onPressed: pane.action = "maximize" }}
+                }}
+            }}
+            "#
+        )
+    }
+
+    /// **A press two layers both claim belongs to the one on top.**
+    ///
+    /// Layers made this reachable and nothing enforced it: `take_action` folded
+    /// `action.or(asked)` over `self.layers`, which is declaration order, and
+    /// declaration order is bottom-to-top. So the *lowest* layer won a contested
+    /// press — the opposite of what is on screen, and invisible until now
+    /// because a style with one layer has both orders at once.
+    ///
+    /// Across depths here, so what is being read is `PANE_ORDER`: `above` comes
+    /// before `behind` in the list the compositor draws from, and input
+    /// precedence is that list read from the front.
+    ///
+    /// | control | measured |
+    /// |---|---|
+    /// | the old `action.or(asked)` fold over `self.layers` | `Some(Close)`: the `behind` layer wins |
+    #[test]
+    fn a_contested_press_belongs_to_the_topmost_layer() {
+        on_the_qt_thread(|| {
+            let dir = fixture("contested", &[("Pane.qml", &contested("behind", "above"))]);
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+
+            decoration.pointer(20.0, 20.0, Some(true));
+            assert_eq!(
+                decoration.take_action(),
+                Some(Action::ToggleMaximize),
+                "both layers claimed the press, and the `above` one is the one \
+                 drawn over the other -- `Close` here is the press being given \
+                 to the layer underneath, which is `PANE_ORDER` read backwards"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **And within one depth, the later-declared layer is the one on top.**
+    ///
+    /// The same claim one level down. `PANE_ORDER` puts these two in the same
+    /// piece, so it cannot separate them; [`at`] can, and already does for
+    /// drawing — `one_depth_is_walked_backwards_and_the_others_are_left_alone`
+    /// pins the same reversal for the element list. Reused rather than
+    /// re-derived here, because a second reversal written beside the first is a
+    /// second thing to keep in step.
+    ///
+    /// | control | measured |
+    /// |---|---|
+    /// | the old fold, which reads one depth forwards | `Some(Close)`: the earlier sibling wins |
+    #[test]
+    fn within_one_depth_the_press_belongs_to_the_later_layer() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "contested-depth",
+                &[("Pane.qml", &contested("frame", "frame"))],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+
+            decoration.pointer(20.0, 20.0, Some(true));
+            assert_eq!(
+                decoration.take_action(),
+                Some(Action::ToggleMaximize),
+                "QML's own rule for siblings is that the later one draws on \
+                 top, so the later one is pressed -- `Close` is the within-depth \
+                 walk having lost its reversal"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **The layer that lost still has its action taken.**
+    ///
+    /// The one thing an obvious tidy-up of `take_action` would break: stopping
+    /// at the first layer that answered looks like the same function and is
+    /// not. `take_string` is what *clears* `action`, so a layer left unasked
+    /// keeps the press it lost — and fires it on whichever later frame anything
+    /// else happens to ask. Pressing a button on the top layer of this style
+    /// would close the window some seconds later, on an unrelated click.
+    ///
+    /// Measured as a **second** `take_action` with no press in between: nothing
+    /// happened, so nothing may be reported.
+    ///
+    /// Both controls run, and they separate this test from the two above it —
+    /// the tidy-up leaves *precedence* perfectly correct, so only this one
+    /// catches it:
+    ///
+    /// | control | measured |
+    /// |---|---|
+    /// | `.take(1)` on the walk, and skip later depths once one answered | second call returns `Some(Close)`: the stale press |
+    /// | the old `action.or(asked)` fold | first call returns `Some(Close)`: the fixture really is contested |
+    #[test]
+    fn a_layer_that_lost_the_press_still_has_its_action_taken() {
+        on_the_qt_thread(|| {
+            let dir = fixture("stale", &[("Pane.qml", &contested("behind", "above"))]);
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+
+            decoration.pointer(20.0, 20.0, Some(true));
+            assert_eq!(
+                decoration.take_action(),
+                Some(Action::ToggleMaximize),
+                "the press itself, so this test fails loudly rather than \
+                 vacuously if the fixture ever stops pressing anything"
+            );
+            assert_eq!(
+                decoration.take_action(),
+                None,
+                "nothing has been pressed since, so nothing may be reported. \
+                 `Close` here is the losing layer having kept its action -- a \
+                 window that closes itself on some later, unrelated click"
             );
 
             let _ = std::fs::remove_dir_all(&dir);
