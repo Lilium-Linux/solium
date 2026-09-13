@@ -893,6 +893,54 @@ mod tests {
         });
     }
 
+    /// **The one shipped bundle that asks for the pass, and the only thing in
+    /// `cargo test` that loads it.**
+    ///
+    /// `panes/rounded/` exists for exactly one reason — to be the thing a person
+    /// can point a screen at and see a rounded corner — and until this test it
+    /// had no coverage of any kind. Nothing else loads it: the test above loads
+    /// only `example`, `a_declared_radius_becomes_an_effect`'s "rounded" is a
+    /// temporary fixture it writes and deletes, wirecheck builds only
+    /// `panes/top/Frame.qml`, and `--check-qml` is in nobody's gate. So a typo
+    /// in `client.radius` would ship as a bundle that quietly demonstrates
+    /// nothing, which is the one failure this folder cannot afford.
+    ///
+    /// The *value* and not merely non-emptiness: `client.radius: 1` would
+    /// satisfy "declares an effect" and be invisible on a screen.
+    ///
+    /// `Decoration::from_style` as well as `load`, because they read different
+    /// halves of the bundle. `load` reads the manifest and never opens the file
+    /// a layer's `source:` points at — the same gap `--check-qml` has, which
+    /// `panes/README.md` warns about — so a broken `Frame.qml` gets past it. And
+    /// `Frame.qml` is where `clientRadius` is consumed, which is the other half
+    /// of this bundle's reason to exist.
+    #[test]
+    fn the_rounded_bundle_still_declares_the_effect_it_exists_to_show() {
+        on_the_qt_thread(|| {
+            let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes/rounded"));
+            let style = load(dir).expect("the shipped rounded bundle loads");
+            assert_eq!(
+                style.effects,
+                vec![Effect::rounded(14.0)],
+                "`panes/rounded/` is the only shipped style that runs a client \
+                 effect; with the radius gone or mistyped it draws exactly like \
+                 every other bundle and the feature has nothing to show for itself"
+            );
+            assert!(
+                style.insets.top > 0,
+                "its bar reaches `clientRadius` past a reserved band, so there \
+                 has to be a band"
+            );
+            let decoration = crate::decoration::Decoration::from_style(&style, 300, 200)
+                .expect("its one delegated layer builds");
+            assert_eq!(
+                decoration.layers_at(Depth::Frame).collect::<Vec<_>>(),
+                ["bar"],
+                "one layer, in the frame, loaded from Frame.qml"
+            );
+        });
+    }
+
     /// The fallback, taken by `load` rather than by `parse_depth` alone.
     ///
     /// Both ways in: a word that is not one of the three, and an item in

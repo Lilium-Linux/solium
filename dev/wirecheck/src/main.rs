@@ -27,7 +27,9 @@ use smithay::backend::egl::fence::EGLFence;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{Element as _, Id, Kind, RenderElement};
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture, UniformName, UniformType};
+use smithay::backend::renderer::gles::{
+    GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName, UniformType,
+};
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::{
     Bind as _, Color32F, ExportMem as _, Frame as _, ImportDma as _, ImportMem as _, Offscreen as _,
@@ -344,6 +346,246 @@ fn wipe(renderer: &mut GlesRenderer, buffer: &smithay::backend::allocator::dmabu
     renderer
         .with_context(|gl| unsafe { gl.Finish() })
         .map_err(|err| anyhow!("finishing the wipe: {err}"))?;
+    Ok(())
+}
+
+/// A `w`x`h` image of one colour, in the byte order every fourcc here uses.
+///
+/// `fourth` is the A of an ARGB8888 and the X of an XRGB8888 -- the same byte,
+/// and the whole point of `the rounded corners cut` below passing **zero** for
+/// it in the no-alpha case. See `fragment.rs`'s `NO_ALPHA` arm: the X byte is
+/// undefined by the format, an ordinary opaque client leaves it at zero, and a
+/// shader that multiplies it in draws that window completely invisible.
+fn solid(w: i32, h: i32, blue_green_red: [u8; 3], fourth: u8) -> Vec<u8> {
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    for pixel in out.chunks_exact_mut(4) {
+        pixel[..3].copy_from_slice(&blue_green_red);
+        pixel[3] = fourth;
+    }
+    out
+}
+
+/// Draw a texture through a fragment program and read the pixels back.
+///
+/// [`draw_and_read`]'s sibling, and it exists because they cannot be one
+/// function: a `TextureRenderElement` has no constructor that takes a program
+/// -- which is the whole reason `solium::pass::Rounded` is written by hand --
+/// so the program has to reach the draw through `render_texture_from_to`. The
+/// argument list is `Rounded::draw`'s, in the same order, deliberately: what
+/// this is checking is the call the compositor makes.
+fn draw_through_program(
+    renderer: &mut GlesRenderer,
+    texture: &GlesTexture,
+    program: &GlesTexProgram,
+    side: i32,
+    radius: f32,
+) -> Result<Vec<u8>> {
+    let mut into: GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, (side, side).into())
+        .map_err(|err| anyhow!("offscreen buffer for the program draw: {err}"))?;
+    let size = (side, side).into();
+    {
+        let mut framebuffer = renderer
+            .bind(&mut into)
+            .map_err(|err| anyhow!("binding the program draw's buffer: {err}"))?;
+        let mut frame = renderer
+            .render(&mut framebuffer, size, Transform::Normal)
+            .map_err(|err| anyhow!("starting the program draw: {err}"))?;
+        // Transparent, as `offscreen::capture_client` clears to, so a cut
+        // corner reads back as nothing rather than as black.
+        frame
+            .clear(Color32F::TRANSPARENT, &[Rectangle::from_size(size)])
+            .map_err(|err| anyhow!("clearing: {err}"))?;
+        frame
+            .render_texture_from_to(
+                texture,
+                Rectangle::from_size((f64::from(side), f64::from(side)).into()),
+                Rectangle::from_size(size),
+                &[Rectangle::from_size(size)],
+                // Nothing claimed opaque, so this blends. A region an element
+                // calls opaque is drawn with blending DISABLED
+                // (`gles/mod.rs:2585`), and the mask would stop working there.
+                &[],
+                Transform::Normal,
+                1.0,
+                Some(program),
+                &[
+                    Uniform::new(solium_effects::fragment::RADIUS_UNIFORM, radius),
+                    // Both physical, and both the texture's own size, which is
+                    // the pair the shader's `v_coords * tex_size` is written
+                    // against. If this never arrives the uniform stays 0, the
+                    // clamp makes `r` 0 and `away` 0, and every fragment comes
+                    // back at exactly 50% -- so the centre assertion below is
+                    // also the check that `tex_size` reached the program.
+                    Uniform::new(
+                        solium_effects::fragment::SIZE_UNIFORM,
+                        (side as f32, side as f32),
+                    ),
+                ],
+            )
+            .map_err(|err| anyhow!("drawing through the program: {err}"))?;
+        let _ = frame
+            .finish()
+            .map_err(|err| anyhow!("finishing the program draw: {err}"))?;
+    }
+    let framebuffer = renderer
+        .bind(&mut into)
+        .map_err(|err| anyhow!("re-binding the program draw to read it: {err}"))?;
+    let mapping = renderer
+        .copy_framebuffer(
+            &framebuffer,
+            Rectangle::from_size((side, side).into()),
+            Fourcc::Argb8888,
+        )
+        .map_err(|err| anyhow!("copying the program draw: {err}"))?;
+    drop(framebuffer);
+    let pixels = renderer
+        .map_texture(&mapping)
+        .map_err(|err| anyhow!("mapping the program draw: {err}"))?
+        .to_vec();
+    Ok(pixels)
+}
+
+/// **That the compiled program actually cuts a corner**, which compiling it
+/// does not say.
+///
+/// Every other check on this shader in the tree is a statement about its
+/// *text*: `fragment.rs` matches whole lines, and `pass.rs` transcribes the
+/// distance field into Rust and evaluates it. A defect this class of check
+/// cannot see, by construction, is a line ADDED to the program -- append
+/// `gl_FragColor = vec4(1.0);` after the mask and every `has_line`, the
+/// `corner_radius` usage loop, `FIELD`, the `away` transcription, fmt, clippy,
+/// the build and the compile above all stay green while every window with a
+/// radius renders a solid white rectangle. Measured, not imagined.
+///
+/// So: draw a known picture through the program the compositor would use, read
+/// it back, and ask three things of the pixels. Three points and two counts
+/// rather than a golden image, deliberately -- a golden image is how a GPU gate
+/// becomes flaky and then gets switched off, which would be worse than not
+/// checking at all.
+///
+/// Two of smithay's three variants are covered. It compiles the program for
+/// `&[]`, `&[NO_ALPHA]` and `&[EXTERNAL]` and picks between them per texture
+/// from the texture's own format, so importing the same picture twice -- once
+/// as ARGB8888 and once as XRGB8888 -- draws through two different programs.
+/// `EXTERNAL` is not reachable from here: it is chosen when the format is
+/// `None`, which is how a hardware-decoded video surface arrives, and nothing
+/// in this harness can make one.
+fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) -> Result<()> {
+    // 64x64 because every other readback here is, and a radius of a quarter of
+    // the side puts 68 pixels on the softened band -- enough that the antialias
+    // count below is a property rather than a lucky pixel.
+    const SIDE: i32 = 64;
+    const RADIUS: f32 = 16.0;
+    // B, G, R: the byte order both `import_memory` and `copy_framebuffer` use
+    // here. Three different values, so a channel swap is as visible as a
+    // missing draw.
+    const COLOUR: [u8; 3] = [0x3C, 0x78, 0xC8];
+
+    for (what, fourcc, fourth) in [
+        ("alpha", Fourcc::Argb8888, 255_u8),
+        // ZERO, and that is the case rather than an arbitrary filler: the X
+        // byte of an XRGB8888 is undefined, an ordinary opaque client leaves it
+        // at nought, and a shader that multiplied it in would draw that window
+        // completely invisible. `fragment.rs`'s `NO_ALPHA` arm exists for this
+        // and nothing until now has drawn through it.
+        ("no-alpha", Fourcc::Xrgb8888, 0_u8),
+    ] {
+        let source = renderer
+            .import_memory(
+                &solid(SIDE, SIDE, COLOUR, fourth),
+                fourcc,
+                (SIDE, SIDE).into(),
+                false,
+            )
+            .map_err(|err| anyhow!("import_memory for the {what} variant: {err}"))?;
+        let out = draw_through_program(renderer, &source, program, SIDE, RADIUS)?;
+        let at = |x: i32, y: i32| -> [u8; 4] {
+            let i = ((y * SIDE + x) * 4) as usize;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+
+        // 1. The middle is the picture, untouched and opaque.
+        //
+        // Which is three claims at once. The mask leaves the interior alone; the
+        // colour survives the program unswapped; and `tex_size` arrived -- if
+        // that uniform never reaches the shader it stays 0, the clamp makes `r`
+        // 0, `away` 0, and `smoothstep(-0.5, 0.5, 0.0)` paints *every* fragment
+        // at exactly 50%, which is the failure `pass::Rounded::draw` tells the
+        // reader to recognise rather than hunt as a blend bug.
+        let middle = at(SIDE / 2, SIDE / 2);
+        let wanted = [COLOUR[0], COLOUR[1], COLOUR[2], 255];
+        if middle != wanted {
+            return Err(anyhow!(
+                "the {what} variant drew the middle of the texture as {middle:?}, not \
+                 {wanted:?}. Each wrong answer names a different cause, so read the \
+                 numbers: a flat [255, 255, 255, 255] -- or any solid colour that is \
+                 not the picture -- means something writes `gl_FragColor` AFTER the \
+                 mask does; half alpha means `tex_size` never reached the program; \
+                 nothing at all means the picture did not; the right colour in the \
+                 wrong order means a channel swap on the way in or out"
+            ));
+        }
+
+        // 2. All four corners are gone.
+        //
+        // Four and not one, because `abs()` folding the coordinate into a single
+        // quadrant is what draws all four from one expression -- a field written
+        // for the top-left only passes at (0, 0). It is also the check that
+        // `corner_radius` arrived: an unset uniform is 0, the clamp makes `r` 0,
+        // and then nothing is cut anywhere and every one of these is opaque.
+        for (x, y) in [
+            (0, 0),
+            (SIDE - 1, 0),
+            (0, SIDE - 1),
+            (SIDE - 1, SIDE - 1),
+        ] {
+            let corner = at(x, y);
+            if corner[3] != 0 {
+                return Err(anyhow!(
+                    "the {what} variant left the corner at ({x}, {y}) at alpha {} \
+                     rather than cutting it. A radius of 0 -- which is what an \
+                     unset `corner_radius` uniform is -- cuts nothing anywhere",
+                    corner[3]
+                ));
+            }
+        }
+
+        // 3. The counts: enough cut to be this radius, and a soft edge.
+        //
+        // From the shader's own field evaluated over a 64x64 at r=16: 184 fully
+        // cut, 68 on the softened band, 3844 untouched. Banded rather than
+        // matched, so this is not a second transcription of the geometry --
+        // what it pins is the magnitude (r=8 would cut 40 and r=32 would cut
+        // 812) and the *existence* of a band, which is the antialias claim.
+        let mut cut = 0_usize;
+        let mut soft = 0_usize;
+        for pixel in out.chunks_exact(4) {
+            match pixel[3] {
+                0..=7 => cut += 1,
+                248..=255 => {}
+                _ => soft += 1,
+            }
+        }
+        println!(
+            "  rounded-corner shader, {what} variant: {cut} px cut, {soft} px on the \
+             antialiased band, middle {middle:?}"
+        );
+        if !(120..=280).contains(&cut) {
+            return Err(anyhow!(
+                "the {what} variant cut {cut} pixels of a 64x64 at radius 16, where \
+                 the field puts 184. A radius applied at the wrong scale lands here: \
+                 8 would cut about 40 and 32 about 812"
+            ));
+        }
+        if soft < 32 {
+            return Err(anyhow!(
+                "the {what} variant left only {soft} pixels between opaque and cut, \
+                 where the one-texel `smoothstep` puts about 68. The corner is a hard \
+                 step, which is what a mask without the smoothstep looks like"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1694,7 +1936,10 @@ fn main() -> Result<()> {
             UniformName::new(solium_effects::fragment::SIZE_UNIFORM, UniformType::_2f),
         ],
     ) {
-        Ok(_) => println!("  rounded-corner shader: compiled"),
+        Ok(program) => {
+            println!("  rounded-corner shader: compiled");
+            rounded_corners_cut(&mut renderer, &program)?;
+        }
         Err(err) => {
             return Err(anyhow!(
                 "the rounded-corner shader did not compile: {err}. Every window with \
