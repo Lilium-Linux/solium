@@ -49,7 +49,7 @@ PaneStyle {
 |---|---|
 | `insets.top`, `.right`, `.bottom`, `.left` | what the style reserves from the client, **once, for the whole style** |
 | `requires` | what the style needs from the machine. `["gpu"]` is the only term today, and a style naming one this build has never heard of is refused rather than drawn wrong |
-| `client.radius` | rounds the client's own surface, in logical pixels. A non-zero one is an offscreen pass per window per frame. `0` is no effect at all, and so is leaving the key out — which is what twelve of the thirteen bundles that ship do. `example/` is the only one that writes it, and it writes `0` |
+| `client.radius` | rounds the client's own surface, in logical pixels. A non-zero one is an offscreen pass per window per frame. `0` is no effect at all, and so is leaving the key out — which is what twelve of the fourteen bundles that ship do. `example/` writes `0`, to show the key exists and costs nothing; `rounded/` is the only one that asks for the pass |
 | `client.shadow` | reserved for the shadow cast by the client's silhouette; declared, and read by nobody yet |
 | the `Layer` children | the layers, in declaration order |
 
@@ -109,6 +109,7 @@ Once, at build, because neither ever changes for a style:
 |---|---|
 | `insetTop`, `insetRight`, `insetBottom`, `insetLeft` | what `Pane.qml` reserved, so a bar can size itself to its own band without a second copy of the number |
 | `bleedLeft`, `bleedTop` | where the window's own corner is inside this layer's canvas |
+| `clientRadius` | the `client.radius` the style declared, in logical pixels, so a bar or a border can hug the curve the compositor cut. Written on every layer of every style, zero included. `rounded/Frame.qml` is the worked example |
 
 Read back by the compositor:
 
@@ -181,6 +182,7 @@ before styles had layers. The rest are here to show what layers add:
 | folder | |
 |---|---|
 | `example/` | the format written out in full, and the fixture two tests build |
+| `rounded/` | `client.radius`: the compositor cuts the client's corners with a fragment program, and the bar hugs the same curve with `Rectangle.radius` |
 | `sandwich/` | one layer behind the client and one above it, in colours that cannot be confused |
 | `wave/` | a border that physically waves, upward past the pane, using `bleed` |
 | `shadow/` | `behind` plus `bleed`: stacked rectangles standing in for a blur |

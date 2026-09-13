@@ -9,6 +9,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+# The shader text itself, by path rather than by copy. This harness is the only
+# thing in the gate with a GL context, so it is the only thing that can ask a
+# driver whether `ROUNDED_CORNERS` compiles -- and a copy of the source in here
+# would answer that question about a string nothing draws with. The crate is
+# deliberately dependency-free, so this costs the lockfile one path entry.
+solium-effects = { path = "../../crates/effects" }
 smithay = { version = "0.7", default-features = false, features = [
     "backend_drm",
     "backend_gbm",
