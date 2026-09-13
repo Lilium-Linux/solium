@@ -5,7 +5,7 @@
 // crest walks along the window and the silhouette of the decoration changes
 // every frame.
 //
-//     SOLIUM_DECORATION=wave
+//     SOLIUM_PANE=wave
 //
 // It waves *upward, past the pane*, which is the point: `bleed` gives the layer
 // 40px of canvas above the window, and the crests use it. Without bleed this

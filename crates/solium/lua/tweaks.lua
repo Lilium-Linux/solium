@@ -39,7 +39,7 @@ end
 local entries = {}
 for _, style in ipairs(sol.decorations()) do
     table.insert(entries, {
-        id = "decoration:" .. style.name,
+        id = "pane:" .. style.name,
         label = style.name,
         group = style.kind == "bundle" and "Pane style" or "Decoration",
     })
@@ -124,8 +124,8 @@ end)
 function tweaks.handle(id)
     local kind, name = id:match("^(%a+):(.+)$")
 
-    if kind == "decoration" then
-        sol.decoration(name)
+    if kind == "pane" then
+        sol.pane(name)
         return
     end
 

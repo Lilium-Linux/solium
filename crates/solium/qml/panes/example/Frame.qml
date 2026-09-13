@@ -6,8 +6,8 @@
 // `contentWidth`, `contentHeight` — rather than reading them off a parent: a
 // layer has no parent, it is a scene.
 //
-// The shipped decorations under `decorations/` are the same thing with more in
-// them. This one is small because its job is to show the shape.
+// The other bundles under `panes/` are the same thing with more in them. This
+// one is small because its job is to show the shape.
 
 import QtQuick
 import Solium

@@ -56,6 +56,15 @@ use crate::{
 /// client area.
 pub(crate) const TITLEBAR_HEIGHT: i32 = 32;
 
+/// The style drawn when nothing has named one.
+///
+/// The same name `config.lua` carries, and it has to be a *name* rather than a
+/// path: every style this build ships is a folder under `panes/`, so the
+/// default has to be looked up where folders are. It is reached when no script
+/// has run or one set the style back to nothing — a session whose scripts
+/// failed to load still gets titlebars.
+const DEFAULT_STYLE: &str = "top";
+
 /// What a frame button asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -192,7 +201,7 @@ struct Shown {
     /// returns early when nothing it shows has changed. Without the size in
     /// that comparison a window resized without being retitled or refocused
     /// keeps the sizes it had when its title last changed, which
-    /// `decorations/reactive.qml` reads to size its own content.
+    /// `panes/reactive/Frame.qml` reads to size its own content.
     size: (i32, i32),
 }
 
@@ -491,8 +500,7 @@ impl Decoration {
         // re-read, and the scene is then laid out at a size that is not this
         // one either, so a decoration whose insets depended on its size has
         // already been getting an answer computed from the wrong size on both
-        // paths — they are constants by contract, and every decoration that
-        // ships declares them as literals.
+        // paths — they are constants by contract.
         //
         // **What did change, and is worth knowing before someone relaxes that
         // contract.** Before this, both paths read the insets from a
@@ -501,11 +509,17 @@ impl Decoration {
         // software path still reads them from a client-sized one, so it would
         // give two *different* wrong answers — a window whose frame reserved
         // one strip of space on a TTY and another under winit, from one QML
-        // file. Benign today, and only because all eight shipped decorations
-        // declare `insetTop`/`Right`/`Bottom`/`Left` and `overlay` as literals.
-        // The day one of them binds an inset to `width` or `height`, this stops
+        // file. The day one binds an inset to `width` or `height`, this stops
         // being a shared inaccuracy and becomes a divergence between the two
         // paths, which is much harder to see: each path is self-consistent.
+        //
+        // It used to be held in check by the eight decorations that shipped,
+        // every one of which declared `insetTop`/`Right`/`Bottom`/`Left` and
+        // `overlay` as literals. Task 7 moved them into bundles, so the files
+        // this reads are now only ever somebody else's and nothing in this tree
+        // holds the line any more. A bundle has no such hazard — its insets are
+        // read from a manifest built at 1x1 on both paths — which is one more
+        // reason the conversion was worth doing.
         let built = if qml::on_gpu() {
             (1, 1)
         } else {
@@ -1006,6 +1020,27 @@ impl LayerScene {
         // the window declares neither and is handed a property it ignores.
         scene.set_int("bleedLeft", spec.bleed.left);
         scene.set_int("bleedTop", spec.bleed.top);
+        // And what the style reserved, for the same reason and on the same
+        // terms: written once, because a declared inset never changes either.
+        //
+        // **This is the property that makes a decoration convertible.** Seven
+        // of the eight that shipped painted themselves from their own
+        // `insetTop` — `height: frame.insetTop` — so a bundle whose `Pane.qml`
+        // declared the number and whose `Frame.qml` had it deleted would have
+        // drawn a bar of height zero. The alternative was the same literal
+        // written into both files with a comment asking that they be kept in
+        // step, which is two answers to one question and exactly what putting
+        // `insets` on `PaneStyle` rather than on `Layer` was for.
+        //
+        // Flowing the *other* way from `Decoration::new`, which reads these
+        // four off a single QML file because that file is the only place a
+        // decoration's insets exist. A bundle names them once in its manifest
+        // and every layer is told; the spelling is the same either way, so a
+        // file converted into a bundle keeps the bindings it already had.
+        scene.set_int("insetTop", style.insets.top);
+        scene.set_int("insetRight", style.insets.right);
+        scene.set_int("insetBottom", style.insets.bottom);
+        scene.set_int("insetLeft", style.insets.left);
         // A layer at `behind` or `above` paints over the client by definition,
         // and so does any layer of a style that reserved nothing: there is
         // nowhere else for it to paint. Only a `frame` layer inside real insets
@@ -1224,7 +1259,7 @@ impl Decorations {
             // **`Pending` and not `None`**, which is not what it should be and
             // is what it was: this was `self.frames.clear()`, and a pane that
             // is in neither table reserves a titlebar's worth of room for a
-            // frame that is not coming. So `decoration = "none"` only takes
+            // frame that is not coming. So `pane = "none"` only takes
             // effect for windows opened *after* it -- those go through
             // `insert`, which marks them properly. That is half of #90, it is
             // reproduced here deliberately, and the one-word fix belongs in
@@ -1355,14 +1390,22 @@ impl Decorations {
 ///
 /// **A style bundle first, a single QML file second.** A name that is a folder
 /// under `panes/` is a style with layers and is loaded as one; anything else is
-/// the one file decorations have always been. That order is what makes Task 7's
-/// conversion a move of files rather than a change of setting — `decoration =
-/// "top"` draws `decorations/top.qml` today and `panes/top/` the day that
-/// folder exists, and nothing in `config.lua` changes on either side of it.
+/// the one file decorations have always been. That order is what made the
+/// conversion of the shipped eight a move of files rather than a change of
+/// setting: `pane = "top"` drew `decorations/top.qml` before Task 7 and draws
+/// `panes/top/` after it, and nothing in `config.lua` changed on either side.
 ///
 /// The two are the same thing at different sizes, which is why there is one
 /// entry point and not two: a decoration is a style with one `frame` layer.
 fn build(style: Option<&str>, width: i32, height: i32) -> Result<Decoration> {
+    // Nothing named at all — no script has run, or one set the style back to
+    // nothing — draws the default rather than failing. It is named here rather
+    // than left to `qml_path`, which used to answer this with
+    // `shipped_decoration("top")`: that file is a folder now, so the default has
+    // to be a *name* looked up where bundles are, or a session whose scripts did
+    // not load would put a missing-file error against every window it opened,
+    // naming a path that has not existed since Task 7.
+    let style = Some(style.unwrap_or(DEFAULT_STYLE));
     let Some(dir) = bundle(style) else {
         return Decoration::new(&qml_path(style), width, height);
     };
@@ -1411,8 +1454,8 @@ fn say_what_was_built(dir: &Path, decoration: &Decoration) {
 ///
 /// `SOLIUM_QML_TITLEBAR` and any name ending in `.qml` are a *file* and never a
 /// bundle — `style::find` takes anything with a separator in it as a path, so
-/// without this a `SOLIUM_DECORATION=~/mine.qml` would be handed back as a
-/// directory and then reported as having no `Pane.qml` in it.
+/// without this a `SOLIUM_PANE=~/mine.qml` would be handed back as a directory
+/// and then reported as having no `Pane.qml` in it.
 fn bundle(style: Option<&str>) -> Option<PathBuf> {
     if std::env::var_os("SOLIUM_QML_TITLEBAR").is_some() {
         return None;
@@ -1439,6 +1482,10 @@ pub(crate) enum StyleKind {
     /// A folder under `panes/` with a `Pane.qml`: layers, and bleed.
     Bundle,
     /// One file under `decorations/`: a single layer at [`Depth::Frame`].
+    ///
+    /// Nothing ships as one any more — Task 7 made every shipped style a
+    /// bundle — so this kind is now only ever the user's own files. The kind
+    /// stays because those files do.
     File,
 }
 
@@ -1489,7 +1536,8 @@ fn places() -> Vec<Place> {
 ///
 /// A name found in an earlier place hides the same name in a later one, which
 /// is [`build`]'s own order said once more — a bundle called `top` shadows
-/// `decorations/top.qml`, and the user's `top` shadows the shipped one. So the
+/// the user's `decorations/top.qml`, and the user's `top` shadows the shipped
+/// one. So the
 /// list cannot offer a name whose press lands on something else, which is the
 /// single thing a discovered list can get wrong that a declared one could not.
 ///
@@ -1586,13 +1634,51 @@ pub(crate) fn ships() -> Vec<Offered> {
 /// The environment wins over the configuration, not the other way round. The
 /// configuration always names something -- the shipped one says "top" -- so a
 /// script's choice losing to nothing would be one thing, but a script's choice
-/// *winning* leaves `SOLIUM_DECORATION` with no effect at all. It is set by
-/// whoever started this particular run, to try one decoration for one session,
-/// and that is the more specific intent.
+/// *winning* leaves `SOLIUM_PANE` with no effect at all. It is set by whoever
+/// started this particular run, to try one style for one session, and that is
+/// the more specific intent.
+///
+/// `SOLIUM_DECORATION` is the old spelling of the same knob, kept for the same
+/// reason `sol.decoration` is: a style used to be a single QML file and is now
+/// a folder, the name changed with it, and no session started from a shell
+/// history written before the change should silently draw something else. The
+/// new name wins when both are set.
 fn chosen(style: Option<&str>) -> Option<String> {
-    std::env::var("SOLIUM_DECORATION")
-        .ok()
-        .or_else(|| style.map(ToOwned::to_owned))
+    named_by(
+        std::env::var("SOLIUM_PANE").ok(),
+        std::env::var("SOLIUM_DECORATION").ok(),
+        style,
+    )
+}
+
+/// The precedence, with the environment handed in rather than read.
+///
+/// Split out for the same reason `style::requirements_on` is: a test cannot
+/// choose the other one. Tests share a process and its environment, so a test
+/// that exported `SOLIUM_PANE` would decide the answer for every other test in
+/// the binary -- which is why `the_environment_has_already_chosen` exists at
+/// all. Here every combination is reachable and none of them touches anything
+/// else.
+///
+/// What stays untested is the two `env::var` calls above, which is the honest
+/// size of the gap and smaller than the alias going unexercised entirely.
+fn named_by(
+    pane: Option<String>,
+    decoration: Option<String>,
+    style: Option<&str>,
+) -> Option<String> {
+    pane.or(decoration).or_else(|| style.map(ToOwned::to_owned))
+}
+
+/// Whether this run's environment has already named a style.
+///
+/// One function rather than a pair of `var_os` calls at each site, because the
+/// alias is the kind of thing that gets honoured in one place and forgotten in
+/// another -- and every caller is a test standing down so it does not assert
+/// about whatever the developer's shell had exported.
+#[cfg(test)]
+fn environment_names_a_style() -> bool {
+    std::env::var_os("SOLIUM_PANE").is_some() || std::env::var_os("SOLIUM_DECORATION").is_some()
 }
 
 /// Where the frame's QML lives, when it is one file rather than a bundle.
@@ -1600,13 +1686,17 @@ fn chosen(style: Option<&str>) -> Option<String> {
 /// Overridable so a frame can be restyled and reloaded without a rebuild,
 /// which is most of the point of authoring it in QML.
 ///
-/// A name picks one of the decorations that ship with the compositor; a path
-/// picks anyone else's. Writing a decoration is writing a QML file and setting
-/// this -- there is nothing else to build, and no compositor code to touch.
+/// **Nothing ships here any more.** Every style the compositor ships is a
+/// bundle under `panes/`, so a bare name that reaches this function is one
+/// [`crate::style::find`] did not answer, and the only names that resolve are
+/// the user's own files under `~/.config/solium/qml/decorations/` and paths.
+/// The path stays because those files exist on people's machines: one QML file
+/// is still a decoration, and deleting the eight that shipped is not a reason
+/// to stop reading anyone else's.
 ///
 /// ```sh
-/// SOLIUM_DECORATION=left          # qml/decorations/left.qml
-/// SOLIUM_DECORATION=~/mine.qml    # anywhere
+/// SOLIUM_PANE=mine                # ~/.config/solium/qml/decorations/mine.qml
+/// SOLIUM_PANE=~/mine.qml          # anywhere
 /// ```
 fn qml_path(style: Option<&str>) -> PathBuf {
     // The old name still works: it was a path to a titlebar, and it is a path
@@ -1633,7 +1723,9 @@ fn qml_path(style: Option<&str>) -> PathBuf {
 /// The directories a single-file decoration is looked for in, nearest first.
 ///
 /// A file of the same name in the user's own directory shadows the one that
-/// ships, so `decoration = "top"` can mean the user's idea of a top bar. The
+/// ships, so `pane = "top"` can mean the user's idea of a top bar -- and since
+/// Task 7 ships nothing here, it is the only way a name resolves to a file at
+/// all. The
 /// same shape as [`crate::style::directories`] and for the same reason: the
 /// lookup above and the listing in [`catalogue`] walk one list, so what the
 /// panel offers is what a press resolves.
@@ -2391,33 +2483,168 @@ mod tests {
         });
     }
 
+    /// **The old spelling of the per-run override still names a style.**
+    ///
+    /// `SOLIUM_DECORATION` was the knob until Task 7 renamed it, and it is in
+    /// people's shell history and in this repository's own older plan
+    /// documents. An alias that silently stopped working would put the
+    /// *configured* style on screen instead of the one that was asked for,
+    /// which looks exactly like the variable being ignored -- and is.
+    ///
+    /// Through `named_by` rather than `chosen`, because a test that exported
+    /// either name would decide the answer for every other test in this binary.
+    /// All of the combinations, including the one that says which wins.
+    #[test]
+    fn the_old_environment_name_still_names_a_style() {
+        let pane = || Some("bundled".to_owned());
+        let old = || Some("legacy".to_owned());
+
+        assert_eq!(named_by(pane(), None, None).as_deref(), Some("bundled"));
+        assert_eq!(
+            named_by(None, old(), None).as_deref(),
+            Some("legacy"),
+            "the old name on its own is honoured"
+        );
+        assert_eq!(
+            named_by(pane(), old(), None).as_deref(),
+            Some("bundled"),
+            "and loses to the new one, which is the more deliberate spelling"
+        );
+
+        // Either of them still beats the configuration, which is the rule the
+        // rename must not have changed: the variable is set by whoever started
+        // this run, and that is the more specific intent.
+        assert_eq!(
+            named_by(None, old(), Some("configured")).as_deref(),
+            Some("legacy")
+        );
+        assert_eq!(
+            named_by(None, None, Some("configured")).as_deref(),
+            Some("configured"),
+            "and with neither set, the configuration decides"
+        );
+        assert_eq!(named_by(None, None, None), None);
+    }
+
+    /// **A delegated layer is told what the style reserved.**
+    ///
+    /// The property that made converting the shipped eight possible at all.
+    /// Seven of them painted themselves from their own `insetTop` --
+    /// `height: frame.insetTop` -- and a delegated layer is its own scene with
+    /// no parent to read the manifest off, so without this the bundle version
+    /// of `top` would declare 32 in `Pane.qml` and draw a bar of height zero.
+    /// The alternative was the same literal in both files with a comment asking
+    /// that they be kept in step, which is the two-answers-to-one-question that
+    /// put `insets` on `PaneStyle` rather than on `Layer`.
+    ///
+    /// Read back through a *derived* property rather than through `insetTop`
+    /// itself. `set_int` followed by `get_int` on the same name would pass
+    /// against a QML root that never declared the property at all -- Qt stores
+    /// it as a dynamic one and hands it straight back -- so what is asserted is
+    /// that a **binding** saw the value, which only happens if it landed on a
+    /// property the file declared.
+    ///
+    /// Four different numbers, so a pair read in the wrong order is not four
+    /// correct answers. And `insetRight` is declared by this fixture and by
+    /// none of the eight, which is the case that says the compositor writes all
+    /// four rather than the ones something happened to need.
+    #[test]
+    fn a_delegated_layer_is_told_the_styles_insets() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "told-insets",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            insets.top: 7
+                            insets.right: 11
+                            insets.bottom: 13
+                            insets.left: 17
+
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property int insetTop: 0
+                            property int insetRight: 0
+                            property int insetBottom: 0
+                            property int insetLeft: 0
+
+                            // Bindings, so these stay zero unless the four above
+                            // were really set on a property this file declared.
+                            readonly property int sawTop: insetTop * 10
+                            readonly property int sawRight: insetRight * 10
+                            readonly property int sawBottom: insetBottom * 10
+                            readonly property int sawLeft: insetLeft * 10
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            let layer = decoration.layers.first_mut().expect("the one layer");
+
+            assert_eq!(layer.scene.get_int("sawTop"), 70, "insets.top reached QML");
+            assert_eq!(layer.scene.get_int("sawRight"), 110);
+            assert_eq!(layer.scene.get_int("sawBottom"), 130);
+            assert_eq!(layer.scene.get_int("sawLeft"), 170);
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
     /// **A name that is a folder under `panes/` reaches its layers.**
     ///
     /// The one link between the setting and everything above: `build` is what
     /// `insert` and `set_style` both call, and without this test `from_style`
     /// is reachable from tests and from nowhere else.
     ///
-    /// Both directions, because the useful claim is the *order* of the lookup
-    /// rather than either half of it. `example` is a bundle and becomes three
-    /// layers; `top` is not one and stays the single QML file a decoration has
-    /// always been, at `frame`, which is what makes Task 7's conversion a move
-    /// of files rather than a change of setting.
+    /// Two shapes of bundle, because the useful claim is that one entry point
+    /// reaches both. `example` declares three layers at three depths; `top`
+    /// declares one at `frame`, which is what a decoration has always been and
+    /// is the shape all eight shipped styles were converted into.
+    ///
+    /// `top` reserving `TITLEBAR_HEIGHT` is the assertion that survived the
+    /// conversion unchanged while the thing behind it moved: the number used to
+    /// be read out of `decorations/top.qml`'s own `insetTop` and now comes from
+    /// `panes/top/Pane.qml`'s `insets.top`. Same 32, read from somewhere else,
+    /// which is precisely what "a move of files rather than a change of
+    /// setting" means and what the frame captures were compared against.
     #[test]
     fn a_name_that_is_a_bundle_builds_its_layers() {
         if the_environment_has_already_chosen() {
-            // `build` reads `SOLIUM_DECORATION` before the argument, so a
-            // session that set it decides this rather than the test does.
+            // `build` reads `SOLIUM_PANE` before the argument, so a session
+            // that set it decides this rather than the test does.
             return;
         }
         on_the_qt_thread(|| {
-            let plain = build(Some("top"), 300, 200).expect("the shipped decoration builds");
-            assert_eq!(plain.layers.len(), 1, "one QML file is one layer");
+            let plain = build(Some("top"), 300, 200).expect("the shipped default builds");
+            assert_eq!(plain.layers.len(), 1, "a titlebar is one layer");
             assert_eq!(plain.layers[0].depth, Depth::Frame);
             assert_eq!(
                 plain.insets().top,
                 TITLEBAR_HEIGHT,
-                "and its insets still come from the scene, not from a style"
+                "and it reserves what it always reserved"
             );
+
+            // Nothing named at all is the same style. Reached through `build`
+            // rather than asserted about `DEFAULT_STYLE`, because what is worth
+            // pinning is that the default resolves to something that *exists*:
+            // it used to name `decorations/top.qml`, which this task deleted.
+            let fallback = build(None, 300, 200).expect("the default builds");
+            assert_eq!(fallback.insets().top, TITLEBAR_HEIGHT);
 
             let bundle = build(Some("example"), 300, 200).expect("the shipped example builds");
             // Guarded for the reason `style`'s `find_reaches_the_shipped_example`
@@ -2679,14 +2906,14 @@ mod tests {
 
     /// Whether this session has already decided which decoration to use.
     ///
-    /// `SOLIUM_QML_TITLEBAR` replaces the path outright and `SOLIUM_DECORATION`
-    /// is read before the style, so either one turns a test that builds a frame
-    /// into a test of whatever that variable points at — a file that may not
-    /// exist, or `none`, which builds nothing at all. Tests share a process and
-    /// an environment, so the answer is to stand down rather than to unset it.
+    /// `SOLIUM_QML_TITLEBAR` replaces the path outright and `SOLIUM_PANE` — or
+    /// its old spelling `SOLIUM_DECORATION` — is read before the style, so any
+    /// of the three turns a test that builds a frame into a test of whatever
+    /// that variable points at: a folder that may not exist, or `none`, which
+    /// builds nothing at all. Tests share a process and an environment, so the
+    /// answer is to stand down rather than to unset it.
     fn the_environment_has_already_chosen() -> bool {
-        std::env::var_os("SOLIUM_QML_TITLEBAR").is_some()
-            || std::env::var_os("SOLIUM_DECORATION").is_some()
+        std::env::var_os("SOLIUM_QML_TITLEBAR").is_some() || environment_names_a_style()
     }
 
     #[test]
@@ -2731,10 +2958,10 @@ mod tests {
     fn a_window_opened_while_the_style_is_none_is_bare_from_the_start() {
         // The half of #90 that works, pinned because the half that does not is
         // one line away in the same function: a window opened *after*
-        // `decoration = "none"` goes through `insert`, which marks it, while
+        // `pane = "none"` goes through `insert`, which marks it, while
         // one already framed when the style changed falls to `Pending` and
         // keeps reserving room. See `set_style`'s bare arm.
-        if std::env::var_os("SOLIUM_DECORATION").is_some() {
+        if environment_names_a_style() {
             // `bare()` reads the environment before the style, so a session
             // that set it decides this rather than the test does.
             return;
@@ -2943,7 +3170,7 @@ mod tests {
     //
     // These replace `script::shipped::the_tweaks_panel_lists_every_decoration_
     // that_ships`, which compared a hand-written Lua array against
-    // `qml/decorations/`. That comparison is gone because the array is gone:
+    // `qml/decorations/`. That comparison is gone because both halves are:
     // the panel's list *is* the directory now, so "the panel offers something
     // that does not exist" and "a decoration nobody can reach" are no longer
     // failures that can happen.
@@ -3150,27 +3377,55 @@ mod tests {
         );
     }
 
-    /// **The one bundle in the tree is offered, and offered as a bundle.**
+    /// **The eight this build ships are offered, once each, as bundles.**
     ///
     /// The instrument check, and the failure it is here for is silent: a
-    /// `StyleKind::Bundle` walk that found nothing would leave the panel showing the
-    /// eight single-file decorations, looking exactly like a working panel,
-    /// with the entire half of this feature that the user asked for missing.
-    /// Every other case in this section would still pass.
+    /// `StyleKind::Bundle` walk that found nothing would leave the panel empty
+    /// or short, looking exactly like a working panel, with no press to prove
+    /// otherwise. Every other case in this section would still pass.
+    ///
+    /// It checked for a `StyleKind::File` too until Task 7, because the eight
+    /// were single files and finding none meant the walk had missed a whole
+    /// kind. They are folders now and **nothing ships as a file**, so that
+    /// assertion could only ever pass by accident -- a stray `.qml` in the
+    /// user's own directory, on the developer's machine alone. What replaces it
+    /// is this: the eight by name, which is a claim about the thing that
+    /// actually moved. The `File` kind is still exercised, on directories a
+    /// test makes, by `bundles_come_before_files_and_each_group_is_sorted` and
+    /// the shadowing cases above.
     #[test]
-    fn the_bundle_that_ships_is_offered_as_a_bundle() {
+    fn the_eight_that_ship_are_offered_as_bundles() {
         let ships = ships();
+        for name in [
+            "top",
+            "left",
+            "bottom",
+            "border",
+            "reactive",
+            "proximity",
+            "reveal",
+            "pulse",
+        ] {
+            assert!(
+                ships.contains(&Offered {
+                    kind: StyleKind::Bundle,
+                    name: name.to_owned(),
+                }),
+                "qml/panes/{name}/ is a style this build ships and the walk did not \
+                 offer it as a bundle. Offered: {ships:?}"
+            );
+            assert_eq!(
+                ships.iter().filter(|it| it.name == name).count(),
+                1,
+                "{name} is offered more than once"
+            );
+        }
         assert!(
             ships.contains(&Offered {
                 kind: StyleKind::Bundle,
                 name: "example".to_owned(),
             }),
-            "qml/panes/example/ is the one bundle in the tree and the walk did not \
-             find it. Offered: {ships:?}"
-        );
-        assert!(
-            ships.iter().any(|offered| offered.kind == StyleKind::File),
-            "...and no single-file decoration either, so the walk found neither kind"
+            "and the worked example, which is what the format is documented by"
         );
     }
 
@@ -3192,18 +3447,22 @@ mod tests {
     /// Reads no environment variable, so it is safe beside the tests that set
     /// one: `available` and `style::find` are both pure directory walks, and it
     /// is `chosen()` -- deliberately not called here -- that reads
-    /// `SOLIUM_DECORATION`.
+    /// `SOLIUM_PANE`.
     ///
     /// **The case it was run against, since a consistency check between two
     /// functions that share a directory list can easily be vacuous.** An empty
-    /// `qml/panes/top/` makes it fail with "`top` is offered as a single file,
-    /// but `style::find` resolves it to ...". That is not contrived: `find`
-    /// accepts any *directory* for a bare name, while [`offered_by`] requires a
-    /// `Pane.qml`, so a bundle whose manifest is missing or misspelled is
-    /// offered as the single-file decoration it shadows and then draws neither.
-    /// The asymmetry is `find`'s and it is Task 3's deliberate choice -- a path
-    /// is taken as given so `load` can name what it could not read -- so this
-    /// watches it rather than changing it.
+    /// `qml/panes/top/` used to make it fail with "`top` is offered as a single
+    /// file, but `style::find` resolves it to ...", because `find` took any
+    /// *directory* for a bare name while [`offered_by`] required a `Pane.qml`.
+    /// Task 7 closed that: a bare name needs the manifest too, and skips a
+    /// folder without one rather than answering with it. So the disagreement
+    /// this test was written to catch can no longer be produced from an empty
+    /// folder -- which is the outcome wanted, not a reason to stop checking.
+    /// What it still holds is the same claim against every *other* way the two
+    /// could drift: a directory list walked in one order here and another
+    /// there, or a kind decided differently on each side. See
+    /// `style::a_bare_name_needs_a_manifest_and_not_merely_a_folder`, which
+    /// pins the rule itself.
     #[test]
     fn what_the_panel_offers_is_what_a_press_resolves() {
         let offered = available();

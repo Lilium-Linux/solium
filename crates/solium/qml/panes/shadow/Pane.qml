@@ -13,7 +13,7 @@
 // look for them, and it costs eight alpha-blended rectangles per window per
 // frame it changes.
 //
-//     SOLIUM_DECORATION=shadow
+//     SOLIUM_PANE=shadow
 //
 // It is here to show that `behind` plus `bleed` is enough to put something
 // underneath a window that reaches past it — and to be the thing item 6

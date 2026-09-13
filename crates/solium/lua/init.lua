@@ -8,7 +8,7 @@ local config = require("config")
 
 -- Settings the compositor itself holds, applied from the same file as
 -- everything else. Both take effect immediately when reloaded.
-sol.decoration(config.decoration)
+sol.pane(config.pane)
 sol.loading(config.loading)
 -- Where the monitors go. Applied on reload too, so moving a screen in the
 -- configuration is `super+shift+r` rather than logging out.

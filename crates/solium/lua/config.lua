@@ -9,7 +9,7 @@
 --
 --     return {
 --         gap = 4,
---         decoration = "reactive",
+--         pane = "reactive",
 --         tiling = { split = 0.618 },
 --     }
 --
@@ -234,10 +234,14 @@ local defaults = {
     -- `super+shift+r` applies a change without ending the session.
     monitors = {},
 
-    -- Which QML file frames every window. A name is one of the decorations in
-    -- `qml/decorations`, or one of your own in
-    -- ~/.config/solium/qml/decorations, which shadows a shipped one of the
-    -- same name. A path is anywhere.
+    -- How every window is framed.
+    --
+    -- A style is a **folder** under `qml/panes` holding a `Pane.qml`: what the
+    -- frame reserves from the client, and a list of layers, each its own QML
+    -- scene at its own depth -- behind the client, in the frame, or above it.
+    -- A name is one of the folders below, or one of your own in
+    -- ~/.config/solium/qml/panes, which shadows a shipped one of the same
+    -- name. A path is anywhere.
     --
     --   "top"        a titlebar above the window (the default)
     --   "left"       a titlebar down the left side
@@ -251,7 +255,14 @@ local defaults = {
     --                built per window. For a desktop with no window furniture,
     --                or a tiling layout whose own bar makes a titlebar
     --                redundant.
-    decoration = "top",
+    --
+    -- A single QML file still works and is still called a decoration: drop one
+    -- in ~/.config/solium/qml/decorations and name it here. It is one layer in
+    -- the frame, which is what every style was before folders.
+    --
+    -- This setting was called `decoration` when a style was one file. The old
+    -- name is still read -- see the bottom of this file.
+    pane = "top",
 
     -- What a window does between being asked for and its application
     -- arriving. A window's life starts when you ask for it, not when the
@@ -386,6 +397,16 @@ if found then
     end
 elseif not tostring(user):match("module 'user' not found") then
     error(tostring(user), 0)
+end
+
+-- `pane` was called `decoration` when a style was a single QML file rather
+-- than a folder. Merging a user.lua that sets the old key leaves `pane` at its
+-- default, so without this the setting would silently stop working -- which is
+-- the worst way to lose an afternoon, and the thing the alias exists to
+-- prevent. Read across only when the new name was not also given: someone who
+-- wrote both meant the one they had to look up.
+if found and type(user) == "table" and user.decoration ~= nil and user.pane == nil then
+    defaults.pane = user.decoration
 end
 
 return defaults

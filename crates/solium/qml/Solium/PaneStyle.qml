@@ -39,6 +39,22 @@ Item {
     // Not per layer: the client is placed once and every layer sees the same
     // client rect, so three layers each declaring insets would be three
     // answers to one question.
+    //
+    // Declared once here and *handed to every layer*: the compositor writes
+    // these four back onto each layer's own root as `insetTop`, `insetRight`,
+    // `insetBottom` and `insetLeft`, once at build, exactly as it does with
+    // `bleedLeft` and `bleedTop`. A delegated layer is its own scene with no
+    // parent to read them off, and a bar that has to know how tall its own
+    // band is would otherwise need a second copy of the number — which is the
+    // disagreement this property being on `PaneStyle` exists to prevent. An
+    // inline layer is already inside this object and can read `insets.top`
+    // directly; it is handed the flat four as well and is free to ignore them.
+    //
+    // The same four names a single QML file under `decorations/` declares, and
+    // deliberately: there the compositor *reads* them, because that file is
+    // the only place a decoration's insets exist. So a decoration converted
+    // into a bundle keeps every binding it already had, and the direction the
+    // number travels is the only thing that changed.
     property Insets insets: Insets {}
 
     // What the style needs from the machine it is loaded on, and is refused

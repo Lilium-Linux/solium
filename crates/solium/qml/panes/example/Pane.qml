@@ -11,15 +11,15 @@
 //
 // says `ok` about the whole surface rather than about one corner of it.
 //
-// **It draws.** `decoration = "example"` — or `SOLIUM_DECORATION=example` —
+// **It draws.** `pane = "example"` — or `SOLIUM_PANE=example` —
 // frames every window with this, which is what a name that is a folder under
 // `panes/` means. It is also what two tests build a real `Decoration` out of:
 // `render`'s ordering test and `style`'s reading test both come here, so this
 // file is the fixture as well as the documentation.
 //
-// It is deliberately not a copy of a shipped decoration: `decorations/top.qml`
-// still ships and is still what `decoration = "top"` draws, and a second copy
-// of it living here would drift from the original with nothing to notice.
+// It is deliberately not a copy of a shipped style: `panes/top/` is what
+// `pane = "top"` draws, and a second copy of it living here would drift from
+// the original with nothing to notice.
 
 import QtQuick
 import Solium

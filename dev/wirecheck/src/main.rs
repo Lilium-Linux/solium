@@ -488,7 +488,7 @@ fn spin_of(scene: *mut c_void) -> i32 {
 /// Checked both ways in this run and that is the whole of its negative control,
 /// so it needs no edited copy of anything: `quadrants.qml` holds an animation
 /// with `loops: Animation.Infinite` and must read 1 for the length of the run,
-/// while `cursor.qml` and `decorations/top.qml` are built and rendered with
+/// while `cursor.qml` and `panes/top/Frame.qml` are built and rendered with
 /// nothing written to them and must read 0. A stub answering "yes" fails on the
 /// second, one answering "no" fails on the first, and an answer read off the
 /// process rather than the scene -- `QAnimationDriver::isRunning()`, which is
@@ -1511,7 +1511,7 @@ fn main() -> Result<()> {
     let mut kept_buffers: Vec<target::Target> = Vec::new();
     for (what, file, w, h) in [
         ("cursor", "crates/solium/qml/cursor.qml", 64, 64),
-        ("decoration", "crates/solium/qml/decorations/top.qml", 640, 480),
+        ("pane layer", "crates/solium/qml/panes/top/Frame.qml", 640, 480),
     ] {
         let path = CString::new(repo().join(file).as_os_str().as_encoded_bytes())?;
         let buffer = target::allocate(&gbm, w, h)
