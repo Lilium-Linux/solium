@@ -235,25 +235,44 @@ pub(crate) fn find(name: &str) -> Option<PathBuf> {
 /// Every term `requires` can name in this build, for a refusal to list.
 const TERMS: [&str; 1] = ["gpu"];
 
-/// Whether this process can offer `term`, or `None` if it has never heard of it.
+/// Whether a process on `gpu` can offer `term`, or `None` for one this build
+/// has never heard of.
 ///
 /// > The software scene graph does not implement `ShaderEffect`, and `Canvas`
 /// > appears not to paint on it; the GPU path does both. So which QML is legal
 /// > depends on which machine you are on, and a style written on one hands a
 /// > white rectangle to another, silently.
 ///
-/// That is the whole reason `requires` exists, and `gpu` is its only term
-/// today. [`crate::qml::on_gpu`] answers which path this process came up on —
-/// not which one was asked for, because Qt fixes its scene graph for the life
-/// of the process and can refuse.
-fn provides(term: &str) -> Option<bool> {
+/// That is the whole reason `requires` exists, and `gpu` is its only term today.
+fn provides(term: &str, gpu: bool) -> Option<bool> {
     match term {
-        "gpu" => Some(crate::qml::on_gpu()),
+        "gpu" => Some(gpu),
         _ => None,
     }
 }
 
-/// Refuse a style this build cannot run, naming what it wanted and what is here.
+/// Refuse a style this process cannot run.
+///
+/// [`crate::qml::on_gpu`] and not `dev::qml_gpu()`: what Qt *did* with the
+/// knob, not what it was asked for. It can refuse, and the answer is only known
+/// once `start` has run — which by this point it has, because the scene being
+/// read exists.
+fn requirements(manifest: &Path, required: &[String]) -> Result<()> {
+    requirements_on(manifest, required, crate::qml::on_gpu())
+}
+
+/// The decision, with the scene graph as an argument rather than as a global.
+///
+/// Split out because a test cannot choose one. Qt fixes its scene graph for the
+/// life of the process, the gate's container has no render node, and there is
+/// no way back — so a test of the real entry point only ever exercises the
+/// software side, on every machine this is ever run on. Here both sides are
+/// reachable.
+///
+/// Deliberately *not* the same move as making `resolve` take existence as a
+/// parameter, which the brief asked for and this task did not do. A directory
+/// is a fact a test can make, so faking one would swap a real check for a
+/// pretend one. A scene graph is not.
 ///
 /// **An unrecognised term is a refusal, not a warning.** `requires` is a list so
 /// that `["gpu", "effects/2"]` is format versioning through the same mechanism,
@@ -272,10 +291,10 @@ fn provides(term: &str) -> Option<bool> {
 ///
 /// An author who wants a term to be advisory has somewhere to put it already:
 /// out of `requires`. There is no way to spell the other direction.
-fn requirements(manifest: &Path, required: &[String]) -> Result<()> {
+fn requirements_on(manifest: &Path, required: &[String], gpu: bool) -> Result<()> {
     let unmet: Vec<String> = required
         .iter()
-        .filter_map(|term| match provides(term) {
+        .filter_map(|term| match provides(term, gpu) {
             Some(true) => None,
             Some(false) if term == "gpu" => Some(format!(
                 "`{term}` needs the GPU scene graph and this process came up on the software \
@@ -292,7 +311,7 @@ fn requirements(manifest: &Path, required: &[String]) -> Result<()> {
     }
     let available: Vec<&str> = TERMS
         .into_iter()
-        .filter(|term| provides(term) == Some(true))
+        .filter(|term| provides(term, gpu) == Some(true))
         .collect();
     Err(anyhow!(
         "{} requires [{}] and cannot be loaded here: {}. This build knows [{}] and provides [{}]",
@@ -858,6 +877,50 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&dir);
         });
+    }
+
+    /// Both sides of the decision, which no process running this can supply.
+    ///
+    /// Every other test here runs on whichever scene graph Qt came up on, and in
+    /// the container the gate builds in that is always the software one: no
+    /// render node, and Qt fixes the choice for the life of the process. So the
+    /// GPU side of `requirements` is unreachable from a test of the real entry
+    /// point, on every machine this will ever be run on, and the decision takes
+    /// the answer as an argument so that it is reachable here.
+    ///
+    /// What stays untested is one line — `requirements` binding the argument to
+    /// `qml::on_gpu()`. That is the honest size of the gap, and it is smaller
+    /// than the whole rule going unexercised in one direction.
+    #[test]
+    fn the_gpu_term_is_decided_by_the_path_the_process_came_up_on() {
+        let manifest = Path::new("/panes/neon/Pane.qml");
+        let gpu = ["gpu".to_string()];
+
+        super::requirements_on(manifest, &gpu, true).expect("a GPU process runs a GPU style");
+
+        let err =
+            super::requirements_on(manifest, &gpu, false).expect_err("a software process cannot");
+        let said = err.to_string();
+        assert!(said.contains("/panes/neon/Pane.qml"), "{said}");
+        assert!(said.contains("requires [gpu]"), "{said}");
+        assert!(said.contains("came up on the software one"), "{said}");
+        assert!(said.contains("knows [gpu] and provides []"), "{said}");
+
+        // What is available is reported from the same place the decision is
+        // made, so the two cannot drift into disagreeing.
+        let future = ["effects/2".to_string()];
+        let on_gpu = super::requirements_on(manifest, &future, true)
+            .expect_err("unknown is unknown on either path")
+            .to_string();
+        assert!(
+            on_gpu.contains("knows [gpu] and provides [gpu]"),
+            "{on_gpu}"
+        );
+        assert!(super::requirements_on(manifest, &future, false).is_err());
+
+        // Nothing asked for is nothing to refuse, on either path.
+        super::requirements_on(manifest, &[], false).expect("portable");
+        super::requirements_on(manifest, &[], true).expect("portable");
     }
 
     /// An unrecognised requirement is a refusal, on either path.
