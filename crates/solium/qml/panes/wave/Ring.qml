@@ -108,44 +108,44 @@ Item {
                 }
             }
 
-            // The mean of this frame, which is what the wave is measured
-            // AGAINST rather than added to.
+            // Smoothed across neighbouring bars before anything else reads
+            // them. cava's bars are independent buckets and a border drawn
+            // straight off them is visibly serrated -- each bucket is a corner
+            // whatever the interpolation between them does.
             //
-            // This is the difference between a border that waves and one that
-            // breathes. Feeding the bars in directly gives every point nearly
-            // the same radius -- a real spectrum's bars mostly sit within a
-            // band of each other, so the outline comes out very close to a
-            // plain rounded rectangle however loud the music is. What the eye
-            // reads as a wave is one bar standing out from its neighbours, so
-            // that is what is amplified: `gain` multiplies the DEVIATION from
-            // the frame's own mean, and the mean itself only sets how far out
-            // the whole ring rests.
-            let mean = 0;
-            for (const level of raw) {
-                mean += level;
-            }
-            mean = raw.length > 0 ? mean / raw.length : 0;
-
-            const gain = 3.2;
-            const parsed = [];
+            // Three taps and not five. Five blurred a peak across so many bars
+            // that the border stopped showing the music and started showing
+            // its envelope -- smooth, but the same shape whatever was playing.
+            // This is the least blur that still takes the teeth off.
+            const weights = [1, 2, 1];
+            const smoothed = [];
             for (let i = 0; i < raw.length; ++i) {
-                // Loudness lifts the resting radius; the spectrum's shape is
-                // what actually makes the waves. Floored at zero so silence
-                // rests at the ring's own radius instead of retracting inside
-                // it -- with the spectrum mirrored, bass down one half and
-                // treble down the other, a track with no treble used to leave
-                // that entire half collapsed flat onto the window.
-                let height = 0.12 + mean * 0.8 + (raw[i] - mean) * gain;
-                height = Math.max(0, Math.min(1.35, height));
+                let sum = 0;
+                let total = 0;
+                for (let k = -1; k <= 1; ++k) {
+                    const j = i + k;
+                    if (j < 0 || j >= raw.length) {
+                        continue;
+                    }
+                    const weight = weights[k + 1];
+                    sum += raw[j] * weight;
+                    total += weight;
+                }
+                smoothed.push(total > 0 ? sum / total : 0);
+            }
+
+            const parsed = [];
+            for (let i = 0; i < smoothed.length; ++i) {
+                let level = smoothed[i];
                 // Eased towards the new reading rather than snapped to it.
                 // cava's bars jump frame to frame and a border that jumps with
-                // them reads as flicker; carrying some of the last reading
-                // turns the same numbers into something that swells and falls,
-                // which is what a wave is.
-                if (previous.length === raw.length && !isNaN(previous[i])) {
-                    height = previous[i] * 0.4 + height * 0.6;
+                // them reads as flicker. A third of the last reading is enough
+                // to take that off; more than that and the border lags the
+                // music plainly enough to see, which is worse than flicker.
+                if (previous.length === smoothed.length && !isNaN(previous[i])) {
+                    level = previous[i] * 0.3 + level * 0.7;
                 }
-                parsed.push(height);
+                parsed.push(level);
             }
             ring.levels = parsed;
         };
@@ -159,29 +159,61 @@ Item {
         return Math.sin(t * periods * 2 * Math.PI + phase);
     }
 
-    // The spectrum, at `t` (0..1) round the loop.
+    // Where the top edge's midpoint falls in the arc-length walk.
     //
-    // **Mirrored**, not wrapped: bass-to-treble down one half and back up the
-    // other. A spectrum is bass-heavy, so wrapping it once puts every large
-    // bar in one short arc and leaves three quarters of the border flat -- and
-    // bar 0 against bar N is a cut, silence next to a beat, where mirroring
-    // closes the loop with no join at all.
+    // The walk starts at the end of the top-left corner, so `t = 0` is an
+    // arbitrary place on the top edge and folding the spectrum there put the
+    // mirror line off to one side. Folding HERE makes the two halves of the
+    // border reflections of each other about the window's vertical centre,
+    // and -- because a rounded rectangle is symmetric -- half a perimeter on
+    // from the top centre is exactly the bottom centre, so the other fold
+    // lands right as well.
+    readonly property real topCentre: {
+        const r = Math.min(ring.corner, ring.paneWidth / 2, ring.paneHeight / 2);
+        const flatX = Math.max(0, ring.paneWidth - 2 * r);
+        const flatY = Math.max(0, ring.paneHeight - 2 * r);
+        const arc = Math.PI * r / 2;
+        const total = 2 * flatX + 2 * flatY + 4 * arc;
+        return total > 0 ? (flatX / 2) / total : 0;
+    }
+
+    // One ring's slice of the spectrum, at `t` (0..1) round the loop.
+    //
+    // `lo`..`hi` are fractions of the bar list, so each ring shows a different
+    // part of the sound: the outer one the bass, the middle the mids, the
+    // inner one the treble. Three rings reading the same bars moved as one
+    // thick outline -- separating them is what makes the layering mean
+    // something rather than just look like a thicker border.
+    //
+    // **Mirrored about the top centre**, not wrapped. A spectrum is
+    // bass-heavy, so wrapping it once round would put every large bar in one
+    // short arc; and bar 0 against bar N is a cut, silence next to a beat,
+    // where mirroring closes the loop with no join at all. It is also what
+    // makes the border symmetric left to right.
     //
     // **Smoothstepped between bars, not interpolated straight.** A straight
-    // line between two readings is a straight line on screen, and the joins
-    // between them are corners -- which is exactly the faceting that shows up
-    // as creases in the curve. `f * f * (3 - 2f)` leaves the slope at zero on
-    // each reading, so neighbouring segments meet without a kink and a row of
-    // bars reads as a row of swells.
-    function levelAt(t) {
+    // line between two readings is a straight line on screen and the joins are
+    // corners -- exactly the creasing that shows up as lines in the curve.
+    // `f * f * (3 - 2f)` leaves the slope at zero on each reading, so
+    // neighbouring segments meet without a kink.
+    function levelAt(t, lo, hi) {
         const bars = ring.levels.length;
-        const turn = ((t % 1) + 1) % 1;
+        if (bars < 2) {
+            return 0;
+        }
+        const first = Math.max(0, Math.min(bars - 2, Math.floor(bars * lo)));
+        const last = Math.max(first + 1, Math.min(bars - 1, Math.floor(bars * hi)));
+        const count = last - first + 1;
+
+        const turn = ((((t - ring.topCentre) % 1) + 1) % 1);
         const fold = turn < 0.5 ? turn * 2 : (1 - turn) * 2;
-        const at = fold * (bars - 1);
-        const i = Math.min(bars - 2, Math.floor(at));
-        const f = at - i;
+        const at = fold * (count - 1);
+        const step = Math.min(count - 2, Math.floor(at));
+        const f = at - step;
         const eased = f * f * (3 - 2 * f);
-        return ring.levels[i] + (ring.levels[i + 1] - ring.levels[i]) * eased;
+        const a = ring.levels[first + step];
+        const b = ring.levels[first + step + 1];
+        return a + (b - a) * eased;
     }
 
     // A point `t` (0..1) of the way round a rounded rectangle by arc length,
@@ -243,10 +275,25 @@ Item {
     // *client* can sit between two things; these all sit behind it, so three
     // scenes would be three textures and three uploads buying nothing. Moving
     // one to `depth: "above"` in Pane.qml is what layering buys.
+    // `lo`/`hi` are each ring's slice of the spectrum: bass outermost, where
+    // there is the most room, treble innermost against the window's edge.
+    //
+    // **The reaches are chosen so the three can never cross.** Each ring is
+    // filled from its own curve inward and the inner ones are painted last, so
+    // a ring that swells past the one outside it does not overlap it -- it
+    // erases it. With the bands free to reach any radius that happened
+    // constantly, and the result was one muddled outline whose colour depended
+    // on which frequency was loudest. Held apart, the widest each can get
+    // (`reach + swell * 1.35`) still clears the next one's resting radius, so
+    // there are always three readable rings and each is visibly its own band.
+    //
+    //     treble   3 .. 12.4      mids  14 .. 23.4      bass  25 .. 35.8
+    //
+    // and 35.8 is inside the 44 the layer declared, which is a hard clip.
     readonly property var rings: [
-        { reach: 26, swell: 30, periods: 18, duration: 7400, ink: Theme.text },
-        { reach: 17, swell: 22, periods: 22, duration: 5600, ink: Theme.accent },
-        { reach: 9,  swell: 15, periods: 26, duration: 4300, ink: Theme.edge }
+        { reach: 25, swell: 8, lo: 0.00, hi: 0.30, periods: 18, duration: 7400, ink: Theme.text },
+        { reach: 14, swell: 7, lo: 0.28, hi: 0.62, periods: 22, duration: 5600, ink: Theme.accent },
+        { reach: 3,  swell: 7, lo: 0.60, hi: 1.00, periods: 26, duration: 4300, ink: Theme.edge }
     ]
 
     Repeater {
@@ -295,15 +342,44 @@ Item {
                         const w = ring.paneWidth;
                         const h = ring.paneHeight;
                         const r = Math.min(ring.corner, w / 2, h / 2);
+
+                        // The wave is the DEVIATION from this ring's own band,
+                        // not the level in it. A real spectrum's bars mostly
+                        // sit within a band of each other, so feeding levels
+                        // straight in gives every point nearly the same radius
+                        // and the outline comes out close to a plain rounded
+                        // rectangle however loud the music is. What an eye
+                        // reads as a wave is one bar standing out from its
+                        // neighbours -- so the mean only sets how far the ring
+                        // rests out, and the distance from it is what waves.
+                        let mean = 0;
+                        if (bars > 0) {
+                            const first = Math.floor(bars * spec.lo);
+                            const last = Math.min(bars - 1, Math.floor(bars * spec.hi));
+                            for (let i = first; i <= last; ++i) {
+                                mean += ring.levels[i];
+                            }
+                            mean = mean / Math.max(1, last - first + 1);
+                        }
+
                         for (let i = 0; i < steps; ++i) {
                             const t = i / steps;
                             // `band.phase` is read only on the fallback
                             // branch, so with a feed running it is not a
                             // binding dependency at all and this rebuilds when
                             // the music changes rather than on every frame.
-                            const height = bars === 0
-                                ? ring.sineAt(t, spec.periods, band.phase)
-                                : ring.levelAt(t);
+                            let height;
+                            if (bars === 0) {
+                                height = ring.sineAt(t, spec.periods, band.phase);
+                            } else {
+                                const level = ring.levelAt(t, spec.lo, spec.hi);
+                                // Floored at zero, so silence RESTS rather
+                                // than retracts: with the spectrum mirrored, a
+                                // track missing this ring's band used to leave
+                                // the whole border collapsed onto the window.
+                                height = Math.max(0, Math.min(1.35,
+                                    0.12 + mean * 0.8 + (level - mean) * 3.2));
+                            }
                             points.push(ring.ringPoint(
                                 t, x, y, w, h, r, spec.reach + spec.swell * height));
                         }
