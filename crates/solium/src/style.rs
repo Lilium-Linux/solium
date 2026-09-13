@@ -172,6 +172,66 @@ pub(crate) struct Style {
     pub(crate) dir: PathBuf,
 }
 
+/// The bundles that ship with the compositor.
+///
+/// Baked from `CARGO_MANIFEST_DIR`, which is what `qml::import_path` already
+/// does with `qml/` and for the same reason: there is no install step in this
+/// tree yet, so a path fixed at build time is at least true of the build that
+/// fixed it. Both move together on the day there is one.
+fn shipped() -> PathBuf {
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes"))
+}
+
+/// Where a style bundle called `name` is, or `None`.
+///
+/// Split from [`find`] so the *order* is decided in one function that is handed
+/// its directories rather than going looking for them — `find` supplies the
+/// real ones, a test supplies its own.
+///
+/// The order is the one decorations already use and the one `sol.surface` uses:
+/// the user's directory shadows the shipped one, name by name, so replacing a
+/// style means dropping in a folder rather than copying everything else.
+///
+/// It **does** consult the filesystem, and cannot do otherwise: shadowing is a
+/// question about which directories exist. The brief said this was testable
+/// without one and it is not — a test asserting the user's copy wins has to
+/// create the user's copy. See the plan's amendment of 2026-09-13.
+fn resolve(name: &str, user: Option<&Path>) -> Option<PathBuf> {
+    // `Path::join("")` is the directory itself, and `is_dir()` agrees, so
+    // without this an empty name resolves to the whole `panes/` folder and the
+    // failure surfaces later as a missing `Pane.qml` in a directory nobody
+    // named. A name that is not a name has no bundle.
+    if name.is_empty() {
+        return None;
+    }
+    // A path is taken as given, existing or not: `load` then says "…has no
+    // Pane.qml" and names it, where a `None` here would name nothing and leave
+    // a typo indistinguishable from a style this build does not ship.
+    if name.contains('/') {
+        return Some(PathBuf::from(name));
+    }
+    if let Some(candidate) = user.map(|dir| dir.join(name))
+        && candidate.is_dir()
+    {
+        return Some(candidate);
+    }
+    let own = shipped().join(name);
+    own.is_dir().then_some(own)
+}
+
+/// Where the bundle called `name` is on this machine, or `None`.
+///
+/// `panes/` under the user's QML directory, because a style bundle is QML and
+/// belongs beside the design system it imports — a `Solium/Theme.qml` dropped
+/// in there is already what `Theme.titlebarHeight` resolves to inside a
+/// bundle's `Pane.qml`, so splitting the two across different roots would mean
+/// a style and the theme it is written against could come from different
+/// places.
+pub(crate) fn find(name: &str) -> Option<PathBuf> {
+    let user = crate::qml::user_qml_dir().map(|dir| dir.join("panes"));
+    resolve(name, user.as_deref())
+}
+
 /// Read a bundle's `Pane.qml`.
 ///
 /// The manifest scene is loaded at 1x1 and never rendered: it declares
@@ -344,11 +404,22 @@ mod tests {
         assert!(err.to_string().contains("has no Pane.qml"), "{err}");
     }
 
+    /// An empty directory of this test's own, on the real filesystem.
+    ///
+    /// Cleared first, because these are named after the test and the process
+    /// and a second run of the same test in the same binary would otherwise
+    /// find its own leftovers.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("solium-style-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        dir
+    }
+
     /// A bundle written into a directory of its own, for the tests that need
     /// values nothing else in the tree can shadow.
     fn fixture(name: &str, manifest: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("solium-style-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        let dir = scratch(name);
         std::fs::write(dir.join("Pane.qml"), manifest).expect("writing the manifest");
         dir
     }
@@ -551,5 +622,122 @@ mod tests {
             assert!(err.to_string().contains("declares no layers"), "{err}");
             let _ = std::fs::remove_dir_all(&empty);
         });
+    }
+
+    /// A path is a path, and is handed back whether or not it exists.
+    ///
+    /// Deliberately not checked here: a mistyped path that comes back unchanged
+    /// is reported by [`load`] as "… has no Pane.qml" and *names the thing that
+    /// was wrong*, where a `None` would name nothing and leave the caller unable
+    /// to tell a typo from a style this build does not ship.
+    #[test]
+    fn a_path_is_taken_as_given() {
+        assert_eq!(
+            super::resolve("/tmp/solium-no-such-style", None),
+            Some(PathBuf::from("/tmp/solium-no-such-style"))
+        );
+        // Relative too: what makes it a path is the separator, not the root.
+        assert_eq!(
+            super::resolve("./neon", None),
+            Some(PathBuf::from("./neon"))
+        );
+        // And a path wins over the lookup entirely, so a user directory that
+        // happens to hold a folder of the same spelling does not capture it.
+        assert_eq!(
+            super::resolve("/tmp/solium-no-such-style", Some(Path::new("/tmp"))),
+            Some(PathBuf::from("/tmp/solium-no-such-style"))
+        );
+    }
+
+    /// The user's directory shadows the shipped one, name by name, so replacing
+    /// a style means dropping in a folder rather than copying everything else.
+    ///
+    /// Two things this test does that the brief's version could not:
+    ///
+    /// * **It creates the directory.** `resolve` asks `is_dir()`, so a user
+    ///   path nobody made falls straight through to the shipped tree — the
+    ///   brief's `/home/someone/…` returns `None`, and the claim that the
+    ///   lookup is testable without a filesystem is not true of a lookup that
+    ///   consults one. See the plan's amendment of 2026-09-13.
+    /// * **It uses a name that also ships.** `example` exists in both places, so
+    ///   this pins the *order*. A name only the user has would be found first
+    ///   either way and would pass against a reversed lookup.
+    #[test]
+    fn a_bare_name_prefers_the_users_directory() {
+        let user = scratch("user-panes");
+        std::fs::create_dir_all(user.join("example")).expect("a user bundle");
+
+        assert_eq!(
+            super::resolve("example", Some(&user)),
+            Some(user.join("example")),
+            "the user's `example` shadows the shipped one"
+        );
+        assert_ne!(
+            super::resolve("example", Some(&user)),
+            Some(shipped_example())
+        );
+
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// With nothing of that name in the user's directory, the shipped one.
+    ///
+    /// Both ways of having nothing: no user directory at all — which is what
+    /// `user_qml_dir` returns on a machine with no `~/.config/solium/qml` — and
+    /// one that exists but does not hold this name.
+    #[test]
+    fn a_bare_name_falls_back_to_the_shipped_bundle() {
+        let user = scratch("user-panes-empty");
+
+        assert_eq!(super::resolve("example", None), Some(shipped_example()));
+        assert_eq!(
+            super::resolve("example", Some(&user)),
+            Some(shipped_example()),
+            "an empty user directory is not an answer"
+        );
+
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// A name in neither place is `None` rather than a path that is not there.
+    ///
+    /// The empty name is here because it is the one input that made the old
+    /// shape of this return something absurd: `Path::join("")` is the directory
+    /// itself, which `is_dir()` happily confirms, so `find("")` answered with
+    /// the whole `panes/` folder.
+    #[test]
+    fn a_name_that_is_nowhere_is_none() {
+        let user = scratch("user-panes-nowhere");
+        assert_eq!(super::resolve("neon", Some(&user)), None);
+        assert_eq!(super::resolve("neon", None), None);
+        assert_eq!(super::resolve("", Some(&user)), None);
+        assert_eq!(super::resolve("", None), None);
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// `find` against this machine, which must reach the shipped example.
+    ///
+    /// The one assertion `resolve`'s tests cannot make: that the directory
+    /// `find` builds out of `user_qml_dir` is the one styles are actually in.
+    /// Guarded, because a user bundle called `example` is entitled to win —
+    /// that is the feature — and then the shipped path is the wrong assertion.
+    #[test]
+    fn find_reaches_the_shipped_example() {
+        let user = crate::qml::user_qml_dir().map(|dir| dir.join("panes"));
+        let shadowed = user.is_some_and(|dir| dir.join("example").is_dir());
+        if shadowed {
+            assert!(
+                super::find("example").is_some(),
+                "a user bundle is still a bundle"
+            );
+        } else {
+            assert_eq!(super::find("example"), Some(shipped_example()));
+        }
+        assert_eq!(super::find("no-such-style-ships-here"), None);
+    }
+
+    /// The bundle this tree ships, by the same route `resolve` reaches it.
+    fn shipped_example() -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes")).join("example")
     }
 }
