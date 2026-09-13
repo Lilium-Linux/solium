@@ -4,8 +4,8 @@
 // feature, and a format with no instance of it is a set of property
 // declarations nobody has tried to write against. It exercises every property
 // both types have — all three depths, both spellings of `bleed`, inline content
-// and delegated content, `insets`, `requires`, and the reserved `client` group
-// — so that
+// and delegated content, `insets`, `requires`, `client.radius`, which is read,
+// and `client.shadow`, which is still reserved — so that
 //
 //     solium --check-qml crates/solium/qml/panes/example/Pane.qml
 //

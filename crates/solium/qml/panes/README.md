@@ -49,7 +49,7 @@ PaneStyle {
 |---|---|
 | `insets.top`, `.right`, `.bottom`, `.left` | what the style reserves from the client, **once, for the whole style** |
 | `requires` | what the style needs from the machine. `["gpu"]` is the only term today, and a style naming one this build has never heard of is refused rather than drawn wrong |
-| `client.radius` | rounds the client's own surface, in logical pixels. A non-zero one is an offscreen pass per window per frame; `0` is no effect at all, and is what every shipped style declares |
+| `client.radius` | rounds the client's own surface, in logical pixels. A non-zero one is an offscreen pass per window per frame. `0` is no effect at all, and so is leaving the key out — which is what twelve of the thirteen bundles that ship do. `example/` is the only one that writes it, and it writes `0` |
 | `client.shadow` | reserved for the shadow cast by the client's silhouette; declared, and read by nobody yet |
 | the `Layer` children | the layers, in declaration order |
 
