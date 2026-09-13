@@ -122,12 +122,17 @@ pub(crate) enum Content {
 /// absence is the measurement.** There was one, justified by
 /// `size_of::<Decoration>()` being 248; a decoration then became a *list* of
 /// layers, its scene and its backing moved behind that list's pointer, and it
-/// is now **104 bytes** — under clippy's 200-byte threshold, so the lint does
+/// is now **112 bytes** — under clippy's 200-byte threshold, so the lint does
 /// not fire at all and an `#[expect]` for it is an unfulfilled expectation and
 /// a warning of its own. The niche is unchanged and still load-bearing, which
 /// is what `a_frame_costs_what_the_decoration_in_it_costs` pins: a `Vec`'s
 /// pointer is non-null, so the discriminant still lands inside the payload and
-/// `Frame` is 104 as well. `Pane` is 704.
+/// `Frame` is 112 as well. `Pane` is 712.
+///
+/// Those three literals have gone stale once already — bleed put the pane's
+/// size into `Shown`, eight bytes, and all three moved together. They are here
+/// to give the threshold a scale and nothing depends on them, which is why the
+/// test is a relation and not two numbers.
 #[derive(Debug, Default)]
 pub(crate) enum Frame {
     /// A client is still coming, or its frame has not been built yet. Keep
@@ -147,8 +152,8 @@ pub(crate) enum Frame {
     /// clothes — and it leaves when the pane does, which is the table
     /// reconciliation this whole change exists to delete.
     ///
-    /// Not boxed. Measured: `size_of::<Decoration>()` is 104 and `Frame` with
-    /// this arm inline is also 104, because the discriminant lands in a niche.
+    /// Not boxed. Measured: `size_of::<Decoration>()` is 112 and `Frame` with
+    /// this arm inline is also 112, because the discriminant lands in a niche.
     /// A `Box` here buys an allocation per decorated window and saves nothing —
     /// and a decoration's own scenes are already behind one pointer, since a
     /// style is a `Vec` of layers.
@@ -1079,8 +1084,9 @@ mod tests {
     /// false number attached is worse than one with no reason at all.
     ///
     /// Written as a relation rather than as two literals on purpose. The
-    /// numbers move whenever anything in a decoration moves, and the fact worth
-    /// keeping is not that they are 104 but that they are *equal*: the
+    /// numbers move whenever anything in a decoration moves — they already have
+    /// once, 104 to 112, when bleed put the pane's size into `Shown` — and the
+    /// fact worth keeping is not what they are but that they are *equal*: the
     /// discriminant lands in a niche inside the payload, so the three-armed
     /// enum is free relative to the one arm that carries anything. Lose the
     /// niche and this fails, which is exactly when boxing would be worth
