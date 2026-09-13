@@ -34,29 +34,42 @@ Item {
     property int bleedLeft: 0
     property int bleedTop: 0
 
-    // --- the shape -------------------------------------------------------
-    // How far the trough of the wave sits outside the pane, and how far the
-    // crest rides beyond that. `rest + swell` must stay under the bleed
-    // Pane.qml declared, because bleed is a hard clip.
-    readonly property real rest: 16
-    readonly property real swell: 13
-    readonly property real corner: 34
-
-    // Whole periods around the loop, so the curve meets itself. A fraction
-    // leaves a step where the last point joins the first.
-    readonly property int periods: 22
-
-    // Points per period. A sine reads as smooth from about eight; every point
-    // past that is one more vertex to walk on every frame of the animation.
+    // How smooth each curve is. A sine reads as smooth from about eight points
+    // per period; every point past that is another vertex walked every frame.
     readonly property int perPeriod: 10
 
-    property real phase: 0
-    NumberAnimation on phase {
-        running: ring.focused
-        loops: Animation.Infinite
-        from: 0
-        to: 2 * Math.PI
-        duration: 6000
+    // How far the corners are rounded before the wave is added.
+    readonly property real corner: 34
+
+    // --- where the wave comes from ---------------------------------------
+    // Live levels, one per bar, each -1..1. Empty means nothing is feeding
+    // this and the rings fall back to a plain travelling sine, which is the
+    // state on a machine with no audio source wired up -- so a style is never
+    // a blank window because a helper is not running.
+    //
+    // This is the seam an audio visualiser plugs into: the shape does not care
+    // whether a number came from `Math.sin` or from a spectrum, so wiring one
+    // up changes what fills this list and nothing else in the file.
+    property var levels: []
+
+    // The wave's height at `t` (0..1) round the loop.
+    //
+    // `periods` must be a whole number in the fallback, or the sine does not
+    // close on itself and there is a visible step where the curve meets its
+    // own start.
+    function height_at(t, periods, phase) {
+        const bars = ring.levels.length;
+        if (bars === 0) {
+            return Math.sin(t * periods * 2 * Math.PI + phase);
+        }
+        // Sampled around the loop and wrapped, so the first and last bar are
+        // neighbours rather than a cut -- the loop has no ends to be an edge.
+        const at = t * bars + phase * bars / (2 * Math.PI);
+        const i = Math.floor(at);
+        const f = at - i;
+        const a = ring.levels[((i % bars) + bars) % bars];
+        const b = ring.levels[(((i + 1) % bars) + bars) % bars];
+        return a + (b - a) * f;
     }
 
     // A point `t` (0..1) of the way round a rounded rectangle by arc length,
@@ -109,35 +122,69 @@ Item {
                         y + r - (r + out) * Math.sin(a));
     }
 
-    Shape {
-        anchors.fill: parent
-        // Antialiasing on the one curve that has to look drawn rather than
-        // stepped; there is a single path here, so it is paid once.
-        antialiasing: true
+    // --- the rings -------------------------------------------------------
+    // Outermost first, so each is painted over by the next and what remains
+    // visible is the band between them. The client covers the innermost part,
+    // which is why none of them needs a hole cut in it.
+    //
+    // Three rings in ONE scene, not three layers. A layer exists so the
+    // *client* can sit between two things; these all sit behind it, so three
+    // scenes would be three textures and three uploads buying nothing. Moving
+    // one to `depth: "above"` in Pane.qml is what layering buys, and it is one
+    // line when a style wants it.
+    readonly property var rings: [
+        { reach: 30, swell: 15, periods: 18, duration: 7400, ink: Theme.text },
+        { reach: 20, swell: 12, periods: 22, duration: 5600, ink: Theme.accent },
+        { reach: 10, swell: 8,  periods: 26, duration: 4300, ink: Theme.edge }
+    ]
 
-        ShapePath {
-            fillColor: ring.focused ? Theme.text : Theme.edgeInactive
-            strokeWidth: -1
+    Repeater {
+        model: ring.rings.length
 
-            PathPolyline {
-                path: {
-                    const points = [];
-                    const steps = ring.periods * ring.perPeriod;
-                    const x = ring.bleedLeft;
-                    const y = ring.bleedTop;
-                    const w = ring.paneWidth;
-                    const h = ring.paneHeight;
-                    const r = Math.min(ring.corner, w / 2, h / 2);
-                    for (let i = 0; i < steps; ++i) {
-                        const t = i / steps;
-                        const out = ring.rest + ring.swell
-                            * Math.sin(t * ring.periods * 2 * Math.PI + ring.phase);
-                        points.push(ring.ringPoint(t, x, y, w, h, r, out));
+        Shape {
+            id: band
+            required property int index
+            readonly property var spec: ring.rings[index]
+
+            anchors.fill: parent
+            // One curve per ring, so the cost of asking for a drawn edge
+            // rather than a stepped one is paid three times, not per point.
+            antialiasing: true
+
+            // Each ring travels at its own rate, so the three drift apart
+            // instead of moving as one rigid outline.
+            property real phase: 0
+            NumberAnimation on phase {
+                running: ring.focused
+                loops: Animation.Infinite
+                from: 0
+                to: 2 * Math.PI
+                duration: band.spec.duration
+            }
+
+            ShapePath {
+                fillColor: ring.focused ? band.spec.ink : Theme.edgeInactive
+                strokeWidth: -1
+
+                PathPolyline {
+                    path: {
+                        const points = [];
+                        const spec = band.spec;
+                        const steps = spec.periods * ring.perPeriod;
+                        const x = ring.bleedLeft;
+                        const y = ring.bleedTop;
+                        const w = ring.paneWidth;
+                        const h = ring.paneHeight;
+                        const r = Math.min(ring.corner, w / 2, h / 2);
+                        for (let i = 0; i < steps; ++i) {
+                            const t = i / steps;
+                            const out = spec.reach + spec.swell
+                                * ring.height_at(t, spec.periods, band.phase);
+                            points.push(ring.ringPoint(t, x, y, w, h, r, out));
+                        }
+                        points.push(points[0]);
+                        return points;
                     }
-                    // Closed: the first point again, which the whole-number
-                    // period count has already made the same height.
-                    points.push(points[0]);
-                    return points;
                 }
             }
         }
