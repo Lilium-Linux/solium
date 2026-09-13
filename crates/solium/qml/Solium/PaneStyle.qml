@@ -22,6 +22,12 @@
 //
 // `style::load` reads `insets`, `requires` and the Layer children; `client` is
 // still reserved and read by nobody.
+//
+// The same file is loaded twice over, for two different jobs. As a *manifest*
+// it is built at 1x1, asked what it declares and never drawn — `layerIndex`
+// stays -1 and nothing in it is parented. As a *layer* it is built once more
+// per inline layer, with `layerIndex` set to the one it is drawing, and that
+// instance is a real scene that really renders. See `showOneLayer` below.
 
 import QtQuick
 
@@ -64,7 +70,74 @@ Item {
     //
     // A `list<Item>` and the default property, so layers are written as plain
     // children. Note that items assigned to a list property are *not* parented
-    // — `style.children` stays empty — which is correct here: a `PaneStyle` is
-    // a manifest and is never itself drawn.
+    // — `style.children` stays empty — which is correct for a manifest, and is
+    // why `showOneLayer` has to parent rather than merely show.
     default property list<Item> layers
+
+    // Which of the layers above this instance is drawing. -1 is the manifest.
+    //
+    // Set by the compositor at creation, through `createWithInitialProperties`,
+    // so it is already right when `Component.onCompleted` runs. An inline layer
+    // has no file of its own, so its scene *is* this file loaded again with
+    // this property pointing at one child.
+    property int layerIndex: -1
+
+    // What the compositor tells a frame about the window it belongs to.
+    //
+    // Declared here so an inline layer can bind to them — `Frame.qml` in a
+    // bundle declares the same five for the same reason, since a delegated
+    // layer is its own scene with no parent to read them off. `Decoration::tell`
+    // writes all five on every layer of a style, whichever way it was written.
+    property string title: ""
+    property bool focused: false
+    property bool pointerInside: false
+    property int contentWidth: 0
+    property int contentHeight: 0
+
+    // And the two that go the other way: what a button under the pointer says
+    // about itself, and what it asked for. The compositor reads `onButton` and
+    // *takes* `action`, clearing it — see `Decoration::take_action`.
+    property bool onButton: false
+    property string action: ""
+
+    Component.onCompleted: style.showOneLayer()
+    onLayerIndexChanged: style.showOneLayer()
+
+    // Put the one layer this scene was built for into the scene graph.
+    //
+    // **Driven from here, down.** The obvious spelling is a `visible:` binding
+    // on `Layer` asking its parent which index it is, and it is a measured
+    // no-op: an item assigned to a `list<Item>` gets a QObject parent and not a
+    // visual one, and QML's `parent` is `parentItem()` — so `parent` is null
+    // for every layer in here, the binding is always true, and every inline
+    // layer would draw its siblings. Measured on these very types: `layers` 3,
+    // `children` 0.
+    //
+    // Which is also why this *parents* rather than only setting `visible`.
+    // Nothing in `layers` is in the scene graph at all until something puts it
+    // there, so hiding the other two would still leave this scene drawing
+    // nothing; and parenting all three would draw all three into every layer's
+    // scene, which is a client sandwiched between two copies of one picture.
+    //
+    // Anchored to fill, so `anchors.fill: parent` inside a layer resolves to
+    // the canvas the compositor sized this scene to.
+    function showOneLayer() {
+        // A manifest. `style::load` builds one at 1x1, reads what it declares
+        // and drops it, so there is nothing to put on screen and nothing here
+        // should touch the layers it is about to be asked about.
+        if (style.layerIndex < 0) {
+            return;
+        }
+        for (let i = 0; i < style.layers.length; ++i) {
+            const layer = style.layers[i];
+            if (i !== style.layerIndex) {
+                layer.visible = false;
+                layer.parent = null;
+                continue;
+            }
+            layer.visible = true;
+            layer.parent = style;
+            layer.anchors.fill = style;
+        }
+    }
 }

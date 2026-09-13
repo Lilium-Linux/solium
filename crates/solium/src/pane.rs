@@ -117,18 +117,18 @@ pub(crate) enum Content {
 /// `Decorations` is down to the style a script chose and the code that builds a
 /// [`crate::decoration::Decoration`] from it; what it builds it hands to the
 /// pane. See `docs/superpowers/plans/2026-09-12-pane-ownership.md`.
+///
+/// **There is no `large_enum_variant` suppression on this any more, and its
+/// absence is the measurement.** There was one, justified by
+/// `size_of::<Decoration>()` being 248; a decoration then became a *list* of
+/// layers, its scene and its backing moved behind that list's pointer, and it
+/// is now **104 bytes** — under clippy's 200-byte threshold, so the lint does
+/// not fire at all and an `#[expect]` for it is an unfulfilled expectation and
+/// a warning of its own. The niche is unchanged and still load-bearing, which
+/// is what `a_frame_costs_what_the_decoration_in_it_costs` pins: a `Vec`'s
+/// pointer is non-null, so the discriminant still lands inside the payload and
+/// `Frame` is 104 as well. `Pane` is 704.
 #[derive(Debug, Default)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "the `Box` it suggests is measured and rejected. `size_of::<Decoration>()` \
-              is 248 and this enum is 248 as well, because the discriminant lands in a \
-              niche inside it -- so inlining is free relative to the decoration itself, \
-              and boxing buys a heap allocation per decorated window and a pointer chase \
-              on every access in order to save nothing. There is one of these per pane, \
-              and the only place panes are moved in bulk is `Panes::sync`, once a frame: \
-              800 bytes per pane rather than 568, or 16 KB of memcpy per frame at twenty \
-              windows instead of 11 KB."
-)]
 pub(crate) enum Frame {
     /// A client is still coming, or its frame has not been built yet. Keep
     /// reserving the insets a frame will want, or the window jumps when it
@@ -147,9 +147,11 @@ pub(crate) enum Frame {
     /// clothes — and it leaves when the pane does, which is the table
     /// reconciliation this whole change exists to delete.
     ///
-    /// Not boxed. Measured: `size_of::<Decoration>()` is 248 and `Frame` with
-    /// this arm inline is also 248, because the discriminant lands in a niche.
-    /// A `Box` here buys an allocation per decorated window and saves nothing.
+    /// Not boxed. Measured: `size_of::<Decoration>()` is 104 and `Frame` with
+    /// this arm inline is also 104, because the discriminant lands in a niche.
+    /// A `Box` here buys an allocation per decorated window and saves nothing —
+    /// and a decoration's own scenes are already behind one pointer, since a
+    /// style is a `Vec` of layers.
     Styled(crate::decoration::Decoration),
 }
 
@@ -1066,5 +1068,32 @@ mod tests {
             Duration::ZERO,
         );
         assert!(!pane.awaits(&[1, 2, 3]));
+    }
+
+    /// **A `Frame` costs what the decoration inside it costs, and not a byte
+    /// more.**
+    ///
+    /// The claim the `#[expect(clippy::large_enum_variant)]` on `Frame` used to
+    /// carry in prose, asserted instead — because that comment's number went
+    /// stale the moment a `Decoration` changed shape, and a suppression with a
+    /// false number attached is worse than one with no reason at all.
+    ///
+    /// Written as a relation rather than as two literals on purpose. The
+    /// numbers move whenever anything in a decoration moves, and the fact worth
+    /// keeping is not that they are 104 but that they are *equal*: the
+    /// discriminant lands in a niche inside the payload, so the three-armed
+    /// enum is free relative to the one arm that carries anything. Lose the
+    /// niche and this fails, which is exactly when boxing would be worth
+    /// re-arguing.
+    #[test]
+    fn a_frame_costs_what_the_decoration_in_it_costs() {
+        assert_eq!(
+            size_of::<Frame>(),
+            size_of::<crate::decoration::Decoration>(),
+            "`Frame::Styled` stopped fitting its discriminant into a niche, so \
+             a pane now pays for the tag as well as for the decoration -- and \
+             the case for boxing, which was rejected on these two numbers being \
+             equal, is worth making again"
+        );
     }
 }

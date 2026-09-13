@@ -29,7 +29,7 @@ use smithay::{
     wayland::compositor::with_states,
 };
 
-use crate::{layer, pane::Pane, present, state::Solium};
+use crate::{layer, pane::Pane, present, state::Solium, style::Depth};
 
 render_elements! {
     /// Everything Solium can draw.
@@ -290,14 +290,62 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
 /// Topmost first is what the damage tracker expects; getting it backwards
 /// composites the stack upside down, which looks like a stacking bug rather
 /// than an ordering one.
-/// The frame around a pane, whatever is inside it.
+/// One piece of a pane, in the order it goes into the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Piece {
+    /// The style's layers at one depth, topmost first.
+    Layers(Depth),
+    /// The client's own surface and the popups above it — or, for a pane whose
+    /// application has not arrived, the scene standing in for one.
+    Client,
+}
+
+/// A pane's pieces, topmost first: `above`, `frame`, the client, `behind`.
 ///
-/// Takes the pane's whole `Frame` rather than a rect and an alpha, and that is
-/// deliberate: every piece of a window — the client's surface, its popups, its
-/// frame, the scene standing in for it — is drawn from the *pane's* transform,
-/// so none of them can be given the wrong one or miss one of its parts. The
-/// frame did miss the opacity, and a window closing faded away underneath a
-/// titlebar that stayed perfectly solid.
+/// **The order is stated here and nowhere else.** It is the whole point of the
+/// feature — a client's surface sitting *between* two layers the same style
+/// produced is the one thing a single QML file cannot do — and it is also the
+/// easiest thing in it to get wrong by half a list, in a way that reads as a
+/// stacking bug rather than an ordering one. The pane's own position among the
+/// other panes is untouched: this is only what happens inside one of them.
+///
+/// Three walks read it: `elements` for a live client, `elements` again for a
+/// pane still showing the compositor's own scene, and [`flat_window_elements`]
+/// for the offscreen pass a deformed window is drawn through. A tilted window
+/// has to carry its layers in the order it would have had flat, which is the
+/// second reason this is one array rather than three sequences of calls.
+pub(crate) const PANE_ORDER: [Piece; 4] = [
+    Piece::Layers(Depth::Above),
+    Piece::Layers(Depth::Frame),
+    Piece::Client,
+    Piece::Layers(Depth::Behind),
+];
+
+/// Walk one pane's pieces in the order they go into the frame.
+///
+/// Generic over what a piece produces, and taking the list to push into rather
+/// than returning one, for two separate reasons. The first is cost: the
+/// identity case has to stay exactly what a decoration costs today, and a `Vec`
+/// returned per depth per pane per frame is an allocation that did not exist
+/// before. The second is that the compositor's own walk can then be *driven* by
+/// a test with no renderer and no GPU — the same [`PANE_ORDER`], the same
+/// `Decoration`, and a closure that records a layer's name instead of building
+/// an element out of it.
+pub(crate) fn pane_pieces<T>(into: &mut Vec<T>, mut piece: impl FnMut(&mut Vec<T>, Piece)) {
+    for each in PANE_ORDER {
+        piece(into, each);
+    }
+}
+
+/// The frame around a pane, at one depth.
+///
+/// Takes the pane's whole transform — through [`crate::decoration::Drawing`] —
+/// rather than a rect and an alpha, and that is deliberate: every piece of a
+/// window — the client's surface, its popups, its layers, the scene standing in
+/// for it — is drawn from the *pane's* transform, so none of them can be given
+/// the wrong one or miss one of its parts. The frame did miss the opacity, and
+/// a window closing faded away underneath a titlebar that stayed perfectly
+/// solid.
 ///
 /// Drawn whenever there is a decoration at all, not only when it reserved
 /// space: a frame that takes nothing and floats over the window — a bar that
@@ -309,9 +357,8 @@ fn chrome(
     renderer: &mut GlesRenderer,
     elements: &mut Vec<Element>,
     pane: crate::pane::PaneId,
-    frame: present::Frame,
-    outer: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
-    scale: f64,
+    depth: Depth,
+    drawing: crate::decoration::Drawing,
 ) {
     let title = state.pane_title(pane);
     let look = crate::decoration::Look {
@@ -323,23 +370,14 @@ fn chrome(
     };
     let mut animating = false;
     if let Some(decoration) = state.panes.get_mut(pane).and_then(Pane::decoration_mut) {
-        // Already an `Element`: a frame is a memory buffer on the software
-        // path and a texture on the GPU one, and which of the two it is is the
+        // Already `Element`s: a layer is a memory buffer on the software path
+        // and a texture on the GPU one, and which of the two it is is the
         // decoration's own business rather than this function's.
         //
-        // And already an answer about whether it is still moving, out of the
+        // And already an answer about whether they are still moving, out of the
         // same call: asking afterwards is asking the flag the draw just spent.
         // See [`Drawn`].
-        let drawn = decoration.frame(
-            renderer,
-            frame.rect,
-            outer.size,
-            &look,
-            frame.opacity,
-            scale,
-        );
-        elements.extend(drawn.element);
-        animating = drawn.animating;
+        animating = decoration.layer_elements(renderer, depth, &look, drawing, elements);
     }
     // Ask for another frame while the decoration is still moving. The client
     // has not damaged anything, so without this the next frame never comes and
@@ -656,6 +694,13 @@ pub(crate) fn elements(
             continue;
         }
         frame.rect = onto(frame.rect);
+        // Where this pane's layers go, computed once for all three depths.
+        let drawing = crate::decoration::Drawing {
+            rect: frame.rect,
+            outer: outer.size,
+            alpha: frame.opacity,
+            scale,
+        };
         // The frame's share, in drawn pixels: a transform that scaled the
         // window scaled its frame with it.
         let insets = state.insets_of(pane);
@@ -677,10 +722,17 @@ pub(crate) fn elements(
         // already carries the name says it twice, so that is a setting and it
         // is off.
         if ours {
-            if state.loading.decorated {
-                chrome(state, renderer, &mut elements, pane, frame, outer, scale);
-            }
-            scene(state, renderer, &mut elements, pane, frame, now, scale);
+            // Through `PANE_ORDER` as well, so a pane waiting for its
+            // application is layered the same way it will be once it arrives:
+            // an `above` layer covers the standing-in scene exactly as it will
+            // cover the client, and the handover does not restack anything.
+            pane_pieces(&mut elements, |elements, piece| match piece {
+                Piece::Layers(depth) if state.loading.decorated => {
+                    chrome(state, renderer, elements, pane, depth, drawing);
+                }
+                Piece::Layers(_) => (),
+                Piece::Client => scene(state, renderer, elements, pane, frame, now, scale),
+            });
             continue;
         }
 
@@ -725,15 +777,6 @@ pub(crate) fn elements(
             continue;
         }
 
-        // The frame covers the whole window, not a strip of it: whatever it
-        // does not draw on is left transparent, and that is what lets a
-        // decoration put its bar on any side, or draw a border, or both.
-        // Drawn whenever there is a decoration at all, not only when it
-        // reserved space: a frame that takes nothing and floats over the
-        // window -- a bar that appears on hover, a border that does not push
-        // the client around -- is a decoration too.
-        chrome(state, renderer, &mut elements, pane, frame, outer, scale);
-
         // What is left of the drawn rect once the frame has taken its share is
         // the client's.
         let client = present::logical(
@@ -752,42 +795,64 @@ pub(crate) fn elements(
             ratio(client.size.h, real.size.h),
         ));
 
-        // Popups first: they are above the window they belong to.
-        if let Some(surface) = window
-            .toplevel()
-            .map(|toplevel| toplevel.wl_surface().clone())
-        {
-            for (popup, offset) in PopupManager::popups_for_surface(&surface) {
-                let popup_origin =
-                    origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
-                let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                    render_elements_from_surface_tree(
-                        renderer,
-                        popup.wl_surface(),
-                        popup_origin,
-                        output_scale,
-                        frame.opacity,
-                        Kind::Unspecified,
-                    );
-                elements.extend(popup_elements.into_iter().map(|element| {
+        // **This is the sandwich.** The client goes into the list between the
+        // layers its own style produced -- `above` and `frame` are already in
+        // by the time `Piece::Client` comes round, and `behind` follows it --
+        // which is the thing a single decoration file cannot express. The order
+        // is `PANE_ORDER`'s and is not restated here.
+        //
+        // A layer covers the whole window rather than a strip of it: whatever
+        // it does not draw on is left transparent, which is what lets a
+        // decoration put its bar on any side, or draw a border, or both. Drawn
+        // whenever there is a decoration at all, not only when it reserved
+        // space: a frame that takes nothing and floats over the window -- a bar
+        // that appears on hover, a border that does not push the client around
+        // -- is a decoration too.
+        pane_pieces(&mut elements, |elements, piece| match piece {
+            Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
+            Piece::Client => {
+                // Popups first: they are above the window they belong to.
+                if let Some(surface) = window
+                    .toplevel()
+                    .map(|toplevel| toplevel.wl_surface().clone())
+                {
+                    for (popup, offset) in PopupManager::popups_for_surface(&surface) {
+                        let popup_origin = origin
+                            + (offset - popup.geometry().loc).to_physical_precise_round(scale);
+                        let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                            render_elements_from_surface_tree(
+                                renderer,
+                                popup.wl_surface(),
+                                popup_origin,
+                                output_scale,
+                                frame.opacity,
+                                Kind::Unspecified,
+                            );
+                        elements.extend(popup_elements.into_iter().map(|element| {
+                            Element::Window(RescaleRenderElement::from_element(
+                                element, origin, factor,
+                            ))
+                        }));
+                    }
+                }
+
+                // A surface's top-left is not the window's. A client that draws
+                // its own decorations puts its drop shadow *outside* the window
+                // geometry and tells us so through `set_window_geometry`;
+                // drawing the surface at the window's position therefore lands
+                // the shadow where the window should be and pushes the window
+                // itself down and right by the shadow's width. That is what
+                // made Firefox look both misplaced and shadowed. Popups already
+                // did this; toplevels did not.
+                let surface_origin =
+                    origin - window.geometry().loc.to_physical_precise_round(scale);
+                let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                    window.render_elements(renderer, surface_origin, output_scale, frame.opacity);
+                elements.extend(window_elements.into_iter().map(|element| {
                     Element::Window(RescaleRenderElement::from_element(element, origin, factor))
                 }));
             }
-        }
-
-        // A surface's top-left is not the window's. A client that draws its own
-        // decorations puts its drop shadow *outside* the window geometry and
-        // tells us so through `set_window_geometry`; drawing the surface at the
-        // window's position therefore lands the shadow where the window should
-        // be and pushes the window itself down and right by the shadow's width.
-        // That is what made Firefox look both misplaced and shadowed. Popups
-        // already did this; toplevels did not.
-        let surface_origin = origin - window.geometry().loc.to_physical_precise_round(scale);
-        let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-            window.render_elements(renderer, surface_origin, output_scale, frame.opacity);
-        elements.extend(window_elements.into_iter().map(|element| {
-            Element::Window(RescaleRenderElement::from_element(element, origin, factor))
-        }));
+        });
     }
 
     // Scripted surfaces at the bottom layer: under the windows, over the
@@ -1016,39 +1081,23 @@ pub(crate) fn flat_window_elements(
     };
     let insets = state.frame_insets(window);
     let output_scale = Scale::from(scale);
+    let Some(pane) = state.panes.id_of(window) else {
+        return elements;
+    };
 
-    // The frame, over the whole texture.
-    {
-        let title = state.window_title(window);
-        let look = crate::decoration::Look {
-            title: &title,
-            focused: state.is_focused(window),
-            pointer_inside: state.pointer_inside(window),
-        };
-        let whole = present::logical(
+    // Fully opaque, and over the whole texture: this pass draws the window flat
+    // at its real size and the warp applies the transform's opacity to the
+    // whole texture afterwards, so applying it here as well would fade the
+    // frame squared.
+    let drawing = crate::decoration::Drawing {
+        rect: present::logical(
             (0.0, 0.0),
             (f64::from(outer.size.w), f64::from(outer.size.h)),
-        );
-        if let Some(id) = state.panes.id_of(window)
-            && let Some(decoration) = state.panes.get_mut(id).and_then(Pane::decoration_mut)
-        {
-            // Fully opaque here: this pass draws the window flat into a
-            // texture at its real size, and the warp applies the transform's
-            // opacity to the whole texture afterwards. Applying it twice would
-            // fade the frame squared.
-            let drawn = decoration.frame(renderer, whole, outer.size, &look, 1.0, scale);
-            elements.extend(drawn.element);
-            // And this pass owes the next frame just as `chrome` does. It is
-            // the *only* one that does for a deformed window: this is the draw
-            // that spends the scene's flag, and `chrome` skips a window that
-            // came through here. A window left tilted by a script is not
-            // animating in the compositor's sense and nothing else is asking,
-            // so without this a pulse inside a tilted window stops dead.
-            if drawn.animating {
-                state.redraw = true;
-            }
-        }
-    }
+        ),
+        outer: outer.size,
+        alpha: 1.0,
+        scale,
+    };
 
     // The client within it.
     let origin = present::logical(
@@ -1058,29 +1107,38 @@ pub(crate) fn flat_window_elements(
     .loc
     .to_physical_precise_round(scale);
 
-    if let Some(surface) = window
-        .toplevel()
-        .map(|toplevel| toplevel.wl_surface().clone())
-    {
-        for (popup, offset) in PopupManager::popups_for_surface(&surface) {
-            let popup_origin =
-                origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
-            let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                render_elements_from_surface_tree(
-                    renderer,
-                    popup.wl_surface(),
-                    popup_origin,
-                    output_scale,
-                    1.0,
-                    Kind::Unspecified,
-                );
-            elements.extend(popup_elements.into_iter().map(Element::Window2));
-        }
-    }
+    // The same `PANE_ORDER` a flat window goes through, so a tilted window
+    // carries its layers in the order it would have had standing still. A
+    // second sequence of calls here is how a deformed window would come to have
+    // its `above` layer underneath its client.
+    pane_pieces(&mut elements, |elements, piece| match piece {
+        Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
+        Piece::Client => {
+            if let Some(surface) = window
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface().clone())
+            {
+                for (popup, offset) in PopupManager::popups_for_surface(&surface) {
+                    let popup_origin =
+                        origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
+                    let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                        render_elements_from_surface_tree(
+                            renderer,
+                            popup.wl_surface(),
+                            popup_origin,
+                            output_scale,
+                            1.0,
+                            Kind::Unspecified,
+                        );
+                    elements.extend(popup_elements.into_iter().map(Element::Window2));
+                }
+            }
 
-    let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-        window.render_elements(renderer, origin, output_scale, 1.0);
-    elements.extend(window_elements.into_iter().map(Element::Window2));
+            let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                window.render_elements(renderer, origin, output_scale, 1.0);
+            elements.extend(window_elements.into_iter().map(Element::Window2));
+        }
+    });
     elements
 }
 
