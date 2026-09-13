@@ -67,6 +67,18 @@ promised; it still exists with one field.
 **Task 5** — `Solium::damage_for` does not exist; the path is
 `self.drawn(id, pane_outer)` at `state.rs:904`. The point stands.
 
+> **Both halves of that were wrong, corrected while doing Task 5.**
+> `state.rs:904` is inside `Solium::aimed_at` and resolves a *deform anchor*; it
+> has nothing to do with damage. And there is no pane-level damage computation
+> anywhere in this compositor — damage is derived entirely from element
+> geometries, by `OutputDamageTracker::render_output` on the winit path and
+> `DrmCompositor::render_frame` on the TTY one, and nothing here adds a rect of
+> its own. So "damage includes the bleed" *is* "the element's geometry is the
+> canvas", which is what `decoration::Spread::drawn` is. The one place a pane's
+> own rectangle did stand between a layer and the screen is the off-screen cull
+> in `render::elements`, which now tests the widest layer's reach. See
+> `task-5-report.md`.
+
 **Task 6** — clean. `insets_of` is now a match on `pane.frame()`, which makes
 the invariant easier to hold than when this was written.
 
