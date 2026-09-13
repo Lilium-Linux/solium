@@ -40,6 +40,7 @@
 //! ```
 
 pub mod ffi;
+pub mod fragment;
 
 /// A rectangle, in whatever coordinates the caller is using.
 ///
