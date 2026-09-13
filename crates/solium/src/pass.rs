@@ -40,10 +40,23 @@ use solium_effects::fragment::{Effect, Inputs, RADIUS_UNIFORM, ROUNDED_CORNERS, 
     )
 )]
 pub(crate) fn needs_pass(effects: &[Effect]) -> Option<Effect> {
-    effects
-        .iter()
-        .copied()
-        .find(|effect| !effect.is_none_effect() && effect.inputs() == Inputs::SelfTexture)
+    effects.iter().copied().find(|effect| {
+        !effect.is_none_effect()
+                // Spelled out rather than `== Inputs::SelfTexture`, and the
+                // difference is the whole point: `Inputs` is not
+                // `#[non_exhaustive]`, so an equality test lets a future effect
+                // declaring `Backdrop` compile here and be silently skipped --
+                // which is precisely the "blur renders as no blur and nobody
+                // reports it" failure `fragment::Inputs::Backdrop` warns about.
+                // A match makes that a compile error on this line instead, for
+                // the same discriminant compare and no extra branch. It is the
+                // mechanism the three `expect(dead_code)` markers in this file
+                // already rely on: put the tripwire where the change happens.
+                && match effect.inputs() {
+                    Inputs::SelfTexture => true,
+                    Inputs::Nothing | Inputs::Backdrop => false,
+                }
+    })
 }
 
 /// The compiled fragment programs, one of each, for the life of the renderer.
@@ -57,10 +70,16 @@ pub(crate) fn needs_pass(effects: &[Effect]) -> Option<Effect> {
 /// down because it is not obvious from the call site.** Two things hold it:
 ///
 /// * It cannot run inside a live `GlesFrame`. `GlesFrame` holds
-///   `&'frame mut GlesRenderer` (smithay `gles/mod.rs:328`), so `&mut
+///   `&'frame mut GlesRenderer` (smithay `gles/mod.rs:329`), so `&mut
 ///   GlesRenderer` in this signature is a borrow the frame already has. The
 ///   invariant `qml::no_frame_in_flight` states by convention is, for this one
 ///   call, a compile error -- which is why there is no runtime assertion here.
+///   And it cannot be shortened away: `GlesFrame` has a `Drop` impl (`gles/
+///   mod.rs:2966`), so the borrow lives to the end of the frame's scope rather
+///   than to its last use. Checked by construction, not by reading -- a probe
+///   call in `offscreen.rs`'s live-frame arm gives `error[E0499]: cannot
+///   borrow *renderer as mutable more than once`, and the compiler names the
+///   destructor as the reason.
 /// * Between frames it is one more ordinary `GlesRenderer` entry point.
 ///   `import_dmabuf`, `bind`, `render` and `wait` all `make_current` the same
 ///   way, on every frame, and Qt's belief is corrected on the way *in* to Qt
@@ -160,5 +179,20 @@ mod tests {
     fn a_none_effect_does_not_hide_the_one_behind_it() {
         let rounded = Effect::rounded(8.0);
         assert_eq!(needs_pass(&[Effect::rounded(0.0), rounded]), Some(rounded));
+    }
+
+    /// And of two that both want one, the FIRST wins -- which the doc on
+    /// `needs_pass` claims and nothing pinned.
+    ///
+    /// `.rev().find(..)` -- last-effect-wins -- passes every other test in this
+    /// module, so without this the doc was a promise the code was free to
+    /// break. It cannot be reached from `style::load` today, which pushes at
+    /// most one effect; it is pinned because the doc says it, and a claim
+    /// nothing can violate is the defect this plan has already removed twice.
+    #[test]
+    fn of_two_effects_that_both_want_a_pass_the_first_wins() {
+        let first = Effect::rounded(4.0);
+        let second = Effect::rounded(12.0);
+        assert_eq!(needs_pass(&[first, second]), Some(first));
     }
 }
