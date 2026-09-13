@@ -168,7 +168,13 @@ pub(crate) struct Style {
     /// would be three answers to one question.
     pub(crate) insets: Insets,
     pub(crate) layers: Vec<LayerSpec>,
-    /// The effects this style runs on the client, in declaration order.
+    /// The effects this style runs on the client.
+    ///
+    /// A `Vec` holding at most one thing today, because `client.radius` is the
+    /// only key that makes one. There is deliberately no promise here about
+    /// what order means: whoever adds the second key is who finds out whether
+    /// two effects compose, and is the first person able to write a test that
+    /// an ordering claim could fail.
     ///
     /// Empty is the ordinary case and the one worth protecting: an effect
     /// declaring `self` costs an offscreen pass per frame, so a list that is
@@ -472,16 +478,15 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
     }
 
     // `client.radius` has been read by `get_int` and consumed by nothing since
-    // the group work landed; this is what consumes it. Through the same
-    // `QQmlProperty` path the insets take, because `QObject::property` takes a
-    // name and not a path -- `scene.get_int("client.radius")` silently
-    // returning 0 for every style is a bug this codebase has already shipped
-    // once.
+    // the group work landed; this is what consumes it. Through `get_int` and
+    // its dotted path, for the reason set out on the insets below.
     //
     // Not clamped here. `is_none_effect` is the one thing that decides what a
-    // radius that is not a radius means -- zero, negative, or NaN -- and a
-    // `.max(0)` in front of it would be a second answer to that question in a
-    // second place, agreeing today and free to drift.
+    // radius that is not a radius means -- zero or negative -- and a `.max(0)`
+    // in front of it would be a second answer to that question in a second
+    // place, agreeing today and free to drift. Its third case, NaN, cannot
+    // arrive down this path at all: `get_int` is an `i32` and `f64::from` of
+    // one is total.
     let mut effects = Vec::new();
     let rounded =
         solium_effects::fragment::Effect::rounded(f64::from(scene.get_int("client.radius")));
@@ -493,7 +498,10 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
         // Dotted paths, which is the whole of what `host.cpp` had to learn:
         // `insets` is a grouped property, so it is a child object held in a
         // property and `QObject::property("insets.top")` finds nothing and
-        // reads back 0. See `solium_qml_scene_get_int`.
+        // reads back 0 -- which this codebase shipped once, as a style
+        // reserving space at the top read back as reserving none. See
+        // `solium_qml_scene_get_int`, and `client.radius` above, which is a
+        // grouped property too and is read the same way for the same reason.
         insets: Insets {
             top: scene.get_int("insets.top").max(0),
             right: scene.get_int("insets.right").max(0),
@@ -623,7 +631,12 @@ mod tests {
     /// So the four sides carry four *different* non-zero values, which also
     /// catches the version of this where the sides are read in the wrong order.
     /// `client.shadow.blur` is here because it is two levels deep and the spec
-    /// writes it that way; nothing reads `client` in anger yet.
+    /// writes it that way, and nothing reads it.
+    ///
+    /// `client.radius: 5` is *not* decoration, and deleting it would quietly
+    /// narrow this test: `load` turns a non-zero one into an `Effect`, so it
+    /// is a live read through the same dotted path. What it becomes is pinned
+    /// next door, in `a_declared_radius_becomes_an_effect`.
     #[test]
     fn a_grouped_property_is_read_through_its_group() {
         on_the_qt_thread(|| {
@@ -747,7 +760,10 @@ mod tests {
                 "#,
             );
             let style = load(&dir).expect("the fixture loads");
-            assert!(style.effects.is_empty());
+            assert!(
+                style.effects.is_empty(),
+                "a style that never mentions `client` runs nothing"
+            );
             let _ = std::fs::remove_dir_all(&dir);
 
             let dir = fixture(
@@ -864,14 +880,21 @@ mod tests {
             assert_eq!(style.insets.bottom, 0);
             assert_eq!(style.insets.left, 0);
 
-            // The example is the only shipped bundle that writes `client` at
-            // all, and it writes `client.radius: 0`. So this is the shipped
-            // desktop's half of `a_style_with_no_radius_runs_no_effects`: not a
-            // fixture built to be empty, but the real file, asserted to cost
-            // nothing.
+            // The shipped desktop's half of
+            // `a_style_with_no_radius_runs_no_effects`: not a fixture built to
+            // be empty, but the real file, asserted to cost nothing.
+            //
+            // The *declaration* is deliberately not asserted alongside it,
+            // because through this path it cannot be: `ClientTreatment.radius`
+            // defaults to 0, so `get_int("client.radius")` reads 0 for a bundle
+            // that writes `0` and for one that has never heard of the key. They
+            // are the same value here by construction — which is the whole
+            // reason a radius of 0 has to mean *no effect* rather than an
+            // effect that rounds by nothing. So this says what it pins, and
+            // pins what it says: the cost, not the text of the file.
             assert!(
                 style.effects.is_empty(),
-                "the shipped example declares radius 0, which is no pass"
+                "the shipped desktop runs no client effects"
             );
         });
     }
