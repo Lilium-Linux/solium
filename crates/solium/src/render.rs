@@ -1100,6 +1100,19 @@ fn cursor(
 /// The offscreen pass draws these into a texture so a deformed window is
 /// deformed as one thing. Built at the origin because the texture *is* the
 /// window's own space; where it lands on screen is the warp's business.
+///
+/// **A deformed window loses its bleed, and that is a known limit rather than
+/// an oversight.** `offscreen::capture` sizes its texture from the window's
+/// outer rect, so a layer placed at `(-bleed.left, -bleed.top)` falls outside
+/// the framebuffer and is clipped by the renderer — the spikes are simply not
+/// in the picture that gets bent. Fixing it means capturing at the decoration's
+/// widest canvas *and* building `warp::mesh` over that larger rectangle, since
+/// the mesh is what maps the texture back onto the window; both the genie's
+/// anchor arithmetic and `crates/effects` are written against the window's own
+/// rect today. It is `capture`'s change and the effects plan's, not this one's.
+/// What it costs meanwhile is an effect that disappears while a window is being
+/// deformed and comes back when it lands, which is visible but is not wrong
+/// pixels.
 pub(crate) fn flat_window_elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,

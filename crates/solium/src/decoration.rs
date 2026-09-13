@@ -1326,12 +1326,13 @@ fn build(style: Option<&str>, width: i32, height: i32) -> Result<Decoration> {
     Ok(decoration)
 }
 
-/// Say what a bundle built, in the order it will be drawn.
+/// Say what a bundle built, in the order it will be drawn and how far past the
+/// window it may draw.
 ///
 /// At `debug`, once per window, and it earns the line because what this feature
-/// adds is an *order*: "the spikes are behind the window" is otherwise
-/// diagnosed by looking at the screen and guessing which of the depth string,
-/// the declaration order and the element list was wrong.
+/// adds is an *order* and a *reach*: "the spikes are behind the window" is
+/// otherwise diagnosed by looking at the screen and guessing which of the depth
+/// string, the declaration order and the element list was wrong.
 ///
 /// Built through the same [`crate::render::PANE_ORDER`] the frame is, so it
 /// cannot report an order the compositor does not draw — which is the whole
@@ -1343,9 +1344,14 @@ fn say_what_was_built(dir: &Path, decoration: &Decoration) {
         crate::render::Piece::Layers(depth) => into.extend(decoration.layers_at(depth)),
         crate::render::Piece::Client => into.push("<the client>"),
     });
+    // The reach as well as the order, because a style that looks wrong raises
+    // two questions and neither is answerable from the screen. "The spikes are
+    // behind the window" is the order; "the spikes are inside the titlebar" is
+    // a canvas that did not grow, and this is the number it grew by.
     tracing::debug!(
         bundle = %dir.display(),
         ?order,
+        reach = ?decoration.bleed(),
         "built a pane style; topmost first, and the client is where it says"
     );
 }
