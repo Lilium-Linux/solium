@@ -409,4 +409,12 @@ if found and type(user) == "table" and user.decoration ~= nil and user.pane == n
     defaults.pane = user.decoration
 end
 
+-- And the old key does not survive into the table the compositor reads.
+-- `merge` above copied it in, so without this the configuration carries both
+-- `pane` and a `decoration` that is no longer a setting -- inert today, and
+-- exactly what a later pass validating `pairs(config)` would flag against a key
+-- the compositor itself wrote. Unconditional: the read-across above takes its
+-- value from `user`, never from here.
+defaults.decoration = nil
+
 return defaults
