@@ -1009,6 +1009,19 @@ pub(crate) fn elements(
                     // whole, so the element's position is the *same* number
                     // the surfaces below would have used rather than a second
                     // rounding of it.
+                    //
+                    // **The texture can be up to one physical pixel larger
+                    // than this, at a fractional scale**, and that is not a
+                    // defect to hunt when the arc looks a fraction short on a
+                    // HiDPI screen. `offscreen::pixels` sizes the capture with
+                    // `.ceil()`; this rounds. At 1149 logical by 1.25 that is
+                    // 1437 against 1436, so the whole texture is squeezed into
+                    // one pixel less and the corner lands marginally inside
+                    // where the arithmetic says. The warp path has had the
+                    // same seam since it was written and nobody has seen it.
+                    // Recorded because the symptom -- "the radius is slightly
+                    // wrong, but only on the 1.25x monitor" -- is exactly what
+                    // a scale bug looks like, and this is not one.
                     let dst = smithay::utils::Rectangle::new(
                         origin,
                         client.size.to_physical_precise_round(scale),
