@@ -1,13 +1,13 @@
-// One continuous wavy outline around the whole pane.
+// One continuous wavy outline around the whole pane, shaped by the music.
 //
-// Not four strips meeting at the corners -- one closed curve. The wave is a
-// function of how far round the perimeter a point sits, so it carries through
-// the corners without a seam, and because the number of periods is a whole
-// number the curve closes on itself where it started.
+// Not four strips meeting at the corners -- one closed curve per ring. The
+// offset is a function of how far round the PERIMETER a point sits, so the
+// wave carries through the corners without a seam, and the loop closes on
+// itself where it started.
 //
-// The outline is a rounded rectangle offset along its own normal. Walking it by
-// ARC LENGTH is what keeps the wave even: stepping x and y separately bunches
-// the periods up at the corners and stretches them along the sides.
+// The outline is a rounded rectangle pushed out along its own normal. Walking
+// it by ARC LENGTH is what keeps the wave even: stepping x and y separately
+// bunches detail up at the corners and stretches it along the sides.
 //
 // Filled solid and sitting *behind* the client, so the middle never has to be
 // cut out -- the window covers it. That is what a `behind` layer is for.
@@ -34,42 +34,49 @@ Item {
     property int bleedLeft: 0
     property int bleedTop: 0
 
-    // How smooth each curve is. A sine reads as smooth from about eight points
-    // per period; every point past that is another vertex walked every frame.
-    readonly property int perPeriod: 10
-
     // How far the corners are rounded before the wave is added.
     readonly property real corner: 34
 
-    // --- where the wave comes from ---------------------------------------
-    // Live levels, one per bar, each -1..1. Empty means nothing is feeding
-    // this and the rings fall back to a plain travelling sine, which is the
-    // state on a machine with no audio source wired up -- so a style is never
-    // a blank window because a helper is not running.
-    //
-    // This is the seam an audio visualiser plugs into: the shape does not care
-    // whether a number came from `Math.sin` or from a spectrum, so wiring one
-    // up changes what fills this list and nothing else in the file.
+    // Points per period for the fallback sine. A spectrum asks for its own
+    // count -- see the path below.
+    readonly property int perPeriod: 10
+
+    // --- where the shape comes from ---------------------------------------
+    // Live levels, one per bar, each 0..1 -- 0 is silence and rests at the
+    // ring's own radius, 1 is a peak at full swell. Empty means nothing is
+    // feeding this and the rings fall back to a travelling sine, so a machine
+    // with no audio helper running gets a decoration rather than a flat line.
     property var levels: []
 
     // Where to look for them. A plain file, rewritten whole by whatever is
     // producing the numbers -- see cava-feed.sh beside this file.
     //
     // A *file* and not the FIFO cava writes directly, because reading a FIFO
-    // means blocking until a writer shows up, and the thread this would block
-    // is the one the compositor draws every window on. A file read either
-    // finds bytes or does not, and a missing one is the same as silence.
+    // means blocking until a writer shows up, and the thread that would block
+    // is the one the compositor draws every window on.
     readonly property string feedPath: "file:///tmp/solium-audio"
 
-    // Polled rather than pushed, because nothing in QML can be woken by a
-    // file changing.
+    // --- the heartbeat ----------------------------------------------------
+    // **This is not what makes the waves move.** With audio feeding them the
+    // shape comes from the spectrum alone and this is never read -- see the
+    // ternary in the path, which only evaluates `phase` on the fallback
+    // branch, so with levels present it is not even a binding dependency and
+    // the geometry is rebuilt when the music changes rather than every frame.
     //
-    // **This only fires while something is animating**, and that is not a
-    // detail: the compositor drains Qt's event queue inside `solium_qml_tick`,
-    // which runs on frames it draws -- so a `Timer` in a settled scene never
-    // fires at all. The rings' own `NumberAnimation` is what keeps frames
-    // coming, and both are bound to `focused`. An unfocused window stops
-    // reading the file, which is the behaviour wanted anyway.
+    // It runs anyway, for two reasons. It is what the sine falls back *to*
+    // when no helper is running. And a `Timer` in a settled scene never fires
+    // at all: the compositor drains Qt's event queue inside `solium_qml_tick`,
+    // which only runs on a frame it draws, so without something animating the
+    // poll below would stop and the audio with it.
+    property real phase: 0
+    NumberAnimation on phase {
+        running: ring.focused
+        loops: Animation.Infinite
+        from: 0
+        to: 2 * Math.PI
+        duration: 7000
+    }
+
     Timer {
         interval: 40
         repeat: true
@@ -83,33 +90,62 @@ Item {
             if (request.readyState !== XMLHttpRequest.DONE) {
                 return;
             }
-            // No file, no reader, no producer: fall back to the sine rather
-            // than to a flat line. A missing helper should look like a style
-            // that is not wired up, not like one that is broken.
+            // No file, no producer: fall back to the sine rather than to a
+            // flat line. A missing helper should look like a style nobody
+            // wired up, not like one that is broken.
             const body = request.responseText;
             if (!body) {
                 ring.levels = [];
                 return;
             }
-            const parsed = [];
-            for (const field of body.trim().split(/[;,\s]+/)) {
-                const value = parseFloat(field);
+            const previous = ring.levels;
+            const fields = body.trim().split(/[;,\s]+/);
+            const raw = [];
+            for (let i = 0; i < fields.length; ++i) {
+                const value = parseFloat(fields[i]);
                 if (!isNaN(value)) {
-                    // 0..100 in, -0.3..1.2 out, through a square root.
-                    //
-                    // Not linear, and that is from looking at it: a spectrum
-                    // sits low almost all the time -- a bar over 40 is a beat,
-                    // not a normal reading -- so a straight 0..100 -> -1..1 map
-                    // leaves the border tucked flat against the window and
-                    // twitching, which is what the first version did. The root
-                    // lifts the quiet half without clipping the loud one.
-                    //
-                    // The -0.3 floor is silence: slightly inside the resting
-                    // radius, so a paused track looks calm rather than gone.
-                    const level = Math.max(0, Math.min(1, value / 100));
-                    parsed.push(Math.max(-1, Math.min(1.2,
-                        -0.3 + 1.5 * Math.sqrt(level))));
+                    raw.push(Math.max(0, Math.min(1, value / 100)));
                 }
+            }
+
+            // The mean of this frame, which is what the wave is measured
+            // AGAINST rather than added to.
+            //
+            // This is the difference between a border that waves and one that
+            // breathes. Feeding the bars in directly gives every point nearly
+            // the same radius -- a real spectrum's bars mostly sit within a
+            // band of each other, so the outline comes out very close to a
+            // plain rounded rectangle however loud the music is. What the eye
+            // reads as a wave is one bar standing out from its neighbours, so
+            // that is what is amplified: `gain` multiplies the DEVIATION from
+            // the frame's own mean, and the mean itself only sets how far out
+            // the whole ring rests.
+            let mean = 0;
+            for (const level of raw) {
+                mean += level;
+            }
+            mean = raw.length > 0 ? mean / raw.length : 0;
+
+            const gain = 3.2;
+            const parsed = [];
+            for (let i = 0; i < raw.length; ++i) {
+                // Loudness lifts the resting radius; the spectrum's shape is
+                // what actually makes the waves. Floored at zero so silence
+                // rests at the ring's own radius instead of retracting inside
+                // it -- with the spectrum mirrored, bass down one half and
+                // treble down the other, a track with no treble used to leave
+                // that entire half collapsed flat onto the window.
+                let height = 0.12 + mean * 0.8 + (raw[i] - mean) * gain;
+                height = Math.max(0, Math.min(1.35, height));
+                // Eased towards the new reading rather than snapped to it.
+                // cava's bars jump frame to frame and a border that jumps with
+                // them reads as flicker; carrying some of the last reading
+                // turns the same numbers into something that swells and falls,
+                // which is what a wave is.
+                if (previous.length === raw.length && !isNaN(previous[i])) {
+                    height = previous[i] * 0.4 + height * 0.6;
+                }
+                parsed.push(height);
             }
             ring.levels = parsed;
         };
@@ -117,29 +153,35 @@ Item {
         request.send();
     }
 
-    // The wave's height at `t` (0..1) round the loop.
+    // The fallback: a plain travelling sine. `periods` is whole so the curve
+    // closes on itself; a fraction leaves a step where it meets its own start.
+    function sineAt(t, periods, phase) {
+        return Math.sin(t * periods * 2 * Math.PI + phase);
+    }
+
+    // The spectrum, at `t` (0..1) round the loop.
     //
-    // `periods` must be a whole number in the fallback, or the sine does not
-    // close on itself and there is a visible step where the curve meets its
-    // own start.
-    function height_at(t, periods, phase) {
+    // **Mirrored**, not wrapped: bass-to-treble down one half and back up the
+    // other. A spectrum is bass-heavy, so wrapping it once puts every large
+    // bar in one short arc and leaves three quarters of the border flat -- and
+    // bar 0 against bar N is a cut, silence next to a beat, where mirroring
+    // closes the loop with no join at all.
+    //
+    // **Smoothstepped between bars, not interpolated straight.** A straight
+    // line between two readings is a straight line on screen, and the joins
+    // between them are corners -- which is exactly the faceting that shows up
+    // as creases in the curve. `f * f * (3 - 2f)` leaves the slope at zero on
+    // each reading, so neighbouring segments meet without a kink and a row of
+    // bars reads as a row of swells.
+    function levelAt(t) {
         const bars = ring.levels.length;
-        if (bars === 0) {
-            return Math.sin(t * periods * 2 * Math.PI + phase);
-        }
-        // **Mirrored**, not wrapped: the spectrum runs bass-to-treble down one
-        // half of the loop and back up the other. Two reasons, both from
-        // looking at it. A spectrum is bass-heavy, so wrapping it once puts
-        // every large bar in one short arc and leaves three quarters of the
-        // border flat. And bar 0 next to bar N is a cut -- silence against a
-        // beat -- where mirroring closes the loop on itself with no join at
-        // all, which is the same reason the sine's period count is whole.
-        const turn = ((t + phase / (2 * Math.PI)) % 1 + 1) % 1;
+        const turn = ((t % 1) + 1) % 1;
         const fold = turn < 0.5 ? turn * 2 : (1 - turn) * 2;
         const at = fold * (bars - 1);
         const i = Math.min(bars - 2, Math.floor(at));
         const f = at - i;
-        return ring.levels[i] + (ring.levels[i + 1] - ring.levels[i]) * f;
+        const eased = f * f * (3 - 2 * f);
+        return ring.levels[i] + (ring.levels[i + 1] - ring.levels[i]) * eased;
     }
 
     // A point `t` (0..1) of the way round a rounded rectangle by arc length,
@@ -193,15 +235,14 @@ Item {
     }
 
     // --- the rings -------------------------------------------------------
-    // Outermost first, so each is painted over by the next and what remains
+    // Outermost first, so each is painted over by the next and what stays
     // visible is the band between them. The client covers the innermost part,
     // which is why none of them needs a hole cut in it.
     //
     // Three rings in ONE scene, not three layers. A layer exists so the
     // *client* can sit between two things; these all sit behind it, so three
     // scenes would be three textures and three uploads buying nothing. Moving
-    // one to `depth: "above"` in Pane.qml is what layering buys, and it is one
-    // line when a style wants it.
+    // one to `depth: "above"` in Pane.qml is what layering buys.
     readonly property var rings: [
         { reach: 26, swell: 30, periods: 18, duration: 7400, ink: Theme.text },
         { reach: 17, swell: 22, periods: 22, duration: 5600, ink: Theme.accent },
@@ -217,15 +258,16 @@ Item {
             readonly property var spec: ring.rings[index]
 
             anchors.fill: parent
-            // One curve per ring, so the cost of asking for a drawn edge
-            // rather than a stepped one is paid three times, not per point.
+            // One curve per ring, so a drawn edge rather than a stepped one is
+            // paid for three times, not once per point.
             antialiasing: true
 
-            // Each ring travels at its own rate, so the three drift apart
-            // instead of moving as one rigid outline.
+            // Only the fallback reads this -- see the heartbeat above. Each
+            // ring travels at its own rate so the three drift apart rather
+            // than moving as one rigid outline.
             property real phase: 0
             NumberAnimation on phase {
-                running: ring.focused
+                running: ring.focused && ring.levels.length === 0
                 loops: Animation.Infinite
                 from: 0
                 to: 2 * Math.PI
@@ -240,14 +282,14 @@ Item {
                     path: {
                         const points = [];
                         const spec = band.spec;
-                        // Enough points to resolve whatever is driving it.
-                        // The sine needs only `perPeriod` per period; a
-                        // spectrum needs several per BAR or the peaks are
-                        // averaged away into a smooth ripple, which is what
-                        // real music looked like before this line existed.
                         const bars = ring.levels.length;
-                        const steps = Math.max(spec.periods * ring.perPeriod,
-                                               bars * 6);
+                        // Enough points to resolve whatever is driving it. The
+                        // sine needs `perPeriod` per period; a spectrum needs
+                        // several per BAR, or every peak is averaged into its
+                        // neighbours and real music reads as a smooth ripple.
+                        const steps = bars === 0
+                            ? spec.periods * ring.perPeriod
+                            : Math.max(240, bars * 10);
                         const x = ring.bleedLeft;
                         const y = ring.bleedTop;
                         const w = ring.paneWidth;
@@ -255,9 +297,15 @@ Item {
                         const r = Math.min(ring.corner, w / 2, h / 2);
                         for (let i = 0; i < steps; ++i) {
                             const t = i / steps;
-                            const out = spec.reach + spec.swell
-                                * ring.height_at(t, spec.periods, band.phase);
-                            points.push(ring.ringPoint(t, x, y, w, h, r, out));
+                            // `band.phase` is read only on the fallback
+                            // branch, so with a feed running it is not a
+                            // binding dependency at all and this rebuilds when
+                            // the music changes rather than on every frame.
+                            const height = bars === 0
+                                ? ring.sineAt(t, spec.periods, band.phase)
+                                : ring.levelAt(t);
+                            points.push(ring.ringPoint(
+                                t, x, y, w, h, r, spec.reach + spec.swell * height));
                         }
                         points.push(points[0]);
                         return points;
