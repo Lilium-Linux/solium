@@ -25,6 +25,77 @@
 
 ---
 
+## Amended 2026-09-13, after a drift check against the tree
+
+This plan was written on 2026-09-08. The pane-ownership refactor, the GPU
+render target, `crates/effects` and group addressing all landed since. **Task 9
+is already done** — it became `docs/superpowers/plans/2026-09-12-pane-ownership.md`
+and completed. Task 8 is phase 2. This plan is now Tasks 1–7.
+
+### The one that would have shipped
+
+**`scene.get_int("insets.top")` silently returns 0, always.** `host.cpp`'s
+getter is `root->property(name)`, and `QObject::property` takes a *name*, not a
+path — there is no `QQmlProperty` in `host.cpp` at all. Task 2's five tests
+exercise `parse_depth` and `parse_bleed` and none of them touches `load()`, so
+they go green while the client is drawn over the titlebar.
+
+Task 2 must either reach the group object and then its property, or introduce
+`QQmlProperty`. It must also have a test that reads a nested property back out
+of a *loaded scene* rather than only parsing strings.
+
+### Per task
+
+**Task 2** — `qml::Scene::new` no longer exists; use `Scene::for_host(path, w,
+h, None)`, because a GPU host refuses software scenes at construction. Written
+against `Decorations::frames`/`bare`, both deleted; a pane now carries
+`Frame::Pending | None | Styled(Decoration)`.
+
+**Task 3** — `a_bare_name_prefers_the_users_directory` cannot pass against the
+`resolve` in its own task: the candidate is not a directory, `user` is not
+empty, so it falls through and returns `None`. The prose claims it is testable
+without a filesystem; `is_dir()` means it is not.
+
+**Task 4** — `layer_elements -> Vec<MemoryRenderBufferRenderElement<R>>` is
+software-only; a frame is `Element::Chrome` or `Element::Screen` depending on
+`Backing`, so the return type wants `render::Element`. Growing `Decoration` by a
+`Vec` falsifies the measured "248 and 248" behind the
+`#[expect(clippy::large_enum_variant)]` on `Frame::Styled` — re-measure and
+update the reason. `Decorations` was **not** renamed to `StyleDefault` as Task 9
+promised; it still exists with one field.
+
+**Task 5** — `Solium::damage_for` does not exist; the path is
+`self.drawn(id, pane_outer)` at `state.rs:904`. The point stands.
+
+**Task 6** — clean. `insets_of` is now a match on `pane.frame()`, which makes
+the invariant easier to hold than when this was written.
+
+**Task 7** — three things:
+* The eight shipped decorations **read** their own inset properties
+  (`top.qml:91` is `height: frame.insetTop`; seven of eight do it). Deleting
+  them gives eight `DIFFERS` with no clue why. They must become in-properties
+  the compositor sets, like `contentWidth`.
+* `dev/wirecheck/src/main.rs:1514` hardcodes
+  `crates/solium/qml/decorations/top.qml`, which this task deletes — **and
+  wirecheck runs on every gate.** Its "animating, both ways" control needs one
+  process reading 1 for `quadrants.qml` and 0 for both `cursor.qml` and that
+  decoration.
+* `SOLIUM_DECORATION` lives in `decoration.rs` (six sites), not `dev.rs`. The
+  file list also misses `config.lua:238`, `script.rs:1333` and `:2982`,
+  `docs/decorations.md` and `docs/ricing.md`.
+
+### Fixed in Task 1 rather than carried
+
+`property QtObject insets` makes `insets.top: 32` **unassignable** — QML
+resolves a grouped property against the property's *declared type*, not the
+bound object, so `QtObject` has no `top`. This was in the brief, this plan, and
+the spec's own example, in all three of `insets.top`, `client.radius` and
+`client.shadow.blur`. The groups now have named types (`Insets`,
+`ClientTreatment`, `ClientShadow`), `internal` in `qmldir`, so the public
+surface is still the two types and the spec's examples now work as written.
+
+---
+
 ### Task 1: `PaneStyle` and `Layer` QML types
 
 **Files:**
