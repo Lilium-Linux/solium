@@ -81,7 +81,28 @@ pub const ROUNDED_CORNERS: &str = r"#version 100
 #extension GL_OES_EGL_image_external : require
 #endif
 
+// highp where the hardware has it, which is not a nicety here.
+//
+// GLES 2 guarantees mediump only 10 mantissa bits. This shader multiplies a
+// normalised coordinate back up into pixels -- `v_coords * tex_size` -- so one
+// ULP at 3840px is about 3.75px, seven times the width of the smoothstep that
+// antialiases the arc. The corner would wobble and its edge come apart, on a
+// 4K screen only.
+//
+// Mesa evaluates mediump at fp32, so none of that is visible on the machine
+// this was written on. Same shape as the logical-versus-physical radius above:
+// a defect whose only symptom is on hardware the author does not have.
+// `GL_FRAGMENT_PRECISION_HIGH` is the compiler's own answer to whether highp
+// exists in a fragment shader, so this asks rather than assumes.
+//
+// smithay's `texture.frag` settles for mediump and is not a precedent: it
+// samples at `v_coords` and never scales a normalised coordinate back into
+// pixel space, so it has no bits to lose.
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 #if defined(EXTERNAL)
 uniform samplerExternalOES tex;
 #else
@@ -307,6 +328,25 @@ mod tests {
     /// misbehaves on a GPU: an XRGB window drawn with its undefined X byte as
     /// alpha is *invisible*, and an external texture read through a
     /// `sampler2D` is *black*. `texture.frag` is the model this mirrors.
+    /// The precision guard, whose absence no test on this machine can feel.
+    ///
+    /// Mesa evaluates `mediump` at fp32, so removing this changes nothing here
+    /// and everything on a 4K screen with a conformant driver -- one mediump
+    /// ULP at 3840px is ~3.75px, against a half-pixel antialiasing band.
+    #[test]
+    fn the_shader_asks_for_highp_where_it_exists() {
+        assert!(
+            has_line("#ifdef GL_FRAGMENT_PRECISION_HIGH"),
+            "the shader scales a normalised coordinate into pixels, so it has \
+             to ask for highp rather than take mediump's ten mantissa bits"
+        );
+        assert!(has_line("precision highp float;"));
+        assert!(
+            has_line("precision mediump float;"),
+            "and still falls back: highp in a fragment shader is optional in GLES 2"
+        );
+    }
+
     #[test]
     fn the_shader_handles_every_variant_smithay_compiles_it_into() {
         for required in [
