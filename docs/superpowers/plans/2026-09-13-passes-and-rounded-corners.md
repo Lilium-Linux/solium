@@ -159,7 +159,15 @@ pub enum Inputs {
     Backdrop,
 }
 
-/// The corner radius a rounded-corner program takes, in physical pixels.
+/// The corner radius a rounded-corner program takes.
+///
+/// **In physical pixels, and converted by whoever sets it** -- which is not
+/// this crate. `Effect::radius` is LOGICAL, because that is what someone types
+/// into a `Pane.qml` and a style should not have to know what scale a monitor
+/// runs at. The shader measures in the texture's own pixels and the texture is
+/// captured at the output's scale, so the two differ by exactly that factor on
+/// a HiDPI screen and not at all on a 1x one -- which is the shape of bug that
+/// looks perfect on the machine it was written on.
 pub const RADIUS_UNIFORM: &str = "corner_radius";
 
 /// The texture's size in physical pixels.

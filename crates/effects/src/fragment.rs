@@ -385,15 +385,39 @@ mod tests {
             )),
             "the radius is used unclamped, so a large one erodes the window"
         );
-        // And nothing walks around the clamp: the raw uniform may be mentioned
-        // exactly twice -- once to declare it, once to clamp it -- and both
-        // halves of the distance field are written in terms of the clamped
-        // copy. A third mention is a bypass.
-        assert_eq!(
-            ROUNDED_CORNERS.matches(RADIUS_UNIFORM).count(),
-            2,
-            "`{RADIUS_UNIFORM}` is used somewhere other than its declaration \
-             and the clamp, so part of the distance field is unclamped"
+        // And nothing walks around the clamp. Stated as two properties rather
+        // than as a count of the uniform's name, which was the first attempt
+        // and was wrong in both directions: a comment inside the shader string
+        // that happened to mention `corner_radius` pushed the count to three
+        // and failed with "part of the distance field is unclamped", which is
+        // a wrong diagnosis of a harmless edit -- and a bypass that replaced
+        // half the field with a literal kept the count at two and passed.
+        //
+        // First: the raw uniform appears on no line but its declaration and
+        // the clamp. Comments are free to say its name.
+        for line in ROUNDED_CORNERS.lines() {
+            let code = line.split("//").next().unwrap_or_default().trim();
+            if !code.contains(RADIUS_UNIFORM) {
+                continue;
+            }
+            assert!(
+                code == format!("uniform float {RADIUS_UNIFORM};")
+                    || code.starts_with("float r = min("),
+                "`{RADIUS_UNIFORM}` is used at `{code}`, which is neither its \
+                 declaration nor the clamp -- so that part of the distance \
+                 field is computed from the unclamped radius"
+            );
+        }
+        // Second: both halves of the field are written in terms of the clamped
+        // copy. The check above cannot see this -- a half replaced by a
+        // literal mentions the uniform nowhere and would pass it.
+        assert!(
+            has_line("vec2 p = abs(v_coords * tex_size - half_size) - (half_size - vec2(r));"),
+            "the inset half of the distance field is not written in terms of `r`"
+        );
+        assert!(
+            has_line("float away = length(max(p, 0.0)) - r;"),
+            "the outset half of the distance field is not written in terms of `r`"
         );
     }
 }
