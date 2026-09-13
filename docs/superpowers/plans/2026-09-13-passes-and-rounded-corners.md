@@ -43,7 +43,7 @@
 - Modify: `crates/effects/src/lib.rs` (add `pub mod fragment;`)
 
 **Interfaces:**
-- Produces: `solium_effects::fragment::{Effect, Inputs, ROUNDED_CORNERS, RADIUS_UNIFORM}`. `Effect::rounded(radius: f64) -> Effect`, `Effect::inputs(&self) -> Inputs`, `Effect::radius(&self) -> f64`.
+- Produces: `solium_effects::fragment::{Effect, Inputs, ROUNDED_CORNERS, RADIUS_UNIFORM, SIZE_UNIFORM}`. `Effect::rounded(radius: f64) -> Effect`, `Effect::inputs(&self) -> Inputs`, `Effect::radius(&self) -> f64`, `Effect::is_none_effect(&self) -> bool`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -74,20 +74,45 @@ mod tests {
         assert!(!Effect::rounded(1.0).is_none_effect());
     }
 
-    /// The shader is handed to Smithay, which requires the `//_DEFINES` line
-    /// and rejects a `#version` directive. Both are easy to lose in an edit and
-    /// neither fails until a GPU is present.
+    /// The shader is handed to Smithay, whose contract for a *texture* program
+    /// is not the one its own documentation states. Read from the source, not
+    /// the doc comment:
+    ///
+    /// | | texture program | pixel program |
+    /// |---|---|---|
+    /// | marker | `//_DEFINES_` | `//_DEFINES_` |
+    /// | `#version` | **the shader supplies it** | smithay prepends it |
+    /// | `size` uniform | **not provided** | provided |
+    ///
+    /// `gles/mod.rs:1964` says the marker is `//_DEFINES`, without the
+    /// trailing underscore. `shaders/mod.rs:125` is what actually runs and it
+    /// replaces `//_DEFINES_`. A shader carrying the documented spelling has
+    /// its marker left in place as a comment, compiles, and then fails to link
+    /// because the `#define`s it needed were never substituted.
+    ///
+    /// None of this fails until there is a GPU, which is why it is asserted
+    /// here and compiled for real in wirecheck.
     #[test]
-    fn the_shader_is_shaped_the_way_smithay_requires() {
+    fn the_shader_is_shaped_the_way_smithay_actually_requires() {
+        // Whole line, not `contains`: `contains("//_DEFINES")` is true of the
+        // WRONG spelling too, because it is a prefix of the right one. That
+        // near-miss is the bug this test exists to catch, so matching a
+        // substring here would make the test agree with the defect.
         assert!(
-            ROUNDED_CORNERS.contains("//_DEFINES"),
-            "smithay replaces this line with its own #defines"
+            ROUNDED_CORNERS.lines().any(|line| line.trim() == "//_DEFINES_"),
+            "smithay replaces a line that is exactly `//_DEFINES_` with its #defines"
         );
         assert!(
-            !ROUNDED_CORNERS.contains("#version"),
-            "smithay prepends #version 100 itself and a second one will not compile"
+            ROUNDED_CORNERS.starts_with("#version 100"),
+            "texture_program does NOT prepend a version -- the built-in \
+             texture.frag carries its own, and so must this"
         );
         assert!(ROUNDED_CORNERS.contains(RADIUS_UNIFORM));
+        assert!(
+            ROUNDED_CORNERS.contains(SIZE_UNIFORM),
+            "a texture program gets no `size` uniform from smithay; only a \
+             pixel program does, so this one has to declare its own"
+        );
     }
 }
 ```
@@ -134,39 +159,61 @@ pub enum Inputs {
     Backdrop,
 }
 
-/// The additional uniform a rounded-corner program takes, in pixels.
+/// The corner radius a rounded-corner program takes, in physical pixels.
 pub const RADIUS_UNIFORM: &str = "corner_radius";
+
+/// The texture's size in physical pixels.
+///
+/// Ours, not Smithay's. A *pixel* program is given a `size` uniform; a
+/// *texture* program is not -- the built-in `texture.frag` declares only
+/// `tex`, `alpha` and `v_coords`. So a texture shader that needs to measure in
+/// pixels has to be told how big it is.
+pub const SIZE_UNIFORM: &str = "tex_size";
 
 /// Rounded corners, as a fragment program over the node's own texture.
 ///
-/// Smithay's contract, both halves of which are load-bearing and neither of
-/// which fails until there is a GPU: the source must contain a line that is
-/// only `//_DEFINES`, which it replaces with its own `#define`s, and it must
-/// **not** carry a `#version` directive because it prepends `#version 100`.
+/// Smithay's contract for a TEXTURE program, read from `shaders/mod.rs:125`
+/// rather than from the doc comment on `compile_custom_texture_shader`, which
+/// is wrong about the first of these:
 ///
-/// `size` and `alpha` are Smithay's own uniforms; `corner_radius` is ours.
+/// * the source must contain a line that is exactly `//_DEFINES_` -- with the
+///   trailing underscore; the doc comment omits it;
+/// * the source supplies its own `#version 100`. `texture_program` does not
+///   prepend one, and the built-in `texture.frag` carries its own. (The
+///   *pixel* program is the one where smithay prepends it.)
+///
+/// `alpha` is Smithay's; `corner_radius` and `tex_size` are ours. A texture
+/// program gets no `size` uniform -- only a pixel program does.
 /// The distance field is the standard rounded-box one: fold the coordinate
 /// into one quadrant, and measure from the centre of that corner's circle.
 /// Antialiased over one pixel with `smoothstep`, because a hard cut on a
 /// curve is a staircase.
-pub const ROUNDED_CORNERS: &str = r"
-//_DEFINES
+pub const ROUNDED_CORNERS: &str = r"#version 100
+
+//_DEFINES_
 
 precision mediump float;
 uniform sampler2D tex;
 uniform float alpha;
-uniform vec2 size;
 uniform float corner_radius;
+uniform vec2 tex_size;
 varying vec2 v_coords;
 
 void main() {
     vec4 colour = texture2D(tex, v_coords);
 
-    // Into pixels, then into the corner's own quadrant: |p| folds all four
-    // corners onto one, so this is written once rather than four times.
-    vec2 p = abs(v_coords * size - size * 0.5) - (size * 0.5 - vec2(corner_radius));
+    // Into pixels, then into one corner's quadrant: abs() folds all four
+    // corners onto one, so the distance field is written once rather than
+    // four times. `v_coords` is `(tex_matrix * position).xy`, which for a
+    // whole texture runs 0..1 -- see smithay's texture.vert.
+    vec2 half_size = tex_size * 0.5;
+    vec2 p = abs(v_coords * tex_size - half_size) - (half_size - vec2(corner_radius));
     float away = length(max(p, 0.0)) - corner_radius;
 
+    // Every channel, not just alpha: a wayland surface is PREMULTIPLIED, so
+    // colour and alpha have to be scaled together or a faded edge comes out
+    // too bright. Smithay's own texture.frag does `color * alpha` for the
+    // same reason.
     gl_FragColor = colour * alpha * (1.0 - smoothstep(-0.5, 0.5, away));
 }
 ";
@@ -235,7 +282,8 @@ Expected: PASS, three new tests.
 For each, mutate, run `dev/gate.sh`, record the failure, revert:
 - `Inputs::SelfTexture` → `Inputs::Nothing` in `inputs()` → `rounded_corners_reads_the_node_itself` fails.
 - `!(*radius > 0.0)` → `false` → `a_zero_radius_is_not_an_effect` fails.
-- Delete the `//_DEFINES` line from `ROUNDED_CORNERS` → `the_shader_is_shaped_the_way_smithay_requires` fails.
+- Change the marker to `//_DEFINES` (drop the trailing underscore — the spelling Smithay's own doc comment gives) → `the_shader_is_shaped_the_way_smithay_actually_requires` fails. **Run this one first**: it is the real defect the test was written for, and a `contains` assertion would have passed it.
+- Delete the leading `#version 100` → the same test fails on its second assertion.
 
 - [ ] **Step 6: Commit**
 
@@ -475,7 +523,7 @@ Create `crates/solium/src/pass.rs`:
 //! by the number of animating windows.
 
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram, UniformName, UniformType};
-use solium_effects::fragment::{Effect, Inputs, RADIUS_UNIFORM, ROUNDED_CORNERS};
+use solium_effects::fragment::{Effect, Inputs, RADIUS_UNIFORM, ROUNDED_CORNERS, SIZE_UNIFORM};
 
 /// Whether this node's effects need the node rendered to a texture first, and
 /// which effect wants it.
@@ -515,7 +563,11 @@ impl Programs {
         if self.rounded.is_none() && !self.rounded_failed {
             match renderer.compile_custom_texture_shader(
                 ROUNDED_CORNERS,
-                &[UniformName::new(RADIUS_UNIFORM, UniformType::_1f)],
+                &[
+                    UniformName::new(RADIUS_UNIFORM, UniformType::_1f),
+                    // Ours because smithay gives a texture program no `size`.
+                    UniformName::new(SIZE_UNIFORM, UniformType::_2f),
+                ],
             ) {
                 Ok(program) => self.rounded = Some(program),
                 Err(err) => {
@@ -649,46 +701,69 @@ In `render.rs`, in the function that handles `Piece::Client` for a pane, before 
         && let Some((texture, size)) = crate::offscreen::capture(state, renderer, pane, window, scale)
         && let Some(program) = state.programs.rounded(renderer)
     {
-        let radius = effect.radius() * scale;
-        elements.push(Element::Screen(rounded_element(
-            texture, size, outer, radius, program.clone(), alpha,
+        // Physical pixels, because the shader measures in the texture's own
+        // pixels and the texture was captured at the monitor's scale. A
+        // logical radius here is a corner that is right on one screen and
+        // wrong on the other -- a bug that only appears on a desk with two
+        // monitors at different scales.
+        let radius = (effect.radius() * scale) as f32;
+        elements.push(Element::Rounded(crate::pass::Rounded::new(
+            texture,
+            size,
+            outer.loc.to_physical_precise_round(scale),
+            radius,
+            program.clone(),
+            alpha,
         )));
         return;
     }
 ```
 
-`rounded_element` builds a `TextureRenderElement` at `outer`'s location, carrying the program and one uniform:
+**`TextureRenderElement` has no `with_texture_program`.** Checked against
+`smithay-0.7.0/src/backend/renderer/element/texture.rs`: the constructors are
+`from_texture`, `from_texture_render_buffer`, `from_texture_buffer`,
+`from_texture_with_damage` and `from_static_texture`, and none of them take a
+program. So the snippet above cannot be written and the program is applied on
+the **frame** instead:
 
 ```rust
-/// The captured client, to be drawn through `program` with `radius` pixels cut
-/// from each corner.
-///
-/// The uniform is in **physical** pixels, because the shader measures in the
-/// texture's own pixels and the texture was captured at the monitor's scale. A
-/// logical radius here is a corner that is right on one monitor and wrong on
-/// the other, which is the class of bug that only shows up on a desk with two
-/// screens of different scales.
-fn rounded_element(
-    texture: GlesTexture,
-    size: Size<i32, Physical>,
-    outer: Rectangle<i32, Logical>,
-    radius: f64,
-    program: GlesTexProgram,
-    alpha: f32,
-) -> TextureRenderElement<GlesTexture> {
-    TextureRenderElement::from_static_texture(
-        Id::new(),
-        texture,
-        outer.loc.to_physical_precise_round(1.0),
-        size,
-        alpha,
-        Kind::Unspecified,
-    )
-    .with_texture_program(program, vec![Uniform::new(RADIUS_UNIFORM, radius as f32)])
+impl RenderElement<GlesRenderer> for Rounded {
+    fn draw(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        src: Rectangle<f64, BufferCoords>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+    ) -> Result<(), GlesError> {
+        // Override, draw, clear. The override lives on the frame and outlasts
+        // this element if it is not cleared, so the very next window drawn
+        // would come out with rounded corners it never asked for -- and only
+        // when it happened to be drawn after this one, which is a bug that
+        // moves around as windows are raised.
+        frame.override_default_tex_program(
+            self.program.clone(),
+            vec![
+                Uniform::new(RADIUS_UNIFORM, self.radius),
+                Uniform::new(SIZE_UNIFORM, (self.size.w as f32, self.size.h as f32)),
+            ],
+        );
+        let drawn = frame.render_texture_from_to(
+            &self.texture, src, dst, damage, opaque_regions, Transform::Normal, self.alpha, None, &[],
+        );
+        frame.clear_tex_program_override();
+        drawn
+    }
 }
 ```
 
-**If `TextureRenderElement` has no `with_texture_program` in this Smithay version**, the program is applied on the frame instead: implement `RenderElement<GlesRenderer>::draw` on a small wrapper in `pass.rs` that calls `frame.override_default_tex_program(program, uniforms)`, draws the texture, then `frame.clear_tex_program_override()`. `warp.rs` is the worked example of a hand-written `RenderElement` in this codebase — follow its shape, including its `Element` variant. Take whichever route the API actually offers and say which in the report.
+`crates/solium/src/warp.rs` is the worked example of a hand-written
+`RenderElement` in this tree — follow its shape, including adding a variant to
+the `render_elements!` block in `render.rs` (call it `Rounded`, beside
+`Warped`). Check `render_texture_from_to`'s exact signature in
+`smithay-0.7.0/src/backend/renderer/gles/mod.rs` before writing the call; the
+argument list above is from the plan's author reading the type, not from
+compiling it, and it is the one thing here most likely to need a comma moved.
 
 - [ ] **Step 5: Run the tests, then see them fail**
 
@@ -819,10 +894,16 @@ In the census section of `dev/wirecheck/src/main.rs`, after the scene cases, add
     // in the tree that can ask it.
     match renderer.compile_custom_texture_shader(
         solium_effects::fragment::ROUNDED_CORNERS,
-        &[UniformName::new(
-            solium_effects::fragment::RADIUS_UNIFORM,
-            UniformType::_1f,
-        )],
+        &[
+            UniformName::new(
+                solium_effects::fragment::RADIUS_UNIFORM,
+                UniformType::_1f,
+            ),
+            UniformName::new(
+                solium_effects::fragment::SIZE_UNIFORM,
+                UniformType::_2f,
+            ),
+        ],
     ) {
         Ok(_) => println!("  rounded-corner shader: compiled"),
         Err(err) => {
@@ -895,6 +976,8 @@ git commit -m "pass: rounded corners, seen on a screen and pinned in the gate"
 
 **Spec coverage.** The spec's pass section names four effects and one table. `rounded corners / self` is Tasks 1–6. `blur / backdrop` is represented as `Inputs::Backdrop` in Task 1 and implemented nowhere, which is the plan's stated scope. `wavy border, glow, spikes / —` is `Inputs::Nothing` and already works — `panes/wave/` is the shipped proof. `shadow / self` reuses Tasks 3–5 unchanged and is item 10's work, not this plan's. The opaque-region sentence ("a property the node declares and the renderer's culling reads") is Task 5. The prerequisite sentence about `offscreen::capture` allocating per frame is satisfied — that is phase 1 item 2, already done.
 
-**Placeholders.** One conditional remains in Task 4, Step 4: whether `TextureRenderElement` exposes `with_texture_program` in Smithay 0.7, or whether the program has to be applied on the frame through a hand-written `RenderElement`. Both routes are spelled out with the file to copy from (`warp.rs`), and the task says to report which was taken. I left it conditional rather than guessing because I confirmed `compile_custom_texture_shader` and `GlesFrame::override_default_tex_program` exist but did not confirm the element-level convenience wrapper, and a plan that asserts an API I have not read is worse than one that names both paths.
+**Placeholders.** The conditional that was in Task 4 is resolved: `TextureRenderElement` has no `with_texture_program`, so the program is applied on the frame through a hand-written `RenderElement`, and that is now the only route the task gives. One uncertainty is left and is labelled where it sits — the exact argument list of `render_texture_from_to`, which the task tells the implementer to check before writing rather than trusting.
+
+**Corrected before dispatch, from reading Smithay's source rather than its docs.** Three errors in the first draft of Task 1, all of which would have compiled and none of which would have failed before a GPU was present: the defines marker is `//_DEFINES_` and not `//_DEFINES` (Smithay's own doc comment at `gles/mod.rs:1964` gives the wrong spelling; `shaders/mod.rs:125` is what runs); a texture program supplies its own `#version 100` rather than having one prepended, which is the opposite of the pixel-program rule the draft had copied; and a texture program gets no `size` uniform at all, so the shader has to declare and be passed its own. The draft's own test would not have caught the first of these, because `contains("//_DEFINES")` is true of the wrong spelling — it is a prefix of the right one. The test is now a whole-line match and says why.
 
 **Type consistency.** `Effect::rounded(f64)`, `Effect::radius() -> f64`, `Effect::inputs() -> Inputs`, `Effect::is_none_effect() -> bool`, `needs_pass(&[Effect]) -> Option<Effect>`, `Programs::rounded(&mut GlesRenderer) -> Option<&GlesTexProgram>`, `opaque_inside(Rectangle<i32, Physical>, f64) -> Rectangle<i32, Physical>`, `RADIUS_UNIFORM: &str` — each is defined once and used with the same signature everywhere after.
