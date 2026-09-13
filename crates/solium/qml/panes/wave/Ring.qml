@@ -77,11 +77,42 @@ Item {
         duration: 7000
     }
 
+    // --- how hard to draw -------------------------------------------------
+    // Every point of every ring is rebuilt whenever the pane's size changes,
+    // and during a drag-resize that is every frame -- three paths, each a few
+    // hundred `Qt.point`s with trigonometry behind them, against a 3.8ms
+    // budget on a 260Hz screen. At rest the size never changes and the
+    // geometry is rebuilt only when the music does, which is 25 times a
+    // second; a resize asks for it two hundred times a second instead.
+    //
+    // So a resize gets a coarser curve. The detail is not visible while the
+    // window is moving under the pointer, and the moment it settles the full
+    // count comes back.
+    property int lastWidth: 0
+    property int lastHeight: 0
+    property int settling: 0
+    readonly property bool resizing: ring.settling > 0
+
     Timer {
         interval: 40
         repeat: true
         running: ring.focused
-        onTriggered: ring.readFeed()
+        onTriggered: {
+            // Sampled here rather than watched with a signal handler, because
+            // the compositor writes width and height separately: a handler on
+            // each would see two changes per frame and this sees the pair.
+            if (ring.paneWidth !== ring.lastWidth || ring.paneHeight !== ring.lastHeight) {
+                ring.lastWidth = ring.paneWidth;
+                ring.lastHeight = ring.paneHeight;
+                // Five ticks of quiet -- 200ms -- before calling it settled,
+                // so a drag that pauses mid-way does not flicker back to full
+                // detail and down again.
+                ring.settling = 5;
+            } else if (ring.settling > 0) {
+                ring.settling -= 1;
+            }
+            ring.readFeed();
+        }
     }
 
     function readFeed() {
@@ -335,8 +366,10 @@ Item {
                         // several per BAR, or every peak is averaged into its
                         // neighbours and real music reads as a smooth ripple.
                         const steps = bars === 0
-                            ? spec.periods * ring.perPeriod
-                            : Math.max(240, bars * 10);
+                            ? spec.periods * (ring.resizing ? 4 : ring.perPeriod)
+                            : (ring.resizing
+                                ? Math.max(96, bars * 3)
+                                : Math.max(240, bars * 7));
                         const x = ring.bleedLeft;
                         const y = ring.bleedTop;
                         const w = ring.paneWidth;
