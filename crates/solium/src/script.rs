@@ -1356,7 +1356,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     )?;
 
     sol.set(
-        "decoration",
+        "pane",
         lua.create_function(|lua, name: Option<String>| {
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Decoration { name });
@@ -1364,7 +1364,13 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // Everything `sol.decoration` could be handed, discovered from the
+    // The old name for `sol.pane`. A style used to be a single QML file and
+    // is now a folder; the name changed with it. Kept so no configuration
+    // written before the change breaks, and cheap enough to keep until there
+    // is a reason to remove it.
+    sol.set("decoration", sol.get::<mlua::Function>("pane")?)?;
+
+    // Everything `sol.pane` could be handed, discovered from the
     // directories the compositor actually resolves against rather than from a
     // list kept in Lua. Same principle as `parse_easing`: the names come from
     // the machinery, so a style someone writes is offerable the moment it
@@ -2413,6 +2419,61 @@ mod tests {
         }
     }
 
+    /// **`sol.decoration` is still `sol.pane`.**
+    ///
+    /// The setting was renamed when a style stopped being one QML file and
+    /// became a folder. `sol.decoration` stays because an `init.lua` someone
+    /// wrote before that calls it by name, and Lua gives no warning for a call
+    /// to a nil field -- it raises, the script that raised is abandoned, and a
+    /// configuration that used to work comes up with no bindings and no
+    /// layouts. One line to keep, and this is what says the line is there.
+    ///
+    /// Both are driven, and the *same* command has to come back from each: an
+    /// alias bound to some other function would pass a test that only checked
+    /// `sol.decoration` was callable.
+    #[test]
+    fn the_old_name_for_sol_pane_still_works() {
+        let directory = std::env::temp_dir().join("solium-script-test-pane-alias");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+P", function() sol.pane("border") end)
+            sol.bind("Super+D", function() sol.decoration("border") end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let named = |scripts: &mut Scripts, combo: &str| {
+            let outcome = scripts.key(combo, empty_snapshot());
+            assert!(outcome.handled, "{combo} was not handled");
+            match outcome.commands.as_slice() {
+                [Command::Decoration { name }] => name.clone(),
+                other => panic!("expected one style command from {combo}, got {other:?}"),
+            }
+        };
+
+        assert_eq!(named(&mut scripts, "super+p").as_deref(), Some("border"));
+        assert_eq!(
+            named(&mut scripts, "super+d").as_deref(),
+            Some("border"),
+            "the old name reaches the same command as the new one"
+        );
+    }
+
+    /// A snapshot with nothing in it, for the tests that only want a call made.
+    fn empty_snapshot() -> Snapshot {
+        Snapshot {
+            keyboard: crate::keymap::State::initial(),
+            windows: Vec::new(),
+            monitors: Vec::new(),
+            work_area: Rect::default(),
+            cursor: (0.0, 0.0),
+        }
+    }
+
     /// **A script names an effect, and what comes back is the engine's.**
     ///
     /// The round trip nothing else covers: `crates/effects` has thorough unit
@@ -3000,44 +3061,50 @@ mod shipped {
         found
     }
 
-    /// **Every decoration the shipped configuration names is one that ships.**
+    /// **Every pane style the shipped configuration names is one that ships.**
     ///
-    /// `decoration.rs`'s `qml_path` turns a bare name into
-    /// `qml/decorations/<name>.qml` with nothing in between checking, so a name
-    /// that is not there is a scene that fails to build once per window -- every
-    /// window undecorated, and a log line each.
+    /// A name that is nowhere is a frame that fails to build once per window --
+    /// every window undecorated, and a log line each.
     ///
-    /// Resolved through `decoration::ships` rather than by joining `.qml` onto
+    /// Resolved through `decoration::ships` rather than by joining a path onto
     /// the name here, which is this module's own rule -- "resolves each name
     /// through the same function the compositor uses at run time" -- and which
-    /// this test was the one exception to. It matters now rather than as a
-    /// tidy-up: since Task 3 a name may equally be a **bundle** under `panes/`,
-    /// and a hand-joined `<name>.qml` would fail the first shipped script to
-    /// name one. That was recorded against Task 7 as something to remember
-    /// while moving files; going through the resolver means there is nothing
-    /// to remember.
+    /// this test was the one exception to. It matters rather than being a
+    /// tidy-up, and Task 7 is where it would have bitten: the eight names
+    /// `config.lua` has always carried stopped being files under
+    /// `qml/decorations` and became folders under `qml/panes` on one commit,
+    /// and a hand-joined `<name>.qml` would have gone red for all eight while
+    /// the compositor drew them perfectly. Through the resolver there was
+    /// nothing to remember.
+    ///
+    /// Both markers, because the setting is `pane` and `decoration` is still
+    /// read: a user.lua written before the rename still names a style, and a
+    /// name that has to resolve is a name this has to check. `everywhere` sees
+    /// only the shipped scripts, so what this really pins is that the alias in
+    /// `config.lua` cannot be left pointing at a style that was deleted.
     #[test]
-    fn every_decoration_named_is_one_that_ships() {
+    fn every_pane_style_named_is_one_that_ships() {
         let ships = crate::decoration::ships();
         // The walk before anything is decided by it: a catalogue that came back
         // empty would pass every name below by having no opinion, which is the
         // one way this can be green and mean nothing.
         assert!(
             ships.len() >= 8,
-            "this build offers {} styles, which is fewer than the eight decorations \
-             in the tree -- the walk is broken, not the configuration",
+            "this build offers {} styles, which is fewer than the eight that \
+             `config.lua` documents -- the walk is broken, not the configuration",
             ships.len()
         );
-        let asked = everywhere("decoration =");
+        let mut asked = everywhere("pane =");
+        asked.extend(everywhere("decoration ="));
         assert!(
             !asked.is_empty(),
-            "no decorations found; the scan is broken"
+            "no pane styles found; the scan is broken"
         );
         for (file, line, name) in asked {
             // `none` is a real setting and draws no frame at all, deliberately.
             assert!(
                 name == "none" || ships.iter().any(|offered| offered.name == name),
-                "{file}:{line} asks for decoration {name:?}, and this build ships no style \
+                "{file}:{line} asks for pane style {name:?}, and this build ships no style \
                  of that name -- it ships {:?}",
                 ships
                     .iter()

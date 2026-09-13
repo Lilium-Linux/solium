@@ -1,9 +1,7 @@
-// A border that lights up where the cursor is, with a titlebar above it.
+// The one layer of `panes/reactive`: the lit border and the bar above it.
 //
-// The pointer is delivered to the frame while it is anywhere over the window,
-// so the glow can follow the cursor across the client area rather than only
-// along the frame's own band. A `MouseArea` over the whole frame reads it;
-// nothing here has to know where the client stops.
+// A `MouseArea` over the whole layer reads the pointer; nothing here has to
+// know where the client stops.
 
 import QtQuick
 import Solium
@@ -11,10 +9,16 @@ import Solium
 Item {
     id: frame
 
-    property int insetTop: 30
-    property int insetRight: 4
-    property int insetBottom: 4
-    property int insetLeft: 4
+    // What this layer paints, set by the compositor from the `insets` that
+    // `Pane.qml` declares. A style reserves space once for the whole pane, so
+    // the number lives in the manifest and every layer is told it — the space
+    // reserved and the space painted cannot be two different numbers, which is
+    // what putting `insets` on `PaneStyle` rather than on `Layer` was for.
+    //
+    // Zero is what this reads if the file is built outside a pane — by
+    // `--check-qml`, say — and drawing nothing is the honest answer there.
+    property int insetTop: 0
+    property int insetLeft: 0
 
     property string title: ""
     property bool focused: false

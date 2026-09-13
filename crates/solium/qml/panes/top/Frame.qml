@@ -1,7 +1,4 @@
-// A window's titlebar.
-//
-// Drawn by the compositor, not by the client: the frame reserves its own height
-// so frame and window are one object, and the client is never covered.
+// The one layer of `panes/top`: the bar itself.
 //
 // Every colour and measurement comes from `Solium.Theme`, which the shell's own
 // surfaces import too — one engine, one singleton, so changing a colour there
@@ -18,13 +15,15 @@ import Solium
 Item {
     id: frame
 
-    // How much of the window this frame reserves. Read once, when the frame is
-    // built, and everything else follows from it: the client is placed inside
-    // what is left, and this Item covers the whole outer rect.
-    property int insetTop: 32
-    property int insetRight: 0
-    property int insetBottom: 0
-    property int insetLeft: 0
+    // What this layer paints, set by the compositor from the `insets` that
+    // `Pane.qml` declares. A style reserves space once for the whole pane, so
+    // the number lives in the manifest and every layer is told it — the space
+    // reserved and the space painted cannot be two different numbers, which is
+    // what putting `insets` on `PaneStyle` rather than on `Layer` was for.
+    //
+    // Zero is what this reads if the file is built outside a pane — by
+    // `--check-qml`, say — and drawing nothing is the honest answer there.
+    property int insetTop: 0
 
     // Set by the compositor.
     property string title: ""

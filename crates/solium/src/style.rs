@@ -227,6 +227,9 @@ pub(crate) fn directories() -> Vec<PathBuf> {
 /// question about which directories exist. The brief said this was testable
 /// without one and it is not — a test asserting the user's copy wins has to
 /// create the user's copy. See the plan's amendment of 2026-09-13.
+///
+/// A bare name wants a bundle and not merely a folder; a path is taken as
+/// given. Both halves are argued for at the branches below.
 fn resolve(name: &str, user: Option<&Path>) -> Option<PathBuf> {
     // `Path::join("")` is the directory itself, and `is_dir()` agrees, so
     // without this an empty name resolves to the whole `panes/` folder and the
@@ -241,10 +244,31 @@ fn resolve(name: &str, user: Option<&Path>) -> Option<PathBuf> {
     if name.contains('/') {
         return Some(PathBuf::from(name));
     }
+    // A bare name asks a **different question**, and gets a different answer: a
+    // directory with no `Pane.qml` in it is skipped and the search goes on to
+    // the next place.
+    //
+    // The two are not inconsistent. A path is one location someone typed, and
+    // an error about that location is the most useful thing to say about it. A
+    // bare name is a *search across several directories*, and a folder that is
+    // not a bundle is not an answer to it — stopping there would mean an empty
+    // `~/.config/solium/qml/panes/top/` silently replaces the shipped `top`
+    // with a window that has no frame at all. Since Task 7 every style the
+    // compositor ships is a bundle, so that is not a corner case any more: it
+    // is one `mkdir` in the wrong place costing someone their titlebars, with
+    // nothing on screen to say which directory did it. Falling through, the
+    // shipped one still draws; and a name in no place at all is still `None`,
+    // which names the name that was typed.
+    //
+    // It is also what makes the panel honest. `decoration::offered_by` has
+    // always required a `Pane.qml` before listing a folder, so before this the
+    // listing and the lookup could disagree about one name — see
+    // `what_the_panel_offers_is_what_a_press_resolves`, which watched for
+    // exactly that and now cannot find it.
     places(user)
         .into_iter()
         .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_dir())
+        .find(|candidate| candidate.join("Pane.qml").is_file())
 }
 
 /// Where the bundle called `name` is on this machine, or `None`.
@@ -782,7 +806,7 @@ mod tests {
     #[test]
     fn a_bare_name_prefers_the_users_directory() {
         let user = scratch("user-panes");
-        std::fs::create_dir_all(user.join("example")).expect("a user bundle");
+        bundle_at(&user.join("example"));
 
         assert_eq!(
             super::resolve("example", Some(&user)),
@@ -795,6 +819,77 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// A folder with the right name and no `Pane.qml` in it is **not** an
+    /// answer to a bare name: the search goes on to the next place.
+    ///
+    /// The case this is for is one `mkdir` in the wrong place. Every style the
+    /// compositor ships is a bundle, so `~/.config/solium/qml/panes/top/` made
+    /// and not yet filled in shadows the shipped `top` by name — and if a bare
+    /// name took any directory, the answer would be a window with no frame at
+    /// all, with nothing on screen to say which directory did it. Falling
+    /// through, the shipped `top` still draws.
+    ///
+    /// Deliberately **not** the same rule as a path, which is taken as given so
+    /// `load` can say "…has no Pane.qml" about the one location that was typed
+    /// — asserted here as well, so the two cannot be collapsed into one.
+    ///
+    /// And it is the agreement the panel relies on: `decoration::offered_by`
+    /// has always required a `Pane.qml` before listing a folder, so a lookup
+    /// that did not was a name the panel could offer and a press resolve
+    /// somewhere else.
+    #[test]
+    fn a_bare_name_needs_a_manifest_and_not_merely_a_folder() {
+        let user = scratch("user-panes-empty-bundle");
+        std::fs::create_dir_all(user.join("example")).expect("an empty folder");
+
+        assert_eq!(
+            super::resolve("example", Some(&user)),
+            Some(shipped_example()),
+            "an empty `example/` is not a bundle, so the shipped one still answers"
+        );
+
+        // A name that is *only* there as an empty folder is nowhere at all,
+        // rather than a directory `load` would then have to refuse.
+        std::fs::create_dir_all(user.join("neon")).expect("an empty folder");
+        assert_eq!(super::resolve("neon", Some(&user)), None);
+
+        // Fill it in and it wins, which is what proves the fall-through above
+        // was about the manifest and not about the directory being unreadable.
+        bundle_at(&user.join("neon"));
+        assert_eq!(
+            super::resolve("neon", Some(&user)),
+            Some(user.join("neon")),
+            "a folder becomes a bundle the moment it has a Pane.qml"
+        );
+
+        // A path is still taken as given, manifest or not. The asymmetry is the
+        // point: one location someone typed deserves an error about that
+        // location, and a search does not stop at a folder that is not a
+        // bundle.
+        let empty = user.join("example");
+        assert_eq!(
+            super::resolve(empty.to_str().expect("a utf-8 scratch path"), Some(&user)),
+            Some(empty),
+            "a path to the same empty folder is handed back, for `load` to name"
+        );
+
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// A directory with a `Pane.qml` in it: the least a bundle can be.
+    ///
+    /// The contents do not matter to `resolve`, which never loads it — what is
+    /// being written is the *presence* of the manifest, which is the whole of
+    /// what tells a bundle from a folder.
+    fn bundle_at(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("a bundle directory");
+        std::fs::write(
+            dir.join("Pane.qml"),
+            "import QtQuick\nimport Solium\n\nPaneStyle { Layer { depth: \"frame\" } }\n",
+        )
+        .expect("a manifest");
     }
 
     /// With nothing of that name in the user's directory, the shipped one.
@@ -841,7 +936,9 @@ mod tests {
     #[test]
     fn find_reaches_the_shipped_example() {
         let user = crate::qml::user_qml_dir().map(|dir| dir.join("panes"));
-        let shadowed = user.is_some_and(|dir| dir.join("example").is_dir());
+        // A bundle and not merely a folder, which is what `resolve` asks: an
+        // empty `example/` of the user's does not shadow anything.
+        let shadowed = user.is_some_and(|dir| dir.join("example").join("Pane.qml").is_file());
         if shadowed {
             assert!(
                 super::find("example").is_some(),

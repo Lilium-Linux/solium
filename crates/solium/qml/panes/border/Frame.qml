@@ -1,7 +1,4 @@
-// No bar at all: a border, and the window's own edges.
-//
-// The smallest useful decoration, and the one worth reading first — every
-// other file here is this plus something.
+// The one layer of `panes/border`: an outline, and nothing else.
 
 import QtQuick
 import Solium
@@ -9,10 +6,15 @@ import Solium
 Item {
     id: frame
 
-    property int insetTop: 3
-    property int insetRight: 3
-    property int insetBottom: 3
-    property int insetLeft: 3
+    // What this layer paints, set by the compositor from the `insets` that
+    // `Pane.qml` declares. A style reserves space once for the whole pane, so
+    // the number lives in the manifest and every layer is told it — the space
+    // reserved and the space painted cannot be two different numbers, which is
+    // what putting `insets` on `PaneStyle` rather than on `Layer` was for.
+    //
+    // Zero is what this reads if the file is built outside a pane — by
+    // `--check-qml`, say — and drawing nothing is the honest answer there.
+    property int insetTop: 0
 
     property string title: ""
     property bool focused: false

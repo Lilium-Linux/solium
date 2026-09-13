@@ -73,7 +73,7 @@ rebind and one more. Under `WIRECHECK_REBUILD_ON_RESIZE` it reads 80 -> 0, which
 is printed in that control's own failure message.
 
 **Every scene the compositor builds, on a GPU host.** The compositor's real
-`qml/cursor.qml` and `qml/decorations/top.qml`, built through
+`qml/cursor.qml` and `qml/panes/top/Frame.qml`, built through
 `solium_qml_scene_new_gpu` and rendered. Before Task 7 those two went down the
 *software* constructor, which a GPU host refuses outright — so `SOLIUM_QML_GPU=1`
 gave a desktop with a wallpaper on it and no window frames and no pointer, each
@@ -110,7 +110,7 @@ The two readings are taken in one run, in one process, against one driver, and
 needed, because a stub cannot satisfy both. `quadrants.qml` carries an animation
 with `loops: Animation.Infinite` and is asserted to read 1, in the resize case,
 on the same line that already asserts `spin` has moved. `cursor.qml` and
-`decorations/top.qml` are built and rendered in the scene case above with
+`panes/top/Frame.qml` are built and rendered in the scene case above with
 nothing written to them, and are asserted to read 0.
 
 Verified by stubbing `solium_qml_scene_animating`'s return in a control copy,

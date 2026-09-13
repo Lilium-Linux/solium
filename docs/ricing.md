@@ -20,7 +20,7 @@ Write `~/.config/solium/user.lua` with only what you want changed:
 ```lua
 return {
     gap = 4,
-    decoration = "reactive",
+    pane = "reactive",
     tiling = { split = 0.618 },
 }
 ```
@@ -47,7 +47,7 @@ Three guides go deeper than the recipes below:
 | your settings | `~/.config/solium/user.lua` |
 | your bindings and layout | `~/.config/solium/init.lua` |
 | one module, replaced | `~/.config/solium/tiling.lua`, `scrolling.lua`, … |
-| your decorations | `~/.config/solium/qml/decorations/*.qml` |
+| your pane styles | `~/.config/solium/qml/panes/<name>/` |
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
 | your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml` |
 
@@ -60,7 +60,7 @@ set — including its later improvements.
 ### A different frame
 
 ```lua
-return { decoration = "left" }
+return { pane = "left" }
 ```
 
 `top`, `left`, `bottom`, `border`, `reactive`, `proximity`, `reveal`, `pulse`.
@@ -69,22 +69,29 @@ Reload and every open window is re-framed.
 ### No frame at all
 
 ```lua
-return { decoration = "none" }
+return { pane = "none" }
 ```
 
 No bar, no border, and no QML scene built per window — which is different from
 a decoration that draws nothing: there is no scene to rasterise, so an
 undecorated desktop costs nothing per window. For a tiling layout whose own bar
-makes a titlebar redundant, or for taste. `SOLIUM_DECORATION=none` does it for
+makes a titlebar redundant, or for taste. `SOLIUM_PANE=none` does it for
 one run.
 
 ### Your own frame
 
-Copy one you like into `~/.config/solium/qml/decorations/` and edit it. A file
-named `top.qml` there shadows the shipped `top.qml`, so you can keep using
-`decoration = "top"` and mean yours. `crates/solium/qml/decorations/README.md`
-is the contract: what a frame is told, what it can ask for, and what it
-reserves.
+Copy one you like into `~/.config/solium/qml/panes/` and edit it. A folder
+named `top` there shadows the shipped `top`, so you can keep using
+`pane = "top"` and mean yours. `crates/solium/qml/panes/README.md` is the
+contract: what a style declares, what each layer is told, what it can ask for,
+and what it costs.
+
+A style is a folder holding a `Pane.qml` — what the frame reserves, and a list
+of layers, each its own QML scene at its own depth: behind the client, in the
+frame, or above it. A layer can also `bleed` past the window's edge, which is
+how a border waves or a shadow reaches. A single QML file still works too and
+is still called a decoration; it lives in
+`~/.config/solium/qml/decorations/` and is one layer in the frame.
 
 ### What a window shows before its application exists
 

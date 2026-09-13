@@ -1,22 +1,10 @@
-// A titlebar that is not there until you approach the window.
-//
-// Reserves nothing, so the client keeps the whole slot and nothing reflows
-// when the bar appears — the frame simply draws over the window. That is what
-// an inset of zero buys: an overlay rather than a band.
-//
-// The bar slides out of the window's own top edge, which reads as the window
-// producing it rather than as a panel fading in on top.
+// The one layer of `panes/reveal`: a bar tucked above the window's own edge.
 
 import QtQuick
 import Solium
 
 Item {
     id: frame
-
-    property int insetTop: 0
-    property int insetRight: 0
-    property int insetBottom: 0
-    property int insetLeft: 0
 
     property string title: ""
     property bool focused: false
@@ -31,6 +19,9 @@ Item {
     // it changes rather than just its bands.
     property bool overlay: true
 
+    // The bar's own height, and nothing to do with what the pane reserves:
+    // `Pane.qml` reserves nothing at all, which is why this number lives only
+    // here.
     readonly property int barHeight: 34
 
     Rectangle {

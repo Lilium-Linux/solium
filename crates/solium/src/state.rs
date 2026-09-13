@@ -112,7 +112,7 @@ fn grown(real: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logica
 /// want, because a window that changes shape the moment its frame appears is
 /// worse than one that was always the right size. It must not apply to a pane
 /// that will never have a frame — a client drawing its own decorations, an
-/// override-redirect menu, or `decoration = "none"` — which got a titlebar's
+/// override-redirect menu, or `pane = "none"` — which got a titlebar's
 /// worth of blank space above it with no titlebar in it. That is what an
 /// Electron application looked like here.
 const fn insets_for(frame: &crate::pane::Frame) -> Insets {

@@ -9,7 +9,7 @@
 // There is no titlebar on purpose. `insets` reserves nothing, so the client
 // fills the pane and every coloured pixel you can see is bleed.
 //
-//     SOLIUM_DECORATION=bleedy
+//     SOLIUM_PANE=bleedy
 //
 // What to look for, in order:
 //   * a band all the way round every window, outside it

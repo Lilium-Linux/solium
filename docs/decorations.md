@@ -5,8 +5,8 @@ in-process. Window frames, the pointer, the loading window, the shell itself.
 There is nothing to compile and no Rust to touch: write a file, name it, press
 `super+shift+r`.
 
-The property-by-property contract for a frame lives next to the frames, at
-[`crates/solium/qml/decorations/README.md`](../crates/solium/qml/decorations/README.md).
+The property-by-property contract for a frame lives next to the styles, at
+[`crates/solium/qml/panes/README.md`](../crates/solium/qml/panes/README.md).
 This is the guide: what the pieces are, how to write one, and what it costs.
 
 ![Titlebars drawn by the compositor in QML, at rest and scaled down in overview](window-frames.png)
@@ -28,7 +28,7 @@ other application on the machine follows.
 
 | what | where | named by |
 |---|---|---|
-| window frames | `qml/decorations/*.qml` | `decoration = "top"` |
+| window frames | `qml/panes/<name>/` | `pane = "top"` |
 | the loading window | `qml/loading/*.qml` | `loading = { scene = "window" }` |
 | the pointer | `qml/cursor.qml` | `SOLIUM_QML_CURSOR` |
 | a shell (bar, dock) | anywhere | `SOLIUM_SHELL_SCENE` |
@@ -213,7 +213,7 @@ tried, and the first attempt was a hard cut with one stray frame in it.
 ## Trying things quickly
 
 ```sh
-SOLIUM_DECORATION=left ./target/debug/solium     # one run, one decoration
+SOLIUM_PANE=left       ./target/debug/solium     # one run, one pane style
 SOLIUM_LOADING=mine    ./target/debug/solium     # one run, one loading scene
 solium --check-qml path/to/thing.qml             # does it even load?
 ```
