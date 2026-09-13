@@ -329,13 +329,20 @@ alone.
    stops leaving the wallpaper behind, and "the whole screen" and "this
    workspace" become nameable — which is what a global or per-workspace shader
    needs before any shader exists.
-5. **Passes, and one effect through them.** An effect declares its inputs; one
+5. **Layers with depth and bleed.** Moved up from phase 3, where it sat
+   because it was mistaken for styling. It is a capability, it is the one
+   originally asked for, and it needs **none** of what follows: a layer is a
+   QML scene rendered to its own texture and placed in the element list at a
+   depth relative to the client, which is the element machinery that already
+   exists. Passes are only needed by effects that read an *input*.
+
+6. **Passes, and one effect through them.** An effect declares its inputs; one
    declaring `backdrop` splits the frame. Land it with **rounded corners** and
    nothing else — the cheapest effect that declares `self`, and the one that
    forces the opaque-region question the whole design rests on. One effect
    proven end to end is what makes the next phase design against a real
    mechanism.
-6. **`z`, `pivot`, node alpha.** Completes `Frame`. Not a prerequisite for
+7. **`z`, `pivot`, node alpha.** Completes `Frame`. Not a prerequisite for
    anything above, which is why it sits at the end of the phase rather than the
    start — but it is what the deck, atrium and any card stack need.
 
@@ -352,7 +359,6 @@ alone.
 
 ### Phase 3 — the things made with it
 
-9. **Layers with depth and bleed.** The pane-styles plan's Tasks 1–7.
 10. **The effects worth shipping:** shadows, blur, wavy and reactive borders.
     By this point each is a file in `crates/effects` or a shader named in a
     style bundle, which is the whole test of this document.
