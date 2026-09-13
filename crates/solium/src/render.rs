@@ -687,9 +687,41 @@ pub(crate) fn elements(
         // deform can put pixels well outside `frame.rect` — a genie reaches
         // toward a dock — and there is no cheap rect that bounds it, so those
         // are always drawn and the renderer clips.
-        if frame.matrix.is_identity()
-            && frame.deform.is_none()
-            && !frame.rect.overlaps(screen.to_f64())
+        //
+        // **Tested against the bleed and not against the pane**, which is the
+        // one place a pane's own rectangle stood between a layer and the
+        // screen. A style that reaches 200px past its window has 199 of them
+        // still on this monitor when the window itself is one pixel off the
+        // edge, and culling by the window would have made a glow vanish the
+        // instant the thing it belongs to left — during a workspace slide,
+        // which is exactly when it is being looked at.
+        //
+        // Deliberately *not* the check above. That one is the slot, and it is
+        // containment: a window parked a screen away to hide it must not throw
+        // a glow onto the screen you are looking at, however far it bleeds.
+        //
+        // Through the same `spread` the layers themselves are placed by, so the
+        // rectangle this keeps a pane alive for is the rectangle its widest
+        // layer will actually occupy — including the scaling, since a window
+        // enlarged by a mode has its bleed enlarged with it.
+        let reach = crate::decoration::spread(
+            crate::decoration::Drawing {
+                rect: frame.rect,
+                outer: outer.size,
+                alpha: frame.opacity,
+                scale,
+            },
+            state
+                .panes
+                .get(pane)
+                .and_then(Pane::decoration)
+                .map_or_else(
+                    crate::style::Bleed::default,
+                    crate::decoration::Decoration::bleed,
+                ),
+        )
+        .drawn;
+        if frame.matrix.is_identity() && frame.deform.is_none() && !reach.overlaps(screen.to_f64())
         {
             continue;
         }
@@ -1154,7 +1186,12 @@ pub(crate) fn flat_window_elements(
 /// A zero-sized window is not drawable, but it is reachable: a client can
 /// commit before it has been configured. Scaling by zero would collapse the
 /// element and scaling by infinity would take the renderer with it.
-fn ratio(drawn: f64, real: i32) -> f64 {
+///
+/// Shared with `decoration::spread`, which needs exactly this number for
+/// exactly this reason: a layer's bleed scales with the window its layer
+/// belongs to, and two definitions of "how much has this window been scaled by"
+/// is how a frame and its bleed come to be scaled differently.
+pub(crate) fn ratio(drawn: f64, real: i32) -> f64 {
     if real <= 0 || drawn <= 0.0 {
         1.0
     } else {

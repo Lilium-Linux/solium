@@ -85,14 +85,39 @@ Item {
     // What the compositor tells a frame about the window it belongs to.
     //
     // Declared here so an inline layer can bind to them — `Frame.qml` in a
-    // bundle declares the same five for the same reason, since a delegated
+    // bundle declares the ones it uses for the same reason, since a delegated
     // layer is its own scene with no parent to read them off. `Decoration::tell`
-    // writes all five on every layer of a style, whichever way it was written.
+    // writes all of these on every layer of a style, whichever way it was
+    // written.
     property string title: ""
     property bool focused: false
     property bool pointerInside: false
     property int contentWidth: 0
     property int contentHeight: 0
+
+    // Where the window's own rectangle is inside this scene.
+    //
+    // A layer is laid out on its **canvas** — the pane's outer rect grown by
+    // the `bleed` that layer declared — so `anchors.fill: parent` covers the
+    // canvas and not the window. These four say where the window is within it:
+    // its top-left corner is at (bleedLeft, bleedTop), and it is paneWidth by
+    // paneHeight. A border straddling the window's top edge is drawn around
+    // `y: bleedTop`; the strip above that is over whatever is behind the
+    // window.
+    //
+    // `bleedLeft` and `bleedTop` are written once, at build, because a declared
+    // bleed never changes. The two sizes are written whenever the window is
+    // resized. All four are zero for a layer that declared no bleed, which is
+    // why content written against them is also correct without one.
+    //
+    // Two of the four sides and not four, deliberately: `bleedRight` is
+    // `width - bleedLeft - paneWidth` and `bleedBottom` is its twin, and a
+    // second spelling of a number QML can already work out is a second thing to
+    // keep in step.
+    property int bleedLeft: 0
+    property int bleedTop: 0
+    property int paneWidth: 0
+    property int paneHeight: 0
 
     // And the two that go the other way: what a button under the pointer says
     // about itself, and what it asked for. The compositor reads `onButton` and

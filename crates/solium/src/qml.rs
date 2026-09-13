@@ -20,6 +20,15 @@
 pub(crate) mod paint;
 mod target;
 
+/// The largest a scene may be, per side.
+///
+/// Re-exported because it is no longer only a GPU allocator's business. A
+/// layer's canvas is the pane grown by an **author-controlled** `bleed`, so
+/// `decoration::canvas` is where an absurd number is first turned into a size,
+/// and it is the one place that can decline it before either path allocates —
+/// the software path has no [`target::allocate`] to refuse it.
+pub(crate) use target::MAX_SIDE;
+
 use std::{
     borrow::Cow,
     cell::Cell,

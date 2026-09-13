@@ -82,14 +82,6 @@ pub(crate) struct Bleed {
 
 impl Bleed {
     /// Whether this layer needs a canvas larger than the pane at all.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the question Task 5 asks before growing a layer's canvas \
-                      and its damage; the parser that answers it is here"
-        )
-    )]
     pub(crate) const fn any(self) -> bool {
         self.top > 0 || self.right > 0 || self.bottom > 0 || self.left > 0
     }
@@ -152,20 +144,11 @@ pub(crate) struct LayerSpec {
     pub(crate) depth: Depth,
     /// How far past the pane this layer may paint.
     ///
-    /// Read out of the manifest and carried, and **nothing draws with it yet**:
-    /// Task 4 gives every layer the pane's outer rect as its canvas, and
-    /// growing that canvas — along with the pane's damage, which is the half
-    /// that is not obvious — is Task 5. Parsed here rather than there because
-    /// the parser is what `a_bare_number_bleeds_on_every_side` and its three
+    /// Read here and drawn with by [`crate::decoration::canvas`], which is the
+    /// one place it becomes a size. Parsed here rather than there because the
+    /// parser is what `a_bare_number_bleeds_on_every_side` and its three
     /// siblings pin, and a property read a task later is a property whose
     /// spelling nobody has checked against a real `Pane.qml`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "declared, parsed and carried; Task 5 is what grows a canvas by it"
-        )
-    )]
     pub(crate) bleed: Bleed,
     /// The file this layer's content lives in, when it is not inline.
     pub(crate) source: Option<PathBuf>,

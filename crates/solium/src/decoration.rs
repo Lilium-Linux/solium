@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     pane::{Frame, Pane, PaneId, Panes},
-    style::{Depth, LayerSpec, Style},
+    style::{Bleed, Depth, LayerSpec, Style},
 };
 
 use anyhow::{Context as _, Result};
@@ -182,6 +182,15 @@ struct Shown {
     /// border that lights up when you approach the window needs to know this
     /// even while the pointer is over the client, which is not ours.
     pointer_inside: bool,
+    /// The pane's outer size, in logical pixels.
+    ///
+    /// Here because [`Decoration::tell`] hands QML four numbers derived from it
+    /// — `contentWidth`, `contentHeight`, `paneWidth`, `paneHeight` — and
+    /// returns early when nothing it shows has changed. Without the size in
+    /// that comparison a window resized without being retitled or refocused
+    /// keeps the sizes it had when its title last changed, which
+    /// `decorations/reactive.qml` reads to size its own content.
+    size: (i32, i32),
 }
 
 /// How a rasterised frame reaches the screen.
@@ -230,6 +239,132 @@ pub(crate) struct Drawing {
     pub(crate) scale: f64,
 }
 
+/// The rectangle a layer is rasterised into: the pane, grown by its bleed.
+///
+/// **This is the whole of the clip.** A layer is drawn into a buffer of exactly
+/// this size, so content reaching past it is not clipped by a rule somebody has
+/// to remember to apply — there is nowhere for it to go. Bleed being a promise
+/// rather than a request is a property of the arrangement, which is why there is
+/// no `clip: true` anywhere and no region intersected on the way out: one style
+/// cannot force a full-screen repaint every frame because one style cannot
+/// produce pixels outside its own canvas.
+///
+/// The pane's own corner moves within it — a canvas that bleeds upward starts
+/// above the pane — which is why a layer is told `bleedLeft` and `bleedTop`:
+/// `anchors.fill: parent` covers the canvas, and QML needs a known origin to
+/// place the window's own corner against.
+///
+/// **Capped at [`qml::MAX_SIDE`] per side**, in logical pixels. `bleed` is
+/// author-controlled and this is the first place it becomes a size, so it is
+/// also the last place a typo can be turned into something drawable rather than
+/// a 1.6 GB allocation. See [`fits`] for how much of an over-large bleed
+/// survives, and `qml::MAX_SIDE` for why the cap is applied twice.
+pub(crate) fn canvas(outer: Rectangle<i32, Logical>, bleed: Bleed) -> Rectangle<i32, Logical> {
+    let (left, right) = fits(outer.size.w, bleed.left, bleed.right);
+    let (top, bottom) = fits(outer.size.h, bleed.top, bleed.bottom);
+    Rectangle::new(
+        (outer.loc.x - left, outer.loc.y - top).into(),
+        (outer.size.w + left + right, outer.size.h + top + bottom).into(),
+    )
+}
+
+/// How much of the bleed asked for on one axis actually fits on the canvas.
+///
+/// Both sides are reduced in proportion to what they asked for, rather than one
+/// of them being sacrificed: a layer that asked for a symmetric glow and is
+/// given all of it on the left and none on the right is worse to look at than
+/// one given half of each, and the arithmetic is the same length either way.
+///
+/// A pane already wider than [`qml::MAX_SIDE`] has `room` of zero, so it gets no
+/// bleed at all and the canvas is the pane — today's behaviour, which is the
+/// right thing for this to degrade to.
+fn fits(pane: i32, before: i32, after: i32) -> (i32, i32) {
+    let asked = before.saturating_add(after);
+    let room = qml::MAX_SIDE.saturating_sub(pane);
+    if asked <= room {
+        return (before, after);
+    }
+    if room <= 0 || asked <= 0 {
+        return (0, 0);
+    }
+    // Widened, because `before * room` reaches 2^31 * 2^13 and a style that
+    // overflowed here would get a *negative* bleed — a canvas smaller than the
+    // pane, which is the one thing `pixels` in `style.rs` refuses outright.
+    // `before <= asked`, so the quotient is at most `room` and the narrowing
+    // back cannot fail.
+    let kept = i32::try_from(i64::from(before) * i64::from(room) / i64::from(asked)).unwrap_or(0);
+    (kept, room - kept)
+}
+
+/// One layer's canvas, and where on screen it lands this frame.
+///
+/// Two rectangles because they are not the same rectangle and are not even in
+/// the same units. [`Self::canvas`] is the pane's own space at the pane's own
+/// size — what Qt lays the scene out in and what the buffer is — and
+/// [`Self::drawn`] is where a presentation transform has put it, which in a
+/// mode is somewhere else and a different size.
+///
+/// A pure function of a [`Drawing`] and a [`Bleed`], so the arithmetic that
+/// decides both a layer's cost and its damage can be read out without a
+/// renderer, a GPU or Qt.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Spread {
+    /// What the scene is rasterised into, relative to the pane's own top-left
+    /// corner: `loc` is `(-left, -top)` and `size` is the pane plus the bleed.
+    pub(crate) canvas: Rectangle<i32, Logical>,
+    /// **The element's geometry, and therefore its damage.**
+    ///
+    /// Smithay tracks an element by its geometry and damages what it vacates,
+    /// so a layer whose element is the *pane's* rect while its picture is the
+    /// canvas would both squash the picture into the pane and leave the bleed
+    /// undamaged when the window moves — an animating glow smeared across its
+    /// neighbours, with the pane itself repainting perfectly. Stating the
+    /// canvas here is what makes rule three hold, and it is the only thing
+    /// that does.
+    pub(crate) drawn: Rectangle<f64, Logical>,
+}
+
+/// Where one layer's canvas is, and where it is drawn.
+///
+/// The bleed scales with the window exactly as the frame does: a thumbnail in
+/// an overview carries its spikes at thumbnail size, because the buffer is
+/// mapped onto this rectangle whole. Growing the drawn rect by the *unscaled*
+/// bleed instead would map a shrunken pane's picture onto a full-size border,
+/// which reads as the effect detaching from the window it belongs to.
+///
+/// Reachable from `render::elements` as well as from here, and for one reason:
+/// the off-screen cull has to ask what rectangle a pane's widest layer will
+/// occupy, and a second answer to that question is how a pane comes to be
+/// culled off a screen its glow is still on.
+pub(crate) fn spread(drawing: Drawing, bleed: Bleed) -> Spread {
+    let canvas = canvas(Rectangle::from_size(drawing.outer), bleed);
+    let across = crate::render::ratio(drawing.rect.size.w, drawing.outer.w);
+    let down = crate::render::ratio(drawing.rect.size.h, drawing.outer.h);
+    // From the canvas and not from the bleed as declared, so that the cap above
+    // cannot leave the buffer and the rectangle it is drawn into disagreeing —
+    // which would stretch the picture rather than clip it.
+    let (left, top) = (-canvas.loc.x, -canvas.loc.y);
+    let (wider, taller) = (
+        canvas.size.w - drawing.outer.w,
+        canvas.size.h - drawing.outer.h,
+    );
+    Spread {
+        canvas,
+        drawn: Rectangle::new(
+            (
+                drawing.rect.loc.x - f64::from(left) * across,
+                drawing.rect.loc.y - f64::from(top) * down,
+            )
+                .into(),
+            (
+                drawing.rect.size.w + f64::from(wider) * across,
+                drawing.rect.size.h + f64::from(taller) * down,
+            )
+                .into(),
+        ),
+    }
+}
+
 /// One layer of a style, as a live scene.
 ///
 /// Separate scenes rather than one image with passes, because nothing else lets
@@ -243,6 +378,15 @@ struct LayerScene {
     name: String,
     scene: qml::Scene,
     backing: Backing,
+    /// How far past the pane this layer may paint, as it declared.
+    ///
+    /// Carried per layer and not per decoration because it *is* per layer:
+    /// three layers of one style have three different canvases, and the cost of
+    /// bleed is paid by the layer that asked for it. Read by [`spread`] for the
+    /// canvas, by `overlay` below for the bands, and by
+    /// [`Decoration::pointer`], which has to put the pointer back into a
+    /// coordinate frame this moved.
+    bleed: Bleed,
     /// Whether this layer paints outside the space the style reserved.
     ///
     /// A layer that stays inside the insets only has to have those bands
@@ -250,6 +394,13 @@ struct LayerScene {
     /// client -- a bar floating above the window, a glow across it -- has to
     /// have all of it copied, because anything in it may have moved. A layer
     /// at `behind` or `above` is one by definition.
+    ///
+    /// **And so is one with any bleed at all**, which is not an approximation:
+    /// the bands are strips of the *buffer* measured from its corners, and a
+    /// bleeding layer's buffer starts `bleed.left` to the left of the pane. Its
+    /// top band would be a strip of empty canvas above the titlebar and the
+    /// titlebar itself would never be copied, so a spike-throwing bar would
+    /// upload its spikes and drop its own bar.
     overlay: bool,
     /// The device-pixel size **this layer** was last drawn at.
     ///
@@ -398,6 +549,10 @@ impl Decoration {
                 name: String::new(),
                 scene,
                 backing: Backing::for_host(on_gpu),
+                // A single QML file has no manifest to declare one in, so a
+                // decoration's canvas is its pane and every arithmetic below
+                // collapses to what it was before layers existed.
+                bleed: Bleed::default(),
                 overlay,
                 buffer_size: (0, 0),
             }],
@@ -474,6 +629,15 @@ impl Decoration {
     /// full-size one. No time is passed: the clock belongs to the process, and
     /// `qml::tick` advances it once for the whole frame.
     ///
+    /// **The size and the position are per layer**, which is what bleed is.
+    /// Each layer is rasterised into its own canvas — the pane grown by the
+    /// bleed *it* declared — and the element is placed at that canvas rather
+    /// than at the pane, so the picture is not squashed back into the pane and
+    /// the damage the compositor tracks is the canvas. The pane's position among
+    /// the other panes is untouched: bleed changes a layer's canvas, not its
+    /// depth, so a background window's glow is still covered by the window in
+    /// front of it. See [`Spread`].
+    ///
     /// Concrete on `GlesRenderer` rather than generic since the GPU path
     /// arrived, for the reason `ShellSurface::element` gives: taking the
     /// thread's EGL context back off Qt is `EGLContext::make_current`, and
@@ -506,45 +670,68 @@ impl Decoration {
             let scaled = (f64::from(logical) * drawing.scale).round() as i32;
             scaled.max(1)
         };
-        let size = (pixels(width), pixels(height));
 
         // Before anything renders, on either path — and for **every** layer,
         // not the ones about to be drawn. This runs once per depth and the
         // write is guarded by `shown`, so telling only this depth's layers
         // would tell whichever depth came first and silently skip the rest.
         self.tell(look, width, height);
-        self.buffer_size = size;
-
-        // The drawn size scales the frame with the window it belongs to.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a frame is at most an output wide"
-        )]
-        let drawn: Size<i32, Logical> = (
-            drawing.rect.size.w.round() as i32,
-            drawing.rect.size.h.round().max(1.0) as i32,
-        )
-            .into();
-        let placement = Placement {
-            // Physical, which is what the parameter has always been: at 1x a
-            // logical position was the same number and it did not matter.
-            position: (
-                drawing.rect.loc.x * drawing.scale,
-                drawing.rect.loc.y * drawing.scale,
-            ),
-            size: drawn,
-            alpha: drawing.alpha,
-            kind: Kind::Unspecified,
-        };
+        // The **pane's** pixels and not any layer's canvas. `client_size` reads
+        // this to size a client while a style is being swapped, and a bleeding
+        // layer's canvas would tell it the window is larger than it is.
+        self.buffer_size = (pixels(width), pixels(height));
 
         let insets = self.insets;
         let mut animating = false;
         for layer in at(self.layers.iter_mut(), depth) {
+            // Per layer, because this is the whole of bleed: its own canvas,
+            // its own buffer, and its own rectangle on screen.
+            let spread = spread(drawing, layer.bleed);
+            let size = (pixels(spread.canvas.size.w), pixels(spread.canvas.size.h));
+            // The drawn size scales the layer with the window it belongs to.
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a canvas is at most MAX_SIDE, which is an i32"
+            )]
+            let drawn_size: Size<i32, Logical> = (
+                spread.drawn.size.w.round() as i32,
+                spread.drawn.size.h.round().max(1.0) as i32,
+            )
+                .into();
+            let placement = Placement {
+                // Physical, which is what the parameter has always been: at 1x
+                // a logical position was the same number and it did not matter.
+                position: (
+                    spread.drawn.loc.x * drawing.scale,
+                    spread.drawn.loc.y * drawing.scale,
+                ),
+                size: drawn_size,
+                alpha: drawing.alpha,
+                kind: Kind::Unspecified,
+            };
             let drawn = layer.element(renderer, insets, size, placement, drawing.scale);
             into.extend(drawn.element);
             animating |= drawn.animating;
         }
         animating
+    }
+
+    /// The widest any of this style's layers may paint past the pane.
+    ///
+    /// The union and not a sum: three layers each reaching 24px upward reach
+    /// 24px upward. It is what bounds the whole decoration on screen, which is
+    /// the one question asked of a pane rather than of a layer — see the
+    /// off-screen cull in `render::elements`, where a pane whose own rect has
+    /// left the monitor may still have a glow reaching back onto it.
+    pub(crate) fn bleed(&self) -> Bleed {
+        self.layers
+            .iter()
+            .fold(Bleed::default(), |widest, layer| Bleed {
+                top: widest.top.max(layer.bleed.top),
+                right: widest.right.max(layer.bleed.right),
+                bottom: widest.bottom.max(layer.bleed.bottom),
+                left: widest.left.max(layer.bleed.left),
+            })
     }
 
     /// The names of the layers at one depth, in the order they are drawn.
@@ -563,9 +750,17 @@ impl Decoration {
     /// allocates.
     ///
     /// Every layer and not only the frame: a glow behind a window that cannot
-    /// tell whether the window is focused is a glow that is always on. The five
+    /// tell whether the window is focused is a glow that is always on. The
     /// properties are declared on `PaneStyle` as well as on a delegated layer's
     /// own root, so an inline layer can bind to them too.
+    ///
+    /// The **size** is in the comparison as well as the look, and that is not
+    /// tidiness. `paneWidth` and `paneHeight` are how a bleeding layer finds
+    /// the window's own rectangle inside a canvas larger than it — with
+    /// `bleedLeft` and `bleedTop`, which never change and are written once at
+    /// build. Leaving the size out would mean a window that is resized without
+    /// being retitled keeps the numbers it had at its last title change, which
+    /// puts a spike-throwing bar's spikes at the width the window used to be.
     fn tell(&mut self, look: &Look<'_>, width: i32, height: i32) {
         let Look {
             title,
@@ -575,6 +770,7 @@ impl Decoration {
         if self.shown.title == title
             && self.shown.focused == focused
             && self.shown.pointer_inside == pointer_inside
+            && self.shown.size == (width, height)
         {
             return;
         }
@@ -590,11 +786,16 @@ impl Decoration {
             layer.scene.set_bool("pointerInside", pointer_inside);
             layer.scene.set_int("contentWidth", content.0);
             layer.scene.set_int("contentHeight", content.1);
+            // The pane, which is not the canvas a bleeding layer is laid out
+            // in and not the client either.
+            layer.scene.set_int("paneWidth", width);
+            layer.scene.set_int("paneHeight", height);
         }
         self.shown.title.clear();
         self.shown.title.push_str(title);
         self.shown.focused = focused;
         self.shown.pointer_inside = pointer_inside;
+        self.shown.size = (width, height);
     }
 
     /// Tell the frame the pointer has left the window altogether.
@@ -602,6 +803,13 @@ impl Decoration {
     /// Sent as a position rather than a flag as well, because QML's hover
     /// handling is positional: a `MouseArea` that never sees the pointer leave
     /// stays hovered forever, and a border lit by proximity stays lit.
+    ///
+    /// Sent raw, **not** shifted into a bleeding layer's canvas the way
+    /// [`Self::pointer`] shifts a real position. `(-1, -1)` means "off the end
+    /// of everything", and a layer bleeding 24px to the left would receive
+    /// `(23, 23)` — a point comfortably inside its canvas, so the leave event
+    /// would arrive as a hover and the border lit by proximity would stay lit
+    /// for the rest of the session.
     pub(crate) fn pointer_left(&mut self) {
         for layer in &mut self.layers {
             layer.scene.pointer(-1.0, -1.0, None);
@@ -619,9 +827,21 @@ impl Decoration {
     /// border that stays lit. Deciding which layer *wants* the press needs the
     /// scene to say whether a `MouseArea` accepted it, which the spec's *Input,
     /// scoped* section is about and which nothing here can answer yet.
+    ///
+    /// **Into each layer's own canvas**, which is not the pane's space once a
+    /// layer bleeds. `x` and `y` are measured from the pane's top-left corner
+    /// and a canvas starts `bleedLeft` to the left of it, so a layer with any
+    /// bleed would otherwise find every button `bleedLeft` to the right of
+    /// where the pointer really was — the close button lighting up while the
+    /// pointer is over the maximise one. Task 6 is what *clips* this to the
+    /// pane; this is only the frame it is expressed in.
     pub(crate) fn pointer(&mut self, x: f64, y: f64, pressed: Option<bool>) {
         for layer in &mut self.layers {
-            layer.scene.pointer(x, y, pressed);
+            layer.scene.pointer(
+                x + f64::from(layer.bleed.left),
+                y + f64::from(layer.bleed.top),
+                pressed,
+            );
         }
     }
 
@@ -686,14 +906,28 @@ impl LayerScene {
         // rebinds onto the outer rect in the monitor's pixels regardless, and
         // building at the real size means ~3.9 MB allocated, handed to Qt,
         // imported and freed again for every layer of every window that opens.
+        //
+        // The **canvas** and not the pane, on the software path: this layer is
+        // laid out at whatever it may paint on, which is the pane grown by the
+        // bleed it declared. A scene built at the pane's size and only resized
+        // later would lay every anchor out against the wrong rectangle for one
+        // frame, which for a layer whose content is positioned against
+        // `bleedTop` is the frame where the spikes are in the titlebar.
         let on_gpu = qml::on_gpu();
+        let canvas = canvas(
+            Rectangle::from_size(
+                (
+                    width + style.insets.horizontal(),
+                    height + style.insets.vertical(),
+                )
+                    .into(),
+            ),
+            spec.bleed,
+        );
         let built = if on_gpu {
             (1, 1)
         } else {
-            (
-                (width + style.insets.horizontal()).max(1),
-                (height + style.insets.vertical()).max(1),
-            )
+            (canvas.size.w.max(1), canvas.size.h.max(1))
         };
         // An inline layer has no file of its own, so its scene is the manifest
         // loaded again with `layerIndex` pointing at the one child it draws.
@@ -710,18 +944,32 @@ impl LayerScene {
                 (&manifest, Some(inline.as_str()))
             }
         };
-        let scene = qml::Scene::for_host(path, built.0, built.1, initial)?;
+        let mut scene = qml::Scene::for_host(path, built.0, built.1, initial)?;
+        // Where the pane's own corner is inside the canvas. Written once
+        // because a declared bleed never changes; the pane's *size* does, and
+        // that goes through `tell` with everything else that can move.
+        //
+        // On the scene's root whichever way the layer was written: `PaneStyle`
+        // declares all four for an inline layer, a delegated file declares the
+        // ones it uses on its own root, and one that positions nothing against
+        // the window declares neither and is handed a property it ignores.
+        scene.set_int("bleedLeft", spec.bleed.left);
+        scene.set_int("bleedTop", spec.bleed.top);
         // A layer at `behind` or `above` paints over the client by definition,
         // and so does any layer of a style that reserved nothing: there is
         // nowhere else for it to paint. Only a `frame` layer inside real insets
-        // can be copied band by band, and only if it says it stays inside them.
-        let overlay =
-            spec.depth != Depth::Frame || !style.insets.any() || scene.get_bool("overlay");
+        // can be copied band by band, and only if it says it stays inside them
+        // — and a layer with any bleed at all has already said it does not.
+        let overlay = spec.depth != Depth::Frame
+            || !style.insets.any()
+            || spec.bleed.any()
+            || scene.get_bool("overlay");
         Ok(Self {
             depth: spec.depth,
             name: spec.name.clone(),
             scene,
             backing: Backing::for_host(on_gpu),
+            bleed: spec.bleed,
             overlay,
             buffer_size: (0, 0),
         })
@@ -1207,6 +1455,8 @@ fn shellexpand(path: &str) -> String {
 mod tests {
     use super::*;
 
+    use crate::style::Bleed;
+
     /// Everything Qt-touching in this file's tests goes through this. It moved
     /// to `qml` when `style` needed it too — the rule it encodes is the QML
     /// engine's thread affinity, which is not a fact about decorations.
@@ -1350,6 +1600,273 @@ mod tests {
         });
     }
 
+    /// A style whose `above` layer reaches 40px past the top of the pane.
+    ///
+    /// Three bands of flat opaque colour, and the green one is the control
+    /// built into the fixture: it is drawn *above the canvas*, so a picture
+    /// containing any of it is a layer that was given more room than it asked
+    /// for. Inline rather than delegated, so this also exercises `bleedTop` and
+    /// `paneHeight` reaching an inline layer through `PaneStyle`.
+    const BLEEDING: &str = r##"
+        import QtQuick
+        import Solium
+
+        PaneStyle {
+            id: pane
+
+            insets.top: 32
+
+            Layer {
+                depth: "above"; name: "spikes"; bleed: { "top": 40 }
+
+                // The strip past the pane, which is the whole point.
+                Rectangle {
+                    x: 0; y: 0; width: parent ? parent.width : 0
+                    height: pane.bleedTop
+                    color: "#ff0000"
+                }
+                // The pane's own rectangle, found inside the canvas.
+                Rectangle {
+                    x: 0; y: pane.bleedTop; width: parent ? parent.width : 0
+                    height: pane.paneHeight
+                    color: "#0000ff"
+                }
+                // Above the canvas entirely, and **declared last** so it would
+                // draw over both of the others: any green at all is a canvas
+                // larger than this layer asked for.
+                Rectangle {
+                    x: 0; y: -60; width: parent ? parent.width : 0; height: 60
+                    color: "#00ff00"
+                }
+            }
+        }
+    "##;
+
+    /// One column of a rendered layer, top to bottom, as `(r, g, b, a)`.
+    ///
+    /// The length is the **buffer's own height**, worked out from the bytes
+    /// rather than from anything that was asked for, so a test can measure how
+    /// tall a canvas really came out. Premultiplied ARGB32 little-endian, as
+    /// [`middle`] explains.
+    fn column(layer: &mut LayerScene, x: i32) -> Vec<(u8, u8, u8, u8)> {
+        let rendered = layer.scene.render().expect("the layer renders");
+        let stride = rendered.stride.max(1);
+        let at = usize::try_from(x.max(0)).unwrap_or(0) * 4;
+        (0..rendered.pixels.len() / stride)
+            .map(|row| {
+                let from = row * stride + at;
+                let pixel = rendered
+                    .pixels
+                    .get(from..from + 4)
+                    .expect("a pixel in the layer");
+                (pixel[2], pixel[1], pixel[0], pixel[3])
+            })
+            .collect()
+    }
+
+    /// How many rows of each colour a column has, in order.
+    fn runs(column: &[(u8, u8, u8, u8)]) -> Vec<((u8, u8, u8, u8), usize)> {
+        let mut runs: Vec<((u8, u8, u8, u8), usize)> = Vec::new();
+        for pixel in column {
+            match runs.last_mut() {
+                Some((colour, count)) if colour == pixel => *count += 1,
+                _ => runs.push((*pixel, 1)),
+            }
+        }
+        runs
+    }
+
+    /// **A layer paints outside its pane, and stops exactly where it said.**
+    ///
+    /// The claim the whole project was started for, read as pixels. The
+    /// compositor cannot be started here — there is no free VT — so the
+    /// screenshot the brief asks for is not available; what stands in its place
+    /// is the layer's own buffer, which is the thing a screenshot would be a
+    /// photograph of. Everything up to the upload is real: the manifest, the
+    /// bleed parsed out of it, `Decoration::from_style`, the canvas the scene
+    /// was built at, `tell`, and Qt's own rasteriser.
+    ///
+    /// A 60x88 client under a 32px inset is a 60x120 pane. The `above` layer
+    /// declares 40px of bleed at the top, so its canvas is 60x160 and reads,
+    /// top to bottom: 40 rows of red that are **not over the window at all**,
+    /// then 120 rows of blue that are. Nothing else fits in 160 rows, which is
+    /// what makes the run lengths the assertion.
+    ///
+    /// **The clip is structural rather than checked**, and that is worth being
+    /// exact about because it changes what a control can show. A layer is
+    /// rasterised into a buffer that *is* its canvas, so content reaching past
+    /// it is not rejected — there is nowhere for it to be drawn. The green band
+    /// is 60px above the canvas and is absent from a picture holding every
+    /// other band; it is declared last, so if the canvas ever were larger than
+    /// the layer asked for it would paint over both of the others rather than
+    /// hiding underneath them.
+    ///
+    /// Three controls, all run:
+    ///
+    /// | control | measured |
+    /// |---|---|
+    /// | `canvas` returning `outer` — the state before this task | 120 rows against 160: no strip at all |
+    /// | the canvas grown by twice the declared bleed, with QML still told 40 | 200 rows against 160 |
+    /// | the green band moved onto the canvas, at `y: 0` | 60 green rows then 100 blue: the run list does see green |
+    ///
+    /// The third is a control on the *reader* rather than on the code — it is
+    /// what says the second assertion could fail at all.
+    #[test]
+    fn a_layer_paints_past_its_pane_and_stops_where_it_promised() {
+        on_the_qt_thread(|| {
+            let dir = fixture("bleeding", &[("Pane.qml", BLEEDING)]);
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            assert_eq!(
+                style.layers[0].bleed,
+                Bleed {
+                    top: 40,
+                    right: 0,
+                    bottom: 0,
+                    left: 0
+                },
+                "per-side, so this layer pays for one side and not four"
+            );
+
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            // What `layer_elements` does before anything renders, which is
+            // where `paneHeight` comes from. The pane, not the client and not
+            // the canvas: 88 plus the 32 the style reserved.
+            decoration.tell(
+                &Look {
+                    title: "",
+                    focused: false,
+                    pointer_inside: false,
+                },
+                60,
+                120,
+            );
+
+            if crate::qml::on_gpu() {
+                // A GPU scene is built at 1x1 into a dmabuf; there is no
+                // `QImage` to read and nothing here can bind a texture. The
+                // geometry above this is path-independent, and `dev/wirecheck`
+                // is where GPU pictures are checked.
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+
+            let layer = decoration.layers.first_mut().expect("the one layer");
+            let column = column(layer, 2);
+
+            assert_eq!(
+                column.len(),
+                160,
+                "the canvas is the pane grown by the bleed: 120 rows of window and \
+                 40 rows above it. 120 means nothing grew and the layer is still \
+                 confined to its pane"
+            );
+            assert_eq!(
+                runs(&column),
+                vec![((255, 0, 0, 255), 40), ((0, 0, 255, 255), 120)],
+                "40 rows of red *above the window* and then the window's own 120 -- \
+                 the strip is the layer painting where the pane is not, and the \
+                 boundary at exactly row 40 is it stopping where it said it would. \
+                 Any green at all is the band drawn above the canvas having been \
+                 given room it never asked for, which is bleed as a request rather \
+                 than a promise"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A bleeding layer has its whole canvas copied, not its bands.**
+    ///
+    /// The bands are strips of the *buffer* measured from its corners, and a
+    /// bleeding layer's buffer no longer starts at the pane's corner. Copying
+    /// them would upload a strip of empty canvas above the titlebar and never
+    /// copy the titlebar itself — the one failure mode that shows a style's
+    /// bleed correctly and drops the part of it that was there before.
+    ///
+    /// Two layers in one fixture rather than two fixtures, so the only
+    /// difference between them is the property under test: same depth, same
+    /// insets, same content.
+    #[test]
+    fn bleeding_is_enough_to_lose_the_band_optimisation() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "bands",
+                &[(
+                    "Pane.qml",
+                    r#"
+                    import QtQuick
+                    import Solium
+
+                    PaneStyle {
+                        insets.top: 32
+                        Layer { depth: "frame"; name: "plain" }
+                        Layer { depth: "frame"; name: "reaching"; bleed: 12 }
+                    }
+                    "#,
+                )],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+
+            assert!(
+                !decoration.layers[0].overlay,
+                "a `frame` layer inside real insets that says nothing is still \
+                 copied band by band -- if this is false the optimisation is gone \
+                 for every window, not only the bleeding ones"
+            );
+            assert!(
+                decoration.layers[1].overlay,
+                "and the same layer with a bleed is not: its bands are measured \
+                 from a corner 12px outside the pane, so the top band would be \
+                 empty canvas and the titlebar would never be copied"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// What bounds a whole pane on screen: the union, not the sum.
+    ///
+    /// Read by the off-screen cull in `render::elements`, which is the one
+    /// place a pane's own rectangle stood between a layer and the monitor. Two
+    /// layers reaching 24px upward reach 24px upward.
+    #[test]
+    fn a_decorations_reach_is_the_widest_of_its_layers_and_not_their_total() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "reach",
+                &[(
+                    "Pane.qml",
+                    r#"
+                    import QtQuick
+                    import Solium
+
+                    PaneStyle {
+                        insets.top: 32
+                        Layer { depth: "behind"; name: "glow";   bleed: 24 }
+                        Layer { depth: "above";  name: "spikes"; bleed: { "top": 48, "left": 8 } }
+                    }
+                    "#,
+                )],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            assert_eq!(
+                decoration.bleed(),
+                Bleed {
+                    top: 48,
+                    right: 24,
+                    bottom: 24,
+                    left: 24
+                },
+                "72 on top would be two layers' reach added together, which is \
+                 not a distance anything paints at"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
     /// The layers of one depth, newest on top, and the others left out.
     ///
     /// `layer_elements` and `layers_at` share one selection — [`at`] — so this
@@ -1437,6 +1954,208 @@ mod tests {
                 assert!(!bundle.layers.is_empty(), "a user bundle is still a bundle");
             }
         });
+    }
+
+    /// The canvas is the pane grown by the bleed, and the pane's own corner
+    /// moves within it — which is why a layer is told `bleedLeft` and
+    /// `bleedTop`: `anchors.fill: parent` covers the canvas, and QML needs a
+    /// known origin to position the window's own corner against.
+    #[test]
+    fn a_canvas_is_the_pane_grown_by_its_bleed() {
+        let outer = Rectangle::<i32, Logical>::new((100, 200).into(), (800, 600).into());
+        let bleed = Bleed {
+            top: 40,
+            right: 10,
+            bottom: 0,
+            left: 20,
+        };
+        let canvas = super::canvas(outer, bleed);
+        assert_eq!(canvas.loc.x, 80);
+        assert_eq!(canvas.loc.y, 160);
+        assert_eq!(canvas.size.w, 830);
+        assert_eq!(canvas.size.h, 640);
+    }
+
+    #[test]
+    fn no_bleed_means_the_canvas_is_the_pane() {
+        let outer = Rectangle::<i32, Logical>::new((0, 0).into(), (400, 300).into());
+        assert_eq!(super::canvas(outer, Bleed::default()), outer);
+    }
+
+    /// **A canvas is capped, because `bleed` is author-controlled.**
+    ///
+    /// `qml::MAX_SIDE` used to be reachable only by owning an implausible
+    /// monitor; a layer's canvas is the first thing in this compositor whose
+    /// size comes out of a style file, so `bleed: 20000` is now one typo away
+    /// from a 1.6 GB allocation. The GPU path would refuse the buffer and
+    /// freeze the scene with one warning; the software path would ask Qt for
+    /// the `QImage` and `MemoryRenderBuffer::new` for the rest.
+    ///
+    /// Both sides are cut in proportion rather than one being sacrificed, so
+    /// what a symmetric glow loses it loses symmetrically.
+    #[test]
+    fn a_canvas_larger_than_a_scene_may_be_is_cut_down_to_one() {
+        let outer = Rectangle::<i32, Logical>::new((0, 0).into(), (1000, 800).into());
+        let absurd = super::canvas(
+            outer,
+            Bleed {
+                top: 20_000,
+                right: 20_000,
+                bottom: 20_000,
+                left: 20_000,
+            },
+        );
+        assert_eq!(
+            (absurd.size.w, absurd.size.h),
+            (crate::qml::MAX_SIDE, crate::qml::MAX_SIDE),
+            "a canvas is never larger than a scene may be"
+        );
+        assert_eq!(
+            (absurd.loc.x, absurd.loc.y),
+            (
+                -(crate::qml::MAX_SIDE - 1000) / 2,
+                -(crate::qml::MAX_SIDE - 800) / 2
+            ),
+            "and what is left is split between the two sides that asked for it"
+        );
+
+        // The pane's own corner is still inside it, whatever was cut. A canvas
+        // that had lost the whole of one side's bleed to rounding would put the
+        // window outside the picture drawn around it.
+        assert!(absurd.contains_rect(outer));
+
+        // And a pane already too large for a scene keeps the behaviour it has
+        // today rather than acquiring a negative canvas.
+        let enormous =
+            Rectangle::<i32, Logical>::new((0, 0).into(), (crate::qml::MAX_SIDE + 500, 200).into());
+        let capped = super::canvas(
+            enormous,
+            Bleed {
+                top: 0,
+                right: 40,
+                bottom: 0,
+                left: 40,
+            },
+        );
+        assert_eq!(capped.size.w, enormous.size.w, "no room, so no bleed");
+        assert_eq!(capped.size.h, 200, "and the axis with room is untouched");
+    }
+
+    /// One drawing, used by the `spread` tests below.
+    ///
+    /// A window 800x600 at (100, 200), drawn exactly where it lives at 1x — so
+    /// every number that comes out of `spread` is the bleed and nothing else.
+    fn at_rest() -> Drawing {
+        Drawing {
+            rect: crate::present::logical((100.0, 200.0), (800.0, 600.0)),
+            outer: (800, 600).into(),
+            alpha: 1.0,
+            scale: 1.0,
+        }
+    }
+
+    /// **The element's rectangle is the canvas, which is what makes the damage
+    /// the canvas.**
+    ///
+    /// Rule three. Smithay tracks an element by its geometry and damages what
+    /// it vacates when that geometry moves, so a layer drawn at the *pane's*
+    /// rectangle would leave the strip its bleed occupied undamaged — an
+    /// animating glow smearing across its neighbours while the window it
+    /// belongs to repaints perfectly, which is the hardest kind of rendering
+    /// bug to attribute because the thing that looks broken is not the thing
+    /// that is.
+    ///
+    /// The control is `spread` returning `drawing.rect` unchanged, which is
+    /// what this code did before bleed existed: measured
+    /// `(100, 200) 800x600` against the `(100, 152) 848x648` below, failing on
+    /// the assertion that names the damage.
+    #[test]
+    fn a_layer_is_drawn_at_its_canvas_and_not_at_its_pane() {
+        let bleed = Bleed {
+            top: 48,
+            right: 24,
+            bottom: 0,
+            left: 24,
+        };
+        let spread = super::spread(at_rest(), bleed);
+
+        assert_eq!(
+            spread.canvas,
+            Rectangle::<i32, Logical>::new((-24, -48).into(), (848, 648).into()),
+            "the canvas is the pane's own space, so its origin is the pane's corner"
+        );
+        assert!(
+            (spread.drawn.loc.x - 76.0).abs() < 1e-9 && (spread.drawn.loc.y - 152.0).abs() < 1e-9,
+            "the element starts where the canvas does -- 24 left and 48 above the \
+             window -- and not where the window does: this is the rectangle the \
+             damage tracker follows, and a bleed it does not cover is a bleed that \
+             leaves trails when it animates. Measured {:?}",
+            spread.drawn.loc
+        );
+        assert!(
+            (spread.drawn.size.w - 848.0).abs() < 1e-9
+                && (spread.drawn.size.h - 648.0).abs() < 1e-9,
+            "and it is the whole canvas, so the picture maps onto it one to one \
+             rather than being squashed back into the pane. Measured {:?}",
+            spread.drawn.size
+        );
+    }
+
+    /// A layer that asked for nothing costs nothing and moves nothing.
+    ///
+    /// The identity case, which every window on an ordinary desktop is: the
+    /// canvas is the pane, the element is where it always was, and none of the
+    /// arithmetic above is observable.
+    #[test]
+    fn a_layer_with_no_bleed_is_placed_exactly_where_it_was() {
+        let drawing = at_rest();
+        let spread = super::spread(drawing, Bleed::default());
+        assert_eq!(spread.canvas, Rectangle::from_size(drawing.outer));
+        assert_eq!(spread.drawn, drawing.rect);
+    }
+
+    /// **The bleed scales with the window, because the buffer is mapped onto
+    /// the whole of the drawn rectangle.**
+    ///
+    /// A thumbnail in an overview carries its spikes at thumbnail size. Growing
+    /// the drawn rect by the *unscaled* bleed instead would map a half-size
+    /// pane's picture onto a full-size border, which reads as the effect coming
+    /// unstuck from the window it belongs to — and, worse, would be wrong by a
+    /// different amount at every step of a resize animation.
+    #[test]
+    fn a_halved_window_carries_a_halved_bleed() {
+        let half = Drawing {
+            rect: crate::present::logical((0.0, 0.0), (400.0, 300.0)),
+            outer: (800, 600).into(),
+            alpha: 1.0,
+            scale: 1.0,
+        };
+        let spread = super::spread(
+            half,
+            Bleed {
+                top: 48,
+                right: 0,
+                bottom: 0,
+                left: 24,
+            },
+        );
+        assert_eq!(
+            spread.canvas.size,
+            (824, 648).into(),
+            "the scene is still rasterised at the window's own size: a thumbnail's \
+             titlebar costs what a full-size one does"
+        );
+        assert!(
+            (spread.drawn.loc.x + 12.0).abs() < 1e-9 && (spread.drawn.loc.y + 24.0).abs() < 1e-9,
+            "but it lands half as far out. Measured {:?}",
+            spread.drawn.loc
+        );
+        assert!(
+            (spread.drawn.size.w - 412.0).abs() < 1e-9
+                && (spread.drawn.size.h - 324.0).abs() < 1e-9,
+            "and is half as large. Measured {:?}",
+            spread.drawn.size
+        );
     }
 
     #[test]

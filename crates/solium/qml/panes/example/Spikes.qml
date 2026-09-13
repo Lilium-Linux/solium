@@ -8,6 +8,11 @@
 // whatever is behind the window, and the half below it is drawn over the
 // client, which is what `depth: "above"` means.
 //
+// The half above the window is the feature. It is drawn at the pane's own
+// stacking depth, so it covers the window *behind* this one and is covered by
+// any window in front — a background window's spikes do not appear over the
+// window being typed in.
+//
 // They stop at the edge of the canvas. Bleed is a promise, not a request: a
 // layer is clipped to what it asked for, or one style can quietly force a
 // full-screen repaint on every frame. And the strip takes no clicks — a spike
@@ -16,12 +21,11 @@
 // Plain rotated rectangles rather than `Canvas` or `ShaderEffect`, so that the
 // bundle stays portable and can honestly declare `requires: []`.
 //
-// **`bleedTop` is still this file's own default and nothing sets it yet.** A
-// layer's canvas is the pane's outer rect until Task 5 grows it, so today this
-// scene is the window's size and the strip above the window does not exist: the
-// diamonds are drawn 48px inside the top edge rather than straddling it. That is
-// the one visible difference between what this file describes and what
-// `decoration = "example"` currently draws.
+// Nothing here states 48 twice. The `Layer` in `Pane.qml` declares the bleed
+// and the compositor hands it back as `bleedTop`, so the canvas this is laid
+// out on and the offset the diamonds are placed at are the same number by
+// construction — which is the only way a file positioned against the edge of
+// its own canvas can be correct at more than one bleed.
 
 import QtQuick
 import Solium
@@ -31,7 +35,12 @@ Item {
 
     // Set by the compositor: how far the canvas extends past the pane, so the
     // content can find the window's own corner inside it.
-    property int bleedTop: 48
+    //
+    // Zero rather than 48, like `contentWidth` and for the same reason: these
+    // are in-properties. A plausible default is a file that looks right when
+    // nothing set it, and the one thing worth being able to see is whether it
+    // was told.
+    property int bleedTop: 0
     property int bleedLeft: 0
 
     Row {
