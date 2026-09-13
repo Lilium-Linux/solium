@@ -329,9 +329,23 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // size yet -- where `outer_geometry` is a zero-size rect that overlaps
         // nothing and would be culled while `elements` went on to draw it --
         // and `insets_of` grows by the decoration's insets where
-        // `frame_insets` gives an undecorated window none. Being wrong in that
-        // direction is a blank corner rather than a slow one, so the question
-        // is asked of the rectangle `elements` will ask it of.
+        // `frame_insets` gives an undecorated window none. So the question is
+        // asked of the rectangle `elements` will ask it of.
+        //
+        // Being wrong in that direction is *not* a blank corner, which is what
+        // this comment used to say: `Prepared::pass` answering `None` falls
+        // through to the ordinary surface path below, so a wrongly culled pane
+        // is a SQUARE-CORNERED window for one frame. Worth knowing, because it
+        // sets how hard to lean -- the failure is cosmetic and self-correcting,
+        // while being wrong the other way is a capture per window per frame
+        // for the life of the session.
+        //
+        // Costed honestly: `pane_outer_of` is two linear `Panes::get` scans
+        // (one through `insets_of`) plus an `element_location`, so this is
+        // O(panes) per pane per frame, not the single `overlaps` it reads as.
+        // About three hundred comparisons at twelve panes -- nothing beside an
+        // offscreen render, and the reason the cheap case stays cheap is that
+        // `on_screen` is short, not that this line is.
         if !state
             .pane_outer_of(pane)
             .is_some_and(|slot| state.on_any_output(slot))
