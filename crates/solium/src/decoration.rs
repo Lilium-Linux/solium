@@ -19,7 +19,10 @@
 //! [`Depth::Frame`]: the identity case is this machinery holding one thing
 //! rather than a second path beside it.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     pane::{Frame, Pane, PaneId, Panes},
@@ -1373,6 +1376,163 @@ fn bundle(style: Option<&str>) -> Option<PathBuf> {
     crate::style::find(&name)
 }
 
+/// What a `decoration =` name can turn out to be.
+///
+/// The variant order is [`build`]'s order, and both the sort below and
+/// [`catalogue`]'s shadowing rely on it: a bundle is tried first, so a bundle
+/// wins. Pinned by `bundles_come_before_files_and_each_group_is_sorted`,
+/// because a derived `Ord` over a reordered enum is a silent change.
+///
+/// `StyleKind` rather than `Kind` because this file already imports smithay's
+/// `element::Kind` — the same reason the module header spells out which of the
+/// three "Layer"s it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum StyleKind {
+    /// A folder under `panes/` with a `Pane.qml`: layers, and bleed.
+    Bundle,
+    /// One file under `decorations/`: a single layer at [`Depth::Frame`].
+    File,
+}
+
+impl StyleKind {
+    /// The word a script sees. Matched in `lua/tweaks.lua`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Bundle => "bundle",
+            Self::File => "file",
+        }
+    }
+}
+
+/// One thing this machine can be asked to draw.
+///
+/// Field order is the sort order: kind, then name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Offered {
+    pub(crate) kind: StyleKind,
+    pub(crate) name: String,
+}
+
+/// One directory to look in, and what a name found there means.
+struct Place {
+    dir: PathBuf,
+    kind: StyleKind,
+}
+
+/// Everywhere a bare name is looked for, in the order [`build`] looks.
+///
+/// Both halves come from the function that does the looking —
+/// [`crate::style::directories`] and [`decoration_directories`] — rather than
+/// being spelled out again here, so there is no second copy of the order to
+/// drift.
+fn places() -> Vec<Place> {
+    let bundles = crate::style::directories().into_iter().map(|dir| Place {
+        dir,
+        kind: StyleKind::Bundle,
+    });
+    let files = decoration_directories().into_iter().map(|dir| Place {
+        dir,
+        kind: StyleKind::File,
+    });
+    bundles.chain(files).collect()
+}
+
+/// Everything `places` can offer: one entry per name, nearest place winning.
+///
+/// A name found in an earlier place hides the same name in a later one, which
+/// is [`build`]'s own order said once more — a bundle called `top` shadows
+/// `decorations/top.qml`, and the user's `top` shadows the shipped one. So the
+/// list cannot offer a name whose press lands on something else, which is the
+/// single thing a discovered list can get wrong that a declared one could not.
+///
+/// Sorted for display, because `read_dir` order is whatever the filesystem
+/// feels like: unsorted, the panel's buttons would move between runs.
+fn catalogue(places: &[Place]) -> Vec<Offered> {
+    let mut offered: Vec<Offered> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for place in places {
+        // A directory that is not there is not an error and not a warning: most
+        // people have no `panes/` of their own, and that is the normal case
+        // rather than a misconfiguration.
+        let Ok(entries) = std::fs::read_dir(&place.dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let Some(name) = offered_by(&entry.path(), place.kind) else {
+                continue;
+            };
+            if seen.insert(name.clone()) {
+                offered.push(Offered {
+                    kind: place.kind,
+                    name,
+                });
+            }
+        }
+    }
+    offered.sort();
+    offered
+}
+
+/// The name `path` offers under a place of this kind, or `None` for one that
+/// offers nothing.
+fn offered_by(path: &Path, kind: StyleKind) -> Option<String> {
+    match kind {
+        // `Pane.qml` rather than merely a directory. `style::load` reads that
+        // file first and fails with "has no Pane.qml" without it, so a folder
+        // that has none is not a style and listing it would be listing a button
+        // that cannot work. It also keeps shared pieces out of the panel: a
+        // `panes/common/` of components several bundles import is a directory
+        // and is not a style.
+        StyleKind::Bundle => path
+            .join("Pane.qml")
+            .is_file()
+            .then(|| path.file_name()?.to_str().map(ToOwned::to_owned))
+            .flatten(),
+        StyleKind::File => (path.is_file() && path.extension().is_some_and(|end| end == "qml"))
+            .then(|| path.file_stem()?.to_str().map(ToOwned::to_owned))
+            .flatten(),
+    }
+}
+
+/// Everything this machine can be asked to draw, for a script to offer.
+///
+/// **Discovered, not declared.** `lua/tweaks.lua` kept a hand-written array of
+/// the eight decorations that shipped, so a style the user wrote was never in
+/// the Developer Tweaks panel however correct it was. The names now come from
+/// the directories the compositor actually resolves against, the same way
+/// `script::parse_easing` takes its curves from the animation engine rather
+/// than a list beside it — a bundle dropped into
+/// `~/.config/solium/qml/panes/` is in the panel after one reload, with
+/// nothing to edit.
+///
+/// Walked on every call rather than cached: it is a directory listing, it
+/// happens when a script asks, and the whole point is that it is current.
+pub(crate) fn available() -> Vec<Offered> {
+    catalogue(&places())
+}
+
+/// Everything *this build ships* can be asked to draw.
+///
+/// Shipped only, and the distinction is the whole point: this answers "does the
+/// configuration in the repository name something the repository contains",
+/// which [`available`] cannot, because it would resolve a name against
+/// whatever happens to be in the developer's own `~/.config/solium` and pass
+/// on their machine alone. Read by
+/// `script::shipped::every_decoration_named_is_one_that_ships`.
+#[cfg(test)]
+pub(crate) fn ships() -> Vec<Offered> {
+    catalogue(&[
+        Place {
+            dir: crate::style::shipped(),
+            kind: StyleKind::Bundle,
+        },
+        Place {
+            dir: shipped_decorations(),
+            kind: StyleKind::File,
+        },
+    ])
+}
+
 /// What names the frame: the environment, and then the configuration.
 ///
 /// The environment wins over the configuration, not the other way round. The
@@ -1412,15 +1572,30 @@ fn qml_path(style: Option<&str>) -> PathBuf {
     if name.contains('/') || name.ends_with(".qml") {
         return PathBuf::from(shellexpand(&name));
     }
-    // A file of the same name in the user's own directory shadows the one that
-    // ships, so `decoration = "top"` can mean the user's idea of a top bar.
-    if let Some(user) = qml::user_qml_dir() {
-        let theirs = user.join("decorations").join(format!("{name}.qml"));
-        if theirs.is_file() {
-            return theirs;
-        }
-    }
-    shipped_decoration(&name)
+    let file = format!("{name}.qml");
+    decoration_directories()
+        .into_iter()
+        .map(|dir| dir.join(&file))
+        .find(|candidate| candidate.is_file())
+        // Nowhere at all: name the shipped path anyway, so the failure that
+        // follows says where this looked rather than naming nothing.
+        .unwrap_or_else(|| shipped_decoration(&name))
+}
+
+/// The directories a single-file decoration is looked for in, nearest first.
+///
+/// A file of the same name in the user's own directory shadows the one that
+/// ships, so `decoration = "top"` can mean the user's idea of a top bar. The
+/// same shape as [`crate::style::directories`] and for the same reason: the
+/// lookup above and the listing in [`catalogue`] walk one list, so what the
+/// panel offers is what a press resolves.
+fn decoration_directories() -> Vec<PathBuf> {
+    let mut places: Vec<PathBuf> = qml::user_qml_dir()
+        .map(|dir| dir.join("decorations"))
+        .into_iter()
+        .collect();
+    places.push(shipped_decorations());
+    places
 }
 
 /// Whether this style means "draw no frame at all".
@@ -1440,10 +1615,14 @@ fn bare(style: Option<&str>) -> bool {
     )
 }
 
+/// The single-file decorations that ship with the compositor.
+pub(crate) fn shipped_decorations() -> PathBuf {
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/decorations"))
+}
+
 /// One of the decorations that ship with the compositor, by name.
 fn shipped_decoration(name: &str) -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/decorations"))
-        .join(format!("{name}.qml"))
+    shipped_decorations().join(format!("{name}.qml"))
 }
 
 /// Expand a leading `~`, since this is read from an environment variable and
@@ -2554,5 +2733,286 @@ mod tests {
             // Deliberately not asserted: which pane is rebuilt first. That order
             // was `HashMap`'s and is now the stacking order, and nothing reads it.
         });
+    }
+
+    // ---- what the panel can offer -------------------------------------------
+    //
+    // These replace `script::shipped::the_tweaks_panel_lists_every_decoration_
+    // that_ships`, which compared a hand-written Lua array against
+    // `qml/decorations/`. That comparison is gone because the array is gone:
+    // the panel's list *is* the directory now, so "the panel offers something
+    // that does not exist" and "a decoration nobody can reach" are no longer
+    // failures that can happen.
+    //
+    // What a walk can get wrong instead is everything below. Its failures are
+    // quiet in a way the old one's were not -- the panel renders a short list
+    // exactly as happily as a complete one -- so the cheap instrument checks
+    // (`is_empty`, "a bundle was found at all") are as load-bearing here as the
+    // precedence cases.
+
+    /// An empty `panes/` and `decorations/` pair of this test's own.
+    ///
+    /// Two directories rather than one, because everything here turns on which
+    /// of the two a name was found in.
+    fn shelf(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("solium-offered-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("panes")).expect("a panes directory");
+        std::fs::create_dir_all(dir.join("decorations")).expect("a decorations directory");
+        dir
+    }
+
+    /// A bundle called `name` on `shelf`, with the manifest that makes it one.
+    fn bundle_on(shelf: &Path, name: &str) {
+        let dir = shelf.join("panes").join(name);
+        std::fs::create_dir_all(&dir).expect("a bundle directory");
+        std::fs::write(dir.join("Pane.qml"), "import Solium\nPaneStyle {}\n")
+            .expect("writing a manifest");
+    }
+
+    /// A single-file decoration called `name` on `shelf`.
+    fn file_on(shelf: &Path, name: &str) {
+        std::fs::write(
+            shelf.join("decorations").join(format!("{name}.qml")),
+            "import QtQuick\nItem {}\n",
+        )
+        .expect("writing a decoration");
+    }
+
+    /// The two places a shelf holds, in the order [`build`] tries them.
+    fn places_on(shelf: &Path) -> Vec<Place> {
+        vec![
+            Place {
+                dir: shelf.join("panes"),
+                kind: StyleKind::Bundle,
+            },
+            Place {
+                dir: shelf.join("decorations"),
+                kind: StyleKind::File,
+            },
+        ]
+    }
+
+    /// **A bundle and a file of the same name are one entry, and it is the
+    /// bundle.**
+    ///
+    /// Which is what `build` does with the name: `bundle()` is consulted first
+    /// and only a `None` from it reaches `qml_path`. A panel showing both would
+    /// be offering two buttons that do the same thing, and the one labelled as
+    /// a file would be a lie about what the press draws.
+    #[test]
+    fn a_bundle_hides_a_single_file_of_the_same_name() {
+        let shelf = shelf("shadow");
+        bundle_on(&shelf, "top");
+        file_on(&shelf, "top");
+
+        assert_eq!(
+            catalogue(&places_on(&shelf)),
+            vec![Offered {
+                kind: StyleKind::Bundle,
+                name: "top".to_owned(),
+            }],
+            "one `top`, and it is the bundle"
+        );
+
+        // The control, and it is what makes the case above about *precedence*
+        // rather than about bundles: take the bundle away and the same name is
+        // still offered, now as the file it now is.
+        std::fs::remove_dir_all(shelf.join("panes").join("top")).expect("removing the bundle");
+        assert_eq!(
+            catalogue(&places_on(&shelf)),
+            vec![Offered {
+                kind: StyleKind::File,
+                name: "top".to_owned(),
+            }],
+            "with the bundle gone, the file is what `top` means"
+        );
+    }
+
+    /// **A name in two places of the same kind is offered once.**
+    ///
+    /// The user's `panes/example/` shadows the shipped one, so the panel has
+    /// one `example` button rather than two identical ones, only one of which
+    /// could ever be reached.
+    #[test]
+    fn a_name_in_two_places_is_offered_once() {
+        let mine = shelf("mine");
+        let theirs = shelf("theirs");
+        bundle_on(&mine, "twin");
+        bundle_on(&theirs, "twin");
+        let both = || {
+            vec![
+                Place {
+                    dir: mine.join("panes"),
+                    kind: StyleKind::Bundle,
+                },
+                Place {
+                    dir: theirs.join("panes"),
+                    kind: StyleKind::Bundle,
+                },
+            ]
+        };
+
+        assert_eq!(
+            catalogue(&both()),
+            vec![Offered {
+                kind: StyleKind::Bundle,
+                name: "twin".to_owned(),
+            }],
+            "the shadowed copy is not a second button"
+        );
+
+        // The control: a walk that simply stopped at the first directory would
+        // give the same single entry above and be wrong. A name only the second
+        // one has must still arrive.
+        bundle_on(&theirs, "only-theirs");
+        assert_eq!(
+            catalogue(&both())
+                .into_iter()
+                .map(|offered| offered.name)
+                .collect::<Vec<_>>(),
+            vec!["only-theirs".to_owned(), "twin".to_owned()],
+            "the second place is read; it is the repeated *name* that is dropped"
+        );
+    }
+
+    /// **A directory under `panes/` with no `Pane.qml` is not a style.**
+    ///
+    /// `style::load` reads that file first and fails without it, so offering
+    /// such a folder would be offering a button that cannot work. It is also
+    /// how a `panes/common/` of shared components several bundles import stays
+    /// out of the panel -- which is a thing somebody authoring a set of styles
+    /// will make almost immediately.
+    #[test]
+    fn a_directory_with_no_manifest_is_not_offered() {
+        let shelf = shelf("manifest");
+        let common = shelf.join("panes").join("common");
+        std::fs::create_dir_all(&common).expect("a directory");
+        std::fs::write(common.join("Frame.qml"), "import QtQuick\nItem {}\n")
+            .expect("writing a component");
+
+        assert_eq!(
+            catalogue(&places_on(&shelf)),
+            Vec::<Offered>::new(),
+            "a folder of components is not a style"
+        );
+
+        // The control: the only thing that was missing was the manifest.
+        std::fs::write(common.join("Pane.qml"), "import Solium\nPaneStyle {}\n")
+            .expect("writing a manifest");
+        assert_eq!(
+            catalogue(&places_on(&shelf)),
+            vec![Offered {
+                kind: StyleKind::Bundle,
+                name: "common".to_owned(),
+            }],
+            "and with one, it is"
+        );
+    }
+
+    /// **Bundles first, then files, each sorted by name.**
+    ///
+    /// Pinned rather than left to `StyleKind`'s declaration order, which is what
+    /// actually decides it through the derived `Ord` -- reordering that enum
+    /// would otherwise reorder the panel silently.
+    ///
+    /// It is a display requirement and not a preference. `qml/tweaks.qml` draws
+    /// a group heading whenever the group differs from the previous entry's, so
+    /// a list that interleaved the two kinds would print "Pane style" and
+    /// "Decoration" alternately down the whole panel. And sorted at all because
+    /// `read_dir` order is the filesystem's business: unsorted, the buttons
+    /// would move between runs.
+    #[test]
+    fn bundles_come_before_files_and_each_group_is_sorted() {
+        let shelf = shelf("order");
+        bundle_on(&shelf, "zebra");
+        bundle_on(&shelf, "apple");
+        file_on(&shelf, "yak");
+        file_on(&shelf, "bee");
+
+        assert_eq!(
+            catalogue(&places_on(&shelf))
+                .into_iter()
+                .map(|offered| (offered.kind, offered.name))
+                .collect::<Vec<_>>(),
+            vec![
+                (StyleKind::Bundle, "apple".to_owned()),
+                (StyleKind::Bundle, "zebra".to_owned()),
+                (StyleKind::File, "bee".to_owned()),
+                (StyleKind::File, "yak".to_owned()),
+            ],
+            "two contiguous runs, each in name order"
+        );
+    }
+
+    /// **The one bundle in the tree is offered, and offered as a bundle.**
+    ///
+    /// The instrument check, and the failure it is here for is silent: a
+    /// `StyleKind::Bundle` walk that found nothing would leave the panel showing the
+    /// eight single-file decorations, looking exactly like a working panel,
+    /// with the entire half of this feature that the user asked for missing.
+    /// Every other case in this section would still pass.
+    #[test]
+    fn the_bundle_that_ships_is_offered_as_a_bundle() {
+        let ships = ships();
+        assert!(
+            ships.contains(&Offered {
+                kind: StyleKind::Bundle,
+                name: "example".to_owned(),
+            }),
+            "qml/panes/example/ is the one bundle in the tree and the walk did not \
+             find it. Offered: {ships:?}"
+        );
+        assert!(
+            ships.iter().any(|offered| offered.kind == StyleKind::File),
+            "...and no single-file decoration either, so the walk found neither kind"
+        );
+    }
+
+    /// **Everything the panel offers is what pressing it would resolve to.**
+    ///
+    /// The load-bearing one, and the closest thing to a replacement for the
+    /// pinning test that is gone: it ties the *listing* to the *resolver*
+    /// rather than to a second copy of the directory layout. `style::find` is
+    /// the call `bundle()` makes, so a `StyleKind::Bundle` it answers `None` for is
+    /// a button labelled as a style with layers that would draw a single-file
+    /// decoration, and a `StyleKind::File` it answers `Some` for is the reverse.
+    ///
+    /// Against this machine's real directories, the user's included -- which is
+    /// the point, since shadowing is exactly what it is checking and only a
+    /// real `~/.config/solium/qml/panes` can produce it. It asserts agreement
+    /// rather than contents, so it says nothing about what is installed and
+    /// passes on a machine with nothing of its own.
+    ///
+    /// Reads no environment variable, so it is safe beside the tests that set
+    /// one: `available` and `style::find` are both pure directory walks, and it
+    /// is `chosen()` -- deliberately not called here -- that reads
+    /// `SOLIUM_DECORATION`.
+    #[test]
+    fn what_the_panel_offers_is_what_a_press_resolves() {
+        let offered = available();
+        assert!(
+            !offered.is_empty(),
+            "this machine offers no styles at all; the walk is broken, not the tree"
+        );
+        for entry in offered {
+            let found = crate::style::find(&entry.name);
+            match entry.kind {
+                StyleKind::Bundle => assert!(
+                    found.is_some(),
+                    "{:?} is offered as a bundle, but `style::find` does not find it, so a \
+                     press would fall through to a single file",
+                    entry.name
+                ),
+                StyleKind::File => assert!(
+                    found.is_none(),
+                    "{:?} is offered as a single file, but `style::find` resolves it to {} -- \
+                     a press would draw that bundle instead",
+                    entry.name,
+                    found.unwrap_or_default().display()
+                ),
+            }
+        }
     }
 }
