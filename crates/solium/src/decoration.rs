@@ -878,8 +878,14 @@ impl Decoration {
     /// What a button asked for since the last call, if anything.
     ///
     /// **Topmost first**, which is [`crate::render::PANE_ORDER`] read from the
-    /// front — the order the compositor draws in — so the layer the user is
-    /// looking at is the one whose press counts. This used to fold over
+    /// front — the order the compositor draws in — so that of the layers that
+    /// *answered*, the one on top is believed. It arbitrates; it does not
+    /// decide who is asked. [`Self::pointer`] still delivers to every layer, so
+    /// an `above` layer painting an opaque panel over a close button it has no
+    /// `MouseArea` of its own for leaves that button the only answerer, and the
+    /// window closes under the panel. Fixing *that* needs the scene to say
+    /// whether a `MouseArea` accepted, which is the spec's *Input, scoped*.
+    /// This used to fold over
     /// declaration order, and declaration order is bottom-to-top (see [`at`]):
     /// two layers with a button in the same place handed the press to the one
     /// *underneath*, which is the opposite of what is on screen. A style with a

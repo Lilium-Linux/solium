@@ -4521,12 +4521,15 @@ mod tests {
     ///
     /// **What it is and is not.** It is the two rectangles' relationship, in
     /// one place, with the reason written down; it is not a guard on the
-    /// hit-tests. Both controls below were run, and the second is the honest
-    /// limit of this test:
+    /// hit-tests, and it adds no machine-checked coverage that `decoration.rs`
+    /// did not already have. Both controls below were run, and between them
+    /// they are the honest limit of this test: the one it fails is pinned
+    /// twice over elsewhere, and the regression it is named for is pinned
+    /// nowhere.
     ///
     /// | control | measured |
     /// |---|---|
-    /// | `canvas` returning `outer` — the state before Task 5 | fails on the first assertion |
+    /// | `canvas` returning `outer` — the state before Task 5 | fails on the first assertion, but so do `decoration::tests::a_canvas_is_the_pane_grown_by_its_bleed` and `no_bleed_means_the_canvas_is_the_pane`, which pin it already |
     /// | `frame_under` **and** `decorated_under` switched to the canvas, through `decoration::spread` | the whole suite still passes, 201 of 201 |
     ///
     /// The regression is instead caught with a real pointer, which is what the
