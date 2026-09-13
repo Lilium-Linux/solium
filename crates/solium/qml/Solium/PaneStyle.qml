@@ -113,11 +113,20 @@ Item {
     // layer would draw its siblings. Measured on these very types: `layers` 3,
     // `children` 0.
     //
-    // Which is also why this *parents* rather than only setting `visible`.
-    // Nothing in `layers` is in the scene graph at all until something puts it
-    // there, so hiding the other two would still leave this scene drawing
-    // nothing; and parenting all three would draw all three into every layer's
-    // scene, which is a client sandwiched between two copies of one picture.
+    // Which is also why this *parents*, and does not only set `visible`.
+    // Nothing in `layers` is in the scene graph until something puts it there,
+    // so hiding two of three and parenting none draws nothing at all. Both
+    // halves are measured, each as its own control over
+    // `every_layer_is_its_own_scene_and_draws_only_itself`:
+    //
+    //   hidden, never parented   ->  every layer reads transparent
+    //   parented, never hidden   ->  every layer shows all three
+    //
+    // `visible = false` is what hides a sibling once it is parented; the
+    // `parent = null` beside it is not the mechanism and is measured not to be
+    // — with everything parented and hidden by `visible` alone the pictures are
+    // right. It is there so a layer this scene will never draw is out of the
+    // scene graph rather than merely invisible inside it.
     //
     // Anchored to fill, so `anchors.fill: parent` inside a layer resolves to
     // the canvas the compositor sized this scene to.
