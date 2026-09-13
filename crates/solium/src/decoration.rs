@@ -470,6 +470,19 @@ pub(crate) struct Decoration {
     layers: Vec<LayerScene>,
     /// What the style asked to reserve, read once when it was built.
     insets: Insets,
+    /// What the style runs on the client's own pixels, read once when it was
+    /// built.
+    ///
+    /// Here for the same reason `insets` is here and by the same route: the
+    /// declaration lives on `PaneStyle`, and this is the pane's copy of it.
+    /// **The renderer has no other way to reach a pane's `Style`** -- nothing
+    /// keeps one after `from_style` has read it -- so a pane's decoration is
+    /// what `render::prepare` asks whether this window needs a pass.
+    ///
+    /// Empty is the ordinary case and the whole cost model: a window whose
+    /// style declares nothing here is drawn exactly as it was before any of
+    /// this existed, and every window on an unstyled machine is that window.
+    effects: Vec<solium_effects::fragment::Effect>,
     /// The device-pixel size the frame was last drawn at.
     ///
     /// Kept on both paths, because `client_size` is asked for it while a style
@@ -574,6 +587,10 @@ impl Decoration {
                 buffer_size: (0, 0),
             }],
             insets,
+            // A single QML file has no manifest either, and `client.radius` is
+            // declared on `PaneStyle`. So a decoration that is one file runs
+            // no effects and costs no pass, which is what it has always cost.
+            effects: Vec::new(),
             buffer_size: (0, 0),
             shown: Shown::default(),
             restore: None,
@@ -613,6 +630,10 @@ impl Decoration {
             // format rests on: the client is placed once, so three layers each
             // answering would be three answers to one question.
             insets: style.insets,
+            // And the same, one line down, for the same reason: `client.radius`
+            // is declared on `PaneStyle` once, and every layer is *told* it
+            // rather than asked for it. See `LayerScene::build`.
+            effects: style.effects.clone(),
             buffer_size: (0, 0),
             shown: Shown::default(),
             restore: None,
@@ -630,6 +651,15 @@ impl Decoration {
     /// What this frame reserves around its client.
     pub(crate) const fn insets(&self) -> Insets {
         self.insets
+    }
+
+    /// What this style runs on the client's own pixels.
+    ///
+    /// Asked once per pane per frame by `render::prepare`, and empty for every
+    /// window on a machine nobody has styled -- so it is a slice and not an
+    /// `Option<Effect>`, and answering costs a pointer and a length.
+    pub(crate) fn effects(&self) -> &[solium_effects::fragment::Effect] {
+        &self.effects
     }
 
     /// The layers of this style at one depth, drawn into `into`, topmost first.
@@ -958,6 +988,31 @@ impl Backing {
     }
 }
 
+/// The radius a layer of this style should hug, in logical pixels.
+///
+/// Zero when the style declares no effect that masks the client, which is
+/// every shipped bundle and every style nobody has touched. A style wanting a
+/// rounded border around a *square* client declares no `client.radius` and
+/// sets its own `radius` — and pays for no pass, which is the point.
+///
+/// The *first* effect that is really an effect, which is the same choice
+/// `pass::needs_pass` makes and is made here again rather than shared with it:
+/// that one answers in `Effect`s for a shader, this one in `i32`s for QML, and
+/// a `Style` holding two rounding effects at once is a thing to design when
+/// something can declare one.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the radius reached `Effect` from `get_int`, so it was an i32 \
+              before it was an f64 and the round trip is exact"
+)]
+fn client_radius(style: &Style) -> i32 {
+    style
+        .effects
+        .iter()
+        .find(|effect| !effect.is_none_effect())
+        .map_or(0, |effect| effect.radius() as i32)
+}
+
 impl LayerScene {
     /// One declared layer, brought up as a scene of its own.
     fn build(spec: &LayerSpec, style: &Style, width: i32, height: i32) -> Result<Self> {
@@ -1041,6 +1096,28 @@ impl LayerScene {
         scene.set_int("insetRight", style.insets.right);
         scene.set_int("insetBottom", style.insets.bottom);
         scene.set_int("insetLeft", style.insets.left);
+        // What the client is being masked to, so a layer can match it. A
+        // rounded client inside a square border is the failure this prevents,
+        // and it is one number declared once — exactly why `client.radius`
+        // lives on `PaneStyle` and not on `Layer`, and exactly how `insets`
+        // above already work.
+        //
+        // **The split falls out of who drew the pixels.** The client's are the
+        // application's, so the compositor masks them with a fragment program
+        // — `pass.rs`, and the whole of this plan. A layer's are Qt's, and Qt
+        // rounds a rectangle with one property; a GPU pass to do what
+        // `Rectangle.radius` does for free would be absurd. So only the
+        // *number* crosses the seam, and this is the crossing.
+        //
+        // LOGICAL pixels, like every other value a layer is told. `pass.rs`
+        // multiplies by the output scale for the shader; nothing QML sees is
+        // ever in device pixels.
+        //
+        // Written unconditionally, so a style that declares no radius tells
+        // its layers zero rather than leaving whatever the file defaulted to
+        // — the same reason all four insets are written rather than the ones
+        // something happened to need.
+        scene.set_int("clientRadius", client_radius(style));
         // A layer at `behind` or `above` paints over the client by definition,
         // and so does any layer of a style that reserved nothing: there is
         // nowhere else for it to paint. Only a `frame` layer inside real insets
@@ -2649,6 +2726,170 @@ mod tests {
             assert_eq!(layer.scene.get_int("sawRight"), 110);
             assert_eq!(layer.scene.get_int("sawBottom"), 130);
             assert_eq!(layer.scene.get_int("sawLeft"), 170);
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// A bundle declaring a client radius and a delegated layer to read it.
+    ///
+    /// **The layer's own default is 7 and not 0, and that is the whole design
+    /// of this fixture.** A `clientRadius` default of 0 makes "the compositor
+    /// wrote 0" and "the compositor wrote nothing" the same reading, so the
+    /// zero case below -- the one that pins `map_or(0, ..)` -- could not fail.
+    /// With 7 as the default, an unwritten property reads back 71 and a
+    /// written zero reads back 1.
+    ///
+    /// The `+ 1` is there for the same reason one step further in: without it
+    /// a written 0 and an unwritten 0 would both be 0 again.
+    fn radius_fixture(name: &str, declared: &str) -> PathBuf {
+        fixture(
+            name,
+            &[
+                (
+                    "Pane.qml",
+                    &format!(
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {{
+                            {declared}
+                            Layer {{ depth: "frame"; name: "bar"; source: "Frame.qml" }}
+                        }}
+                        "#
+                    ),
+                ),
+                (
+                    "Frame.qml",
+                    r"
+                        import QtQuick
+
+                        Item {
+                            property int clientRadius: 7
+
+                            // A binding, so this moves only if the property
+                            // above was really set on one this file declared.
+                            readonly property int sawRadius: clientRadius * 10 + 1
+                        }
+                        ",
+                ),
+            ],
+        )
+    }
+
+    /// **A layer is told what the client is being masked to**, so a border can
+    /// match the curve instead of squaring it off around it.
+    ///
+    /// The other half of the seam this plan opens: the compositor rounds the
+    /// client with a fragment program because those pixels are the
+    /// application's, and QML rounds a layer with `Rectangle.radius` because
+    /// those are Qt's. Only the number crosses, and it crosses exactly as
+    /// `insets` do -- declared once on `PaneStyle`, written onto every layer.
+    ///
+    /// Read back through a *derived* property for the reason
+    /// `a_delegated_layer_is_told_the_styles_insets` gives: `set_int` followed
+    /// by `get_int` on one name is a round trip through the compositor's own
+    /// map and passes against a scene that never loaded.
+    #[test]
+    fn a_layer_is_told_the_clients_radius() {
+        on_the_qt_thread(|| {
+            let dir = radius_fixture("told-radius", "client.radius: 12");
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            let layer = decoration.layers.first_mut().expect("the one layer");
+
+            assert_eq!(
+                layer.scene.get_int("sawRadius"),
+                121,
+                "a declared `client.radius` has to reach a delegated layer, or \
+                 a bundle's border squares off the corners the compositor cut"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// And a style that declares none tells its layers **zero**, rather than
+    /// leaving whatever the file defaulted to.
+    ///
+    /// The control for the test above, and the one that can actually fail: it
+    /// is the only assertion here that a hardcoded `set_int("clientRadius",
+    /// 12)` would not satisfy, and the only one that separates "the compositor
+    /// wrote 0" from "the compositor wrote nothing" -- see `radius_fixture`
+    /// for how.
+    #[test]
+    fn a_layer_of_a_style_with_no_radius_is_told_zero() {
+        on_the_qt_thread(|| {
+            let dir = radius_fixture("told-no-radius", "");
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            let layer = decoration.layers.first_mut().expect("the one layer");
+
+            assert_eq!(
+                layer.scene.get_int("sawRadius"),
+                1,
+                "a style declaring no radius must say so; 71 means the property \
+                 was never written and the layer is hugging a curve nobody cut"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A pane carries its style's client effects, because the renderer has
+    /// no other way to reach them.**
+    ///
+    /// Nothing keeps a `Style` once `from_style` has read it, so the pane's
+    /// decoration is where `render::prepare` asks whether this window needs a
+    /// pass. Asserted through `pass::needs_pass` as well as against the list,
+    /// because the list being right and the question being asked of it are two
+    /// separate things and only the second one draws anything.
+    #[test]
+    fn a_decoration_carries_the_styles_client_effects() {
+        on_the_qt_thread(|| {
+            let dir = radius_fixture("carried-effects", "client.radius: 12");
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+
+            assert_eq!(
+                decoration.effects(),
+                [solium_effects::fragment::Effect::rounded(12.0)],
+                "the declared radius has to survive the trip onto the pane"
+            );
+            assert_eq!(
+                crate::pass::needs_pass(decoration.effects()),
+                Some(solium_effects::fragment::Effect::rounded(12.0)),
+                "and be recognised as wanting a pass, which is what runs one"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **And a style that declares nothing costs nothing**, which is the rule
+    /// this whole plan is written around: every window on a machine nobody has
+    /// styled is this window, and it must be drawn by exactly the path it was
+    /// drawn by before any of this existed -- no capture, no bind, no program,
+    /// no extra element.
+    ///
+    /// `needs_pass` answering `None` is the whole of what keeps it there, so
+    /// that is what is asserted rather than the empty list alone: a list that
+    /// is empty and a question that is never asked of it look identical from
+    /// here and are not.
+    #[test]
+    fn a_decoration_with_no_declared_radius_runs_no_pass() {
+        on_the_qt_thread(|| {
+            let dir = radius_fixture("carried-nothing", "");
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+
+            assert!(decoration.effects().is_empty());
+            assert_eq!(
+                crate::pass::needs_pass(decoration.effects()),
+                None,
+                "an unstyled window must not buy an offscreen pass per frame"
+            );
 
             let _ = std::fs::remove_dir_all(&dir);
         });

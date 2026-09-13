@@ -34,11 +34,14 @@ use crate::{pane::PaneId, qml::paint::Kept, state::Solium};
 /// How many textures one pane keeps for its own captures.
 ///
 /// **One, because a pane is captured once a frame at one size.**
-/// `render::prepare` walks the panes once per frame and calls [`capture`] at
-/// most once for each, at that pane's own monitor's scale. There is never a
-/// second size live to alternate with — which is exactly the case
-/// `qml::paint`'s cap of two does exist for: one scene drawn on both sides of
-/// a bezel, once per output, at two scales, every frame.
+/// `render::prepare` walks the panes once per frame and calls [`capture`] *or*
+/// [`capture_client`] at most once for each, at that pane's own monitor's
+/// scale. It picks between them rather than doing both, which is what keeps
+/// this one: a warped window and a rounded one want different sizes, so a pane
+/// doing both at once would thrash a cache of one. There is never a second
+/// size live to alternate with — which is exactly the case `qml::paint`'s cap
+/// of two does exist for: one scene drawn on both sides of a bezel, once per
+/// output, at two scales, every frame.
 ///
 /// The arithmetic says the same from the other side. A capture of an ordinary
 /// 1150x850 window is 1150 x 850 x 4 = 3.9 MB, and 2300 x 1700 x 4 = 15.6 MB
@@ -184,7 +187,67 @@ pub(crate) fn capture(
         tracing::warn!("a warped window had nothing to draw offscreen");
         return None;
     }
+    let texture = into_scratch(state, renderer, pane, size, &elements, scale)?;
+    Some((texture, size))
+}
 
+/// Draw `window`'s **client and nothing else** at its real size, into a
+/// texture.
+///
+/// The sibling of [`capture`], and the difference is the whole reason there
+/// are two. That one draws the window as it appears — frame, layers, popups —
+/// because a warp bends the whole thing as one object. This one draws only the
+/// application's own surface tree, because what a `client.radius` masks is the
+/// *client*: its frame is Qt's and rounds itself from `clientRadius` (see
+/// `LayerScene::build`), and its popups are separate windows that must not be
+/// clipped to it.
+///
+/// Which means this must not be called for a window that is also being warped:
+/// the two want different sizes out of the one texture a pane keeps, and
+/// `render::prepare` picks between them rather than doing both.
+///
+/// The surface tree is drawn at `-window.geometry().loc`, so the texture is
+/// exactly the window's geometry rectangle. A client that draws its own shadow
+/// outside that rectangle — `set_window_geometry` is how it says so — has the
+/// shadow clipped off by this, which is a real limit and the right one: the
+/// rectangle being masked is the one the client called its window.
+pub(crate) fn capture_client(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: PaneId,
+    window: &Window,
+    scale: f64,
+) -> Option<(GlesTexture, Size<i32, Physical>)> {
+    let real = state.real_geometry(window)?;
+    let size = pixels(real.size, scale);
+
+    let elements = crate::render::client_elements(renderer, window, scale);
+    if elements.is_empty() {
+        // Debug and not warn: a client with nothing mapped yet is ordinary and
+        // reaches here on the frames between its window appearing and its
+        // first buffer. `render::elements` draws it as it always did.
+        tracing::debug!("a client with an effect had nothing to draw offscreen");
+        return None;
+    }
+    let texture = into_scratch(state, renderer, pane, size, &elements, scale)?;
+    Some((texture, size))
+}
+
+/// Draw `elements` into the pane's own texture at `size`, and hand it back.
+///
+/// The half [`capture`] and [`capture_client`] share: what differs between
+/// them is *what* is drawn and how big, and everything from the allocation to
+/// the fence is the same. Written once because the two halves that are easy to
+/// get wrong — releasing the framebuffer on every path out, and waiting on the
+/// fence rather than dropping it — are the ones nobody notices twice.
+fn into_scratch(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: PaneId,
+    size: Size<i32, Physical>,
+    elements: &[crate::render::Element],
+    scale: f64,
+) -> Option<GlesTexture> {
     // The pane's own texture, made once and then reused for as long as the
     // window stays this size. `state` and `renderer` are separate borrows --
     // the renderer is not reached through the state -- so the closure can hold
@@ -200,11 +263,7 @@ pub(crate) fn capture(
         }) {
             Ok(texture) => texture,
             Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    ?buffer_size,
-                    "no offscreen buffer for a warped window"
-                );
+                tracing::warn!(?err, ?buffer_size, "no offscreen buffer for a capture");
                 return None;
             }
         }
@@ -242,7 +301,7 @@ pub(crate) fn capture(
                     });
 
                 let whole = [Rectangle::from_size(size)];
-                for element in &elements {
+                for element in elements {
                     let source = element.src();
                     let destination = element.geometry(Scale::from(scale));
                     // Damage is the whole texture, and stays so now that the
@@ -276,7 +335,7 @@ pub(crate) fn capture(
     };
 
     crate::warp::release_framebuffer(renderer);
-    drawn.then_some((texture, size))
+    drawn.then_some(texture)
 }
 
 /// One monitor's worth of picture, drawn into a texture of its own.

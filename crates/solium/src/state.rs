@@ -387,6 +387,16 @@ pub(crate) struct Solium {
     /// whoever is sitting there, from input being broken.
     pub(crate) pointer: crate::cursor::Pointer,
 
+    /// Fragment programs, compiled on first use and kept for the life of the
+    /// renderer.
+    ///
+    /// Not on the renderer, because that one is Smithay's; not on the pane,
+    /// because a program belongs to a GL context and there is one of those.
+    /// Beside `pointer` rather than among the protocol states for the same
+    /// reason `pointer` is here: it is something the compositor draws *with*,
+    /// not something a client binds.
+    pub(crate) programs: crate::pass::Programs,
+
     /// Hardware buffer sharing: `zwp_linux_dmabuf_v1`.
     ///
     /// The global itself is created by whichever backend has a renderer, since
@@ -639,6 +649,7 @@ impl Solium {
             socket_name: String::new(),
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
+            programs: crate::pass::Programs::default(),
             published_windows: String::new(),
             focusing: false,
             pending_drop: None,

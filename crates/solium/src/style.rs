@@ -185,18 +185,12 @@ pub(crate) struct Style {
     /// The radii in here are **logical** pixels, as declared. Nothing on this
     /// side knows what output the window will land on; `crate::pass` is the
     /// seam that multiplies by the scale. See `fragment::RADIUS_UNIFORM`.
-    // Used by the tests, so the exemption applies only outside them. `expect`
-    // and not `allow`, as `mat4` does: the day something renders from this the
-    // expectation goes unfulfilled and the build says so, so the marker cannot
-    // outlive the reason for it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "this is the wire from a declared radius to an Effect; \
-                      the pass that runs one is a later task in the same plan"
-        )
-    )]
+    ///
+    /// Read twice and in two directions by `decoration.rs`: copied onto the
+    /// `Decoration`, so `render::prepare` can ask a pane whether its client
+    /// needs a pass; and turned into the `clientRadius` every layer is told,
+    /// so a border can match the curve the compositor is about to cut rather
+    /// than squaring it off around it.
     pub(crate) effects: Vec<solium_effects::fragment::Effect>,
     pub(crate) dir: PathBuf,
 }

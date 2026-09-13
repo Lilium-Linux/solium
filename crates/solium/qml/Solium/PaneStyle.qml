@@ -86,6 +86,24 @@ Item {
     // before the property existed. `shadow` is the same shape and is still
     // reserved: it derives from the node's silhouette rather than masking it,
     // and nothing draws it yet.
+    //
+    // Declared once here and *handed to every layer*, exactly as `insets` are
+    // and for the same reason: the compositor writes `radius` back onto each
+    // layer's own root as `clientRadius`, in logical pixels, once at build. A
+    // layer that wants to hug the curve declares
+    //
+    //     property int clientRadius: 0     // set by the compositor
+    //     radius: clientRadius + 2         // hug it from outside
+    //
+    // **That split is not arbitrary; it falls out of who drew the pixels.**
+    // The client's are the application's, so the compositor masks them with a
+    // fragment program — see `pass.rs`. A layer's are Qt's, and Qt rounds a
+    // rectangle with one property; a GPU pass to do what `Rectangle.radius`
+    // does for free would be absurd. So the compositor rounds the client, QML
+    // rounds itself, and the only thing that crosses the seam is the number. A
+    // style wanting a rounded border around a *square* client declares no
+    // `client.radius` and sets its own `radius` — and pays for no pass, which
+    // is the point.
     property ClientTreatment client: ClientTreatment {}
 
     // The Layer children, in declaration order. Read by the compositor.
