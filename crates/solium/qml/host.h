@@ -293,6 +293,24 @@ int solium_qml_scene_layer_count(const SoliumQmlScene *scene);
 const char *solium_qml_scene_layer_field(const SoliumQmlScene *scene, int index,
                                          const char *field);
 
+/* One element of a string-list property, or NULL once `index` is past the end.
+ *
+ * `name` is a property *path*, exactly as solium_qml_scene_get_int's is.
+ *
+ * `PaneStyle.requires` is what this is for: a style says what it needs of the
+ * machine it is loaded on, and is refused for wanting it when it cannot have
+ * it. A list rather than a flag so that `["gpu", "effects/2"]` is versioning
+ * through the same mechanism, which is why this reads a list rather than a
+ * joined string.
+ *
+ * An empty element reads back as "" and only the end is NULL, so a list holding
+ * an empty string is not mistaken for a shorter one.
+ *
+ * The returned pointer is valid until the next call to this function on this
+ * thread, and the caller copies it.
+ */
+const char *solium_qml_scene_string_at(const SoliumQmlScene *scene, const char *name, int index);
+
 /* Pointer input, in scene coordinates. `pressed`: 1 down, 0 up, -1 motion. */
 void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed);
 

@@ -232,6 +232,78 @@ pub(crate) fn find(name: &str) -> Option<PathBuf> {
     resolve(name, user.as_deref())
 }
 
+/// Every term `requires` can name in this build, for a refusal to list.
+const TERMS: [&str; 1] = ["gpu"];
+
+/// Whether this process can offer `term`, or `None` if it has never heard of it.
+///
+/// > The software scene graph does not implement `ShaderEffect`, and `Canvas`
+/// > appears not to paint on it; the GPU path does both. So which QML is legal
+/// > depends on which machine you are on, and a style written on one hands a
+/// > white rectangle to another, silently.
+///
+/// That is the whole reason `requires` exists, and `gpu` is its only term
+/// today. [`crate::qml::on_gpu`] answers which path this process came up on —
+/// not which one was asked for, because Qt fixes its scene graph for the life
+/// of the process and can refuse.
+fn provides(term: &str) -> Option<bool> {
+    match term {
+        "gpu" => Some(crate::qml::on_gpu()),
+        _ => None,
+    }
+}
+
+/// Refuse a style this build cannot run, naming what it wanted and what is here.
+///
+/// **An unrecognised term is a refusal, not a warning.** `requires` is a list so
+/// that `["gpu", "effects/2"]` is format versioning through the same mechanism,
+/// and versioning that a build can ignore is not versioning: a style naming a
+/// term this build has never heard of was written against a *later* one, so the
+/// likeliest reading of it is "there is something here you do not know how to
+/// draw". Warning and loading anyway would put back exactly the silence the
+/// property exists to remove, one word further along — a style drawn wrong, on
+/// a machine that had already been told it could not draw it.
+///
+/// The cost of being wrong either way decides it too. Refusing a style that
+/// would in fact have looked fine costs one line deleted from a bundle, and the
+/// error says which line. Loading one that does not costs a desktop that looks
+/// broken with nothing naming the cause, which is the failure this feature is
+/// for.
+///
+/// An author who wants a term to be advisory has somewhere to put it already:
+/// out of `requires`. There is no way to spell the other direction.
+fn requirements(manifest: &Path, required: &[String]) -> Result<()> {
+    let unmet: Vec<String> = required
+        .iter()
+        .filter_map(|term| match provides(term) {
+            Some(true) => None,
+            Some(false) if term == "gpu" => Some(format!(
+                "`{term}` needs the GPU scene graph and this process came up on the software \
+                 one, which does not implement ShaderEffect and does not appear to paint Canvas"
+            )),
+            Some(false) => Some(format!("`{term}` is not available on this machine")),
+            None => Some(format!(
+                "`{term}` is not a requirement this build has heard of"
+            )),
+        })
+        .collect();
+    if unmet.is_empty() {
+        return Ok(());
+    }
+    let available: Vec<&str> = TERMS
+        .into_iter()
+        .filter(|term| provides(term) == Some(true))
+        .collect();
+    Err(anyhow!(
+        "{} requires [{}] and cannot be loaded here: {}. This build knows [{}] and provides [{}]",
+        manifest.display(),
+        required.join(", "),
+        unmet.join("; "),
+        TERMS.join(", "),
+        available.join(", "),
+    ))
+}
+
 /// Read a bundle's `Pane.qml`.
 ///
 /// The manifest scene is loaded at 1x1 and never rendered: it declares
@@ -239,8 +311,10 @@ pub(crate) fn find(name: &str) -> Option<PathBuf> {
 /// is going to look at. `Decoration::new` builds its GPU scenes the same way
 /// and for the same reason.
 ///
-/// `requires` is deliberately not read here. Refusing a style the machine
-/// cannot run is the loader's job, and the loader is Task 3.
+/// `requires` is checked *here*, and not by [`find`] or by a caller, because
+/// this is the only door: a [`Style`] that exists has already been found
+/// runnable, and there is no path that produces one without passing this.
+/// See [`requirements`] for what an unknown term does.
 pub(crate) fn load(dir: &Path) -> Result<Style> {
     let manifest = dir.join("Pane.qml");
     if !manifest.is_file() {
@@ -263,6 +337,10 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
             manifest.display()
         ));
     }
+    // Before the layers, and after the root check: a bundle that is not a
+    // PaneStyle has not asked for anything, and there is no point cataloguing
+    // the layers of a style that is about to be refused.
+    requirements(&manifest, &scene.string_list("requires"))?;
     let count = usize::try_from(declared).unwrap_or(0);
 
     let mut layers = Vec::with_capacity(count);
@@ -739,5 +817,198 @@ mod tests {
     /// The bundle this tree ships, by the same route `resolve` reaches it.
     fn shipped_example() -> PathBuf {
         PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes")).join("example")
+    }
+
+    /// A style is refused when the path cannot give it what it asked for.
+    ///
+    /// Which way this test runs is decided by the process, not by the assertion:
+    /// `qml::start()` is called first so `on_gpu()` is answering about a host
+    /// that exists, and then the same bundle must load on one path and be
+    /// refused on the other. The container the gate runs in has no render node,
+    /// so the refusal is the branch that is actually exercised there.
+    #[test]
+    fn a_style_the_path_cannot_run_is_refused() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "needs-gpu",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    requires: ["gpu"]
+                    Layer { depth: "frame"; name: "shader" }
+                }
+                "#,
+            );
+            crate::qml::start().expect("Qt starts");
+
+            if crate::qml::on_gpu() {
+                let style = load(&dir).expect("a GPU build runs a GPU style");
+                assert_eq!(style.layers.len(), 1);
+            } else {
+                let err = load(&dir).expect_err("the software path cannot run a GPU style");
+                let said = err.to_string();
+                // What was required, why it could not be had, and what is here.
+                // A refusal that says only "no" sends someone to the wrong file.
+                assert!(said.contains("requires [gpu]"), "{said}");
+                assert!(said.contains("software"), "{said}");
+                assert!(said.contains("knows [gpu] and provides []"), "{said}");
+            }
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// An unrecognised requirement is a refusal, on either path.
+    ///
+    /// `requires` is a list so that versioning goes through the same mechanism,
+    /// and a build that shrugs at a term it does not know is not versioned. A
+    /// style naming `effects/2` was written against a later build than this
+    /// one; loading it anyway is the silence the property exists to remove.
+    #[test]
+    fn an_unknown_requirement_is_refused() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "needs-the-future",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    requires: ["effects/2"]
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+            let err = load(&dir).expect_err("this build has never heard of effects/2");
+            let said = err.to_string();
+            assert!(said.contains("`effects/2` is not a requirement"), "{said}");
+            assert!(said.contains("knows [gpu]"), "{said}");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// Declaring nothing is portable, both ways of declaring it.
+    ///
+    /// `requires: []` and no `requires` at all are the same answer, which is
+    /// what makes the property something a style can leave out. The shipped
+    /// bundle is the `[]` case — see
+    /// `the_example_bundle_reads_back_as_it_is_written`, which loads it — and
+    /// this is the absent one, read back through the list itself rather than
+    /// only through the style loading.
+    #[test]
+    fn a_style_that_requires_nothing_is_portable() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "requires-nothing",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+            load(&dir).expect("a style asking for nothing loads anywhere");
+
+            let scene =
+                crate::qml::Scene::for_host(&dir.join("Pane.qml"), 1, 1, None).expect("a scene");
+            assert!(scene.string_list("requires").is_empty());
+            // And a property that is not a list at all is not read as one.
+            assert!(scene.string_list("nothing.at.all").is_empty());
+            drop(scene);
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// The shapes a list can arrive in, all read the same way.
+    ///
+    /// Measured rather than assumed, and the measurement is the reason the
+    /// unwrap in `solium_qml_scene_string_at` is written the way it is:
+    ///
+    /// * `list<string>` is a `QStringList` in the metaobject and arrives plain.
+    ///   Dropping the QJSValue unwrap changes nothing about `requires` — run as
+    ///   a control, all nineteen tests stayed green — so the unwrap is **not**
+    ///   what makes that property work, and a comment claiming it was would be
+    ///   the second thing in this file to describe a branch that never fires.
+    /// * `var` is the shape that needs it. A QML `var` hands its value back
+    ///   wrapped, exactly as `bleed` does, and without the unwrap a `var` list
+    ///   reads as empty. That is what `tags` here pins.
+    /// * A single value where a list was expected is one element, not none.
+    ///   `QVariant::toList()` answers empty for anything that is not already a
+    ///   list, and for `requires` "declares nothing" is precisely the wrong
+    ///   default — a requirement silently dropped is what the property exists
+    ///   to prevent.
+    #[test]
+    fn a_var_list_and_a_lone_value_read_like_a_string_list() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "list-shapes",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    property var tags: ["one", "two"]
+                    property var lone: "only"
+                    property var nothing: []
+
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+            let scene =
+                crate::qml::Scene::for_host(&dir.join("Pane.qml"), 1, 1, None).expect("a scene");
+
+            assert_eq!(scene.string_list("tags"), ["one", "two"], "a var list");
+            assert_eq!(
+                scene.string_list("lone"),
+                ["only"],
+                "one value is one element"
+            );
+            assert!(scene.string_list("nothing").is_empty());
+            drop(scene);
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// Two terms, read in order and reported together.
+    ///
+    /// The list is what the FFI is for: a joined string would have made
+    /// `["gpu", "effects/2"]` one unparseable term, and the refusal has to name
+    /// each of them separately to be worth reading.
+    #[test]
+    fn every_declared_requirement_is_read_and_reported() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "needs-two",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    requires: ["gpu", "effects/2"]
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+
+            let scene =
+                crate::qml::Scene::for_host(&dir.join("Pane.qml"), 1, 1, None).expect("a scene");
+            assert_eq!(scene.string_list("requires"), ["gpu", "effects/2"]);
+            drop(scene);
+
+            let err = load(&dir).expect_err("effects/2 is unknown on either path");
+            let said = err.to_string();
+            assert!(said.contains("requires [gpu, effects/2]"), "{said}");
+            assert!(said.contains("`effects/2`"), "{said}");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 }

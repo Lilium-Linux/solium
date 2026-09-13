@@ -20,7 +20,8 @@
 // compositor. It also means a simple style is one file with inline layers and
 // a complex one is a folder, with no format to migrate between.
 //
-// Nothing in the compositor reads any of this yet.
+// `style::load` reads `insets`, `requires` and the Layer children; `client` is
+// still reserved and read by nobody.
 
 import QtQuick
 
@@ -46,9 +47,11 @@ Item {
     // A list rather than a flag, so `["gpu", "effects/2"]` is versioning
     // through the same mechanism rather than a second one.
     //
-    // Declared here and read by nobody: finding and loading a bundle is not
-    // built yet, and a style written today should not have to change shape
-    // when it is.
+    // Read by `style::load`, which refuses the bundle when a term cannot be
+    // had — including one it has never heard of, since a style naming that was
+    // written against a later build and the likeliest reading is "there is
+    // something here you do not know how to draw". Leaving a term out is how a
+    // style says it would merely *like* something.
     property list<string> requires: []
 
     // Reserved. Declared now so a style folder written today does not change
