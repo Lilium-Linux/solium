@@ -4503,4 +4503,53 @@ mod tests {
         // up share a mutex, and that mutex is in the module where they live.
         // A second, unsynchronised starter in another module is a data race.
     }
+
+    /// Drawing is unclipped; input is not. A spike reaching over the next
+    /// window must not eat that window's clicks — the failure mode is a
+    /// neighbour that has silently stopped responding, with nothing on screen
+    /// to explain it.
+    ///
+    /// **It passed the moment it was written, and that is the point.** Every
+    /// hit-test in this file — `frame_under`, `decorated_under`, `window_under`,
+    /// `surface_under` and `resize_target` — reaches its pane through
+    /// [`Solium::pane_outer`], and the two that own a decoration gate on
+    /// `drawn.rect.contains(location)` before a layer is asked anything at all.
+    /// So the invariant holds by construction and nothing *states* it: the
+    /// canvas is a rectangle that exists, is larger, is right there in
+    /// `decoration.rs`, and is exactly what someone fixing "my glow does not
+    /// take clicks" would reach for.
+    ///
+    /// **What it is and is not.** It is the two rectangles' relationship, in
+    /// one place, with the reason written down; it is not a guard on the
+    /// hit-tests. Both controls below were run, and the second is the honest
+    /// limit of this test:
+    ///
+    /// | control | measured |
+    /// |---|---|
+    /// | `canvas` returning `outer` — the state before Task 5 | fails on the first assertion |
+    /// | `frame_under` **and** `decorated_under` switched to the canvas, through `decoration::spread` | the whole suite still passes, 201 of 201 |
+    ///
+    /// The regression is instead caught with a real pointer, which is what the
+    /// task's step 4 is for: two panes side by side under `bleedy`, a press
+    /// 60px into the first one's bleed and 20px inside the second, and the
+    /// second takes focus. Run against the canvas-hit-test build above, the
+    /// *first* window takes it and the second is left unfocused — a neighbour
+    /// that has silently stopped responding, exactly as described.
+    ///
+    /// A point 30px to the *left* of the pane: inside a canvas that bled 50, and
+    /// outside the pane on the only axis that matters.
+    #[test]
+    fn a_point_in_the_bleed_is_not_in_the_pane() {
+        let outer = Rectangle::<i32, Logical>::new((100, 100).into(), (200, 200).into());
+        let bleed = crate::style::Bleed {
+            top: 50,
+            right: 50,
+            bottom: 50,
+            left: 50,
+        };
+        let canvas = crate::decoration::canvas(outer, bleed);
+        let in_bleed = smithay::utils::Point::<f64, smithay::utils::Logical>::from((70.0, 120.0));
+        assert!(canvas.to_f64().contains(in_bleed));
+        assert!(!outer.to_f64().contains(in_bleed));
+    }
 }

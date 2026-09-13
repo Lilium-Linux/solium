@@ -836,8 +836,10 @@ impl Decoration {
     /// and a canvas starts `bleedLeft` to the left of it, so a layer with any
     /// bleed would otherwise find every button `bleedLeft` to the right of
     /// where the pointer really was — the close button lighting up while the
-    /// pointer is over the maximise one. Task 6 is what *clips* this to the
-    /// pane; this is only the frame it is expressed in.
+    /// pointer is over the maximise one. This is only the frame the point is
+    /// expressed in; the *clip* is in the callers, both of which test the
+    /// pane's outer rect before they reach a decoration at all — see
+    /// `state::tests::a_point_in_the_bleed_is_not_in_the_pane`.
     pub(crate) fn pointer(&mut self, x: f64, y: f64, pressed: Option<bool>) {
         for layer in &mut self.layers {
             layer.scene.pointer(
@@ -2033,9 +2035,10 @@ mod tests {
     /// | `pointer` not shifted | the scene reads the pointer at `(5, 7)`, 30 and 40 short |
     /// | `pointer_left` shifted the same way `pointer` is | still hovered after the pointer left |
     ///
-    /// Task 6 is what *clips* input to the pane — though note that both callers
-    /// already gate on `drawn.rect.contains(location)`, the pane's own outer
-    /// rect, so a spike over a neighbour does not reach this function at all.
+    /// The *clip* is elsewhere and was already there: both callers gate on
+    /// `drawn.rect.contains(location)`, the pane's own outer rect, so a spike
+    /// over a neighbour never reaches this function at all. That is now stated
+    /// as well as true — `state::tests::a_point_in_the_bleed_is_not_in_the_pane`.
     #[test]
     fn the_pointer_arrives_in_the_layers_own_canvas() {
         on_the_qt_thread(|| {
