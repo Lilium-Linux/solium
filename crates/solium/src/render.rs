@@ -391,9 +391,10 @@ fn client_pass(
     // `compile_custom_texture_shader`'s `make_current` is safe. `Programs`
     // says why at length, and the borrow checker enforces it.
     let program = state.programs.rounded(renderer)?.clone();
-    let (texture, size) = crate::offscreen::capture_client(state, renderer, pane, window, scale)?;
+    let (texture, size, opaque) =
+        crate::offscreen::capture_client(state, renderer, pane, window, scale)?;
     Some(crate::pass::Pass::new(
-        texture, size, effect, scale, program,
+        texture, size, effect, scale, opaque, program,
     ))
 }
 

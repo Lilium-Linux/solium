@@ -211,13 +211,23 @@ pub(crate) fn capture(
 /// outside that rectangle — `set_window_geometry` is how it says so — has the
 /// shadow clipped off by this, which is a real limit and the right one: the
 /// rectangle being masked is the one the client called its window.
+///
+/// The `bool` is whether the client covered the whole capture with opaque
+/// regions of its own, and it exists because the texture is **cleared to
+/// transparent** before anything is drawn into it. Nothing else about the
+/// result says whether its pixels are opaque: a terminal at 80% background, a
+/// GTK app rounding its own corners, a client that has not painted all of its
+/// geometry yet all produce a capture with holes in it. `pass::opaque_of` will
+/// not claim any of the texture opaque unless this is true, which keeps the
+/// rounded path's claim a subset of what the same client's surfaces claimed on
+/// the ordinary one.
 pub(crate) fn capture_client(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     pane: PaneId,
     window: &Window,
     scale: f64,
-) -> Option<(GlesTexture, Size<i32, Physical>)> {
+) -> Option<(GlesTexture, Size<i32, Physical>, bool)> {
     let real = state.real_geometry(window)?;
     let size = pixels(real.size, scale);
 
@@ -229,8 +239,30 @@ pub(crate) fn capture_client(
         tracing::debug!("a client with an effect had nothing to draw offscreen");
         return None;
     }
+    // Asked before the draw, and of the elements rather than of the texture: a
+    // texture cannot be asked what it contains without reading it back.
+    //
+    // `+ loc` because an element states its opaque regions relative to itself
+    // and its geometry relative to what it is drawn into, which here is the
+    // capture. That is the same sum smithay's own damage tracker does
+    // (`damage/mod.rs:530,580`), and getting it wrong is a claim about the
+    // wrong part of the window.
+    let output_scale = Scale::from(scale);
+    let opaque = crate::pass::covers(
+        size,
+        elements.iter().flat_map(|element| {
+            let loc = element.geometry(output_scale).loc;
+            element
+                .opaque_regions(output_scale)
+                .into_iter()
+                .map(move |mut region| {
+                    region.loc += loc;
+                    region
+                })
+        }),
+    );
     let texture = into_scratch(state, renderer, pane, size, &elements, scale)?;
-    Some((texture, size))
+    Some((texture, size, opaque))
 }
 
 /// Draw `elements` into the pane's own texture at `size`, and hand it back.

@@ -131,6 +131,139 @@ pub(crate) fn physical_radius(effect: Effect, scale: f64) -> f32 {
     (effect.radius() * scale) as f32
 }
 
+/// The largest rectangle certainly inside a rounded rect.
+///
+/// **The two errors here are not the same size, and the asymmetry decides
+/// every rounding in this function.** A region SMALLER than the truth costs
+/// drawing: something is painted that did not need to be. A region LARGER than
+/// the truth costs correctness: the renderer skips painting what is behind it,
+/// and what shows through instead is whatever the last frame left in the
+/// buffer -- and, because smithay draws a region an element calls opaque with
+/// blending disabled (`gles/mod.rs:2585`), the element's own transparency
+/// stops working there too. So every choice below is the small one.
+///
+/// Inset by the radius on all four sides. Not the tightest region possible --
+/// the tightest is a cross, since only the four corner squares have anything
+/// cut out of them -- but the cross is three rectangles where this is one, and
+/// this is certainly inside. `ROUNDED_CORNERS` folds the coordinate into one
+/// quadrant and measures `abs(p) - (half - r)`, which is `<= 0` on both axes
+/// exactly when the point is at least `r` from every edge; the shader then
+/// reports `-r` for it, uncut.
+///
+/// `ceil`, because a physical radius is a logical one times an output scale
+/// and is rarely whole: 13 logical at 1.25 is 16.25, and rounding that down
+/// claims a quarter-pixel column that the shader cut.
+///
+/// Saturating throughout, because `Effect::rounded(1e30)` is accepted upstream
+/// -- `is_none_effect` refuses only zero, negatives and NaN -- and `radius as
+/// i32` saturates at `i32::MAX`, where `inset * 2` is a debug panic in the
+/// middle of a frame.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "clamped to i32's range on the line above the cast"
+)]
+pub(crate) fn opaque_inside(
+    rect: Rectangle<i32, Physical>,
+    radius: f64,
+) -> Rectangle<i32, Physical> {
+    let inset = radius.ceil().clamp(0.0, f64::from(i32::MAX)) as i32;
+    let w = rect.size.w.saturating_sub(inset.saturating_mul(2)).max(0);
+    let h = rect.size.h.saturating_sub(inset.saturating_mul(2)).max(0);
+    Rectangle::new(
+        (
+            rect.loc.x.saturating_add(inset),
+            rect.loc.y.saturating_add(inset),
+        )
+            .into(),
+        (w, h).into(),
+    )
+}
+
+/// Whether `regions` leave no part of a `size`-sized rectangle uncovered.
+///
+/// Asked of a capture once, in `offscreen::capture_client`, with the opaque
+/// regions the client's own surfaces declared. The capture is cleared to
+/// transparent and the client draws into it, so the only thing that makes any
+/// of it opaque is the client saying so -- and a translucent client is
+/// ordinary, not exotic. See [`opaque_of`], which is what the answer gates.
+///
+/// The whole capture rather than only the part [`opaque_inside`] would claim,
+/// which is stricter than needed and deliberately so: it is one question
+/// instead of one per placement, and it means the sampler cannot reach a
+/// transparent texel from an opaque fragment however the texture is filtered.
+///
+/// **`!size.is_empty()` is belt and braces, and is recorded as such because
+/// removing it changes no test.** Smithay already answers `false` for a
+/// zero-sized capture, but only as a consequence of `intersection` returning
+/// `None` for a zero-area overlap (`geometry.rs:1364`): an empty rect can
+/// never be subtracted away, so it stays in the remainder. That is a detail of
+/// how `subtract_rects` treats degenerate input rather than a promise about
+/// this question, and the direction it would fail in if it changed is the
+/// expensive one -- a capture with no pixels called opaque everywhere.
+pub(crate) fn covers(
+    size: Size<i32, Physical>,
+    regions: impl IntoIterator<Item = Rectangle<i32, Physical>>,
+) -> bool {
+    !size.is_empty()
+        && Rectangle::from_size(size)
+            .subtract_rects(regions)
+            .is_empty()
+}
+
+/// The part of a rounded capture that is certainly opaque on screen, **as a
+/// rectangle relative to the element**, or `None` if none of it is.
+///
+/// Relative to the element because that is the frame smithay documents
+/// `Element::opaque_regions` in -- "the opaque regions of the element relative
+/// to the element" -- and the damage tracker adds the element's own location
+/// back on (`damage/mod.rs:530,580`). A claim built from the drawn rect whole
+/// is therefore offset twice and lands at `2 * dst.loc`: a patch of desktop
+/// with no window on it, left unpainted. That is this task's own failure
+/// pointed somewhere arbitrary, so the origin is dropped here rather than at
+/// the call site.
+///
+/// Three things make it `None`, and each is a way the window is opaque
+/// *nowhere* rather than merely not at its corners:
+///
+/// * the client did not cover its own capture (see [`covers`]);
+/// * the pane is mid-fade. The damage tracker reads `opaque_regions` and
+///   `alpha` separately and never multiplies one into the other, so an element
+///   has to do it -- smithay's own `TextureRenderElement` returns nothing below
+///   1.0 (`element/texture.rs:647`) for exactly this reason;
+/// * the radius is under half a physical pixel. `ROUNDED_CORNERS` omits the
+///   interior term of the rounded-box field, so it reports `-r` at *every*
+///   point inside the shape rather than the real distance; through
+///   `smoothstep(-0.5, 0.5, away)` that makes a window with a sub-half-pixel
+///   radius uniformly translucent everywhere. NaN lands here too, named rather
+///   than left to fall out of a negation, because it compares false against
+///   every bound and would otherwise reach `opaque_inside` and inset by zero.
+///
+/// `widen` is the last of it, and it is the one a 1:1 screen cannot feel. The
+/// radius is in the **texture's** pixels, and the texture is not always drawn
+/// at its own size: an animated window is captured once at its real size and
+/// stretched onto whatever rect it has this frame, mask and all. Drawn
+/// smaller, the corner shrinks and a smaller inset would do; drawn *larger* --
+/// which a script setting a rect bigger than the window's geometry does -- the
+/// corner grows, and an inset of `radius` screen pixels would be too small,
+/// which is the expensive direction. [`crate::render::ratio`] is the same
+/// number `elements` scales the ordinary path by, asked here rather than
+/// defined a second time, and it answers 1.0 for the degenerate sizes.
+pub(crate) fn opaque_of(
+    dst: Rectangle<i32, Physical>,
+    texture: Size<i32, Physical>,
+    radius: f32,
+    alpha: f32,
+    capture_opaque: bool,
+) -> Option<Rectangle<i32, Physical>> {
+    if !capture_opaque || alpha < 1.0 || radius < 0.5 || radius.is_nan() {
+        return None;
+    }
+    let widen = crate::render::ratio(f64::from(dst.size.w), texture.w)
+        .max(crate::render::ratio(f64::from(dst.size.h), texture.h));
+    let region = opaque_inside(Rectangle::from_size(dst.size), f64::from(radius) * widen);
+    (!region.is_empty()).then_some(region)
+}
+
 /// The compiled fragment programs, one of each, for the life of the renderer.
 ///
 /// Compiling a shader is not a per-frame cost anybody should pay, and
@@ -253,6 +386,11 @@ pub(crate) struct Pass {
     size: Size<i32, Physical>,
     /// **Physical** pixels; see [`physical_radius`].
     radius: f32,
+    /// Whether the client covered the whole capture with opaque regions of its
+    /// own, which is the only thing that makes any of this texture opaque: it
+    /// was cleared to transparent before the client drew into it. See
+    /// [`covers`], which answers it, and [`opaque_of`], which reads it.
+    opaque: bool,
     program: GlesTexProgram,
 }
 
@@ -266,12 +404,14 @@ impl Pass {
         size: Size<i32, Physical>,
         effect: Effect,
         scale: f64,
+        opaque: bool,
         program: GlesTexProgram,
     ) -> Self {
         Self {
             texture,
             size,
             radius: physical_radius(effect, scale),
+            opaque,
             program,
         }
     }
@@ -292,6 +432,7 @@ impl Pass {
             size: self.size,
             dst,
             radius: self.radius,
+            opaque: self.opaque,
             program: self.program.clone(),
             alpha,
         }
@@ -320,12 +461,16 @@ impl Pass {
 /// they are scoped to the one call. There is nothing to clear and therefore
 /// nothing to forget to clear.
 ///
-/// **Not covered by any test in this file, and not for want of trying.**
+/// **Almost none of it is covered by a test, and not for want of trying.**
 /// `offscreen::Scratch` is generic over what it keeps so its policy can be
 /// driven without a GPU; the same trick does not work here, because a
 /// `GlesTexProgram` is as unconstructable without a context as a `GlesTexture`
-/// is and this element holds one. Everything on it is seen for the first time
-/// by Task 6, on a screen.
+/// is and this element holds one. The exception is `opaque_regions`, which is
+/// the one answer here whose cost of being wrong is a corrupt screen rather
+/// than a wrong picture: all of it lives in [`opaque_of`], which takes numbers
+/// and is tested against the shader's own distance field. The rest -- `src`,
+/// `geometry`, `alpha`, `draw` -- is seen for the first time by Task 6, on a
+/// screen.
 #[derive(Clone, Debug)]
 pub(crate) struct Rounded {
     id: Id,
@@ -338,6 +483,8 @@ pub(crate) struct Rounded {
     /// a window being animated is drawn smaller than it was captured.
     dst: Rectangle<i32, Physical>,
     radius: f32,
+    /// See [`Pass::opaque`], whose copy this is.
+    opaque: bool,
     program: GlesTexProgram,
     alpha: f32,
 }
@@ -362,16 +509,28 @@ impl Element for Rounded {
         self.dst
     }
 
-    /// None, for now.
+    /// The drawn rect, inset by the radius -- or nothing at all.
     ///
-    /// **Task 5 of this plan is what replaces this**, and it is not a
-    /// formality: the client used to be an opaque rectangle, and the damage
-    /// tracker skipped drawing whatever was behind it. A rounded client is not
-    /// opaque at its corners, so claiming the whole rectangle leaves the
-    /// wallpaper undrawn in four little squares. Claiming nothing is merely
-    /// slower, which is the right way round to be wrong meanwhile.
+    /// **This is the point of the whole plan, and the reason rounded corners
+    /// were chosen as the first effect rather than something prettier.** A
+    /// square client is opaque everywhere, and the damage tracker uses that to
+    /// skip drawing whatever is behind it. A rounded one is not opaque at four
+    /// places, so an element that kept claiming its whole rectangle would leave
+    /// the wallpaper undrawn in four little squares -- and what is there
+    /// instead is whatever the last frame left in the buffer, which reads as
+    /// four smears following the window around. Opacity becomes a property the
+    /// node declares and the culling reads, rather than a global assumption
+    /// that quietly stopped being true.
+    ///
+    /// [`opaque_of`] is all of it, including the three ways this answers
+    /// nothing at all; it is a free function because nothing in a test can
+    /// construct a `GlesTexture` or a `GlesTexProgram`, and this decision is
+    /// too expensive to be wrong to leave where only a screen can check it.
     fn opaque_regions(&self, _scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
-        OpaqueRegions::default()
+        opaque_of(self.dst, self.size, self.radius, self.alpha, self.opaque)
+            .map_or_else(OpaqueRegions::default, |region| {
+                OpaqueRegions::from_slice(&[region])
+            })
     }
 
     fn alpha(&self) -> f32 {
@@ -541,6 +700,343 @@ mod tests {
         assert!(
             !programs.refuse(Effect::rounded(4.0)),
             "nor a different one"
+        );
+    }
+
+    /// The question the whole design rests on, and the reason rounded corners
+    /// were chosen as the first effect rather than something prettier.
+    ///
+    /// A square window is opaque everywhere, and the renderer uses that to
+    /// skip drawing whatever is behind it. Round the corners and that stops
+    /// being true at four places -- so an element that keeps claiming the
+    /// whole rect leaves the wallpaper undrawn under each corner, and what is
+    /// there instead is whatever the last frame left, which reads as four
+    /// smears that follow the window around.
+    ///
+    /// Inset by the radius on every side: the largest rectangle that is
+    /// certainly inside a rounded rect. Not the tightest possible region --
+    /// the tightest is a cross -- but it is right, and a region that is
+    /// smaller than the truth only costs drawing, where one larger than the
+    /// truth costs correctness.
+    #[test]
+    fn a_rounded_rect_is_opaque_only_inside_its_corners() {
+        let rect = Rectangle::<i32, Physical>::new((100, 100).into(), (300, 200).into());
+        let opaque = opaque_inside(rect, 20.0);
+        assert_eq!(opaque.loc.x, 120);
+        assert_eq!(opaque.loc.y, 120);
+        assert_eq!(opaque.size.w, 260);
+        assert_eq!(opaque.size.h, 160);
+    }
+
+    /// A radius larger than the window is not a negative rectangle.
+    #[test]
+    fn a_radius_bigger_than_the_window_claims_nothing() {
+        let rect = Rectangle::<i32, Physical>::new((0, 0).into(), (30, 30).into());
+        let opaque = opaque_inside(rect, 40.0);
+        assert_eq!(opaque.size.w, 0);
+        assert_eq!(opaque.size.h, 0);
+    }
+
+    /// Rounded **up**, and the whole test is the direction.
+    ///
+    /// The two tests above pass unchanged with `floor`, `round`, `trunc` or a
+    /// bare `as i32`, because 20.0 and 40.0 are already whole. A physical
+    /// radius is not: it is a logical one times an output scale, so 12 at
+    /// 1.25 is 15.0 and 13 at 1.25 is 16.25. Rounding that down claims a
+    /// quarter-pixel column the shader cut, which is the expensive direction.
+    #[test]
+    fn a_fractional_radius_insets_by_the_whole_pixel_it_touches() {
+        let rect = Rectangle::<i32, Physical>::new((0, 0).into(), (100, 100).into());
+        let opaque = opaque_inside(rect, 16.25);
+        assert_eq!(opaque.loc.x, 17, "16.25 has to inset 17, not 16");
+        assert_eq!(opaque.size.w, 66);
+    }
+
+    /// `Effect::rounded(1e9)` is accepted upstream -- `is_none_effect` refuses
+    /// only zero, negatives and NaN -- so an absurd radius reaches here.
+    ///
+    /// `radius.ceil() as i32` saturates at `i32::MAX`, and `inset * 2` on that
+    /// is an overflow: a debug panic, in the middle of a frame, taking the
+    /// compositor with it. Nothing else in this file would notice.
+    #[test]
+    fn an_absurd_radius_does_not_overflow_the_inset() {
+        let rect = Rectangle::<i32, Physical>::new((0, 0).into(), (100, 100).into());
+        assert!(opaque_inside(rect, 1e30).is_empty());
+        assert!(opaque_inside(rect, f64::INFINITY).is_empty());
+    }
+
+    /// **Relative to the element, not to the output.** Smithay's `Element`
+    /// spells it out -- "the opaque regions of the element relative to the
+    /// element" -- and the damage tracker adds the element's own location
+    /// back on (`damage/mod.rs:530,580`), exactly as it does for damage.
+    ///
+    /// So the rect to inset is the drawn rect's *size* at the origin, and a
+    /// claim built from `self.dst` whole is offset twice: it lands at
+    /// `2 * dst.loc`, somewhere else on the screen entirely, and tells the
+    /// renderer to stop painting a patch of desktop that has no window on it.
+    /// That is the failure this task exists to prevent, aimed at a random
+    /// rectangle instead of at four corners.
+    ///
+    /// Pinned by moving the window and asserting nothing changes. A version
+    /// that returned `opaque_inside(dst, radius)` agrees with every other test
+    /// in this module, because all of them place the element at the origin.
+    #[test]
+    fn the_claim_is_relative_to_the_element_not_to_the_output() {
+        let texture = Size::<i32, Physical>::from((300, 200));
+        let at_origin = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
+        let far_away = Rectangle::<i32, Physical>::new((1920, 1080).into(), texture);
+        assert_eq!(
+            opaque_of(at_origin, texture, 20.0, 1.0, true),
+            opaque_of(far_away, texture, 20.0, 1.0, true),
+            "where the window is on screen cannot change what it claims"
+        );
+        assert_eq!(
+            opaque_of(far_away, texture, 20.0, 1.0, true),
+            Some(Rectangle::new((20, 20).into(), (260, 160).into())),
+        );
+    }
+
+    /// **The radius is measured in the texture's pixels, and the texture is
+    /// not always drawn at its own size.**
+    ///
+    /// A window being animated is captured once, at its real size, and drawn
+    /// into more or less of the screen; the mask lives in the texture, so the
+    /// corner is stretched or squeezed with everything else. An inset of
+    /// `radius` screen pixels is therefore only right at 1:1 -- and it is
+    /// wrong in the *expensive* direction whenever the window is drawn larger
+    /// than it was captured, which a script setting a rect bigger than the
+    /// window's geometry does.
+    ///
+    /// Both halves are asserted because ignoring the magnification entirely
+    /// satisfies the shrinking one if it is stated as an inequality: the
+    /// doubled case is the one that fails.
+    #[test]
+    fn the_inset_is_the_radius_as_it_lands_on_screen() {
+        let texture = Size::<i32, Physical>::from((400, 400));
+        let doubled = Rectangle::<i32, Physical>::new((0, 0).into(), (800, 800).into());
+        assert_eq!(
+            opaque_of(doubled, texture, 20.0, 1.0, true),
+            Some(Rectangle::new((40, 40).into(), (720, 720).into())),
+            "drawn at twice its size, the corner is twice as big"
+        );
+        let halved = Rectangle::<i32, Physical>::new((0, 0).into(), (200, 200).into());
+        assert_eq!(
+            opaque_of(halved, texture, 20.0, 1.0, true),
+            Some(Rectangle::new((10, 10).into(), (180, 180).into())),
+            "and half as big drawn half the size"
+        );
+    }
+
+    /// A half-faded window is opaque nowhere, and the damage tracker will not
+    /// work that out on its own.
+    ///
+    /// It reads `Element::opaque_regions` and `Element::alpha` separately and
+    /// never multiplies one into the other -- checked in `damage/mod.rs`,
+    /// where `alpha` is used only to decide whether the element *moved*
+    /// (`instance_matches`, line 631). Smithay's own `TextureRenderElement`
+    /// therefore returns nothing at all below 1.0 (`element/texture.rs:647`),
+    /// and this has to do the same or a window fading in leaves the wallpaper
+    /// behind it undrawn across its whole middle rather than at four corners.
+    ///
+    /// 0.999 as well as 0.5, because `alpha <= 0.5` and `alpha == 0.0` are
+    /// both wrong implementations that a single half-opacity case accepts.
+    #[test]
+    fn a_fading_window_is_opaque_nowhere() {
+        let texture = Size::<i32, Physical>::from((300, 200));
+        let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
+        assert_eq!(opaque_of(dst, texture, 20.0, 0.5, true), None);
+        assert_eq!(opaque_of(dst, texture, 20.0, 0.999, true), None);
+        assert!(
+            opaque_of(dst, texture, 20.0, 1.0, true).is_some(),
+            "and a window that is not fading still claims its middle"
+        );
+    }
+
+    /// **A rounded window is no more opaque than the same window was square.**
+    ///
+    /// The capture is cleared to transparent and the client's surfaces are
+    /// drawn into it, so what is in the texture is whatever the client put
+    /// there: a terminal at 80% background, a GTK app that rounds its own
+    /// corners, a client that has not painted its whole geometry. Claiming
+    /// the middle of *that* opaque is the same defect as claiming the corners
+    /// -- and worse here than at the corners, because smithay draws a region
+    /// an element calls opaque with blending **disabled**
+    /// (`gles/mod.rs:2585`), so a translucent client would not merely smear:
+    /// it would stop being translucent.
+    ///
+    /// So the capture is asked, once, whether the client covered it with
+    /// opaque regions of its own, and nothing is claimed unless it did. That
+    /// makes this element's claim a subset of what the client's own surfaces
+    /// claimed on the ordinary path, which is the property worth having.
+    #[test]
+    fn a_capture_the_client_left_translucent_is_opaque_nowhere() {
+        let texture = Size::<i32, Physical>::from((300, 200));
+        let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
+        assert_eq!(opaque_of(dst, texture, 20.0, 1.0, false), None);
+        assert!(opaque_of(dst, texture, 20.0, 1.0, true).is_some());
+    }
+
+    /// Below half a physical pixel of radius, *nothing* is opaque -- and that
+    /// is a property of the shader rather than of the geometry.
+    ///
+    /// `ROUNDED_CORNERS` computes `away = length(max(p, 0.0)) - r`, which
+    /// omits the interior term of the exact rounded-box field: every fragment
+    /// inside the shape reports `-r` and not its real distance to the edge. It
+    /// is then fed to `smoothstep(-0.5, 0.5, away)`, so a window with `r` under
+    /// a half pixel comes out uniformly *translucent everywhere*, not merely
+    /// softened at four arcs. Claiming any of it opaque would draw it with
+    /// blending off and paint over what is behind it.
+    ///
+    /// `0.0` alone is not enough: refusing only a zero radius is a wrong
+    /// implementation that this catches and that one would not.
+    #[test]
+    fn a_radius_under_half_a_pixel_is_opaque_nowhere() {
+        let texture = Size::<i32, Physical>::from((300, 200));
+        let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
+        assert_eq!(opaque_of(dst, texture, 0.4, 1.0, true), None);
+        assert_eq!(
+            opaque_of(dst, texture, f32::NAN, 1.0, true),
+            None,
+            "NaN compares false against every bound and must not fall through \
+             to an inset of zero, which would claim the whole rectangle"
+        );
+        assert!(opaque_of(dst, texture, 0.5, 1.0, true).is_some());
+    }
+
+    /// `ROUNDED_CORNERS`'s distance field, evaluated in Rust.
+    ///
+    /// Transcribed from the four lines of `fragment.rs` that compute it, so
+    /// that the claim this file makes is checked against the program that
+    /// actually cuts the corners rather than against a second opinion about
+    /// geometry. `point` is `v_coords * tex_size`: the fragment's position in
+    /// the texture's own pixels.
+    fn away(point: (f64, f64), texture: Size<i32, Physical>, radius: f64) -> f64 {
+        let half = (f64::from(texture.w) * 0.5, f64::from(texture.h) * 0.5);
+        let r = radius.min(half.0.min(half.1));
+        let p = (
+            (point.0 - half.0).abs() - (half.0 - r),
+            (point.1 - half.1).abs() - (half.1 - r),
+        );
+        p.0.max(0.0).hypot(p.1.max(0.0)) - r
+    }
+
+    /// **Every corner of what this file calls opaque is a fragment the shader
+    /// leaves untouched**, checked against the shader's own arithmetic.
+    ///
+    /// The corners and not the middle, and that is the whole test: `away` is
+    /// `-r` at *every* interior point -- the field saturates -- so a middle
+    /// sample is satisfied by an inset of zero, by an inset of one, by any
+    /// inset at all. The corners of the claimed rect are the only points whose
+    /// answer depends on how far it was inset.
+    ///
+    /// `smoothstep(-0.5, 0.5, away)` is the mask, so "untouched" is
+    /// `away <= -0.5` and not `away <= 0.0`: a fragment in the softened band is
+    /// partly cut, and partly cut is not opaque.
+    ///
+    /// The last assertion is the one that stops the test being vacuous. A
+    /// transcription that returned some large negative number everywhere would
+    /// satisfy all the rest of it; the rect's own corner has to come out
+    /// *outside* the shape, which is the thing that made the inset necessary.
+    #[test]
+    fn the_shader_leaves_everything_this_file_claims_alone() {
+        let texture = Size::<i32, Physical>::from((300, 200));
+        let radius = 20.0_f64;
+
+        for magnification in [1.0_f64, 0.5, 2.0, 3.7] {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a test's own window sizes, chosen to be whole"
+            )]
+            let drawn = Size::<i32, Physical>::from((
+                (f64::from(texture.w) * magnification) as i32,
+                (f64::from(texture.h) * magnification) as i32,
+            ));
+            let dst = Rectangle::<i32, Physical>::new((0, 0).into(), drawn);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the radius the element carries is an f32 uniform"
+            )]
+            let claimed = opaque_of(dst, texture, radius as f32, 1.0, true)
+                .unwrap_or_else(|| panic!("{magnification}x claims nothing at all"));
+
+            // Back into the texture's pixels, which is where the shader
+            // measures: the element's rect is the texture stretched onto it.
+            let back = |x: i32, y: i32| {
+                (
+                    f64::from(x) / f64::from(drawn.w) * f64::from(texture.w),
+                    f64::from(y) / f64::from(drawn.h) * f64::from(texture.h),
+                )
+            };
+            for (x, y) in [
+                (claimed.loc.x, claimed.loc.y),
+                (claimed.loc.x + claimed.size.w, claimed.loc.y),
+                (claimed.loc.x, claimed.loc.y + claimed.size.h),
+                (
+                    claimed.loc.x + claimed.size.w,
+                    claimed.loc.y + claimed.size.h,
+                ),
+            ] {
+                let d = away(back(x, y), texture, radius);
+                assert!(
+                    d <= -0.5,
+                    "at {magnification}x the corner ({x}, {y}) of the claimed \
+                     region is {d} from the shape's edge, so the shader cuts \
+                     into it and the wallpaper behind it would go undrawn"
+                );
+            }
+        }
+
+        assert!(
+            away((0.0, 0.0), texture, radius) > 0.5,
+            "the window's own corner is outside the rounded shape -- without \
+             this the field above could be a constant and every assertion in \
+             this test would hold"
+        );
+    }
+
+    /// Whether the client covered its capture, which is the question
+    /// `a_capture_the_client_left_translucent_is_opaque_nowhere` turns into a
+    /// claim of nothing.
+    ///
+    /// The overlapping pair is the case that matters: two regions whose areas
+    /// sum to the whole texture, arranged so that they do not cover it. An
+    /// implementation that added areas up -- which is the obvious cheap one --
+    /// calls that covered, and it is the shape a client with a translucent
+    /// strip actually produces.
+    #[test]
+    fn a_capture_is_opaque_only_when_the_client_covered_all_of_it() {
+        let size = Size::<i32, Physical>::from((100, 100));
+        let whole = Rectangle::<i32, Physical>::new((0, 0).into(), size);
+        assert!(covers(size, [whole]));
+        assert!(!covers(size, []), "a client that declared nothing opaque");
+        assert!(
+            covers(
+                size,
+                [
+                    Rectangle::new((0, 0).into(), (100, 60).into()),
+                    Rectangle::new((0, 40).into(), (100, 60).into()),
+                ]
+            ),
+            "two overlapping halves that do cover it"
+        );
+        assert!(
+            !covers(
+                size,
+                [
+                    Rectangle::new((0, 0).into(), (100, 60).into()),
+                    Rectangle::new((0, 10).into(), (100, 60).into()),
+                ]
+            ),
+            "and two that overlap enough to add up to it without covering it"
+        );
+        // The behaviour and not the guard: smithay delivers this one on its own,
+        // so deleting `!size.is_empty()` from `covers` leaves every test here
+        // green. Asserted anyway, because it is the answer that matters and
+        // because the assertion is what would notice if smithay stopped giving
+        // it. `covers` says why the guard stays.
+        assert!(
+            !covers(Size::from((0, 0)), [whole]),
+            "a capture with no pixels is not opaque, whatever is claimed of it"
         );
     }
 }
