@@ -23,6 +23,7 @@ mod monitor;
 mod offscreen;
 mod pacing;
 mod pane;
+mod pass;
 mod present;
 mod qml;
 mod render;
