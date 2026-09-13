@@ -849,6 +849,19 @@ mod tests {
             "and the client capture rounds, as `render::elements` and \
              `WaylandSurfaceRenderElement::opaque_regions` both do"
         );
+        // And a fraction on the OTHER side of a half, because 1149 x 1.25 is
+        // 1436.25 and truncating gives 1436 too -- so the case above cannot
+        // tell rounding from flooring, and a later "simplification" to
+        // `to_i32_floor` would pass it while re-opening the one-pixel
+        // disagreement in the other direction.
+        let over: Size<i32, Logical> = (1151, 850).into();
+        assert_eq!(
+            client_pixels(over, 1.25).w,
+            1439,
+            "1151 x 1.25 is 1438.75, which rounds up -- flooring gives 1438 \
+             and puts the capture a pixel inside `dst` again"
+        );
+
         // Where there is nothing to disagree about, they agree.
         for scale in [1.0, 2.0] {
             assert_eq!(pixels(width, scale), client_pixels(width, scale));

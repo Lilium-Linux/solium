@@ -419,5 +419,22 @@ mod tests {
             has_line("float away = length(max(p, 0.0)) - r;"),
             "the outset half of the distance field is not written in terms of `r`"
         );
+
+        // The two lines that decide where the corner circle sits and how wide
+        // the antialiased band is. Neither was pinned here until Task 5's
+        // re-review found it: a transcription of this field in
+        // `solium::pass` was the ONLY thing in the workspace that noticed
+        // `tex_size * 0.5` becoming `* 0.4`, and it lives in another crate.
+        // A shader's own crate should be the thing that catches an edit to it.
+        assert!(
+            has_line("vec2 half_size = tex_size * 0.5;"),
+            "the corner circles are placed from the half-size; at anything \
+             but 0.5 they are not in the corners"
+        );
+        assert!(
+            has_line("gl_FragColor = colour * (1.0 - smoothstep(-0.5, 0.5, away));"),
+            "the antialias band is one texel wide and centred on the edge; \
+             widening it makes the whole window translucent at small radii"
+        );
     }
 }
