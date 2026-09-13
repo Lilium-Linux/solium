@@ -168,6 +168,30 @@ pub(crate) struct Style {
     /// would be three answers to one question.
     pub(crate) insets: Insets,
     pub(crate) layers: Vec<LayerSpec>,
+    /// The effects this style runs on the client, in declaration order.
+    ///
+    /// Empty is the ordinary case and the one worth protecting: an effect
+    /// declaring `self` costs an offscreen pass per frame, so a list that is
+    /// non-empty when nobody asked for anything is the whole desktop paying
+    /// for a feature nobody turned on. `client.radius: 0` is *no effect*
+    /// rather than an effect that rounds by nothing, for exactly that reason.
+    ///
+    /// The radii in here are **logical** pixels, as declared. Nothing on this
+    /// side knows what output the window will land on; `crate::pass` is the
+    /// seam that multiplies by the scale. See `fragment::RADIUS_UNIFORM`.
+    // Used by the tests, so the exemption applies only outside them. `expect`
+    // and not `allow`, as `mat4` does: the day something renders from this the
+    // expectation goes unfulfilled and the build says so, so the marker cannot
+    // outlive the reason for it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "this is the wire from a declared radius to an Effect; \
+                      the pass that runs one is a later task in the same plan"
+        )
+    )]
+    pub(crate) effects: Vec<solium_effects::fragment::Effect>,
     pub(crate) dir: PathBuf,
 }
 
@@ -447,6 +471,24 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
         return Err(anyhow!("{} declares no layers", manifest.display()));
     }
 
+    // `client.radius` has been read by `get_int` and consumed by nothing since
+    // the group work landed; this is what consumes it. Through the same
+    // `QQmlProperty` path the insets take, because `QObject::property` takes a
+    // name and not a path -- `scene.get_int("client.radius")` silently
+    // returning 0 for every style is a bug this codebase has already shipped
+    // once.
+    //
+    // Not clamped here. `is_none_effect` is the one thing that decides what a
+    // radius that is not a radius means -- zero, negative, or NaN -- and a
+    // `.max(0)` in front of it would be a second answer to that question in a
+    // second place, agreeing today and free to drift.
+    let mut effects = Vec::new();
+    let rounded =
+        solium_effects::fragment::Effect::rounded(f64::from(scene.get_int("client.radius")));
+    if !rounded.is_none_effect() {
+        effects.push(rounded);
+    }
+
     Ok(Style {
         // Dotted paths, which is the whole of what `host.cpp` had to learn:
         // `insets` is a grouped property, so it is a child object held in a
@@ -459,6 +501,7 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
             left: scene.get_int("insets.left").max(0),
         },
         layers,
+        effects,
         dir: dir.to_path_buf(),
     })
 }
@@ -467,6 +510,7 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
 mod tests {
     use super::{Bleed, Depth, load, parse_bleed, parse_depth};
     use crate::qml::qt_test::on_the_qt_thread;
+    use solium_effects::fragment::Effect;
 
     use std::path::{Path, PathBuf};
 
@@ -626,6 +670,132 @@ mod tests {
         });
     }
 
+    /// `client.radius` has been a key the loader reads and nothing consumes
+    /// since the group work. This is the commit that consumes it.
+    ///
+    /// **Two fixtures with two different radii, and neither of them is the
+    /// insets.** One fixture cannot tell "reads the declared number" from
+    /// "pushes a constant whenever something is declared" — a `load` that
+    /// hardcoded `rounded(12.0)` passes the first of these and fails the
+    /// second. The first sets `insets.top: 0` so an implementation reading
+    /// the wrong dotted path finds nothing and produces no effect at all;
+    /// the second sets it to a different non-zero number, so one reading
+    /// `insets.top` produces the wrong radius rather than none.
+    #[test]
+    fn a_declared_radius_becomes_an_effect() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "rounded",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    insets.top: 0
+                    client.radius: 12
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+            let style = load(&dir).expect("the fixture loads");
+            assert_eq!(
+                style.effects,
+                vec![Effect::rounded(12.0)],
+                "a declared radius is the one effect this style runs"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+
+            let dir = fixture(
+                "rounded-again",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    insets.top: 9
+                    client.radius: 7
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+            let style = load(&dir).expect("the fixture loads");
+            assert_eq!(
+                style.effects,
+                vec![Effect::rounded(7.0)],
+                "the radius is read from the file, not decided by the loader"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// And the ordinary case stays ordinary: no radius, no effect, no pass.
+    /// Every shipped style is this case, so an effect list that is non-empty
+    /// here is an offscreen capture per window per frame for the whole desktop.
+    #[test]
+    fn a_style_with_no_radius_runs_no_effects() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "plain",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    insets.top: 32
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+            let style = load(&dir).expect("the fixture loads");
+            assert!(style.effects.is_empty());
+            let _ = std::fs::remove_dir_all(&dir);
+
+            let dir = fixture(
+                "zero",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    insets.top: 0
+                    client.radius: 0
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+            let style = load(&dir).expect("the fixture loads");
+            assert!(
+                style.effects.is_empty(),
+                "a radius of zero is no effect, not an effect that rounds by zero"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+
+            // A negative is the same answer, and arrives the same way: someone
+            // binds `client.radius` to an expression. `Effect::is_none_effect`
+            // is the single thing that decides this, so it is asserted through
+            // `load` rather than trusted from the other crate's unit test.
+            let dir = fixture(
+                "negative",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    insets.top: 0
+                    client.radius: -5
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+            let style = load(&dir).expect("the fixture loads");
+            assert!(
+                style.effects.is_empty(),
+                "a negative radius is no effect either"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
     /// The shipped example, read back exactly as it is written.
     ///
     /// `panes/example/` exists to be the format written out once, so this is
@@ -693,6 +863,16 @@ mod tests {
             assert_eq!(style.insets.right, 0);
             assert_eq!(style.insets.bottom, 0);
             assert_eq!(style.insets.left, 0);
+
+            // The example is the only shipped bundle that writes `client` at
+            // all, and it writes `client.radius: 0`. So this is the shipped
+            // desktop's half of `a_style_with_no_radius_runs_no_effects`: not a
+            // fixture built to be empty, but the real file, asserted to cost
+            // nothing.
+            assert!(
+                style.effects.is_empty(),
+                "the shipped example declares radius 0, which is no pass"
+            );
         });
     }
 

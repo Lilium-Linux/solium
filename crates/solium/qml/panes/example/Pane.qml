@@ -40,8 +40,11 @@ PaneStyle {
     // it a white rectangle.
     requires: []
 
-    // Reserved and unread. Here to show that a style written today already has
-    // somewhere to put these.
+    // `client.radius` is read: a non-zero one rounds the client's own surface
+    // and costs an offscreen pass per frame. Zero, as here, is no effect at
+    // all, which is why this example is still free to draw. The two shadow
+    // properties are reserved and unread, and are here to show that a style
+    // written today already has somewhere to put them.
     client.radius: 0
     client.shadow.blur: 0
     client.shadow.opacity: 0
