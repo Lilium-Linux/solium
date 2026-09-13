@@ -1,96 +1,71 @@
 // One edge's worth of flowing sine waves.
 //
-// **The geometry is built once and then slid sideways.** A travelling sine is
-// a static sine translated -- shift it by exactly one wavelength and the image
-// is identical -- so nothing here recomputes a curve per frame. Each band is
-// one `Shape` whose polyline is sampled when the size changes, and the
-// animation moves a single `x`.
+// **Nothing here is recomputed per frame.** Each band is a single `Image`
+// holding one seamless period of a sine, tiled along the edge, inside an
+// `Item` whose `x` is animated. A travelling sine is a static sine translated
+// -- slide it by exactly one wavelength and the picture is identical -- so the
+// animation is one transform per band and the loop has no seam to hide.
 //
-// That is the whole difference between this and something that stutters. The
-// version before this one built the wave out of a few hundred `Rectangle`s and
-// re-laid-out every one of them every frame; this is a dozen scene-graph nodes
-// with a transform on each, and the sampling happens on resize.
+// That shape is not a preference, it is what the compositor can see. Measured
+// nested, four frames 400ms apart:
+//
+//     QtQuick.Shapes, animating the Shape's own x      540 bytes changed
+//     QtQuick.Shapes, inside an animated parent Item   540 bytes changed
+//     static Rectangles, animated parent Item      120,989 bytes changed
+//     one tiled Image, animated parent Item         23,399 bytes changed
+//
+// 540 is the blinking cursor -- it is what "nothing moved" looks like. A
+// `Shape` renders once here and never redraws, whatever moves it, so the whole
+// decoration sat still. `Image` and `Rectangle` both drive redraws; `Image`
+// does it with one item per band instead of hundreds.
 
 import QtQuick
-import QtQuick.Shapes
 
 Item {
     id: band
 
-    // How long the edge is, and how deep the waves are allowed to run.
+    // How long the edge is, and how far out the waves may run.
     property real span: 0
     property real depth: 0
     property bool running: false
 
-    // Drawn back to front: the first is the furthest out and the palest.
-    property var inks: []
-
-    implicitWidth: span
-    implicitHeight: depth
-
-    // Sampled per wave, not per pixel: a sine needs few points to read as
-    // smooth, and every point is a vertex the renderer walks.
-    readonly property int samplesPerWave: 14
+    // Back to front: the first is the furthest out and the palest.
+    readonly property var waves: [
+        { art: "band0.svg", wavelength: 260, duration: 7000 },
+        { art: "band1.svg", wavelength: 190, duration: 5200 },
+        { art: "band2.svg", wavelength: 150, duration: 4100 }
+    ]
 
     Repeater {
-        model: band.inks.length
+        model: band.waves.length
 
-        Shape {
-            id: wave
+        Item {
+            id: slider
             required property int index
+            readonly property var wave: band.waves[index]
 
-            // Each band has its own wavelength, height and speed, so they
-            // drift apart instead of moving as one rigid block -- which is
-            // what makes it read as water rather than as a striped ribbon.
-            readonly property real wavelength: 210 + index * 64
-            readonly property real amplitude: band.depth * (0.30 - index * 0.055)
-            readonly property real rest: band.depth * (0.42 + index * 0.13)
-            readonly property int duration: 5200 + index * 2100
-
-            // One wavelength of overhang, because the shape slides by exactly
-            // that much: without it the trailing end would walk into view.
-            readonly property real drawn: band.span + wavelength + 2
-
-            width: drawn
-            height: band.depth
             y: 0
+            height: band.depth
+            width: band.span + wave.wavelength
 
-            // Slides by one wavelength and repeats. Seamless by construction:
-            // a sine translated by its own wavelength is the same sine, so
-            // there is no jump at the loop point to hide.
-            property real shift: 0
-            NumberAnimation on shift {
+            // Slides exactly one wavelength and repeats, which is seamless by
+            // construction rather than by hiding a jump.
+            NumberAnimation on x {
                 running: band.running
                 loops: Animation.Infinite
                 from: 0
-                to: -wave.wavelength
-                duration: wave.duration
+                to: -slider.wave.wavelength
+                duration: slider.wave.duration
             }
-            x: -wave.wavelength + shift
 
-            ShapePath {
-                fillColor: band.inks[wave.index]
-                strokeWidth: -1
-
-                PathPolyline {
-                    // Rebuilt when the geometry changes, never on the phase.
-                    path: {
-                        const points = [];
-                        const k = 2 * Math.PI / wave.wavelength;
-                        const steps = Math.max(
-                            8, Math.ceil(wave.drawn / wave.wavelength) * band.samplesPerWave);
-                        for (let i = 0; i <= steps; ++i) {
-                            const x = wave.drawn * i / steps;
-                            points.push(Qt.point(
-                                x, wave.rest + Math.sin(x * k) * wave.amplitude));
-                        }
-                        // Down to the pane's edge and back, so the band is a
-                        // filled body rather than a hairline.
-                        points.push(Qt.point(wave.drawn, band.depth + 2));
-                        points.push(Qt.point(0, band.depth + 2));
-                        return points;
-                    }
-                }
+            Image {
+                source: slider.wave.art
+                // Rasterised once at this size and then repeated. The SVG is
+                // one period, so the tile seam falls where the curve already
+                // meets itself.
+                sourceSize: Qt.size(slider.wave.wavelength, band.depth)
+                fillMode: Image.TileHorizontally
+                anchors.fill: parent
             }
         }
     }

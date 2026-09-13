@@ -1705,6 +1705,33 @@ static bool animation_running(const QObject *item)
             return true;
         }
     }
+    /* And the visual children, which are not always the QObject ones.
+     *
+     * `Repeater` -- and `Loader`, and anything else that instantiates a
+     * component at runtime -- gives its delegates a *visual* parent through
+     * `setParentItem` and leaves `QObject::parent()` pointing somewhere else
+     * (at the creating context, or nowhere). A walk of `children()` alone
+     * therefore never reaches inside a delegate, and every animation in one is
+     * invisible to this: the scene animates, nothing marks it dirty, and the
+     * compositor stops drawing a decoration that is still moving.
+     *
+     * Found by a style whose waves were a `Repeater` of bands, each sliding on
+     * its own `NumberAnimation`. It rendered its first frame and then sat
+     * perfectly still; the same animation moved to a direct child of the root
+     * ran. `Repeater` is not an exotic construct -- it is how any decoration
+     * draws a list of anything -- so this was not a corner.
+     *
+     * Only children this walk has not already been through: `setParentItem`
+     * does set `QObject::parent()` when there is not one yet, so for ordinary
+     * declared children the two lists are the same list and recursing again
+     * would visit the whole subtree twice at every level. */
+    if (const auto *as_item = qobject_cast<const QQuickItem *>(item)) {
+        for (const QQuickItem *child : as_item->childItems()) {
+            if (child->parent() != item && animation_running(child)) {
+                return true;
+            }
+        }
+    }
     return false;
 }
 

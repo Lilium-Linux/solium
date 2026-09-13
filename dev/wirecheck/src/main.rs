@@ -1531,6 +1531,7 @@ fn main() -> Result<()> {
     for (what, file, w, h, dress) in [
         ("cursor", "crates/solium/qml/cursor.qml", 64, 64, false),
         ("pane layer", "crates/solium/qml/panes/top/Frame.qml", 640, 480, true),
+        ("delegate", "dev/wirecheck/delegate.qml", 64, 64, false),
     ] {
         let path = CString::new(repo().join(file).as_os_str().as_encoded_bytes())?;
         let buffer = target::allocate(&gbm, w, h)
@@ -1623,6 +1624,34 @@ fn main() -> Result<()> {
         // on every tick whether or not anything is registered. A process-wide
         // answer is `true` on this line, for ever, and a compositor gated on it
         // never sleeps again.
+        // `delegate.qml` is the one scene in this loop that *is* animating, and
+        // it is here to be the positive half of the same instrument. Its only
+        // animation sits inside a `Repeater` delegate, which `Repeater` parents
+        // visually rather than as a `QObject` child -- so a host that walks
+        // only `QObject::children()` from the root cannot see it and answers
+        // `false`. Measured both ways in this process: with host.cpp's walk
+        // reaching visual children it reads 1, and with that half removed it
+        // reads 0 while every other line of this run is unchanged.
+        //
+        // The two halves are what make either one mean anything. `cursor` and
+        // `pane layer` must read 0 or the host says yes to everything; this
+        // must read 1 or the host is blind to a construct any decoration
+        // drawing a list of anything is built from.
+        if what == "delegate" {
+            if !animating(built) {
+                return Err(anyhow!(
+                    "`solium_qml_scene_animating` says {file} is not animating. Its only \
+                     animation is inside a `Repeater` delegate, running and infinite, so \
+                     this is the host walking `QObject::children()` and stopping at the \
+                     delegate boundary. Every animation in a `Repeater` -- which is how a \
+                     decoration draws a list of anything -- then renders one frame and \
+                     freezes, because nothing ever marks the scene dirty again"
+                ));
+            }
+            kept_scenes.push(built);
+            kept_buffers.push(buffer);
+            continue;
+        }
         if animating(built) {
             return Err(anyhow!(
                 "`solium_qml_scene_animating` says the {what} scene ({file}) is animating. \
