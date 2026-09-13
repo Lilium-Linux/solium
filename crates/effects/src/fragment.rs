@@ -68,7 +68,7 @@ pub const SIZE_UNIFORM: &str = "tex_size";
 /// * it is compiled **six times**, not once, and has to behave under each set
 ///   of `#define`s. Three define sets -- `&[]`, `&[NO_ALPHA]`, `&[EXTERNAL]`
 ///   -- and `texture_program` links each of them *twice*, once plain and once
-///   with `DEBUG_FLAGS` chained on (`shaders/mod.rs:122-141`). Three is the
+///   with `DEBUG_FLAGS` chained on (`shaders/mod.rs:215-217` builds the three; the two `link_program` calls at `:142-143` are what double them). Three is the
 ///   number of variants `variant_for_format` picks between; six is the number
 ///   that have to compile, and a shader that only builds without the debug
 ///   define fails at renderer construction and takes the session with it. See
