@@ -1764,14 +1764,21 @@ fn display_all(places: &[PathBuf]) -> String {
 /// what the panel offers is what a press resolves.
 ///
 /// **[`shipped_decorations`] stays in the list although this build puts nothing
-/// in it**, and is a directory that is not in the tree. It is kept because
-/// [`places`] and [`ships`] are built from this function and from
-/// [`crate::style::directories`] precisely so there is no second copy of the
-/// search order to drift, and dropping the shipped half here would leave
-/// `ships` walking a kind of place `places` does not. `catalogue` skips a
-/// directory it cannot read, so the cost is one path in one error message
-/// saying where this looked -- which is true, and reads better than an empty
-/// list.
+/// in it**, and is a directory that is not in the tree. It is kept so that the
+/// *kinds* of place stay matched: [`places`] is built from this function, and
+/// [`ships`] names [`shipped_decorations`] itself -- so dropping the shipped
+/// half here would leave `ships` walking a kind of place `places` does not,
+/// and the listing and the lookup would disagree about what a file style even
+/// is. `catalogue` skips a directory it cannot read, so the cost is one path
+/// in one error message saying where this looked -- which is true, and reads
+/// better than an empty list.
+///
+/// Note what this does **not** claim: `ships` builds its own two-element list
+/// rather than calling this, because it needs the shipped halves alone and
+/// this function deliberately leads with the user's. So the two are matched by
+/// review and by `what_the_panel_offers_is_what_a_press_resolves`, not by
+/// construction -- weaker than [`crate::style::directories`]'s arrangement,
+/// and said out loud rather than implied.
 fn decoration_directories() -> Vec<PathBuf> {
     let mut places: Vec<PathBuf> = qml::user_qml_dir()
         .map(|dir| dir.join("decorations"))
