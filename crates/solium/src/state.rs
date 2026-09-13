@@ -89,6 +89,25 @@ use crate::{
     script::{AnimationSpec, Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
 };
 
+/// Whether `rect` lands on any of `screens`.
+///
+/// A free function over plain rectangles rather than a method, for one reason:
+/// `Solium` cannot be built in a unit test — it needs a `Display` — and
+/// neither can a `Space` with monitors mapped into it. This is the half that
+/// decides, so this is the half that is testable, and [`Solium::on_any_output`]
+/// is the two-line adapter that feeds it `space.outputs()`. Same trick, same
+/// reason, as `offscreen::Scratch` being generic over what it keeps.
+///
+/// Exclusive, through `Rectangle::overlaps`, and deliberately the same call
+/// `render::elements` makes when it culls a pane against one screen: a window
+/// whose right edge is exactly the monitor's left edge has no pixel on it.
+fn anywhere_on(
+    rect: Rectangle<i32, Logical>,
+    screens: impl IntoIterator<Item = Rectangle<i32, Logical>>,
+) -> bool {
+    screens.into_iter().any(|screen| screen.overlaps(rect))
+}
+
 /// A rectangle grown outward by the frame drawn around it.
 fn grown(real: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logical> {
     if !insets.any() {
@@ -1090,6 +1109,26 @@ impl Solium {
     /// there, with no bookkeeping to keep in step and nothing to go stale.
     pub(crate) fn output_of(&self, rect: Rectangle<i32, Logical>) -> Option<Output> {
         self.output_at((rect.loc.x + rect.size.w / 2, rect.loc.y + rect.size.h / 2).into())
+    }
+
+    /// Whether a rectangle is on any monitor at all.
+    ///
+    /// **Not [`Self::output_of`], which never answers `None`**: that one falls
+    /// back to the *nearest* monitor, because a window being dragged has to
+    /// belong to something. This is the other question -- is any of this
+    /// rectangle on a screen -- and a workspace that is hidden by being parked
+    /// a screen away is precisely the case where the two answers differ.
+    ///
+    /// Asked by `render::prepare`, which runs before any output is bound and
+    /// so has no one screen to test against; `render::elements` asks the same
+    /// thing one monitor at a time and needs no such helper.
+    pub(crate) fn on_any_output(&self, rect: Rectangle<i32, Logical>) -> bool {
+        anywhere_on(
+            rect,
+            self.space
+                .outputs()
+                .filter_map(|output| self.space.output_geometry(output)),
+        )
     }
 
     /// The monitor a surface is on, for telling it what to draw itself like.
@@ -4478,6 +4517,72 @@ smithay::delegate_xwayland_shell!(Solium);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two monitors side by side, 1920 wide each, as `space.output_geometry`
+    /// would report them.
+    fn two_monitors() -> [Rectangle<i32, Logical>; 2] {
+        [
+            Rectangle::new((0, 0).into(), (1920, 1080).into()),
+            Rectangle::new((1920, 0).into(), (1920, 1080).into()),
+        ]
+    }
+
+    fn at(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    /// **The cull `render::prepare` runs before it captures anything.**
+    ///
+    /// A hidden workspace is not unmapped -- it is drawn a screen away -- so
+    /// "is any of this rectangle on a monitor" is the question that separates
+    /// a window worth capturing from one nothing will ever draw. Getting it
+    /// wrong in the cheap direction costs a permanent offscreen pass per
+    /// hidden window; getting it wrong in the other direction stops a visible
+    /// window being captured, which is a blank corner. So both directions are
+    /// asserted, and each line names an implementation it rules out.
+    #[test]
+    fn a_pane_is_on_a_monitor_only_if_some_monitor_covers_part_of_it() {
+        let screens = two_monitors();
+
+        assert!(
+            anywhere_on(at(100, 100, 800, 600), screens),
+            "a window in the middle of the first monitor is on it"
+        );
+        // Rules out `all(..)` in place of `any(..)`: this one touches only the
+        // second screen, and with two monitors mapped that is the common case.
+        assert!(
+            anywhere_on(at(2000, 100, 800, 600), screens),
+            "and one on the second monitor is on that"
+        );
+        assert!(
+            anywhere_on(at(1800, 100, 400, 600), screens),
+            "a window dragged across the bezel is on both"
+        );
+
+        // The case the cull exists for: a workspace hidden by being parked one
+        // screen to the left of the desk. Rules out `|_| true`.
+        assert!(
+            !anywhere_on(at(-1920, 0, 1920, 1080), screens),
+            "a workspace parked a screen away is on no monitor, which is how a \
+             workspace switch hides one"
+        );
+        assert!(
+            !anywhere_on(at(0, -2000, 800, 600), screens),
+            "and so is one parked above the desk"
+        );
+
+        // Exclusive, matching `render::elements`. Rules out
+        // `overlaps_or_touches`, which differs from `overlaps` only here.
+        assert!(
+            !anywhere_on(at(-800, 0, 800, 1080), screens),
+            "a window whose right edge is exactly the monitor's left edge has \
+             no pixel on it"
+        );
+
+        // Rules out a constant `true`, and covers the moment between a monitor
+        // going away and the session noticing.
+        assert!(!anywhere_on(at(100, 100, 800, 600), []));
+    }
 
     #[test]
     fn a_frame_reserves_what_it_always_reserved() {

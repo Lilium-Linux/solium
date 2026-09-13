@@ -10,7 +10,11 @@
 //! the genie already uses, and it keeps its texture on the pane rather than
 //! allocating one a frame. That was made a prerequisite of this work rather
 //! than a follow-up for exactly this reason: an effect system multiplies a
-//! per-frame allocation by the number of animating windows.
+//! per-frame allocation by the number of windows that have one -- and where a
+//! warp meant "animating", and so bounded and brief, a `client.radius` is
+//! permanent. The multiplier is the number of *visible* styled windows, every
+//! frame, for the life of the session. `render::prepare` culls panes no
+//! monitor shows for that reason and not as an optimisation.
 //!
 //! **The capture happens in `render::prepare` and never in `render::elements`,
 //! and that is not a preference.** A capture binds a framebuffer of its own,
@@ -95,9 +99,12 @@ const fn runnable(inputs: Inputs) -> bool {
 /// but skipping it *silently* is what `fragment::Inputs::Backdrop` forbids, so
 /// the branch where `needs_pass` says `None` asks this and says so once.
 ///
-/// Only reachable with a non-empty effect list, which on a machine nobody has
-/// styled never happens: `style::load` pushes nothing at all for the absent or
-/// zero `client.radius` every shipped bundle declares.
+/// Only reachable with a non-empty effect list. That is not the same as "never
+/// on an unstyled machine" any more, and the weaker claim is the true one:
+/// `style::load` pushes nothing for an absent or zero `client.radius`, which is
+/// thirteen of the fourteen shipped bundles -- but `panes/rounded/` declares
+/// `client.radius: 14`, so a session using it walks a one-element list here on
+/// the branch below.
 ///
 /// **Nothing can construct an effect this returns today**, because `Effect` has
 /// one variant and it reads `SelfTexture`. That is why the guarantee is

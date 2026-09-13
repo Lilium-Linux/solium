@@ -45,10 +45,19 @@ use crate::{pane::PaneId, qml::paint::Kept, state::Solium};
 ///
 /// The arithmetic says the same from the other side. A capture of an ordinary
 /// 1150x850 window is 1150 x 850 x 4 = 3.9 MB, and 2300 x 1700 x 4 = 15.6 MB
-/// of it on a 2x monitor. One per *warped* pane is what every mode that
-/// deforms windows holds at once, and they all deform every window on screen:
-/// an overview of twenty windows is 78 MB, or 313 MB at 2x. A cap of two would
-/// be 156 MB and 626 MB for a second entry nothing can ever ask for.
+/// of it on a 2x monitor. One per pane holding one at once: an overview of
+/// twenty windows is 78 MB, or 313 MB at 2x. A cap of two would be 156 MB and
+/// 626 MB for a second entry nothing can ever ask for.
+///
+/// **Read that as a steady state and not a worst case.** It was written when a
+/// capture meant a warp -- every mode that deforms windows deforms all of
+/// them, but only while it is running. A `client.radius` does not stop, so a
+/// styled session holds one of these per *visible* styled window for as long
+/// as the session lasts. Visible is what bounds it, and it is bounded
+/// deliberately: `render::prepare` skips a pane no monitor shows and hands its
+/// texture back through [`Scratch::release`], because a hidden workspace is
+/// parked a screen away rather than unmapped and would otherwise be paid for
+/// in full, forever.
 ///
 /// What it costs when the size does change — a client resizing mid-warp, a
 /// window crossing onto a monitor at another scale — is today's behaviour and
