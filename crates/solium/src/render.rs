@@ -1081,9 +1081,12 @@ pub(crate) fn flat_window_elements(
     };
     let insets = state.frame_insets(window);
     let output_scale = Scale::from(scale);
-    let Some(pane) = state.panes.id_of(window) else {
-        return elements;
-    };
+    // `None` only for a window smithay put in the space behind our back, which
+    // `offscreen::capture` cannot produce -- it is holding the pane. Its layers
+    // are skipped rather than the whole window, which is what the `if let`
+    // around the old single `frame` call did: a window drawn without its chrome
+    // is a window, and one skipped entirely is a hole in the picture.
+    let pane = state.panes.id_of(window);
 
     // Fully opaque, and over the whole texture: this pass draws the window flat
     // at its real size and the warp applies the transform's opacity to the
@@ -1112,7 +1115,11 @@ pub(crate) fn flat_window_elements(
     // second sequence of calls here is how a deformed window would come to have
     // its `above` layer underneath its client.
     pane_pieces(&mut elements, |elements, piece| match piece {
-        Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
+        Piece::Layers(depth) => {
+            if let Some(pane) = pane {
+                chrome(state, renderer, elements, pane, depth, drawing);
+            }
+        }
         Piece::Client => {
             if let Some(surface) = window
                 .toplevel()
