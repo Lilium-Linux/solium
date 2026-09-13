@@ -36,6 +36,6 @@ PaneStyle {
         // baseline and bleed is a hard clip: anything past what the layer
         // declared is cut, not drawn.
         bleed: 64
-        source: "Waves.qml"
+        source: "Ring.qml"
     }
 }
