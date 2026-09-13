@@ -213,25 +213,27 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
             .filter(|it| !it.is_empty())
             .map(|it| dir.join(it));
         let declared_depth = scene.layer_field(index, "depth");
-        let depth = match declared_depth.as_deref().and_then(depth_from) {
-            Some(depth) => depth,
-            None => {
-                // Said rather than silently corrected. `layers` is a
-                // `list<Item>`, so `None` here is an item that is not a `Layer`
-                // at all, and a word that is not one of the three is a typo —
-                // both end up at `frame`, and neither should have to be found
-                // by looking at the screen and wondering.
-                tracing::warn!(
-                    bundle = %dir.display(),
-                    layer = name,
-                    index,
-                    depth = declared_depth.as_deref().unwrap_or("<no depth property>"),
-                    "unknown layer depth, drawing it at `frame`; the vocabulary \
-                     is `behind`, `frame`, `above`"
-                );
-                Depth::Frame
-            }
-        };
+        // Through `parse_depth` and not a second copy of its fallback. The
+        // fallback is what `an_unknown_depth_falls_back_to_frame` pins, and a
+        // `load` that decided it again for itself is a test passing while the
+        // path it is named after does something else — which is the shape of
+        // defect this whole task is about.
+        let depth = parse_depth(declared_depth.as_deref().unwrap_or_default());
+        if declared_depth.as_deref().and_then(depth_from).is_none() {
+            // Said rather than silently corrected. `layers` is a `list<Item>`,
+            // so a missing property here is an item that is not a `Layer` at
+            // all, and a word that is not one of the three is a typo — both
+            // end up at `frame`, and neither should have to be found by
+            // looking at the screen and wondering.
+            tracing::warn!(
+                bundle = %dir.display(),
+                layer = name,
+                index,
+                depth = declared_depth.as_deref().unwrap_or("<no depth property>"),
+                "unknown layer depth, drawing it where decorations already are; \
+                 the vocabulary is `behind`, `frame`, `above`"
+            );
+        }
         layers.push(LayerSpec {
             depth,
             bleed: parse_bleed(&scene.layer_field(index, "bleed").unwrap_or_default()),
@@ -479,6 +481,45 @@ mod tests {
             assert_eq!(style.insets.right, 0);
             assert_eq!(style.insets.bottom, 0);
             assert_eq!(style.insets.left, 0);
+        });
+    }
+
+    /// The fallback, taken by `load` rather than by `parse_depth` alone.
+    ///
+    /// Both ways in: a word that is not one of the three, and an item in
+    /// `layers` that is not a `Layer` at all — `default property list<Item>`
+    /// accepts any `Item`, so a `Rectangle` in there has no `depth` property to
+    /// read. Each warns, naming the bundle and the layer, and each lands at
+    /// `frame`. The style still loads, because a window with no frame at all is
+    /// a worse answer to a misspelling than a frame in the ordinary place.
+    #[test]
+    fn an_unknown_depth_still_loads_the_style() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "bad-depth",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    Layer { depth: "beneath"; name: "typo" }
+                    Rectangle { width: 1; height: 1 }
+                }
+                "#,
+            );
+            let style = load(&dir).expect("a typo does not fail the style");
+
+            assert_eq!(style.layers.len(), 2);
+            assert_eq!(style.layers[0].depth, Depth::Frame, "`beneath` is a typo");
+            assert_eq!(style.layers[0].name, "typo");
+            assert_eq!(
+                style.layers[1].depth,
+                Depth::Frame,
+                "a Rectangle has no depth property at all"
+            );
+            assert_eq!(style.layers[1].name, "");
+
+            let _ = std::fs::remove_dir_all(&dir);
         });
     }
 
