@@ -41,6 +41,9 @@ Item {
     // count -- see the path below.
     readonly property int perPeriod: 10
 
+    // How many times the spectrum sweeps round the window. See `levelAt`.
+    readonly property int sweeps: 3
+
     // --- where the shape comes from ---------------------------------------
     // Live levels, one per bar, each 0..1 -- 0 is silence and rests at the
     // ring's own radius, 1 is a peak at full swell. Empty means nothing is
@@ -148,7 +151,7 @@ Item {
             // that the border stopped showing the music and started showing
             // its envelope -- smooth, but the same shape whatever was playing.
             // This is the least blur that still takes the teeth off.
-            const weights = [1, 2, 1];
+            const weights = [0, 1, 0];
             const smoothed = [];
             for (let i = 0; i < raw.length; ++i) {
                 let sum = 0;
@@ -168,13 +171,12 @@ Item {
             const parsed = [];
             for (let i = 0; i < smoothed.length; ++i) {
                 let level = smoothed[i];
-                // Eased towards the new reading rather than snapped to it.
-                // cava's bars jump frame to frame and a border that jumps with
-                // them reads as flicker. A third of the last reading is enough
-                // to take that off; more than that and the border lags the
-                // music plainly enough to see, which is worse than flicker.
+                // Barely eased. A little of the last reading takes the
+                // hard flicker off cava's bars; any more and the border shows
+                // the envelope of the music rather than the music, which is
+                // what "too smooth to see it visualising" was.
                 if (previous.length === smoothed.length && !isNaN(previous[i])) {
-                    level = previous[i] * 0.3 + level * 0.7;
+                    level = previous[i] * 0.18 + level * 0.82;
                 }
                 parsed.push(level);
             }
@@ -236,15 +238,32 @@ Item {
         const last = Math.max(first + 1, Math.min(bars - 1, Math.floor(bars * hi)));
         const count = last - first + 1;
 
-        const turn = ((((t - ring.topCentre) % 1) + 1) % 1);
-        const fold = turn < 0.5 ? turn * 2 : (1 - turn) * 2;
+        // Swept `sweeps` times round rather than once, out and back each
+        // time. Once round sounds right and is not: any one edge of the window
+        // then shows only its own share of the loop, and for the top edge that
+        // was the first 29% of the band -- five adjacent bars, which are
+        // usually close in value, so the edge people actually look at was the
+        // flattest part of the whole border. Measured there before this: a 2
+        // to 5 PIXEL wave. Sweeping three times puts most of the band along
+        // every edge.
+        //
+        // `2 * |u - round(u)|` is a triangle wave, and an EVEN one -- which is
+        // what keeps the border symmetric left to right, since `turn` is
+        // measured from the top centre and the two sides see equal and
+        // opposite values.
+        const turn = (t - ring.topCentre);
+        const u = turn * ring.sweeps;
+        const fold = 2 * Math.abs(u - Math.round(u));
         const at = fold * (count - 1);
         const step = Math.min(count - 2, Math.floor(at));
         const f = at - step;
-        const eased = f * f * (3 - 2 * f);
+        // Straight between bars, not smoothstepped. Smoothstep leaves the
+        // slope at zero on every reading, which rounds each bar into a swell
+        // -- soft, and hard to read as a spectrum. A straight line gives each
+        // bar a point, which is what a spike is.
         const a = ring.levels[first + step];
         const b = ring.levels[first + step + 1];
-        return a + (b - a) * eased;
+        return a + (b - a) * f;
     }
 
     // A point `t` (0..1) of the way round a rounded rectangle by arc length,
@@ -318,13 +337,38 @@ Item {
     // (`reach + swell * 1.35`) still clears the next one's resting radius, so
     // there are always three readable rings and each is visibly its own band.
     //
-    //     treble   3 .. 12.4      mids  14 .. 23.4      bass  25 .. 35.8
+    // The three bands, innermost first. `swell` is how far a full-scale
+    // reading in that band pushes the edge out.
+    readonly property var bands: [
+        { lo: 0.00, hi: 0.30, swell: 18 },   // bass
+        { lo: 0.28, hi: 0.62, swell: 13 },   // mids
+        { lo: 0.60, hi: 1.00, swell: 9 }     // treble
+    ]
+
+    // **They STACK rather than sit at their own radii, and that is what stops
+    // them erasing each other.** Each ring is filled from its curve inward and
+    // the later ones paint over, so a ring that swells past the one outside it
+    // does not overlap it -- it wipes it out. At fixed radii that happened
+    // whenever one band got loud and another did not, and the border turned a
+    // single colour. Summed, ring k's edge is always at least ring k-1's, so
+    // the order on screen is fixed however the music moves.
     //
-    // and 35.8 is inside the 44 the layer declared, which is a hard clip.
+    // What you see is each band's own thickness: the dark ring against the
+    // window is the bass, the blue band on top of it the mids, the grey
+    // outside that the treble.
+    //
+    // **Reach is zero, so silence draws nothing.** With every band quiet the
+    // outermost curve is the pane's own outline and the client covers it
+    // exactly -- no border, no ring, nothing outside the window at all. Sound
+    // is the only thing that ever pushes a point past the edge.
+    //
+    // Drawn outermost first, so `count` counts down: 3 bands summed, then 2,
+    // then 1. Full scale in all three is 40, inside the 44 the layer declared,
+    // which is a hard clip.
     readonly property var rings: [
-        { reach: 25, swell: 8, lo: 0.00, hi: 0.30, periods: 18, duration: 7400, ink: Theme.text },
-        { reach: 14, swell: 7, lo: 0.28, hi: 0.62, periods: 22, duration: 5600, ink: Theme.accent },
-        { reach: 3,  swell: 7, lo: 0.60, hi: 1.00, periods: 26, duration: 4300, ink: Theme.edge }
+        { count: 3, periods: 26, duration: 4300, ink: Theme.edge },
+        { count: 2, periods: 22, duration: 5600, ink: Theme.accent },
+        { count: 1, periods: 18, duration: 7400, ink: Theme.text }
     ]
 
     Repeater {
@@ -376,45 +420,38 @@ Item {
                         const h = ring.paneHeight;
                         const r = Math.min(ring.corner, w / 2, h / 2);
 
-                        // The wave is the DEVIATION from this ring's own band,
-                        // not the level in it. A real spectrum's bars mostly
-                        // sit within a band of each other, so feeding levels
-                        // straight in gives every point nearly the same radius
-                        // and the outline comes out close to a plain rounded
-                        // rectangle however loud the music is. What an eye
-                        // reads as a wave is one bar standing out from its
-                        // neighbours -- so the mean only sets how far the ring
-                        // rests out, and the distance from it is what waves.
-                        let mean = 0;
-                        if (bars > 0) {
-                            const first = Math.floor(bars * spec.lo);
-                            const last = Math.min(bars - 1, Math.floor(bars * spec.hi));
-                            for (let i = first; i <= last; ++i) {
-                                mean += ring.levels[i];
-                            }
-                            mean = mean / Math.max(1, last - first + 1);
-                        }
-
                         for (let i = 0; i < steps; ++i) {
                             const t = i / steps;
                             // `band.phase` is read only on the fallback
                             // branch, so with a feed running it is not a
                             // binding dependency at all and this rebuilds when
                             // the music changes rather than on every frame.
-                            let height;
+                            let out;
                             if (bars === 0) {
-                                height = ring.sineAt(t, spec.periods, band.phase);
+                                out = 16 + 10 * ring.sineAt(t, spec.periods, band.phase);
                             } else {
-                                const level = ring.levelAt(t, spec.lo, spec.hi);
-                                // Floored at zero, so silence RESTS rather
-                                // than retracts: with the spectrum mirrored, a
-                                // track missing this ring's band used to leave
-                                // the whole border collapsed onto the window.
-                                height = Math.max(0, Math.min(1.35,
-                                    0.12 + mean * 0.8 + (level - mean) * 3.2));
+                                // Straight off the level, so **silence is
+                                // flat**: no sound in a band and that band
+                                // adds nothing, so the curve is the pane's own
+                                // outline and nothing shows outside it.
+                                //
+                                // A gentle curve and a gain rather than a
+                                // straight map: a spectrum sits low almost all
+                                // the time, so `level` alone barely leaves the
+                                // edge. Both numbers are held down by the
+                                // clamp -- a square root with a gain of 1.7
+                                // sent every bar past a level of 0.35 to the
+                                // ceiling, and a band pinned at its ceiling is
+                                // as flat as one pinned at its floor.
+                                out = 0;
+                                for (let k = 0; k < spec.count; ++k) {
+                                    const b = ring.bands[k];
+                                    const level = ring.levelAt(t, b.lo, b.hi);
+                                    out += b.swell
+                                        * Math.min(1, Math.pow(level, 0.7) * 1.15);
+                                }
                             }
-                            points.push(ring.ringPoint(
-                                t, x, y, w, h, r, spec.reach + spec.swell * height));
+                            points.push(ring.ringPoint(t, x, y, w, h, r, out));
                         }
                         points.push(points[0]);
                         return points;
