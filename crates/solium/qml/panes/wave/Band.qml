@@ -6,18 +6,20 @@
 // -- slide it by exactly one wavelength and the picture is identical -- so the
 // animation is one transform per band and the loop has no seam to hide.
 //
-// That shape is not a preference, it is what the compositor can see. Measured
-// nested, four frames 400ms apart:
+// One tiled `Image` per band rather than a drawn curve, because a wave is
+// periodic: one rasterised period repeated costs one texture and one node,
+// whatever the window's width. `QtQuick.Shapes` would also work -- measured,
+// 59,764 bytes changed per frame -- and would let the colours come from
+// `Theme` instead of being baked into the art. The cost of that is
+// re-tessellating a polyline per band; the cost of this is three SVGs that do
+// not follow the theme. Either is defensible and this one was already built.
 //
-//     QtQuick.Shapes, animating the Shape's own x      540 bytes changed
-//     QtQuick.Shapes, inside an animated parent Item   540 bytes changed
-//     static Rectangles, animated parent Item      120,989 bytes changed
-//     one tiled Image, animated parent Item         23,399 bytes changed
-//
-// 540 is the blinking cursor -- it is what "nothing moved" looks like. A
-// `Shape` renders once here and never redraws, whatever moves it, so the whole
-// decoration sat still. `Image` and `Rectangle` both drive redraws; `Image`
-// does it with one item per band instead of hundreds.
+// **Corrected, because the first version of this comment said the opposite.**
+// It claimed `Shape` renders once and never redraws, with a table of
+// measurements to prove it. The measurements were real and the conclusion was
+// wrong: every `Shape` tried was inside a `Repeater` delegate, and host.cpp's
+// `animation_running` could not see into one, so what was actually being
+// measured was that bug. `Shape` was never the problem.
 
 import QtQuick
 
