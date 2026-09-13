@@ -35,7 +35,7 @@ PaneStyle {
         // More than Waves.qml's `reach` of 44, because a crest rides above the
         // baseline and bleed is a hard clip: anything past what the layer
         // declared is cut, not drawn.
-        bleed: 64
+        bleed: 44
         source: "Ring.qml"
     }
 }
