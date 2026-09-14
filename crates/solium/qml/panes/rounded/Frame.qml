@@ -97,14 +97,57 @@ Item {
             font.pixelSize: Theme.fontSize
         }
 
-        // The hairline sits on the seam — the band's last row — for the same
-        // reason. At the bar's own bottom it would be under the client and
-        // visible only inside the two notches, as a stray mark across each.
-        Rectangle {
-            y: frame.insetTop - height
-            width: parent.width
-            height: 1
-            color: frame.focused ? Theme.edge : Theme.edgeInactive
-        }
+    }
+
+    // The seam, traced along the client's cut rather than laid across it.
+    //
+    // **A straight full-width hairline is wrong in this style and right in
+    // `panes/flush`**, and the difference is the corner. There the client's
+    // top is square, so the band's last row and the client's first row meet
+    // end to end and a straight line is the seam. Here the client's top two
+    // corners are cut away, so the last `clientRadius` pixels at each end of
+    // that row are not the seam at all — they are the middle of a notch. A
+    // straight line drawn there is a grey lid lying across the top of the
+    // white curve, crossing the rounding instead of following it. That is
+    // what shipped in 83be7a3 and what the user rejected.
+    //
+    // So the line belongs to the CLIENT's outline and not to the bar's bottom
+    // edge, and the shape that gives is a rounded rectangle with a border and
+    // no fill, **concentric with the shader's own arc and one pixel outside
+    // it**. The client's top-left corner is cut on a circle of radius `r`
+    // centred at `(r, insetTop + r)`. Growing this rect by one pixel on the
+    // top and both sides — `x: -1`, `y: insetTop - 1`, `width + 2` — and
+    // giving it `radius: r + 1` puts its arc centre at that same point with a
+    // radius one larger, so every point of the border is exactly one pixel
+    // outside the cut, all the way round. Measured: it is.
+    //
+    // **The two arcs come from different rasterisers and that is a real
+    // question, not a formality.** The client's is `fragment.rs`'s distance
+    // field evaluated on the GPU; this one is Qt's scene graph. They are the
+    // same circle analytically, which is necessary and not sufficient. What
+    // was measured nested at r=12 is that the border sits one pixel outside
+    // the client's first opaque pixel on every row of the arc, with no row
+    // where it crosses into the client and no row where it leaves a gap.
+    // The alternative, had they disagreed, was to stop the straight line
+    // `clientRadius` short of each end — never wrong, but never an outline
+    // either.
+    //
+    // Only its top edge and its top two corners are ever seen: the layer is
+    // at `behind`, so the rest is under the client, and the side columns at
+    // `x = -1` and `x = width` are outside the canvas the layer is clipped
+    // to. The height is `2 * radius + 4` for the same reason — two radii is
+    // the least Qt will round both corners of, and the four keeps the BOTTOM
+    // two corners below the client's top cut and so out of sight. A taller
+    // one would reach the client's bottom cut and draw a stray arc in each of
+    // those notches.
+    Rectangle {
+        x: -1
+        y: frame.insetTop - 1
+        width: frame.width + 2
+        height: 2 * frame.clientRadius + 4
+        color: "transparent"
+        radius: frame.clientRadius + 1
+        border.width: 1
+        border.color: frame.focused ? Theme.edge : Theme.edgeInactive
     }
 }
