@@ -957,7 +957,8 @@ pub(crate) fn elements(
         // an effect.
         let aimed = state.aimed_at(frame.deform);
         if (!frame.matrix.is_identity() || aimed.is_some())
-            && let Some(mesh) = crate::warp::mesh(frame.rect, frame.matrix, aimed, scale)
+            && let Some(mesh) =
+                crate::warp::mesh(frame.rect, frame.matrix, aimed, frame.pivot, scale)
             && let Some(texture) = prepared.texture(&window)
         {
             elements.push(Element::Warped(crate::warp::Warp::new(
