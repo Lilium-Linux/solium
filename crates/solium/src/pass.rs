@@ -364,7 +364,8 @@ fn every_corner_is_finite(radii: Corners) -> bool {
 /// It widens all four the same, because it is the *texture* that is being
 /// stretched: one capture, one rect, one ratio per axis, and the larger of the
 /// two taken for every side. A per-side ratio would be a second answer to a
-/// question the texture has already answered.
+/// question the texture has already answered. [`side_inset`] is where the
+/// widening and the shader's antialiasing band are turned into one number.
 pub(crate) fn opaque_of(
     dst: Rectangle<i32, Physical>,
     texture: Size<i32, Physical>,
@@ -384,9 +385,54 @@ pub(crate) fn opaque_of(
     let (top, right, bottom, left) = radii.max_of_side();
     let region = opaque_inside(
         Rectangle::from_size(dst.size),
-        (top * widen, right * widen, bottom * widen, left * widen),
+        (
+            side_inset(top, widen),
+            side_inset(right, widen),
+            side_inset(bottom, widen),
+            side_inset(left, widen),
+        ),
     );
     (!region.is_empty()).then_some(region)
+}
+
+/// One side's inset in screen pixels, before [`opaque_inside`] rounds it up.
+///
+/// **Two lower bounds, and the larger of them wins.** They agree on every
+/// window anybody had before a corner was allowed to be square, which is why
+/// there used to be only one.
+///
+/// * `radius * widen` -- the corner as it lands on screen. `radius` is in the
+///   texture's pixels and the texture is not always drawn at its own size, so
+///   a corner drawn at twice its size needs twice the inset.
+/// * `max(radius, 0.5) * widen - 0.5` -- **far enough in that the first
+///   fragment the GPU evaluates is already past the mask's near end.** The
+///   shader's mask is `smoothstep(-0.5, 0.5, away)` with `away` in *texture*
+///   pixels, so a fragment is fully opaque only once it is half a texture
+///   pixel inside the shape; `max(radius, 0.5)` is that floor, and it does
+///   nothing at all except where the radius is too small to supply it. The
+///   `- 0.5` is a *screen* half pixel, going the other way: the outermost
+///   claimed row is pixel `k`, and the fragment there sits at its centre,
+///   `k + 0.5`, already half a pixel in. `k + 0.5 >= widen * max(radius, 0.5)`
+///   is the condition, rearranged.
+///
+/// **The two halves cancel at 1:1 and do not under magnification**, which is
+/// the whole of why the second bound exists and why nothing noticed it while
+/// a square corner was refused outright. A square side inset by nothing puts
+/// its first fragment `0.5 / widen` texture pixels in: at `widen = 1` that is
+/// exactly `-0.5`, the mask's near end and fully opaque, but at `widen = 2` it
+/// is `-0.25`, where `smoothstep` is `0.16` -- a row drawn at **84% alpha and
+/// claimed opaque**, which is a darkened fringe painted with blending
+/// disabled. At `widen = 3` it is 74%.
+///
+/// The first bound is not needed for correctness -- the second alone is
+/// sufficient, and provably so -- but it is kept because dropping it would
+/// *tighten* five other cases (a sub-half-pixel radius at 1:1, and fractional
+/// radii such as 16.25 or 12 at 3.7x, each by one pixel) and claiming **more**
+/// than before is the direction this file does not take without being asked.
+/// Composed like this, the only window whose claim changes is the one that was
+/// wrong.
+fn side_inset(radius: f64, widen: f64) -> f64 {
+    (radius * widen).max(radius.max(0.5) * widen - 0.5)
 }
 
 /// The compiled fragment programs, one of each, for the life of the renderer.
@@ -1383,6 +1429,78 @@ mod tests {
         );
     }
 
+    /// **A square corner drawn magnified gives up one row, and it is the row
+    /// that would otherwise be a darkened fringe.**
+    ///
+    /// The combination nothing covered, and the reason it went unnoticed: a
+    /// square corner was refused outright until the shader gained its interior
+    /// term, so "square" and "magnified" had never met. The mask is
+    /// `smoothstep(-0.5, 0.5, away)` with `away` in *texture* pixels, and a
+    /// window drawn at `widen` times its capture puts its outermost screen
+    /// fragment centre only `0.5 / widen` texture pixels inside the edge. At
+    /// 1:1 that is exactly `-0.5`, the mask's near end, fully opaque -- which
+    /// is why an uncut side may be inset by nothing there. At 2x it is
+    /// `-0.25`, which the mask draws at **84% alpha**, and claiming it would
+    /// paint that fringe over the wallpaper with blending disabled.
+    ///
+    /// The four numbers this pins, which are the boundaries of
+    /// [`side_inset`]'s two bounds:
+    ///
+    /// | | square corner | rounded (r = 12) |
+    /// |---|---|---|
+    /// | 1:1 | 0 | 12 |
+    /// | 2x | **1** | 24 |
+    ///
+    /// Only the bottom-left cell moved. The rounded column is `radius * widen`
+    /// in both rows, and that is the check that the band term did not quietly
+    /// start charging every window a pixel.
+    #[test]
+    fn a_square_corner_drawn_magnified_gives_up_the_fringing_row() {
+        let texture = Size::<i32, Physical>::from((300, 200));
+        let finder = Corners {
+            top_left: 0.0,
+            top_right: 0.0,
+            bottom_left: 12.0,
+            bottom_right: 12.0,
+        };
+        let doubled = Rectangle::<i32, Physical>::new((0, 0).into(), (600, 400).into());
+        assert_eq!(
+            opaque_of(doubled, texture, finder, 1.0, true),
+            Some(Rectangle::new((24, 1).into(), (552, 375).into())),
+            "the square top gives up ONE row at 2x where it gave up none at \
+             1:1, and the cut sides give up exactly twice what they gave"
+        );
+        // The rounded column of the table, at both scales, so the band term
+        // cannot start charging an ordinary window a pixel it does not owe.
+        let at_size = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
+        assert_eq!(
+            opaque_of(at_size, texture, Corners::all(12.0), 1.0, true),
+            Some(Rectangle::new((12, 12).into(), (276, 176).into())),
+        );
+        assert_eq!(
+            opaque_of(doubled, texture, Corners::all(12.0), 1.0, true),
+            Some(Rectangle::new((24, 24).into(), (552, 352).into())),
+        );
+
+        // And the shader's own answer at the two rows either side of the
+        // claim's top edge, in texture pixels: screen row `k` is sampled at
+        // `(k + 0.5) / widen`.
+        let row = |k: f64| away((12.25, (k + 0.5) / 2.0), texture, finder);
+        assert!(
+            row(1.0) <= -0.5,
+            "the first claimed row, {} from the edge, has to be past the mask's \
+             near end",
+            row(1.0)
+        );
+        assert!(
+            row(0.0) > -0.5,
+            "and the row above it is inside the band at {} -- that is the row \
+             an inset of `radius * widen` alone would have claimed, and the \
+             shader draws it at 84%",
+            row(0.0)
+        );
+    }
+
     /// The sum `capture_client` makes before it asks [`covers`] anything.
     ///
     /// Stated as a case that is covered **only** if the shift happens and only
@@ -1500,14 +1618,30 @@ mod tests {
     /// leaves untouched**, checked against the shader's own arithmetic.
     ///
     /// The corners and not the middle, and that is the whole test: `away` is
-    /// `-r` at *every* interior point of a quadrant -- the field saturates --
-    /// so a middle sample is satisfied by an inset of zero, by an inset of one,
-    /// by any inset at all. The corners of the claimed rect are the only points
-    /// whose answer depends on how far it was inset.
+    /// the distance to the nearest edge, so the middle of any window of any
+    /// size is tens of pixels past the mask's near end and is satisfied by an
+    /// inset of zero, by an inset of one, by any inset at all. The corners of
+    /// the claimed rect are the closest claimed points to an edge, and so the
+    /// only ones whose answer depends on how far it was inset.
+    ///
+    /// (Before `ROUNDED_CORNERS` gained its interior term that sentence had a
+    /// stronger form -- `away` was *exactly* `-r` at every interior point,
+    /// because the field saturated -- and the conclusion was the same. The
+    /// field no longer saturates, and the reason to sample the corners is now
+    /// the ordinary one.)
     ///
     /// `smoothstep(-0.5, 0.5, away)` is the mask, so "untouched" is
     /// `away <= -0.5` and not `away <= 0.0`: a fragment in the softened band is
     /// partly cut, and partly cut is not opaque.
+    ///
+    /// **Sampled at the claimed rect's integer corner, which is the stricter
+    /// model**: the fragment the GPU evaluates there sits half a screen pixel
+    /// further in, so passing here implies passing at the centre. It is the
+    /// right model wherever the inset is at least a pixel, and it cannot be
+    /// used where a side is inset by nothing -- the geometric edge of a square
+    /// side really is at `away == 0`. That case is
+    /// `a_square_corner_keeps_the_rows_above_it`, which samples centres and
+    /// says why.
     ///
     /// **Four different radii, so each corner of the claimed rect is checked
     /// against the radius of the quadrant it actually lands in.** With

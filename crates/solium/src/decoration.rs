@@ -1019,13 +1019,28 @@ fn client_radii(style: &Style) -> Corners {
 /// `style::load` reads every corner with `get_int` and widens it, so the round
 /// trip back is the same value it started as — there is nothing here to round,
 /// only a type to put back.
+///
+/// **Clamped at zero, and this is the one place the two sides of the seam
+/// disagree on purpose.** A negative corner is reachable: `client.radius: -5`
+/// with one corner declared positive gives three negative corners and one real
+/// one, and `Corners::is_none` refuses only the case where *all* of them are.
+/// On the compositor's side it means something — the shader's `p` is pushed
+/// further negative on both axes, so a negative radius *inflates* the shape
+/// rather than cutting it, and `pass::side_inset` keeps the sign and clamps
+/// only the inset it derives from it.
+///
+/// QML has no such reading. `Rectangle.radius` is undefined for a negative,
+/// and a layer doing arithmetic on one — `clientRadius + 2`, the outward hug —
+/// would put its border *inside* the client instead of around it. So what
+/// crosses the seam is the number a layer can use, and the sign stays on the
+/// side that has a use for it.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the radius reached `Effect` from `get_int`, so it was an i32 \
               before it was an f64 and the round trip is exact"
 )]
 fn whole(radius: f64) -> i32 {
-    radius as i32
+    (radius as i32).max(0)
 }
 
 impl LayerScene {
@@ -2956,6 +2971,55 @@ mod tests {
             assert_eq!(layer.scene.get_int("sawTopRight"), 2, "302 is unwritten");
             assert_eq!(layer.scene.get_int("sawBottomLeft"), 3, "403 is unwritten");
             assert_eq!(layer.scene.get_int("sawBottomRight"), 4, "504 is unwritten");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A negative corner reaches a layer as zero, where it means something
+    /// on the compositor's side.**
+    ///
+    /// Reachable, and not by a contrived route: `client.radius: -5` is the
+    /// fallback every corner that does not declare itself takes, so declaring
+    /// one corner positive leaves the other three negative --
+    /// `Corners::is_none` refuses only the case where *all* of them are, so the
+    /// effect is real and the pass runs.
+    ///
+    /// `pass` keeps the sign, because a negative radius inflates the shape
+    /// there rather than cutting it. QML has no reading for one:
+    /// `Rectangle.radius` is undefined for a negative, and the `clientRadius +
+    /// 2` hug would put a border *inside* the client. See `whole`, which is
+    /// the one line where the two sides differ and says why.
+    #[test]
+    fn a_negative_corner_reaches_a_layer_as_zero() {
+        on_the_qt_thread(|| {
+            let dir = radius_fixture(
+                "told-negative",
+                "client.radius: -5
+                 client.radiusTopRight: 6",
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            let layer = decoration.layers.first_mut().expect("the one layer");
+
+            assert_eq!(
+                layer.scene.get_int("sawTopLeft"),
+                1,
+                "a -5 corner is told as 0, not as -5 (which would read -499) \
+                 and not left unwritten (which would read 201)"
+            );
+            assert_eq!(layer.scene.get_int("sawBottomLeft"), 3);
+            assert_eq!(layer.scene.get_int("sawBottomRight"), 4);
+            assert_eq!(
+                layer.scene.get_int("sawTopRight"),
+                602,
+                "and the one corner that is a radius is untouched by the clamp"
+            );
+            assert_eq!(
+                layer.scene.get_int("sawRadius"),
+                61,
+                "the singular is the largest, which here is the only positive one"
+            );
 
             let _ = std::fs::remove_dir_all(&dir);
         });

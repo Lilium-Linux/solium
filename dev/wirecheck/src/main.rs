@@ -378,7 +378,7 @@ fn draw_through_program(
     texture: &GlesTexture,
     program: &GlesTexProgram,
     side: i32,
-    radius: f32,
+    radii: (f32, f32, f32, f32),
 ) -> Result<Vec<u8>> {
     let mut into: GlesTexture = renderer
         .create_buffer(Fourcc::Abgr8888, (side, side).into())
@@ -410,18 +410,21 @@ fn draw_through_program(
                 1.0,
                 Some(program),
                 &[
-                    // All four corners the same: this harness has one `radius`
-                    // parameter and nothing yet constructs a `Corners` with
-                    // differing ones. `RADIUS_UNIFORM` is a `vec4` now --
-                    // `fragment.rs`'s `corner_radius` -- and a 4-tuple is what
-                    // `UniformValue`'s `From` impl turns into `_4f`, matching the
-                    // `UniformType::_4f` this program was compiled with above;
-                    // a bare `f32` here would send `_1f` against a `vec4`
-                    // location and every fragment would come back unset.
-                    Uniform::new(
-                        solium_effects::fragment::RADIUS_UNIFORM,
-                        (radius, radius, radius, radius),
-                    ),
+                    // `(tl, tr, bl, br)` -- `Corners`' field order, which is
+                    // the order `fragment.rs` indexes `corner_radius` by, and
+                    // the order `pass::Rounded::draw` sends. Four values the
+                    // CALLER chooses rather than one repeated: this harness is
+                    // the only place in the tree that can see the packing at
+                    // all, because a transposition type-checks, compiles, and
+                    // draws a perfectly ordinary window with its corners
+                    // swapped. `rounded_corners_cut` sends four distinct ones
+                    // for exactly that reason.
+                    //
+                    // A 4-tuple and not a bare `f32`, which `UniformValue`
+                    // would turn into `_1f` against a `vec4` location and
+                    // mismatch the `UniformType::_4f` this program was compiled
+                    // with above, leaving every fragment unset.
+                    Uniform::new(solium_effects::fragment::RADIUS_UNIFORM, radii),
                     // Both physical, and both the texture's own size, which is
                     // the pair the shader's `v_coords * tex_size` is written
                     // against. If this never arrives the uniform stays 0, the
@@ -510,7 +513,8 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
                 false,
             )
             .map_err(|err| anyhow!("import_memory for the {what} variant: {err}"))?;
-        let out = draw_through_program(renderer, &source, program, SIDE, RADIUS)?;
+        let out =
+            draw_through_program(renderer, &source, program, SIDE, (RADIUS, RADIUS, RADIUS, RADIUS))?;
         let at = |x: i32, y: i32| -> [u8; 4] {
             let i = ((y * SIDE + x) * 4) as usize;
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -532,17 +536,18 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
                  {wanted:?}. Each wrong answer names a different cause, so read the \
                  numbers: a flat [255, 255, 255, 255] -- or any solid colour that is \
                  not the picture -- means something writes `gl_FragColor` AFTER the \
-                 mask does; half alpha means EITHER uniform never reached the \
-                 program -- an unset `tex_size` puts every fragment on the \
-                 boundary, and an unset `corner_radius` clamps `r` to 0 which \
-                 does the same, and the two are byte-identical here, so check \
-                 BOTH `Uniform::new` calls above rather than one. Note they are \
-                 THIS file's, not the compositor's: nothing here runs \
-                 `pass::Rounded::draw`, so a wrong uniform there is invisible \
-                 to this case and always has been; nothing at all means the \
-                 picture did not reach the \
-                 program; the right colour in the wrong order means a channel \
-                 swap on the way in or out"
+                 mask does; half alpha means `tex_size` never reached the \
+                 program, which makes `half_size` zero, `r` zero and `away` \
+                 zero -- the smoothstep's midpoint -- at every fragment. That \
+                 used to be the signature of a missing `corner_radius` too, and \
+                 is not any more: since `fragment.rs` gained the interior term \
+                 an unset radius draws the texture fully OPAQUE and uncut, so \
+                 it is assertion 2 below that catches it, not this one. Note \
+                 the uniforms are THIS file's, not the compositor's: nothing \
+                 here runs `pass::Rounded::draw`, so a wrong uniform there is \
+                 invisible to this case and always has been; nothing at all \
+                 means the picture did not reach the program; the right colour \
+                 in the wrong order means a channel swap on the way in or out"
             ));
         }
 
@@ -552,18 +557,20 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
         // quadrant is what draws all four from one expression -- a field written
         // for the top-left only passes at (0, 0).
         //
-        // It is NOT the check that `corner_radius` arrived, which this comment
-        // used to claim: an unset radius makes `r` 0, which puts the whole
-        // texture on the boundary, so the middle assertion above fires first
-        // and this one is never reached. Measured, not reasoned -- dropping
-        // either uniform reds with the identical message, which is why that
-        // message now names both.
+        // **It IS the check that `corner_radius` arrived, and it became that
+        // when the shader gained its interior term.** It did not use to be:
+        // with the old field an unset radius made `away` 0 at every point,
+        // which is the smoothstep's midpoint, so the whole texture came back
+        // at alpha 127 and the middle assertion above fired first -- dropping
+        // either uniform reds with the identical message, measured rather than
+        // reasoned. The exact field reports the real distance to the edge
+        // instead, so `r == 0` now draws a plain opaque RECTANGLE: the middle
+        // is right, and it is these four corners that are wrong.
         //
-        // What an unset radius does, for the record, since it is not what the
-        // obvious guess says: `r` is 0, so `p` is exactly zero at every point
-        // and `away` is 0 everywhere -- which is the smoothstep's midpoint, so
-        // the whole texture comes back at alpha 127. Not opaque, not cut. The
-        // middle assertion sees that first.
+        // So read a failure here as either of two things -- a field written
+        // for one quadrant rather than folded with `abs()`, or a
+        // `corner_radius` that never arrived -- and the per-corner case below
+        // tells them apart, since an unset uniform cuts nothing anywhere.
         for (x, y) in [
             (0, 0),
             (SIDE - 1, 0),
@@ -617,6 +624,82 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
                 "the {what} variant left only {soft} pixels between opaque and cut, \
                  where the one-texel `smoothstep` puts about 68. The corner is a hard \
                  step, which is what a mask without the smoothstep looks like"
+            ));
+        }
+    }
+
+    // 4. FOUR DISTINCT radii, which is the only thing in this tree that can
+    //    see the `vec4` packing at all.
+    //
+    // Everything above sends one radius four times, and under that every
+    // permutation of `corner_radius` draws the identical picture. So a
+    // transposition between `Corners`' field order and the shader's component
+    // order -- `pass::Rounded::draw`'s tuple, this file's, or `fragment.rs`'s
+    // three `picked` lines -- type-checks, compiles, links, passes every unit
+    // test in the workspace, and swaps a window's corners on screen. Nothing
+    // but a real draw with four different values can tell.
+    //
+    // `style.rs` had this exact blindness and closed it the same way: four
+    // distinct values instead of one repeated.
+    {
+        const RADII: (f32, f32, f32, f32) = (6.0, 12.0, 20.0, 28.0);
+        let source = renderer
+            .import_memory(
+                &solid(SIDE, SIDE, COLOUR, 255),
+                Fourcc::Argb8888,
+                (SIDE, SIDE).into(),
+                false,
+            )
+            .map_err(|err| anyhow!("import_memory for the per-corner draw: {err}"))?;
+        let out = draw_through_program(renderer, &source, program, SIDE, RADII)?;
+        // Indexed `(tl, tr, bl, br)`, the order the uniform is packed in.
+        let mut cut = [0_usize; 4];
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                if out[((y * SIDE + x) * 4 + 3) as usize] <= 7 {
+                    let quadrant = usize::from(x >= SIDE / 2) + 2 * usize::from(y >= SIDE / 2);
+                    cut[quadrant] += 1;
+                }
+            }
+        }
+        println!(
+            "  rounded-corner shader, per-corner {RADII:?}: tl={} tr={} bl={} br={} px cut",
+            cut[0], cut[1], cut[2], cut[3]
+        );
+
+        // From the shader's own field evaluated over a 64x64 at these radii:
+        // 5, 23, 76, 154. Banded rather than matched, for the reason the
+        // single-radius count above is banded -- a second transcription of the
+        // geometry is not what this is for. The bands do not overlap, which is
+        // the property that matters: every one of the 23 wrong permutations
+        // puts at least one count outside its own band.
+        for (corner, count, low, high) in [
+            ("top-left (r=6)", cut[0], 2_usize, 12_usize),
+            ("top-right (r=12)", cut[1], 13, 40),
+            ("bottom-left (r=20)", cut[2], 52, 105),
+            ("bottom-right (r=28)", cut[3], 115, 200),
+        ] {
+            if !(low..=high).contains(&count) {
+                return Err(anyhow!(
+                    "the {corner} corner cut {count} pixels, where the field puts \
+                     it in {low}..={high}. The four counts this draw produced were \
+                     {cut:?} as (tl, tr, bl, br), against about (5, 23, 76, 154): \
+                     read them as a permutation first, because a `corner_radius` \
+                     packed in any order but (tl, tr, bl, br) lands here and \
+                     nothing else in the workspace can see it. `fragment.rs`'s \
+                     `picked` lines, `pass::Rounded::draw`'s tuple and this \
+                     file's `Uniform::new` all have to agree"
+                ));
+            }
+        }
+        // Belt and braces over the bands, and cheap: strictly increasing is
+        // what four increasing radii mean, and it stays true if someone
+        // retunes the radii above without retuning the bands.
+        if !(cut[0] < cut[1] && cut[1] < cut[2] && cut[2] < cut[3]) {
+            return Err(anyhow!(
+                "the cut areas {cut:?} as (tl, tr, bl, br) are not strictly \
+                 increasing, where the radii {RADII:?} are -- so the components \
+                 of `corner_radius` do not reach the quadrants they name"
             ));
         }
     }
