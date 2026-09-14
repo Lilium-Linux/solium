@@ -262,6 +262,13 @@ impl Prepared {
 /// masks its client.
 ///
 /// Must run before the backend binds its own buffer; see [`Prepared`].
+/// Note on the clock: this walk calls [`Solium::drawn`], which samples the
+/// clock per pane — the very thing that function's own doc now tells a
+/// multi-pane caller not to do. It is left as it was, deliberately: `prepare`
+/// decides what to **capture**, and a capture is keyed on a window and a size,
+/// neither of which a few microseconds of skew can change. `elements` was the
+/// caller where the skew was visible, and that is the one that was fixed. A
+/// drive-by change here would be churn.
 pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepared {
     // Everything here is the compositor's own work, ahead of any output, apart
     // from the tick below — which is entirely Qt's and is measured separately
@@ -679,10 +686,19 @@ type Node = (
 /// function's own contract; the tests pin everything else about it.
 ///
 /// `total_cmp` is deliberately not used. It orders NaN — above every finite
-/// float — so a script reaching NaN with one division would find its window
-/// teleported to the front of the stack for reasons nothing on screen
-/// explains. Answering `Equal` leaves it exactly where the stack put it, which
-/// is what the default depth does and the only answer a user can predict.
+/// float — so a NaN depth reaching here would put a window at the front of the
+/// stack for reasons nothing on screen explains. Answering `Equal` leaves it
+/// where the stack put it, which is what the default depth does.
+///
+/// **This is not the guard, and it is not merely a tidying.** `script::depth_from`
+/// refuses a non-finite depth at the boundary and is the only path from a
+/// script to `Frame::z`, so nothing can reach this today — it is the layer
+/// that must not make things worse if a second producer ever appears. And what
+/// it prevents is not a scrambled stack: `Equal` against every finite depth,
+/// while those do not tie with each other, is **not a total order**, and
+/// `slice::sort_by` handed one *may panic* — on this walk, a dead compositor.
+/// So if a second `Frame::z` producer is ever added, it needs its own refusal;
+/// this line makes the failure survivable, not impossible.
 fn by_depth<T>(nodes: &mut [(T, f32)]) {
     nodes.sort_by(|(_, left), (_, right)| {
         right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
@@ -867,8 +883,15 @@ pub(crate) fn elements(
     // one instant and draw on another, and resolving per pane would shear each
     // window against its neighbours and against the scripted layers above and
     // below, which are all placed at `now`. One instant for everything on this
-    // screen, and one `drawn` per pane per screen — which is what the loop
-    // cost before there was a sort.
+    // screen, and one `drawn` per pane per screen.
+    //
+    // That is slightly *more* than the loop cost before there was a sort: the
+    // old walk resolved a frame only after the `ours && !pane_has_scene`
+    // continue, so a pane on its way out cost nothing. `drawn_at` is
+    // side-effect-free, so the extra call is wasted work rather than a
+    // behaviour change — but it is not free when a group names a monitor,
+    // where it searches the outputs per pane. The other new cost is one
+    // `Vec<(Node, f32)>` per screen per frame, about 180 bytes a pane.
     //
     // The transform inside it is expressed against the *outer* rect — the
     // window including its frame — so the frame scales and moves with the

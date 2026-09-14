@@ -80,8 +80,11 @@ pub(crate) struct Shift {
     /// **About each member's own centre**, which is the honest limit of this
     /// stage: it tilts every window in the selection in place rather than
     /// turning the desk they sit on. A common pivot needs a rectangle for the
-    /// group and a `pivot` on the node, and both are `z`, `pivot`, node alpha —
-    /// the last item of this phase. What composes correctly *today* is the part
+    /// group and a `pivot` on the node. **The node half now exists** — `z`,
+    /// `pivot` and node alpha all landed — and the group rectangle still does
+    /// not, so this limit is unchanged and is now the *only* thing standing in
+    /// the way. It was never part of that item. What composes correctly today
+    /// is the part
     /// that made this item worth doing first: the translation and the opacity,
     /// which is what a desk is made of.
     pub(crate) matrix: Mat4,

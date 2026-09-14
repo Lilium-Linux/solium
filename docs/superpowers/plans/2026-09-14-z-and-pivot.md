@@ -37,7 +37,7 @@ So this plan is two fields, not three.
 | `crates/solium/src/warp.rs` (modify) | The two lines computing the rect's centre take the pivot instead. |
 | `crates/solium/src/render.rs` (modify) | Panes are drawn in `z` order — one stable sort, at the one place draw order is decided. |
 | `crates/solium/src/script.rs` (modify) | `z`, `pivot_x`, `pivot_y` on `sol.present` and `sol.present_group`. |
-| `docs/ricing.md` (modify) | What the two knobs do and what they deliberately do not. |
+| `docs/modes.md` (modify) | What the two knobs do and what they deliberately do not. |
 
 ---
 
@@ -383,7 +383,7 @@ git commit -m "render: draw nodes deepest last, and equal depths as the stack ga
 
 **Files:**
 - Modify: `crates/solium/src/script.rs:1285-1330` (the `present` option reads) and `transform_from`
-- Modify: `docs/ricing.md`
+- Modify: `docs/modes.md` — **not `ricing.md`, which this plan originally named.** `ricing.md` contains no `sol.present` at all and points at `modes.md` for modes; corrected after implementation.
 - Test: `crates/solium/src/script.rs`
 
 **Interfaces:**
@@ -473,7 +473,7 @@ Expected: PASS.
 
 - [ ] **Step 6: Document it**
 
-In `docs/ricing.md`, beside the other `sol.present` options:
+In `docs/modes.md`, beside the other `sol.present` options:
 
 ```markdown
 ### Depth and pivot
@@ -493,7 +493,7 @@ is the default, `(0, 0)` the top-left corner. Each axis defaults on its own.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/solium/src/script.rs docs/ricing.md
+git add crates/solium/src/script.rs docs/modes.md
 git commit -m "script: z and pivot on present, each axis defaulting on its own"
 ```
 
