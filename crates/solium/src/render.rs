@@ -642,6 +642,52 @@ impl Picture {
     }
 }
 
+/// One pane's place in the draw walk: which pane, its client if it has one,
+/// the slot it occupies, and how it is being drawn this instant.
+///
+/// A named tuple rather than four loose ones because it is carried through a
+/// sort, and a sort is exactly where a pair of same-typed fields gets swapped
+/// without anything noticing.
+type Node = (
+    crate::pane::PaneId,
+    Option<Window>,
+    smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    present::Frame,
+);
+
+/// Order nodes for drawing: nearest the viewer first, equal depths as they
+/// came.
+///
+/// Generic over what is carried so the compositor's walk and the tests drive
+/// the same code — `Solium` is not constructible in a test, and an ordering
+/// rule checked against a second copy of itself is not checked.
+///
+/// **Descending, because the list this orders is walked topmost-first.** A
+/// higher `z` is nearer the viewer and nearer the viewer is earlier in
+/// `elements`, so the comparison reads `right` against `left` rather than the
+/// other way round. Getting it backwards does not look like a sort error: it
+/// looks like raising a window hides it.
+///
+/// `sort_by` and not `sort_unstable_by`, because equal depths must keep the
+/// order the stack gave them and every window is `0.0` — that is what makes
+/// the default free. Worth recording that no test below rejects the unstable
+/// one: on this toolchain the two agree for every arrangement of up to 32
+/// nodes, so the difference is only reachable with a stack larger than anyone
+/// looks at, and a fixture that size would be pinning `core`'s small-sort
+/// threshold rather than this line. The stable sort is correct by the
+/// function's own contract; the tests pin everything else about it.
+///
+/// `total_cmp` is deliberately not used. It orders NaN — above every finite
+/// float — so a script reaching NaN with one division would find its window
+/// teleported to the front of the stack for reasons nothing on screen
+/// explains. Answering `Equal` leaves it exactly where the stack put it, which
+/// is what the default depth does and the only answer a user can predict.
+fn by_depth<T>(nodes: &mut [(T, f32)]) {
+    nodes.sort_by(|(_, left), (_, right)| {
+        right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 /// What to draw for one frame, topmost first.
 ///
 /// Called once per monitor. `frame.screen` is where that output sits in the
@@ -788,10 +834,50 @@ pub(crate) fn elements(
         scale,
     ));
 
-    for (pane, window) in state.on_screen() {
-        let Some(global) = state.pane_outer_of(pane) else {
-            continue;
-        };
+    // **Depth orders this walk and nothing else.** `z` is a sort key over a
+    // painter's-algorithm list, not a coordinate: it decides which window
+    // covers which, and `rect` stays the truth for input, so a window raised
+    // above its neighbour is still clicked where the layout put it. See the
+    // spec's *Hit-testing does not move*.
+    //
+    // `prepare` is deliberately left walking `on_screen()` in stacking order.
+    // It decides what to *capture*, and what a window is captured into does
+    // not depend on what covers it — a sort there would be a sort per frame
+    // buying nothing.
+    //
+    // The three cheap-path gates below — the capture in `prepare`, the
+    // off-screen cull, and the warp — ask only about `matrix` and `deform`,
+    // and they are right not to ask about `z`. A depth needs no texture, no
+    // mesh and no program: it is spent entirely by this sort, which happens
+    // out here where every window passes through it whichever path it then
+    // takes. **A flat window raised above its neighbours is reordered and
+    // still drawn from its own surfaces**, which is the whole point — raising
+    // a window must not cost it an offscreen render.
+    //
+    // The frame is resolved here and carried rather than resolved again in the
+    // loop, for two reasons. `drawn` reads the clock *through* — see
+    // `present::Clock` — so asking twice is two instants of one animation, and
+    // the depth that sorted would not quite be the depth that drew. And it
+    // keeps this to one `drawn` per pane per screen, which is what the loop
+    // cost before there was a sort.
+    //
+    // The transform inside it is expressed against the *outer* rect — the
+    // window including its frame — so the frame scales and moves with the
+    // window rather than beside it. Computed in global coordinates, because
+    // that is the space a script's target was written in, and moved onto each
+    // screen afterwards.
+    let mut order: Vec<(Node, f32)> = state
+        .on_screen()
+        .into_iter()
+        .filter_map(|(pane, window)| {
+            let global = state.pane_outer_of(pane)?;
+            let frame = state.drawn(pane, global);
+            Some(((pane, window, global, frame), frame.z))
+        })
+        .collect();
+    by_depth(&mut order);
+
+    for ((pane, window, global, mut frame), _) in order {
         let outer = smithay::utils::Rectangle::new(global.loc - screen.loc, global.size);
         // Whether what is drawn here is ours or the client's. A window whose
         // application has not arrived is obviously ours; so is one whose
@@ -807,13 +893,6 @@ pub(crate) fn elements(
         if ours && !state.pane_has_scene(pane) {
             continue;
         }
-
-        // The transform is expressed against the *outer* rect — the window
-        // including its frame — so the frame scales and moves with the window
-        // rather than beside it. Computed in global coordinates, because that
-        // is the space a script's target was written in, and moved onto this
-        // screen afterwards.
-        let mut frame = state.drawn(pane, global);
 
         // **A window is drawn only on the monitors it lives on.** Its slot
         // decides that, not its transform.
@@ -1489,7 +1568,7 @@ pub(crate) fn ratio(drawn: f64, real: i32) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Drawn, Painted, ratio};
+    use super::{Drawn, Painted, by_depth, ratio};
     use crate::qml::qt_test::on_the_qt_thread;
 
     /// A QML scene's two answers, with Qt's exact behaviour.
@@ -1864,5 +1943,101 @@ mod tests {
         assert!((ratio(400.0, 0) - 1.0).abs() < f64::EPSILON);
         assert!((ratio(0.0, 800) - 1.0).abs() < f64::EPSILON);
         assert!((ratio(-5.0, 800) - 1.0).abs() < f64::EPSILON);
+    }
+
+    /// What came out of [`by_depth`], as names, which is the only thing any of
+    /// the depth tests asks about.
+    fn names<'a>(order: &[(&'a str, f32)]) -> Vec<&'a str> {
+        order.iter().map(|(name, _)| *name).collect()
+    }
+
+    /// Equal depths keep the order the stack gave them. This is the whole of
+    /// the cheap path: every window is `0.0`, so the list must come out
+    /// exactly as it went in, and an unstyled session pays nothing for a
+    /// feature it does not use.
+    ///
+    /// Three distinct names, because a list of interchangeable payloads cannot
+    /// see itself being permuted.
+    ///
+    /// **This list is already in its own sorted order, so the sort has nothing
+    /// to move** — which is the property, and also why this is not on its own
+    /// a test of stability. `raising_one_card_leaves_the_rest_in_order` is the
+    /// one where the sort does work and a tie is still observable afterwards.
+    #[test]
+    fn equal_depths_keep_the_stacking_order() {
+        let mut order = vec![("a", 0.0_f32), ("b", 0.0), ("c", 0.0)];
+        by_depth(&mut order);
+        assert_eq!(names(&order), vec!["a", "b", "c"]);
+    }
+
+    /// And a raised node is drawn nearer the viewer — which, in a list the
+    /// renderer walks topmost-first, means EARLIER.
+    ///
+    /// Three different depths, and an input order that is neither the answer
+    /// nor the answer reversed: `under, over, between` sorts to `over,
+    /// between, under` and reverses to `between, over, under`. So neither
+    /// "leave it alone" nor "turn it round" passes, and neither does sorting
+    /// the other way (`under, between, over`) nor sorting by name in either
+    /// direction (`under, over, between` and `between, over, under`). Five
+    /// wrong answers, five different lists.
+    #[test]
+    fn a_higher_depth_is_drawn_in_front() {
+        let mut order = vec![("under", 0.0_f32), ("over", 2.0), ("between", 1.0)];
+        by_depth(&mut order);
+        assert_eq!(names(&order), vec!["over", "between", "under"]);
+    }
+
+    /// Raising one card leaves the rest of the stack in the order it was in.
+    /// This is the case the default depth cannot show, and the one a script
+    /// lifting a card actually asks for: the sort really has to move
+    /// something, and the four untouched nodes have to come through it
+    /// unshuffled.
+    ///
+    /// A separate test from `equal_depths_keep_the_stacking_order` because the
+    /// obvious wrong way to write this — repeatedly find the deepest remaining
+    /// node and swap it into place — passes that one (nothing to pick between)
+    /// and passes `a_higher_depth_is_drawn_in_front` (with three nodes the
+    /// swaps happen to land right), and fails here: the swap that brings
+    /// `raised` to the front sends `top` to where `raised` was, behind
+    /// `second`.
+    #[test]
+    fn raising_one_card_leaves_the_rest_in_order() {
+        let mut order = vec![
+            ("top", 0.0_f32),
+            ("second", 0.0),
+            ("raised", 3.0),
+            ("fourth", 0.0),
+            ("fifth", 0.0),
+        ];
+        by_depth(&mut order);
+        assert_eq!(
+            names(&order),
+            vec!["raised", "top", "second", "fourth", "fifth"]
+        );
+    }
+
+    /// A NaN depth does not panic and does not move the window. A script
+    /// reaches one with a single division, and the only answer a user can
+    /// predict is that nothing happens — which is the same answer the default
+    /// depth gives.
+    ///
+    /// This rejects both of the implementations that look right. `total_cmp`
+    /// orders NaN above every finite float and sweeps the window to the front
+    /// of the stack; `unwrap_or(Ordering::Less)` sweeps it to the front as
+    /// well. Both were run.
+    ///
+    /// It does **not** reject `unwrap_or(Ordering::Greater)`, and that is
+    /// worth writing down rather than leaving to be discovered: neither
+    /// `Greater` nor `Equal` ever answers `Less` on a list of otherwise equal
+    /// depths, so the sort sees a list already in order and hands it back
+    /// untouched whichever of the two is written. `Equal` is here because it
+    /// is the symmetric answer — the one that stays "leave it alone" when the
+    /// depths around it are not equal — not because a test can see the
+    /// difference on this fixture.
+    #[test]
+    fn a_depth_that_is_not_a_number_is_left_where_it_is() {
+        let mut order = vec![("a", 0.0_f32), ("nan", f32::NAN), ("b", 0.0)];
+        by_depth(&mut order);
+        assert_eq!(names(&order), vec!["a", "nan", "b"]);
     }
 }
