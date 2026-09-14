@@ -37,9 +37,29 @@ So this is not a workaround for a badly placed seam. It is the capability that m
 
 ## The configuration shape, and why it is four keys and not a map
 
-`bleed` accepts `40` or `{"top":160,"left":8}`, and that would be the consistent spelling. **It is not available here without new C++.** `bleed` is read with `Scene::layer_field`, which returns a `String` for a *layer* property; `client.radius` is read with `Scene::get_int`, the only accessor that resolves a dotted path, and there is no `get_string` that does. Making `ClientTreatment.radius` a `var` to hold a map would break `get_int` — a QVariant holding a JS object reads back as 0 — so the map form costs a new FFI entry point and a `QQmlProperty` string read in `host.cpp`.
+`bleed` accepts `40` or `{"top":160,"left":8}`, and that would be one
+consistent spelling. **Corrected during pre-flight: my first reason for not
+using it was wrong.** I wrote that there is no path-taking string reader.
+There is — `solium_qml_scene_string_at` (`host.cpp:2030`) reads through
+`QQmlProperty` "for the same reason `solium_qml_scene_get_int` does", and it
+already unwraps the `QJSValue` that bit this codebase once.
 
-So: **four int keys, each defaulting to `client.radius`.** Two levels of fallback, no new FFI, and every read is the `get_int` that already works.
+The real obstacle is narrower: `string_at` walks a **list**, and a
+`QVariantMap` falls through its list branch to `value.toString()`, which is
+empty for a map. The map→JSON conversion exists — `host.cpp:2019-2023`, via
+`QJsonDocument` — but it lives in `layer_field`, which is indexed by *layer*
+and takes a field name rather than a path. So the map form costs a new FFI
+entry point that reuses that block: perhaps fifteen lines of C++, not the
+larger thing I claimed.
+
+**The decision stands anyway, on a better argument: `insets` is the nearest
+neighbour and it is four `get_int`s.** `scene.get_int("insets.top")` and its
+three siblings are how a grouped `PaneStyle` property with four numbers is
+already read (`style.rs`, in the `Ok(Style { .. })` literal). Per-corner radii
+are exactly that shape — a group on `PaneStyle`, four numbers, read by path.
+`bleed` is a *layer* field reached through a different accessor. Matching the
+thing it resembles beats matching the thing that merely also has four sides,
+and it needs no C++ at all.
 
 ```qml
 client.radius: 12                    // all four
