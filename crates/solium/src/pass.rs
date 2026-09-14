@@ -181,8 +181,16 @@ pub(crate) fn physical_radii(effect: Effect, scale: f64) -> Corners {
 /// `ROUNDED_CORNERS` picks a radius per quadrant, folds the coordinate into
 /// one corner and measures `abs(p) - (half - r)`, which is `<= 0` on both axes
 /// exactly when the point is at least that quadrant's `r` from both of the
-/// edges it touches; the shader then reports `-r` for it, uncut. Insetting a
-/// side by the larger of its two corners clears both of them.
+/// edges it touches; the shader then reports at most `-r` for it, uncut.
+/// Insetting a side by the larger of its two corners clears both of them.
+///
+/// **A side its corners do not cut is inset by nothing, and that is sound at
+/// the fragment centres the GPU samples.** The geometric edge sits at
+/// `away == 0`, the smoothstep's midpoint, but no fragment is evaluated there:
+/// a centre is half a pixel in, which reports exactly `-0.5` and is fully
+/// opaque. That is a property of the shader's interior term and would be false
+/// without it -- see `every_corner_is_finite`, and the term's own comment in
+/// `fragment.rs`.
 ///
 /// `ceil`, because a physical radius is a logical one times an output scale
 /// and is rarely whole: 13 logical at 1.25 is 16.25, and rounding that down
@@ -276,41 +284,37 @@ pub(crate) fn covers(
             .is_empty()
 }
 
-/// Whether every corner is cut by at least half a physical pixel, which is
-/// what it takes for **any** of this window to be opaque.
+/// Whether all four radii are numbers this file can reason about at all.
 ///
-/// `ROUNDED_CORNERS` omits the interior term of the rounded-box field: it
-/// reports `-r` at *every* point inside the shape rather than the real
-/// distance to the edge, and that answer goes through
-/// `smoothstep(-0.5, 0.5, away)`. So a quadrant whose radius is under half a
-/// pixel is not softened at an arc -- it is drawn **uniformly translucent**,
-/// all of it, and a zero radius lands exactly on the smoothstep's midpoint and
-/// draws that quarter of the window at 50%. `dev/wirecheck` says the same
-/// thing from the other end: an unset `corner_radius` clamps `r` to 0 and
-/// "the whole texture comes back at alpha 127".
+/// **A NaN radius must never reach [`opaque_inside`].** It compares false
+/// against every bound, so nothing downstream refuses it on its own;
+/// `NaN.ceil()` is NaN and `NaN as i32` is 0, so it would inset by nothing and
+/// claim the window's whole rectangle -- including the four corners the shader
+/// really does cut. That is the expensive direction: a claimed region is drawn
+/// with blending disabled (`gles/mod.rs:2585`), so the wallpaper under each
+/// corner would go unpainted and show whatever the last frame left there.
+/// An infinity is refused with it, for one predicate instead of two and
+/// because `ceil().clamp(..)` is the only thing that would otherwise stop it.
 ///
-/// **Per corner, and that is the change a square corner forces.** With one
-/// radius this could only be reached by a style asking for a sub-pixel
-/// rounding, which nothing sensible does. With four it is the ordinary
-/// square-topped window -- `radiusTopLeft: 0` -- and claiming its top rows
-/// opaque would hand a 50%-alpha quadrant to a draw with blending disabled
-/// (`gles/mod.rs:2585`), which paints over the wallpaper rather than blending
-/// with it.
+/// **This used to also demand half a physical pixel, and no longer does.**
+/// That bound was never about geometry -- it was about a shader that omitted
+/// the interior term of the rounded-box field and so reported a flat `-r`
+/// inside the shape, which at `r == 0` is `smoothstep(-0.5, 0.5, 0.0)`: a
+/// square corner's whole quadrant at 50% alpha, measured at 127 on a real GPU.
+/// `ROUNDED_CORNERS` now carries `min(max(p.x, p.y), 0.0)` and reports the
+/// real distance inside, so an uncut side is opaque to its own outermost row
+/// of fragment centres -- exactly `-0.5`, the smoothstep's near end. Keeping
+/// the old bound would refuse the opaque region of every square-cornered
+/// style, which is the shape this feature was added for.
 ///
-/// **This is conservative against a shader defect and not against geometry.**
-/// A square corner *should* be opaque up to its own edge; it is the missing
-/// `min(max(p.x, p.y), 0.0)` term that makes it translucent instead. Adding
-/// that term is a change to `fragment.rs` -- out of this file, and it would
-/// leave every other fragment's answer untouched, since the term is zero
-/// wherever either component of `p` is positive. Until it is added, this
-/// refuses the whole window: a window drawn at half alpha over the wallpaper
-/// merely looks wrong, and one drawn at half alpha with blending off corrupts
-/// what is behind it.
-///
-/// NaN answers `false` here -- `NaN >= 0.5` is false -- and is named rather
-/// than left to fall out of a negation, because it compares false against
-/// every bound and would otherwise reach [`opaque_inside`] and inset by zero.
-fn every_corner_is_cut(radii: Corners) -> bool {
+/// A negative radius is allowed through, and is safe: it *inflates* the shape
+/// rather than cutting it -- `p` is pushed further negative on every axis, so
+/// every fragment is at least as opaque as a square window's -- and
+/// [`opaque_inside`] clamps its inset to zero. It is reachable, too:
+/// `client.radius: -5` with one corner declared positive gives three negative
+/// corners and one real one, and `Corners::is_none` refuses only the case
+/// where *all* of them are.
+fn every_corner_is_finite(radii: Corners) -> bool {
     [
         radii.top_left,
         radii.top_right,
@@ -318,7 +322,7 @@ fn every_corner_is_cut(radii: Corners) -> bool {
         radii.bottom_right,
     ]
     .into_iter()
-    .all(|radius| radius >= 0.5)
+    .all(f64::is_finite)
 }
 
 /// The part of a rounded capture that is certainly opaque on screen, **as a
@@ -341,10 +345,10 @@ fn every_corner_is_cut(radii: Corners) -> bool {
 ///   `alpha` separately and never multiplies one into the other, so an element
 ///   has to do it -- smithay's own `TextureRenderElement` returns nothing below
 ///   1.0 (`element/texture.rs:647`) for exactly this reason;
-/// * **any one** of the four radii is under half a physical pixel -- see
-///   [`every_corner_is_cut`], which is where the whole of that argument is
-///   written down. One corner is enough, because the shader picks its radius
-///   per quadrant and a quadrant is a quarter of the window.
+/// * **any one** of the four radii is not a finite number -- see
+///   [`every_corner_is_finite`], which is where the whole of that argument is
+///   written down. One corner is enough: a NaN would inset by zero and claim
+///   the four corners the shader really cuts.
 ///
 /// `widen` is the last of it, and it is the one a 1:1 screen cannot feel. The
 /// radius is in the **texture's** pixels, and the texture is not always drawn
@@ -368,7 +372,7 @@ pub(crate) fn opaque_of(
     alpha: f32,
     capture_opaque: bool,
 ) -> Option<Rectangle<i32, Physical>> {
-    if !capture_opaque || alpha < 1.0 || !every_corner_is_cut(radii) {
+    if !capture_opaque || alpha < 1.0 || !every_corner_is_finite(radii) {
         return None;
     }
     let widen = crate::render::ratio(f64::from(dst.size.w), texture.w)
@@ -1131,10 +1135,11 @@ mod tests {
     /// by `top_right` because 20 beats the same 6. A `max_of_side` that took
     /// the smaller of the two, or the first of them, fails on both.
     ///
-    /// **Every corner is at least half a pixel on purpose.** Put a 0 in here
-    /// and the answer is `None` for a reason that has nothing to do with
-    /// sides -- see [`every_corner_is_cut`] -- and this test would be asserting
-    /// that guard rather than the arithmetic.
+    /// **Every corner is non-zero on purpose.** A 0 would make two of the four
+    /// insets 0 as well, and an inset of nothing is the one answer that cannot
+    /// tell which corner it came from. The square-cornered shape is
+    /// `a_square_corner_keeps_the_rows_above_it`, which is about a different
+    /// property.
     #[test]
     fn each_side_is_inset_by_the_larger_of_the_two_corners_touching_it() {
         let texture = Size::<i32, Physical>::from((300, 200));
@@ -1210,94 +1215,171 @@ mod tests {
         assert!(opaque_of(dst, texture, Corners::all(20.0), 1.0, true).is_some());
     }
 
-    /// Below half a physical pixel of radius, *nothing* is opaque -- and that
-    /// is a property of the shader rather than of the geometry.
+    /// **A radius that is not a number claims nothing at all.**
     ///
-    /// `ROUNDED_CORNERS` computes `away = length(max(p, 0.0)) - r`, which
-    /// omits the interior term of the exact rounded-box field: every fragment
-    /// inside the shape reports `-r` and not its real distance to the edge. It
-    /// is then fed to `smoothstep(-0.5, 0.5, away)`, so a window with `r` under
-    /// a half pixel comes out uniformly *translucent everywhere*, not merely
-    /// softened at four arcs. Claiming any of it opaque would draw it with
-    /// blending off and paint over what is behind it.
+    /// NaN is the whole of why [`every_corner_is_finite`] still exists after
+    /// the half-pixel bound went. It compares false against every comparison,
+    /// so nothing downstream refuses it on its own; `NaN.ceil()` is NaN and
+    /// `NaN as i32` is 0, so it would reach [`opaque_inside`], inset by
+    /// nothing, and claim the window's whole rectangle -- the four corners the
+    /// shader really cuts included. That region is then drawn with blending
+    /// disabled, so the wallpaper under each corner goes unpainted.
     ///
-    /// `0.0` alone is not enough: refusing only a zero radius is a wrong
-    /// implementation that this catches and that one would not.
+    /// One corner at a time, because a guard that asked `max_of_side` or
+    /// `largest` would let a single NaN through: `f64::max` *ignores* NaN and
+    /// returns the other operand, so `Corners { top_left: NAN, ..all(20.0) }`
+    /// has a perfectly ordinary largest of 20.
+    ///
+    /// Infinity with it, for one predicate rather than two. It is not the
+    /// dangerous direction -- `ceil().clamp(..)` saturates it into an empty
+    /// rect and `opaque_of` answers `None` anyway -- but "is this a number the
+    /// arithmetic below can carry" is one question, and `is_finite` is its
+    /// name.
     #[test]
-    fn a_radius_under_half_a_pixel_is_opaque_nowhere() {
+    fn a_radius_that_is_not_a_number_is_opaque_nowhere() {
         let texture = Size::<i32, Physical>::from((300, 200));
         let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
-        assert_eq!(opaque_of(dst, texture, Corners::all(0.4), 1.0, true), None);
-        assert_eq!(
-            opaque_of(dst, texture, Corners::all(f64::NAN), 1.0, true),
-            None,
-            "NaN compares false against every bound and must not fall through \
-             to an inset of zero, which would claim the whole rectangle"
-        );
-        // The bound is exact rather than approximate -- `smoothstep(-0.5, 0.5,
-        // away)` is 0 at `away == -0.5` and not merely close to it -- so both
-        // sides of it are asserted rather than just the far side. 0.4 alone
-        // leaves every threshold in (0.4, 0.5] passing, and each of those is a
-        // window claimed opaque that the shader has faded.
-        assert_eq!(opaque_of(dst, texture, Corners::all(0.49), 1.0, true), None);
-        assert!(opaque_of(dst, texture, Corners::all(0.5), 1.0, true).is_some());
-    }
-
-    /// **One square corner is enough**, and it is the case per-corner radii
-    /// make ordinary rather than exotic.
-    ///
-    /// The shader picks its radius per quadrant, and the field it evaluates has
-    /// no interior term -- so the quadrant whose radius is 0 is not a sharp
-    /// corner, it is a quarter of the window drawn at exactly 50% alpha. See
-    /// [`every_corner_is_cut`], which is where that argument lives.
-    ///
-    /// **This is the one place this file gives up more than the geometry says
-    /// it must**, and it is deliberate: claiming that quadrant would hand
-    /// 50%-alpha pixels to a draw with blending disabled, which paints over the
-    /// wallpaper instead of blending with it. The moment `fragment.rs` gains
-    /// the `min(max(p.x, p.y), 0.0)` term, a square corner becomes genuinely
-    /// opaque to its own edge and this bound can drop to `>= 0.0` -- at which
-    /// point `a_side_with_no_cut_corner_is_not_inset` stops being an
-    /// arithmetic test and starts describing a window on a screen.
-    ///
-    /// Each of the four in turn, because a guard written against one field --
-    /// or against `max_of_side`, or against `largest` -- passes every other
-    /// assertion in this module. `largest()` in particular is the wrong
-    /// question exactly backwards: `Corners { top_left: 0.0, ..all(20.0) }` has
-    /// a largest of 20 and a quarter of the window at half alpha.
-    #[test]
-    fn a_single_square_corner_is_opaque_nowhere() {
-        let texture = Size::<i32, Physical>::from((300, 200));
-        let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
-        for square in [
-            Corners {
-                top_left: 0.0,
-                ..Corners::all(20.0)
-            },
-            Corners {
-                top_right: 0.0,
-                ..Corners::all(20.0)
-            },
-            Corners {
-                bottom_left: 0.0,
-                ..Corners::all(20.0)
-            },
-            Corners {
-                bottom_right: 0.0,
-                ..Corners::all(20.0)
-            },
-        ] {
-            assert_eq!(
-                opaque_of(dst, texture, square, 1.0, true),
-                None,
-                "{square:?} leaves one quadrant at 50% alpha, and a region \
-                 claimed opaque is drawn with blending disabled"
-            );
+        for broken in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for radii in [
+                Corners::all(broken),
+                Corners {
+                    top_left: broken,
+                    ..Corners::all(20.0)
+                },
+                Corners {
+                    bottom_right: broken,
+                    ..Corners::all(20.0)
+                },
+            ] {
+                assert_eq!(
+                    opaque_of(dst, texture, radii, 1.0, true),
+                    None,
+                    "{radii:?} must not fall through to an inset of zero, which \
+                     would claim the corners the shader cuts"
+                );
+            }
         }
         assert!(
             opaque_of(dst, texture, Corners::all(20.0), 1.0, true).is_some(),
-            "and four cut corners still claim the middle -- without this the \
+            "and four ordinary radii still claim the middle -- without this the \
              guard could refuse everything and pass"
+        );
+    }
+
+    /// **A radius under half a physical pixel is opaque, and that changed with
+    /// the shader.**
+    ///
+    /// It used to be refused, and the reason was never geometry: the field
+    /// omitted its interior term and reported a flat `-r` inside the shape, so
+    /// through `smoothstep(-0.5, 0.5, away)` a sub-half-pixel radius came out
+    /// uniformly translucent rather than nearly square. `ROUNDED_CORNERS` now
+    /// carries `min(max(p.x, p.y), 0.0)` and reports the real distance, so the
+    /// refusal has no premise left -- and keeping it would cost the opaque
+    /// region of every square-cornered style, which is the shape this feature
+    /// exists for.
+    ///
+    /// Still inset by the whole pixel the radius touches, which is the part
+    /// that did *not* change: `ceil(0.4)` is 1, and the claim starts one pixel
+    /// in. See `a_fractional_radius_insets_by_the_whole_pixel_it_touches`.
+    #[test]
+    fn a_radius_under_half_a_pixel_is_opaque_inside_the_pixel_it_touches() {
+        let texture = Size::<i32, Physical>::from((300, 200));
+        let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
+        assert_eq!(
+            opaque_of(dst, texture, Corners::all(0.4), 1.0, true),
+            Some(Rectangle::new((1, 1).into(), (298, 198).into())),
+            "a 0.4-pixel radius rounds to a one-pixel inset, and everything \
+             within it is drawn opaque"
+        );
+        // The claim is checked against the shader's own field rather than left
+        // as arithmetic, at the fragment centres the GPU actually samples --
+        // see `a_square_corner_keeps_the_rows_above_it` for why centres and
+        // not the integer corner.
+        for (x, y) in [(1.5, 1.5), (298.5, 1.5), (1.5, 198.5), (298.5, 198.5)] {
+            let d = away((x, y), texture, Corners::all(0.4));
+            assert!(
+                d <= -0.5,
+                "the fragment at ({x}, {y}) is {d} from the edge, so the shader \
+                 fades it and this file must not call it opaque"
+            );
+        }
+    }
+
+    /// **The Finder shape, through `opaque_of`: a square top keeps its rows.**
+    ///
+    /// `a_side_with_no_cut_corner_is_not_inset` is the same claim one layer
+    /// down, on `opaque_inside` alone; this is the one that says a real window
+    /// gets it. The two were not the same test while a square corner was
+    /// refused outright -- the arithmetic was right and unreachable -- so this
+    /// is the assertion that would have caught the refusal outliving its
+    /// premise.
+    ///
+    /// **Sampled at fragment centres, not at the claimed rect's integer
+    /// corners, and that distinction is the whole of why a zero inset is
+    /// sound.** The geometric edge of a square side really is at `away == 0`,
+    /// the smoothstep's midpoint -- but no fragment is ever evaluated there. A
+    /// centre sits half a pixel in, which reports exactly `-0.5`, the
+    /// smoothstep's near end and fully opaque. `the_shader_leaves_everything_
+    /// this_file_claims_alone` samples the integer corner instead, which is
+    /// the stricter model and the right one wherever the inset is at least
+    /// one pixel; it cannot be the model here, and stretching it to cover a
+    /// zero inset would say a square window is opaque nowhere.
+    ///
+    /// The last two assertions are the pair that makes this a shape rather
+    /// than a blanket: the square corner is left alone and the round one is
+    /// still cut. Before `fragment.rs` gained its interior term every point in
+    /// the top-left quadrant answered `0.0` here -- measured at alpha 127 on a
+    /// real GPU -- so every assertion below except the cut one would have
+    /// failed.
+    #[test]
+    fn a_square_corner_keeps_the_rows_above_it() {
+        let texture = Size::<i32, Physical>::from((300, 200));
+        let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
+        let finder = Corners {
+            top_left: 0.0,
+            top_right: 0.0,
+            bottom_left: 12.0,
+            bottom_right: 12.0,
+        };
+        assert_eq!(
+            opaque_of(dst, texture, finder, 1.0, true),
+            Some(Rectangle::new((12, 0).into(), (276, 188).into())),
+            "nothing cuts the top, so the claim starts at row 0; the sides and \
+             the bottom are each given up to the corner that does cut them"
+        );
+
+        // Every fragment centre the claim reaches along its uncut top row, and
+        // the far corners of the quadrant behind it. All of these read exactly
+        // 0.0 -- 50% alpha -- under the field this shader had before the
+        // interior term.
+        for (x, y) in [
+            (12.5, 0.5),
+            (150.0, 0.5),
+            (287.5, 0.5),
+            (50.0, 50.0),
+            (149.5, 99.5),
+            (12.5, 187.5),
+            (287.5, 187.5),
+        ] {
+            let d = away((x, y), texture, finder);
+            assert!(
+                d <= -0.5,
+                "the fragment centre at ({x}, {y}) is {d} from the shape's \
+                 edge, so the shader does not draw it opaque and this file \
+                 must not claim it"
+            );
+        }
+
+        assert!(
+            away((0.5, 0.5), texture, finder) <= -0.5,
+            "the window's own square corner is opaque -- it is not cut, which \
+             is what `radiusTopLeft: 0` asks for"
+        );
+        assert!(
+            away((0.5, 199.5), texture, finder) > 0.5,
+            "and the rounded corner below it still is cut -- without this the \
+             field could be opaque everywhere and every assertion above would \
+             hold"
         );
     }
 
@@ -1364,7 +1446,7 @@ mod tests {
         ": ((v_coords.y < 0.5) ? corner_radius.y : corner_radius.w);",
         "float r = min(picked, min(half_size.x, half_size.y));",
         "vec2 p = abs(v_coords * tex_size - half_size) - (half_size - vec2(r));",
-        "float away = length(max(p, 0.0)) - r;",
+        "float away = min(max(p.x, p.y), 0.0) + length(max(p, 0.0)) - r;",
         "gl_FragColor = colour * (1.0 - smoothstep(-0.5, 0.5, away));",
     ];
 
@@ -1389,6 +1471,15 @@ mod tests {
     /// every corner look like the top-left. `point.0 < half.0` is the shader's
     /// `v_coords.x < 0.5` with both sides multiplied by `tex_size.x` --
     /// `point` is `v_coords * tex_size` by this function's own contract.
+    ///
+    /// `min(max(p.x, p.y), 0.0)` is the **interior** term, and it is the half
+    /// of the field this transcription lacked for as long as the shader did.
+    /// It contributes `0.0` at every fragment where either component of `p` is
+    /// positive -- so on the arcs, along the edges, and outside the shape this
+    /// answers exactly what it answered before -- and strictly inside it
+    /// replaces a flat `-r` with the real distance to the nearest edge. That
+    /// is what makes an uncut side opaque rather than half-transparent; see
+    /// the line's own comment in `fragment.rs`.
     fn away(point: (f64, f64), texture: Size<i32, Physical>, radii: Corners) -> f64 {
         let half = (f64::from(texture.w) * 0.5, f64::from(texture.h) * 0.5);
         let picked = match (point.0 < half.0, point.1 < half.1) {
@@ -1402,7 +1493,7 @@ mod tests {
             (point.0 - half.0).abs() - (half.0 - r),
             (point.1 - half.1).abs() - (half.1 - r),
         );
-        p.0.max(0.0).hypot(p.1.max(0.0)) - r
+        p.0.max(p.1).min(0.0) + p.0.max(0.0).hypot(p.1.max(0.0)) - r
     }
 
     /// **Every corner of what this file calls opaque is a fragment the shader
