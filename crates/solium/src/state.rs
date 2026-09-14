@@ -751,11 +751,33 @@ impl Solium {
 
     /// How a pane is being drawn right now. Real geometry unless something is
     /// animating it, and real geometry for a pane that has gone.
+    ///
+    /// **Samples the clock itself, so a caller asking about more than one pane
+    /// wants [`Self::drawn_id_at`] instead.** `present::Clock` reads through
+    /// rather than caching — for reasons its own documentation gives — so N
+    /// calls here are N instants, and a frame's worth of panes would each be
+    /// drawn at a slightly different moment of the same animation.
     pub(crate) fn drawn(&self, id: crate::pane::PaneId, real: Rectangle<i32, Logical>) -> Frame {
-        self.panes.get(id).map_or_else(
-            || Frame::real(real),
-            |pane| self.drawn_at(pane, real, self.clock.now()),
-        )
+        self.drawn_id_at(id, real, self.clock.now())
+    }
+
+    /// The same, for a caller that holds the pane's id and already has the
+    /// instant.
+    ///
+    /// The third of the three ways to ask this question, and the one a whole
+    /// frame wants: [`Self::drawn`] holds neither the pane nor the instant,
+    /// [`Self::drawn_at`] holds both, and this holds only the instant. All
+    /// three end in `drawn_at`, so the rule about a pane's own transform and
+    /// its groups' being put together in exactly one place is unaffected.
+    pub(crate) fn drawn_id_at(
+        &self,
+        id: crate::pane::PaneId,
+        real: Rectangle<i32, Logical>,
+        now: std::time::Duration,
+    ) -> Frame {
+        self.panes
+            .get(id)
+            .map_or_else(|| Frame::real(real), |pane| self.drawn_at(pane, real, now))
     }
 
     /// The same, for a caller that already holds the pane and the instant.
