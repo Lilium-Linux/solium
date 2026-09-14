@@ -29,10 +29,42 @@ a demo into a regression test.
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
+| `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and a click still lands on the window the *layout* has on top |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
 over the top, so the only place the failure shows is the hardware.
+
+`present-check.sh` exists because the wiring between a script and the screen is
+the one part of a presentation transform that no unit test reaches. `z` and
+`pivot` are read in `script.rs`, carried through `present::Frame`, and spent in
+`render::by_depth` and `warp::mesh` — all of which are pure functions with tests
+of their own. What sits between them is two field initialisers in
+`state.rs`'s `Command::Present` arm, and reverting *both* of those to their
+defaults passes the entire suite. So this measures pixels instead: it places one
+window at a known rect, turns it twenty degrees about two different points, and
+reports where the corner went.
+
+The corner is the whole difficulty. A rotated window's top-left is not the
+top-left of anything in the picture — it is one particular vertex of a quad, and
+a `pivot` that was silently dropped still draws a perfectly good-looking
+rotation about the centre. Side by side the two frames are indistinguishable.
+So the client prints a marker block at its home position, the marker travels
+with the corner, and `present-check/measure.py` names the quad vertex nearest
+it.
+
+The third claim is the one no screenshot can make. With a window raised above
+the one that covers it, a click in the overlap must still go to the window the
+layout has on top: `Solium::window_under` walks panes in stacking order and
+tests the drawn `rect`, and `z` never enters it. That is deliberate — `rect`
+following a transform is what lets a script hit-test an overview thumbnail
+without knowing it set one — and it is checked here so that a later change
+cannot quietly make raising a window also mean raising its clicks.
+
+    SOLIUM_CHECK_DIR=/tmp/present ./dev/present-check.sh   # keep the frames
+
+Kept out of `gate.sh` deliberately: it needs a host compositor to nest in and a
+client to open, and a gate that cannot run headless is a gate that gets skipped.
 
 `wl-probe` is a Wayland client, and exists because a compositor cannot test its
 own protocol support from the inside. "The global is advertised" is a different
