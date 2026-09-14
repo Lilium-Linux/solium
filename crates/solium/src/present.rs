@@ -202,8 +202,8 @@ impl Deform {
 pub(crate) struct Frame {
     pub(crate) rect: Rectangle<f64, Logical>,
     pub(crate) opacity: f32,
-    /// A 4x4 applied about the rect's centre. Identity means flat, and flat
-    /// stays on the cheap path — see
+    /// A 4x4 applied about `pivot`, which is the rect's centre until a script
+    /// moves it. Identity means flat, and flat stays on the cheap path — see
     /// `docs/spikes/2026-09-06-3d-presentation.md`.
     pub(crate) matrix: Mat4,
     /// A deformation that no rectangle and no matrix can express, such as a

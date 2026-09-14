@@ -44,6 +44,37 @@ layout was never disturbed, so there is nothing to restore.
 it to where it lives. That is every "appears from somewhere" animation — a
 window opening, or growing out of a dock icon.
 
+### Depth and pivot
+
+```lua
+sol.present(id, { z = 2 })                       -- drawn in front
+sol.present(id, { rotate_y = 20, pivot_x = 0 })  -- turns about its left edge
+```
+
+`z` is draw order and nothing else. Equal values keep the order the stack gave
+them, so the default costs nothing — and a window raised above its neighbour is
+still **clicked where the layout put it**, because `rect` stays the truth for
+input.
+
+`pivot` is a fraction of the window, not pixels: `(0.5, 0.5)` is the centre and
+is the default, `(0, 0)` the top-left corner. **Each axis defaults on its own** —
+`pivot_x = 0` means the left edge and says nothing about the vertical. Outside
+`0..1` means what it says rather than being clamped: `pivot_x = 2` hinges the
+window about a line off to its right, which is a door on a frame beside it.
+
+A number that cannot be drawn with is dropped rather than drawn: a NaN depth
+cannot be ordered against anything, a non-finite pivot puts every corner of the
+window at NaN, and both fall back to the default with a line in the log. An
+infinite `z` is kept — `math.huge` is a legible "above everything".
+
+Both belong to a window, so both are `sol.present` keys. `sol.present_group`
+takes neither, and that is deliberate: a pivot on a selection would have to
+overrule each member's own — a member is drawn through one matrix, turning about
+one point — and a depth would raise a desk's windows above the desk next door
+while leaving its own wallpaper behind, because depth orders the windows and
+scripted surfaces are drawn in fixed layers. Turning a whole desk as one shape
+needs a rectangle for the selection, which no group has yet.
+
 ## Moving more than a window
 
 A transform names a **selection**, and a selection can hold things that are not

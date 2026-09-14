@@ -1770,6 +1770,8 @@ impl Solium {
                     opacity,
                     matrix,
                     deform,
+                    z,
+                    pivot,
                     animation,
                 } => {
                     let Some(pane) = self.panes.by_script_id(id) else {
@@ -1786,12 +1788,15 @@ impl Solium {
                         ),
                         opacity: opacity.unwrap_or(1.0),
                         deform: deform.and_then(|deform| self.aimed(&deform)),
-                        // Spelled out rather than `..Frame::real(outer)`: no
-                        // script can ask for either yet, and a struct update
-                        // here would take whatever is added next without
+                        // Both arrive resolved: `script::depth_from` and
+                        // `script::pivot_from` hold the defaults, so a table
+                        // mentioning neither key produces them there rather
+                        // than here. Still spelled out rather than
+                        // `..Frame::real(outer)`, because a struct update
+                        // would take whatever field is added next without
                         // anyone looking at this line again.
-                        z: 0.0,
-                        pivot: (0.5, 0.5),
+                        z,
+                        pivot,
                     };
                     present::present(
                         pane,
@@ -1819,8 +1824,15 @@ impl Solium {
                         rect: present::logical((rect.x, rect.y), (rect.w, rect.h)),
                         opacity: opacity.unwrap_or(1.0),
                         deform: None,
-                        // As above: explicit so the next field added breaks
-                        // this line instead of being defaulted past it.
+                        // Explicit so the next field added breaks this line
+                        // instead of being defaulted past it -- and these two
+                        // stay the defaults because `sol.present_from` reads
+                        // no keys for them. It could not honour them if it
+                        // did: this is the frame a window animates *from*, and
+                        // both fields select the destination's value at the
+                        // first blended frame, so a depth or a pivot here
+                        // would never be on screen. A script wanting either
+                        // says so with `sol.present` once it has landed.
                         z: 0.0,
                         pivot: (0.5, 0.5),
                     };
