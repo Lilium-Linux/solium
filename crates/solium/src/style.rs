@@ -481,10 +481,24 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
     // place, agreeing today and free to drift. Its third case, NaN, cannot
     // arrive down this path at all: `get_int` is an `i32` and `f64::from` of
     // one is total.
+    let all = scene.get_int("client.radius");
+    // A negative means the key was not declared, so the corner takes `radius`.
+    // Reading each with its own `get_int` rather than one dotted walk, because
+    // `QObject::property` takes a name and not a path -- the bug this codebase
+    // has already shipped once, where `get_int("insets.top")` silently read 0
+    // for every style.
+    let mut corner = |name: &str| {
+        let declared = scene.get_int(name);
+        f64::from(if declared < 0 { all } else { declared })
+    };
+    let radii = solium_effects::fragment::Corners {
+        top_left: corner("client.radiusTopLeft"),
+        top_right: corner("client.radiusTopRight"),
+        bottom_left: corner("client.radiusBottomLeft"),
+        bottom_right: corner("client.radiusBottomRight"),
+    };
     let mut effects = Vec::new();
-    let rounded = solium_effects::fragment::Effect::rounded(
-        solium_effects::fragment::Corners::all(f64::from(scene.get_int("client.radius"))),
-    );
+    let rounded = solium_effects::fragment::Effect::rounded(radii);
     if !rounded.is_none_effect() {
         effects.push(rounded);
     }
@@ -731,6 +745,83 @@ mod tests {
                 style.effects,
                 vec![Effect::rounded(Corners::all(7.0))],
                 "the radius is read from the file, not decided by the loader"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// The Finder shape: the titlebar owns the top of the window, so the
+    /// client's top corners are square and nothing has to overhang them.
+    #[test]
+    fn a_corner_can_be_squared_while_the_others_round() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "flushtop",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    insets.top: 32
+                    client.radius: 12
+                    client.radiusTopLeft: 0
+                    client.radiusTopRight: 0
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+            let style = load(&dir).expect("the fixture loads");
+            assert_eq!(
+                style.effects,
+                vec![solium_effects::fragment::Effect::rounded(
+                    solium_effects::fragment::Corners {
+                        top_left: 0.0,
+                        top_right: 0.0,
+                        bottom_left: 12.0,
+                        bottom_right: 12.0,
+                    }
+                )],
+                "each corner defaults to `client.radius` and is overridden on its own"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+
+            // The fixture above cannot catch a transposition of `bottom_left`
+            // and `bottom_right` on its own: both come back at 12 there, so
+            // swapping the two would change nothing an assertion could see —
+            // confirmed by hand while building this test, not merely assumed.
+            // Four distinct values, all declared so `client.radius` acts as
+            // a decoy rather than a fallback, pin every corner -- and every
+            // pairwise transposition -- on its own.
+            let dir = fixture(
+                "allfour",
+                r#"
+                import QtQuick
+                import Solium
+
+                PaneStyle {
+                    insets.top: 32
+                    client.radius: 99
+                    client.radiusTopLeft: 1
+                    client.radiusTopRight: 2
+                    client.radiusBottomLeft: 3
+                    client.radiusBottomRight: 4
+                    Layer { depth: "frame"; name: "bar" }
+                }
+                "#,
+            );
+            let style = load(&dir).expect("the fixture loads");
+            assert_eq!(
+                style.effects,
+                vec![solium_effects::fragment::Effect::rounded(
+                    solium_effects::fragment::Corners {
+                        top_left: 1.0,
+                        top_right: 2.0,
+                        bottom_left: 3.0,
+                        bottom_right: 4.0,
+                    }
+                )],
+                "all four corners distinct and all four declared, so any \
+                 transposition of any pair changes the result"
             );
             let _ = std::fs::remove_dir_all(&dir);
         });

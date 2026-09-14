@@ -20,5 +20,13 @@ import QtQuick
 
 QtObject {
     property int radius: 0
+    // Each corner, defaulting to `radius`. **-1 and not 0 is the default**,
+    // because 0 is a value someone means -- squaring one corner is half the
+    // point of these -- and a default that is also a legal value cannot be
+    // told from one. The compositor reads a negative as "not declared".
+    property int radiusTopLeft: -1
+    property int radiusTopRight: -1
+    property int radiusBottomLeft: -1
+    property int radiusBottomRight: -1
     property ClientShadow shadow: ClientShadow {}
 }
