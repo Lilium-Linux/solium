@@ -626,7 +626,11 @@ mod tests {
         );
         assert!(
             has_line("float away = min(max(p.x, p.y), 0.0) + length(max(p, 0.0)) - r;"),
-            "the outset half of the distance field is not written in terms of `r`"
+            "this is not the exact rounded-box distance written in terms of `r`. \
+             It needs BOTH halves: the interior term `min(max(p.x, p.y), 0.0)`, \
+             which is what a fragment inside the shape is measured by, and the \
+             outset half `length(max(p, 0.0)) - r`, which is the arcs and \
+             everything past an edge"
         );
         // And the interior term is part of that line, pinned by the whole-line
         // match above rather than by a second assertion -- but it is worth
