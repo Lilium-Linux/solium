@@ -1764,6 +1764,12 @@ impl Solium {
                         ),
                         opacity: opacity.unwrap_or(1.0),
                         deform: deform.and_then(|deform| self.aimed(&deform)),
+                        // Spelled out rather than `..Frame::real(outer)`: no
+                        // script can ask for either yet, and a struct update
+                        // here would take whatever is added next without
+                        // anyone looking at this line again.
+                        z: 0.0,
+                        pivot: (0.5, 0.5),
                     };
                     present::present(
                         pane,
@@ -1791,6 +1797,10 @@ impl Solium {
                         rect: present::logical((rect.x, rect.y), (rect.w, rect.h)),
                         opacity: opacity.unwrap_or(1.0),
                         deform: None,
+                        // As above: explicit so the next field added breaks
+                        // this line instead of being defaulted past it.
+                        z: 0.0,
+                        pivot: (0.5, 0.5),
                     };
                     present::from(
                         pane,
