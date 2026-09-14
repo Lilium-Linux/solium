@@ -482,8 +482,9 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
     // arrive down this path at all: `get_int` is an `i32` and `f64::from` of
     // one is total.
     let mut effects = Vec::new();
-    let rounded =
-        solium_effects::fragment::Effect::rounded(f64::from(scene.get_int("client.radius")));
+    let rounded = solium_effects::fragment::Effect::rounded(
+        solium_effects::fragment::Corners::all(f64::from(scene.get_int("client.radius"))),
+    );
     if !rounded.is_none_effect() {
         effects.push(rounded);
     }
@@ -512,7 +513,7 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
 mod tests {
     use super::{Bleed, Depth, load, parse_bleed, parse_depth};
     use crate::qml::qt_test::on_the_qt_thread;
-    use solium_effects::fragment::Effect;
+    use solium_effects::fragment::{Corners, Effect};
 
     use std::path::{Path, PathBuf};
 
@@ -707,7 +708,7 @@ mod tests {
             let style = load(&dir).expect("the fixture loads");
             assert_eq!(
                 style.effects,
-                vec![Effect::rounded(12.0)],
+                vec![Effect::rounded(Corners::all(12.0))],
                 "a declared radius is the one effect this style runs"
             );
             let _ = std::fs::remove_dir_all(&dir);
@@ -728,7 +729,7 @@ mod tests {
             let style = load(&dir).expect("the fixture loads");
             assert_eq!(
                 style.effects,
-                vec![Effect::rounded(7.0)],
+                vec![Effect::rounded(Corners::all(7.0))],
                 "the radius is read from the file, not decided by the loader"
             );
             let _ = std::fs::remove_dir_all(&dir);
@@ -921,7 +922,7 @@ mod tests {
             let style = load(dir).expect("the shipped rounded bundle loads");
             assert_eq!(
                 style.effects,
-                vec![Effect::rounded(14.0)],
+                vec![Effect::rounded(Corners::all(14.0))],
                 "`panes/rounded/` is the only shipped style that runs a client \
                  effect; with the radius gone or mistyped it draws exactly like \
                  every other bundle and the feature has nothing to show for itself"

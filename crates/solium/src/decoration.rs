@@ -1013,7 +1013,13 @@ fn client_radius(style: &Style) -> i32 {
         .effects
         .iter()
         .find(|effect| !effect.is_none_effect())
-        .map_or(0, |effect| effect.radius() as i32)
+        // Provisional, like `pass::physical_radius`'s same-shaped call:
+        // `largest()` reproduces today's single declared radius exactly,
+        // because nothing constructs a `Corners` with differing corners yet.
+        // Once a later task lets a style's corners genuinely differ, this is
+        // the line that decides what one number QML sees, and it deserves a
+        // deliberate look then rather than inheriting this by default.
+        .map_or(0, |effect| effect.largest() as i32)
 }
 
 impl LayerScene {
@@ -2857,12 +2863,16 @@ mod tests {
 
             assert_eq!(
                 decoration.effects(),
-                [solium_effects::fragment::Effect::rounded(12.0)],
+                [solium_effects::fragment::Effect::rounded(
+                    solium_effects::fragment::Corners::all(12.0)
+                )],
                 "the declared radius has to survive the trip onto the pane"
             );
             assert_eq!(
                 crate::pass::needs_pass(decoration.effects()),
-                Some(solium_effects::fragment::Effect::rounded(12.0)),
+                Some(solium_effects::fragment::Effect::rounded(
+                    solium_effects::fragment::Corners::all(12.0)
+                )),
                 "and be recognised as wanting a pass, which is what runs one"
             );
 

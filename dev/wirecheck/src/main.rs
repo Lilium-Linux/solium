@@ -410,7 +410,18 @@ fn draw_through_program(
                 1.0,
                 Some(program),
                 &[
-                    Uniform::new(solium_effects::fragment::RADIUS_UNIFORM, radius),
+                    // All four corners the same: this harness has one `radius`
+                    // parameter and nothing yet constructs a `Corners` with
+                    // differing ones. `RADIUS_UNIFORM` is a `vec4` now --
+                    // `fragment.rs`'s `corner_radius` -- and a 4-tuple is what
+                    // `UniformValue`'s `From` impl turns into `_4f`, matching the
+                    // `UniformType::_4f` this program was compiled with above;
+                    // a bare `f32` here would send `_1f` against a `vec4`
+                    // location and every fragment would come back unset.
+                    Uniform::new(
+                        solium_effects::fragment::RADIUS_UNIFORM,
+                        (radius, radius, radius, radius),
+                    ),
                     // Both physical, and both the texture's own size, which is
                     // the pair the shader's `v_coords * tex_size` is written
                     // against. If this never arrives the uniform stays 0, the
@@ -1954,7 +1965,7 @@ fn main() -> Result<()> {
     match renderer.compile_custom_texture_shader(
         solium_effects::fragment::ROUNDED_CORNERS,
         &[
-            UniformName::new(solium_effects::fragment::RADIUS_UNIFORM, UniformType::_1f),
+            UniformName::new(solium_effects::fragment::RADIUS_UNIFORM, UniformType::_4f),
             // Ours, because smithay gives a *texture* program no `size`.
             UniformName::new(solium_effects::fragment::SIZE_UNIFORM, UniformType::_2f),
         ],

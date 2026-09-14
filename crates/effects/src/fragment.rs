@@ -32,18 +32,19 @@ pub enum Inputs {
     Backdrop,
 }
 
-/// The corner radius a rounded-corner program takes, in **physical** pixels.
+/// The four corner radii a rounded-corner program takes, in **physical**
+/// pixels, packed `(top_left, top_right, bottom_left, bottom_right)`.
 ///
-/// [`Effect::radius`] is in **logical** pixels, and this is the other side of
+/// [`Effect::radii`] is in **logical** pixels, and this is the other side of
 /// that seam. A style says `radius: 12` because that is what someone types
 /// into a `Pane.qml`, and a style should not have to know a monitor's scale;
 /// the shader measures in texture pixels throughout and knows nothing else.
 ///
-/// **Whoever sets this uniform does the multiply by the output scale** --
-/// `crates/solium/src/pass.rs`, not this crate and not the shader. The two
-/// numbers are equal on a scale-1 output, which is why getting it wrong looks
-/// perfect on the machine it was written on and shows up only on a HiDPI
-/// screen.
+/// **Whoever sets this uniform does the multiply by the output scale, on all
+/// four** -- `crates/solium/src/pass.rs`, not this crate and not the shader.
+/// The two numbers are equal on a scale-1 output, which is why getting it
+/// wrong looks perfect on the machine it was written on and shows up only on
+/// a HiDPI screen.
 pub const RADIUS_UNIFORM: &str = "corner_radius";
 
 /// The texture's size in physical pixels.
@@ -77,8 +78,9 @@ pub const SIZE_UNIFORM: &str = "tex_size";
 ///
 /// `alpha` is Smithay's; `corner_radius` and `tex_size` are ours. A texture
 /// program gets no `size` uniform -- only a pixel program does.
-/// The distance field is the standard rounded-box one: fold the coordinate
-/// into one quadrant, and measure from the centre of that corner's circle.
+/// The distance field is the standard rounded-box one: pick a radius for the
+/// fragment's quadrant, fold the coordinate into that quadrant, and measure
+/// from the centre of that corner's circle.
 pub const ROUNDED_CORNERS: &str = r"#version 100
 
 //_DEFINES_
@@ -116,7 +118,7 @@ uniform sampler2D tex;
 #endif
 
 uniform float alpha;
-uniform float corner_radius;
+uniform vec4 corner_radius;
 uniform vec2 tex_size;
 varying vec2 v_coords;
 
@@ -157,9 +159,18 @@ void main() {
     // centre outside the rectangle and the field calls every fragment of the
     // short edge outside: a 300x200 window at radius 150 loses its whole top
     // and bottom rows instead of degrading to a stadium. Nothing upstream
-    // clamps -- Effect::rounded(1e9) is accepted and is not a none-effect.
+    // clamps -- Effect::rounded(Corners::all(1e9)) is accepted and is not a
+    // none-effect.
     vec2 half_size = tex_size * 0.5;
-    float r = min(corner_radius, min(half_size.x, half_size.y));
+
+    // Which corner this fragment belongs to, decided on the UNFOLDED
+    // coordinate. `abs()` below makes all four look like the top-left, which
+    // is what lets one expression draw four corners -- and is exactly why the
+    // radius has to be chosen first. `corner_radius` is (tl, tr, bl, br).
+    float picked = (v_coords.x < 0.5)
+        ? ((v_coords.y < 0.5) ? corner_radius.x : corner_radius.z)
+        : ((v_coords.y < 0.5) ? corner_radius.y : corner_radius.w);
+    float r = min(picked, min(half_size.x, half_size.y));
     vec2 p = abs(v_coords * tex_size - half_size) - (half_size - vec2(r));
     float away = length(max(p, 0.0)) - r;
 
@@ -178,22 +189,83 @@ void main() {
 }
 ";
 
+/// Four corner radii, independently -- what lets a window be square-topped
+/// and round-bottomed, or any other combination, rather than one radius
+/// applied uniformly.
+///
+/// In **logical** pixels throughout, the same seam as [`Effect::radii`]: a
+/// style writes these, and does not know what scale the window will land on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Corners {
+    pub top_left: f64,
+    pub top_right: f64,
+    pub bottom_left: f64,
+    pub bottom_right: f64,
+}
+
+impl Corners {
+    /// One radius, all four corners. The common case, and the constructor
+    /// that used to be [`Effect::rounded`]'s whole job before a window was
+    /// allowed to differ corner to corner.
+    #[must_use]
+    pub const fn all(radius: f64) -> Self {
+        Self {
+            top_left: radius,
+            top_right: radius,
+            bottom_left: radius,
+            bottom_right: radius,
+        }
+    }
+
+    /// Whether every corner is `<= 0.0` or NaN.
+    ///
+    /// NaN is named rather than left to fall out of a negation, the same
+    /// spelling the single-radius [`Effect::is_none_effect`] used before this
+    /// existed: `!(r > 0.0)` says the same thing in fewer characters, but
+    /// clippy rejects a negated comparison on a partially ordered type -- and
+    /// its objection is the point: NaN is incomparable, so `r <= 0.0` on its
+    /// own would call it rounded and buy an offscreen pass to draw nothing.
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        (self.top_left <= 0.0 || self.top_left.is_nan())
+            && (self.top_right <= 0.0 || self.top_right.is_nan())
+            && (self.bottom_left <= 0.0 || self.bottom_left.is_nan())
+            && (self.bottom_right <= 0.0 || self.bottom_right.is_nan())
+    }
+
+    /// Each side, measured by the larger of the two corners that touch it --
+    /// `(top, right, bottom, left)`. A square-topped, round-bottomed window
+    /// must not give up its top rows to a corner it does not have.
+    #[must_use]
+    pub fn max_of_side(&self) -> (f64, f64, f64, f64) {
+        let top = self.top_left.max(self.top_right);
+        let right = self.top_right.max(self.bottom_right);
+        let bottom = self.bottom_left.max(self.bottom_right);
+        let left = self.top_left.max(self.bottom_left);
+        (top, right, bottom, left)
+    }
+}
+
 /// One effect on one node.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Effect {
-    /// Rounded corners, with a radius in logical pixels.
-    Rounded { radius: f64 },
+    /// Rounded corners, with a radius per corner, in logical pixels.
+    Rounded { radii: Corners },
 }
 
 impl Effect {
-    /// Rounded corners at `radius` **logical** pixels.
+    /// Rounded corners at `radii` **logical** pixels, one value per corner.
     ///
     /// Logical because this is the number a style writes, and a style does not
     /// know what scale the window will land on. [`RADIUS_UNIFORM`] is where it
     /// becomes physical, and says who multiplies.
+    ///
+    /// A single shared radius is the common case, and that convenience now
+    /// lives on [`Corners::all`] rather than here: `Effect::rounded(Corners::all(12.0))`
+    /// is the old one-number behaviour.
     #[must_use]
-    pub const fn rounded(radius: f64) -> Self {
-        Self::Rounded { radius }
+    pub const fn rounded(radii: Corners) -> Self {
+        Self::Rounded { radii }
     }
 
     /// What this effect needs before it can draw.
@@ -204,31 +276,41 @@ impl Effect {
         }
     }
 
-    /// The radius, in **logical** pixels. [`RADIUS_UNIFORM`] is the physical
-    /// one, and the conversion between them is the caller's.
+    /// The radii, in **logical** pixels, one per corner. [`RADIUS_UNIFORM`] is
+    /// the physical one, and the conversion between them is the caller's.
     #[must_use]
-    pub const fn radius(&self) -> f64 {
+    pub const fn radii(&self) -> Corners {
         match self {
-            Self::Rounded { radius } => *radius,
+            Self::Rounded { radii } => *radii,
+        }
+    }
+
+    /// The one number that stands for all four, for the `clientRadius` a layer is
+    /// still told. The *largest*, because that field's only in-tree use is an
+    /// outward hug (`PaneStyle.qml`: `clientRadius + 2`, "hug it from outside"),
+    /// and a hug has to clear the biggest cut or it clips into it.
+    #[must_use]
+    pub fn largest(&self) -> f64 {
+        match self {
+            Self::Rounded { radii } => radii
+                .top_left
+                .max(radii.top_right)
+                .max(radii.bottom_left)
+                .max(radii.bottom_right),
         }
     }
 
     /// Whether this is an effect that should not be run at all.
     ///
-    /// A radius of zero is not "rounded by nothing", it is *no effect*, and
+    /// No corner rounded is not "rounded by nothing", it is *no effect*, and
     /// the difference is a whole offscreen pass per window per frame. Every
     /// window on a machine with no styling declares one, so this is the arm
-    /// that keeps the ordinary case ordinary.
-    ///
-    /// NaN is named rather than left to fall out of a negation. `!(r > 0.0)`
-    /// says the same thing in fewer characters, but clippy rejects a negated
-    /// comparison on a partially ordered type -- and its objection is the
-    /// point: NaN is incomparable, so `r <= 0.0` on its own would call it an
-    /// effect and buy an offscreen pass to draw nothing.
+    /// that keeps the ordinary case ordinary. See [`Corners::is_none`] for the
+    /// per-corner rule this now delegates to, NaN included.
     #[must_use]
     pub const fn is_none_effect(&self) -> bool {
         match self {
-            Self::Rounded { radius } => *radius <= 0.0 || radius.is_nan(),
+            Self::Rounded { radii } => radii.is_none(),
         }
     }
 }
@@ -251,28 +333,102 @@ mod tests {
         ROUNDED_CORNERS.lines().any(|line| line.trim() == wanted)
     }
 
+    /// Four corners, and the shader has to tell them apart. A single radius is
+    /// the common case and gets a constructor; it is not the only case.
+    #[test]
+    fn corners_can_differ() {
+        let finder = Corners {
+            top_left: 0.0,
+            top_right: 0.0,
+            bottom_left: 12.0,
+            bottom_right: 12.0,
+        };
+        let effect = Effect::rounded(finder);
+        assert_eq!(effect.radii(), finder);
+        assert!(
+            !effect.is_none_effect(),
+            "two corners rounded is still an effect"
+        );
+    }
+
+    /// All four zero is *no effect*, and that is what keeps the ordinary
+    /// window off the pass path entirely.
+    #[test]
+    fn every_corner_zero_is_no_effect() {
+        assert!(Effect::rounded(Corners::all(0.0)).is_none_effect());
+        assert!(Effect::rounded(Corners::all(-3.0)).is_none_effect());
+        assert!(Effect::rounded(Corners::all(f64::NAN)).is_none_effect());
+        // But ONE corner is enough to be one.
+        let one = Corners {
+            top_left: 8.0,
+            ..Corners::all(0.0)
+        };
+        assert!(!Effect::rounded(one).is_none_effect());
+    }
+
+    /// Each side is inset by the larger of the two corners touching it. The
+    /// asymmetry is the point: a square-topped, round-bottomed window must not
+    /// give up its top rows.
+    #[test]
+    fn a_side_is_measured_by_its_larger_corner() {
+        let corners = Corners {
+            top_left: 0.0,
+            top_right: 0.0,
+            bottom_left: 12.0,
+            bottom_right: 20.0,
+        };
+        let (top, right, bottom, left) = corners.max_of_side();
+        assert!(
+            (top - 0.0).abs() < f64::EPSILON,
+            "no top corner is cut, so no top rows are lost"
+        );
+        assert!(
+            (right - 20.0).abs() < f64::EPSILON,
+            "the right side touches top-right and bottom-right"
+        );
+        assert!((bottom - 20.0).abs() < f64::EPSILON);
+        assert!((left - 12.0).abs() < f64::EPSILON);
+    }
+
+    /// The shader picks a radius per quadrant BEFORE `abs()` folds the
+    /// coordinate, which is the one line that makes four radii possible at
+    /// all. Pinned by text here and drawn for real in wirecheck.
+    #[test]
+    fn the_shader_selects_a_radius_per_quadrant() {
+        assert!(
+            has_line("uniform vec4 corner_radius;"),
+            "four radii, as tl/tr/bl/br"
+        );
+        assert!(
+            ROUNDED_CORNERS.contains("v_coords.x < 0.5"),
+            "the quadrant is chosen from the unfolded coordinate; after `abs()` \
+             every corner looks like the top-left and the four are indistinguishable"
+        );
+    }
+
+    /// `largest` is what a layer's own `clientRadius` still gets -- see
+    /// `Effect::largest`. It has to be the biggest of the four, not the
+    /// smallest or an average, because `PaneStyle.qml`'s `clientRadius + 2`
+    /// hug has to clear the biggest cut or it clips into it.
+    #[test]
+    fn largest_is_the_biggest_of_the_four() {
+        let effect = Effect::rounded(Corners {
+            top_left: 4.0,
+            top_right: 20.0,
+            bottom_left: 12.0,
+            bottom_right: 0.0,
+        });
+        assert!((effect.largest() - 20.0).abs() < f64::EPSILON);
+    }
+
     /// An effect that reads nothing draws inline; one that reads `self` needs
     /// the node rendered to a texture first. That distinction is the whole
     /// mechanism, so it is a value and not a comment.
     #[test]
     fn rounded_corners_reads_the_node_itself() {
-        let effect = Effect::rounded(12.0);
+        let effect = Effect::rounded(Corners::all(12.0));
         assert_eq!(effect.inputs(), Inputs::SelfTexture);
-        assert!((effect.radius() - 12.0).abs() < f64::EPSILON);
-    }
-
-    /// A radius of zero is not a rounded window with no rounding: it is no
-    /// effect at all, and has to stay off the pass path entirely or every
-    /// window on the machine pays for a capture to be drawn square.
-    #[test]
-    fn a_zero_radius_is_not_an_effect() {
-        assert!(Effect::rounded(0.0).is_none_effect());
-        assert!(Effect::rounded(-4.0).is_none_effect());
-        assert!(!Effect::rounded(1.0).is_none_effect());
-        // NaN with the rest, because it is the radius that arrives from a
-        // script dividing by zero and it compares false against every bound:
-        // whichever way `is_none_effect` is spelled, it has to land here.
-        assert!(Effect::rounded(f64::NAN).is_none_effect());
+        assert_eq!(effect.radii(), Corners::all(12.0));
     }
 
     /// The shader is handed to Smithay, whose contract for a *texture* program
@@ -309,7 +465,7 @@ mod tests {
         // compositor will pass to `UniformName::new` and the name the shader
         // declares cannot drift apart. See `has_line` for why not `contains`.
         for declaration in [
-            format!("uniform float {RADIUS_UNIFORM};"),
+            format!("uniform vec4 {RADIUS_UNIFORM};"),
             format!("uniform vec2 {SIZE_UNIFORM};"),
         ] {
             assert!(
@@ -379,17 +535,16 @@ mod tests {
     /// **A radius larger than the window degrades to a stadium; it does not
     /// eat the window.**
     ///
-    /// Nothing upstream clamps: `Effect::rounded(1e9)` is accepted and is not
-    /// a none-effect. Unclamped, `half_size - vec2(r)` goes negative on the
-    /// short axis, every fragment of the short edge reports `away >= 0`, and a
-    /// 300x200 window at radius 150 loses its top and bottom rows outright.
+    /// Nothing upstream clamps: `Effect::rounded(Corners::all(1e9))` is
+    /// accepted and is not a none-effect. Unclamped, `half_size - vec2(r)`
+    /// goes negative on the short axis, every fragment of the short edge
+    /// reports `away >= 0`, and a 300x200 window at radius 150 loses its top
+    /// and bottom rows outright.
     #[test]
     fn a_radius_larger_than_the_window_cannot_erode_it() {
         assert!(
-            has_line(&format!(
-                "float r = min({RADIUS_UNIFORM}, min(half_size.x, half_size.y));"
-            )),
-            "the radius is used unclamped, so a large one erodes the window"
+            has_line("float r = min(picked, min(half_size.x, half_size.y));"),
+            "the picked per-corner radius is used unclamped, so a large one erodes the window"
         );
         // And nothing walks around the clamp. Stated as two properties rather
         // than as a count of the uniform's name, which was the first attempt
@@ -400,18 +555,23 @@ mod tests {
         // half the field with a literal kept the count at two and passed.
         //
         // First: the raw uniform appears on no line but its declaration and
-        // the clamp. Comments are free to say its name.
+        // the two branches of the per-quadrant pick that feeds the clamp --
+        // the clamp itself now reads `picked`, not `corner_radius`, which is
+        // why the assertion above pins the clamp's own line directly instead
+        // of walking to it here. Comments are free to say the uniform's name.
         for line in ROUNDED_CORNERS.lines() {
             let code = line.split("//").next().unwrap_or_default().trim();
             if !code.contains(RADIUS_UNIFORM) {
                 continue;
             }
             assert!(
-                code == format!("uniform float {RADIUS_UNIFORM};")
-                    || code.starts_with("float r = min("),
+                code == format!("uniform vec4 {RADIUS_UNIFORM};")
+                    || code == "? ((v_coords.y < 0.5) ? corner_radius.x : corner_radius.z)"
+                    || code == ": ((v_coords.y < 0.5) ? corner_radius.y : corner_radius.w);",
                 "`{RADIUS_UNIFORM}` is used at `{code}`, which is neither its \
-                 declaration nor the clamp -- so that part of the distance \
-                 field is computed from the unclamped radius"
+                 declaration nor a branch of the per-quadrant pick -- so that \
+                 part of the distance field reads the radius somewhere the \
+                 clamp cannot reach"
             );
         }
         // Second: both halves of the field are written in terms of the clamped

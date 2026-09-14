@@ -120,7 +120,7 @@ pub(crate) fn refused(effects: &[Effect]) -> Option<Effect> {
 /// A declared radius, in the **physical** pixels the shader measures in.
 ///
 /// **This is the seam `fragment::RADIUS_UNIFORM` names, and it is the whole of
-/// it.** [`Effect::radius`] is logical, because a style writes `radius: 12`
+/// it.** [`Effect::radii`] is logical, because a style writes `radius: 12`
 /// into a `Pane.qml` and cannot know which monitor the window will land on;
 /// the shader multiplies a normalised coordinate by `tex_size` and measures in
 /// the texture's own pixels throughout, and the texture was captured at the
@@ -135,7 +135,12 @@ pub(crate) fn refused(effects: &[Effect]) -> Option<Effect> {
     reason = "a corner radius is tens of pixels; f32 is what the uniform takes"
 )]
 pub(crate) fn physical_radius(effect: Effect, scale: f64) -> f32 {
-    (effect.radius() * scale) as f32
+    // Provisional: `largest()` stands in for a single radius because nothing
+    // upstream constructs a `Corners` with differing corners yet -- this
+    // returns one `f32`, sent to all four components of the shader's `vec4`
+    // uniform below. A later task replaces this with four genuinely
+    // different physical values, one per corner.
+    (effect.largest() * scale) as f32
 }
 
 /// The largest rectangle certainly inside a rounded rect.
@@ -344,7 +349,7 @@ impl Programs {
             match renderer.compile_custom_texture_shader(
                 ROUNDED_CORNERS,
                 &[
-                    UniformName::new(RADIUS_UNIFORM, UniformType::_1f),
+                    UniformName::new(RADIUS_UNIFORM, UniformType::_4f),
                     // Ours because smithay gives a texture program no `size`.
                     UniformName::new(SIZE_UNIFORM, UniformType::_2f),
                 ],
@@ -593,7 +598,19 @@ impl RenderElement<GlesRenderer> for Rounded {
             self.alpha,
             Some(&self.program),
             &[
-                Uniform::new(RADIUS_UNIFORM, self.radius),
+                // All four corners the same: `self.radius` is one physical
+                // value -- see `physical_radius` -- and nothing upstream
+                // constructs a `Corners` with differing corners yet. The
+                // shader's `corner_radius` is a `vec4` now, so a 4-tuple is
+                // what has to reach it; sending a bare `f32` here would
+                // register as `_1f` against a `vec4` location and mismatch
+                // the `UniformType::_4f` this program was compiled with in
+                // `Programs::rounded`, leaving every fragment unset -- not a
+                // theoretical risk, `dev/wirecheck` hit exactly this.
+                Uniform::new(
+                    RADIUS_UNIFORM,
+                    (self.radius, self.radius, self.radius, self.radius),
+                ),
                 // Both physical, which is the pair the shader's `v_coords *
                 // tex_size` arithmetic is written against. If this never
                 // arrives the uniform stays 0, the shader's clamp makes `r` 0
@@ -615,6 +632,7 @@ impl RenderElement<GlesRenderer> for Rounded {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solium_effects::fragment::Corners;
 
     /// The question the renderer asks every pane, every frame. It has to be
     /// cheap and it has to answer `None` for the overwhelmingly common case,
@@ -626,7 +644,7 @@ mod tests {
 
     #[test]
     fn an_effect_reading_self_needs_a_pass() {
-        let rounded = Effect::rounded(10.0);
+        let rounded = Effect::rounded(Corners::all(10.0));
         assert_eq!(needs_pass(&[rounded]), Some(rounded));
     }
 
@@ -635,7 +653,7 @@ mod tests {
     /// being wrong is every window on the machine rendering offscreen.
     #[test]
     fn a_none_effect_needs_no_pass() {
-        assert_eq!(needs_pass(&[Effect::rounded(0.0)]), None);
+        assert_eq!(needs_pass(&[Effect::rounded(Corners::all(0.0))]), None);
     }
 
     /// The first effect wins, and it is the first one that *needs a pass* --
@@ -648,8 +666,11 @@ mod tests {
     /// would then round nothing.
     #[test]
     fn a_none_effect_does_not_hide_the_one_behind_it() {
-        let rounded = Effect::rounded(8.0);
-        assert_eq!(needs_pass(&[Effect::rounded(0.0), rounded]), Some(rounded));
+        let rounded = Effect::rounded(Corners::all(8.0));
+        assert_eq!(
+            needs_pass(&[Effect::rounded(Corners::all(0.0)), rounded]),
+            Some(rounded)
+        );
     }
 
     /// And of two that both want one, the FIRST wins -- which the doc on
@@ -662,8 +683,8 @@ mod tests {
     /// nothing can violate is the defect this plan has already removed twice.
     #[test]
     fn of_two_effects_that_both_want_a_pass_the_first_wins() {
-        let first = Effect::rounded(4.0);
-        let second = Effect::rounded(12.0);
+        let first = Effect::rounded(Corners::all(4.0));
+        let second = Effect::rounded(Corners::all(12.0));
         assert_eq!(needs_pass(&[first, second]), Some(first));
     }
 
@@ -679,7 +700,7 @@ mod tests {
     /// `scale as i32` that the doubling would not.
     #[test]
     fn a_declared_radius_becomes_physical_pixels_at_the_monitors_scale() {
-        let rounded = Effect::rounded(12.0);
+        let rounded = Effect::rounded(Corners::all(12.0));
         assert!((physical_radius(rounded, 2.0) - 24.0).abs() < f32::EPSILON);
         assert!((physical_radius(rounded, 1.5) - 18.0).abs() < f32::EPSILON);
         assert!((physical_radius(rounded, 1.0) - 12.0).abs() < f32::EPSILON);
@@ -708,8 +729,8 @@ mod tests {
     #[test]
     fn the_effects_this_build_can_make_are_not_refused() {
         assert_eq!(refused(&[]), None);
-        assert_eq!(refused(&[Effect::rounded(12.0)]), None);
-        assert_eq!(refused(&[Effect::rounded(0.0)]), None);
+        assert_eq!(refused(&[Effect::rounded(Corners::all(12.0))]), None);
+        assert_eq!(refused(&[Effect::rounded(Corners::all(0.0))]), None);
     }
 
     /// Said once, not at the refresh rate.
@@ -723,11 +744,11 @@ mod tests {
     #[test]
     fn an_effect_that_cannot_be_run_is_named_once_and_not_every_frame() {
         let mut programs = Programs::default();
-        let effect = Effect::rounded(12.0);
+        let effect = Effect::rounded(Corners::all(12.0));
         assert!(programs.refuse(effect), "the first refusal says so");
         assert!(!programs.refuse(effect), "and the second says nothing");
         assert!(
-            !programs.refuse(Effect::rounded(4.0)),
+            !programs.refuse(Effect::rounded(Corners::all(4.0))),
             "nor a different one"
         );
     }
@@ -1029,7 +1050,7 @@ mod tests {
     /// name in this shader is a substring of something else legitimately in it.
     const FIELD: [&str; 5] = [
         "vec2 half_size = tex_size * 0.5;",
-        "float r = min(corner_radius, min(half_size.x, half_size.y));",
+        "float r = min(picked, min(half_size.x, half_size.y));",
         "vec2 p = abs(v_coords * tex_size - half_size) - (half_size - vec2(r));",
         "float away = length(max(p, 0.0)) - r;",
         "gl_FragColor = colour * (1.0 - smoothstep(-0.5, 0.5, away));",
