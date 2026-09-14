@@ -2065,17 +2065,21 @@ fn transform_from(options: &Table) -> mlua::Result<Option<Mat4>> {
 /// `0.0`, which ties with every other window and so leaves the order the stack
 /// gave them exactly as it was. That is what makes the default free.
 ///
-/// **A NaN is dropped and reported.** `present::by_depth` compares with
-/// `partial_cmp(..).unwrap_or(Equal)`, so a NaN ties with `1.0` and with `2.0`
-/// while those two do not tie with each other — a comparator that is not an
-/// order at all, which leaves `sort_by` free to return any arrangement of the
-/// list. One division in a script reaches it. The window keeps its place
-/// rather than the script keeping its typo, which is the answer `deform_from`
-/// gives an effect this build does not have.
+/// **A NaN is dropped and reported, and this guard is load-bearing.**
+/// `render::by_depth` compares with `partial_cmp(..).unwrap_or(Equal)`, so a
+/// NaN ties with `1.0` and with `2.0` while those two do not tie with each
+/// other — a comparator that is not a total order. `slice::sort_by`'s contract
+/// for one of those is not merely an unspecified arrangement: **it may panic**,
+/// and the call site is the render walk, where a panic is the session going
+/// black rather than a stack in the wrong order. One division in a script
+/// reaches it. So the window keeps its place rather than the script keeping its
+/// typo — the answer `deform_from` gives an effect this build does not have,
+/// and not a cosmetic tidy-up to be relaxed later.
 ///
-/// **An infinity is kept.** It orders against every finite depth and never
-/// reaches any arithmetic — `z` is read in exactly one place, as the sort key
-/// — so `z = math.huge` means "above everything" and costs nothing to honour.
+/// **An infinity is kept, either sign.** It orders against every finite depth
+/// and never reaches any arithmetic — `z` is read in exactly one place, as the
+/// sort key — so `z = math.huge` means "above everything", `-math.huge` means
+/// "behind everything", and both cost nothing to honour.
 fn depth_from(options: Option<&Table>) -> mlua::Result<f32> {
     /// Ties with every other window, so the stack's own order survives.
     const LEVEL: f32 = 0.0;
@@ -2856,18 +2860,20 @@ mod tests {
     /// comparison against a NaN is false. The window disappears and its damage
     /// rectangle is nonsense, from a typo.
     ///
-    /// A **depth** is milder and still not an order. `by_depth` answers
-    /// `Equal` when `partial_cmp` declines, so a NaN ties with 1.0 and with
-    /// 2.0 while those two do not tie with each other; a comparator that is
-    /// not a total order leaves `sort_by` free to return any arrangement of
-    /// the list.
+    /// A **depth** is quieter to look at and no safer. `render::by_depth`
+    /// answers `Equal` when `partial_cmp` declines, so a NaN ties with 1.0 and
+    /// with 2.0 while those two do not tie with each other -- not a total
+    /// order, and `slice::sort_by` handed one of those **may panic**. That is
+    /// the render walk, so the failure is the session going black.
     ///
     /// So both fall back to the default and say so in the log -- the answer
     /// `deform_from` gives an effect this build does not have, and
     /// `easing_from` an easing nobody wrote: the script loses the key it
-    /// mistyped and keeps its window. An **infinite depth is kept**, because
-    /// it orders perfectly well and `z = math.huge` is a legible spelling of
-    /// "above everything".
+    /// mistyped and keeps its window. An **infinite depth is kept**, in both
+    /// directions, because it orders perfectly well: `z = math.huge` is a
+    /// legible spelling of "above everything" and `-math.huge` of "behind
+    /// everything". Both are asserted, because a guard written
+    /// `z.is_nan() || z == f32::NEG_INFINITY` passes every other case here.
     #[test]
     fn a_depth_or_a_pivot_that_cannot_be_drawn_with_falls_back() {
         let directory = std::env::temp_dir().join("solium-script-test-nonfinite");
@@ -2882,6 +2888,7 @@ mod tests {
                 sol.present(3, { pivot_x = 0.25, pivot_y = 1/0 })
                 sol.present(4, { pivot_y = -1/0 })
                 sol.present(5, { z = 1/0 })
+                sol.present(6, { z = -1/0 })
             end)
             "#,
         )
@@ -2890,7 +2897,7 @@ mod tests {
         let mut scripts = Scripts::load(&config).expect("loading the test script");
         let outcome = scripts.key("super+4", Snapshot::default());
         let drawn = presented(&outcome.commands);
-        assert_eq!(drawn.len(), 5);
+        assert_eq!(drawn.len(), 6);
 
         // The key that was wrong is the only key that loses anything: the
         // pivot beside the NaN depth is the one the script wrote.
@@ -2912,11 +2919,20 @@ mod tests {
         assert_eq!(drawn[3].1, (0.5, 0.5), "in either direction");
 
         // A depth is not a coordinate and an infinite one sorts, so it is the
-        // one non-finite number here that survives.
+        // one non-finite number here that survives -- **in both directions**.
+        // Asserted from each end because a guard that refused only one of them
+        // (`z.is_nan() || z == f32::NEG_INFINITY`, the plausible one: NaN and
+        // the negative infinity are what a division by zero yields when the
+        // numerator went wrong) passes every other case in this test.
         assert!(
             drawn[4].0.is_infinite() && drawn[4].0 > 0.0,
             "an infinite depth orders, so it is kept, got {}",
             drawn[4].0
+        );
+        assert!(
+            drawn[5].0.is_infinite() && drawn[5].0 < 0.0,
+            "and so does a negative one, which means behind everything, got {}",
+            drawn[5].0
         );
 
         let _ = std::fs::remove_dir_all(&directory);
