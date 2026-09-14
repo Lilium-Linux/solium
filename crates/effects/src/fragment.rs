@@ -244,6 +244,18 @@ impl Corners {
         let left = self.top_left.max(self.bottom_left);
         (top, right, bottom, left)
     }
+
+    /// The one number that stands for all four, for the `clientRadius` a layer
+    /// is still told. The *largest*, because that field's only in-tree use is
+    /// an outward hug (`PaneStyle.qml`: `clientRadius + 2`, "hug it from
+    /// outside"), and a hug has to clear the biggest cut or it clips into it.
+    #[must_use]
+    pub fn largest(&self) -> f64 {
+        self.top_left
+            .max(self.top_right)
+            .max(self.bottom_left)
+            .max(self.bottom_right)
+    }
 }
 
 /// One effect on one node.
@@ -285,19 +297,12 @@ impl Effect {
         }
     }
 
-    /// The one number that stands for all four, for the `clientRadius` a layer is
-    /// still told. The *largest*, because that field's only in-tree use is an
-    /// outward hug (`PaneStyle.qml`: `clientRadius + 2`, "hug it from outside"),
-    /// and a hug has to clear the biggest cut or it clips into it.
+    /// The one number [`Corners::largest`] gives this effect's radii -- see
+    /// there for why the largest. A one-line delegate rather than a second
+    /// copy of the max chain, so the reasoning has exactly one home.
     #[must_use]
     pub fn largest(&self) -> f64 {
-        match self {
-            Self::Rounded { radii } => radii
-                .top_left
-                .max(radii.top_right)
-                .max(radii.bottom_left)
-                .max(radii.bottom_right),
-        }
+        self.radii().largest()
     }
 
     /// Whether this is an effect that should not be run at all.
@@ -400,25 +405,30 @@ mod tests {
             "four radii, as tl/tr/bl/br"
         );
         assert!(
-            ROUNDED_CORNERS.contains("v_coords.x < 0.5"),
+            has_line("float picked = (v_coords.x < 0.5)"),
             "the quadrant is chosen from the unfolded coordinate; after `abs()` \
              every corner looks like the top-left and the four are indistinguishable"
         );
     }
 
     /// `largest` is what a layer's own `clientRadius` still gets -- see
-    /// `Effect::largest`. It has to be the biggest of the four, not the
+    /// `Corners::largest`. It has to be the biggest of the four, not the
     /// smallest or an average, because `PaneStyle.qml`'s `clientRadius + 2`
     /// hug has to clear the biggest cut or it clips into it.
+    ///
+    /// On a bare `Corners` directly, because that is the shape a later task
+    /// holds with no `Effect` around it; `Effect::largest` is checked too,
+    /// since it is a caller of this and not a second implementation.
     #[test]
     fn largest_is_the_biggest_of_the_four() {
-        let effect = Effect::rounded(Corners {
+        let corners = Corners {
             top_left: 4.0,
             top_right: 20.0,
             bottom_left: 12.0,
             bottom_right: 0.0,
-        });
-        assert!((effect.largest() - 20.0).abs() < f64::EPSILON);
+        };
+        assert!((corners.largest() - 20.0).abs() < f64::EPSILON);
+        assert!((Effect::rounded(corners).largest() - 20.0).abs() < f64::EPSILON);
     }
 
     /// An effect that reads nothing draws inline; one that reads `self` needs
@@ -527,7 +537,7 @@ mod tests {
         // same path under a different name satisfies every assertion above and
         // still draws an invisible window.
         assert!(
-            ROUNDED_CORNERS.contains("vec4(colour.rgb, 1.0)"),
+            has_line("colour = vec4(colour.rgb, 1.0) * alpha;"),
             "NO_ALPHA has to replace the alpha channel, not sample it"
         );
     }

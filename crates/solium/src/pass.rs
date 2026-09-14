@@ -166,10 +166,10 @@ pub(crate) fn physical_radius(effect: Effect, scale: f64) -> f32 {
 /// and is rarely whole: 13 logical at 1.25 is 16.25, and rounding that down
 /// claims a quarter-pixel column that the shader cut.
 ///
-/// Saturating throughout, because `Effect::rounded(1e30)` is accepted upstream
-/// -- `is_none_effect` refuses only zero, negatives and NaN -- and `radius as
-/// i32` saturates at `i32::MAX`, where `inset * 2` is a debug panic in the
-/// middle of a frame.
+/// Saturating throughout, because `Effect::rounded(Corners::all(1e30))` is
+/// accepted upstream -- `is_none_effect` refuses only zero, negatives and
+/// NaN -- and `radius as i32` saturates at `i32::MAX`, where `inset * 2` is
+/// a debug panic in the middle of a frame.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "clamped to i32's range on the line above the cast"
@@ -809,8 +809,9 @@ mod tests {
         assert_eq!(opaque.size.w, 66);
     }
 
-    /// `Effect::rounded(1e9)` is accepted upstream -- `is_none_effect` refuses
-    /// only zero, negatives and NaN -- so an absurd radius reaches here.
+    /// `Effect::rounded(Corners::all(1e9))` is accepted upstream --
+    /// `is_none_effect` refuses only zero, negatives and NaN -- so an absurd
+    /// radius reaches here.
     ///
     /// `radius.ceil() as i32` saturates at `i32::MAX`, and `inset * 2` on that
     /// is an overflow: a debug panic, in the middle of a frame, taking the
@@ -1041,15 +1042,19 @@ mod tests {
     /// `fragment.rs` would otherwise leave every assertion below green while
     /// the shader cut a different shape from the one this file insets against
     /// -- and the failure would be invisible until a screen. `fragment.rs` has
-    /// its own copy of this idea and pins three of these five; the two it does
-    /// not are `half_size`, which decides where the corner circles sit, and
-    /// the `smoothstep`, which is the entire reason the bound below is `-0.5`
-    /// and not `0.0`.
+    /// its own copy of this idea and pins every line below somewhere in its
+    /// own tests too -- the five that were here before Task 1, plus the three
+    /// that pick `corner_radius`'s quadrant, which is a second opinion by a
+    /// different mechanism (whole-line `has_line`, a whitelist walk) rather
+    /// than a reason to trust this one less.
     ///
     /// Whole lines rather than `contains`, for `fragment.rs`'s reason: every
     /// name in this shader is a substring of something else legitimately in it.
-    const FIELD: [&str; 5] = [
+    const FIELD: [&str; 8] = [
         "vec2 half_size = tex_size * 0.5;",
+        "float picked = (v_coords.x < 0.5)",
+        "? ((v_coords.y < 0.5) ? corner_radius.x : corner_radius.z)",
+        ": ((v_coords.y < 0.5) ? corner_radius.y : corner_radius.w);",
         "float r = min(picked, min(half_size.x, half_size.y));",
         "vec2 p = abs(v_coords * tex_size - half_size) - (half_size - vec2(r));",
         "float away = length(max(p, 0.0)) - r;",
@@ -1064,6 +1069,15 @@ mod tests {
     /// rather than against a second opinion about geometry. `point` is
     /// `v_coords * tex_size`: the fragment's position in the texture's own
     /// pixels.
+    ///
+    /// **One `radius`, not four -- provisional, like `physical_radius`.** The
+    /// shader picks a `corner_radius` component per quadrant (`FIELD`'s three
+    /// `picked` lines) before this file's clamp ever runs; this collapses
+    /// that pick to the single value passed in. Faithful only because
+    /// `Rounded::draw` currently sends that same physical radius to all four
+    /// components -- the moment a caller sends four different ones, this has
+    /// to pick per quadrant too, or it transcribes a program that is not the
+    /// one being run.
     fn away(point: (f64, f64), texture: Size<i32, Physical>, radius: f64) -> f64 {
         let half = (f64::from(texture.w) * 0.5, f64::from(texture.h) * 0.5);
         let r = radius.min(half.0.min(half.1));
