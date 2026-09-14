@@ -26,6 +26,12 @@
 // rectangle for free since it had a scene graph. The only thing that crosses
 // between them is the number, which the compositor writes onto every layer of
 // every style as `clientRadius`.
+//
+// `panes/flush/` is the other way the same two halves can meet: there the
+// client's top corners are squared, the bar's rounded top *is* the window's
+// top, and the two meet on a flat seam. Here they interlock instead. Both
+// exist because the per-corner keys make the choice a style's rather than the
+// compositor's.
 
 import QtQuick
 import Solium
@@ -45,10 +51,36 @@ PaneStyle {
     // `pass::physical_radius` multiplies it by the monitor's own scale on the
     // way to the shader, so a window dragged onto a HiDPI screen keeps the
     // corner it had rather than half of it.
-    client.radius: 14
+    //
+    // All four corners, which is this style's whole shape: the top two are cut
+    // *inside* the window, under the ends of the bar, and what shows through
+    // them is the bar. `panes/flush/` squares those two instead and gets the
+    // other picture.
+    client.radius: 12
 
+    // **`behind`, and that one word is the difference between this style
+    // working and this style covering the client's first line of text.**
+    //
+    // The bar is taller than the band it was given — see `Frame.qml` — because
+    // it has to reach down past the seam to be *in* the two notches the shader
+    // cuts out of the client's top corners. A bar that reaches down there and
+    // is drawn at `frame` is drawn OVER the client, and the `clientRadius`
+    // rows it overhangs by are the client's top rows: in a terminal, the top
+    // half of the prompt.
+    //
+    // Lowering it under the client keeps both halves. The overhang still fills
+    // the notches, because a rounded client is no longer opaque there and
+    // `pass::opaque_of` gives those sides up — so what the shader cut away is
+    // exactly what the bar shows through. And it no longer covers anything,
+    // because every pixel the client does draw is drawn on top of it.
+    //
+    // The alternative is to stop the bar at the seam, which also uncovers the
+    // client and is *wrong*: with nothing behind the notches they show the
+    // wallpaper, and the window reads as a bar resting on a chipped rectangle.
+    // The two are indistinguishable while the bar is a flat colour and are not
+    // once it is a gradient, so this is depth and not height on purpose.
     Layer {
-        depth: "frame"
+        depth: "behind"
         name: "bar"
         source: "Frame.qml"
     }

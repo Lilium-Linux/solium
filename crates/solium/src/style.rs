@@ -985,8 +985,8 @@ mod tests {
         });
     }
 
-    /// **The one shipped bundle that asks for the pass, and the only thing in
-    /// `cargo test` that loads it.**
+    /// **One of the two shipped bundles that ask for the pass, and the only
+    /// thing in `cargo test` that loads this one.**
     ///
     /// `panes/rounded/` exists for exactly one reason — to be the thing a person
     /// can point a screen at and see a rounded corner — and until this test it
@@ -999,6 +999,16 @@ mod tests {
     ///
     /// The *value* and not merely non-emptiness: `client.radius: 1` would
     /// satisfy "declares an effect" and be invisible on a screen.
+    ///
+    /// **And the depth, which is the half of this bundle a picture is needed to
+    /// check and a test can still pin.** Its bar reaches `clientRadius` past
+    /// the reserved band in order to be inside the two notches the shader cuts
+    /// out of the client's top corners. At `Depth::Frame` that overhang is
+    /// drawn OVER the client and eats its top `clientRadius` rows — the top
+    /// half of a terminal's first line, which is what this style was reported
+    /// for. `Depth::Behind` fills the same notches and covers nothing. The two
+    /// differ by one word in `Pane.qml` and by nothing else that compiles, so
+    /// the word is asserted here.
     ///
     /// `Decoration::from_style` as well as `load`, because they read different
     /// halves of the bundle. `load` reads the manifest and never opens the file
@@ -1013,10 +1023,10 @@ mod tests {
             let style = load(dir).expect("the shipped rounded bundle loads");
             assert_eq!(
                 style.effects,
-                vec![Effect::rounded(Corners::all(14.0))],
-                "`panes/rounded/` is the only shipped style that runs a client \
-                 effect; with the radius gone or mistyped it draws exactly like \
-                 every other bundle and the feature has nothing to show for itself"
+                vec![Effect::rounded(Corners::all(12.0))],
+                "`panes/rounded/` runs a client effect on all four corners; with \
+                 the radius gone or mistyped it draws exactly like every other \
+                 bundle and the feature has nothing to show for itself"
             );
             assert!(
                 style.insets.top > 0,
@@ -1026,9 +1036,73 @@ mod tests {
             let decoration = crate::decoration::Decoration::from_style(&style, 300, 200)
                 .expect("its one delegated layer builds");
             assert_eq!(
+                decoration.layers_at(Depth::Behind).collect::<Vec<_>>(),
+                ["bar"],
+                "one layer, UNDER the client, loaded from Frame.qml. At \
+                 `Depth::Frame` the same file draws the same rectangle over the \
+                 client instead of under it, and its `clientRadius` of overhang \
+                 covers the client's top rows"
+            );
+            assert!(
+                decoration.layers_at(Depth::Frame).next().is_none(),
+                "and nothing left at `frame`"
+            );
+        });
+    }
+
+    /// **The other one, and the only shipped bundle whose four corners are not
+    /// all the same number.**
+    ///
+    /// `panes/flush/` is what the per-corner keys are for: `client.radius: 12`
+    /// with the top pair taken back to `0`, so the client's top edge is square
+    /// and the bar's own rounded top is the window's top. Drop the two
+    /// overrides and it is `panes/rounded` with `panes/rounded`'s overhang
+    /// missing — the notches come back and there is nothing behind them.
+    ///
+    /// So the assertion is the *shape* and not merely that an effect exists.
+    /// `Corners::all(12.0)` passes "declares an effect", passes
+    /// `is_none_effect`, and is the wrong picture. Nothing else in the
+    /// workspace loads a shipped bundle with four distinct corners, which
+    /// makes this the one place a `radiusTopLeft` that silently stopped being
+    /// read would be caught.
+    ///
+    /// A **zero** in particular, which is the case that needs a real fixture
+    /// rather than a fixture written for the test: `0` and "not declared" are
+    /// different things here and are told apart by the `-1` sentinel in
+    /// `ClientTreatment.qml`. If that sentinel were dropped, these two corners
+    /// would read back as 12 and this test is what says so.
+    #[test]
+    fn the_flush_bundle_squares_the_two_corners_its_bar_meets() {
+        on_the_qt_thread(|| {
+            let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes/flush"));
+            let style = load(dir).expect("the shipped flush bundle loads");
+            assert_eq!(
+                style.effects,
+                vec![Effect::rounded(Corners {
+                    top_left: 0.0,
+                    top_right: 0.0,
+                    bottom_left: 12.0,
+                    bottom_right: 12.0,
+                })],
+                "`panes/flush/` declares `client.radius: 12` and squares the top \
+                 pair. All four at 12 means the per-corner keys are not being \
+                 read and the style draws `panes/rounded`'s shape; all four at 0 \
+                 means the fallback to `radius` is not happening and it draws no \
+                 corners at all"
+            );
+            assert!(
+                style.insets.top > 0,
+                "its bar is exactly `insetTop` tall, so there has to be a band"
+            );
+            let decoration = crate::decoration::Decoration::from_style(&style, 300, 200)
+                .expect("its one delegated layer builds");
+            assert_eq!(
                 decoration.layers_at(Depth::Frame).collect::<Vec<_>>(),
                 ["bar"],
-                "one layer, in the frame, loaded from Frame.qml"
+                "one layer, in the frame, loaded from Frame.qml. Unlike \
+                 `panes/rounded` this bar reaches nothing past its band, so it \
+                 has no reason to go under the client and takes the cheap \
+                 band-by-band copy instead"
             );
         });
     }

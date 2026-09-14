@@ -49,7 +49,8 @@ PaneStyle {
 |---|---|
 | `insets.top`, `.right`, `.bottom`, `.left` | what the style reserves from the client, **once, for the whole style** |
 | `requires` | what the style needs from the machine. `["gpu"]` is the only term today, and a style naming one this build has never heard of is refused rather than drawn wrong |
-| `client.radius` | rounds the client's own surface, in logical pixels. A non-zero one is an offscreen pass per window per frame. `0` is no effect at all, and so is leaving the key out — which is what twelve of the fourteen bundles that ship do. `example/` writes `0`, to show the key exists and costs nothing; `rounded/` is the only one that asks for the pass |
+| `client.radius` | rounds the client's own surface, in logical pixels. A non-zero one is an offscreen pass per window per frame. `0` is no effect at all, and so is leaving the key out — which is what twelve of the fifteen bundles that ship do. `example/` writes `0`, to show the key exists and costs nothing; `rounded/` and `flush/` are the two that ask for the pass |
+| `client.radiusTopLeft`, `.radiusTopRight`, `.radiusBottomLeft`, `.radiusBottomRight` | one corner each, in logical pixels. Every one of them defaults to `client.radius`, so a style that wants four the same writes one key and these never come up. **A `0` has to be written out**: squaring a corner is half of what these are for, so an absent corner follows `radius` rather than being square. `flush/` is the shipped example |
 | `client.shadow` | reserved for the shadow cast by the client's silhouette; declared, and read by nobody yet |
 | the `Layer` children | the layers, in declaration order |
 
@@ -183,7 +184,8 @@ before styles had layers. The rest are here to show what layers add:
 | folder | |
 |---|---|
 | `example/` | the format written out in full, and the fixture two tests build |
-| `rounded/` | `client.radius`: the compositor cuts the client's corners with a fragment program, and the bar hugs the same curve with `Rectangle.radius` |
+| `rounded/` | `client.radius`: the compositor cuts all four of the client's corners with a fragment program, and the bar -- at `behind`, reaching `clientRadius` past its band -- shows through the two it cut inside the window |
+| `flush/` | the same seam the other way up: `radiusTopLeft` and `radiusTopRight` at `0`, so the client's top is square, the bar's own rounded top is the window's top, and the two meet flat. The only shipped bundle whose four corners differ |
 | `sandwich/` | one layer behind the client and one above it, in colours that cannot be confused |
 | `wave/` | a border that physically waves, upward past the pane, using `bleed` |
 | `shadow/` | `behind` plus `bleed`: stacked rectangles standing in for a blur |

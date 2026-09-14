@@ -104,9 +104,9 @@ const fn runnable(inputs: Inputs) -> bool {
 /// Only reachable with a non-empty effect list. That is not the same as "never
 /// on an unstyled machine" any more, and the weaker claim is the true one:
 /// `style::load` pushes nothing for an absent or zero `client.radius`, which is
-/// thirteen of the fourteen shipped bundles -- but `panes/rounded/` declares
-/// `client.radius: 14`, so a session using it walks a one-element list here on
-/// the branch below.
+/// thirteen of the fifteen shipped bundles -- but `panes/rounded/` and
+/// `panes/flush/` each declare `client.radius: 12`, so a session using either
+/// walks a one-element list here on the branch below.
 ///
 /// **Nothing can construct an effect this returns today**, because `Effect` has
 /// one variant and it reads `SelfTexture`. That is why the guarantee is

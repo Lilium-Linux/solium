@@ -703,6 +703,104 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
             ));
         }
     }
+
+    // 5. A radius of ZERO on two corners: the shape `panes/flush/` ships, and
+    //    the case where "square" has to mean *opaque* and not merely uncut.
+    //
+    // Everything above sends a radius of at least 6 to every quadrant, and
+    // every radius at or above half a pixel is past the smoothstep's far end
+    // -- so the whole family draws the same picture whether the shader's
+    // distance field carries its interior term or not. Drop that term and this
+    // draw is the only one in the tree that changes: a zero radius makes the
+    // interior report exactly 0, which is the smoothstep's MIDPOINT, and the
+    // two square quadrants come back at alpha 127 across every pixel. A window
+    // with a square top drawn at half transparency, with the top half of the
+    // desktop showing through it.
+    //
+    // That is why the assertion is "nothing cut AND nothing partial" rather
+    // than the cut count the other cases use. A 50% quadrant cuts nothing: it
+    // would pass every count in this function and pass every unit test in the
+    // workspace, because `Corners { top_left: 0.0, .. }` is a perfectly
+    // ordinary value that the CPU side has no opinion about. The partial count
+    // is what sees it.
+    //
+    // It is also the tighter half of the same claim `pass::opaque_inside`
+    // makes on the CPU -- an uncut side gets an inset of zero, which is a lie
+    // unless the outermost row really is opaque -- and the measured failure at
+    // r=0.3, alpha 228, is inside the partial band by twenty counts. So this
+    // catches the near miss and not only the flagrant one.
+    {
+        const RADII: (f32, f32, f32, f32) = (0.0, 0.0, RADIUS, RADIUS);
+        let source = renderer
+            .import_memory(
+                &solid(SIDE, SIDE, COLOUR, 255),
+                Fourcc::Argb8888,
+                (SIDE, SIDE).into(),
+                false,
+            )
+            .map_err(|err| anyhow!("import_memory for the squared-corner draw: {err}"))?;
+        let out = draw_through_program(renderer, &source, program, SIDE, RADII)?;
+        // Indexed `(tl, tr, bl, br)`, as above.
+        let mut cut = [0_usize; 4];
+        let mut partial = [0_usize; 4];
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                let quadrant = usize::from(x >= SIDE / 2) + 2 * usize::from(y >= SIDE / 2);
+                match out[((y * SIDE + x) * 4 + 3) as usize] {
+                    0..=7 => cut[quadrant] += 1,
+                    248..=255 => {}
+                    _ => partial[quadrant] += 1,
+                }
+            }
+        }
+        let corner_alpha = |x: i32, y: i32| out[((y * SIDE + x) * 4 + 3) as usize];
+        println!(
+            "  rounded-corner shader, squared top {RADII:?}: cut {cut:?}, partial \
+             {partial:?} as (tl, tr, bl, br); the two square corner pixels are at \
+             alpha {} and {}",
+            corner_alpha(0, 0),
+            corner_alpha(SIDE - 1, 0),
+        );
+
+        for (corner, quadrant) in [("top-left", 0_usize), ("top-right", 1)] {
+            if cut[quadrant] != 0 || partial[quadrant] != 0 {
+                return Err(anyhow!(
+                    "the {corner} quadrant was given a radius of 0 and came back \
+                     with {} pixels cut and {} pixels neither opaque nor cut, \
+                     where a square corner has none of either. Its outermost \
+                     pixel is at alpha {}. **127, or anything near it, across \
+                     the whole quadrant is the interior term missing from \
+                     `away` in `fragment.rs`** -- `length(max(p, 0.0)) - r` \
+                     saturates at -r inside the shape, which is exactly 0 when \
+                     r is 0, which is the smoothstep's midpoint. A handful of \
+                     partial pixels along the outer rows instead is the \
+                     boundary moving: a fragment centre sits half a pixel \
+                     inside the edge and must report -0.5, the smoothstep's \
+                     near end. Pixels CUT here is a different fault -- the \
+                     radius reaching the wrong quadrant -- and case 4 above \
+                     names it",
+                    cut[quadrant],
+                    partial[quadrant],
+                    corner_alpha(if quadrant == 0 { 0 } else { SIDE - 1 }, 0),
+                ));
+            }
+        }
+        // And the other two really were cut, so the draw is not simply an
+        // uncut rectangle passing the two assertions above by doing nothing.
+        // The same band the single-radius case puts r=16 in, per corner:
+        // 184 over four corners is 46 each.
+        for (corner, quadrant) in [("bottom-left", 2_usize), ("bottom-right", 3)] {
+            if !(25..=75).contains(&cut[quadrant]) {
+                return Err(anyhow!(
+                    "the {corner} quadrant was given a radius of {RADIUS} and cut \
+                     {} pixels, where the field puts it near 46. The two square \
+                     corners passed, so a wholly uncut draw -- a `corner_radius` \
+                     that never arrived -- lands here rather than above",
+                    cut[quadrant],
+                ));
+            }
+        }
+    }
     Ok(())
 }
 

@@ -993,9 +993,10 @@ impl Backing {
 /// The four radii a layer of this style should hug, in logical pixels.
 ///
 /// All zero when the style declares no effect that masks the client, which is
-/// thirteen of the fourteen shipped bundles and every style nobody has
-/// touched; `panes/rounded/` is the one that declares a radius, and
-/// `panes/example/` writes `0` on purpose to show the key costs nothing. A
+/// thirteen of the fifteen shipped bundles and every style nobody has
+/// touched; `panes/rounded/` and `panes/flush/` are the two that declare a
+/// radius -- and `flush/` is the one whose four are not all the same number --
+/// while `panes/example/` writes `0` on purpose to show the key costs nothing. A
 /// style wanting a rounded border around a *square* client declares no
 /// `client.radius` and sets its own `radius` — and pays for no pass, which is
 /// the point.
