@@ -109,7 +109,8 @@ Once, at build, because neither ever changes for a style:
 |---|---|
 | `insetTop`, `insetRight`, `insetBottom`, `insetLeft` | what `Pane.qml` reserved, so a bar can size itself to its own band without a second copy of the number |
 | `bleedLeft`, `bleedTop` | where the window's own corner is inside this layer's canvas |
-| `clientRadius` | the `client.radius` the style declared, in logical pixels, so a bar or a border can hug the curve the compositor cut. Written on every layer of every style, zero included. `rounded/Frame.qml` is the worked example |
+| `clientRadiusTopLeft`, `clientRadiusTopRight`, `clientRadiusBottomLeft`, `clientRadiusBottomRight` | what the compositor is cutting each corner of the client to, in logical pixels, so a bar or a border can hug that curve. Written on every layer of every style, zeroes included — a corner left unwritten reads back 0, which is indistinguishable from one the style really squared |
+| `clientRadius` | the **largest** of the four above, for a layer that wants one number. Its use is an outward hug (`radius: clientRadius + 2`), and a hug has to clear the biggest cut; a layer that needs one particular corner reads it by name. Written on every layer of every style, zero included. `rounded/Frame.qml` is the worked example |
 
 Read back by the compositor:
 

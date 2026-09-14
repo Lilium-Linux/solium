@@ -44,6 +44,8 @@ use smithay::{
     utils::{Buffer as BufferCoords, Logical, Rectangle, Size, Transform},
 };
 
+use solium_effects::fragment::Corners;
+
 use crate::{
     qml::{
         self,
@@ -988,9 +990,9 @@ impl Backing {
     }
 }
 
-/// The radius a layer of this style should hug, in logical pixels.
+/// The four radii a layer of this style should hug, in logical pixels.
 ///
-/// Zero when the style declares no effect that masks the client, which is
+/// All zero when the style declares no effect that masks the client, which is
 /// thirteen of the fourteen shipped bundles and every style nobody has
 /// touched; `panes/rounded/` is the one that declares a radius, and
 /// `panes/example/` writes `0` on purpose to show the key costs nothing. A
@@ -1000,26 +1002,30 @@ impl Backing {
 ///
 /// The *first* effect that is really an effect, which is the same choice
 /// `pass::needs_pass` makes and is made here again rather than shared with it:
-/// that one answers in `Effect`s for a shader, this one in `i32`s for QML, and
-/// a `Style` holding two rounding effects at once is a thing to design when
-/// something can declare one.
+/// that one answers in `Effect`s for a shader, this one in numbers for QML,
+/// and a `Style` holding two rounding effects at once is a thing to design
+/// when something can declare one.
+fn client_radii(style: &Style) -> Corners {
+    style
+        .effects
+        .iter()
+        .find(|effect| !effect.is_none_effect())
+        .map_or(Corners::all(0.0), |effect| effect.radii())
+}
+
+/// A logical radius as the `i32` a layer is told.
+///
+/// Whole because `set_int` is; exact because the number came *from* an `i32`.
+/// `style::load` reads every corner with `get_int` and widens it, so the round
+/// trip back is the same value it started as — there is nothing here to round,
+/// only a type to put back.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the radius reached `Effect` from `get_int`, so it was an i32 \
               before it was an f64 and the round trip is exact"
 )]
-fn client_radius(style: &Style) -> i32 {
-    style
-        .effects
-        .iter()
-        .find(|effect| !effect.is_none_effect())
-        // Provisional, like `pass::physical_radius`'s same-shaped call:
-        // `largest()` reproduces today's single declared radius exactly,
-        // because nothing constructs a `Corners` with differing corners yet.
-        // Once a later task lets a style's corners genuinely differ, this is
-        // the line that decides what one number QML sees, and it deserves a
-        // deliberate look then rather than inheriting this by default.
-        .map_or(0, |effect| effect.largest() as i32)
+fn whole(radius: f64) -> i32 {
+    radius as i32
 }
 
 impl LayerScene {
@@ -1107,7 +1113,7 @@ impl LayerScene {
         scene.set_int("insetLeft", style.insets.left);
         // What the client is being masked to, so a layer can match it. A
         // rounded client inside a square border is the failure this prevents,
-        // and it is one number declared once — exactly why `client.radius`
+        // and it is declared once on the style — exactly why `client.radius`
         // lives on `PaneStyle` and not on `Layer`, and exactly how `insets`
         // above already work.
         //
@@ -1116,17 +1122,40 @@ impl LayerScene {
         // — `pass.rs`, and the whole of this plan. A layer's are Qt's, and Qt
         // rounds a rectangle with one property; a GPU pass to do what
         // `Rectangle.radius` does for free would be absurd. So only the
-        // *number* crosses the seam, and this is the crossing.
+        // *numbers* cross the seam, and this is the crossing.
         //
         // LOGICAL pixels, like every other value a layer is told. `pass.rs`
         // multiplies by the output scale for the shader; nothing QML sees is
         // ever in device pixels.
         //
-        // Written unconditionally, so a style that declares no radius tells
-        // its layers zero rather than leaving whatever the file defaulted to
-        // — the same reason all four insets are written rather than the ones
-        // something happened to need.
-        scene.set_int("clientRadius", client_radius(style));
+        // All four, and not the one a titlebar happens to need. Same reason
+        // all four insets are written: a layer that reads a property the
+        // compositor decided not to send gets 0, and 0 is a legal radius —
+        // so a corner left unwritten is indistinguishable from a corner the
+        // style really squared, and a bar would hug a curve nobody cut.
+        //
+        // Written unconditionally for the same reason, so a style that
+        // declares no radius tells its layers zero rather than leaving
+        // whatever the file defaulted to.
+        let radii = client_radii(style);
+        scene.set_int("clientRadiusTopLeft", whole(radii.top_left));
+        scene.set_int("clientRadiusTopRight", whole(radii.top_right));
+        scene.set_int("clientRadiusBottomLeft", whole(radii.bottom_left));
+        scene.set_int("clientRadiusBottomRight", whole(radii.bottom_right));
+        // **And the singular survives.** It is not replaced by the four above:
+        // `PaneStyle.qml` uses it itself, `docs/ricing.md` documents it, and a
+        // bundle nobody in this tree wrote may read it — removing it would
+        // break those silently, since an undeclared property reads back 0 and
+        // 0 is a radius.
+        //
+        // The LARGEST of the four when they differ, because that field's only
+        // in-tree use is an outward hug — `PaneStyle.qml`'s `clientRadius + 2`,
+        // "hug it from outside" — and a hug has to clear the biggest cut or it
+        // clips into it. The cost of being wrong this way is visible slack
+        // around a corner that was cut less; the cost the other way is a border
+        // crossing the curve. A layer that wants the real number for one corner
+        // now has it by name.
+        scene.set_int("clientRadius", whole(radii.largest()));
         // A layer at `behind` or `above` paints over the client by definition,
         // and so does any layer of a style that reserved nothing: there is
         // nowhere else for it to paint. Only a `frame` layer inside real insets
@@ -2742,15 +2771,23 @@ mod tests {
 
     /// A bundle declaring a client radius and a delegated layer to read it.
     ///
-    /// **The layer's own default is 7 and not 0, and that is the whole design
-    /// of this fixture.** A `clientRadius` default of 0 makes "the compositor
-    /// wrote 0" and "the compositor wrote nothing" the same reading, so the
-    /// zero case below -- the one that pins `map_or(0, ..)` -- could not fail.
-    /// With 7 as the default, an unwritten property reads back 71 and a
-    /// written zero reads back 1.
+    /// **Every default is non-zero, and that is the whole design of this
+    /// fixture.** A `clientRadius` default of 0 makes "the compositor wrote 0"
+    /// and "the compositor wrote nothing" the same reading, so the zero case
+    /// below -- the one that pins the `map_or` -- could not fail. With 7 as the
+    /// default, an unwritten property reads back 71 and a written zero reads
+    /// back 1.
     ///
     /// The `+ 1` is there for the same reason one step further in: without it
     /// a written 0 and an unwritten 0 would both be 0 again.
+    ///
+    /// The four corners take that same shape with a **different default and a
+    /// different constant each**, so the readbacks cannot be confused with one
+    /// another: a pair of corners written in the wrong order, or one derived
+    /// property bound to the wrong source, produces a number no correct run
+    /// produces. Sharing one default across the four would make a transposition
+    /// invisible in exactly the case that matters -- two corners a style
+    /// declared the same.
     fn radius_fixture(name: &str, declared: &str) -> PathBuf {
         fixture(
             name,
@@ -2776,10 +2813,18 @@ mod tests {
 
                         Item {
                             property int clientRadius: 7
+                            property int clientRadiusTopLeft: 2
+                            property int clientRadiusTopRight: 3
+                            property int clientRadiusBottomLeft: 4
+                            property int clientRadiusBottomRight: 5
 
-                            // A binding, so this moves only if the property
-                            // above was really set on one this file declared.
+                            // Bindings, so these move only if the properties
+                            // above were really set on ones this file declared.
                             readonly property int sawRadius: clientRadius * 10 + 1
+                            readonly property int sawTopLeft: clientRadiusTopLeft * 100 + 1
+                            readonly property int sawTopRight: clientRadiusTopRight * 100 + 2
+                            readonly property int sawBottomLeft: clientRadiusBottomLeft * 100 + 3
+                            readonly property int sawBottomRight: clientRadiusBottomRight * 100 + 4
                         }
                         ",
                 ),
@@ -2814,6 +2859,68 @@ mod tests {
                 "a declared `client.radius` has to reach a delegated layer, or \
                  a bundle's border squares off the corners the compositor cut"
             );
+            // And the four siblings, each carrying the same 12: a bare
+            // `client.radius` is every corner, so this is the inheritance half
+            // of the seam rather than a second spelling of the line above.
+            assert_eq!(layer.scene.get_int("sawTopLeft"), 1201);
+            assert_eq!(layer.scene.get_int("sawTopRight"), 1202);
+            assert_eq!(layer.scene.get_int("sawBottomLeft"), 1203);
+            assert_eq!(layer.scene.get_int("sawBottomRight"), 1204);
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **Each corner reaches a layer by its own name, and `clientRadius` is the
+    /// largest of them.**
+    ///
+    /// The test that can see a transposition: four declared values, all
+    /// different, against four defaults that are also all different, so a pair
+    /// written in the wrong order produces a number no correct run produces.
+    /// `a_layer_is_told_the_clients_radius` cannot -- every corner there is 12,
+    /// and so is every permutation of it.
+    ///
+    /// **`client.radius: 99` is declared and must not appear anywhere.** All
+    /// four corners override it, so it is the fallback that is never taken; an
+    /// implementation that wrote the style's own `radius` through to
+    /// `clientRadius` instead of `largest()` reads back 991 here, and passes
+    /// every other test in this file.
+    ///
+    /// The top-left is a written **zero**, which is the corner a square-topped
+    /// style declares and the one a default of 0 could never have shown: it
+    /// reads back 1, where an unwritten property reads 201.
+    #[test]
+    fn a_layer_is_told_each_corner_and_the_largest_of_them() {
+        on_the_qt_thread(|| {
+            let dir = radius_fixture(
+                "told-corners",
+                "client.radius: 99
+                 client.radiusTopLeft: 0
+                 client.radiusTopRight: 6
+                 client.radiusBottomLeft: 14
+                 client.radiusBottomRight: 8",
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            let layer = decoration.layers.first_mut().expect("the one layer");
+
+            assert_eq!(
+                layer.scene.get_int("sawTopLeft"),
+                1,
+                "a square corner has to be written as 0; 201 is the property \
+                 left untouched, and a layer would hug a curve nobody cut"
+            );
+            assert_eq!(layer.scene.get_int("sawTopRight"), 602);
+            assert_eq!(layer.scene.get_int("sawBottomLeft"), 1403);
+            assert_eq!(layer.scene.get_int("sawBottomRight"), 804);
+            assert_eq!(
+                layer.scene.get_int("sawRadius"),
+                141,
+                "the singular is the LARGEST of the four -- its one in-tree use \
+                 is `clientRadius + 2`, an outward hug, which has to clear the \
+                 biggest cut. 991 means the style's own `client.radius` was \
+                 written through, and it is the value no corner took"
+            );
 
             let _ = std::fs::remove_dir_all(&dir);
         });
@@ -2841,6 +2948,14 @@ mod tests {
                 "a style declaring no radius must say so; 71 means the property \
                  was never written and the layer is hugging a curve nobody cut"
             );
+            // And all four corners, on the same terms. Each has its own
+            // non-zero default, so each of these says separately that the
+            // compositor wrote a zero rather than that it wrote nothing --
+            // which is the only way to catch three of four being written.
+            assert_eq!(layer.scene.get_int("sawTopLeft"), 1, "201 is unwritten");
+            assert_eq!(layer.scene.get_int("sawTopRight"), 2, "302 is unwritten");
+            assert_eq!(layer.scene.get_int("sawBottomLeft"), 3, "403 is unwritten");
+            assert_eq!(layer.scene.get_int("sawBottomRight"), 4, "504 is unwritten");
 
             let _ = std::fs::remove_dir_all(&dir);
         });
