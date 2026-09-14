@@ -388,7 +388,14 @@ git commit -m "render: draw nodes deepest last, and equal depths as the stack ga
 
 **Interfaces:**
 - Consumes: `Frame::{z, pivot}`.
-- Produces: `sol.present(id, { z = 2, pivot_x = 0, pivot_y = 1 })` and the same three keys on `sol.present_group`.
+- Produces: `sol.present(id, { z = 2, pivot_x = 0, pivot_y = 1 })`.
+
+**NOT on `sol.present_group`, and this line originally asked for it.** Declined during implementation, upheld on review, verified from source both ways:
+
+* A group is **one matrix and one point** (`group.rs:136` is `matrix: frame.matrix.then(self.matrix)`), so a group pivot could only *overrule* each member's own — against the promise that a window tilted inside a moving desk stays tilted within it, which is stated in `docs/modes.md:106`, the spec at line 73, `group.rs:25`, **and pinned by a test at `group.rs:648`**. And it still would not be the desk turning as one, which needs the group rectangle `group.rs:80-86` already names as the honest limit of that stage.
+* A group `z` would reach only **part** of a selection. `by_depth` is called once, over the pane walk; scripted surfaces go through four fixed call sites (`render.rs:793, 829, 1200, 1233`) each hardcoding a `Layer`, never sorted. **A raised desk would leave its own wallpaper behind.**
+
+The `opacity` precedent does not transfer: opacity composes multiplicatively (`group.rs:135`), `z` and `pivot` cannot.
 
 - [ ] **Step 1: Write the failing test**
 
