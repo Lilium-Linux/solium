@@ -568,39 +568,44 @@ mod tests {
     /// the top-left corner leaves that corner exactly where it was -- which is
     /// the whole difference, and the reason a card stack needs this.
     ///
-    /// The rect is 200x100 and one of the pivots is asymmetric, because a
-    /// square rect cannot see a transposed pivot and neither can a pivot that
-    /// reads the same both ways round: `(0.5, 0.5)` and `(0.0, 0.0)` are their
-    /// own transpositions, so `(1.0, 0.0)` is here to be the one that is not.
+    /// **Size, location and pivot each carry two different numbers**, because a
+    /// pair that reads the same both ways round cannot see the components of
+    /// that pair being swapped. A square rect hides a transposed size; an
+    /// origin at `(100, 100)` hides a transposed location; and `(0.5, 0.5)` and
+    /// `(0.0, 0.0)` are their own transpositions, so `(1.0, 0.0)` is here to be
+    /// the pivot that is not. Three symmetries, three swaps, one rule.
     #[test]
     fn a_pivot_is_the_point_the_matrix_leaves_alone() {
-        let rect = Rectangle::<f64, Logical>::new((100.0, 100.0).into(), (200.0, 100.0).into());
+        let rect = Rectangle::<f64, Logical>::new((40.0, 90.0).into(), (200.0, 100.0).into());
         let turn = Mat4::rotate_z(std::f32::consts::FRAC_PI_2);
 
         let centred = mesh(rect, turn, None, (0.5, 0.5), 1.0).expect("a mesh");
         let cornered = mesh(rect, turn, None, (0.0, 0.0), 1.0).expect("a mesh");
 
-        // Vertex 0 is (u, v) = (0, 0): the rect's top-left, at (100, 100).
+        // Vertex 0 is (u, v) = (0, 0): the rect's top-left, at (40, 90).
         let (cx, cy) = (cornered.vertices[0].x, cornered.vertices[0].y);
         assert!(
-            (cx - 100.0).abs() < 0.01 && (cy - 100.0).abs() < 0.01,
+            (cx - 40.0).abs() < 0.01 && (cy - 90.0).abs() < 0.01,
             "a turn about the top-left leaves the top-left alone, got ({cx}, {cy})"
         );
-        // And about the centre it does not, or the test above proves nothing.
+        // A negative control, and only that: about the centre the top-left
+        // moves. It is satisfied by almost any wrong pivot, so it catches
+        // nothing on its own -- it is here so the assertion above cannot be
+        // passed by a `mesh` that simply never moves anything.
         let (mx, my) = (centred.vertices[0].x, centred.vertices[0].y);
         assert!(
-            (mx - 100.0).abs() > 1.0 || (my - 100.0).abs() > 1.0,
+            (mx - 40.0).abs() > 1.0 || (my - 90.0).abs() > 1.0,
             "a turn about the centre moves the top-left, got ({mx}, {my})"
         );
 
-        // `(1.0, 0.0)` is the top-right corner, at (300, 100). Read the pair
-        // the other way round and the pivot is (100, 200) instead -- the one
-        // mistake a square window would hide.
+        // `(1.0, 0.0)` is the top-right corner, at (240, 90). Read the pair the
+        // other way round and the pivot is (40, 190) instead -- the mistake a
+        // square window would hide.
         let top_right = mesh(rect, turn, None, (1.0, 0.0), 1.0).expect("a mesh");
         // Vertex 1 is (u, v) = (1, 0): the rect's top-right.
         let (tx, ty) = (top_right.vertices[1].x, top_right.vertices[1].y);
         assert!(
-            (tx - 300.0).abs() < 0.01 && (ty - 100.0).abs() < 0.01,
+            (tx - 240.0).abs() < 0.01 && (ty - 90.0).abs() < 0.01,
             "a turn about the top-right leaves the top-right alone, got ({tx}, {ty})"
         );
     }
@@ -610,32 +615,46 @@ mod tests {
     ///
     /// Checked as a property, not against a second copy of the old arithmetic.
     /// A point reflection -- `scale(-1, -1, 1)` -- sends every point to its
-    /// opposite through the pivot, so it maps the rect onto itself exactly
-    /// when the pivot is the rect's centre: the top-left lands on the
-    /// bottom-right and the bottom-right on the top-left. Move the pivot
-    /// anywhere else and both land somewhere else. There is no trigonometry in
-    /// it, so the comparison is exact rather than within an epsilon.
+    /// opposite through the pivot, so it maps the rect onto itself exactly when
+    /// the pivot is the rect's centre. That is **one** equation, `2P = TL + BR`,
+    /// asserted from both ends because the pair reads better than the half; it
+    /// is not two independent checks, and dropping either loses nothing.
+    ///
+    /// There is no trigonometry in a point reflection and `scale` leaves the
+    /// bottom row of the matrix at `0, 0, 0, 1`, so `w` is exactly 1, the
+    /// perspective divide is exact, and every value involved is a small
+    /// integer. Hence `assert_eq!` on f32 rather than an epsilon.
+    ///
+    /// The rect's origin is asymmetric for the reason the test above gives.
     #[test]
     fn the_default_pivot_is_the_centre_it_replaced() {
-        let rect = Rectangle::<f64, Logical>::new((0.0, 0.0).into(), (300.0, 200.0).into());
+        let rect = Rectangle::<f64, Logical>::new((40.0, 70.0).into(), (300.0, 200.0).into());
         let through =
             mesh(rect, Mat4::scale(-1.0, -1.0, 1.0), None, (0.5, 0.5), 1.0).expect("a mesh");
 
         // Vertices 0 and 2 are (u, v) = (0, 0) and (1, 1): the rect's top-left
-        // and its bottom-right, which the reflection exchanges.
+        // at (40, 70) and its bottom-right at (340, 270), which it exchanges.
         assert_eq!(
             (through.vertices[0].x, through.vertices[0].y),
-            (300.0, 200.0),
+            (340.0, 270.0),
             "the top-left reflects onto the bottom-right"
         );
         assert_eq!(
             (through.vertices[2].x, through.vertices[2].y),
-            (0.0, 0.0),
-            "the bottom-right reflects onto the top-left"
+            (40.0, 70.0),
+            "and the bottom-right back onto the top-left: the same equation"
         );
 
-        // And through a matrix a window would really carry. A rotation about
-        // the centre is symmetric about it, so the corners average back to it.
+        // A second pin on the pivot, through a matrix with trigonometry in it.
+        //
+        // **This says nothing about the rotation** -- it would pass identically
+        // with `Mat4::IDENTITY`, and that is the point rather than a weakness.
+        // The six offsets of the triangle list `[TL, TR, BR, TL, BR, BL]` sum
+        // to exactly zero about the pivot, so for *any* linear map the mesh's
+        // mean lands back on the pivot itself. Asserting it lands on the rect's
+        // centre therefore pins the pivot there whatever matrix a window
+        // carries -- which is the one thing this test is about. The finiteness
+        // check is along for the ride.
         let turned = mesh(rect, Mat4::rotate_y(0.3), None, (0.5, 0.5), 1.0).expect("a mesh");
         let (mut sum_x, mut sum_y) = (0.0_f32, 0.0_f32);
         for corner in &turned.vertices {
@@ -647,8 +666,8 @@ mod tests {
         let count = turned.vertices.len() as f32;
         let (average_x, average_y) = (sum_x / count, sum_y / count);
         assert!(
-            (average_x - 150.0).abs() < 0.001 && (average_y - 100.0).abs() < 0.001,
-            "a turn about the centre leaves the mesh centred on it, got ({average_x}, {average_y})"
+            (average_x - 190.0).abs() < 0.001 && (average_y - 170.0).abs() < 0.001,
+            "the mesh's mean is the pivot, which is the centre, got ({average_x}, {average_y})"
         );
     }
 }
