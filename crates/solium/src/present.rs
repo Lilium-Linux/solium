@@ -324,28 +324,28 @@ impl Blend for Frame {
             // animate the angle instead and rebuild the matrix per frame.
             matrix: self.matrix.blend(other.matrix, progress),
             deform: Deform::blend(self.deform, other.deform, progress),
-            // A straight line, like every other number here, because both ends
-            // are this trait's contract — `0.0` is `self` exactly, `1.0` has
-            // arrived — and a straight line is the only reading continuous at
-            // both. A depth that stepped would cross its neighbours between one
-            // frame and the next rather than rising past them; a pivot that
-            // took its destination's value up front would turn the first frame
-            // about a point the animation is never at. Not that either is
-            // reachable yet: nothing sets them, so both ends are the defaults
-            // and this is a no-op on every path that exists today.
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "a depth is a small float either way"
-            )]
-            z: mix(f64::from(self.z), f64::from(other.z)) as f32,
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "a pivot is a fraction of the rect either way"
-            )]
-            pivot: (
-                mix(f64::from(self.pivot.0), f64::from(other.pivot.0)) as f32,
-                mix(f64::from(self.pivot.1), f64::from(other.pivot.1)) as f32,
-            ),
+            // These two select rather than measure, so they arrive at the first
+            // frame and stay — the rule `Deform::mix` above already applies to
+            // its anchor, and for a related reason: there is no meaningful
+            // value part of the way between two of them.
+            //
+            // A depth is a sort key over a painter's-algorithm list, not a
+            // coordinate in a depth buffer. Two windows swap which is drawn
+            // over the other in one frame whatever the number does in between,
+            // so a sweep buys no continuity at all and costs correctness for
+            // the animation's whole duration: raise a window from 0.0 to 5.0
+            // past a neighbour at 3.0 and a swept depth draws it *behind* that
+            // neighbour for the first 60% of its own raise.
+            //
+            // A pivot is unobservable while `self.matrix` is identity, which is
+            // the ordinary case of animating from rest into a rotation — so
+            // taking the destination costs nothing there, where sweeping would
+            // turn the card about an axis drifting from the centre to the edge.
+            // The case that could notice the step needs a re-present part way
+            // through a rotation, and there no policy is right, because the
+            // matrix would have to be re-conjugated about the new pivot anyway.
+            z: other.z,
+            pivot: other.pivot,
         }
     }
 }
@@ -362,7 +362,21 @@ impl Blend for Frame {
 ///
 /// So the holder below is generic and this is the one thing it needs.
 pub(crate) trait Blend: Copy {
-    /// This, `progress` of the way toward `other`. `0.0` is `self` exactly.
+    /// This, `progress` of the way toward `other`.
+    ///
+    /// Not every field sweeps, and which do is not a matter of taste:
+    ///
+    /// * A field that **measures** is `self` exactly at `0.0` and moves —
+    ///   [`Frame`]'s `rect`, `opacity` and `matrix`, and a [`Deform`]'s
+    ///   parameters. Half way between two of these is a value in its own right.
+    /// * A field that **selects** takes the destination's from the first frame
+    ///   and holds it — a [`Deform`]'s anchor, and a [`Frame`]'s `z` and
+    ///   `pivot`. Half way between two of these is nothing: no identity between
+    ///   two dock icons, no position between two places in a stacking order,
+    ///   and nothing observing a pivot while the matrix is still identity.
+    ///
+    /// So `0.0` is `self` in every field that has a half way, and the
+    /// destination in the ones that do not.
     fn blend(self, other: Self, progress: f64) -> Self;
 }
 
@@ -767,15 +781,25 @@ mod tests {
         assert_eq!(smaller.pivot, (0.0, 1.0));
     }
 
-    /// **A blend starts at one frame's depth and pivot and arrives at the
-    /// other's.** `blend` writes every field out by hand, so it is the literal
-    /// most likely to drop one quietly; and the two ends are the [`Blend`]
-    /// trait's own contract rather than a policy about the middle.
+    /// **A blend has its destination's depth and pivot from the first frame.**
+    /// These two *select* rather than *measure*, so they take the destination
+    /// and hold it instead of sweeping — the rule `Deform::mix` already
+    /// applies to its anchor, and the one [`Blend`] now states.
     ///
-    /// Both pivots are asymmetric, so reading `.0` and `.1` the wrong way
-    /// round -- or blending from `other` towards `self` -- fails here.
+    /// A depth is a sort key over a painter's-algorithm list, not a coordinate
+    /// in a depth buffer, so there is no smooth crossing to be had: two windows
+    /// swap which is drawn over the other in one frame whatever the number does
+    /// in between. Swept, a window raised from 0.0 past a neighbour at 3.0 is
+    /// drawn *behind* that neighbour for the first 60% of its own raise, which
+    /// is the opposite of what raising it means.
+    ///
+    /// Every value is distinct and both pivots are asymmetric, so taking
+    /// `self`'s, sweeping between them, and reading `.0` and `.1` the wrong way
+    /// round all fail here. `0.0` is the sample that discriminates; `0.3` and
+    /// `1.0` only confirm the value is held for the whole animation rather than
+    /// at its ends.
     #[test]
-    fn a_blend_starts_at_one_depth_and_pivot_and_arrives_at_the_other() {
+    fn a_blend_has_its_destinations_depth_and_pivot_from_the_first_frame() {
         let mut from = Frame::real(rect(10, 20, 300, 200));
         from.z = 2.0;
         from.pivot = (0.0, 1.0);
@@ -783,23 +807,18 @@ mod tests {
         to.z = 9.0;
         to.pivot = (0.25, 0.75);
 
-        let start = from.blend(to, 0.0);
-        assert!(
-            (start.z - 2.0).abs() < f32::EPSILON,
-            "`0.0` is `self` exactly"
-        );
-        assert_eq!(start.pivot, (0.0, 1.0), "`0.0` is `self` exactly");
-
-        let end = from.blend(to, 1.0);
-        assert!(
-            (end.z - 9.0).abs() < f32::EPSILON,
-            "an animation has to arrive at the depth it was aimed at"
-        );
-        assert_eq!(
-            end.pivot,
-            (0.25, 0.75),
-            "an animation has to arrive at the pivot it was aimed at"
-        );
+        for progress in [0.0, 0.3, 1.0] {
+            let blended = from.blend(to, progress);
+            assert!(
+                (blended.z - 9.0).abs() < f32::EPSILON,
+                "at {progress}: the depth it was aimed at, not one frame behind"
+            );
+            assert_eq!(
+                blended.pivot,
+                (0.25, 0.75),
+                "at {progress}: the pivot it was aimed at, not one frame behind"
+            );
+        }
     }
 
     #[test]
