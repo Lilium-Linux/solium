@@ -29,7 +29,7 @@ a demo into a regression test.
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
-| `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and a click still lands on the window the *layout* has on top |
+| `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
@@ -45,21 +45,31 @@ defaults passes the entire suite. So this measures pixels instead: it places one
 window at a known rect, turns it twenty degrees about two different points, and
 reports where the corner went.
 
-The corner is the whole difficulty. A rotated window's top-left is not the
-top-left of anything in the picture — it is one particular vertex of a quad, and
-a `pivot` that was silently dropped still draws a perfectly good-looking
-rotation about the centre. Side by side the two frames are indistinguishable.
-So the client prints a marker block at its home position, the marker travels
-with the corner, and `present-check/measure.py` names the quad vertex nearest
-it.
+The corner is the whole difficulty, and "look at it" is not a weaker version of
+this check — it is not a check at all. A rotated window's top-left is not the
+top-left of anything in the picture: it is one particular vertex of a quad, and
+which one cannot be read off the image. Drop the `pivot` and the frame that
+asked to turn about its own corner comes back **byte for byte identical** to the
+frame that asked to turn about its centre — `cmp -l` counts zero differing
+bytes, against 382,961 between the two correct frames. There is no visual signal
+to miss because there is none to have. So the client prints a marker block at
+its home position, the marker travels with the corner, and
+`present-check/measure.py` names the quad vertex nearest it.
 
-The third claim is the one no screenshot can make. With a window raised above
-the one that covers it, a click in the overlap must still go to the window the
-layout has on top: `Solium::window_under` walks panes in stacking order and
-tests the drawn `rect`, and `z` never enters it. That is deliberate — `rect`
-following a transform is what lets a script hit-test an overview thumbnail
-without knowing it set one — and it is checked here so that a later change
-cannot quietly make raising a window also mean raising its clicks.
+The last two claims are the ones no screenshot can make, and they are two halves
+of the same rule. `Solium::window_under` walks panes in stacking order and tests
+`drawn_at(..).rect.contains(location)`:
+
+* **`z` never enters the walk.** A window raised over the one covering it is
+  drawn in front and still does not take its clicks. Checked with *three*
+  windows, the third parked out of the way holding focus — with only two, the
+  window that should take the click is already focused, "it worked" and "nothing
+  happened" produce the same log, and the check rests entirely on the compositor
+  emitting a focus event for a no-change refocus.
+* **`rect` does.** A window presented somewhere else takes clicks where it is
+  drawn and not where it lives. This is the likelier regression by far —
+  `outer.contains` is the obvious-looking simplification, it inverts both clicks,
+  and it passes every other check in here.
 
     SOLIUM_CHECK_DIR=/tmp/present ./dev/present-check.sh   # keep the frames
 
