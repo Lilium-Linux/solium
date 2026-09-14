@@ -37,7 +37,9 @@ use smithay::{
     },
     utils::{Buffer as BufferCoords, Physical, Point, Rectangle, Scale, Size, Transform},
 };
-use solium_effects::fragment::{Effect, Inputs, RADIUS_UNIFORM, ROUNDED_CORNERS, SIZE_UNIFORM};
+use solium_effects::fragment::{
+    Corners, Effect, Inputs, RADIUS_UNIFORM, ROUNDED_CORNERS, SIZE_UNIFORM,
+};
 
 /// Whether this node's effects need the node rendered to a texture first, and
 /// which effect wants it.
@@ -117,7 +119,7 @@ pub(crate) fn refused(effects: &[Effect]) -> Option<Effect> {
         .find(|effect| !effect.is_none_effect() && !runnable(effect.inputs()))
 }
 
-/// A declared radius, in the **physical** pixels the shader measures in.
+/// The declared radii, in the **physical** pixels the shader measures in.
 ///
 /// **This is the seam `fragment::RADIUS_UNIFORM` names, and it is the whole of
 /// it.** [`Effect::radii`] is logical, because a style writes `radius: 12`
@@ -130,17 +132,21 @@ pub(crate) fn refused(effects: &[Effect]) -> Option<Effect> {
 /// perfect on the machine it was written on and wrong on every HiDPI one --
 /// and wrong *differently* on each screen of a desk with two scales, since
 /// `scale` here is the capturing monitor's and not a constant.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "a corner radius is tens of pixels; f32 is what the uniform takes"
-)]
-pub(crate) fn physical_radius(effect: Effect, scale: f64) -> f32 {
-    // Provisional: `largest()` stands in for a single radius because nothing
-    // upstream constructs a `Corners` with differing corners yet -- this
-    // returns one `f32`, sent to all four components of the shader's `vec4`
-    // uniform below. A later task replaces this with four genuinely
-    // different physical values, one per corner.
-    (effect.largest() * scale) as f32
+///
+/// **Four multiplies and not one.** Scaling a single number -- the largest,
+/// say -- and copying it to the other three is the same defect one step in:
+/// exactly right whenever the corners agree, and wrong by the ratio between
+/// them the moment they do not, which is the case this whole change exists
+/// for. `Corners` keeps its own field order here and everywhere, because that
+/// order is what the shader indexes `corner_radius` by.
+pub(crate) fn physical_radii(effect: Effect, scale: f64) -> Corners {
+    let radii = effect.radii();
+    Corners {
+        top_left: radii.top_left * scale,
+        top_right: radii.top_right * scale,
+        bottom_left: radii.bottom_left * scale,
+        bottom_right: radii.bottom_right * scale,
+    }
 }
 
 /// The largest rectangle certainly inside a rounded rect.
@@ -154,13 +160,29 @@ pub(crate) fn physical_radius(effect: Effect, scale: f64) -> f32 {
 /// blending disabled (`gles/mod.rs:2585`), the element's own transparency
 /// stops working there too. So every choice below is the small one.
 ///
-/// Inset by the radius on all four sides. Not the tightest region possible --
-/// the tightest is a cross, since only the four corner squares have anything
-/// cut out of them -- but the cross is three rectangles where this is one, and
-/// this is certainly inside. `ROUNDED_CORNERS` folds the coordinate into one
-/// quadrant and measures `abs(p) - (half - r)`, which is `<= 0` on both axes
-/// exactly when the point is at least `r` from every edge; the shader then
-/// reports `-r` for it, uncut.
+/// `sides` is `(top, right, bottom, left)`, **each side inset on its own** --
+/// the tuple [`Corners::max_of_side`] returns, in the order it returns it.
+/// Each side is measured by the larger of the two corners that touch it,
+/// because a side gives up rows only to a corner that is really cut: a
+/// square-topped, round-bottomed window that inset all four by one number
+/// would throw away twelve rows of a top nothing cuts. That costs drawing and
+/// never correctness, which is why it went unnoticed while one radius was the
+/// only shape there was -- but it is a cost paid for nothing.
+///
+/// **The order is the one thing here that fails silently.** Four `f64`s in a
+/// tuple type-check in any arrangement, and transposing `right` with `left`
+/// draws perfectly on every symmetric window, which is every window a test
+/// writes by accident. `a_side_with_no_cut_corner_is_not_inset` is the case
+/// that separates them.
+///
+/// Not the tightest region possible -- the tightest is a cross, since only the
+/// four corner squares have anything cut out of them -- but the cross is three
+/// rectangles where this is one, and this is certainly inside.
+/// `ROUNDED_CORNERS` picks a radius per quadrant, folds the coordinate into
+/// one corner and measures `abs(p) - (half - r)`, which is `<= 0` on both axes
+/// exactly when the point is at least that quadrant's `r` from both of the
+/// edges it touches; the shader then reports `-r` for it, uncut. Insetting a
+/// side by the larger of its two corners clears both of them.
 ///
 /// `ceil`, because a physical radius is a logical one times an output scale
 /// and is rarely whole: 13 logical at 1.25 is 16.25, and rounding that down
@@ -168,23 +190,33 @@ pub(crate) fn physical_radius(effect: Effect, scale: f64) -> f32 {
 ///
 /// Saturating throughout, because `Effect::rounded(Corners::all(1e30))` is
 /// accepted upstream -- `is_none_effect` refuses only zero, negatives and
-/// NaN -- and `radius as i32` saturates at `i32::MAX`, where `inset * 2` is
-/// a debug panic in the middle of a frame.
+/// NaN -- and `radius as i32` saturates at `i32::MAX`, where adding two of
+/// them is a debug panic in the middle of a frame.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "clamped to i32's range on the line above the cast"
 )]
 pub(crate) fn opaque_inside(
     rect: Rectangle<i32, Physical>,
-    radius: f64,
+    sides: (f64, f64, f64, f64),
 ) -> Rectangle<i32, Physical> {
-    let inset = radius.ceil().clamp(0.0, f64::from(i32::MAX)) as i32;
-    let w = rect.size.w.saturating_sub(inset.saturating_mul(2)).max(0);
-    let h = rect.size.h.saturating_sub(inset.saturating_mul(2)).max(0);
+    let whole = |side: f64| side.ceil().clamp(0.0, f64::from(i32::MAX)) as i32;
+    let (top, right, bottom, left) = sides;
+    let (top, right, bottom, left) = (whole(top), whole(right), whole(bottom), whole(left));
+    let w = rect
+        .size
+        .w
+        .saturating_sub(left.saturating_add(right))
+        .max(0);
+    let h = rect
+        .size
+        .h
+        .saturating_sub(top.saturating_add(bottom))
+        .max(0);
     Rectangle::new(
         (
-            rect.loc.x.saturating_add(inset),
-            rect.loc.y.saturating_add(inset),
+            rect.loc.x.saturating_add(left),
+            rect.loc.y.saturating_add(top),
         )
             .into(),
         (w, h).into(),
@@ -244,6 +276,51 @@ pub(crate) fn covers(
             .is_empty()
 }
 
+/// Whether every corner is cut by at least half a physical pixel, which is
+/// what it takes for **any** of this window to be opaque.
+///
+/// `ROUNDED_CORNERS` omits the interior term of the rounded-box field: it
+/// reports `-r` at *every* point inside the shape rather than the real
+/// distance to the edge, and that answer goes through
+/// `smoothstep(-0.5, 0.5, away)`. So a quadrant whose radius is under half a
+/// pixel is not softened at an arc -- it is drawn **uniformly translucent**,
+/// all of it, and a zero radius lands exactly on the smoothstep's midpoint and
+/// draws that quarter of the window at 50%. `dev/wirecheck` says the same
+/// thing from the other end: an unset `corner_radius` clamps `r` to 0 and
+/// "the whole texture comes back at alpha 127".
+///
+/// **Per corner, and that is the change a square corner forces.** With one
+/// radius this could only be reached by a style asking for a sub-pixel
+/// rounding, which nothing sensible does. With four it is the ordinary
+/// square-topped window -- `radiusTopLeft: 0` -- and claiming its top rows
+/// opaque would hand a 50%-alpha quadrant to a draw with blending disabled
+/// (`gles/mod.rs:2585`), which paints over the wallpaper rather than blending
+/// with it.
+///
+/// **This is conservative against a shader defect and not against geometry.**
+/// A square corner *should* be opaque up to its own edge; it is the missing
+/// `min(max(p.x, p.y), 0.0)` term that makes it translucent instead. Adding
+/// that term is a change to `fragment.rs` -- out of this file, and it would
+/// leave every other fragment's answer untouched, since the term is zero
+/// wherever either component of `p` is positive. Until it is added, this
+/// refuses the whole window: a window drawn at half alpha over the wallpaper
+/// merely looks wrong, and one drawn at half alpha with blending off corrupts
+/// what is behind it.
+///
+/// NaN answers `false` here -- `NaN >= 0.5` is false -- and is named rather
+/// than left to fall out of a negation, because it compares false against
+/// every bound and would otherwise reach [`opaque_inside`] and inset by zero.
+fn every_corner_is_cut(radii: Corners) -> bool {
+    [
+        radii.top_left,
+        radii.top_right,
+        radii.bottom_left,
+        radii.bottom_right,
+    ]
+    .into_iter()
+    .all(|radius| radius >= 0.5)
+}
+
 /// The part of a rounded capture that is certainly opaque on screen, **as a
 /// rectangle relative to the element**, or `None` if none of it is.
 ///
@@ -264,13 +341,10 @@ pub(crate) fn covers(
 ///   `alpha` separately and never multiplies one into the other, so an element
 ///   has to do it -- smithay's own `TextureRenderElement` returns nothing below
 ///   1.0 (`element/texture.rs:647`) for exactly this reason;
-/// * the radius is under half a physical pixel. `ROUNDED_CORNERS` omits the
-///   interior term of the rounded-box field, so it reports `-r` at *every*
-///   point inside the shape rather than the real distance; through
-///   `smoothstep(-0.5, 0.5, away)` that makes a window with a sub-half-pixel
-///   radius uniformly translucent everywhere. NaN lands here too, named rather
-///   than left to fall out of a negation, because it compares false against
-///   every bound and would otherwise reach `opaque_inside` and inset by zero.
+/// * **any one** of the four radii is under half a physical pixel -- see
+///   [`every_corner_is_cut`], which is where the whole of that argument is
+///   written down. One corner is enough, because the shader picks its radius
+///   per quadrant and a quadrant is a quarter of the window.
 ///
 /// `widen` is the last of it, and it is the one a 1:1 screen cannot feel. The
 /// radius is in the **texture's** pixels, and the texture is not always drawn
@@ -282,19 +356,32 @@ pub(crate) fn covers(
 /// which is the expensive direction. [`crate::render::ratio`] is the same
 /// number `elements` scales the ordinary path by, asked here rather than
 /// defined a second time, and it answers 1.0 for the degenerate sizes.
+///
+/// It widens all four the same, because it is the *texture* that is being
+/// stretched: one capture, one rect, one ratio per axis, and the larger of the
+/// two taken for every side. A per-side ratio would be a second answer to a
+/// question the texture has already answered.
 pub(crate) fn opaque_of(
     dst: Rectangle<i32, Physical>,
     texture: Size<i32, Physical>,
-    radius: f32,
+    radii: Corners,
     alpha: f32,
     capture_opaque: bool,
 ) -> Option<Rectangle<i32, Physical>> {
-    if !capture_opaque || alpha < 1.0 || radius < 0.5 || radius.is_nan() {
+    if !capture_opaque || alpha < 1.0 || !every_corner_is_cut(radii) {
         return None;
     }
     let widen = crate::render::ratio(f64::from(dst.size.w), texture.w)
         .max(crate::render::ratio(f64::from(dst.size.h), texture.h));
-    let region = opaque_inside(Rectangle::from_size(dst.size), f64::from(radius) * widen);
+    // `(top, right, bottom, left)`, in that order into `opaque_inside`, which
+    // takes it in that order. Destructured and rebuilt by name rather than
+    // mapped over a tuple, so a transposition here has to be written out on
+    // purpose.
+    let (top, right, bottom, left) = radii.max_of_side();
+    let region = opaque_inside(
+        Rectangle::from_size(dst.size),
+        (top * widen, right * widen, bottom * widen, left * widen),
+    );
     (!region.is_empty()).then_some(region)
 }
 
@@ -418,8 +505,8 @@ pub(crate) struct Pass {
     texture: GlesTexture,
     /// The texture's own size, which is what the shader measures in.
     size: Size<i32, Physical>,
-    /// **Physical** pixels; see [`physical_radius`].
-    radius: f32,
+    /// **Physical** pixels, all four; see [`physical_radii`].
+    radii: Corners,
     /// Whether the client covered the whole capture with opaque regions of its
     /// own, which is the only thing that makes any of this texture opaque: it
     /// was cleared to transparent before the client drew into it. See
@@ -432,7 +519,7 @@ impl Pass {
     /// What `render::prepare` captured, and what it takes to draw it.
     ///
     /// `scale` is the monitor the capture was taken at, and is the one number
-    /// that turns `effect`'s logical radius into the shader's physical one.
+    /// that turns `effect`'s logical radii into the shader's physical ones.
     pub(crate) fn new(
         texture: GlesTexture,
         size: Size<i32, Physical>,
@@ -444,7 +531,7 @@ impl Pass {
         Self {
             texture,
             size,
-            radius: physical_radius(effect, scale),
+            radii: physical_radii(effect, scale),
             opaque,
             program,
         }
@@ -465,7 +552,7 @@ impl Pass {
             texture: self.texture.clone(),
             size: self.size,
             dst,
-            radius: self.radius,
+            radii: self.radii,
             opaque: self.opaque,
             program: self.program.clone(),
             alpha,
@@ -516,7 +603,9 @@ pub(crate) struct Rounded {
     /// Where the client goes on this output, which is not the texture's size:
     /// a window being animated is drawn smaller than it was captured.
     dst: Rectangle<i32, Physical>,
-    radius: f32,
+    /// **Physical** pixels, in `Corners`' own field order, which is the order
+    /// the shader indexes `corner_radius` by. See [`physical_radii`].
+    radii: Corners,
     /// See [`Pass::opaque`], whose copy this is.
     opaque: bool,
     program: GlesTexProgram,
@@ -543,7 +632,8 @@ impl Element for Rounded {
         self.dst
     }
 
-    /// The drawn rect, inset by the radius -- or nothing at all.
+    /// The drawn rect, inset on each side by the larger of the two corners
+    /// that touch it -- or nothing at all.
     ///
     /// **This is the point of the whole plan, and the reason rounded corners
     /// were chosen as the first effect rather than something prettier.** A
@@ -561,7 +651,7 @@ impl Element for Rounded {
     /// construct a `GlesTexture` or a `GlesTexProgram`, and this decision is
     /// too expensive to be wrong to leave where only a screen can check it.
     fn opaque_regions(&self, _scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
-        opaque_of(self.dst, self.size, self.radius, self.alpha, self.opaque)
+        opaque_of(self.dst, self.size, self.radii, self.alpha, self.opaque)
             .map_or_else(OpaqueRegions::default, |region| {
                 OpaqueRegions::from_slice(&[region])
             })
@@ -577,6 +667,10 @@ impl Element for Rounded {
 }
 
 impl RenderElement<GlesRenderer> for Rounded {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a corner radius is tens of pixels; f32 is what the uniform takes"
+    )]
     fn draw(
         &self,
         frame: &mut GlesFrame<'_, '_>,
@@ -598,18 +692,29 @@ impl RenderElement<GlesRenderer> for Rounded {
             self.alpha,
             Some(&self.program),
             &[
-                // All four corners the same: `self.radius` is one physical
-                // value -- see `physical_radius` -- and nothing upstream
-                // constructs a `Corners` with differing corners yet. The
-                // shader's `corner_radius` is a `vec4` now, so a 4-tuple is
-                // what has to reach it; sending a bare `f32` here would
-                // register as `_1f` against a `vec4` location and mismatch
-                // the `UniformType::_4f` this program was compiled with in
+                // **`(tl, tr, bl, br)`, which is `Corners`' own field order and
+                // is the order the shader indexes.** `corner_radius.x` is read
+                // where `v_coords` is in the top-left quadrant, `.y` top-right,
+                // `.z` bottom-left, `.w` bottom-right -- so this tuple and
+                // `Corners`' declaration have to stay in step, and nothing but
+                // a screen would notice if they stopped: a transposed pair
+                // draws a correct-looking window with its corners swapped, and
+                // on the overwhelmingly common window where all four agree it
+                // draws nothing wrong at all.
+                //
+                // A 4-tuple and not a bare `f32`, which would register as
+                // `_1f` against a `vec4` location and mismatch the
+                // `UniformType::_4f` this program was compiled with in
                 // `Programs::rounded`, leaving every fragment unset -- not a
                 // theoretical risk, `dev/wirecheck` hit exactly this.
                 Uniform::new(
                     RADIUS_UNIFORM,
-                    (self.radius, self.radius, self.radius, self.radius),
+                    (
+                        self.radii.top_left as f32,
+                        self.radii.top_right as f32,
+                        self.radii.bottom_left as f32,
+                        self.radii.bottom_right as f32,
+                    ),
                 ),
                 // Both physical, which is the pair the shader's `v_coords *
                 // tex_size` arithmetic is written against. If this never
@@ -631,8 +736,10 @@ impl RenderElement<GlesRenderer> for Rounded {
 
 #[cfg(test)]
 mod tests {
+    // `Corners` arrives with everything else: `pass` imports it at the top of
+    // the file now that `Rounded` holds one, so a second `use` here would be
+    // the same name reached two ways.
     use super::*;
-    use solium_effects::fragment::Corners;
 
     /// The question the renderer asks every pane, every frame. It has to be
     /// cheap and it has to answer `None` for the overwhelmingly common case,
@@ -701,9 +808,38 @@ mod tests {
     #[test]
     fn a_declared_radius_becomes_physical_pixels_at_the_monitors_scale() {
         let rounded = Effect::rounded(Corners::all(12.0));
-        assert!((physical_radius(rounded, 2.0) - 24.0).abs() < f32::EPSILON);
-        assert!((physical_radius(rounded, 1.5) - 18.0).abs() < f32::EPSILON);
-        assert!((physical_radius(rounded, 1.0) - 12.0).abs() < f32::EPSILON);
+        assert_eq!(physical_radii(rounded, 2.0), Corners::all(24.0));
+        assert_eq!(physical_radii(rounded, 1.5), Corners::all(18.0));
+        assert_eq!(physical_radii(rounded, 1.0), Corners::all(12.0));
+    }
+
+    /// **All four are multiplied, and each stays its own corner.**
+    ///
+    /// The test above can see neither half of that: every corner of
+    /// `Corners::all(12.0)` is 12, so scaling one and copying it to the other
+    /// three passes it, and so does any permutation of the four. Four distinct
+    /// values at a scale that is not 1 is the only shape that fails both --
+    /// and 1.5 rather than 2.0, so that a doubling cannot pass for a multiply
+    /// either.
+    #[test]
+    fn each_corner_is_scaled_and_stays_its_own_corner() {
+        let declared = Corners {
+            top_left: 2.0,
+            top_right: 4.0,
+            bottom_left: 8.0,
+            bottom_right: 16.0,
+        };
+        assert_eq!(
+            physical_radii(Effect::rounded(declared), 1.5),
+            Corners {
+                top_left: 3.0,
+                top_right: 6.0,
+                bottom_left: 12.0,
+                bottom_right: 24.0,
+            },
+            "a corner that swaps places is a window rounded at the wrong end, \
+             and at 1x every wrong scaling agrees with the right one"
+        );
     }
 
     /// What this renderer can run at all, which is a different question from
@@ -763,26 +899,55 @@ mod tests {
     /// there instead is whatever the last frame left, which reads as four
     /// smears that follow the window around.
     ///
-    /// Inset by the radius on every side: the largest rectangle that is
-    /// certainly inside a rounded rect. Not the tightest possible region --
-    /// the tightest is a cross -- but it is right, and a region that is
-    /// smaller than the truth only costs drawing, where one larger than the
+    /// Inset on every side by the corner that cuts it: the largest rectangle
+    /// that is certainly inside a rounded rect. Not the tightest possible
+    /// region -- the tightest is a cross -- but it is right, and a region that
+    /// is smaller than the truth only costs drawing, where one larger than the
     /// truth costs correctness.
+    ///
+    /// All four equal here, which is the case every window had before this
+    /// change and the overwhelmingly common one after it. The asymmetric shape
+    /// is `a_side_with_no_cut_corner_is_not_inset`, one test down.
     #[test]
     fn a_rounded_rect_is_opaque_only_inside_its_corners() {
         let rect = Rectangle::<i32, Physical>::new((100, 100).into(), (300, 200).into());
-        let opaque = opaque_inside(rect, 20.0);
+        let opaque = opaque_inside(rect, (20.0, 20.0, 20.0, 20.0));
         assert_eq!(opaque.loc.x, 120);
         assert_eq!(opaque.loc.y, 120);
         assert_eq!(opaque.size.w, 260);
         assert_eq!(opaque.size.h, 160);
     }
 
+    /// **A square-topped window keeps its top rows.**
+    ///
+    /// The one-radius signature this replaced inset all four sides by the same
+    /// number, which for the Finder shape -- square on top, cut underneath --
+    /// would have thrown away twelve rows of a top that nothing cuts at all.
+    /// That costs drawing and never correctness, which is why nothing noticed
+    /// while a window had one radius; it is a cost paid for nothing.
+    ///
+    /// Four different numbers, and every side asserted, because the tuple is
+    /// where an ordering mistake is silent: `(0, 20, 20, 12)` transposed into
+    /// `(0, 12, 20, 20)` type-checks, draws identically on every symmetric
+    /// window, and fails here on `loc.x`.
+    #[test]
+    fn a_side_with_no_cut_corner_is_not_inset() {
+        let rect = Rectangle::<i32, Physical>::new((100, 100).into(), (300, 200).into());
+        let inside = opaque_inside(rect, (0.0, 20.0, 20.0, 12.0));
+        assert_eq!(inside.loc.y, 100, "nothing is cut along the top");
+        assert_eq!(
+            inside.loc.x, 112,
+            "the left side is inset by its larger corner"
+        );
+        assert_eq!(inside.size.h, 180, "only the bottom is taken");
+        assert_eq!(inside.size.w, 268);
+    }
+
     /// A radius larger than the window is not a negative rectangle.
     #[test]
     fn a_radius_bigger_than_the_window_claims_nothing() {
         let rect = Rectangle::<i32, Physical>::new((0, 0).into(), (30, 30).into());
-        let opaque = opaque_inside(rect, 40.0);
+        let opaque = opaque_inside(rect, (40.0, 40.0, 40.0, 40.0));
         assert_eq!(opaque.size.w, 0);
         assert_eq!(opaque.size.h, 0);
         // The location as well as the size, because the brief's two assertions
@@ -792,6 +957,13 @@ mod tests {
         // a claim somewhere arbitrary.
         assert_eq!(opaque.loc.x, 40);
         assert_eq!(opaque.loc.y, 40);
+        // And one side alone is enough, which the symmetric case above cannot
+        // say: each axis now subtracts a *sum* of two different sides, so a
+        // `max(0)` that was reached by both being large is not the same
+        // assertion as one reached by either.
+        let one_side = opaque_inside(rect, (40.0, 0.0, 0.0, 0.0));
+        assert_eq!(one_side.size.h, 0, "a top deeper than the window");
+        assert_eq!(one_side.size.w, 30, "and the other axis untouched by it");
     }
 
     /// Rounded **up**, and the whole test is the direction.
@@ -804,23 +976,46 @@ mod tests {
     #[test]
     fn a_fractional_radius_insets_by_the_whole_pixel_it_touches() {
         let rect = Rectangle::<i32, Physical>::new((0, 0).into(), (100, 100).into());
-        let opaque = opaque_inside(rect, 16.25);
+        let opaque = opaque_inside(rect, (16.25, 16.25, 16.25, 16.25));
         assert_eq!(opaque.loc.x, 17, "16.25 has to inset 17, not 16");
         assert_eq!(opaque.size.w, 66);
+        // Each side rounded on its own and not once for all four: with four
+        // sides there is a rounding per side, and one of them applied to the
+        // rest would claim a quarter-pixel column the shader cut on whichever
+        // sides it was not computed from.
+        let mixed = opaque_inside(rect, (16.25, 4.0, 0.25, 8.75));
+        assert_eq!(mixed.loc.y, 17);
+        assert_eq!(mixed.loc.x, 9, "8.75 has to inset 9");
+        assert_eq!(mixed.size.h, 82, "17 off the top and 1 off the bottom");
+        assert_eq!(mixed.size.w, 87, "9 off the left and 4 off the right");
     }
 
     /// `Effect::rounded(Corners::all(1e9))` is accepted upstream --
     /// `is_none_effect` refuses only zero, negatives and NaN -- so an absurd
     /// radius reaches here.
     ///
-    /// `radius.ceil() as i32` saturates at `i32::MAX`, and `inset * 2` on that
-    /// is an overflow: a debug panic, in the middle of a frame, taking the
-    /// compositor with it. Nothing else in this file would notice.
+    /// `radius.ceil() as i32` saturates at `i32::MAX`, and adding two of those
+    /// together is an overflow: a debug panic, in the middle of a frame, taking
+    /// the compositor with it. Nothing else in this file would notice.
+    ///
+    /// Two saturated sides on one axis and not one, because the inset per axis
+    /// is now `left + right` rather than `inset * 2` -- and `i32::MAX + 0` does
+    /// not overflow where `i32::MAX + i32::MAX` does.
     #[test]
     fn an_absurd_radius_does_not_overflow_the_inset() {
         let rect = Rectangle::<i32, Physical>::new((0, 0).into(), (100, 100).into());
-        assert!(opaque_inside(rect, 1e30).is_empty());
-        assert!(opaque_inside(rect, f64::INFINITY).is_empty());
+        assert!(opaque_inside(rect, (1e30, 1e30, 1e30, 1e30)).is_empty());
+        assert!(
+            opaque_inside(
+                rect,
+                (f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::INFINITY)
+            )
+            .is_empty()
+        );
+        assert!(
+            opaque_inside(rect, (1e30, 0.0, 1e30, 0.0)).is_empty(),
+            "one axis saturated at both ends is the sum that overflows"
+        );
     }
 
     /// **Relative to the element, not to the output.** Smithay's `Element`
@@ -836,7 +1031,7 @@ mod tests {
     /// rectangle instead of at four corners.
     ///
     /// Pinned by moving the window and asserting nothing changes. A version
-    /// that returned `opaque_inside(dst, radius)` agrees with every other test
+    /// that returned `opaque_inside(dst, sides)` agrees with every other test
     /// in this module, because all of them place the element at the origin.
     #[test]
     fn the_claim_is_relative_to_the_element_not_to_the_output() {
@@ -844,12 +1039,12 @@ mod tests {
         let at_origin = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
         let far_away = Rectangle::<i32, Physical>::new((1920, 1080).into(), texture);
         assert_eq!(
-            opaque_of(at_origin, texture, 20.0, 1.0, true),
-            opaque_of(far_away, texture, 20.0, 1.0, true),
+            opaque_of(at_origin, texture, Corners::all(20.0), 1.0, true),
+            opaque_of(far_away, texture, Corners::all(20.0), 1.0, true),
             "where the window is on screen cannot change what it claims"
         );
         assert_eq!(
-            opaque_of(far_away, texture, 20.0, 1.0, true),
+            opaque_of(far_away, texture, Corners::all(20.0), 1.0, true),
             Some(Rectangle::new((20, 20).into(), (260, 160).into())),
         );
     }
@@ -873,13 +1068,13 @@ mod tests {
         let texture = Size::<i32, Physical>::from((400, 400));
         let doubled = Rectangle::<i32, Physical>::new((0, 0).into(), (800, 800).into());
         assert_eq!(
-            opaque_of(doubled, texture, 20.0, 1.0, true),
+            opaque_of(doubled, texture, Corners::all(20.0), 1.0, true),
             Some(Rectangle::new((40, 40).into(), (720, 720).into())),
             "drawn at twice its size, the corner is twice as big"
         );
         let halved = Rectangle::<i32, Physical>::new((0, 0).into(), (200, 200).into());
         assert_eq!(
-            opaque_of(halved, texture, 20.0, 1.0, true),
+            opaque_of(halved, texture, Corners::all(20.0), 1.0, true),
             Some(Rectangle::new((10, 10).into(), (180, 180).into())),
             "and half as big drawn half the size"
         );
@@ -905,7 +1100,7 @@ mod tests {
         let wide = Size::<i32, Physical>::from((400, 200));
         let stretched = Rectangle::<i32, Physical>::new((0, 0).into(), (800, 200).into());
         assert_eq!(
-            opaque_of(stretched, wide, 20.0, 1.0, true),
+            opaque_of(stretched, wide, Corners::all(20.0), 1.0, true),
             Some(Rectangle::new((40, 40).into(), (720, 120).into())),
             "the horizontal arc doubled, so 40 is the inset on every side"
         );
@@ -916,9 +1111,47 @@ mod tests {
         let tall = Size::<i32, Physical>::from((200, 400));
         let stood_up = Rectangle::<i32, Physical>::new((0, 0).into(), (200, 800).into());
         assert_eq!(
-            opaque_of(stood_up, tall, 20.0, 1.0, true),
+            opaque_of(stood_up, tall, Corners::all(20.0), 1.0, true),
             Some(Rectangle::new((40, 40).into(), (120, 720).into())),
             "the vertical arc doubled, and the inset has to follow that axis too"
+        );
+    }
+
+    /// **Four radii land on four sides, in the right places.**
+    ///
+    /// The whole of this task between `Corners` and a rectangle, and the only
+    /// test in the module where a transposition can show. Every other
+    /// `opaque_of` case here is `Corners::all`, under which all six possible
+    /// swaps of the four fields, and both possible orderings of the tuple, give
+    /// the identical answer.
+    ///
+    /// The numbers are chosen so each side takes a *different* corner, which is
+    /// what makes `max_of_side` visible rather than assumed: the left side is
+    /// insetting by `bottom_left` because 30 beats `top_left`'s 6, and the top
+    /// by `top_right` because 20 beats the same 6. A `max_of_side` that took
+    /// the smaller of the two, or the first of them, fails on both.
+    ///
+    /// **Every corner is at least half a pixel on purpose.** Put a 0 in here
+    /// and the answer is `None` for a reason that has nothing to do with
+    /// sides -- see [`every_corner_is_cut`] -- and this test would be asserting
+    /// that guard rather than the arithmetic.
+    #[test]
+    fn each_side_is_inset_by_the_larger_of_the_two_corners_touching_it() {
+        let texture = Size::<i32, Physical>::from((300, 200));
+        let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
+        let radii = Corners {
+            top_left: 6.0,
+            top_right: 20.0,
+            bottom_left: 30.0,
+            bottom_right: 12.0,
+        };
+        // top = max(6, 20) = 20; right = max(20, 12) = 20;
+        // bottom = max(30, 12) = 30; left = max(6, 30) = 30.
+        assert_eq!(
+            opaque_of(dst, texture, radii, 1.0, true),
+            Some(Rectangle::new((30, 20).into(), (250, 150).into())),
+            "the left side is cut by its bottom corner and the top by its \
+             right one, so neither is the corner sharing its name"
         );
     }
 
@@ -939,10 +1172,13 @@ mod tests {
     fn a_fading_window_is_opaque_nowhere() {
         let texture = Size::<i32, Physical>::from((300, 200));
         let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
-        assert_eq!(opaque_of(dst, texture, 20.0, 0.5, true), None);
-        assert_eq!(opaque_of(dst, texture, 20.0, 0.999, true), None);
+        assert_eq!(opaque_of(dst, texture, Corners::all(20.0), 0.5, true), None);
+        assert_eq!(
+            opaque_of(dst, texture, Corners::all(20.0), 0.999, true),
+            None
+        );
         assert!(
-            opaque_of(dst, texture, 20.0, 1.0, true).is_some(),
+            opaque_of(dst, texture, Corners::all(20.0), 1.0, true).is_some(),
             "and a window that is not fading still claims its middle"
         );
     }
@@ -967,8 +1203,11 @@ mod tests {
     fn a_capture_the_client_left_translucent_is_opaque_nowhere() {
         let texture = Size::<i32, Physical>::from((300, 200));
         let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
-        assert_eq!(opaque_of(dst, texture, 20.0, 1.0, false), None);
-        assert!(opaque_of(dst, texture, 20.0, 1.0, true).is_some());
+        assert_eq!(
+            opaque_of(dst, texture, Corners::all(20.0), 1.0, false),
+            None
+        );
+        assert!(opaque_of(dst, texture, Corners::all(20.0), 1.0, true).is_some());
     }
 
     /// Below half a physical pixel of radius, *nothing* is opaque -- and that
@@ -988,9 +1227,9 @@ mod tests {
     fn a_radius_under_half_a_pixel_is_opaque_nowhere() {
         let texture = Size::<i32, Physical>::from((300, 200));
         let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
-        assert_eq!(opaque_of(dst, texture, 0.4, 1.0, true), None);
+        assert_eq!(opaque_of(dst, texture, Corners::all(0.4), 1.0, true), None);
         assert_eq!(
-            opaque_of(dst, texture, f32::NAN, 1.0, true),
+            opaque_of(dst, texture, Corners::all(f64::NAN), 1.0, true),
             None,
             "NaN compares false against every bound and must not fall through \
              to an inset of zero, which would claim the whole rectangle"
@@ -1000,8 +1239,66 @@ mod tests {
         // sides of it are asserted rather than just the far side. 0.4 alone
         // leaves every threshold in (0.4, 0.5] passing, and each of those is a
         // window claimed opaque that the shader has faded.
-        assert_eq!(opaque_of(dst, texture, 0.49, 1.0, true), None);
-        assert!(opaque_of(dst, texture, 0.5, 1.0, true).is_some());
+        assert_eq!(opaque_of(dst, texture, Corners::all(0.49), 1.0, true), None);
+        assert!(opaque_of(dst, texture, Corners::all(0.5), 1.0, true).is_some());
+    }
+
+    /// **One square corner is enough**, and it is the case per-corner radii
+    /// make ordinary rather than exotic.
+    ///
+    /// The shader picks its radius per quadrant, and the field it evaluates has
+    /// no interior term -- so the quadrant whose radius is 0 is not a sharp
+    /// corner, it is a quarter of the window drawn at exactly 50% alpha. See
+    /// [`every_corner_is_cut`], which is where that argument lives.
+    ///
+    /// **This is the one place this file gives up more than the geometry says
+    /// it must**, and it is deliberate: claiming that quadrant would hand
+    /// 50%-alpha pixels to a draw with blending disabled, which paints over the
+    /// wallpaper instead of blending with it. The moment `fragment.rs` gains
+    /// the `min(max(p.x, p.y), 0.0)` term, a square corner becomes genuinely
+    /// opaque to its own edge and this bound can drop to `>= 0.0` -- at which
+    /// point `a_side_with_no_cut_corner_is_not_inset` stops being an
+    /// arithmetic test and starts describing a window on a screen.
+    ///
+    /// Each of the four in turn, because a guard written against one field --
+    /// or against `max_of_side`, or against `largest` -- passes every other
+    /// assertion in this module. `largest()` in particular is the wrong
+    /// question exactly backwards: `Corners { top_left: 0.0, ..all(20.0) }` has
+    /// a largest of 20 and a quarter of the window at half alpha.
+    #[test]
+    fn a_single_square_corner_is_opaque_nowhere() {
+        let texture = Size::<i32, Physical>::from((300, 200));
+        let dst = Rectangle::<i32, Physical>::new((0, 0).into(), texture);
+        for square in [
+            Corners {
+                top_left: 0.0,
+                ..Corners::all(20.0)
+            },
+            Corners {
+                top_right: 0.0,
+                ..Corners::all(20.0)
+            },
+            Corners {
+                bottom_left: 0.0,
+                ..Corners::all(20.0)
+            },
+            Corners {
+                bottom_right: 0.0,
+                ..Corners::all(20.0)
+            },
+        ] {
+            assert_eq!(
+                opaque_of(dst, texture, square, 1.0, true),
+                None,
+                "{square:?} leaves one quadrant at 50% alpha, and a region \
+                 claimed opaque is drawn with blending disabled"
+            );
+        }
+        assert!(
+            opaque_of(dst, texture, Corners::all(20.0), 1.0, true).is_some(),
+            "and four cut corners still claim the middle -- without this the \
+             guard could refuse everything and pass"
+        );
     }
 
     /// The sum `capture_client` makes before it asks [`covers`] anything.
@@ -1050,6 +1347,16 @@ mod tests {
     ///
     /// Whole lines rather than `contains`, for `fragment.rs`'s reason: every
     /// name in this shader is a substring of something else legitimately in it.
+    ///
+    /// **The three `picked` lines are also the only written-down statement of
+    /// which `vec4` component is which corner**, and two things in this file
+    /// depend on that answer: [`away`]'s `match`, and the tuple
+    /// `Rounded::draw` hands to `Uniform::new`. Read off the lines below,
+    /// `x < 0.5 && y < 0.5` -- the top-left quadrant -- takes `corner_radius.x`,
+    /// so the packing is `(top_left, top_right, bottom_left, bottom_right)`,
+    /// which is `Corners`' own field order. That is why `draw` names each field
+    /// rather than spreading a struct: the two orders agreeing is a fact about
+    /// these lines, not about the type.
     const FIELD: [&str; 8] = [
         "vec2 half_size = tex_size * 0.5;",
         "float picked = (v_coords.x < 0.5)",
@@ -1070,17 +1377,27 @@ mod tests {
     /// `v_coords * tex_size`: the fragment's position in the texture's own
     /// pixels.
     ///
-    /// **One `radius`, not four -- provisional, like `physical_radius`.** The
-    /// shader picks a `corner_radius` component per quadrant (`FIELD`'s three
-    /// `picked` lines) before this file's clamp ever runs; this collapses
-    /// that pick to the single value passed in. Faithful only because
-    /// `Rounded::draw` currently sends that same physical radius to all four
-    /// components -- the moment a caller sends four different ones, this has
-    /// to pick per quadrant too, or it transcribes a program that is not the
-    /// one being run.
-    fn away(point: (f64, f64), texture: Size<i32, Physical>, radius: f64) -> f64 {
+    /// **Four radii, picked per quadrant, exactly where the shader picks.**
+    /// This used to take one `f64` and was faithful only while `Rounded::draw`
+    /// sent one physical radius to all four components of the `vec4`; it does
+    /// not any more, and a transcription that collapsed the pick would be
+    /// describing a program nobody runs.
+    ///
+    /// The pick is on the **unfolded** coordinate and happens before the
+    /// clamp, which is the order `FIELD`'s `picked` lines are in and the only
+    /// order that can tell four corners apart: `abs()` on the next line makes
+    /// every corner look like the top-left. `point.0 < half.0` is the shader's
+    /// `v_coords.x < 0.5` with both sides multiplied by `tex_size.x` --
+    /// `point` is `v_coords * tex_size` by this function's own contract.
+    fn away(point: (f64, f64), texture: Size<i32, Physical>, radii: Corners) -> f64 {
         let half = (f64::from(texture.w) * 0.5, f64::from(texture.h) * 0.5);
-        let r = radius.min(half.0.min(half.1));
+        let picked = match (point.0 < half.0, point.1 < half.1) {
+            (true, true) => radii.top_left,
+            (false, true) => radii.top_right,
+            (true, false) => radii.bottom_left,
+            (false, false) => radii.bottom_right,
+        };
+        let r = picked.min(half.0.min(half.1));
         let p = (
             (point.0 - half.0).abs() - (half.0 - r),
             (point.1 - half.1).abs() - (half.1 - r),
@@ -1092,19 +1409,31 @@ mod tests {
     /// leaves untouched**, checked against the shader's own arithmetic.
     ///
     /// The corners and not the middle, and that is the whole test: `away` is
-    /// `-r` at *every* interior point -- the field saturates -- so a middle
-    /// sample is satisfied by an inset of zero, by an inset of one, by any
-    /// inset at all. The corners of the claimed rect are the only points whose
-    /// answer depends on how far it was inset.
+    /// `-r` at *every* interior point of a quadrant -- the field saturates --
+    /// so a middle sample is satisfied by an inset of zero, by an inset of one,
+    /// by any inset at all. The corners of the claimed rect are the only points
+    /// whose answer depends on how far it was inset.
     ///
     /// `smoothstep(-0.5, 0.5, away)` is the mask, so "untouched" is
     /// `away <= -0.5` and not `away <= 0.0`: a fragment in the softened band is
     /// partly cut, and partly cut is not opaque.
     ///
-    /// The last assertion is the one that stops the test being vacuous. A
+    /// **Four different radii, so each corner of the claimed rect is checked
+    /// against the radius of the quadrant it actually lands in.** With
+    /// `Corners::all` this test cannot see a transposition anywhere between
+    /// `max_of_side` and the shader's `picked`: all four quadrants answer the
+    /// same, so the rect could be inset by the wrong side's corner and still
+    /// land outside a circle of the right size. The values are picked so that
+    /// no two quadrants agree and so that each side's inset comes from a
+    /// different corner than the one sharing its name.
+    ///
+    /// The last two assertions are what stop the test being vacuous. A
     /// transcription that returned some large negative number everywhere would
-    /// satisfy all the rest of it; the rect's own corner has to come out
-    /// *outside* the shape, which is the thing that made the inset necessary.
+    /// satisfy all the rest of it; the window's own corners have to come out
+    /// *outside* the shape, which is the thing that made the inset necessary --
+    /// and two of them, in two quadrants with two different radii, because one
+    /// is satisfied by a field that reads a single component of `corner_radius`
+    /// and ignores the pick.
     #[test]
     fn the_shader_leaves_everything_this_file_claims_alone() {
         for line in FIELD {
@@ -1116,7 +1445,12 @@ mod tests {
         }
 
         let texture = Size::<i32, Physical>::from((300, 200));
-        let radius = 20.0_f64;
+        let radii = Corners {
+            top_left: 6.0,
+            top_right: 20.0,
+            bottom_left: 12.0,
+            bottom_right: 30.0,
+        };
 
         for magnification in [1.0_f64, 0.5, 2.0, 3.7] {
             #[expect(
@@ -1128,11 +1462,7 @@ mod tests {
                 (f64::from(texture.h) * magnification) as i32,
             ));
             let dst = Rectangle::<i32, Physical>::new((0, 0).into(), drawn);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "the radius the element carries is an f32 uniform"
-            )]
-            let claimed = opaque_of(dst, texture, radius as f32, 1.0, true)
+            let claimed = opaque_of(dst, texture, radii, 1.0, true)
                 .unwrap_or_else(|| panic!("{magnification}x claims nothing at all"));
 
             // Back into the texture's pixels, which is where the shader
@@ -1152,7 +1482,7 @@ mod tests {
                     claimed.loc.y + claimed.size.h,
                 ),
             ] {
-                let d = away(back(x, y), texture, radius);
+                let d = away(back(x, y), texture, radii);
                 assert!(
                     d <= -0.5,
                     "at {magnification}x the corner ({x}, {y}) of the claimed \
@@ -1163,10 +1493,16 @@ mod tests {
         }
 
         assert!(
-            away((0.0, 0.0), texture, radius) > 0.5,
-            "the window's own corner is outside the rounded shape -- without \
-             this the field above could be a constant and every assertion in \
-             this test would hold"
+            away((0.0, 0.0), texture, radii) > 0.5,
+            "the window's own top-left corner is outside the rounded shape -- \
+             without this the field above could be a constant and every \
+             assertion in this test would hold"
+        );
+        assert!(
+            away((300.0, 200.0), texture, radii) > 0.5,
+            "and its bottom-right, which is cut by a different radius: one \
+             corner alone is satisfied by a field that ignores the quadrant \
+             pick and always reads `corner_radius.x`"
         );
     }
 
