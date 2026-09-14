@@ -184,11 +184,23 @@ pub(crate) enum Command {
         id: u64,
         rect: Option<Rect>,
         opacity: Option<f32>,
-        /// A 3D transform about the drawn rect's centre, when the script asked
-        /// for one. `None` keeps the window flat and on the cheap path.
+        /// A 3D transform about `pivot`, which is the drawn rect's centre
+        /// unless the script moved it. `None` keeps the window flat and on the
+        /// cheap path.
         matrix: Option<Mat4>,
         /// A deformation the drawn rect cannot express, such as a genie.
         deform: Option<Deform>,
+        /// How deep the window is drawn. See [`crate::present::Frame::z`].
+        ///
+        /// Resolved rather than `Option`, unlike the four above it: nothing
+        /// downstream means "left alone" — `sol.present` builds a whole frame
+        /// every time — and a default kept here is one a test can reach
+        /// without a compositor to run it against.
+        z: f32,
+        /// What `matrix` turns about, as a fraction of the drawn rect. See
+        /// [`crate::present::Frame::pivot`]. Resolved here for the same reason
+        /// as `z`.
+        pivot: (f32, f32),
         animation: AnimationSpec,
     },
     /// Name a selection, or take the name away with `None`.
@@ -1282,15 +1294,22 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "present",
         lua.create_function(|lua, (id, options): (u64, Option<Table>)| {
-            let (rect, opacity, matrix, deform) = match options {
+            let (rect, opacity, matrix, deform) = match options.as_ref() {
                 Some(options) => (
-                    rect_from(&options)?,
+                    rect_from(options)?,
                     options.get::<Option<f32>>("opacity")?,
-                    transform_from(&options)?,
-                    deform_from(&options)?,
+                    transform_from(options)?,
+                    deform_from(options)?,
                 ),
                 None => (None, None, None, None),
             };
+            // Outside the match, because these two resolve to a value where
+            // the four above resolve to "said nothing": `sol.present(id)` and
+            // `sol.present(id, {})` have to produce the same depth and the
+            // same pivot, and one function answering for both tables is how
+            // the two answers cannot drift apart.
+            let z = depth_from(options.as_ref())?;
+            let pivot = pivot_from(options.as_ref())?;
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 pending.commands.push(Command::Present {
@@ -1299,6 +1318,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     opacity,
                     matrix,
                     deform,
+                    z,
+                    pivot,
                     animation,
                 });
             })
@@ -2037,6 +2058,90 @@ fn transform_from(options: &Table) -> mlua::Result<Option<Mat4>> {
     Ok(Some(matrix))
 }
 
+/// How deep a script asked for a window to be drawn. See
+/// [`crate::present::Frame::z`].
+///
+/// Nothing said — no table at all, or a table that does not mention it — is
+/// `0.0`, which ties with every other window and so leaves the order the stack
+/// gave them exactly as it was. That is what makes the default free.
+///
+/// **A NaN is dropped and reported.** `present::by_depth` compares with
+/// `partial_cmp(..).unwrap_or(Equal)`, so a NaN ties with `1.0` and with `2.0`
+/// while those two do not tie with each other — a comparator that is not an
+/// order at all, which leaves `sort_by` free to return any arrangement of the
+/// list. One division in a script reaches it. The window keeps its place
+/// rather than the script keeping its typo, which is the answer `deform_from`
+/// gives an effect this build does not have.
+///
+/// **An infinity is kept.** It orders against every finite depth and never
+/// reaches any arithmetic — `z` is read in exactly one place, as the sort key
+/// — so `z = math.huge` means "above everything" and costs nothing to honour.
+fn depth_from(options: Option<&Table>) -> mlua::Result<f32> {
+    /// Ties with every other window, so the stack's own order survives.
+    const LEVEL: f32 = 0.0;
+
+    let Some(options) = options else {
+        return Ok(LEVEL);
+    };
+    let Some(z) = options.get::<Option<f32>>("z")? else {
+        return Ok(LEVEL);
+    };
+    if z.is_nan() {
+        tracing::warn!(
+            "a NaN `z` cannot be ordered against anything; drawing at the default depth"
+        );
+        return Ok(LEVEL);
+    }
+    Ok(z)
+}
+
+/// What a script asked a window's matrix to turn about, as a fraction of the
+/// rect it is drawn at. See [`crate::present::Frame::pivot`].
+///
+/// **Each axis defaults on its own.** `pivot_x = 0` means the left edge and
+/// says nothing about the vertical; defaulting the pair together would take a
+/// script that named one axis and hinge its window about a corner it never
+/// mentioned.
+///
+/// **Outside `0..1` is kept, deliberately.** `pivot_x = 2` turns the window
+/// about a line off to its right, which is a hinge and not a mistake — a door
+/// swinging on a frame beside it — and `warp.rs` is exactly as defined there
+/// as it is at the centre. Clamping would quietly turn one deliberate effect
+/// into a different one.
+///
+/// **Non-finite is not kept.** `warp.rs` computes `loc + size * pivot` for the
+/// point the matrix turns about, so a NaN or an infinity makes that point
+/// non-finite and every vertex of the mesh with it. Nothing downstream
+/// declines to draw the result: `Mat4::project_with_w` guards with
+/// `out_w <= 1e-6`, and every comparison against a NaN is false. A window
+/// would vanish, with a damage rectangle to match, because a script divided by
+/// zero. That axis falls back to the centre and says so.
+fn pivot_from(options: Option<&Table>) -> mlua::Result<(f32, f32)> {
+    /// The middle of the window, which is what `warp.rs` computed before there
+    /// was a pivot to name.
+    const CENTRE: f32 = 0.5;
+
+    let Some(options) = options else {
+        return Ok((CENTRE, CENTRE));
+    };
+    // By key, so the two axes cannot be read into each other: there is one
+    // body and it is given the name of the axis it is answering for.
+    let axis = |key: &str| -> mlua::Result<f32> {
+        let Some(fraction) = options.get::<Option<f32>>(key)? else {
+            return Ok(CENTRE);
+        };
+        if !fraction.is_finite() {
+            tracing::warn!(
+                key,
+                "a pivot that is not a finite fraction would put every vertex of the window at NaN; turning about the centre on that axis"
+            );
+            return Ok(CENTRE);
+        }
+        Ok(fraction)
+    };
+    Ok((axis("pivot_x")?, axis("pivot_y")?))
+}
+
 /// A Lua table, read as an effect's parameters.
 ///
 /// The bridge between `sol.present` and `crates/effects`, which has no
@@ -2174,6 +2279,31 @@ fn selection_from(options: &Table) -> mlua::Result<Selection> {
 /// of its own to be moved to. `rotate_*` and `perspective` are read by the same
 /// `transform_from` a window's own matrix comes from, so the two spell a
 /// rotation identically.
+///
+/// **`z`, `pivot_x` and `pivot_y` are deliberately not read here**, and it is
+/// not an oversight to be tidied up by copying the two lines from
+/// `sol.present`. They are the two fields of a frame a selection cannot carry:
+///
+/// * A **pivot** would have to replace each member's own, because a member is
+///   drawn through one matrix turning about one point, and `Shift::apply`
+///   composes the group's matrix onto the member's. That contradicts the
+///   promise this whole primitive is built on — "a window tilted inside a
+///   moving desk stays tilted *within* it" — and it still would not be the
+///   thing a script asking for it wants, which is the desk turning as one
+///   about a point. That needs a *rectangle for the group*, which no selection
+///   has; `group.rs`'s `Shift::matrix` already names it as the honest limit of
+///   this stage.
+/// * A **depth** would reach only some of a selection. `z` orders the pane
+///   walk in `render.rs` and nothing else: scripted surfaces are drawn in
+///   fixed layer passes, in declaration order, carried and faded but never
+///   sorted. So a desk raised by `z` would lift its windows above the desk
+///   next door and leave its own wallpaper behind — the one failure a
+///   selection exists to make impossible.
+///
+/// Both are a *node's* answer, which is where the spec puts them, and
+/// `sol.present` is how a script gives one. An unknown key in this table is
+/// ignored like any other, so a script that writes one gets no window in the
+/// wrong place — it gets nothing, which is the mild half of this note.
 fn shift_from(options: &Table) -> mlua::Result<crate::group::Shift> {
     Ok(crate::group::Shift {
         dx: options.get::<Option<f64>>("x")?.unwrap_or(0.0),
@@ -2640,6 +2770,167 @@ mod tests {
                 aim: Aim::Surface("dock".to_owned()),
             })
         );
+    }
+
+    /// **A script says how deep a window is drawn and what it turns about.**
+    ///
+    /// All of that pair's surface in one script: both keys read, a table
+    /// mentioning neither producing exactly the frame every window has had
+    /// until now, and each pivot axis defaulting on its own -- `pivot_x = 0`
+    /// means the left edge and says nothing about the vertical, so a script
+    /// naming one axis must not be given two.
+    ///
+    /// **The two pivot numbers are deliberately different, and neither is a
+    /// default.** `(0.5, 0.5)` and `(0.0, 0.0)` are each their own transpose,
+    /// so a fixture built from either cannot tell `pivot_x` read into the
+    /// wrong half of the pair from the code being right. `(0.25, 1.0)` can,
+    /// and the two one-axis cases pin the same swap from the other side:
+    /// naming only `pivot_x` must move the *first* number and only that one.
+    #[test]
+    fn a_script_says_how_deep_a_window_is_and_what_it_turns_about() {
+        let directory = std::env::temp_dir().join("solium-script-test-depth");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+3", function()
+                sol.present(1, { z = 2.5, pivot_x = 0.25, pivot_y = 1.0 })
+                -- All four, because `rect_from` refuses half a rect: a table
+                -- that mentions neither new key still has to be a table a
+                -- script could really write.
+                sol.present(2, { x = 10, y = 20, w = 300, h = 200 })
+                sol.present(3, { pivot_x = 0.25 })
+                sol.present(4, { pivot_y = 1.0 })
+                sol.present(5)
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+3", Snapshot::default());
+        let drawn = presented(&outcome.commands);
+        assert_eq!(drawn.len(), 5);
+
+        assert!(
+            (drawn[0].0 - 2.5).abs() < f32::EPSILON,
+            "the depth the script asked for, got {}",
+            drawn[0].0
+        );
+        assert_eq!(drawn[0].1, (0.25, 1.0), "x into x, y into y");
+
+        // A table mentioning neither is the frame every window on the machine
+        // has had until now: depth zero, which ties with every other window
+        // and so keeps the order the stack gave them, turning about its own
+        // centre.
+        assert!((drawn[1].0 - 0.0).abs() < f32::EPSILON);
+        assert_eq!(drawn[1].1, (0.5, 0.5));
+
+        // One axis named leaves the other in the middle. Asserted from both
+        // sides, because one of them alone is satisfied by a reader that
+        // defaults the pair together on whichever axis it was given.
+        assert_eq!(drawn[2].1, (0.25, 0.5), "only the horizontal moved");
+        assert_eq!(drawn[3].1, (0.5, 1.0), "only the vertical moved");
+
+        // And no options table at all answers the same as a table that says
+        // nothing -- `sol.present(id)` clears a window back to its own
+        // geometry, and it must not sort or hinge differently for it.
+        assert!((drawn[4].0 - 0.0).abs() < f32::EPSILON);
+        assert_eq!(drawn[4].1, (0.5, 0.5));
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A number no window can be drawn with is dropped, per key and per
+    /// axis.**
+    ///
+    /// One division reaches NaN from a script, and the two fields answer it
+    /// very differently if nothing stops it here.
+    ///
+    /// A **pivot** is the dangerous one. `warp.rs` computes
+    /// `loc + size * pivot` for the point the matrix turns about, so a
+    /// non-finite one makes that centre non-finite and every vertex of the
+    /// mesh with it -- and nothing further down declines to draw the result,
+    /// because `Mat4::project_with_w` guards with `out_w <= 1e-6` and every
+    /// comparison against a NaN is false. The window disappears and its damage
+    /// rectangle is nonsense, from a typo.
+    ///
+    /// A **depth** is milder and still not an order. `by_depth` answers
+    /// `Equal` when `partial_cmp` declines, so a NaN ties with 1.0 and with
+    /// 2.0 while those two do not tie with each other; a comparator that is
+    /// not a total order leaves `sort_by` free to return any arrangement of
+    /// the list.
+    ///
+    /// So both fall back to the default and say so in the log -- the answer
+    /// `deform_from` gives an effect this build does not have, and
+    /// `easing_from` an easing nobody wrote: the script loses the key it
+    /// mistyped and keeps its window. An **infinite depth is kept**, because
+    /// it orders perfectly well and `z = math.huge` is a legible spelling of
+    /// "above everything".
+    #[test]
+    fn a_depth_or_a_pivot_that_cannot_be_drawn_with_falls_back() {
+        let directory = std::env::temp_dir().join("solium-script-test-nonfinite");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+4", function()
+                sol.present(1, { z = 0/0, pivot_x = 0.25 })
+                sol.present(2, { pivot_x = 0/0, pivot_y = 1.0 })
+                sol.present(3, { pivot_x = 0.25, pivot_y = 1/0 })
+                sol.present(4, { pivot_y = -1/0 })
+                sol.present(5, { z = 1/0 })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+4", Snapshot::default());
+        let drawn = presented(&outcome.commands);
+        assert_eq!(drawn.len(), 5);
+
+        // The key that was wrong is the only key that loses anything: the
+        // pivot beside the NaN depth is the one the script wrote.
+        assert!(
+            (drawn[0].0 - 0.0).abs() < f32::EPSILON,
+            "a NaN depth is zero"
+        );
+        assert_eq!(drawn[0].1, (0.25, 0.5));
+
+        // And the axis that was wrong is the only axis. This is the second
+        // reading of the transpose: a NaN given as `pivot_x` must come back as
+        // a centred *first* number beside the 1.0 that was given as `pivot_y`.
+        assert_eq!(drawn[1].1, (0.5, 1.0), "the horizontal fell back, alone");
+        assert_eq!(
+            drawn[2].1,
+            (0.25, 0.5),
+            "and an infinity no less than a NaN"
+        );
+        assert_eq!(drawn[3].1, (0.5, 0.5), "in either direction");
+
+        // A depth is not a coordinate and an infinite one sorts, so it is the
+        // one non-finite number here that survives.
+        assert!(
+            drawn[4].0.is_infinite() && drawn[4].0 > 0.0,
+            "an infinite depth orders, so it is kept, got {}",
+            drawn[4].0
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The depth and pivot of each `Present` in a batch, in order.
+    fn presented(commands: &[Command]) -> Vec<(f32, (f32, f32))> {
+        commands
+            .iter()
+            .map(|command| match command {
+                Command::Present { z, pivot, .. } => (*z, *pivot),
+                other => panic!("expected a present command, got {other:?}"),
+            })
+            .collect()
     }
 
     /// **A script names a selection, and both halves of it come back.**
