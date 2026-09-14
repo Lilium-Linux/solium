@@ -124,6 +124,69 @@ pixels belong to the application and only a shader can mask them, and QML rounds
 itself, because `Rectangle.radius` is free. A style that wants a rounded border
 around a *square* client sets only its own `radius` and buys no pass at all.
 
+#### One corner at a time
+
+Each corner can be given its own radius. Each of the four defaults to `radius`,
+so one key still means all four and nothing written before these existed
+changes:
+
+| key | |
+|---|---|
+| `client.radius` | all four corners, and the default the four below fall back to |
+| `client.radiusTopLeft` | that corner alone |
+| `client.radiusTopRight` | |
+| `client.radiusBottomLeft` | |
+| `client.radiusBottomRight` | |
+
+```qml
+// Pane.qml — square on top, round underneath
+client.radius: 12
+client.radiusTopLeft: 0
+client.radiusTopRight: 0
+```
+
+A `0` here has to be written out. Squaring a corner is half of what these keys
+are for, so a corner that is *absent* follows `radius` and a corner that says
+`0` is square — leaving the key out is not a way of squaring it.
+
+Every layer is told all four by name as well:
+
+```qml
+// Frame.qml
+property int clientRadiusTopLeft: 0      // and TopRight, BottomLeft, BottomRight
+property int clientRadius: 0             // still written: the LARGEST of the four
+```
+
+`clientRadius` survives and is the largest of the four, because what a layer
+does with one number is hug the window from outside — and a hug has to clear
+the biggest cut or it crosses the curve. A layer that cares about one corner
+reads that corner.
+
+#### Two ways a titlebar meets a rounded window
+
+The shipped pair, and the reason the corners are separable at all. Both reserve
+a band at the top; what differs is which corners the shader cuts and where the
+bar is drawn.
+
+| | `pane = "rounded"` | `pane = "flush"` |
+|---|---|---|
+| the client's top corners | rounded | square |
+| what draws the window's top | the bar's own `radius` | the bar's own `radius` |
+| the bar's height | `insetTop + clientRadius` | `insetTop` |
+| the bar's depth | `behind` | `frame` |
+| where the two meet | the bar shows through the client's cut corners | a flat seam, corner to corner |
+
+`flush` is the simpler of the two: with the client's top squared there is
+nothing to fill, so the bar stops at the seam and stays in the frame, where the
+compositor copies it band by band.
+
+`rounded` cuts all four, which leaves two notches inside the window where the
+client's top corners were. Something has to be behind them or they show the
+wallpaper — so its bar is `clientRadius` taller than its band and sits at
+`depth: "behind"`. Under the client it fills the notches and covers nothing;
+over the client the same rectangle would eat the client's top `clientRadius`
+rows, which in a terminal is the top half of the first line.
+
 ### What a window shows before its application exists
 
 A window's life starts when you ask for the application, not when the program

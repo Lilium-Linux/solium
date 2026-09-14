@@ -87,13 +87,42 @@ Item {
     // reserved: it derives from the node's silhouette rather than masking it,
     // and nothing draws it yet.
     //
-    // Declared once here and *handed to every layer*, exactly as `insets` are
-    // and for the same reason: the compositor writes `radius` back onto each
-    // layer's own root as `clientRadius`, in logical pixels, once at build. A
-    // layer that wants to hug the curve declares
+    // **Each corner can also be declared on its own**, with `radiusTopLeft`,
+    // `radiusTopRight`, `radiusBottomLeft` and `radiusBottomRight`. Each
+    // defaults to `radius`, so one key still means all four and the ordinary
+    // case is exactly what it was; naming one overrides that corner alone.
     //
-    //     property int clientRadius: 0     // set by the compositor
-    //     radius: clientRadius + 2         // hug it from outside
+    //     client.radius: 12
+    //     client.radiusTopLeft: 0
+    //     client.radiusTopRight: 0
+    //
+    // A square top and a rounded bottom, which is `panes/flush/` — the shape a
+    // titlebar can sit flush on. Four named keys rather than a list, because a
+    // corner is a named thing: `radiusTopLeft` cannot be given in the wrong
+    // order, and a style that wants one of them writes one line.
+    //
+    // **A zero has to be written out and cannot be left implied.** Squaring a
+    // corner is half of what these are for, so `0` is a value someone means;
+    // "not declared" is therefore spelled `-1` internally, which is the only
+    // way the compositor can tell a corner squared on purpose from one that
+    // was never mentioned and should follow `radius`. See `ClientTreatment`.
+    //
+    // Declared once here and *handed to every layer*, exactly as `insets` are
+    // and for the same reason: the compositor writes all four back onto each
+    // layer's own root as `clientRadiusTopLeft`, `clientRadiusTopRight`,
+    // `clientRadiusBottomLeft` and `clientRadiusBottomRight`, in logical
+    // pixels, once at build — on every layer of every style, zeroes included.
+    //
+    // It writes `clientRadius` too, which survives all of this and is the
+    // **largest of the four**. That is the number a layer wants when it wants
+    // one number: its use is an outward hug, and a hug has to clear the
+    // biggest cut or it crosses the curve somewhere. A layer that needs one
+    // particular corner reads that corner by name.
+    //
+    //     property int clientRadius: 0        // set by the compositor
+    //     radius: clientRadius + 2            // hug it from outside
+    //
+    //     property int clientRadiusTopLeft: 0 // or one corner, by name
     //
     // **That split is not arbitrary; it falls out of who drew the pixels.**
     // The client's are the application's, so the compositor masks them with a
