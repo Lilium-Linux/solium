@@ -172,7 +172,40 @@ void main() {
         : ((v_coords.y < 0.5) ? corner_radius.y : corner_radius.w);
     float r = min(picked, min(half_size.x, half_size.y));
     vec2 p = abs(v_coords * tex_size - half_size) - (half_size - vec2(r));
-    float away = length(max(p, 0.0)) - r;
+
+    // The exact rounded-box distance, **interior term and all**.
+    //
+    // `length(max(p, 0.0)) - r` on its own is only the OUTSIDE half of the
+    // field. It is right on the arcs and right past every edge, and inside the
+    // shape it saturates: both components of `p` are negative there, so it
+    // reports a flat `-r` at every interior fragment instead of that
+    // fragment's real distance to the edge. While a window had one radius that
+    // was merely imprecise -- anything at `r >= 0.5` is past the smoothstep's
+    // far end and comes out fully opaque either way, which is why half a pixel
+    // was the bound everything downstream was written against.
+    //
+    // With a radius per quadrant it stops being imprecise and starts being
+    // wrong, because `r` can now be 0 on one corner while the others round. A
+    // zero radius makes the interior report exactly 0 -- the smoothstep's
+    // MIDPOINT -- so that quadrant, a quarter of the window, is drawn at 50%
+    // alpha rather than squared off. Measured on a real GPU through
+    // `dev/wirecheck`: `corner_radius = (0, 16, 16, 16)` came back at alpha
+    // 127 across every pixel of the top-left quadrant, and at 228 for a radius
+    // of 0.3. A square-topped window is the headline case for per-corner
+    // radii, not an exotic one -- `panes/flush/` is exactly that shape.
+    //
+    // `min(max(p.x, p.y), 0.0)` is that missing term, and adding it changes
+    // nothing anywhere else: it is exactly 0.0 wherever either component of
+    // `p` is positive, which is every fragment on an arc, along a straight
+    // edge, or outside the shape. Checked and not merely argued -- all four
+    // quadrants of a 64x64 at r=16 hash byte-identical across the change.
+    //
+    // It also settles where the shape's own boundary lands. A fragment centre
+    // sits half a pixel inside the edge, so the outermost row now reports
+    // exactly -0.5 for any `r` -- the smoothstep's near end, fully opaque --
+    // which is what lets `pass::opaque_inside` claim an uncut side with an
+    // inset of zero.
+    float away = min(max(p.x, p.y), 0.0) + length(max(p, 0.0)) - r;
 
     // The mask goes last, after the tint. The tint ADDS a constant, so a
     // fragment masked to zero before it would be painted back in and the cut
@@ -592,9 +625,17 @@ mod tests {
             "the inset half of the distance field is not written in terms of `r`"
         );
         assert!(
-            has_line("float away = length(max(p, 0.0)) - r;"),
+            has_line("float away = min(max(p.x, p.y), 0.0) + length(max(p, 0.0)) - r;"),
             "the outset half of the distance field is not written in terms of `r`"
         );
+        // And the interior term is part of that line, pinned by the whole-line
+        // match above rather than by a second assertion -- but it is worth
+        // naming here, because dropping it is the one edit that leaves every
+        // *other* assertion in this module green. `length(max(p, 0.0)) - r`
+        // alone reports a flat `-r` inside the shape, which at `r == 0` is the
+        // smoothstep's midpoint: a square corner's whole quadrant at 50%
+        // alpha, measured at 127 on a real GPU. See the comment on the line
+        // itself.
 
         // The two lines that decide where the corner circle sits and how wide
         // the antialiased band is. Neither was pinned here until Task 5's
