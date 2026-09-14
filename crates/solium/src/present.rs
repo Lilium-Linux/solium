@@ -209,6 +209,31 @@ pub(crate) struct Frame {
     /// A deformation that no rectangle and no matrix can express, such as a
     /// genie. `None` is the ordinary case and stays on the cheap path.
     pub(crate) deform: Option<Deform>,
+    /// How deep this node is drawn. Higher is nearer the viewer.
+    ///
+    /// **Equal values keep the order the stack gave them**, which is what
+    /// makes the default free: every window is 0.0, the sort is stable, and
+    /// the list comes out exactly as it went in. A script lifting one card of
+    /// a stack does not have to restack the whole session to do it.
+    ///
+    /// Draw order only. `rect` is still the truth for input, so a window
+    /// raised above its neighbour is still clicked where the layout put it —
+    /// see the spec's *Hit-testing does not move*. The alternative is
+    /// inverting a projective transform per pointer event and then explaining
+    /// to a script why the window it placed is not where clicks land.
+    pub(crate) z: f32,
+    /// What `matrix` turns about, as a fraction of `rect`: `(0.5, 0.5)` is the
+    /// centre, `(0.0, 0.0)` the top-left corner.
+    ///
+    /// A fraction and not pixels, so it survives the window being resized
+    /// mid-animation — which is the case that made `scaled` carry it.
+    ///
+    /// It cannot be composed in `script.rs`: `translate(-p) · R · translate(p)`
+    /// needs the window's size, and `transform_from` sees only the options
+    /// table, so it would be right when a script passed an explicit rect and
+    /// silently wrong otherwise. It is resolved in `warp.rs`, at the two lines
+    /// that compute the centre.
+    pub(crate) pivot: (f32, f32),
 }
 
 impl Frame {
@@ -219,6 +244,8 @@ impl Frame {
             opacity: 1.0,
             matrix: Mat4::IDENTITY,
             deform: None,
+            z: 0.0,
+            pivot: (0.5, 0.5),
         }
     }
 
@@ -235,6 +262,8 @@ impl Frame {
             opacity: self.opacity,
             matrix: self.matrix,
             deform: self.deform,
+            z: self.z,
+            pivot: self.pivot,
         }
     }
 
@@ -295,6 +324,28 @@ impl Blend for Frame {
             // animate the angle instead and rebuild the matrix per frame.
             matrix: self.matrix.blend(other.matrix, progress),
             deform: Deform::blend(self.deform, other.deform, progress),
+            // A straight line, like every other number here, because both ends
+            // are this trait's contract — `0.0` is `self` exactly, `1.0` has
+            // arrived — and a straight line is the only reading continuous at
+            // both. A depth that stepped would cross its neighbours between one
+            // frame and the next rather than rising past them; a pivot that
+            // took its destination's value up front would turn the first frame
+            // about a point the animation is never at. Not that either is
+            // reachable yet: nothing sets them, so both ends are the defaults
+            // and this is a no-op on every path that exists today.
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a depth is a small float either way"
+            )]
+            z: mix(f64::from(self.z), f64::from(other.z)) as f32,
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a pivot is a fraction of the rect either way"
+            )]
+            pivot: (
+                mix(f64::from(self.pivot.0), f64::from(other.pivot.0)) as f32,
+                mix(f64::from(self.pivot.1), f64::from(other.pivot.1)) as f32,
+            ),
         }
     }
 }
@@ -682,6 +733,75 @@ mod tests {
         assert_eq!(frame.rect.size.w, 50.0);
     }
 
+    /// The identity frame is the one every undecorated, unanimated window on
+    /// the machine gets, so its defaults are the whole of the cheap path.
+    #[test]
+    fn the_identity_frame_is_centred_and_at_depth_zero() {
+        let frame = Frame::real(rect(10, 20, 300, 200));
+        assert!(
+            (frame.z - 0.0).abs() < f32::EPSILON,
+            "depth zero, so nothing sorts"
+        );
+        assert!((frame.pivot.0 - 0.5).abs() < f32::EPSILON);
+        assert!(
+            (frame.pivot.1 - 0.5).abs() < f32::EPSILON,
+            "the centre, as `matrix`'s doc has always said"
+        );
+    }
+
+    /// `scaled` is what "smaller, in place" means and is used by the open
+    /// animation and by peek. It must carry both new fields through, because a
+    /// frame that loses its pivot mid-animation turns about a different point
+    /// for one frame and jumps.
+    ///
+    /// The rect and the pivot are both asymmetric, so a `scaled` that read the
+    /// two components the wrong way round fails here rather than passing on a
+    /// square.
+    #[test]
+    fn scaling_a_frame_keeps_its_depth_and_its_pivot() {
+        let mut frame = Frame::real(rect(10, 20, 300, 200));
+        frame.z = 3.0;
+        frame.pivot = (0.0, 1.0);
+        let smaller = frame.scaled(0.5);
+        assert!((smaller.z - 3.0).abs() < f32::EPSILON);
+        assert_eq!(smaller.pivot, (0.0, 1.0));
+    }
+
+    /// **A blend starts at one frame's depth and pivot and arrives at the
+    /// other's.** `blend` writes every field out by hand, so it is the literal
+    /// most likely to drop one quietly; and the two ends are the [`Blend`]
+    /// trait's own contract rather than a policy about the middle.
+    ///
+    /// Both pivots are asymmetric, so reading `.0` and `.1` the wrong way
+    /// round -- or blending from `other` towards `self` -- fails here.
+    #[test]
+    fn a_blend_starts_at_one_depth_and_pivot_and_arrives_at_the_other() {
+        let mut from = Frame::real(rect(10, 20, 300, 200));
+        from.z = 2.0;
+        from.pivot = (0.0, 1.0);
+        let mut to = Frame::real(rect(10, 20, 300, 200));
+        to.z = 9.0;
+        to.pivot = (0.25, 0.75);
+
+        let start = from.blend(to, 0.0);
+        assert!(
+            (start.z - 2.0).abs() < f32::EPSILON,
+            "`0.0` is `self` exactly"
+        );
+        assert_eq!(start.pivot, (0.0, 1.0), "`0.0` is `self` exactly");
+
+        let end = from.blend(to, 1.0);
+        assert!(
+            (end.z - 9.0).abs() < f32::EPSILON,
+            "an animation has to arrive at the depth it was aimed at"
+        );
+        assert_eq!(
+            end.pivot,
+            (0.25, 0.75),
+            "an animation has to arrive at the pivot it was aimed at"
+        );
+    }
+
     #[test]
     fn hit_testing_inverts_the_transform() {
         let real = rect(0, 0, 400, 300);
@@ -691,6 +811,8 @@ mod tests {
             opacity: 1.0,
             matrix: Mat4::IDENTITY,
             deform: None,
+            z: 0.0,
+            pivot: (0.5, 0.5),
         };
         // The centre of the thumbnail is the centre of the window.
         let mapped = to_window_space(drawn, real, Point::from((600.0, 175.0)));
