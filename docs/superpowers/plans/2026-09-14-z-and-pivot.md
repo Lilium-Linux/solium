@@ -257,7 +257,11 @@ Expected: PASS.
 - [ ] **Step 5: See each test fail**
 
 - Hard-code `pivot` to `(0.5, 0.5)` inside `mesh`, ignoring the argument → `a_pivot_is_the_point_the_matrix_leaves_alone` fails on its first assertion.
-- Use `pivot.1` for x and `pivot.0` for y → the same test fails, and this is the mutation worth running, because a transposed pivot is right for every square window and wrong for every other.
+- Use `pivot.1` for x and `pivot.0` for y → **the two cases above do NOT catch this, and that was a defect in this plan.** `(0.5, 0.5)` and `(0.0, 0.0)` are each their own transpose, so a non-square *rect* does not help — the *pivot* has to be asymmetric too. Add a `(1.0, 0.0)` case and check the mutation fails at that assertion. Corrected after the task was implemented, from the implementer's report; the original text claimed the 200x100 rect carried it, which was wrong about which symmetry mattered.
+
+**And the same mistake has now been made three times in this one test, so make the fixture asymmetric in EVERY dimension it is asked about.** The pivot was symmetric (my error), then the rect's `loc` was symmetric — `(100, 100)` and `(0, 0)`, so `loc.x` and `loc.y` are interchangeable and a transposed origin passes both tests. Size, location and pivot each need two different numbers, or a swap in that dimension is invisible.
+
+**A trap when re-running these mutations:** making `mesh` ignore its `pivot` argument needs a `let _ = pivot;`, or clippy's unused-variable error fires *before* the tests and the compile failure reads as the mutation being caught.
 
 - [ ] **Step 6: Commit**
 
