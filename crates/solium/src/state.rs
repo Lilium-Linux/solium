@@ -4715,4 +4715,313 @@ mod tests {
         assert!(canvas.to_f64().contains(in_bleed));
         assert!(!outer.to_f64().contains(in_bleed));
     }
+
+    /// **Issue #99: a rescale left already-open windows blurry.**
+    ///
+    /// Two protocols tell a client what scale to draw at. `commit`'s call to
+    /// `send_surface_state` resends `wl_surface.preferred_buffer_scale` on
+    /// every commit, so an existing client picks up a new output scale the
+    /// moment it next draws. `new_fractional_scale` answers the other one,
+    /// `wp_fractional_scale_v1`, but only when a client asks -- once, ever,
+    /// per surface, and nothing called it again when `scale_outputs` changed
+    /// a monitor's scale later. A window opened before a `super+shift+r`
+    /// rescale kept the scale it was told at startup, and the compositor
+    /// upscaled its buffer to fill the larger area the new scale gave it.
+    ///
+    /// This needs a real client, not a bare `WlSurface`: `Window` only wraps
+    /// a real `ToplevelSurface`, and Smithay gives no way to fabricate one
+    /// except a client asking for it over the wire. `wl-probe` (see its own
+    /// `Cargo.toml`) exists in this workspace for the identical reason -- some
+    /// protocol claims can only be checked from the client's side -- and its
+    /// dependencies are what make this affordable here: `wayland-client` and
+    /// `wayland-protocols`'s `client` feature were already in the lockfile.
+    mod scale_resend {
+        use super::*;
+        use smithay::output::{Mode, PhysicalProperties, Subpixel};
+        use smithay::reexports::wayland_server::Display;
+        use std::os::unix::io::{AsFd, OwnedFd};
+        use std::os::unix::net::UnixStream;
+        use wayland_client::protocol::{
+            wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+        };
+        use wayland_client::{Connection, Dispatch, QueueHandle};
+        use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+
+        /// The client side of the fixture. Binds exactly the three globals a
+        /// window needs and nothing else -- there is no renderer on this end
+        /// to answer anything more, and none of what follows needs one.
+        #[derive(Debug, Default)]
+        struct Client {
+            compositor: Option<wl_compositor::WlCompositor>,
+            wm_base: Option<xdg_wm_base::XdgWmBase>,
+            shm: Option<wl_shm::WlShm>,
+        }
+
+        impl Dispatch<wl_registry::WlRegistry, ()> for Client {
+            fn event(
+                state: &mut Self,
+                registry: &wl_registry::WlRegistry,
+                event: wl_registry::Event,
+                (): &(),
+                _conn: &Connection,
+                qh: &QueueHandle<Self>,
+            ) {
+                let wl_registry::Event::Global {
+                    name, interface, ..
+                } = event
+                else {
+                    return;
+                };
+                match interface.as_str() {
+                    "wl_compositor" => state.compositor = Some(registry.bind(name, 1, qh, ())),
+                    "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
+                    "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
+                    _ => {}
+                }
+            }
+        }
+
+        wayland_client::delegate_noop!(Client: ignore wl_compositor::WlCompositor);
+        wayland_client::delegate_noop!(Client: ignore wl_surface::WlSurface);
+        wayland_client::delegate_noop!(Client: ignore wl_shm::WlShm);
+        wayland_client::delegate_noop!(Client: ignore wl_shm_pool::WlShmPool);
+        wayland_client::delegate_noop!(Client: ignore wl_buffer::WlBuffer);
+        wayland_client::delegate_noop!(Client: ignore xdg_wm_base::XdgWmBase);
+        wayland_client::delegate_noop!(Client: ignore xdg_surface::XdgSurface);
+        wayland_client::delegate_noop!(Client: ignore xdg_toplevel::XdgToplevel);
+
+        /// An anonymous, already-unlinked file of `size` bytes -- enough for a
+        /// client to back a `wl_shm_pool` with. Its contents are never read:
+        /// nothing in this fixture renders. Only its *size* matters, because
+        /// that is what gives the mapped `Window` a real, non-zero bounding
+        /// box instead of the `Rectangle::zero()` an uncommitted surface has,
+        /// which overlaps no output at all and so would never appear in
+        /// `elements_for_output` for either monitor below.
+        fn anon_file(size: i32) -> OwnedFd {
+            let path = std::env::temp_dir().join(format!(
+                "solium-scale-resend-test-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .expect("creating a backing file for a test wl_shm_pool");
+            std::fs::remove_file(&path).expect("unlinking the test shm file");
+            file.set_len(u64::from(size.unsigned_abs()))
+                .expect("sizing the test shm file");
+            file.into()
+        }
+
+        /// Opens one window through the real protocol: a surface, an
+        /// `xdg_toplevel`, and a tiny committed buffer, so `new_toplevel` maps
+        /// a `Window` with a real, non-zero bounding box at `(0, 0)` -- where
+        /// every window is first mapped; the caller repositions it from
+        /// there. Returns the newly-mapped `Window`.
+        fn open_window(
+            display: &mut Display<Solium>,
+            state: &mut Solium,
+            conn: &Connection,
+            client: &Client,
+            qh: &QueueHandle<Client>,
+        ) -> Window {
+            let compositor = client.compositor.clone().expect("wl_compositor bound");
+            let wm_base = client.wm_base.clone().expect("xdg_wm_base bound");
+            let shm = client.shm.clone().expect("wl_shm bound");
+
+            let before: Vec<Window> = state.space.elements().cloned().collect();
+
+            let surface = compositor.create_surface(qh, ());
+            let xdg_surface = wm_base.get_xdg_surface(&surface, qh, ());
+            let _toplevel = xdg_surface.get_toplevel(qh, ());
+
+            const SIDE: i32 = 64;
+            const STRIDE: i32 = SIDE * 4;
+            let fd = anon_file(STRIDE * SIDE);
+            let pool = shm.create_pool(fd.as_fd(), STRIDE * SIDE, qh, ());
+            let buffer =
+                pool.create_buffer(0, SIDE, SIDE, STRIDE, wl_shm::Format::Argb8888, qh, ());
+            surface.attach(Some(&buffer), 0, 0);
+            surface.commit();
+
+            conn.flush().expect("flushing the window-open requests");
+            display
+                .dispatch_clients(state)
+                .expect("dispatching the window-open requests");
+
+            state
+                .space
+                .elements()
+                .find(|window| !before.contains(window))
+                .cloned()
+                .expect("new_toplevel mapped a window")
+        }
+
+        /// The scenario issue #99 describes: two monitors, a `super+shift+r`
+        /// rescale of one of them, and a window already open on each.
+        #[test]
+        fn changed_output_resends_fractional_scale_and_unchanged_output_does_not() {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+
+            // Two monitors side by side, both starting at 1x -- the state
+            // they would be in right after `place_outputs` first ran.
+            let output_a = Output::new(
+                "scale-resend-test-a".to_string(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "solium".to_string(),
+                    model: "test-a".to_string(),
+                },
+            );
+            output_a.change_current_state(
+                Some(Mode {
+                    size: (1920, 1080).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                Some(Scale::Fractional(1.0)),
+                None,
+            );
+            state.space.map_output(&output_a, (0, 0));
+
+            let output_b = Output::new(
+                "scale-resend-test-b".to_string(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "solium".to_string(),
+                    model: "test-b".to_string(),
+                },
+            );
+            output_b.change_current_state(
+                Some(Mode {
+                    size: (1920, 1080).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                Some(Scale::Fractional(1.0)),
+                None,
+            );
+            state.space.map_output(&output_b, (1920, 0));
+
+            // A real client -- see the module doc comment for why.
+            let (server_side, client_side) = UnixStream::pair().expect("a socketpair");
+            display
+                .handle()
+                .insert_client(server_side, std::sync::Arc::new(ClientState::default()))
+                .expect("inserting the test client");
+            let conn = Connection::from_socket(client_side).expect("wrapping the client socket");
+            let mut event_queue = conn.new_event_queue::<Client>();
+            let qh = event_queue.handle();
+            let mut client = Client::default();
+
+            conn.display().get_registry(&qh, ());
+            conn.flush().expect("flushing get_registry");
+            display
+                .dispatch_clients(&mut state)
+                .expect("dispatching get_registry");
+            display
+                .flush_clients()
+                .expect("flushing the registry snapshot");
+            // The one blocking read in this fixture: it is safe because the
+            // server has, on the line above, already written the response --
+            // every global this compositor has -- onto the socket. Blocking
+            // here waits on bytes that are already in the kernel buffer, not
+            // on the server, which nothing is driving but this same thread.
+            event_queue
+                .blocking_dispatch(&mut client)
+                .expect("reading the registry snapshot");
+
+            let window_a = open_window(&mut display, &mut state, &conn, &client, &qh);
+            let window_b = open_window(&mut display, &mut state, &conn, &client, &qh);
+
+            // Placed explicitly, one per monitor: `new_toplevel` maps every
+            // window at `(0, 0)`, and where the pane system fits it from
+            // there depends on a layout this test does not configure.
+            state.space.map_element(window_a.clone(), (100, 100), false);
+            state
+                .space
+                .map_element(window_b.clone(), (2100, 100), false);
+            // `elements_for_output` reads overlap data that only
+            // `Space::refresh` computes -- see its own doc comment. The real
+            // backends call it once a frame, for the same reason.
+            state.space.refresh();
+
+            let surface_a = window_a
+                .wl_surface()
+                .expect("window a has a surface")
+                .into_owned();
+            let surface_b = window_b
+                .wl_surface()
+                .expect("window b has a surface")
+                .into_owned();
+
+            let preferred_scale = |surface: &WlSurface| {
+                with_states(surface, |states| {
+                    with_fractional_scale(states, |fractional| fractional.preferred_scale())
+                })
+            };
+
+            assert_eq!(
+                preferred_scale(&surface_a),
+                None,
+                "neither window has asked for a fractional scale yet, so \
+                 neither should have one before the rescale"
+            );
+            assert_eq!(preferred_scale(&surface_b), None);
+
+            // The rescale: `a`'s monitor is asked for 2x, as if someone had
+            // just edited it in and pressed `super+shift+r`. `b`'s monitor is
+            // asked for exactly the scale it already has.
+            state.arrangement = crate::monitor::Arrangement::new(vec![
+                crate::monitor::Placement {
+                    name: "scale-resend-test-a".to_string(),
+                    at: None,
+                    beside: None,
+                    mode: crate::monitor::Wanted::default(),
+                    vrr: None,
+                    transform: None,
+                    enabled: true,
+                    primary: false,
+                    scale: crate::monitor::Scaling::Fixed(2.0),
+                },
+                crate::monitor::Placement {
+                    name: "scale-resend-test-b".to_string(),
+                    at: None,
+                    beside: None,
+                    mode: crate::monitor::Wanted::default(),
+                    vrr: None,
+                    transform: None,
+                    enabled: true,
+                    primary: false,
+                    scale: crate::monitor::Scaling::Fixed(1.0),
+                },
+            ]);
+            state.scale_outputs();
+
+            assert_eq!(
+                preferred_scale(&surface_a),
+                Some(2.0),
+                "a's monitor actually changed scale (1x to 2x), so a real \
+                 client's wp_fractional_scale_v1 object -- bound once, at \
+                 startup, and never asked again -- must be told the new \
+                 value, or it keeps drawing at the old one forever. This is \
+                 issue #99."
+            );
+            assert_eq!(
+                preferred_scale(&surface_b),
+                None,
+                "b's monitor was asked for exactly the scale it already had, \
+                 so scale_outputs's own early `continue` means this function \
+                 never runs for it at all -- and separately, b's window was \
+                 never on the monitor that changed, so it must be untouched \
+                 even if it had been"
+            );
+        }
+    }
 }

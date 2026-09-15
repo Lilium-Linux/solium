@@ -59,3 +59,13 @@ mlua = { version = "0.12.1", features = ["lua54", "vendored"] }
 # crates/solium/qml/host.cpp for why in-process rather than over a protocol.
 cc = "1"
 pkg-config = "0.3"
+
+[dev-dependencies]
+# A real Wayland client, for `state::tests::scale_resend`. `Window` only
+# wraps a real `ToplevelSurface`, and nothing fabricates one except a client
+# actually asking for one over the wire -- `wl-probe` (see its own
+# `Cargo.toml`) exists for the identical reason. Both already resolve to
+# these versions with these features in the lockfile, since `wl-probe`
+# depends on them too; this only adds an edge to a graph that does not change.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
