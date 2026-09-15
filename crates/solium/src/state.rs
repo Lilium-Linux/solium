@@ -21,7 +21,6 @@ use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
-use std::collections::HashMap;
 
 use smithay::{
     backend::{allocator::dmabuf::Dmabuf, renderer::utils::on_commit_buffer_handler},
@@ -90,6 +89,25 @@ use crate::{
     script::{AnimationSpec, Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
 };
 
+/// Whether `rect` lands on any of `screens`.
+///
+/// A free function over plain rectangles rather than a method, for one reason:
+/// `Solium` cannot be built in a unit test — it needs a `Display` — and
+/// neither can a `Space` with monitors mapped into it. This is the half that
+/// decides, so this is the half that is testable, and [`Solium::on_any_output`]
+/// is the two-line adapter that feeds it `space.outputs()`. Same trick, same
+/// reason, as `offscreen::Scratch` being generic over what it keeps.
+///
+/// Exclusive, through `Rectangle::overlaps`, and deliberately the same call
+/// `render::elements` makes when it culls a pane against one screen: a window
+/// whose right edge is exactly the monitor's left edge has no pixel on it.
+fn anywhere_on(
+    rect: Rectangle<i32, Logical>,
+    screens: impl IntoIterator<Item = Rectangle<i32, Logical>>,
+) -> bool {
+    screens.into_iter().any(|screen| screen.overlaps(rect))
+}
+
 /// A rectangle grown outward by the frame drawn around it.
 fn grown(real: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logical> {
     if !insets.any() {
@@ -103,6 +121,28 @@ fn grown(real: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logica
         )
             .into(),
     )
+}
+
+/// How much room a frame takes around its client.
+///
+/// The whole of what a [`crate::pane::Frame`] means to a layout, in one place
+/// so that every reader of it agrees. The `Pending` arm is the interesting
+/// one: a frame that has not been built *yet* still reserves what one will
+/// want, because a window that changes shape the moment its frame appears is
+/// worse than one that was always the right size. It must not apply to a pane
+/// that will never have a frame — a client drawing its own decorations, an
+/// override-redirect menu, or `pane = "none"` — which got a titlebar's
+/// worth of blank space above it with no titlebar in it. That is what an
+/// Electron application looked like here.
+const fn insets_for(frame: &crate::pane::Frame) -> Insets {
+    match frame {
+        crate::pane::Frame::Pending => Insets {
+            top: TITLEBAR_HEIGHT,
+            ..Insets::NONE
+        },
+        crate::pane::Frame::None => Insets::NONE,
+        crate::pane::Frame::Styled(decoration) => decoration.insets(),
+    }
 }
 
 fn to_rect(rectangle: Rectangle<i32, Logical>) -> Rect {
@@ -156,7 +196,15 @@ pub(crate) struct Solium {
     ///
     /// The wallpaper is one of these and there is nothing in here that knows
     /// that. See `scripted.rs`.
-    pub(crate) surfaces: Vec<crate::scripted::Surface>,
+    pub(crate) surfaces: crate::scripted::Surfaces,
+
+    /// Every selection a script has named, and where each is being carried.
+    ///
+    /// **Not a sixth table keyed by `PaneId`.** A group holds its own members
+    /// and its own transform, so nothing here is keyed by anything and there is
+    /// nothing to reconcile: a selection naming a window that has closed
+    /// resolves to nothing and costs a `u64`. See `group.rs`.
+    pub(crate) groups: crate::group::Groups,
 
     /// The keymap in force, kept so a reload that changes nothing does not
     /// re-send one. See `keymap.rs`.
@@ -244,14 +292,11 @@ pub(crate) struct Solium {
     /// told. QML hover is positional: a frame never told the pointer left
     /// stays lit forever.
     pub(crate) hovered_frame: Option<crate::pane::PaneId>,
-    /// Windows on their way out, and when to tell them so. See `close_pane`.
-    closing: HashMap<crate::pane::PaneId, std::time::Duration>,
-    /// Windows that have been asked to close, and when they were asked.
-    ///
-    /// A close is a request. A client may put up "are you sure?" and stay, and
-    /// nothing in the protocol says so -- the only evidence is the window
-    /// still being here. See `settle_refused`.
-    asked: HashMap<crate::pane::PaneId, std::time::Duration>,
+    // A window on its way out, and one that has been asked to close and not
+    // gone, used to be two `HashMap<PaneId, Duration>` here. They are
+    // `Pane::closing_at` and `Pane::asked_at` now: a timer about one window is
+    // part of that window, and leaves with it rather than waiting to be swept
+    // out of a table beside it. See `close_pane` and `settle_refused`.
     /// When the last memory report went out; see `memory_report`.
     pub(crate) reported_at: std::time::Duration,
     /// XWayland's window manager, once XWayland has started. `None` means no
@@ -349,7 +394,8 @@ pub(crate) struct Solium {
     /// pastes nothing at all.
     pub(crate) primary_selection_state: PrimarySelectionState,
 
-    /// Every decorated window's frame, drawn by us from QML.
+    /// How windows are framed: which QML draws a frame, and the building of
+    /// one. The frames themselves are on the panes they are drawn around.
     pub(crate) decorations: Decorations,
 
     /// What the pointer should look like right now.
@@ -359,6 +405,16 @@ pub(crate) struct Solium {
     /// track this has an invisible pointer — which is indistinguishable, to
     /// whoever is sitting there, from input being broken.
     pub(crate) pointer: crate::cursor::Pointer,
+
+    /// Fragment programs, compiled on first use and kept for the life of the
+    /// renderer.
+    ///
+    /// Not on the renderer, because that one is Smithay's; not on the pane,
+    /// because a program belongs to a GL context and there is one of those.
+    /// Beside `pointer` rather than among the protocol states for the same
+    /// reason `pointer` is here: it is something the compositor draws *with*,
+    /// not something a client binds.
+    pub(crate) programs: crate::pass::Programs,
 
     /// Hardware buffer sharing: `zwp_linux_dmabuf_v1`.
     ///
@@ -565,8 +621,6 @@ impl Solium {
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
             loading: crate::script::Loading::default(),
             hovered_frame: None,
-            closing: HashMap::new(),
-            asked: HashMap::new(),
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
@@ -591,7 +645,8 @@ impl Solium {
             idle_state: crate::idle::IdleState::new::<Self>(&display_handle),
             idle_inhibit_state: crate::idle::inhibit_state(&display_handle),
             idle: crate::idle::Idle::default(),
-            surfaces: Vec::new(),
+            surfaces: crate::scripted::Surfaces::default(),
+            groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),
             session_lock_state: crate::lock::state(&display_handle),
@@ -613,6 +668,7 @@ impl Solium {
             socket_name: String::new(),
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
+            programs: crate::pass::Programs::default(),
             published_windows: String::new(),
             focusing: false,
             pending_drop: None,
@@ -695,11 +751,226 @@ impl Solium {
 
     /// How a pane is being drawn right now. Real geometry unless something is
     /// animating it, and real geometry for a pane that has gone.
+    ///
+    /// **Samples the clock itself, so a caller asking about more than one pane
+    /// wants [`Self::drawn_id_at`] instead.** `present::Clock` reads through
+    /// rather than caching — for reasons its own documentation gives — so N
+    /// calls here are N instants, and a frame's worth of panes would each be
+    /// drawn at a slightly different moment of the same animation.
     pub(crate) fn drawn(&self, id: crate::pane::PaneId, real: Rectangle<i32, Logical>) -> Frame {
-        self.panes.get(id).map_or_else(
-            || Frame::real(real),
-            |pane| present::frame(pane, real, self.clock.now()),
-        )
+        self.drawn_id_at(id, real, self.clock.now())
+    }
+
+    /// The same, for a caller that holds the pane's id and already has the
+    /// instant.
+    ///
+    /// The third of the three ways to ask this question, and the one a whole
+    /// frame wants: [`Self::drawn`] holds neither the pane nor the instant,
+    /// [`Self::drawn_at`] holds both, and this holds only the instant. All
+    /// three end in `drawn_at`, so the rule about a pane's own transform and
+    /// its groups' being put together in exactly one place is unaffected.
+    pub(crate) fn drawn_id_at(
+        &self,
+        id: crate::pane::PaneId,
+        real: Rectangle<i32, Logical>,
+        now: std::time::Duration,
+    ) -> Frame {
+        self.panes
+            .get(id)
+            .map_or_else(|| Frame::real(real), |pane| self.drawn_at(pane, real, now))
+    }
+
+    /// The same, for a caller that already holds the pane and the instant.
+    ///
+    /// **The one place a pane's own transform and its groups' are put
+    /// together**, so no caller can ask for one and forget the other. Every
+    /// reader of a drawn rectangle goes through here — the renderer, the hit
+    /// test, the resize edges, the window list a script sees — which is what
+    /// keeps "a workspace you cannot see is one you cannot click into by
+    /// accident" true now that the workspace is a selection rather than a
+    /// transform per window.
+    ///
+    /// Hit-testing follows the *rectangle* and not the matrix, which is
+    /// unchanged: a window drawn in perspective is still clicked where the
+    /// layout put it, and a mode that wants otherwise inverts its own transform
+    /// through `present::to_window_space`.
+    pub(crate) fn drawn_at(
+        &self,
+        pane: &Pane,
+        real: Rectangle<i32, Logical>,
+        now: std::time::Duration,
+    ) -> Frame {
+        let frame = present::frame(pane, real, now);
+        if self.groups.is_empty() {
+            return frame;
+        }
+        // Only worked out when a selection has actually named a screen: this is
+        // a geometric search over the outputs, per pane, per frame.
+        let monitor = self
+            .groups
+            .names_monitors()
+            .then(|| self.output_of(real).map(|output| output.name()))
+            .flatten();
+        self.groups
+            .on_window(pane.id().get(), monitor.as_deref(), now)
+            .apply(frame)
+    }
+
+    /// Where one monitor's instance of a scripted surface is actually drawn.
+    ///
+    /// The surface half of [`Self::drawn_at`], and deliberately a rectangle
+    /// rather than a `Frame`: a selection reaches a surface as a displacement
+    /// and an opacity, and no further. A matrix or a deformation on a group
+    /// reaches its *panes* — bending a surface means capturing it into a texture
+    /// first, and a scripted surface is a memory buffer on the software path,
+    /// where there is no texture to bend. That is `offscreen::capture` for
+    /// surfaces, which is a change of its own and not a line of this one.
+    pub(crate) fn carried(
+        &self,
+        id: crate::scripted::SurfaceId,
+        output: &Output,
+        area: Rectangle<i32, Logical>,
+    ) -> Rectangle<i32, Logical> {
+        if self.groups.is_empty() {
+            return area;
+        }
+        let (dx, dy) = self
+            .groups
+            .on_surface(id, &output.name(), self.clock.now())
+            .offset();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a displacement on this desktop, in logical pixels"
+        )]
+        let moved = Rectangle::new(
+            (
+                area.loc.x + dx.round() as i32,
+                area.loc.y + dy.round() as i32,
+            )
+                .into(),
+            area.size,
+        );
+        moved
+    }
+
+    /// How much of a scripted surface a selection is showing.
+    pub(crate) fn carried_alpha(&self, id: crate::scripted::SurfaceId, output: &Output) -> f32 {
+        if self.groups.is_empty() {
+            return 1.0;
+        }
+        self.groups
+            .on_surface(id, &output.name(), self.clock.now())
+            .opacity
+    }
+
+    /// Turn what a script aimed at into what the compositor holds.
+    ///
+    /// The one place a surface's *name* becomes a [`crate::scripted::SurfaceId`]
+    /// — which is what makes an anchor `Copy` and a `Frame` still cheap to
+    /// blend. A name nobody has declared loses the effect and not the window,
+    /// the same failure an anchor that stops resolving already has, and it says
+    /// so once rather than every frame.
+    fn aimed(&self, deform: &crate::script::Deform) -> Option<present::Deform> {
+        let anchor = match &deform.aim {
+            crate::script::Aim::Rect(rect) => {
+                present::Anchor::Rect(present::logical((rect.x, rect.y), (rect.w, rect.h)))
+            }
+            crate::script::Aim::Window(id) => present::Anchor::Pane(*id),
+            crate::script::Aim::Surface(name) => match self.surfaces.named(name) {
+                Some(id) => present::Anchor::Surface(id),
+                None => {
+                    tracing::warn!(
+                        surface = name,
+                        "no surface by that name to aim at, drawing the window undeformed"
+                    );
+                    return None;
+                }
+            },
+        };
+        Some(present::Deform {
+            effect: deform.effect,
+            anchor,
+        })
+    }
+
+    /// Put back the windows a membership change has just moved.
+    ///
+    /// **What happens when membership changes while things are animating**, and
+    /// the reason it is not a jump. A window sent to another workspace leaves
+    /// one selection for another, and the difference between the two shifts
+    /// lands on it between one frame and the next; this displaces its own
+    /// transform by exactly that much, so the frame after the change draws it
+    /// where the frame before did, and animates it home.
+    ///
+    /// Only windows. A surface joining a selection has no transform of its own
+    /// to displace — there is nowhere to put one, and the case it would cover
+    /// (a wallpaper changing desk) is not a thing a desk does. A selection that
+    /// names a monitor is not rebased either: what is on a screen changes
+    /// because the *user* dragged a window across a bezel, which no declaration
+    /// observes.
+    fn keep_displaced(
+        &mut self,
+        displaced: &crate::group::Displaced,
+        now: std::time::Duration,
+        animation: crate::script::AnimationSpec,
+    ) {
+        if displaced.is_empty() {
+            return;
+        }
+        for (id, by) in displaced {
+            let Some(pane) = self.panes.by_script_id(*id) else {
+                continue;
+            };
+            let Some(outer) = self.pane_outer(pane) else {
+                continue;
+            };
+            present::rebase(pane, outer, *by, now, animation.duration, animation.easing);
+        }
+        self.redraw = true;
+    }
+
+    /// Turn a deform's anchor into the rectangle it is aimed at *this frame*.
+    ///
+    /// The compositor half of `crates/effects`. The crate is handed two
+    /// rectangles and knows nothing about panes — that is what keeps it
+    /// testable without a session — so the identity a script named is resolved
+    /// here, on the frame it is drawn on, and never snapshotted when the
+    /// script ran. A dock icon the user is still opening windows next to is
+    /// somewhere else 500 ms later.
+    ///
+    /// A pane is resolved through [`Self::drawn`] rather than to its layout
+    /// slot, so a genie aimed at a window that is itself animating follows the
+    /// window and not the hole it is leaving. One level deep and no deeper:
+    /// `drawn` reads a pane's own transform and resolves no anchors of its
+    /// own, so two panes aimed at each other cannot recurse.
+    ///
+    /// `None` when the anchor names nothing: the pane has closed, or never
+    /// existed. The caller draws the window flat, which is the failure that
+    /// loses an effect rather than the frame.
+    pub(crate) fn aimed_at(&self, deform: Option<present::Deform>) -> Option<present::Aimed> {
+        let deform = deform?;
+        let to = match deform.anchor {
+            present::Anchor::Rect(rect) => rect,
+            present::Anchor::Pane(id) => {
+                let pane = self.panes.by_script_id(id)?;
+                self.drawn(pane.id(), self.pane_outer(pane)?).rect
+            }
+            // The monitor in front of the user, and the primary one when there
+            // is no pointer yet. Not "the first output that answers": that is
+            // stable only until somebody plugs a screen in on the other side.
+            present::Anchor::Surface(id) => {
+                let surface = self.surfaces.get(id)?;
+                let output = self.active_output().or_else(|| self.primary_output())?;
+                let geometry = self.space.output_geometry(&output)?;
+                let primary = self.primary_output();
+                let area = surface.area_on(&output, geometry, primary.as_ref())?;
+                self.carried(id, &output, area).to_f64()
+            }
+        };
+        Some(present::Aimed {
+            effect: deform.effect,
+            to,
+        })
     }
 
     /// Gather the presentation-feedback callbacks committed for this frame.
@@ -767,10 +1038,14 @@ impl Solium {
     }
 
     /// Whether the compositor draws this window's frame.
+    ///
+    /// `Styled` and nothing else: a pane whose frame has not been built is not
+    /// decorated *yet*, and one that will never have a frame is not decorated
+    /// at all. Both were "not in `frames`" before and are one arm apart now.
     pub(crate) fn is_decorated(&self, window: &Window) -> bool {
         self.panes
-            .id_of(window)
-            .is_some_and(|id| self.decorations.contains(id))
+            .of(window)
+            .is_some_and(|pane| pane.decoration().is_some())
     }
 
     /// The monitor the user is working on.
@@ -856,6 +1131,26 @@ impl Solium {
     /// there, with no bookkeeping to keep in step and nothing to go stale.
     pub(crate) fn output_of(&self, rect: Rectangle<i32, Logical>) -> Option<Output> {
         self.output_at((rect.loc.x + rect.size.w / 2, rect.loc.y + rect.size.h / 2).into())
+    }
+
+    /// Whether a rectangle is on any monitor at all.
+    ///
+    /// **Not [`Self::output_of`], which never answers `None`**: that one falls
+    /// back to the *nearest* monitor, because a window being dragged has to
+    /// belong to something. This is the other question -- is any of this
+    /// rectangle on a screen -- and a workspace that is hidden by being parked
+    /// a screen away is precisely the case where the two answers differ.
+    ///
+    /// Asked by `render::prepare`, which runs before any output is bound and
+    /// so has no one screen to test against; `render::elements` asks the same
+    /// thing one monitor at a time and needs no such helper.
+    pub(crate) fn on_any_output(&self, rect: Rectangle<i32, Logical>) -> bool {
+        anywhere_on(
+            rect,
+            self.space
+                .outputs()
+                .filter_map(|output| self.space.output_geometry(output)),
+        )
     }
 
     /// The monitor a surface is on, for telling it what to draw itself like.
@@ -1143,7 +1438,7 @@ impl Solium {
         if let Some(pane) = self.panes.get_mut(id) {
             pane.unmanage();
         }
-        self.decorations.set_bare(id);
+        self.decorations.set_bare(&mut self.panes, id);
     }
 
     /// Which process a client belongs to, as the kernel reports it.
@@ -1297,15 +1592,16 @@ impl Solium {
             return false;
         }
 
-        // Everything keyed by a pane goes when the pane does. Keyed by surface
-        // this could not have happened here, because nothing knew the set of
-        // live windows -- so it was done where a window was seen leaving
-        // tidily, and a client that crashed left its frame behind forever.
-        let live: std::collections::HashSet<crate::pane::PaneId> =
-            self.panes.iter().map(Pane::id).collect();
-        self.decorations.retain(|id| live.contains(&id));
-        self.closing.retain(|id, _| live.contains(id));
-        self.asked.retain(|id, _| live.contains(id));
+        // Nothing to reconcile. A pane's frame and its two timers are fields
+        // of the pane, so `Panes::sync` above took them with the panes it
+        // dropped -- which is the whole point of moving them in.
+        //
+        // What stood here was a `retain` over the decoration tables against
+        // the set of live panes, and before that the same sweep was done where
+        // a window was seen leaving *tidily*: nothing there knew the set of
+        // live windows, so a client that crashed left its frame behind for
+        // ever. A frame that is part of its window cannot be left behind by
+        // either route.
 
         // A window appearing or going is exactly when the keyboard can be left
         // with nowhere to be, and the only moment worth checking.
@@ -1353,7 +1649,7 @@ impl Solium {
                     return None;
                 }
                 let outer = self.pane_outer(pane)?;
-                let drawn = present::frame(pane, outer, now);
+                let drawn = self.drawn_at(pane, outer, now);
                 Some(WindowInfo {
                     id: pane.id().get(),
                     rect: to_rect(outer),
@@ -1474,6 +1770,8 @@ impl Solium {
                     opacity,
                     matrix,
                     deform,
+                    z,
+                    pivot,
                     animation,
                 } => {
                     let Some(pane) = self.panes.by_script_id(id) else {
@@ -1489,7 +1787,16 @@ impl Solium {
                             |rect| present::logical((rect.x, rect.y), (rect.w, rect.h)),
                         ),
                         opacity: opacity.unwrap_or(1.0),
-                        deform,
+                        deform: deform.and_then(|deform| self.aimed(&deform)),
+                        // Both arrive resolved: `script::depth_from` and
+                        // `script::pivot_from` hold the defaults, so a table
+                        // mentioning neither key produces them there rather
+                        // than here. Still spelled out rather than
+                        // `..Frame::real(outer)`, because a struct update
+                        // would take whatever field is added next without
+                        // anyone looking at this line again.
+                        z,
+                        pivot,
                     };
                     present::present(
                         pane,
@@ -1517,6 +1824,17 @@ impl Solium {
                         rect: present::logical((rect.x, rect.y), (rect.w, rect.h)),
                         opacity: opacity.unwrap_or(1.0),
                         deform: None,
+                        // Explicit so the next field added breaks this line
+                        // instead of being defaulted past it -- and these two
+                        // stay the defaults because `sol.present_from` reads
+                        // no keys for them. It could not honour them if it
+                        // did: this is the frame a window animates *from*, and
+                        // both fields select the destination's value at the
+                        // first blended frame, so a depth or a pivot here
+                        // would never be on screen. A script wanting either
+                        // says so with `sol.present` once it has landed.
+                        z: 0.0,
+                        pivot: (0.5, 0.5),
                     };
                     present::from(
                         pane,
@@ -1572,7 +1890,7 @@ impl Solium {
                             self.outer_geometry(&window).map(|outer| (window, outer))
                         })
                         .collect();
-                    if self.decorations.set_style(name) {
+                    if self.decorations.set_style(&mut self.panes, name) {
                         for (window, outer) in slots {
                             self.resize_to(&window, outer);
                         }
@@ -1598,6 +1916,41 @@ impl Solium {
                 }
                 Command::Surface(surface) => self.declare_surface(*surface),
                 Command::SurfaceGone(name) => self.remove_surface(&name),
+                Command::Group {
+                    name,
+                    selection,
+                    animation,
+                } => {
+                    let displaced = match selection {
+                        Some(selection) => {
+                            let selection = crate::group::selection_of(&selection, &self.surfaces);
+                            self.groups.declare(&name, selection, now)
+                        }
+                        None => self.groups.forget(&name, now),
+                    };
+                    self.keep_displaced(&displaced, now, animation);
+                }
+                Command::PresentGroup {
+                    name,
+                    to,
+                    animation,
+                } => {
+                    if !self
+                        .groups
+                        .present(&name, to, now, animation.duration, animation.easing)
+                    {
+                        // Named rather than ignored, for the reason
+                        // `sol.surface` names a scene it cannot find: a
+                        // transform on a selection nobody declared is a typo,
+                        // and a mode that silently does nothing is the hardest
+                        // kind of configuration mistake to find.
+                        tracing::warn!(group = name, "no selection by that name to carry");
+                    }
+                }
+                Command::ClearGroup { name, animation } => {
+                    self.groups
+                        .clear(&name, now, animation.duration, animation.easing);
+                }
                 Command::Monitors(arrangement) => {
                     let was = std::mem::replace(&mut self.arrangement, arrangement);
                     // `enabled = false` on a monitor is an unplug as far as
@@ -1641,7 +1994,7 @@ impl Solium {
             // Against where the window is *drawn*: a window in a mode should be
             // resized by its thumbnail's edge or not at all, never by an edge
             // that is somewhere else on screen.
-            let drawn = present::frame(pane, outer, now).rect;
+            let drawn = self.drawn_at(pane, outer, now).rect;
             let grown = Rectangle::new(
                 (
                     drawn.loc.x.round() as i32 - resize::RESIZE_BORDER,
@@ -1880,7 +2233,7 @@ impl Solium {
         self.panes.iter().rev().find_map(|pane| {
             let window = pane.client()?;
             let outer = self.outer_geometry(window)?;
-            if !present::frame(pane, outer, now).rect.contains(location) {
+            if !self.drawn_at(pane, outer, now).rect.contains(location) {
                 return None;
             }
             Some((window.clone(), self.real_geometry(window)?))
@@ -1937,7 +2290,7 @@ impl Solium {
             let Some(outer) = self.pane_outer(pane) else {
                 continue;
             };
-            let frame = present::frame(pane, outer, now);
+            let frame = self.drawn_at(pane, outer, now);
             if !frame.rect.contains(location) {
                 continue;
             }
@@ -1986,11 +2339,11 @@ impl Solium {
         let now = self.clock.now();
 
         self.panes.iter().rev().find_map(|pane| {
-            if !self.decorations.contains(pane.id()) {
-                return None;
-            }
+            // Only a built frame has anything to hit. A pane reserving room for
+            // one that has not arrived owns no pixels for a click to land on.
+            pane.decoration()?;
             let outer = self.pane_outer(pane)?;
-            let drawn = present::frame(pane, outer, now);
+            let drawn = self.drawn_at(pane, outer, now);
             if !drawn.rect.contains(location) {
                 return None;
             }
@@ -2031,18 +2384,25 @@ impl Solium {
     /// animating it would mean holding a snapshot of every window on the
     /// chance that it might be the next to leave.
     pub(crate) fn close_pane(&mut self, id: crate::pane::PaneId) {
-        if self.closing.contains_key(&id) {
-            return;
-        }
+        // The pane is looked up before the "already leaving" guard rather than
+        // after it, which the `closing` map could not do. Same answer either
+        // way: an id with no pane returned early on the second check before
+        // and returns early on the first one now, and a pane already on its
+        // way out must not have its animation restarted.
         let Some(pane) = self.panes.get(id) else {
             return;
         };
+        if pane.closing_at().is_some() {
+            return;
+        }
         let Some(outer) = self.pane_outer(pane) else {
             return;
         };
         let now = self.clock.now();
         present::close(pane, outer, now);
-        self.closing.insert(id, now + present::CLOSING);
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.begin_closing(now + present::CLOSING);
+        }
         self.redraw = true;
     }
 
@@ -2051,17 +2411,21 @@ impl Solium {
     /// Returns whether any window is still on its way out, so the backend
     /// keeps drawing until they are gone.
     pub(crate) fn settle_closing(&mut self, now: std::time::Duration) -> bool {
-        if self.closing.is_empty() {
-            return false;
-        }
+        // Over the panes rather than over a map of timers, so a pane that has
+        // gone cannot be visited at all. It could be before, between a
+        // `Panes::remove` and the `sync_panes` that swept the map after it --
+        // and every reader that found such an entry did nothing with it but
+        // remove it, so nothing observable turned on that window.
         let due: Vec<crate::pane::PaneId> = self
-            .closing
+            .panes
             .iter()
-            .filter(|(_, at)| now >= **at)
-            .map(|(id, _)| *id)
+            .filter(|pane| pane.closing_at().is_some_and(|at| now >= at))
+            .map(Pane::id)
             .collect();
         for id in due {
-            self.closing.remove(&id);
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.stop_closing();
+            }
             let Some(window) = self.panes.get(id).and_then(Pane::client).cloned() else {
                 // Nothing to ask. A window whose application never arrived is
                 // gone when we say it is, which is the one case where closing
@@ -2092,9 +2456,16 @@ impl Solium {
             // than whether the window is still here a moment later, and a
             // window we could not even ask is the one most in need of coming
             // back.
-            self.asked.insert(id, now);
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.mark_asked(now);
+            }
         }
-        !self.closing.is_empty()
+        // Asked after the loop, not before it: `trigger_close` runs a script,
+        // and a script that closes another window during it starts a timer
+        // this answer has to count. That was true of `!self.closing.is_empty()`
+        // in the same position, and is the reason this is a second pass rather
+        // than a flag gathered during the first.
+        self.panes.iter().any(|pane| pane.closing_at().is_some())
     }
 
     /// Retire transforms that have landed, and say whether anything still
@@ -2107,6 +2478,10 @@ impl Solium {
         for pane in self.panes.iter() {
             animating |= present::settle(pane, now);
         }
+        // And the selections, which animate on the same clock and damage
+        // nothing either. Not folded into the loop above: a group is not a
+        // pane, and one that has landed has to be released exactly once.
+        animating |= self.groups.settle(now);
         // A window that has finished leaving is told to close; until then the
         // session counts as animating so the frames keep coming.
         animating |= self.settle_closing(now);
@@ -2256,22 +2631,30 @@ impl Solium {
     ///
     /// Returns whether anything is still being waited on.
     pub(crate) fn settle_refused(&mut self, now: std::time::Duration) -> bool {
-        if self.asked.is_empty() {
-            return false;
-        }
         /// Long enough that a client which is closing is not interrupted part
         /// way; short enough that coming back reads as an answer to the press
         /// rather than as a window reappearing by itself.
         const GRACE: std::time::Duration = std::time::Duration::from_millis(400);
 
+        // Over the panes, for the reason `settle_closing` is: a window that
+        // has gone is a window that answered, and there is nothing left of it
+        // to bring back.
         let due: Vec<crate::pane::PaneId> = self
-            .asked
+            .panes
             .iter()
-            .filter(|(_, at)| now.saturating_sub(**at) >= GRACE)
-            .map(|(id, _)| *id)
+            .filter(|pane| {
+                pane.asked_at()
+                    .is_some_and(|at| now.saturating_sub(at) >= GRACE)
+            })
+            .map(Pane::id)
             .collect();
         for id in due {
-            self.asked.remove(&id);
+            // Stopped waiting first, then acted on -- the same order the map
+            // did it in, so a pane that goes while this runs is not waited on
+            // for ever.
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.forget_asked();
+            }
             let Some(pane) = self.panes.get(id) else {
                 continue;
             };
@@ -2291,7 +2674,7 @@ impl Solium {
             );
             self.redraw = true;
         }
-        !self.asked.is_empty()
+        self.panes.iter().any(|pane| pane.asked_at().is_some())
     }
 
     /// Act on a frame button.
@@ -2330,8 +2713,9 @@ impl Solium {
 
         let insets = self.frame_insets(window);
         let restore = self
-            .decorations
+            .panes
             .get_mut(id)
+            .and_then(Pane::decoration_mut)
             .map(|decoration| decoration.restore.take());
 
         let (location, size, maximized) = match restore {
@@ -2349,7 +2733,8 @@ impl Solium {
             ),
         };
 
-        if maximized && let Some(decoration) = self.decorations.get_mut(id) {
+        if maximized && let Some(decoration) = self.panes.get_mut(id).and_then(Pane::decoration_mut)
+        {
             decoration.restore = Some(current);
         }
 
@@ -2380,26 +2765,23 @@ impl Solium {
     }
 
     /// The same, for a caller that already knows which pane it means.
-    /// How much room this pane's frame takes.
+    /// How much room this pane's frame takes. See [`insets_for`] for what each
+    /// answer means and why the fallback is a titlebar rather than nothing.
     ///
-    /// The fallback is for a pane whose decoration has not been *built* yet --
-    /// reserving the room from the first frame is what stops a window changing
-    /// shape the moment its frame appears. It must not apply to a pane that
-    /// will never have one: a client drawing its own decorations, an
-    /// override-redirect menu, or `decoration = "none"`. Those got a
-    /// titlebar's worth of blank space above them with no titlebar in it,
-    /// which is what an Electron application looked like here.
+    /// **Asked of the pane, and there is nothing else to ask.** It is the
+    /// reader the two tables actually hurt — `frames` was checked first, so a
+    /// pane in both had `bare` silently ignored — and a frame is one value on
+    /// one pane now.
+    ///
+    /// An id with no pane reserves nothing. It used to answer from the tables,
+    /// which outlived their panes until the next sweep, so a retired id could
+    /// still be told a titlebar's worth; there is no longer anywhere for that
+    /// answer to come from. No caller can reach it today — every one holds a
+    /// live pane — which is why it is a fallback and not a `debug_assert`.
     pub(crate) fn insets_of(&self, id: crate::pane::PaneId) -> Insets {
-        if let Some(decoration) = self.decorations.get(id) {
-            return decoration.insets();
-        }
-        if self.decorations.is_bare(id) {
-            return Insets::NONE;
-        }
-        Insets {
-            top: TITLEBAR_HEIGHT,
-            ..Insets::NONE
-        }
+        self.panes
+            .get(id)
+            .map_or(Insets::NONE, |pane| insets_for(pane.frame()))
     }
 
     /// Raise a window and give it the keyboard.
@@ -2409,6 +2791,15 @@ impl Solium {
     /// number is growing: resident memory alone cannot tell a forgotten
     /// decoration from a Lua heap that never shrinks from an allocator that
     /// simply keeps what it has.
+    ///
+    /// **`decorations` is no longer among them, and not because it was
+    /// redundant.** It counted `Decorations::frames`, and its whole value was
+    /// that an entry there could belong to no pane — which is the leak it was
+    /// added to show. A frame is part of its pane now, so such an entry cannot
+    /// exist and the number cannot be computed; counting framed panes instead
+    /// would put a plausible figure on the line that is blind to exactly the
+    /// thing it was watching for. `windows` is what answers now: a decoration
+    /// that is still held is a pane that is still held.
     pub(crate) fn memory_report(&mut self) {
         if !crate::dev::memory_diagnostics() {
             return;
@@ -2441,7 +2832,6 @@ impl Solium {
             pointer = format!("{pointer_at:?}"),
             focused_inside = format!("{focused_inside:?}"),
             windows = self.panes.len(),
-            decorations = self.decorations.len(),
             lua_kb = self
                 .scripts
                 .as_ref()
@@ -2464,11 +2854,11 @@ impl Solium {
     ) -> Option<(crate::pane::PaneId, Point<f64, Logical>)> {
         let now = self.clock.now();
         self.panes.iter().rev().find_map(|pane| {
-            if !self.decorations.contains(pane.id()) {
-                return None;
-            }
+            // Only a built frame is listening. There is no scene to tell about
+            // the pointer until there is one.
+            pane.decoration()?;
             let outer = self.pane_outer(pane)?;
-            let drawn = present::frame(pane, outer, now);
+            let drawn = self.drawn_at(pane, outer, now);
             if !drawn.rect.contains(location) {
                 return None;
             }
@@ -2544,7 +2934,8 @@ impl Solium {
         // before and after its application arrives -- and it is the *same*
         // frame, keyed by pane, so whatever animation is running in it carries
         // straight through the handover instead of starting again.
-        self.decorations.insert(id, area.size.w, area.size.h);
+        self.decorations
+            .insert(&mut self.panes, id, area.size.w, area.size.h);
         // And the frame's share comes off the slot, exactly as it does for a
         // window the layout placed, so the client is sized to the same rect
         // either way.
@@ -2593,8 +2984,9 @@ impl Solium {
             tracing::info!(program, "gave up on an application that never arrived");
             // Forgotten first, then reported: a layout hearing that a window
             // closed will lay out immediately, and it should not be laying out
-            // around a window that is already gone. Everything else keyed by
-            // the pane goes with it at the next `sync_panes`.
+            // around a window that is already gone. Its frame and its timers
+            // go here with it -- fields of the pane rather than entries in a
+            // table waiting for the next `sync_panes` to sweep them.
             self.panes.remove(id);
             self.trigger_close(id);
         }
@@ -2741,7 +3133,7 @@ impl Solium {
                     .wl_surface()
                     .is_some_and(|owned| owned.as_ref() == surface)
                     && self.pane_outer(pane).is_some_and(|outer| {
-                        let drawn = present::frame(pane, outer, now).rect;
+                        let drawn = self.drawn_at(pane, outer, now).rect;
                         self.space.outputs().any(|output| {
                             self.space
                                 .output_geometry(output)
@@ -2873,8 +3265,15 @@ impl Solium {
             Ok(scripts) => {
                 crate::qml::clear_cache();
                 let style = self.decorations.style().map(ToOwned::to_owned);
-                self.decorations.set_style(None);
-                self.decorations.set_style(style);
+                // Twice, and to the same place it started, to defeat
+                // `set_style`'s "nothing changed" guard. What the second call
+                // does is *rebuild* every existing frame rather than drop it
+                // -- see the comment on it, and the reason: dropping leaves
+                // every open window bare until it is reopened -- so a window
+                // that is framed before a reload is framed after it, by a
+                // different `Decoration` built from the file as it now reads.
+                self.decorations.set_style(&mut self.panes, None);
+                self.decorations.set_style(&mut self.panes, style);
                 self.start_scripts(Some(scripts));
                 self.redraw = true;
                 tracing::info!(config = %path.display(), "configuration reloaded");
@@ -2912,25 +3311,13 @@ impl Solium {
     /// everything: without that check a `super+shift+r` that changed a gap
     /// would re-decode every wallpaper on every monitor.
     pub(crate) fn declare_surface(&mut self, declared: crate::scripted::Declaration) {
-        if let Some(existing) = self
-            .surfaces
-            .iter_mut()
-            .find(|each| each.name() == declared.name)
-        {
-            if existing.declared == declared {
-                return;
-            }
-            *existing = crate::scripted::Surface::new(declared);
-        } else {
-            self.surfaces.push(crate::scripted::Surface::new(declared));
+        if self.surfaces.declare(declared) {
+            self.redraw = true;
         }
-        self.redraw = true;
     }
 
     pub(crate) fn remove_surface(&mut self, name: &str) {
-        let before = self.surfaces.len();
-        self.surfaces.retain(|surface| surface.name() != name);
-        if self.surfaces.len() != before {
+        if self.surfaces.remove(name) {
             self.redraw = true;
         }
     }
@@ -2973,17 +3360,22 @@ impl Solium {
         };
 
         for layer in order {
-            let candidates: Vec<(usize, Rectangle<i32, Logical>)> = self
+            // Where each of them is *drawn*, not merely where it was declared:
+            // a surface carried off by a group is not under the pointer either,
+            // which is the same rule a window follows. Without it, a wallpaper
+            // that slid away with its workspace goes on eating clicks on the
+            // workspace that replaced it.
+            let candidates: Vec<(crate::scripted::SurfaceId, Rectangle<i32, Logical>)> = self
                 .surfaces
                 .iter()
-                .enumerate()
-                .filter(|(_, surface)| surface.interactive() && surface.layer() == layer)
-                .filter_map(|(index, surface)| {
-                    Some((index, surface.area_on(&output, geometry, primary.as_ref())?))
+                .filter(|surface| surface.interactive() && surface.layer() == layer)
+                .filter_map(|surface| {
+                    let area = surface.area_on(&output, geometry, primary.as_ref())?;
+                    Some((surface.id(), self.carried(surface.id(), &output, area)))
                 })
                 .collect();
-            for (index, area) in candidates {
-                let Some(surface) = self.surfaces.get_mut(index) else {
+            for (id, area) in candidates {
+                let Some(surface) = self.surfaces.get_mut(id) else {
                     continue;
                 };
                 if surface.pointer(&output, area, location.x, location.y, pressed) {
@@ -3004,7 +3396,7 @@ impl Solium {
     /// Tweaks panel from a compositor feature into `lua/tweaks.lua`.
     pub(crate) fn settle_surfaces(&mut self) {
         let mut asked: Vec<(String, String)> = Vec::new();
-        for surface in &mut self.surfaces {
+        for surface in self.surfaces.iter_mut() {
             if let Some(action) = surface.taken_action() {
                 asked.push((surface.name().to_owned(), action));
             }
@@ -3027,7 +3419,7 @@ impl Solium {
     /// largest thing the compositor allocates.
     fn prune_surfaces(&mut self) {
         let live: Vec<String> = self.space.outputs().map(Output::name).collect();
-        for surface in &mut self.surfaces {
+        for surface in self.surfaces.iter_mut() {
             surface.keep_only(&live);
         }
     }
@@ -3621,7 +4013,7 @@ impl XdgShellHandler for Solium {
         // rect that was stored is a rect that comes back exactly, where one
         // recomputed afterwards is a guess.
         if let Some(real) = self.real_geometry(&window)
-            && let Some(decoration) = self.decorations.get_mut(id)
+            && let Some(decoration) = self.panes.get_mut(id).and_then(Pane::decoration_mut)
             && decoration.restore.is_none()
         {
             decoration.restore = Some(real);
@@ -3630,8 +4022,14 @@ impl XdgShellHandler for Solium {
         // The whole monitor, and no frame over it. Marked bare rather than
         // having its decoration destroyed, so leaving fullscreen can build it
         // again from the style that is current then.
-        self.decorations.remove(id);
-        self.decorations.set_bare(id);
+        //
+        // Except that `remove` on the line below destroys the decoration the
+        // two lines above just wrote `restore` into, so the rect never comes
+        // back. Filed as #92, and left alone here: this commit moved where a
+        // decoration lives, and lifting `restore` onto the pane would fix a
+        // visible bug inside a change whose contract is that nothing changes.
+        self.decorations.remove(&mut self.panes, id);
+        self.decorations.set_bare(&mut self.panes, id);
 
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Fullscreen);
@@ -3671,18 +4069,19 @@ impl XdgShellHandler for Solium {
         let client_side =
             surface.with_pending_state(|state| state.decoration_mode) == Some(Mode::ClientSide);
         if !client_side {
-            self.decorations.unset_bare(id);
+            self.decorations.unset_bare(&mut self.panes, id);
             let size = self
                 .real_geometry(&window)
                 .map_or((TITLEBAR_HEIGHT * 20, TITLEBAR_HEIGHT * 15), |real| {
                     (real.size.w, real.size.h)
                 });
-            self.decorations.insert(id, size.0, size.1);
+            self.decorations.insert(&mut self.panes, id, size.0, size.1);
         }
 
         if let Some(back) = self
-            .decorations
+            .panes
             .get_mut(id)
+            .and_then(Pane::decoration_mut)
             .and_then(|decoration| decoration.restore.take())
         {
             surface.with_pending_state(|state| state.size = Some(back.size));
@@ -3878,13 +4277,13 @@ impl Solium {
             let real = window.and_then(|window| self.real_geometry(&window));
             let width = real.map_or(TITLEBAR_HEIGHT * 20, |real| real.size.w);
             let height = real.map_or(TITLEBAR_HEIGHT * 15, |real| real.size.h);
-            self.decorations.insert(id, width, height);
+            self.decorations.insert(&mut self.panes, id, width, height);
         } else {
             // Bare on purpose, not merely undecorated: the difference is
             // whether `insets_of` still reserves room for a frame that is
             // coming. For a client drawing its own, none is.
-            self.decorations.remove(id);
-            self.decorations.set_bare(id);
+            self.decorations.remove(&mut self.panes, id);
+            self.decorations.set_bare(&mut self.panes, id);
         }
 
         // The client has to learn its mode before it draws, or it decides for
@@ -4158,3 +4557,162 @@ delegate_output!(Solium);
 delegate_data_device!(Solium);
 smithay::delegate_primary_selection!(Solium);
 smithay::delegate_xwayland_shell!(Solium);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two monitors side by side, 1920 wide each, as `space.output_geometry`
+    /// would report them.
+    fn two_monitors() -> [Rectangle<i32, Logical>; 2] {
+        [
+            Rectangle::new((0, 0).into(), (1920, 1080).into()),
+            Rectangle::new((1920, 0).into(), (1920, 1080).into()),
+        ]
+    }
+
+    fn at(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    /// **The cull `render::prepare` runs before it captures anything.**
+    ///
+    /// A hidden workspace is not unmapped -- it is drawn a screen away -- so
+    /// "is any of this rectangle on a monitor" is the question that separates
+    /// a window worth capturing from one nothing will ever draw. Getting it
+    /// wrong in the cheap direction costs a permanent offscreen pass per
+    /// hidden window; getting it wrong in the other direction stops a visible
+    /// window being captured, which is a blank corner. So both directions are
+    /// asserted, and each line names an implementation it rules out.
+    #[test]
+    fn a_pane_is_on_a_monitor_only_if_some_monitor_covers_part_of_it() {
+        let screens = two_monitors();
+
+        assert!(
+            anywhere_on(at(100, 100, 800, 600), screens),
+            "a window in the middle of the first monitor is on it"
+        );
+        // Rules out `all(..)` in place of `any(..)`: this one touches only the
+        // second screen, and with two monitors mapped that is the common case.
+        assert!(
+            anywhere_on(at(2000, 100, 800, 600), screens),
+            "and one on the second monitor is on that"
+        );
+        assert!(
+            anywhere_on(at(1800, 100, 400, 600), screens),
+            "a window dragged across the bezel is on both"
+        );
+
+        // The case the cull exists for: a workspace hidden by being parked one
+        // screen to the left of the desk. Rules out `|_| true`.
+        assert!(
+            !anywhere_on(at(-1920, 0, 1920, 1080), screens),
+            "a workspace parked a screen away is on no monitor, which is how a \
+             workspace switch hides one"
+        );
+        assert!(
+            !anywhere_on(at(0, -2000, 800, 600), screens),
+            "and so is one parked above the desk"
+        );
+
+        // Exclusive, matching `render::elements`. Rules out
+        // `overlaps_or_touches`, which differs from `overlaps` only here.
+        assert!(
+            !anywhere_on(at(-800, 0, 800, 1080), screens),
+            "a window whose right edge is exactly the monitor's left edge has \
+             no pixel on it"
+        );
+
+        // Rules out a constant `true`, and covers the moment between a monitor
+        // going away and the session noticing.
+        assert!(!anywhere_on(at(100, 100, 800, 600), []));
+    }
+
+    #[test]
+    fn a_frame_reserves_what_it_always_reserved() {
+        // The three answers `insets_of` used to assemble from two tables,
+        // now read off one value.
+        assert_eq!(
+            insets_for(&crate::pane::Frame::Pending),
+            Insets {
+                top: TITLEBAR_HEIGHT,
+                ..Insets::NONE
+            },
+            "a frame that has not been built yet still reserves room for one, \
+             or the window changes shape the moment it arrives"
+        );
+        assert_eq!(
+            insets_for(&crate::pane::Frame::None),
+            Insets::NONE,
+            "a pane that will never have a frame reserves nothing -- a \
+             titlebar's worth of blank space with no titlebar in it is what \
+             an Electron application looked like here"
+        );
+        // The third answer -- that a built frame reserves what its decoration
+        // asked for, on every side, so that a bar along the left and a border
+        // are the same mechanism -- was asserted here against a `Styled` arm
+        // carrying a plain `Insets`. That arm carries the `Decoration` itself
+        // now, and `Decoration::new` is private to `decoration.rs`, so the case
+        // cannot be written here.
+        //
+        // It *can* be written there, and is: `decoration.rs`'s tests build real
+        // frames. The reason this file does not reach over and do the same is
+        // not that a frame needs a GPU and a display -- it does not, and this
+        // comment said so for a while. It is that `solium_qml_start` assigns
+        // the one `QGuiApplication` without a lock, so the tests that bring Qt
+        // up share a mutex, and that mutex is in the module where they live.
+        // A second, unsynchronised starter in another module is a data race.
+    }
+
+    /// Drawing is unclipped; input is not. A spike reaching over the next
+    /// window must not eat that window's clicks — the failure mode is a
+    /// neighbour that has silently stopped responding, with nothing on screen
+    /// to explain it.
+    ///
+    /// **It passed the moment it was written, and that is the point.** Every
+    /// hit-test in this file — `frame_under`, `decorated_under`, `window_under`,
+    /// `surface_under` and `resize_target` — reaches its pane through
+    /// [`Solium::pane_outer`], and the two that own a decoration gate on
+    /// `drawn.rect.contains(location)` before a layer is asked anything at all.
+    /// So the invariant holds by construction and nothing *states* it: the
+    /// canvas is a rectangle that exists, is larger, is right there in
+    /// `decoration.rs`, and is exactly what someone fixing "my glow does not
+    /// take clicks" would reach for.
+    ///
+    /// **What it is and is not.** It is the two rectangles' relationship, in
+    /// one place, with the reason written down; it is not a guard on the
+    /// hit-tests, and it adds no machine-checked coverage that `decoration.rs`
+    /// did not already have. Both controls below were run, and between them
+    /// they are the honest limit of this test: the one it fails is pinned
+    /// twice over elsewhere, and the regression it is named for is pinned
+    /// nowhere.
+    ///
+    /// | control | measured |
+    /// |---|---|
+    /// | `canvas` returning `outer` — the state before Task 5 | fails on the first assertion, but so do `decoration::tests::a_canvas_is_the_pane_grown_by_its_bleed` and `no_bleed_means_the_canvas_is_the_pane`, which pin it already |
+    /// | `frame_under` **and** `decorated_under` switched to the canvas, through `decoration::spread` | the whole suite still passes, 201 of 201 |
+    ///
+    /// The regression is instead caught with a real pointer, which is what the
+    /// task's step 4 is for: two panes side by side under `bleedy`, a press
+    /// 60px into the first one's bleed and 20px inside the second, and the
+    /// second takes focus. Run against the canvas-hit-test build above, the
+    /// *first* window takes it and the second is left unfocused — a neighbour
+    /// that has silently stopped responding, exactly as described.
+    ///
+    /// A point 30px to the *left* of the pane: inside a canvas that bled 50, and
+    /// outside the pane on the only axis that matters.
+    #[test]
+    fn a_point_in_the_bleed_is_not_in_the_pane() {
+        let outer = Rectangle::<i32, Logical>::new((100, 100).into(), (200, 200).into());
+        let bleed = crate::style::Bleed {
+            top: 50,
+            right: 50,
+            bottom: 50,
+            left: 50,
+        };
+        let canvas = crate::decoration::canvas(outer, bleed);
+        let in_bleed = smithay::utils::Point::<f64, smithay::utils::Logical>::from((70.0, 120.0));
+        assert!(canvas.to_f64().contains(in_bleed));
+        assert!(!outer.to_f64().contains(in_bleed));
+    }
+}

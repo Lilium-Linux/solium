@@ -1,7 +1,4 @@
-// A titlebar down the left-hand side.
-//
-// The same frame as `top.qml` turned ninety degrees, which is the point: where
-// a bar lives is two numbers and an anchor, not a different mechanism.
+// The one layer of `panes/bottom`: the bar, under the client.
 
 import QtQuick
 import Solium
@@ -9,10 +6,15 @@ import Solium
 Item {
     id: frame
 
-    property int insetTop: 0
-    property int insetRight: 0
+    // What this layer paints, set by the compositor from the `insets` that
+    // `Pane.qml` declares. A style reserves space once for the whole pane, so
+    // the number lives in the manifest and every layer is told it — the space
+    // reserved and the space painted cannot be two different numbers, which is
+    // what putting `insets` on `PaneStyle` rather than on `Layer` was for.
+    //
+    // Zero is what this reads if the file is built outside a pane — by
+    // `--check-qml`, say — and drawing nothing is the honest answer there.
     property int insetBottom: 0
-    property int insetLeft: 34
 
     property string title: ""
     property bool focused: false
@@ -58,43 +60,30 @@ Item {
     Rectangle {
         id: bar
 
-        anchors { top: parent.top; bottom: parent.bottom; left: parent.left }
-        width: frame.insetLeft
+        anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+        height: frame.insetBottom
         color: frame.focused ? Theme.surface : Theme.surfaceInactive
         Behavior on color { ColorAnimation { duration: Theme.normal } }
 
         Rectangle {
-            anchors { top: parent.top; bottom: parent.bottom; right: parent.right }
-            width: 1
+            anchors { left: parent.left; right: parent.right; top: parent.top }
+            height: 1
             color: frame.focused ? Theme.edge : Theme.edgeInactive
         }
     }
 
-    // Rotated about its own centre, then placed: rotation happens after
-    // layout, so a Text that is as wide as the window is tall ends up as tall
-    // as the window once turned.
     Text {
-        width: Math.min(implicitWidth, Math.max(frame.height - 120, 0))
+        anchors.centerIn: bar
+        width: Math.min(implicitWidth, Math.max(frame.width - 150, 0))
         text: frame.title
         elide: Text.ElideRight
         horizontalAlignment: Text.AlignHCenter
         color: frame.focused ? Theme.text : Theme.textDim
         font { pixelSize: Theme.fontSize; family: Theme.fontFamily }
-
-        rotation: -90
-        transformOrigin: Item.Center
-        x: bar.x + (bar.width - width) / 2
-        y: (frame.height - height) / 2
-
-        Behavior on color { ColorAnimation { duration: Theme.normal } }
     }
 
-    Column {
-        anchors {
-            bottom: bar.bottom
-            bottomMargin: Theme.margin
-            horizontalCenter: bar.horizontalCenter
-        }
+    Row {
+        anchors { right: bar.right; rightMargin: Theme.margin; verticalCenter: bar.verticalCenter }
         spacing: Theme.gap
 
         FrameButton { name: "maximize"; tint: Theme.warning }

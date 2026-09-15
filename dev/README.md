@@ -15,6 +15,7 @@ a demo into a regression test.
 | `SOLIUM_OUTPUTS=<n>` | Give the nested backend `n` monitors, side by side in its one window (1–4). Each gets its own layer map, work area and render pass, drawn into a texture of its own exactly as it would be into its own buffer. One is the default and takes the ordinary path unchanged. |
 | `SOLIUM_LUA_INIT=<path>` | Load this configuration instead of `~/.config/solium/init.lua` or the bundled one. |
 | `SOLIUM_QML_TOPBAR=`, `SOLIUM_QML_TITLEBAR=` | Load chrome from elsewhere, so it can be restyled without a rebuild. |
+| `SOLIUM_QML_GPU=1` | Bring Qt up on the OpenGL scene graph and render QML into a dmabuf the compositor allocated, rather than rasterising it on the CPU. **Not yet usable for a session** — see *QML on the GPU*. |
 | `SOLIUM_DEV_IMAGE=` | The container `dev/run-nested.sh` runs in. |
 | `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
 | `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |
@@ -28,10 +29,52 @@ a demo into a regression test.
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
+| `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
 over the top, so the only place the failure shows is the hardware.
+
+`present-check.sh` exists because the wiring between a script and the screen is
+the one part of a presentation transform that no unit test reaches. `z` and
+`pivot` are read in `script.rs`, carried through `present::Frame`, and spent in
+`render::by_depth` and `warp::mesh` — all of which are pure functions with tests
+of their own. What sits between them is two field initialisers in
+`state.rs`'s `Command::Present` arm, and reverting *both* of those to their
+defaults passes the entire suite. So this measures pixels instead: it places one
+window at a known rect, turns it twenty degrees about two different points, and
+reports where the corner went.
+
+The corner is the whole difficulty, and "look at it" is not a weaker version of
+this check — it is not a check at all. A rotated window's top-left is not the
+top-left of anything in the picture: it is one particular vertex of a quad, and
+which one cannot be read off the image. Drop the `pivot` and the frame that
+asked to turn about its own corner comes back **byte for byte identical** to the
+frame that asked to turn about its centre — `cmp -l` counts zero differing
+bytes, against 382,961 between the two correct frames. There is no visual signal
+to miss because there is none to have. So the client prints a marker block at
+its home position, the marker travels with the corner, and
+`present-check/measure.py` names the quad vertex nearest it.
+
+The last two claims are the ones no screenshot can make, and they are two halves
+of the same rule. `Solium::window_under` walks panes in stacking order and tests
+`drawn_at(..).rect.contains(location)`:
+
+* **`z` never enters the walk.** A window raised over the one covering it is
+  drawn in front and still does not take its clicks. Checked with *three*
+  windows, the third parked out of the way holding focus — with only two, the
+  window that should take the click is already focused, "it worked" and "nothing
+  happened" produce the same log, and the check rests entirely on the compositor
+  emitting a focus event for a no-change refocus.
+* **`rect` does.** A window presented somewhere else takes clicks where it is
+  drawn and not where it lives. This is the likelier regression by far —
+  `outer.contains` is the obvious-looking simplification, it inverts both clicks,
+  and it passes every other check in here.
+
+    SOLIUM_CHECK_DIR=/tmp/present ./dev/present-check.sh   # keep the frames
+
+Kept out of `gate.sh` deliberately: it needs a host compositor to nest in and a
+client to open, and a gate that cannot run headless is a gate that gets skipped.
 
 `wl-probe` is a Wayland client, and exists because a compositor cannot test its
 own protocol support from the inside. "The global is advertised" is a different
@@ -441,6 +484,149 @@ wrong otherwise, and both were hit:
   On a 260 Hz display, 55 fps puts a dragged window four frames behind the
   cursor, which is exactly what it looks like.
 
+**Never glob `target/debug/build/solium-*/out/`.** The Qt host is compiled into
+`libsolium_qml_host.a` under that path, and there is more than one such
+directory: cargo makes a separate one per unit metadata, so `cargo build -p
+solium` and `cargo build` (or `cargo test`) each own one. A test harness or a
+script that links "the" archive by glob picks whichever the shell sorts first,
+which is not the newest, and there is no error — the link succeeds and you
+measure a build from an hour ago. It cost a full round of debugging a fix that
+was already in the tree.
+
+This is not something one commit introduced and another can remove; it is how
+cargo lays the directory out. Either pin the newest,
+
+```sh
+ls -td target/debug/build/solium-*/out | head -1
+```
+
+or compile `crates/solium/qml/host.cpp` from source in the harness's own
+`build.rs`, which is the only way to be certain that what runs is what is
+checked out.
+
+## QML on the GPU
+
+```sh
+SOLIUM_QML_GPU=1 ./target/debug/solium
+```
+
+Qt comes up on its OpenGL scene graph instead of the software rasteriser, and
+renders each scene into a dmabuf the compositor allocated through GBM rather
+than into a `QImage` it then has to upload. Off by default.
+
+**It cannot run a session yet.** Qt picks one scene graph per process and there
+is no way back, so the moment this succeeds every *software* scene stops
+loading — the wallpaper, the window frames and the cursor all fail with `a
+software scene cannot render on it`, and the desktop comes up empty. What the
+knob does today is answer, in the real compositor process, whether the path
+works on this machine:
+
+```
+INFO solium::qml: QML on the GPU: Qt rendered into a buffer we allocated
+                  node=/dev/dri/renderD128 fenced=true
+```
+
+That line means a buffer was allocated, imported into Qt's context as a
+texture, drawn into by real QML, and fenced with a `sync_file` the driver
+exported. `fenced=false` is also a pass — it means the driver declined to
+export a fence and the host waited with `glFinish` instead, which costs a stall
+and nothing else.
+
+Three things worth knowing before running it on a TTY:
+
+* **Qt must be kept off the card node.** Solium writes
+  `$XDG_RUNTIME_DIR/solium-eglfs-kms.json` naming the *render* node and
+  `"headless"`, and sets `QT_QPA_EGLFS_KMS_CONFIG` before Qt starts. Without
+  it eglfs opens `/dev/dri/card1`, and because Qt starts while the scripts load
+  — before `open_gpu` — the kernel hands *Qt* DRM master, logind's `SetMaster`
+  then fails, and the only thing said about it is Smithay's `unable to become
+  drm master`, which is benign noise every other run. A black screen on a TTY
+  with nothing to read. Both JSON keys are needed: `device` alone fails the
+  plugin with `drmModeGetResources failed (Permission denied)`, `headless`
+  alone still opens the card.
+
+* **Qt is told not to install signal handlers, and it matters more than it
+  sounds.** eglfs builds a `QFbVtHandler`, which takes `SIGINT`, `SIGTERM`,
+  `SIGCONT` and `SIGTSTP`. Those handlers do not exit; each writes a byte to a
+  socketpair, and the `_exit(1)` happens whenever Qt's event queue is next
+  drained — here, `qml::tick`'s `processEvents`, which `render::prepare` only
+  reaches when something wants a frame. So a `SIGTERM` to an idle compositor
+  does nothing at all, and the *next redraw* turns it into an `_exit(1)` from
+  inside a render, skipping every Rust destructor: the libseat session, the DRM
+  master release, the VT restore. Whether it happens depends on whether anything
+  asked for a frame afterwards, which is not a property you want in the path
+  that puts your console back.
+
+  `QT_QPA_NO_SIGNAL_HANDLER=1` is set beside the `QT_QPA_EGLFS_*` variables and
+  removes it: measured, the process dies on `SIGTERM` with the knob on, both
+  idle and while drawing. `QT_QPA_ENABLE_TERMINAL_KEYBOARD=1` goes with it —
+  despite the name it tells Qt to *leave the console keyboard alone*, which it
+  otherwise mutes when stdin is a terminal and un-mutes from a destructor this
+  process never runs.
+
+  `Ctrl`+`Alt`+`Backspace` was never affected either way: it is decided in
+  `input/mod.rs` from Solium's own libinput devices, and
+  `QT_QPA_EGLFS_DISABLE_INPUT=1` means eglfs creates no input handlers to
+  compete with them.
+
+* **Qt's diagnostics go through `tracing` now, and needed to.** As of `870aacc`
+  `host.cpp` installs a `qInstallMessageHandler` that forwards to
+  `solium_qml_log_from_qt` in `qml.rs`, so QML binding errors, `console.warn`
+  and every `qWarning` in Qt and in the host come out in the compositor's own
+  log with Qt's logging category as a field. `QT_FORCE_STDERR_LOGGING` is no
+  longer needed for any of it.
+
+  What it was before is worth keeping, because it is why four failures in the
+  rice spike were silent. Qt's default handler picks its destination from
+  whether stderr is a console: **stderr when it is, journald when it is not** —
+  measured both ways on this Fedora Qt 6.11. So a TTY session, where stderr is
+  the VT the compositor has just covered, printed the whole diagnostic half of
+  the host onto a screen nobody could read and into no log at all, while a
+  `2>&1 | tee` run quietly put it in journald where nobody was looking. Neither
+  ever reached `session.log`.
+
+  `RUST_LOG` now gates Qt as well, under the `solium::qml` target like the rest
+  of that module. One consequence: a QML `console.log` is a `QtDebugMsg`, so it
+  needs `RUST_LOG=debug` — **and** `QT_LOGGING_RULES='qml.debug=true'`, because
+  Qt's own category filter drops it before the handler is called. `console.info`
+  and above need neither.
+
+* **A one-frame probe cannot see the bug that matters.** Qt's
+  `QOpenGLContext::currentContext()` is a thread-local Qt sets in its own
+  `makeCurrent`. The compositor takes the thread back with a raw
+  `eglMakeCurrent`, which Qt never sees, so that thread-local goes *stale rather
+  than null* — and `QRhiGles2::ensureContext()` reads exactly it, concludes its
+  context is already current, and issues the whole frame against whichever
+  context really is: the compositor's.
+
+  Nothing fails when this happens. `beginFrame`, `sync`, `render` and `endFrame`
+  all return, the fence is a real `sync_file` and signals in under a
+  millisecond, and the dmabuf stays full of zeros. Measured on a 64x64 scene:
+  16384 of 16384 bytes zero with the compositor's context current across the
+  render, 0 of 16384 bytes wrong with Qt's. The *first* frame after a scene is
+  built works either way, because `initialize()` left Qt's context current and
+  nothing has taken it yet — so a probe that builds a scene, renders once and
+  reads the buffer passes while every frame after it draws nothing.
+
+  `clear_stale_current_context` in `host.cpp` is the fix: `doneCurrent()` on
+  whatever Qt believes is current, when EGL says otherwise. `surface.rs`'s
+  `restore` is the other half, and neither works without the other.
+
+* **A GPU scene's buffer is not stored the way you would guess.** QRhi leaves an
+  OpenGL texture render target in the framebuffer's own orientation, origin
+  bottom-left, so the scene's *top* row lands in the buffer's *last* row. A
+  dmabuf is top-down unless it says otherwise and ours does not, so the shell
+  comes out upside down. `host.cpp` calls
+  `QQuickRenderTarget::setMirrorVertically` on every GPU render target for that
+  reason — including the one rebuilt inside `solium_qml_scene_resize`, which is
+  easy to miss.
+
+  Do not try to correct it on the compositor's side. Smithay's `y_inverted`
+  texture flag negates the texture matrix's y row without the matching
+  translation, and a `Transform::Flipped180` on the render element mirrors
+  within the element's *logical* size while its source rectangle is in device
+  pixels — right at scale 1, wrong on every scaled monitor.
+
 ## Checking an animation frame by frame
 
 ```sh
@@ -504,6 +690,14 @@ keyboard at all — which is how the first run of this backend ended in a reboot
 Two more things stand between you and that: if libinput reports no input devices
 within five seconds, Solium stops on its own rather than hold a display nobody
 can talk to; and from another VT, `pkill -x solium` always works.
+
+That second one is worth one sentence of qualification, because it is a
+last-resort escape and you are reading it before taking a VT. It holds for an
+ordinary session, and it holds with `SOLIUM_QML_GPU=1` only because Solium sets
+`QT_QPA_NO_SIGNAL_HANDLER` before starting Qt — without it eglfs installs its
+own `SIGTERM` handler, and the process then neither dies nor cleanly survives.
+See *QML on the GPU*. On a build that predates that, or one where
+`QT_QPA_PLATFORM` was set from outside, reach for `pkill -9 -x solium`.
 
 **Reading what happened.** A hardware session writes to
 `~/.local/state/solium/session.log` as well as to the terminal, because the

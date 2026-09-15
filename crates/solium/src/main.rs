@@ -12,6 +12,7 @@ mod capture;
 mod cursor;
 mod decoration;
 mod dev;
+mod group;
 mod idle;
 mod input;
 mod keymap;
@@ -20,7 +21,9 @@ mod lock;
 mod mat4;
 mod monitor;
 mod offscreen;
+mod pacing;
 mod pane;
+mod pass;
 mod present;
 mod qml;
 mod render;
@@ -28,6 +31,7 @@ mod screencopy;
 mod script;
 mod scripted;
 mod state;
+mod style;
 mod surface;
 mod synth;
 mod tty;
@@ -146,8 +150,20 @@ fn check_qml(path: Option<String>) -> Result<()> {
     let Some(path) = path else {
         anyhow::bail!("usage: solium --check-qml <file.qml>");
     };
-    qml::start()?;
-    match qml::Scene::new(std::path::Path::new(&path), 400, 200) {
+    // `start_software` and not `start`, so this is a software scene by
+    // construction rather than by preference — the one caller in the compositor
+    // that is right not to go through `qml::Scene::for_host`. It loads one file
+    // to say whether it parses and then exits; nothing here is ever drawn, and
+    // asking for a dmabuf would make the answer depend on whether the machine
+    // has a render node rather than on the QML being checked.
+    //
+    // It used to call `start`, which honours `SOLIUM_QML_GPU` — so run from a
+    // shell with that exported, this started a *GPU* host and `Scene::software`
+    // below was refused by `host.cpp`'s software constructor. A perfectly valid
+    // QML file came back reported as broken, and which answer you got depended
+    // on your environment rather than on your file.
+    qml::start_software()?;
+    match qml::Scene::software(std::path::Path::new(&path), 400, 200) {
         Ok(_) => {
             println!("ok");
             Ok(())

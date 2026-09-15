@@ -38,4 +38,32 @@ echo "scripts..."
 "$root/target/debug/solium" --check >/dev/null \
     || { echo "GATE FAILED: scripts ($root/target/debug/solium --check)" >&2; exit 1; }
 
+# The QML GPU path, against a real GLES renderer and the real host.cpp.
+#
+# Nothing above this line touches it: `cargo test` cannot: it needs a GPU and a
+# Qt installation at run time, and the container this gate builds in has neither
+# a render node nor a display. So it is built in the container like everything
+# else and *run* on the host, the same split as the script check above.
+#
+# It earns a place in the gate because every defect this path has produced was
+# silent -- a frame drawn into the wrong context, a teardown deleting the
+# compositor's GL objects, a buffer stored upside down -- and each of them
+# returned success from every call involved. There is nothing to notice by
+# looking. See dev/wirecheck/README.md.
+echo "wirecheck..."
+run 'nice -n 19 ionice -c 3 taskset -c 14,15 sh -c "cd dev/wirecheck && cargo build -j2"' \
+    || { echo "GATE FAILED: wirecheck did not build" >&2; exit 1; }
+# Whichever render node this box has, rather than renderD128 by name: a machine
+# that enumerates differently would otherwise skip this silently forever.
+node="$(ls -1 /dev/dri/renderD* 2>/dev/null | head -1 || true)"
+if [[ -z "$node" ]]; then
+    echo "  skipped: no render node on this machine"
+elif [[ -n "${SOLIUM_GATE_NO_GPU:-}" ]]; then
+    echo "  skipped: SOLIUM_GATE_NO_GPU is set"
+else
+    "$root/dev/wirecheck/target/debug/wirecheck" "$node" >/tmp/solium-wirecheck.log 2>&1 \
+        || { echo "GATE FAILED: wirecheck on $node (see /tmp/solium-wirecheck.log)" >&2
+             tail -25 /tmp/solium-wirecheck.log >&2; exit 1; }
+fi
+
 echo "gate passed"

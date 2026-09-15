@@ -145,6 +145,11 @@ pub enum Curve {
     OutBack,
     /// Slow at both ends. For things that move rather than appear.
     InOutQuad,
+    /// Slow at both ends, more so: a longer wind-up and a longer settle around
+    /// a faster middle. The same journey [`Self::InOutQuad`] makes, read as
+    /// *weight* rather than as travel — for something crossing a screen rather
+    /// than moving between two slots, which is what the genie does.
+    InOutCubic,
     Spring(Spring),
     /// Any curve at all, as the two control points of a cubic bezier from
     /// (0,0) to (1,1) -- the same four numbers CSS calls `cubic-bezier` and
@@ -242,6 +247,14 @@ impl Curve {
                     1.0 - (inverse * inverse) / 2.0
                 }
             }
+            Self::InOutCubic => {
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    let inverse = -2.0 * t + 2.0;
+                    1.0 - (inverse * inverse * inverse) / 2.0
+                }
+            }
             // A spring is described in seconds, not in fractions of a fixed
             // duration, so a normalised time has to be given one: its own
             // settling time.
@@ -250,13 +263,19 @@ impl Curve {
     }
 
     /// Every curve, for tools that want to show them all.
+    ///
+    /// This is the whole vocabulary [`Self::from_name`] knows, so it is also
+    /// what a script may write — and what the shipped `lua/*.lua` is checked
+    /// against by `script::tests`. [`Self::Bezier`] is deliberately not here:
+    /// it has no name, it is four numbers.
     #[must_use]
-    pub fn all() -> [(&'static str, Self); 5] {
+    pub fn all() -> [(&'static str, Self); 6] {
         [
             ("linear", Self::Linear),
             ("outCubic", Self::OutCubic),
             ("outBack", Self::OutBack),
             ("inOutQuad", Self::InOutQuad),
+            ("inOutCubic", Self::InOutCubic),
             ("spring", Self::Spring(Spring::default())),
         ]
     }
@@ -279,6 +298,7 @@ impl Curve {
             Self::OutCubic => "outCubic",
             Self::OutBack => "outBack",
             Self::InOutQuad => "inOutQuad",
+            Self::InOutCubic => "inOutCubic",
             Self::Spring(_) => "spring",
             Self::Bezier { .. } => "bezier",
         }
@@ -476,6 +496,54 @@ mod tests {
         assert_eq!(Curve::from_name("out_cubic"), Some(Curve::OutCubic));
         assert_eq!(Curve::from_name("OUT-CUBIC"), Some(Curve::OutCubic));
         assert_eq!(Curve::from_name("nonsense"), None);
+    }
+
+    /// Every name in [`Curve::all`] is one a script can write, and every curve
+    /// answers to the name it is listed under.
+    ///
+    /// The round trip rather than either half, because the halves are two
+    /// lists that have to agree and there is nothing but this holding them
+    /// together. A curve added to the enum and to `name` but not to `all` is
+    /// one the compositor will print and then refuse to read back — which is
+    /// the state `bezier` is in, deliberately: it has no name, it is four
+    /// numbers, and it is not in `all` for exactly that reason.
+    #[test]
+    fn every_name_resolves_and_every_curve_names_itself() {
+        for (name, curve) in Curve::all() {
+            assert_eq!(Curve::from_name(name), Some(curve), "{name} is unreadable");
+            assert_eq!(curve.name(), name, "{name} does not answer to its own name");
+        }
+        // The exception, written down so it reads as a decision.
+        assert_eq!(Curve::from_name("bezier"), None);
+    }
+
+    /// `inOutCubic` is a different curve from `inOutQuad` and not a synonym.
+    ///
+    /// Which is the whole reason it is worth a name of its own: it holds back
+    /// harder at both ends and crosses the middle faster, so the same distance
+    /// reads as a heavier object. Both are symmetric about the halfway point,
+    /// and that symmetry is what separates an in-out curve from an out one.
+    #[test]
+    fn in_out_cubic_eases_harder_than_in_out_quad() {
+        assert!(
+            Curve::InOutCubic.at(0.25) < Curve::InOutQuad.at(0.25),
+            "a cubic in-out must leave later"
+        );
+        assert!(
+            Curve::InOutCubic.at(0.75) > Curve::InOutQuad.at(0.75),
+            "and arrive later too, having crossed the middle faster"
+        );
+        for curve in [Curve::InOutQuad, Curve::InOutCubic] {
+            assert!((curve.at(0.5) - 0.5).abs() < 1e-9, "not symmetric");
+            for step in 0..=50_u32 {
+                let t = f64::from(step) / 100.0;
+                assert!(
+                    (curve.at(t) + curve.at(1.0 - t) - 1.0).abs() < 1e-9,
+                    "{} is not symmetric at {t}",
+                    curve.name()
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,10 +1,17 @@
 -- Workspaces, as a presentation.
 --
 -- A workspace switch does not move windows: it moves the *view*. Every window
--- keeps living exactly where its layout put it, and the ones belonging to
--- other workspaces are simply drawn a screen away. `sol.present` is that, and
--- the compositor animates the difference — so the slide is the same machinery
--- that overview and tiling use, and cannot drift out of step with them.
+-- keeps living exactly where its layout put it, and the desks belonging to
+-- other workspaces are simply drawn a screen away. `sol.present_group` is that,
+-- and the compositor animates the difference — so the slide is the same
+-- machinery that overview and tiling use, and cannot drift out of step with
+-- them.
+--
+-- **A desk is a selection, not a loop over windows.** This file used to call
+-- `sol.present` once per window, which is why the wallpaper stayed behind: a
+-- surface had no transform to set, so there was nothing to put in the same
+-- sentence as the windows. `sol.group` names the desk — its windows *and* its
+-- background — and one `sol.present_group` carries all of it, on one clock.
 --
 -- Three consequences worth having, all of them free:
 --
@@ -31,6 +38,7 @@
 
 local config = require("config")
 local monitors = require("monitors")
+local wallpaper = require("wallpaper")
 
 -- The key every monitor shares when workspaces are not per monitor. A name no
 -- connector can have, so it cannot collide with a real one.
@@ -42,6 +50,8 @@ local workspaces = {
     showing = {},
     -- Which workspace each window belongs to, by window id.
     of = {},
+    -- Where each desk was last asked to sit, by selection name. See `apply`.
+    carried = {},
 }
 
 local function key(monitor)
@@ -113,33 +123,117 @@ function workspaces.visible(windows)
     return out
 end
 
--- Draw every window where its workspace is, relative to the one its monitor
--- has in view.
+-- One selection per desk: the windows on it, and its own background.
+--
+-- Named per monitor because a desk is a screenful: two screens showing
+-- workspace 2 are two different desks, sitting at two different offsets and
+-- made of different windows.
+local function desk(monitor, index)
+    return "desk-" .. index .. "@" .. monitor
+end
+
+-- How many desk names to clear when the arrangement shrinks.
+--
+-- A selection is the compositor's until something takes the name away, and it
+-- survives `super+shift+r` the same way a surface and a window's transform do.
+-- So a reload that goes from eight workspaces to four would otherwise leave
+-- four selections carrying windows a screen away with nothing left to bring
+-- them back. Swept once per session, which is the only moment the count can
+-- have changed.
+local MAX_DESKS = 16
+local swept = false
+
+-- Who is on which desk, and where each desk sits.
+--
+-- **One group per desk rather than one `sol.present` per window.** The
+-- difference is not tidiness: a transform names a selection, so the desk's
+-- background travels with its windows because it is *in* the selection, and one
+-- animation carries the lot. `sol.present` per window could only ever move the
+-- windows -- a surface had no transform at all to set.
+--
+-- It also stops the transform going stale. A window moved by the layout while
+-- its desk is off screen used to keep an absolute rectangle worked out before
+-- the move; a displacement stays right wherever the layout puts it.
+function workspaces.regroup()
+    local count = workspaces.count()
+
+    -- Windows by monitor, then by desk. Built in one pass, because
+    -- `workspaces.at` asks which workspace a window is on and that is a table
+    -- lookup per window either way.
+    local on = {}
+    for _, window in ipairs(sol.windows()) do
+        local mine = on[window.monitor] or {}
+        on[window.monitor] = mine
+        local index = workspaces.at(window.id, window.monitor)
+        local list = mine[index] or {}
+        mine[index] = list
+        list[#list + 1] = window.id
+    end
+
+    for _, monitor in ipairs(sol.monitors()) do
+        local mine = on[monitor.name] or {}
+        for index = 1, count do
+            local members = {
+                windows = mine[index] or {},
+                -- Which monitor's instance of the surfaces below. A wallpaper
+                -- declared `on = "every-monitor"` is one name for several
+                -- things, and a desk wants the one on its own screen.
+                monitor = monitor.name,
+            }
+            local background = wallpaper.for_desk(index)
+            if background then
+                members.surfaces = { background }
+            end
+            sol.group(desk(monitor.name, index), members)
+        end
+        if not swept then
+            for index = count + 1, MAX_DESKS do
+                sol.group(desk(monitor.name, index), false)
+            end
+        end
+    end
+    swept = #sol.monitors() > 0
+end
+
+-- Carry every desk to where it sits relative to the one its monitor is showing.
 function workspaces.apply(animation)
     local spread = workspaces.settings.spread or 1.0
+    local count = workspaces.count()
 
+    workspaces.regroup()
     sol.animate(animation or workspaces.settings.motion)
-    for _, window in ipairs(sol.windows()) do
-        -- Its *own* monitor's size and its own monitor's workspace. A window on
-        -- a 1920 screen slid by a 2560's width lands somewhere nothing can
-        -- reach and comes back to where it started only by luck.
-        local area = sol.monitor(window.id)
-        local showing_col, showing_row = workspaces.cell(workspaces.on(window.monitor))
-        local col, row = workspaces.cell(workspaces.at(window.id, window.monitor))
-        local dx = (col - showing_col) * area.w * spread
-        local dy = (row - showing_row) * area.h * spread
-        if dx == 0 and dy == 0 then
-            -- Back to where it really lives, which is where it has been all
-            -- along. Clearing rather than presenting at its own rect matters:
-            -- a window with no transform is one the layout can move freely.
-            sol.present_clear(window.id)
-        else
-            sol.present(window.id, {
-                x = window.x + dx,
-                y = window.y + dy,
-                w = window.w,
-                h = window.h,
-            })
+
+    for _, monitor in ipairs(sol.monitors()) do
+        -- Its *own* monitor's size and its own monitor's workspace. A desk on a
+        -- 1920 screen slid by a 2560's width lands somewhere nothing can reach
+        -- and comes back to where it started only by luck.
+        --
+        -- A monitor *is* its work area -- `sol.monitors()` puts x, y, w and h
+        -- straight on the entry and nests the whole screen under `whole` -- so
+        -- this is the same measurement the per-window loop took from
+        -- `sol.monitor(window.id)`, and the slide is the same length it was.
+        local showing_col, showing_row = workspaces.cell(workspaces.on(monitor.name))
+        for index = 1, count do
+            local col, row = workspaces.cell(index)
+            local dx = (col - showing_col) * monitor.w * spread
+            local dy = (row - showing_row) * monitor.h * spread
+            local key = desk(monitor.name, index)
+            local was = workspaces.carried[key]
+            -- Only when it has actually changed. `sol.present_group` starts a
+            -- new animation from wherever the selection is now, so asking for
+            -- the offset it is already heading to -- which is what a layout
+            -- event mid-slide would do -- restarts the slide and stretches it.
+            if not was or was[1] ~= dx or was[2] ~= dy then
+                workspaces.carried[key] = { dx, dy }
+                if dx == 0 and dy == 0 then
+                    -- Back to nothing, and then nothing at all: the desk in
+                    -- view is released when it lands, so the windows you are
+                    -- looking at cost exactly what an ungrouped desktop costs.
+                    sol.present_group_clear(key)
+                else
+                    sol.present_group(key, { x = dx, y = dy })
+                end
+            end
         end
     end
 end
@@ -228,6 +322,22 @@ sol.on("open", function(id)
     if workspaces.settings.follow_new_windows then
         workspaces.of[id] = workspaces.on(monitors.of(id))
     end
+end)
+
+-- The desks are per monitor, so a screen arriving or leaving is a different set
+-- of them. This is also the first moment there are any monitors to build them
+-- from: a script's top level runs before the compositor has placed a single
+-- output, so declaring them there would declare nothing.
+sol.on("monitors", function()
+    workspaces.apply()
+end)
+
+-- And membership follows the windows. Only the membership -- no `sol.animate`
+-- and no transform, so this cannot disturb whichever layout is also listening
+-- for this event. A selection whose members have not changed is not a change at
+-- all and costs nothing on the other side.
+sol.on("layout", function()
+    workspaces.regroup()
 end)
 
 for index = 1, 9 do
