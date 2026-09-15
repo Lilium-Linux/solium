@@ -176,6 +176,17 @@ pub(crate) fn run() -> Result<()> {
         );
     }
 
+    // Said once, at startup, because with the knob set this is the difference
+    // between a bare desktop and a broken one. `qml::set_allocator` is the
+    // hardware backend's call and there is no equivalent here — winit hands its
+    // renderer a display, not a GBM device — so a scene has nothing to allocate
+    // a buffer from. Qt still comes up on the GPU if it can, and then refuses
+    // software scenes as well, so with this knob set nested draws no QML at
+    // all. That is not something to work out from a blank window.
+    if crate::dev::qml_gpu() {
+        tracing::info!("nested: no GBM device, so QML scenes have no buffer to render into");
+    }
+
     let size = backend.window_size();
     // The host's actual refresh, not an assumed 60: a client pacing itself to
     // the wrong number is a client that misses frames on purpose.
@@ -544,6 +555,31 @@ pub(crate) fn run() -> Result<()> {
         // rendering has damaged the *next* frame, not this one.
         state.redraw = false;
 
+        // `SOLIUM_PACING`, and only over the part of the loop that draws. An
+        // iteration that decided not to draw is not a frame that was slow --
+        // it is the compositor correctly doing nothing, and counting it would
+        // put the idle timeout below into the measurement.
+        //
+        // Nested is not the hardware, and the difference is stated in the
+        // README: there is one window, one swap and no page flip. What it
+        // *does* exercise, with the real Qt and the real driver, is every phase
+        // above the commit -- which is where this instrument's own correctness
+        // lives.
+        let pace = if wanted {
+            crate::pacing::frame()
+        } else {
+            crate::pacing::Frame::off()
+        };
+        if pace.on()
+            && let Some((interval, name)) = state
+                .space
+                .outputs()
+                .map(|output| (frame_interval(output), output.name()))
+                .min_by_key(|(interval, _)| *interval)
+        {
+            pace.deadline(interval, &name);
+        }
+
         // The renderer borrow must end before submit(), so rendering happens in
         // its own scope and only two flags escape.
         // Before the output buffer is bound: this pass binds framebuffers of
@@ -558,7 +594,10 @@ pub(crate) fn run() -> Result<()> {
         // Before the output buffer is bound, alongside `prepare` and for the
         // same reason: a capture binds a framebuffer of its own, and doing
         // that underneath a bound output redirects the whole frame into it.
-        crate::screencopy::settle(&mut state, backend.renderer(), &prepared);
+        {
+            let _prep = crate::pacing::span(crate::pacing::Phase::Prep);
+            crate::screencopy::settle(&mut state, backend.renderer(), &prepared);
+        }
 
         // Not `match backend.bind() { _ if !wanted => ... }`: the scrutinee runs
         // before the guard, so that acquired a buffer on every idle frame and
@@ -602,6 +641,10 @@ pub(crate) fn run() -> Result<()> {
                             else {
                                 continue;
                             };
+                            // One monitor's picture built. Counted here rather
+                            // than at the submit below, because the submit is
+                            // one window however many monitors are inside it.
+                            pace.drew();
                             // `src` must be given whenever `size` is: Smithay
                             // defaults it to the drawn size, which crops the
                             // texture to its top-left corner instead of
@@ -633,6 +676,7 @@ pub(crate) fn run() -> Result<()> {
                         let scale = state
                             .output_for(screen)
                             .map_or(1.0, |output| output.current_scale().fractional_scale());
+                        pace.drew();
                         render::elements(
                             &mut state,
                             renderer,
@@ -641,6 +685,12 @@ pub(crate) fn run() -> Result<()> {
                         )
                     };
 
+                    // As on the hardware backend: the frame is built and
+                    // finished inside this call, so the mark brackets it and is
+                    // dropped before anything looks at the result. See
+                    // `qml::no_frame_in_flight`.
+                    let frame = crate::qml::frame_in_flight();
+                    let gles = crate::pacing::span(crate::pacing::Phase::Gles);
                     let result = damage_tracker.render_output(
                         renderer,
                         &mut framebuffer,
@@ -648,6 +698,8 @@ pub(crate) fn run() -> Result<()> {
                         &elements,
                         [0.05, 0.05, 0.06, 1.0],
                     );
+                    drop(gles);
+                    drop(frame);
                     if let Err(err) = &result {
                         tracing::warn!(?err, "render failed");
                     }
@@ -725,11 +777,15 @@ pub(crate) fn run() -> Result<()> {
             );
         }
 
-        if rendered
-            && !captured
-            && let Err(err) = backend.submit(Some(&[damage]))
-        {
-            tracing::warn!(?err, "submit failed");
+        // The nested stand-in for the hardware's DRM commit: handing the frame
+        // to the host. Measured under the same phase so the two backends read
+        // the same way, with the caveat in `dev/README.md` that there is no
+        // page flip here and the host may or may not block us.
+        if rendered && !captured {
+            let _commit = crate::pacing::span(crate::pacing::Phase::Commit);
+            if let Err(err) = backend.submit(Some(&[damage])) {
+                tracing::warn!(?err, "submit failed");
+            }
         }
 
         state.space.elements().for_each(|window| {
@@ -754,7 +810,11 @@ pub(crate) fn run() -> Result<()> {
 
         // Retire transforms that have landed, so a settled window costs nothing
         // to draw, and learn whether anything still needs the next frame.
-        state.settle(now);
+        {
+            let _settle = crate::pacing::span(crate::pacing::Phase::Settle);
+            state.settle(now);
+        }
+        pace.finish(state.panes.len());
 
         frames += 1;
         if now.saturating_sub(window_started) >= Duration::from_secs(2) {

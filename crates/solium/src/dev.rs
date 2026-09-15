@@ -202,6 +202,23 @@ fn parse_list_with<T>(
     parsed
 }
 
+/// Render QML on the GPU rather than the CPU.
+///
+/// ```sh
+/// SOLIUM_QML_GPU=1 ./target/debug/solium --tty
+/// ```
+///
+/// Off by default while the dmabuf path proves itself. The software path is
+/// the fallback and must keep working: a machine where this fails still has
+/// to run a desktop.
+///
+/// Read once, in `qml::start`, and acted on once. Qt fixes its scene graph
+/// backend for the life of the process, so this cannot be a per-scene choice
+/// and re-reading it could only ever disagree with itself.
+pub(crate) fn qml_gpu() -> bool {
+    std::env::var_os("SOLIUM_QML_GPU").is_some()
+}
+
 /// Whether to report what the compositor is holding, once a second.
 ///
 /// ```sh
@@ -209,6 +226,25 @@ fn parse_list_with<T>(
 /// ```
 pub(crate) fn memory_diagnostics() -> bool {
     std::env::var_os("SOLIUM_MEMDIAG").is_some()
+}
+
+/// Whether to say where a frame's time went, on the frames that took too long.
+///
+/// ```sh
+/// SOLIUM_PACING=1
+/// ```
+///
+/// A flag rather than a threshold, because the threshold is not a preference:
+/// it is the monitor's own frame interval, read from its mode. A number named
+/// here would be right for a 260 Hz screen and wrong for the 75 Hz one beside
+/// it, which is the case this compositor actually runs on.
+///
+/// Read exactly once — `pacing::frame` caches it on the first frame — because
+/// this sits on the path that runs at the refresh rate, and by the time the
+/// phases are counted a `getenv` per frame would be a `getenv` per scene per
+/// output per frame. See `pacing.rs`.
+pub(crate) fn pacing() -> bool {
+    std::env::var_os("SOLIUM_PACING").is_some()
 }
 
 /// Whether to show the Developer Tweaks panel.

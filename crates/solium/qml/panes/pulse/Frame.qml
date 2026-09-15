@@ -1,10 +1,4 @@
-// A titlebar with an animation running inside it.
-//
-// Two of them, in fact: a sheen that travels across the focused window's bar,
-// and an accent line under it that breathes. Both are ordinary QML animations
-// — the compositor drives the scene's clock every frame while it is changing,
-// and stops driving it as soon as the scene says it has settled, so an
-// unfocused window costs nothing to keep on screen.
+// The one layer of `panes/pulse`: the bar, the sheen, and the breathing line.
 
 import QtQuick
 import Solium
@@ -12,10 +6,15 @@ import Solium
 Item {
     id: frame
 
-    property int insetTop: 38
-    property int insetRight: 0
-    property int insetBottom: 0
-    property int insetLeft: 0
+    // What this layer paints, set by the compositor from the `insets` that
+    // `Pane.qml` declares. A style reserves space once for the whole pane, so
+    // the number lives in the manifest and every layer is told it — the space
+    // reserved and the space painted cannot be two different numbers, which is
+    // what putting `insets` on `PaneStyle` rather than on `Layer` was for.
+    //
+    // Zero is what this reads if the file is built outside a pane — by
+    // `--check-qml`, say — and drawing nothing is the honest answer there.
+    property int insetTop: 0
 
     property string title: ""
     property bool focused: false
@@ -41,13 +40,8 @@ Item {
             width: 120
             height: parent.height
             visible: frame.focused
-            gradient: Gradient {
-                orientation: Gradient.Horizontal
-                GradientStop { position: 0.0; color: "transparent" }
-                GradientStop { position: 0.5; color: Theme.accent }
-                GradientStop { position: 1.0; color: "transparent" }
-            }
-            opacity: 0.18
+            color: Theme.accent
+            opacity: 0.12
 
             SequentialAnimation on x {
                 running: frame.focused
@@ -109,7 +103,7 @@ Item {
     }
 
     // The breathing line where the frame meets the client. Inside the
-    // reserved height rather than below it: a frame that stays within its own
+    // reserved height rather than below it: a layer that stays within its own
     // insets only has those copied when it changes, and this one changes on
     // every frame.
     Rectangle {

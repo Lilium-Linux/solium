@@ -1675,6 +1675,7 @@ dependencies = [
  "pkg-config",
  "smithay",
  "solium-animation",
+ "solium-effects",
  "solium-layout",
  "tracing",
  "tracing-subscriber",
@@ -1682,6 +1683,10 @@ dependencies = [
 
 [[package]]
 name = "solium-animation"
+version = "0.0.0"
+
+[[package]]
+name = "solium-effects"
 version = "0.0.0"
 
 [[package]]

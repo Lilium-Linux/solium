@@ -120,11 +120,20 @@ pub(crate) struct Mesh {
     vertices: Vec<Corner>,
 }
 
-/// Cut a rectangle into a mesh and project it, about its own centre.
+/// Cut a rectangle into a mesh and project it, about `pivot`.
 ///
 /// The deform moves points around inside the window's own space; the matrix
 /// then places that in 3D. Both are optional and they compose, which is what
 /// lets a genie happen to a window that is also tilted.
+///
+/// `pivot` is a fraction of `rect`, not pixels: `(0.5, 0.5)` is its centre and
+/// `(0.0, 0.0)` its top-left corner. It is the one point the matrix leaves
+/// alone, which is what separates a card flipping on its own spine from a card
+/// flipping about the middle of itself.
+///
+/// The deform arrives with its anchor already resolved to a rectangle — see
+/// `present::Anchor` — because the thing it is aimed at moves, and the frame
+/// being drawn is the only moment its position is known.
 ///
 /// Returns `None` when any vertex lands at or behind the viewer: a shape with
 /// one vertex projected from behind is not that shape any more, and drawing it
@@ -132,16 +141,25 @@ pub(crate) struct Mesh {
 pub(crate) fn mesh(
     rect: Rectangle<f64, smithay::utils::Logical>,
     matrix: Mat4,
-    deform: Option<crate::present::Deform>,
+    deform: Option<crate::present::Aimed>,
+    pivot: (f32, f32),
     scale: f64,
 ) -> Option<Mesh> {
+    // The two ends of the morph, in the plain numbers the effects crate takes.
+    let from = crate::present::for_effects(rect);
+    let morph = deform.map(|deform| (deform.effect, crate::present::for_effects(deform.to)));
     // One cell unless a deform asks for more: a matrix alone is exact at the
     // corners, because a projective map takes straight edges to straight
     // edges and the per-vertex `q` carries the rest.
-    let (columns, rows) = deform.map_or((1, 1), crate::present::Deform::segments);
+    let (columns, rows) = morph.map_or((1, 1), |(effect, _)| effect.segments());
+    // The point the matrix turns about, and the point the projection is
+    // measured from. `(0.5, 0.5)` is the rect's centre, which is what this
+    // computed before `pivot` existed and is what every flat window still
+    // passes -- so the default is not a special case, it is the same two
+    // multiplications with a 0.5 that used to be spelled `/ 2.0`.
     let (centre_x, centre_y) = (
-        rect.loc.x + rect.size.w / 2.0,
-        rect.loc.y + rect.size.h / 2.0,
+        rect.loc.x + rect.size.w * f64::from(pivot.0),
+        rect.loc.y + rect.size.h * f64::from(pivot.1),
     );
     #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
     let scale32 = scale as f32;
@@ -151,9 +169,9 @@ pub(crate) fn mesh(
         let v = f64::from(row) / f64::from(rows);
         for column in 0..=columns {
             let u = f64::from(column) / f64::from(columns);
-            let (x, y) = match deform {
-                Some(deform) => deform.place(rect, u, v),
-                None => (rect.loc.x + u * rect.size.w, rect.loc.y + v * rect.size.h),
+            let (x, y) = match morph {
+                Some((effect, to)) => effect.place(from, to, u, v),
+                None => from.at(u, v),
             };
             #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
             let offset = (((x - centre_x) as f32), ((y - centre_y) as f32));
@@ -536,5 +554,120 @@ pub(crate) fn release_framebuffer(renderer: &mut GlesRenderer) {
     let restored = unsafe { renderer.with_context(|gl| gl.BindFramebuffer(ffi::FRAMEBUFFER, 0)) };
     if let Err(err) = restored {
         tracing::warn!(?err, "could not release the offscreen framebuffer");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use smithay::utils::{Logical, Rectangle};
+
+    use super::mesh;
+    use crate::mat4::Mat4;
+
+    /// A quarter turn about the centre moves every corner. The same turn about
+    /// the top-left corner leaves that corner exactly where it was -- which is
+    /// the whole difference, and the reason a card stack needs this.
+    ///
+    /// **Size, location and pivot each carry two different numbers**, because a
+    /// pair that reads the same both ways round cannot see the components of
+    /// that pair being swapped. A square rect hides a transposed size; an
+    /// origin at `(100, 100)` hides a transposed location; and `(0.5, 0.5)` and
+    /// `(0.0, 0.0)` are their own transpositions, so `(1.0, 0.0)` is here to be
+    /// the pivot that is not. Three symmetries, three swaps, one rule.
+    #[test]
+    fn a_pivot_is_the_point_the_matrix_leaves_alone() {
+        let rect = Rectangle::<f64, Logical>::new((40.0, 90.0).into(), (200.0, 100.0).into());
+        let turn = Mat4::rotate_z(std::f32::consts::FRAC_PI_2);
+
+        let centred = mesh(rect, turn, None, (0.5, 0.5), 1.0).expect("a mesh");
+        let cornered = mesh(rect, turn, None, (0.0, 0.0), 1.0).expect("a mesh");
+
+        // Vertex 0 is (u, v) = (0, 0): the rect's top-left, at (40, 90).
+        let (cx, cy) = (cornered.vertices[0].x, cornered.vertices[0].y);
+        assert!(
+            (cx - 40.0).abs() < 0.01 && (cy - 90.0).abs() < 0.01,
+            "a turn about the top-left leaves the top-left alone, got ({cx}, {cy})"
+        );
+        // A negative control, and only that: about the centre the top-left
+        // moves. It is satisfied by almost any wrong pivot, so it catches
+        // nothing on its own -- it is here so the assertion above cannot be
+        // passed by a `mesh` that simply never moves anything.
+        let (mx, my) = (centred.vertices[0].x, centred.vertices[0].y);
+        assert!(
+            (mx - 40.0).abs() > 1.0 || (my - 90.0).abs() > 1.0,
+            "a turn about the centre moves the top-left, got ({mx}, {my})"
+        );
+
+        // `(1.0, 0.0)` is the top-right corner, at (240, 90). Read the pair the
+        // other way round and the pivot is (40, 190) instead -- the mistake a
+        // square window would hide.
+        let top_right = mesh(rect, turn, None, (1.0, 0.0), 1.0).expect("a mesh");
+        // Vertex 1 is (u, v) = (1, 0): the rect's top-right.
+        let (tx, ty) = (top_right.vertices[1].x, top_right.vertices[1].y);
+        assert!(
+            (tx - 240.0).abs() < 0.01 && (ty - 90.0).abs() < 0.01,
+            "a turn about the top-right leaves the top-right alone, got ({tx}, {ty})"
+        );
+    }
+
+    /// And the default is the centre it replaced. Every unanimated window on
+    /// the machine takes this path.
+    ///
+    /// Checked as a property, not against a second copy of the old arithmetic.
+    /// A point reflection -- `scale(-1, -1, 1)` -- sends every point to its
+    /// opposite through the pivot, so it maps the rect onto itself exactly when
+    /// the pivot is the rect's centre. That is **one** equation, `2P = TL + BR`,
+    /// asserted from both ends because the pair reads better than the half; it
+    /// is not two independent checks, and dropping either loses nothing.
+    ///
+    /// There is no trigonometry in a point reflection and `scale` leaves the
+    /// bottom row of the matrix at `0, 0, 0, 1`, so `w` is exactly 1, the
+    /// perspective divide is exact, and every value involved is a small
+    /// integer. Hence `assert_eq!` on f32 rather than an epsilon.
+    ///
+    /// The rect's origin is asymmetric for the reason the test above gives.
+    #[test]
+    fn the_default_pivot_is_the_centre_it_replaced() {
+        let rect = Rectangle::<f64, Logical>::new((40.0, 70.0).into(), (300.0, 200.0).into());
+        let through =
+            mesh(rect, Mat4::scale(-1.0, -1.0, 1.0), None, (0.5, 0.5), 1.0).expect("a mesh");
+
+        // Vertices 0 and 2 are (u, v) = (0, 0) and (1, 1): the rect's top-left
+        // at (40, 70) and its bottom-right at (340, 270), which it exchanges.
+        assert_eq!(
+            (through.vertices[0].x, through.vertices[0].y),
+            (340.0, 270.0),
+            "the top-left reflects onto the bottom-right"
+        );
+        assert_eq!(
+            (through.vertices[2].x, through.vertices[2].y),
+            (40.0, 70.0),
+            "and the bottom-right back onto the top-left: the same equation"
+        );
+
+        // A second pin on the pivot, through a matrix with trigonometry in it.
+        //
+        // **This says nothing about the rotation** -- it would pass identically
+        // with `Mat4::IDENTITY`, and that is the point rather than a weakness.
+        // The six offsets of the triangle list `[TL, TR, BR, TL, BR, BL]` sum
+        // to exactly zero about the pivot, so for *any* linear map the mesh's
+        // mean lands back on the pivot itself. Asserting it lands on the rect's
+        // centre therefore pins the pivot there whatever matrix a window
+        // carries -- which is the one thing this test is about. The finiteness
+        // check is along for the ride.
+        let turned = mesh(rect, Mat4::rotate_y(0.3), None, (0.5, 0.5), 1.0).expect("a mesh");
+        let (mut sum_x, mut sum_y) = (0.0_f32, 0.0_f32);
+        for corner in &turned.vertices {
+            assert!(corner.x.is_finite() && corner.y.is_finite());
+            sum_x += corner.x;
+            sum_y += corner.y;
+        }
+        #[expect(clippy::cast_precision_loss, reason = "six vertices")]
+        let count = turned.vertices.len() as f32;
+        let (average_x, average_y) = (sum_x / count, sum_y / count);
+        assert!(
+            (average_x - 190.0).abs() < 0.001 && (average_y - 170.0).abs() < 0.001,
+            "the mesh's mean is the pivot, which is the centre, got ({average_x}, {average_y})"
+        );
     }
 }

@@ -1,0 +1,34 @@
+[package]
+name = "solium-effects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Solium's vertex deformations: named functions over a window's unit square, with no compositor attached."
+
+[lints]
+workspace = true
+
+# cdylib so the engine can be built for the browser and drive the preview
+# *live*, rather than the preview replaying samples. A genie is judged by
+# looking at it, and a deformation whose parameters cannot be moved while you
+# look is one nobody tunes.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The file is `src/bin/preview.rs`, mirroring `solium-animation`'s, but the
+# *binary* cannot also be called `preview`: two bin targets of that name in one
+# workspace write to one `target/debug/preview`, which cargo warns about on
+# every build and says may become a hard error. Renaming the file instead would
+# hide the mirror; renaming the output does not.
+[[bin]]
+name = "effects-preview"
+path = "src/bin/preview.rs"
+
+# Deliberately empty, and for a harder reason than `solium-animation`'s. An
+# effect must be testable without a session -- that is half of why vertex
+# deformation is parametric Rust rather than a shader -- so this crate may not
+# grow a dependency on Wayland, on Smithay, on a renderer or on Solium itself.
+# Rectangles cross the boundary as this crate's own `Rect`, and the compositor
+# converts at the one seam in `present.rs`.
+[dependencies]

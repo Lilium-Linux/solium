@@ -2,29 +2,59 @@
 //!
 //! The compositor's shell surfaces — the bar now, window decorations next —
 //! are authored in QML and rendered by Qt's scene graph inside this process.
-//! See `qml/host.cpp` for why in-process (a shell painting frames over a
-//! protocol was tried and measured at ~15 fps, 39% CPU) and why the *software*
-//! rasteriser (no QPA plugin on this machine will adopt a foreign EGL context,
-//! so a GL scene graph would render on a context Solium cannot sample from).
+//! See `qml/host.cpp` for why in-process: a shell painting frames over a
+//! protocol was tried and measured at ~15 fps, 39% CPU.
+//!
+//! Two paths, and only ever one of them per process, because Qt fixes its
+//! scene graph backend inside `QGuiApplication`. The software rasteriser is the
+//! default and draws into a `QImage` the compositor uploads — no QPA plugin
+//! here will adopt a foreign EGL context, so a GL scene graph cannot simply be
+//! handed Solium's own. The GPU path, behind `SOLIUM_QML_GPU`, works around
+//! that from the other end: the compositor allocates the buffer through GBM and
+//! Qt imports its dmabuf as a texture to draw into. See `start_on_gpu`.
 //!
 //! This module is the only unsafe surface in the compositor, and it is kept
 //! deliberately narrow: a handle, a render call, some setters. Everything Qt is
 //! behind the C ABI.
 
+pub(crate) mod paint;
+mod target;
+
+/// The largest a scene may be, per side.
+///
+/// Re-exported because it is no longer only a GPU allocator's business. A
+/// layer's canvas is the pane grown by an **author-controlled** `bleed`, so
+/// `decoration::canvas` is where an absurd number is first turned into a size,
+/// and it is the one place that can decline it before either path allocates —
+/// the software path has no [`target::allocate`] to refuse it.
+pub(crate) use target::MAX_SIDE;
+
 use std::{
-    ffi::{CStr, CString, c_char, c_double, c_int, c_longlong},
-    path::Path,
+    borrow::Cow,
+    cell::Cell,
+    ffi::{CStr, CString, c_char, c_double, c_int, c_longlong, c_uint, c_ulonglong},
+    os::fd::{FromRawFd as _, OwnedFd},
+    path::{Path, PathBuf},
+    sync::OnceLock,
     time::Duration,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
+use smithay::{
+    backend::{
+        allocator::{dmabuf::Dmabuf, gbm::GbmDevice},
+        drm::{DrmDeviceFd, DrmNode, NodeType},
+        udev,
+    },
+    utils::DeviceFd,
+};
 
 #[expect(
     unsafe_code,
     reason = "the Qt host is C++; this is the declaration of its C ABI"
 )]
 mod ffi {
-    use super::{c_char, c_double, c_int, c_longlong};
+    use super::{c_char, c_double, c_int, c_longlong, c_uint, c_ulonglong};
 
     #[repr(C)]
     pub(super) struct Scene {
@@ -33,6 +63,29 @@ mod ffi {
 
     unsafe extern "C" {
         pub(super) fn solium_qml_start(import_path: *const c_char) -> c_int;
+        pub(super) fn solium_qml_start_gpu(import_path: *const c_char) -> c_int;
+        pub(super) fn solium_qml_scene_new_gpu(
+            qml_path: *const c_char,
+            width: c_int,
+            height: c_int,
+            dmabuf_fd: c_int,
+            stride: c_int,
+            modifier: c_ulonglong,
+            fourcc: c_uint,
+            initial_json: *const c_char,
+        ) -> *mut Scene;
+        pub(super) fn solium_qml_scene_render_gpu(scene: *mut Scene, fence_fd: *mut c_int)
+        -> c_int;
+        pub(super) fn solium_qml_scene_rebind(
+            scene: *mut Scene,
+            dmabuf_fd: c_int,
+            stride: c_int,
+            modifier: c_ulonglong,
+            fourcc: c_uint,
+            width: c_int,
+            height: c_int,
+            scale: f64,
+        ) -> bool;
         pub(super) fn solium_qml_set_windows(json: *const c_char);
         pub(super) fn solium_qml_clear_cache();
         pub(super) fn solium_qml_scene_new_with(
@@ -74,7 +127,19 @@ mod ffi {
             value: c_int,
         );
         pub(super) fn solium_qml_scene_get_bool(scene: *const Scene, name: *const c_char) -> c_int;
+        pub(super) fn solium_qml_scene_layer_count(scene: *const Scene) -> c_int;
+        pub(super) fn solium_qml_scene_layer_field(
+            scene: *const Scene,
+            index: c_int,
+            field: *const c_char,
+        ) -> *const c_char;
+        pub(super) fn solium_qml_scene_string_at(
+            scene: *const Scene,
+            name: *const c_char,
+            index: c_int,
+        ) -> *const c_char;
         pub(super) fn solium_qml_scene_dirty(scene: *const Scene) -> c_int;
+        pub(super) fn solium_qml_scene_animating(scene: *const Scene) -> c_int;
         pub(super) fn solium_qml_scene_pointer(
             scene: *mut Scene,
             x: c_double,
@@ -84,23 +149,585 @@ mod ffi {
     }
 }
 
+/// The levels `qml/host.h` maps Qt's `QtMsgType` onto.
+///
+/// Ours rather than Qt's, and restated here by hand against the
+/// `SOLIUM_QML_LOG_*` defines in that header. There are four, they are a
+/// severity order, and they are not going to grow; the alternative is a
+/// generated binding for one enum.
+const LOG_DEBUG: c_int = 0;
+const LOG_INFO: c_int = 1;
+const LOG_WARN: c_int = 2;
+const LOG_ERROR: c_int = 3;
+
+/// A string Qt lent us for the length of one message.
+///
+/// `None` for the three a release Qt build leaves null — `file`, `function`,
+/// and any category a hand-built context omitted.
+///
+/// # Safety
+///
+/// `ptr` is null, or points at a NUL-terminated string that stays valid for the
+/// life of the returned value. For a `QMessageLogContext` that is the handler
+/// call and nothing past it, which is why nothing here outlives one.
+#[expect(unsafe_code, reason = "reading a C string the Qt host lent us")]
+unsafe fn borrowed_from_qt<'a>(ptr: *const c_char) -> Option<Cow<'a, str>> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract, discharged by `forward_qt_message` in
+    // `qml/host.cpp` — every pointer it passes is either null or Qt's own.
+    Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy())
+}
+
+/// Qt's entire diagnostic channel, arriving in `tracing`.
+///
+/// The one function in this module that is *called* across the boundary rather
+/// than calling across it. `qml/host.cpp` installs a Qt message handler before
+/// `QGuiApplication` exists and that handler calls this, so QML binding errors,
+/// `console.log`/`console.warn`, and every `qWarning` in Qt and in the host
+/// land in the same log as everything else the compositor says.
+///
+/// Until this existed they landed nowhere anyone would look. Qt's default
+/// handler picks its destination from whether stderr is a console: stderr when
+/// it is, journald when it is not — measured on Fedora's Qt 6.11, both ways.
+/// A TTY session is the first case, so the messages went to the VT the
+/// compositor had just taken, were never in `session.log`, and were never in
+/// the journal either. Four separate silent failures in
+/// `docs/spikes/2026-09-11-ricing-solium.md` inherit from that, three of them
+/// presenting as a white screen.
+///
+/// `category` is carried as a field because it is how a reader tells a QML
+/// binding error from a scene-graph warning, and it costs nothing. `file`,
+/// `line` and `function` are `Option` because a release Qt leaves them empty,
+/// and `tracing` records nothing at all for a `None` — so an ordinary line does
+/// not carry three blank fields to say Qt was built without debug info.
+///
+/// No `target:` override, deliberately: these come out under `solium::qml` like
+/// the rest of this module, so `RUST_LOG=solium=debug` reaches them. Qt's
+/// `QtDebugMsg` — which is where a QML `console.log` arrives — is `debug!`, and
+/// the default filter is `info`, so those need asking for.
+///
+/// Nothing in here may log through anything that could itself reach `qWarning`:
+/// formatting and one macro, and the C++ side holds a per-thread guard behind
+/// that. It may be called from any thread, so nothing here reads a thread-local.
+#[expect(
+    unsafe_code,
+    reason = "the Qt message handler calls this across the C ABI"
+)]
+#[unsafe(no_mangle)]
+extern "C" fn solium_qml_log_from_qt(
+    level: c_int,
+    category: *const c_char,
+    message: *const c_char,
+    file: *const c_char,
+    line: c_int,
+    function: *const c_char,
+) {
+    // SAFETY: `qml/host.cpp`'s `forward_qt_message` passes a QMessageLogContext's
+    // own pointers and the bytes of a QByteArray that outlives the call. All of
+    // them may be null and all of them are read before this returns.
+    let (category, message, file, function) = unsafe {
+        (
+            borrowed_from_qt(category),
+            borrowed_from_qt(message),
+            borrowed_from_qt(file),
+            borrowed_from_qt(function),
+        )
+    };
+    let category = category.unwrap_or(Cow::Borrowed("default"));
+    let message = message.unwrap_or(Cow::Borrowed("(Qt said nothing)"));
+    let file = file.as_deref();
+    let function = function.as_deref();
+    let line = (line > 0).then_some(line);
+
+    macro_rules! forward {
+        ($level:ident) => {
+            tracing::$level!(category = %category, file, line, function, "{message}")
+        };
+    }
+
+    match level {
+        LOG_DEBUG => forward!(debug),
+        LOG_INFO => forward!(info),
+        LOG_ERROR => forward!(error),
+        LOG_WARN => forward!(warn),
+        // A level neither side recognises is this file and `qml/host.h` having
+        // drifted apart. Warn rather than drop: a Qt message is at least a
+        // warning, and the drift is worth seeing.
+        _ => forward!(warn),
+    }
+}
+
 /// Start Qt. Idempotent, and must happen on the thread that renders.
 ///
 /// Every scene shares one engine and one import path, which is what makes the
 /// design system a single object rather than a copy per surface — see
 /// `qml/Solium/Theme.qml`.
-#[expect(unsafe_code, reason = "calling into the Qt host")]
+///
+/// Honours `SOLIUM_QML_GPU`, which is what every caller that is going to *draw*
+/// wants. [`start_software`] is for the one that is not.
 pub(crate) fn start() -> Result<()> {
+    start_with(crate::dev::qml_gpu())
+}
+
+/// Start Qt on the **software** scene graph, whatever the knob says.
+///
+/// For `--check-qml`, which loads one QML file to say whether it parses and then
+/// exits. Nothing it builds is ever drawn, so asking for a dmabuf would make the
+/// answer depend on whether the machine has a render node rather than on the QML
+/// being checked.
+///
+/// It exists because [`start`] reads the environment, and a validation entry
+/// point that reads the environment answers a different question depending on
+/// whose shell it is run from. With `SOLIUM_QML_GPU` exported — which is exactly
+/// the state the shell is in during the hardware session that would want this —
+/// `start` brought up a GPU host, and `Scene::software` was then refused by
+/// `host.cpp`'s software constructor: a perfectly good QML file reported as
+/// broken, by the thing whose whole job is to say so accurately.
+///
+/// Not "start with a preference": it *takes* the decision. Qt fixes its scene
+/// graph for the life of the process, so `GPU` is set here and [`on_gpu`] and
+/// any later [`start`] read the same answer.
+pub(crate) fn start_software() -> Result<()> {
+    // If a GPU host is somehow already up this changes nothing and the host
+    // refuses below, loudly — `solium_qml_start` returns 0 rather than handing
+    // back a host that will not do what the caller is about to assume.
+    let _ = GPU.set(false);
+    start_with(false)
+}
+
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+fn start_with(gpu: bool) -> Result<()> {
     let path = import_path();
-    let path = std::path::PathBuf::from(path);
+    let path = PathBuf::from(path);
     let path = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| anyhow!("the QML import path contains a NUL byte"))?;
+
+    // Which scene graph this process came up on, decided once. Qt fixes that
+    // for the life of the process — there is no second chance and no way back
+    // — so the whole decision, availability included, is made inside this
+    // `OnceLock` and every later `start()` reads the answer rather than
+    // re-asking the question.
+    if gpu && *GPU.get_or_init(|| start_on_gpu(&path)) {
+        return Ok(());
+    }
 
     // SAFETY: `path` outlives the call, and the shim is idempotent.
     if unsafe { ffi::solium_qml_start(path.as_ptr()) } == 0 {
         return Err(anyhow!("could not start Qt"));
     }
     Ok(())
+}
+
+/// Whether Qt came up on the GPU. `None` until the first scene asks for one.
+static GPU: OnceLock<bool> = OnceLock::new();
+
+/// Whether the scenes in this process render on the GPU.
+///
+/// The question a surface has to ask before it builds anything, because Qt
+/// fixes its scene graph for the life of the process and a host that came up on
+/// one backend refuses scenes of the other kind — a GPU host will not build a
+/// software scene, and `solium_qml_start` will not hand a software host back to
+/// a caller that asked for the GPU. So this is not "is the knob set": it is
+/// what Qt actually did with it, which is only known once `start` has run.
+pub(crate) fn on_gpu() -> bool {
+    GPU.get().copied().unwrap_or(false)
+}
+
+/// The allocator scenes are rendered through, set once by the backend.
+///
+/// A global because a `Scene` is created from wherever a frame is first needed
+/// — a decoration, a wallpaper, a panel — and threading an allocator through
+/// every one of those call sites would put GBM in the signature of things that
+/// have no business knowing what GBM is.
+static ALLOCATOR: OnceLock<GbmDevice<DrmDeviceFd>> = OnceLock::new();
+
+/// Hand the compositor's GBM device to the scenes. First caller wins.
+pub(crate) fn set_allocator(gbm: GbmDevice<DrmDeviceFd>) {
+    let _ = ALLOCATOR.set(gbm);
+}
+
+/// The device scene buffers come from, or `None` on a backend that has none.
+fn allocator() -> Option<&'static GbmDevice<DrmDeviceFd>> {
+    ALLOCATOR.get()
+}
+
+// How many `GlesFrame`s are alive on this thread.
+//
+// A counter and not a flag, and not because frames nest — they deliberately do
+// not. Every render path in this compositor builds its elements before it binds
+// anything (`offscreen.rs`, `winit.rs`, `tty.rs`, `screencopy.rs` all do), which
+// is the convention this whole invariant rests on.
+//
+// It is a counter because the five marks are five independent RAII guards, and
+// a boolean would be cleared by whichever of them dropped first. Should two ever
+// overlap — which is the situation worth catching, not one to assume away — a
+// flag would go false while a frame was still live and the assertion would stop
+// asserting. A counter is wrong only if it is unbalanced, which `Drop` prevents.
+thread_local! {
+    static FRAMES_IN_FLIGHT: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Says a `GlesFrame` is alive for as long as this is held. See
+/// [`no_frame_in_flight`].
+#[must_use = "the frame is only marked for as long as this is held"]
+pub(crate) struct FrameInFlight(());
+
+/// Mark a live `GlesFrame`, for the whole of its life.
+pub(crate) fn frame_in_flight() -> FrameInFlight {
+    FRAMES_IN_FLIGHT.with(|frames| frames.set(frames.get().saturating_add(1)));
+    FrameInFlight(())
+}
+
+impl Drop for FrameInFlight {
+    fn drop(&mut self) {
+        FRAMES_IN_FLIGHT.with(|frames| frames.set(frames.get().saturating_sub(1)));
+    }
+}
+
+impl std::fmt::Debug for FrameInFlight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FrameInFlight")
+    }
+}
+
+/// Refuse to hand the thread to Qt while the compositor is mid-frame.
+///
+/// **The invariant this whole file depends on and cannot state in a signature:
+/// no GPU-scene entry point may run while a `GlesFrame` is alive.**
+///
+/// A `GlesFrame` is the one thing in this design that carries a current GL
+/// context *across* calls. `Renderer::render` makes the context current when it
+/// builds the frame and every method on the frame afterwards assumes it still
+/// is — `GlesFrame::with_context` is `Ok(func(&self.renderer.gl))` with no
+/// `make_current` at all (smithay `gles/mod.rs:1999-2004`), and so are
+/// `finish_internal` and the frame's own `Drop`. `warp.rs` calls exactly that
+/// method, and its SAFETY comment is true only because the frame is alive.
+///
+/// Every GPU-scene call in here breaks that. Building a scene and freeing one
+/// leave *no* context current; rendering one leaves Qt's. Do either inside a
+/// live frame and every remaining `element.draw`, plus the `cleanup()` inside
+/// `finish_internal`, becomes a GL call with no context — which on EGL is not
+/// an error. It is a no-op. The frame comes out black, the renderer quietly
+/// stops reclaiming textures, and nothing is written to the log: the same
+/// signature as the three defects this path has already produced.
+///
+/// It holds today, and only by convention: every render path collects its
+/// elements before it binds anything (`offscreen.rs`, `tty.rs`, `render.rs`),
+/// and neither `RenderElement::draw` in `warp.rs` touches a scene. Task 7 is
+/// where that stops being enough — a decoration that builds or renders its
+/// scene lazily from inside `draw` is exactly this, and would look like a
+/// rendering bug rather than an ordering one.
+///
+/// Loud in every build rather than only in a debug one. The counter costs a
+/// `Cell` increment per frame, and the alternative in a release build is the
+/// silence described above.
+pub(crate) fn no_frame_in_flight(what: &str) {
+    let live = FRAMES_IN_FLIGHT.with(Cell::get);
+    if live == 0 {
+        return;
+    }
+    // Once per process. The structural violation this catches would otherwise
+    // be a line per scene, per output, per frame, for as long as the session
+    // lasts — and `debug_assert_eq!` below is compiled out of a release build,
+    // so in release there is nothing to stop the flood. One line says
+    // everything a second would; the point is that the failure is not silent,
+    // not that it is repeated.
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::error!(
+            what,
+            live,
+            "a QML scene was touched inside a live GlesFrame: the compositor's \
+             context is about to be taken off this thread mid-frame, and the GL \
+             calls left in the frame will silently do nothing. Said once."
+        );
+    }
+    debug_assert_eq!(
+        live, 0,
+        "{what} ran inside a live GlesFrame; see qml::no_frame_in_flight"
+    );
+}
+
+/// The scene the pre-flight renders, and how big.
+///
+/// Small on purpose: it is proving that a buffer can be allocated, imported,
+/// drawn into and fenced, and none of that gets more true at a larger size.
+const PREFLIGHT_SIDE: i32 = 64;
+
+/// Bring Qt up on the GPU, and prove the round trip before trusting it.
+///
+/// Two hard constraints shape this, both measured rather than assumed.
+///
+/// The first is that `solium_qml_start_gpu` **cannot fail politely**. It picks
+/// the QPA platform plugin, Qt loads that inside `QGuiApplication`'s
+/// constructor, and Qt calls `qFatal` on a plugin it cannot bring up — SIGABRT,
+/// exit 134, no return value to inspect. So everything that can be decided
+/// before it is decided before it — the render node, the KMS config, the GBM
+/// device *and the buffer itself* — and a `false` from this function is always
+/// a decision taken while the software path was still reachable.
+///
+/// The buffer belongs in that list and was not in it at first. Allocating it
+/// inside the pre-flight reads naturally, and it put the one remaining
+/// fallible, machine-dependent step on the wrong side of the door: a driver
+/// that will not give out an ARGB8888 render buffer would have got a committed
+/// GPU host and an empty desktop, one call after the software path was still
+/// there for the taking.
+///
+/// The second is that a `1` back from it is not evidence the path *works*: it
+/// says Qt came up on an RHI, and every remaining thing the GPU path depends on
+/// — the render control initialising, the dmabuf importing, the driver handing
+/// back a fence — is per scene. By then Qt is committed and there is no
+/// fallback left, so the honest thing is not to pretend one exists but to find
+/// out immediately and say so, once, at startup. That is the pre-flight: real
+/// QML, a real buffer from `target::allocate`, the real import and the real
+/// fence, before anything on screen depends on any of it.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+fn start_on_gpu(import_path: &CStr) -> bool {
+    let Some(node) = render_node() else {
+        tracing::warn!(
+            "SOLIUM_QML_GPU is set and no DRM render node could be found; using software"
+        );
+        return false;
+    };
+    if let Err(err) = keep_qt_off_the_hardware(&node) {
+        tracing::warn!(?err, "could not fence Qt off the card node; using software");
+        return false;
+    }
+    // Said out loud because Smithay logs `unable to become drm master` from
+    // inside the next call — `DrmDeviceFd` asks for it on any node it is handed
+    // — and on a render node it can never be granted and is never needed. That
+    // one warning is also the only visible symptom of Qt stealing master from
+    // the compositor, which is what the KMS config above exists to prevent, and
+    // a reader who finds it unexplained has to work out which of the two it is.
+    tracing::info!(
+        node = %node.display(),
+        "opening the render node for QML; the drm master warning that follows is about it"
+    );
+    // Before Qt, not after: a device we cannot open is a reason to stay on the
+    // software path, and after the next call that is no longer a choice.
+    let gbm = match open_render_node(&node) {
+        Ok(gbm) => gbm,
+        Err(err) => {
+            tracing::warn!(?err, node = %node.display(), "no GBM device; using software");
+            return false;
+        }
+    };
+    // And the buffer with it, for exactly the same reason. Opening the device
+    // says nothing about whether it will hand out an ARGB8888 buffer marked
+    // RENDERING; that is a separate question with its own ways to fail, and it
+    // can be answered here, while the software path still exists. Asking it one
+    // call later — inside the pre-flight, where it started — left a machine
+    // that cannot allocate with a committed GPU host and an empty desktop,
+    // which is the outcome this whole ordering is arranged to avoid.
+    let target = match target::allocate(&gbm, PREFLIGHT_SIDE, PREFLIGHT_SIDE) {
+        Ok(target) => target,
+        Err(err) => {
+            tracing::warn!(?err, "no buffer to render a scene into; using software");
+            return false;
+        }
+    };
+
+    // SAFETY: `import_path` outlives the call. This is the point of no return:
+    // it either sets the scene graph backend for the process or aborts it.
+    if unsafe { ffi::solium_qml_start_gpu(import_path.as_ptr()) } != 1 {
+        // Reachable only when Qt was already up on the software backend, since
+        // everything else inside is either infallible or fatal. Nothing has
+        // changed in that case, so the software path is still the right answer.
+        tracing::warn!("Qt is already up on the software scene graph; staying there");
+        return false;
+    }
+
+    // The device is finished with: the buffer above is the only thing this
+    // needed it for, and a `Dmabuf` outlives the `GbmDevice` it came from.
+    drop(gbm);
+
+    match preflight(target) {
+        Ok(fenced) => {
+            tracing::info!(
+                node = %node.display(),
+                fenced,
+                "QML on the GPU: Qt rendered into a buffer we allocated"
+            );
+            // The other half of that sentence, and the reason this knob is off
+            // by default. A GPU host cannot build software scenes — it is one
+            // scene graph per process, and Qt picked this one — so every
+            // surface that has not been moved onto `Scene::gpu` now fails to
+            // load and draws nothing. The session runs; it is bare.
+            tracing::warn!(
+                "SOLIUM_QML_GPU: scenes that are not GPU scenes will not load, so anything \
+                 still on the software path draws nothing until it is converted"
+            );
+        }
+        // Loud, and not fatal. Qt's backend is fixed by now, so this cannot
+        // fall back — but a compositor that quit here would take the session
+        // with it for the sake of a knob that is off by default, and the reason
+        // this line exists is so the failure is read here rather than guessed
+        // at from a blank screen ten seconds later.
+        Err(err) => tracing::error!(
+            ?err,
+            "the GPU path came up and does not work; scenes will not draw. \
+             unset SOLIUM_QML_GPU to go back to software rendering"
+        ),
+    }
+    true
+}
+
+/// Render one frame of real QML into a real dmabuf, and say whether it fenced.
+///
+/// `Ok(false)` is a pass, not a failure: the driver declining to export a fence
+/// means the host waited on the CPU with `glFinish` instead, which is correct
+/// and only costs a stall.
+fn preflight(target: target::Target) -> Result<bool> {
+    let qml = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/probe.qml"));
+    let mut scene = Scene::gpu(&qml, PREFLIGHT_SIDE, PREFLIGHT_SIDE, target, None)?;
+    // A scene is dirty the moment it is built, so this always renders. `None`
+    // would mean Qt thought a scene it has never drawn was already up to date,
+    // which is not a pass by another name.
+    let fence = scene
+        .render_gpu()?
+        .ok_or_else(|| anyhow!("Qt reported a brand new scene as already up to date"))?;
+    Ok(fence.is_some())
+}
+
+/// The render node of the GPU this seat boots on.
+///
+/// The *render* node, never the card: see `keep_qt_off_the_hardware`. Found
+/// through udev rather than taken from `tty::State::open_gpu`, which computes
+/// the same thing at `tty.rs:1110-1113`, because scenes are built while the
+/// scripts load and that happens *before* the GPU is opened — the ordering is
+/// the whole reason the next function exists. Asking udev works in either
+/// order, and on the nested backend, where `open_gpu` never runs at all.
+fn render_node() -> Option<PathBuf> {
+    let seat = std::env::var("XDG_SEAT").unwrap_or_else(|_| "seat0".to_owned());
+    let card = udev::primary_gpu(&seat)
+        .inspect_err(|err| tracing::warn!(?err, seat, "asking udev for the primary GPU"))
+        .ok()
+        .flatten()?;
+    let node = DrmNode::from_path(&card)
+        .inspect_err(|err| tracing::warn!(?err, card = %card.display(), "reading the DRM node"))
+        .ok()?;
+    node.dev_path_with_type(NodeType::Render)
+}
+
+/// Everything Qt has to be told before it exists, so it touches no hardware.
+///
+/// Four pieces of machine state eglfs will otherwise take for itself: the DRM
+/// card node, this process's input devices, its signal dispositions and the
+/// console keyboard. Every one of them already has an owner — the compositor —
+/// and every one of them is settled here, in the last moment before
+/// `QGuiApplication` reads them. The signal and keyboard halves are argued at
+/// the `set_var` calls below; the card node is the rest of this comment.
+///
+/// eglfs does not *need* master and cannot take one by asking. The kernel gives
+/// it away implicitly, to whoever opens the card node while nobody holds it —
+/// and Qt starts here, which on the hardware backend is before `open_gpu`: the
+/// scripts load first, and a `sol.surface` in a user's configuration builds a
+/// scene, which starts Qt. Qt's fd becomes master, logind's `SetMaster` then
+/// returns `EBUSY`, and the only thing said out loud about it is Smithay's
+/// `unable to become drm master`, which `tty.rs` correctly documents as benign
+/// noise for the ordinary case. A black screen on a TTY with nothing to read.
+///
+/// Both JSON keys are required, and that is measured: `device` on its own fails
+/// the plugin with `drmModeGetResources failed (Permission denied)`, and
+/// `headless` on its own still opens the card. With both, Qt opens the card
+/// zero times and issues zero ioctls against it, and still renders QML into the
+/// dmabuf. `QT_QPA_EGLFS_DEVICE` does not exist in this Qt build; the config
+/// file is the only way in.
+fn keep_qt_off_the_hardware(node: &Path) -> Result<()> {
+    let node = node
+        .to_str()
+        .ok_or_else(|| anyhow!("the render node's path is not UTF-8"))?;
+    // Hand-written JSON, so a path that needed escaping would produce a config
+    // Qt reads as malformed and reports as "no device" — which looks exactly
+    // like the machine having no GPU. Device nodes are named out of a very
+    // small alphabet, so this is a should-never-happen guard.
+    if node.contains(['"', '\\']) {
+        return Err(anyhow!(
+            "the render node's path needs JSON escaping: {node}"
+        ));
+    }
+    let config = runtime_dir().join("solium-eglfs-kms.json");
+    std::fs::write(
+        &config,
+        format!("{{ \"device\": \"{node}\", \"headless\": \"64x64\" }}\n"),
+    )
+    .with_context(|| format!("writing {}", config.display()))?;
+
+    // SAFETY: `set_var` is unsound only against a concurrent reader of the
+    // environment. This runs from `qml::start`, on the thread that renders,
+    // before Qt exists — Qt reads all three inside `QGuiApplication`'s
+    // constructor, which is the call after this one — and nothing else in the
+    // compositor reads the environment off the main thread.
+    #[expect(unsafe_code, reason = "std::env::set_var is unsafe in edition 2024")]
+    unsafe {
+        std::env::set_var("QT_QPA_EGLFS_KMS_CONFIG", &config);
+        // No input and no event reader: the compositor owns the devices, and a
+        // second reader of them inside Qt is a second consumer of every event.
+        std::env::set_var("QT_QPA_EGLFS_DISABLE_INPUT", "1");
+        std::env::set_var("QT_QPA_EGLFS_KMS_NO_EVENT_READER_THREAD", "1");
+        // Qt does not get to decide when this process dies.
+        //
+        // eglfs builds a QFbVtHandler, which installs handlers for SIGINT,
+        // SIGTERM, SIGCONT and SIGTSTP. They do not exit; each writes a byte to
+        // a socketpair, and the `_exit(1)` happens later, wherever Qt's event
+        // queue is next drained — for us that is `qml::tick`'s
+        // `processEvents`, reached only from `render::prepare`, which both
+        // backends gate on `redraw || animating`. So a SIGTERM to a compositor
+        // with nothing to draw is not handled and not fatal; it just sits
+        // there, and the next thing that wants a frame turns it into an
+        // `_exit(1)` from inside a render. That skips every Rust destructor on
+        // the way out — the libseat session, the DRM master release, the VT
+        // restore — and whether it happens at all depends on whether anything
+        // asked for a frame afterwards. A compositor that dies without putting
+        // the VT back is how a TTY session ends in a reboot.
+        //
+        // Verified against libQt6EglFSDeviceIntegration.so.6.11.1: this string
+        // is read at 0x12334 and gates the four `sigaction` calls at
+        // 0x123b1-0x123fd; the `_exit` is at 0x12467.
+        std::env::set_var("QT_QPA_NO_SIGNAL_HANDLER", "1");
+        // And it does not get to mute the console keyboard either.
+        //
+        // Reads backwards: setting this makes Qt *leave the terminal keyboard
+        // alone*. The same QFbVtHandler calls `isatty(0)` and, when stdin is a
+        // terminal — which it is for a session started from a TTY login shell —
+        // issues KDSKBMUTE and KDSKBMODE(K_OFF) on it. The matching restore
+        // lives in ~QFbVtHandler, and this process never destroys its
+        // QGuiApplication, so that restore cannot run.
+        //
+        // Solium already owns the console through libseat, which puts the VT in
+        // graphics mode and restores it at the end of the session. A second
+        // party muting the same keyboard and never unmuting it can only
+        // subtract, and Qt has no keyboard to serve here anyway — the line
+        // above told it not to take any input.
+        std::env::set_var("QT_QPA_ENABLE_TERMINAL_KEYBOARD", "1");
+    }
+    tracing::debug!(config = %config.display(), node, "pointed Qt's eglfs at the render node");
+    Ok(())
+}
+
+/// A GBM device on the render node, for the buffers Qt draws into.
+///
+/// Opened directly rather than through the session, which is the one thing a
+/// render node is for: it grants no master, needs no seat, and on the hardware
+/// backend there is no session to open it through at this point anyway — the
+/// scripts, and so the first scene, run before `open_gpu`.
+fn open_render_node(node: &Path) -> Result<GbmDevice<DrmDeviceFd>> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(node)
+        .with_context(|| format!("opening {}", node.display()))?;
+    let fd = DrmDeviceFd::new(DeviceFd::from(OwnedFd::from(file)));
+    GbmDevice::new(fd).context("creating the GBM device")
+}
+
+/// Somewhere to write a file Qt has to be able to read back by path.
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 /// Forget compiled QML, so the next scene is read from disk.
@@ -189,14 +816,80 @@ pub(crate) struct Scene {
     size: (i32, i32),
     /// Device pixels per logical one.
     scale: f64,
+    /// The buffer Qt draws into, on the GPU path; `None` on the software one.
+    ///
+    /// Held for the life of the scene even though nothing here reads it after
+    /// the constructor. Qt is finished with it — EGL took its own reference
+    /// during the import and the host keeps no fd — but the compositor
+    /// re-imports the same dmabuf to sample what Qt drew, so it has to still
+    /// exist. Nothing else owns it.
+    target: Option<target::Target>,
 }
 
 // The scene is bound to the GL context it was created on, and that context
 // belongs to the render thread. Not Send, deliberately: sending it elsewhere
 // would put Qt's scene graph on a thread with no current context.
 impl Scene {
-    /// Load a QML file into a scene of the given size.
-    pub(crate) fn new(qml_path: &Path, width: i32, height: i32) -> Result<Self> {
+    /// One scene of the given pixel size, **on whichever path Qt came up on**.
+    ///
+    /// The constructor every scene in the compositor is built through, and the
+    /// only one that is a decision rather than a preference. Qt fixes its scene
+    /// graph inside `QGuiApplication` and a host that came up on one backend
+    /// refuses scenes of the other kind — `host.cpp` says so in as many words,
+    /// at both constructors — so this reads what Qt did rather than choosing
+    /// anything.
+    ///
+    /// It is here, and public to the crate, because it was not. Three modules
+    /// each picked a constructor for themselves and two of them picked the
+    /// software one, so `SOLIUM_QML_GPU=1` produced a desktop with a wallpaper
+    /// and no window frames and no pointer — every scene refused at
+    /// construction, each refusal logged as its own unrelated failure. A
+    /// fourth caller answering this question for itself is the same bug again.
+    ///
+    /// `main.rs`'s `--check-qml` is the one deliberate exception and says so
+    /// where it sits: it starts its host through [`start_software`], so its
+    /// scene is software by construction and not by preference.
+    pub(crate) fn for_host(
+        qml_path: &Path,
+        width: i32,
+        height: i32,
+        initial: Option<&str>,
+    ) -> Result<Self> {
+        // Qt's, and by a long way the most expensive thing Qt is ever asked to
+        // do in a frame: a QML file read, compiled, instantiated into an object
+        // tree, and on the GPU path a buffer allocated to render it into.
+        //
+        // Measured nested on the first frame of a session, before this was
+        // bracketed: 283 ms, all of it inside `render::elements` and therefore
+        // all of it reported against the compositor. Scenes are not only built
+        // at startup — a window opening builds its decoration, a script can
+        // declare a surface at any moment — so a frame that builds one is a
+        // *stall on a running desktop*, which is very much the shape of thing
+        // "sometimes everything lags" is made of. It should say so in Qt's
+        // column, with `built` beside it.
+        let _qml = crate::pacing::span(crate::pacing::Phase::Qml);
+        crate::pacing::scene_built();
+        if on_gpu() {
+            Self::gpu_sized(qml_path, width, height, initial)
+        } else {
+            Self::with_properties(qml_path, width, height, initial)
+        }
+    }
+
+    /// Load a QML file into a **software** scene, whatever the host is.
+    ///
+    /// Named for what it is rather than `new`, because `new` reads as the
+    /// normal constructor and this one is an exception with exactly one
+    /// legitimate caller: `main.rs`'s `--check-qml`, which validates a file and
+    /// exits. Anything that will be *drawn* wants [`Scene::for_host`], and on a
+    /// GPU host this scene would be refused at construction — see `host.cpp`'s
+    /// software constructor.
+    ///
+    /// Which is why its one caller pairs it with [`start_software`] rather than
+    /// [`start`]. The pairing is the contract: this constructor is only sound in
+    /// a process whose host was brought up software on purpose, and nothing here
+    /// can check that from the inside.
+    pub(crate) fn software(qml_path: &Path, width: i32, height: i32) -> Result<Self> {
         Self::with_properties(qml_path, width, height, None)
     }
 
@@ -206,7 +899,7 @@ impl Scene {
     /// fact is too late and the component never builds. `initial` is a JSON
     /// object.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
-    pub(crate) fn with_properties(
+    fn with_properties(
         qml_path: &Path,
         width: i32,
         height: i32,
@@ -251,7 +944,253 @@ impl Scene {
             scene,
             size: (width, height),
             scale: 1.0,
+            target: None,
         })
+    }
+
+    /// A scene that renders into `target` on the GPU.
+    ///
+    /// The `Target` is moved in rather than borrowed. Qt has no further use for
+    /// it once this returns, but the buffer is what the compositor samples, and
+    /// tying its life to the scene's is the only arrangement in which the thing
+    /// being read cannot be freed while something is still drawing into it.
+    ///
+    /// Leaves **no** GL context current on this thread.
+    ///
+    /// `QQuickRenderControl::initialize` makes Qt's own current and puts nothing
+    /// back, so the host gives the thread up before returning — see
+    /// `release_the_thread` in `qml/host.cpp`. That is deliberate and it is what
+    /// lets this be called from somewhere with no renderer to restore, which
+    /// `ShellSurface::new` is. An empty thread is safe *between* frames: every
+    /// entry point on `GlesRenderer` itself makes its own context current
+    /// before touching GL. It is not safe *inside* one — see
+    /// [`no_frame_in_flight`], which is asserted here.
+    ///
+    /// `render_gpu` is the one call that does *not* hold to this, and says so.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    fn gpu(
+        qml_path: &Path,
+        width: i32,
+        height: i32,
+        target: target::Target,
+        initial: Option<&str>,
+    ) -> Result<Self> {
+        // A GPU scene's pixel size is the buffer's, and it is fixed at
+        // allocation: the texture is exactly as big as the dmabuf, and
+        // `solium_qml_scene_resize` refuses a pixel-size change on one rather
+        // than silently swapping the texture for a paint device and moving the
+        // scene back onto the CPU. A caller that allocated one size and asked
+        // for another would hear about it a frame later, from the host, in a
+        // warning about resizing — nowhere near the mistake. So it is answered
+        // here, where the two sizes are both in scope.
+        no_frame_in_flight("building a GPU scene");
+        if (target.width, target.height) != (width, height) {
+            return Err(anyhow!(
+                "a {width}x{height} scene cannot render into a {}x{} buffer",
+                target.width,
+                target.height
+            ));
+        }
+        let (fd, stride, modifier, fourcc) = target.as_ffi()?;
+        let path = CString::new(qml_path.as_os_str().as_encoded_bytes())
+            .map_err(|_| anyhow!("the QML path contains a NUL byte"))?;
+        let initial = initial
+            .map(|json| CString::new(json).map_err(|_| anyhow!("properties contain a NUL byte")))
+            .transpose()?;
+
+        // SAFETY: every pointer outlives the call. The fd is borrowed for the
+        // length of it and nothing more: the host neither keeps nor dups it,
+        // because EGL takes its own reference on the buffer inside
+        // `eglCreateImageKHR` — measured, by closing the fd immediately after
+        // the import and rendering correctly anyway. `target` stays the only
+        // owner, and it outlives this call by being moved into the scene below.
+        let scene = unsafe {
+            ffi::solium_qml_scene_new_gpu(
+                path.as_ptr(),
+                width,
+                height,
+                fd,
+                stride,
+                c_ulonglong::from(modifier),
+                c_uint::from(fourcc),
+                initial
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
+            )
+        };
+        if scene.is_null() {
+            // No error string to report, unlike the software constructor: every
+            // way this fails is a property of the driver or of Qt rather than
+            // of the QML, so the useful detail is an EGL or GL code and the
+            // host has already written it to the warning log.
+            return Err(anyhow!(
+                "the GPU scene would not load: {}",
+                qml_path.display()
+            ));
+        }
+        Ok(Self {
+            scene,
+            size: (width, height),
+            scale: 1.0,
+            target: Some(target),
+        })
+    }
+
+    /// A GPU scene of `width` by `height` device pixels, buffer and all.
+    ///
+    /// A dmabuf cannot grow, so a size change means a new buffer — but only the
+    /// buffer. [`Scene::rebind_sized`] is how a surface changes size on this
+    /// path; this is only how it gets its first one. `solium_qml_scene_resize`
+    /// still refuses a pixel-size change, because it has no buffer to change it
+    /// to and falling through would swap the texture for a paint device and move
+    /// the scene back onto the CPU behind the caller's back.
+    ///
+    /// Fails on a backend that set no allocator — the nested one — which is the
+    /// only honest answer there: Qt is on the GPU, so a software scene is not
+    /// available either.
+    ///
+    /// Leaves no GL context current on this thread, as [`Scene::gpu`] does.
+    fn gpu_sized(qml_path: &Path, width: i32, height: i32, initial: Option<&str>) -> Result<Self> {
+        let gbm = allocator().ok_or_else(|| {
+            anyhow!("this backend has no GBM device, so it cannot render QML on the GPU")
+        })?;
+        let target = target::allocate(gbm, width, height)?;
+        Self::gpu(qml_path, width, height, target, initial)
+    }
+
+    /// Move this scene onto a different buffer, keeping everything above it.
+    ///
+    /// The QML object tree survives, which is the point: rebuilding it restarts
+    /// every animation inside the scene, and a pane's scene is resized on every
+    /// frame of a window animation. A scene rebuilt per resize does not animate
+    /// slowly, it never advances.
+    ///
+    /// The `Target` is moved in for the same reason [`Scene::gpu`] moves one in:
+    /// the compositor samples this buffer, and tying its life to the scene's is
+    /// the only arrangement where the thing being read cannot be freed while
+    /// something is drawing into it. The previous one is dropped only once the
+    /// host has taken the new one, so a rebind that failed leaves the scene on
+    /// the buffer it was already drawing into.
+    ///
+    /// Leaves **no** GL context current on this thread, as building a scene and
+    /// freeing one do — the host takes the thread for the import and gives it
+    /// back. So this is subject to [`no_frame_in_flight`], asserted here.
+    #[expect(unsafe_code, reason = "handing Qt a buffer we allocated")]
+    fn rebind(
+        &mut self,
+        target: target::Target,
+        width: i32,
+        height: i32,
+        scale: f64,
+    ) -> Result<()> {
+        no_frame_in_flight("rebinding a GPU scene");
+        if self.target.is_none() {
+            return Err(anyhow!("a software scene has no buffer to rebind"));
+        }
+        // Answered here rather than a frame later in a host warning about a
+        // texture that is the wrong size, for the same reason `gpu` answers it:
+        // this is where both sizes are in scope.
+        if (target.width, target.height) != (width, height) {
+            return Err(anyhow!(
+                "a {width}x{height} scene cannot render into a {}x{} buffer",
+                target.width,
+                target.height
+            ));
+        }
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let (fd, stride, modifier, fourcc) = target.as_ffi()?;
+
+        // SAFETY: `self.scene` is non-null for the lifetime of `self`. The fd is
+        // borrowed for the length of the call and nothing more — EGL takes its
+        // own reference inside `eglCreateImageKHR` — and `target` outlives the
+        // call either way, by being moved into `self` below or dropped after it.
+        let ok = unsafe {
+            ffi::solium_qml_scene_rebind(
+                self.scene,
+                fd,
+                stride,
+                c_ulonglong::from(modifier),
+                c_uint::from(fourcc),
+                width,
+                height,
+                scale,
+            )
+        };
+        if !ok {
+            // No error string, as with `gpu`: every way this fails is a property
+            // of the driver or of Qt, and the host has already written the EGL
+            // or GL code to the warning log.
+            return Err(anyhow!(
+                "Qt would not rebind the scene onto a {width}x{height} buffer"
+            ));
+        }
+        // Held only after the host has taken its own reference, so a failed
+        // rebind leaves the previous target in place and still being drawn. The
+        // assignment is what drops the old one.
+        self.target = Some(target);
+        self.size = (width, height);
+        self.scale = scale;
+        Ok(())
+    }
+
+    /// Move this scene onto a fresh buffer of `width` by `height` device pixels.
+    ///
+    /// [`Scene::rebind`] with the allocation done for it, the same way
+    /// [`Scene::gpu_sized`] stands in for [`Scene::gpu`]. A caller that wants a
+    /// differently sized scene has no business knowing what GBM is — see
+    /// `ALLOCATOR`.
+    fn rebind_sized(&mut self, width: i32, height: i32, scale: f64) -> Result<()> {
+        let gbm = allocator().ok_or_else(|| {
+            anyhow!("this backend has no GBM device, so it cannot resize a GPU scene")
+        })?;
+        let target = target::allocate(gbm, width, height)?;
+        self.rebind(target, width, height, scale)
+    }
+
+    /// The buffer this scene renders into, on the GPU path.
+    ///
+    /// What the compositor imports and samples. Borrowed rather than handed
+    /// out: the scene owns the buffer, and the arrangement that makes the whole
+    /// path safe is that the thing being read cannot outlive the thing drawing
+    /// into it.
+    fn buffer(&self) -> Option<&Dmabuf> {
+        self.target.as_ref().map(|target| &target.dmabuf)
+    }
+
+    /// Render, returning a fence that signals when Qt's work has landed.
+    ///
+    /// `Ok(None)` means the scene was already up to date. A `None` fence inside
+    /// `Some` means the driver gave none and the host waited with `glFinish`
+    /// instead, so the frame is already complete — that is a correct answer and
+    /// not an error, it just costs a stall rather than a hand-off.
+    ///
+    /// The one call here that leaves *Qt's* GL context current on this thread —
+    /// building a scene and freeing one both leave none. It is not given back
+    /// because the caller has to take its own context anyway before it can
+    /// import Qt's fence, so a release here would only be an extra
+    /// `eglMakeCurrent` on the way to the same place. Whoever holds a context
+    /// has to make it current again before the next GL call, or that call fails
+    /// somewhere with nothing to do with this one.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    fn render_gpu(&mut self) -> Result<Option<Option<OwnedFd>>> {
+        if self.target.is_none() {
+            // The host would refuse this too, with a warning. Refusing here
+            // says which scene, and says it as an error the caller can carry.
+            return Err(anyhow!("a software scene has no buffer to render into"));
+        }
+        no_frame_in_flight("rendering a GPU scene");
+        let mut fence: c_int = -1;
+        // SAFETY: `self.scene` is non-null for the lifetime of `self`, and
+        // `fence` is a live local for the length of the call.
+        let result = unsafe { ffi::solium_qml_scene_render_gpu(self.scene, &raw mut fence) };
+        match result {
+            0 => Err(anyhow!("the GPU render failed")),
+            UNCHANGED => Ok(None),
+            _ if fence < 0 => Ok(Some(None)),
+            // SAFETY: the host handed ownership of this fd to us, and sets it
+            // to -1 — caught above — on every path where it did not.
+            _ => Ok(Some(Some(unsafe { OwnedFd::from_raw_fd(fence) }))),
+        }
     }
 
     /// Resize a scene to `width` by `height` **device** pixels, at `scale`
@@ -262,6 +1201,11 @@ impl Scene {
     /// every monitor and is drawn with as many real pixels as that monitor has.
     /// The alternative — laying out in device pixels — makes every hardcoded
     /// size in every QML file mean something different per monitor.
+    ///
+    /// On a GPU scene only `scale` can change here: the pixel size is the
+    /// buffer's and this call has no buffer to change it to. The host refuses a
+    /// pixel-size change rather than fall through. [`Scene::rebind_sized`] is
+    /// the other half.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn resize(&mut self, width: i32, height: i32, scale: f64) {
         let scale = if scale > 0.0 { scale } else { 1.0 };
@@ -277,18 +1221,38 @@ impl Scene {
         unsafe { ffi::solium_qml_scene_resize(self.scene, width, height, scale) }
     }
 
-    /// Advance QML animations to a point on the compositor's clock.
-    ///
-    /// Not Qt's clock: there is one clock here, and a QML animation running on
-    /// a second one would drift against every transform beside it.
-    #[expect(unsafe_code, reason = "calling into the Qt host")]
     /// Whether Qt has anything new to draw for this scene.
     ///
     /// Qt reports it through `renderRequested` and `sceneChanged`; asking is a
     /// flag read, so a screen of idle frames costs a comparison each.
+    ///
+    /// **Not the same question as [`Self::animation_in_flight`].** Qt raises
+    /// this when a property that is actually rendered changes value, which a
+    /// running animation does not do on every tick — so a scene can be clean
+    /// and still be moving. Reading this alone as "still animating" is what
+    /// froze decorations part-way through.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn needs_render(&self) -> bool {
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
         unsafe { ffi::solium_qml_scene_dirty(self.scene) != 0 }
+    }
+
+    /// Whether an animation inside this scene is still running.
+    ///
+    /// The other half of "will a later frame look different from this one",
+    /// and the half [`Self::needs_render`] cannot answer: the tick that starts
+    /// a `Behavior` has not moved anything yet, and an interpolation between
+    /// two nearby values spends several ticks landing on the number it already
+    /// had. Both are clean ticks in the middle of a live animation.
+    ///
+    /// Per scene, and deliberately not `QAnimationDriver::isRunning()` — which
+    /// is process-wide *and* reads true for ever once anything has animated.
+    /// `qml/host.cpp`'s `solium_qml_scene_animating` has the measurements and
+    /// the line of Qt that does it.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn animation_in_flight(&self) -> bool {
+        // SAFETY: `self.scene` is non-null for the lifetime of `self`.
+        unsafe { ffi::solium_qml_scene_animating(self.scene) != 0 }
     }
 
     /// Render the scene if it has changed, then hand back its pixels.
@@ -299,12 +1263,20 @@ impl Scene {
     /// are the previous frame's and do not need re-uploading.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn render(&mut self) -> Result<Rendered<'_>> {
+        // Qt's share of the frame, on the software path: the whole of the scene
+        // graph rasterised into a `QImage`. The copy out of that image and the
+        // upload of it are the compositor's and the driver's respectively, and
+        // are measured where they happen -- see `pacing::Phase::Qml`.
+        let _qml = crate::pacing::span(crate::pacing::Phase::Qml);
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
         let status = unsafe { ffi::solium_qml_scene_render(self.scene) };
         if status == 0 {
             return Err(anyhow!("the QML scene failed to render"));
         }
         let changed = status != UNCHANGED;
+        if changed {
+            crate::pacing::scene_rendered();
+        }
 
         let mut stride: c_int = 0;
         // SAFETY: the scene rendered, so its image exists.
@@ -371,6 +1343,13 @@ impl Scene {
     }
 
     /// Read a whole-number property from the scene's root.
+    ///
+    /// `name` is a property *path*: `insetTop` and `insets.top` both work. A
+    /// grouped property is a child object held in a property, and reaching
+    /// into one used to be impossible here — `QObject::property` takes a name
+    /// and looked the whole dotted string up in one piece, so `insets.top`
+    /// resolved to nothing and read back as a perfectly plausible 0. See the
+    /// note on `solium_qml_scene_get_int` in `qml/host.h`.
     #[expect(unsafe_code, reason = "as above")]
     pub(crate) fn get_int(&mut self, name: &str) -> i32 {
         let Ok(name) = std::ffi::CString::new(name) else {
@@ -400,6 +1379,74 @@ impl Scene {
         unsafe { ffi::solium_qml_scene_get_bool(self.scene, name.as_ptr()) != 0 }
     }
 
+    /// How many layers the style at this scene's root declares.
+    ///
+    /// `-1` when the root is not a `PaneStyle` at all, which is a different
+    /// answer from `0`: a bundle whose `Pane.qml` declares the wrong root
+    /// object has to be told apart from one that declares the right root and
+    /// forgot to put any layers in it. See `crate::style::load`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn layer_count(&self) -> i32 {
+        // SAFETY: `self.scene` is non-null for the lifetime of `self`.
+        unsafe { ffi::solium_qml_scene_layer_count(self.scene) }
+    }
+
+    /// One field of one layer, as the string QML holds it as.
+    ///
+    /// `None` when the layer has no such property — which is also what an item
+    /// in `layers` that is not a `Layer` reports, since the property is a
+    /// `list<Item>` and accepts any `Item`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn layer_field(&self, index: usize, field: &str) -> Option<String> {
+        let field = CString::new(field).ok()?;
+        let index = c_int::try_from(index).ok()?;
+        // SAFETY: `field` outlives the call.
+        let value = unsafe { ffi::solium_qml_scene_layer_field(self.scene, index, field.as_ptr()) };
+        if value.is_null() {
+            return None;
+        }
+        // SAFETY: non-null means the host stored a NUL-terminated string that
+        // stays valid until the next call on this thread, and it is copied
+        // here before anything else can make one.
+        Some(
+            unsafe { CStr::from_ptr(value) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    /// Every element of a `list<string>` property, in declaration order.
+    ///
+    /// Empty when there is no such property, which is deliberately the same
+    /// answer as an empty list: `PaneStyle.requires` is what this reads, and a
+    /// style that declares nothing and one that declares `[]` are both saying
+    /// *portable*. Where that distinction does matter — `layers` — the count is
+    /// asked for separately and `-1` carries it.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn string_list(&self, name: &str) -> Vec<String> {
+        let Ok(name) = CString::new(name) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for index in 0.. {
+            // SAFETY: `name` outlives the call.
+            let value =
+                unsafe { ffi::solium_qml_scene_string_at(self.scene, name.as_ptr(), index) };
+            if value.is_null() {
+                break;
+            }
+            // SAFETY: non-null means the host stored a NUL-terminated string
+            // that stays valid until the next call on this thread, and it is
+            // copied here before anything else can make one.
+            out.push(
+                unsafe { CStr::from_ptr(value) }
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        out
+    }
+
     /// Pointer input in scene coordinates. `None` is motion.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn pointer(&mut self, x: f64, y: f64, pressed: Option<bool>) {
@@ -416,6 +1463,21 @@ impl Scene {
 impl Drop for Scene {
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     fn drop(&mut self) {
+        // The buffer goes after the scene, which is what the field order in the
+        // struct buys: a `Drop` body runs before the fields are dropped. Qt's
+        // teardown releases the EGLImage it made from the dmabuf, and doing
+        // that while the fd it was made from is already closed is a question
+        // not worth asking of a driver.
+        //
+        // On a GPU scene this leaves *no* GL context current — Qt makes its own
+        // current to tear the RHI down and then releases it, whatever was
+        // current on the way in. Measured, in both orderings. Anything holding
+        // a context has to make it current again afterwards.
+        //
+        if self.target.is_some() {
+            no_frame_in_flight("freeing a GPU scene");
+        }
+
         // SAFETY: freed exactly once, since `Scene` is not Clone and this
         // pointer is never handed out.
         unsafe { ffi::solium_qml_scene_free(self.scene) }
@@ -424,6 +1486,117 @@ impl Drop for Scene {
 
 impl std::fmt::Debug for Scene {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Scene").field("size", &self.size).finish()
+        // Which of the two paths a scene is on is the first thing worth knowing
+        // about it in a log, and it is not visible from the size.
+        f.debug_struct("Scene")
+            .field("size", &self.size)
+            .field("gpu", &self.target.is_some())
+            .finish()
+    }
+}
+
+/// The one thread in a test process that is allowed to touch Qt.
+///
+/// Here rather than in whichever module first needed it, because the rule it
+/// encodes belongs to the QML engine: it is the test-time half of [`start`]'s
+/// "must happen on the thread that renders". `decoration` and `style` both
+/// build scenes in their tests and both go through this.
+#[cfg(test)]
+pub(crate) mod qt_test {
+    /// Run a test body on the one thread in this process that touches Qt.
+    ///
+    /// **Not a nicety, and not about racing.** [`super::start`]'s own first
+    /// line says Qt has to come up on the thread that renders, and a
+    /// `QQmlEngine` means it: the engine belongs to whichever thread created
+    /// it, and a scene built from it on another one dies on
+    ///
+    /// ```text
+    /// QQmlEngine: Illegal attempt to connect to QQuickMouseArea(…) that is in
+    /// a different thread than the QML engine QQmlEngine(…)
+    /// ```
+    ///
+    /// which is a `qFatal`. Qt aborts, so it is not one test failing — it is
+    /// the whole binary going down on `SIGABRT`, and with no tracing subscriber
+    /// installed the message that says why never reaches anyone. Measured: two
+    /// frames built in two `#[test]`s pass one at a time and abort the run at
+    /// `--test-threads=2`, which is the default.
+    ///
+    /// `cargo test` hands every test an arbitrary worker thread, so the fix is
+    /// not a lock — a lock serialises the work without pinning it — but a
+    /// thread of our own that all of it is handed to. Which is what the
+    /// compositor does: one render thread, and Qt lives on it. Jobs are taken
+    /// one at a time, so this serialises them as well.
+    ///
+    /// A panic is carried back and resumed here, so an assertion inside reads
+    /// as that assertion failing on the test that wrote it.
+    pub(crate) fn on_the_qt_thread(work: impl FnOnce() + Send + 'static) {
+        type Job = Box<dyn FnOnce() + Send>;
+        static QT: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> =
+            std::sync::OnceLock::new();
+
+        let sender = QT.get_or_init(|| {
+            let (sender, receiver) = std::sync::mpsc::channel::<Job>();
+            std::thread::spawn(move || {
+                // Until the channel closes, which is when the process ends.
+                for job in receiver {
+                    job();
+                }
+            });
+            std::sync::Mutex::new(sender)
+        });
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let job: Job = Box::new(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+            // The receiver is on a live test thread waiting on it; there is
+            // nothing useful to do here if it has gone.
+            let _ = done.send(outcome);
+        });
+
+        let sender = sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(sender.send(job).is_ok(), "the Qt thread is gone");
+        drop(sender);
+
+        match finished.recv() {
+            Ok(Ok(())) => (),
+            Ok(Err(panicked)) => std::panic::resume_unwind(panicked),
+            Err(gone) => std::panic::resume_unwind(Box::new(format!(
+                "the Qt thread went without saying why: {gone}"
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The guard has to actually catch the thing it exists for, and a guard
+    /// that is never exercised is a comment with a runtime cost.
+    #[test]
+    fn a_scene_touched_inside_a_live_frame_is_refused() {
+        assert_eq!(super::FRAMES_IN_FLIGHT.with(super::Cell::get), 0);
+        {
+            let _frame = super::frame_in_flight();
+            assert_eq!(super::FRAMES_IN_FLIGHT.with(super::Cell::get), 1);
+            // Nested, as the offscreen pass does.
+            let _inner = super::frame_in_flight();
+            assert_eq!(super::FRAMES_IN_FLIGHT.with(super::Cell::get), 2);
+        }
+        assert_eq!(super::FRAMES_IN_FLIGHT.with(super::Cell::get), 0);
+    }
+
+    /// And it has to *panic* in a debug build rather than only log, or the
+    /// thing it is meant to stop is not stopped.
+    ///
+    /// Debug only, because that is the half of `no_frame_in_flight` that
+    /// panics; a release build logs the same thing and carries on, which is
+    /// deliberate and is argued there.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "live GlesFrame")]
+    fn the_assertion_fires() {
+        let _frame = super::frame_in_flight();
+        super::no_frame_in_flight("a test");
     }
 }

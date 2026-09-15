@@ -20,7 +20,7 @@ Write `~/.config/solium/user.lua` with only what you want changed:
 ```lua
 return {
     gap = 4,
-    decoration = "reactive",
+    pane = "reactive",
     tiling = { split = 0.618 },
 }
 ```
@@ -47,7 +47,7 @@ Three guides go deeper than the recipes below:
 | your settings | `~/.config/solium/user.lua` |
 | your bindings and layout | `~/.config/solium/init.lua` |
 | one module, replaced | `~/.config/solium/tiling.lua`, `scrolling.lua`, … |
-| your decorations | `~/.config/solium/qml/decorations/*.qml` |
+| your pane styles | `~/.config/solium/qml/panes/<name>/` |
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
 | your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml` |
 
@@ -60,31 +60,132 @@ set — including its later improvements.
 ### A different frame
 
 ```lua
-return { decoration = "left" }
+return { pane = "left" }
 ```
 
-`top`, `left`, `bottom`, `border`, `reactive`, `proximity`, `reveal`, `pulse`.
-Reload and every open window is re-framed.
+`top`, `left`, `bottom`, `border`, `reactive`, `proximity`, `reveal`, `pulse`,
+`rounded`. Reload and every open window is re-framed.
 
 ### No frame at all
 
 ```lua
-return { decoration = "none" }
+return { pane = "none" }
 ```
 
 No bar, no border, and no QML scene built per window — which is different from
 a decoration that draws nothing: there is no scene to rasterise, so an
 undecorated desktop costs nothing per window. For a tiling layout whose own bar
-makes a titlebar redundant, or for taste. `SOLIUM_DECORATION=none` does it for
+makes a titlebar redundant, or for taste. `SOLIUM_PANE=none` does it for
 one run.
 
 ### Your own frame
 
-Copy one you like into `~/.config/solium/qml/decorations/` and edit it. A file
-named `top.qml` there shadows the shipped `top.qml`, so you can keep using
-`decoration = "top"` and mean yours. `crates/solium/qml/decorations/README.md`
-is the contract: what a frame is told, what it can ask for, and what it
-reserves.
+Copy one you like into `~/.config/solium/qml/panes/` and edit it. A folder
+named `top` there shadows the shipped `top`, so you can keep using
+`pane = "top"` and mean yours. `crates/solium/qml/panes/README.md` is the
+contract: what a style declares, what each layer is told, what it can ask for,
+and what it costs.
+
+A style is a folder holding a `Pane.qml` — what the frame reserves, and a list
+of layers, each its own QML scene at its own depth: behind the client, in the
+frame, or above it. A layer can also `bleed` past the window's edge, which is
+how a border waves or a shadow reaches. A single QML file still works too and
+is still called a decoration; it lives in
+`~/.config/solium/qml/decorations/` and is one layer in the frame.
+
+### Rounded corners
+
+```qml
+// Pane.qml
+client.radius: 12
+```
+
+A style may round the client's own corners. It is the one effect that reads the
+window's *own* pixels, so a pane that declares it is rendered to a texture first
+and then drawn back through a fragment program — one extra pass per frame, for
+that window only. `client.radius: 0` is no effect at all rather than a radius of
+nothing, so a style that does not want it pays for none of this, and twelve of
+the shipped bundles do not want it.
+
+`pane = "rounded"` is one that does, and is there to be looked at. Two things
+in it are worth copying. The radius is in **logical** pixels — the compositor
+multiplies by the monitor's scale, so the corner is the same size on a HiDPI
+screen rather than half of it. And every layer of the style is told the number
+as `clientRadius`, so a bar or a border can hug the same curve:
+
+```qml
+// Frame.qml
+property int clientRadius: 0   // written by the compositor
+radius: clientRadius           // or clientRadius + 2, to hug it from outside
+```
+
+That split is the whole design: the compositor rounds the client, because those
+pixels belong to the application and only a shader can mask them, and QML rounds
+itself, because `Rectangle.radius` is free. A style that wants a rounded border
+around a *square* client sets only its own `radius` and buys no pass at all.
+
+#### One corner at a time
+
+Each corner can be given its own radius. Each of the four defaults to `radius`,
+so one key still means all four and nothing written before these existed
+changes:
+
+| key | |
+|---|---|
+| `client.radius` | all four corners, and the default the four below fall back to |
+| `client.radiusTopLeft` | that corner alone |
+| `client.radiusTopRight` | |
+| `client.radiusBottomLeft` | |
+| `client.radiusBottomRight` | |
+
+```qml
+// Pane.qml — square on top, round underneath
+client.radius: 12
+client.radiusTopLeft: 0
+client.radiusTopRight: 0
+```
+
+A `0` here has to be written out. Squaring a corner is half of what these keys
+are for, so a corner that is *absent* follows `radius` and a corner that says
+`0` is square — leaving the key out is not a way of squaring it.
+
+Every layer is told all four by name as well:
+
+```qml
+// Frame.qml
+property int clientRadiusTopLeft: 0      // and TopRight, BottomLeft, BottomRight
+property int clientRadius: 0             // still written: the LARGEST of the four
+```
+
+`clientRadius` survives and is the largest of the four, because what a layer
+does with one number is hug the window from outside — and a hug has to clear
+the biggest cut or it crosses the curve. A layer that cares about one corner
+reads that corner.
+
+#### Two ways a titlebar meets a rounded window
+
+The shipped pair, and the reason the corners are separable at all. Both reserve
+a band at the top; what differs is which corners the shader cuts and where the
+bar is drawn.
+
+| | `pane = "rounded"` | `pane = "flush"` |
+|---|---|---|
+| the client's top corners | rounded | square |
+| what draws the window's top | the bar's own `radius` | the bar's own `radius` |
+| the bar's height | `insetTop + clientRadius` | `insetTop` |
+| the bar's depth | `behind` | `frame` |
+| where the two meet | the bar shows through the client's cut corners | a flat seam, corner to corner |
+
+`flush` is the simpler of the two: with the client's top squared there is
+nothing to fill, so the bar stops at the seam and stays in the frame, where the
+compositor copies it band by band.
+
+`rounded` cuts all four, which leaves two notches inside the window where the
+client's top corners were. Something has to be behind them or they show the
+wallpaper — so its bar is `clientRadius` taller than its band and sits at
+`depth: "behind"`. Under the client it fills the notches and covers nothing;
+over the client the same rectangle would eat the client's top `clientRadius`
+rows, which in a terminal is the top half of the first line.
 
 ### What a window shows before its application exists
 
@@ -136,8 +237,21 @@ wallpaper = "~/Pictures/whatever.png",
 layer is drawn *over* this one, so leaving both on means paying to rasterise a
 picture nobody sees.
 
+A **list** gives each workspace its own, and it travels with that workspace:
+
+```lua
+wallpaper = { "~/Pictures/one.png", "~/Pictures/two.png" },
+```
+
+`workspaces.lua` puts each one in the same selection as its desk's windows, so
+one animation carries both and the background stops being left behind when you
+switch. Fewer pictures than workspaces cycles. It costs one screen-sized
+rasterisation per desk you have actually visited, per monitor — which is why one
+image stays one static surface: every desk sharing a picture would make a
+wallpaper that slides pixel-identical to one that does not.
+
 The more interesting part is that **there is no wallpaper in the compositor.**
-`lua/wallpaper.lua` is nine lines and calls one thing:
+`lua/wallpaper.lua` calls one thing:
 
 ```lua
 sol.surface("wallpaper", {
@@ -415,8 +529,8 @@ rather than the titlebars.
 
 ### Your own animation feel
 
-Named curves — `linear`, `outCubic`, `outBack`, `inOutQuad`, `spring` — or four
-numbers, which are a cubic bezier's control points:
+Named curves — `linear`, `outCubic`, `outBack`, `inOutQuad`, `inOutCubic`,
+`spring` — or four numbers, which are a cubic bezier's control points:
 
 ```lua
 return {

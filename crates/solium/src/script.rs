@@ -136,6 +136,47 @@ impl Default for AnimationSpec {
     }
 }
 
+/// What a deformation is aimed at, in the words a script wrote.
+///
+/// The compositor's own [`crate::present::Anchor`] names a surface with a
+/// number, because it lives inside a `Copy` frame that is blended per node per
+/// frame. A script has no numbers for surfaces and should not be given any, so
+/// the name survives this far and is resolved where the command is applied —
+/// which is also the first place that can see whether the surface exists.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Aim {
+    /// A place. Nothing to track, and honest about it.
+    Rect(Rect),
+    /// A window, by the id a script holds it as.
+    Window(u64),
+    /// A surface a script declared — a dock, a bar, a slot in one.
+    Surface(String),
+}
+
+/// A deformation as a script asked for it: the shape, and what it is aimed at.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Deform {
+    pub(crate) effect: solium_effects::Deform,
+    pub(crate) aim: Aim,
+}
+
+/// Who is in a named selection, in the words a script wrote.
+///
+/// Three lists rather than one of a sum type, because that is how a script
+/// writes it — `{ windows = {...}, surfaces = {...} }` — and turning it into
+/// `crate::group::Member`s is the compositor's half of the same seam `Aim`
+/// crosses.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Selection {
+    pub(crate) windows: Vec<u64>,
+    pub(crate) surfaces: Vec<String>,
+    /// Connector names. Every node drawn on one of these is in the selection.
+    pub(crate) monitors: Vec<String>,
+    /// Narrows the surfaces above to one monitor's instance, because a surface
+    /// declared `on = "every-monitor"` is several things wearing one name.
+    pub(crate) on: Option<String>,
+}
+
 /// Something a script asked the compositor to do.
 #[derive(Clone, Debug)]
 pub(crate) enum Command {
@@ -143,11 +184,45 @@ pub(crate) enum Command {
         id: u64,
         rect: Option<Rect>,
         opacity: Option<f32>,
-        /// A 3D transform about the drawn rect's centre, when the script asked
-        /// for one. `None` keeps the window flat and on the cheap path.
+        /// A 3D transform about `pivot`, which is the drawn rect's centre
+        /// unless the script moved it. `None` keeps the window flat and on the
+        /// cheap path.
         matrix: Option<Mat4>,
         /// A deformation the drawn rect cannot express, such as a genie.
-        deform: Option<crate::present::Deform>,
+        deform: Option<Deform>,
+        /// How deep the window is drawn. See [`crate::present::Frame::z`].
+        ///
+        /// Resolved rather than `Option`, unlike the four above it: nothing
+        /// downstream means "left alone" — `sol.present` builds a whole frame
+        /// every time — and a default kept here is one a test can reach
+        /// without a compositor to run it against.
+        z: f32,
+        /// What `matrix` turns about, as a fraction of the drawn rect. See
+        /// [`crate::present::Frame::pivot`]. Resolved here for the same reason
+        /// as `z`.
+        pivot: (f32, f32),
+        animation: AnimationSpec,
+    },
+    /// Name a selection, or take the name away with `None`.
+    ///
+    /// The animation is for the members that *change* selection: a window that
+    /// leaves one desk for another has the difference between the two lands on
+    /// it in one frame, and this is how long it takes to get there. See
+    /// `present::rebase`.
+    Group {
+        name: String,
+        selection: Option<Selection>,
+        animation: AnimationSpec,
+    },
+    /// Carry a named selection, members and all.
+    PresentGroup {
+        name: String,
+        to: crate::group::Shift,
+        animation: AnimationSpec,
+    },
+    /// Carry one back to doing nothing, and stop carrying it.
+    ClearGroup {
+        name: String,
         animation: AnimationSpec,
     },
     Clear {
@@ -1219,15 +1294,22 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "present",
         lua.create_function(|lua, (id, options): (u64, Option<Table>)| {
-            let (rect, opacity, matrix, deform) = match options {
+            let (rect, opacity, matrix, deform) = match options.as_ref() {
                 Some(options) => (
-                    rect_from(&options)?,
+                    rect_from(options)?,
                     options.get::<Option<f32>>("opacity")?,
-                    transform_from(&options)?,
-                    deform_from(&options)?,
+                    transform_from(options)?,
+                    deform_from(options)?,
                 ),
                 None => (None, None, None, None),
             };
+            // Outside the match, because these two resolve to a value where
+            // the four above resolve to "said nothing": `sol.present(id)` and
+            // `sol.present(id, {})` have to produce the same depth and the
+            // same pivot, and one function answering for both tables is how
+            // the two answers cannot drift apart.
+            let z = depth_from(options.as_ref())?;
+            let pivot = pivot_from(options.as_ref())?;
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 pending.commands.push(Command::Present {
@@ -1236,6 +1318,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     opacity,
                     matrix,
                     deform,
+                    z,
+                    pivot,
                     animation,
                 });
             })
@@ -1293,11 +1377,41 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     )?;
 
     sol.set(
-        "decoration",
+        "pane",
         lua.create_function(|lua, name: Option<String>| {
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Decoration { name });
             })
+        })?,
+    )?;
+
+    // The old name for `sol.pane`. A style used to be a single QML file and
+    // is now a folder; the name changed with it. Kept so no configuration
+    // written before the change breaks, and cheap enough to keep until there
+    // is a reason to remove it.
+    sol.set("decoration", sol.get::<mlua::Function>("pane")?)?;
+
+    // Everything `sol.pane` could be handed, discovered from the
+    // directories the compositor actually resolves against rather than from a
+    // list kept in Lua. Same principle as `parse_easing`: the names come from
+    // the machinery, so a style someone writes is offerable the moment it
+    // exists and `lua/tweaks.lua` has nothing to edit.
+    //
+    // `{ name = "...", kind = "bundle" | "file" }` per entry, sorted, bundles
+    // first, and each name appearing once -- the shadowing is already applied,
+    // so a script can offer the list as it stands without implying a choice
+    // the compositor would not make.
+    sol.set(
+        "decorations",
+        lua.create_function(|lua, ()| {
+            let list = lua.create_table()?;
+            for (index, offered) in crate::decoration::available().into_iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("name", offered.name)?;
+                entry.set("kind", offered.kind.as_str())?;
+                list.set(index + 1, entry)?;
+            }
+            Ok(list)
         })?,
     )?;
 
@@ -1347,6 +1461,81 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 pending.commands.push(Command::Clear { id, animation });
+            })
+        })?,
+    )?;
+
+    // Name a selection: windows, surfaces and whole monitors, under one name.
+    //
+    //     sol.group("desk-2", {
+    //         windows  = { 3, 7 },
+    //         surfaces = { "wallpaper-2" },
+    //         monitor  = "DP-1",
+    //     })
+    //     sol.present_group("desk-2", { x = -2560 }, { duration = 300 })
+    //
+    // **A transform names a selection, and selections compose.** The wallpaper
+    // travels because it is in the selection, not because the compositor knows
+    // what a wallpaper is -- it does not, and `sol.surface` stays one primitive
+    // doing five jobs. A member's own `sol.present` composes with the group's
+    // rather than being replaced by it, so a window tilted inside a moving desk
+    // stays tilted within it.
+    //
+    // `sol.group(name, false)` takes one away. Re-declaring the same name
+    // replaces the membership and keeps the transform, so a mode that rebuilds
+    // its groups every time it runs -- which is every mode -- does not restart
+    // its own animation.
+    sol.set(
+        "group",
+        lua.create_function(|lua, (name, options): (String, Value)| {
+            let selection = match options {
+                Value::Table(options) => Some(selection_from(&options)?),
+                // `false` and `nil` both remove it, the same way `sol.surface`
+                // reads them, so one spelling works for both primitives.
+                _ => None,
+            };
+            with_pending(lua, |pending| {
+                let animation = pending.animation;
+                pending.commands.push(Command::Group {
+                    name: name.clone(),
+                    selection: selection.clone(),
+                    animation,
+                });
+            })
+        })?,
+    )?;
+
+    sol.set(
+        "present_group",
+        lua.create_function(
+            |lua, (name, options, motion): (String, Option<Table>, Option<Table>)| {
+                let to = match options.as_ref() {
+                    Some(options) => shift_from(options)?,
+                    None => crate::group::Shift::NONE,
+                };
+                let (duration, easing) = motion_from(motion.as_ref())?;
+                with_pending(lua, |pending| {
+                    let animation = pending.animation.with(duration, easing);
+                    pending.commands.push(Command::PresentGroup {
+                        name: name.clone(),
+                        to,
+                        animation,
+                    });
+                })
+            },
+        )?,
+    )?;
+
+    sol.set(
+        "present_group_clear",
+        lua.create_function(|lua, (name, motion): (String, Option<Table>)| {
+            let (duration, easing) = motion_from(motion.as_ref())?;
+            with_pending(lua, |pending| {
+                let animation = pending.animation.with(duration, easing);
+                pending.commands.push(Command::ClearGroup {
+                    name: name.clone(),
+                    animation,
+                });
             })
         })?,
     )?;
@@ -1869,30 +2058,303 @@ fn transform_from(options: &Table) -> mlua::Result<Option<Mat4>> {
     Ok(Some(matrix))
 }
 
+/// How deep a script asked for a window to be drawn. See
+/// [`crate::present::Frame::z`].
+///
+/// Nothing said — no table at all, or a table that does not mention it — is
+/// `0.0`, which ties with every other window and so leaves the order the stack
+/// gave them exactly as it was. That is what makes the default free.
+///
+/// **A NaN is dropped and reported, and this guard is load-bearing.**
+/// `render::by_depth` compares with `partial_cmp(..).unwrap_or(Equal)`, so a
+/// NaN ties with `1.0` and with `2.0` while those two do not tie with each
+/// other — a comparator that is not a total order. `slice::sort_by`'s contract
+/// for one of those is not merely an unspecified arrangement: **it may panic**,
+/// and the call site is the render walk, where a panic is the session going
+/// black rather than a stack in the wrong order. One division in a script
+/// reaches it. So the window keeps its place rather than the script keeping its
+/// typo — the answer `deform_from` gives an effect this build does not have,
+/// and not a cosmetic tidy-up to be relaxed later.
+///
+/// **An infinity is kept, either sign.** It orders against every finite depth
+/// and never reaches any arithmetic — `z` is read in exactly one place, as the
+/// sort key — so `z = math.huge` means "above everything", `-math.huge` means
+/// "behind everything", and both cost nothing to honour.
+fn depth_from(options: Option<&Table>) -> mlua::Result<f32> {
+    /// Ties with every other window, so the stack's own order survives.
+    const LEVEL: f32 = 0.0;
+
+    let Some(options) = options else {
+        return Ok(LEVEL);
+    };
+    let Some(z) = options.get::<Option<f32>>("z")? else {
+        return Ok(LEVEL);
+    };
+    if z.is_nan() {
+        tracing::warn!(
+            "a NaN `z` cannot be ordered against anything; drawing at the default depth"
+        );
+        return Ok(LEVEL);
+    }
+    Ok(z)
+}
+
+/// What a script asked a window's matrix to turn about, as a fraction of the
+/// rect it is drawn at. See [`crate::present::Frame::pivot`].
+///
+/// **Each axis defaults on its own.** `pivot_x = 0` means the left edge and
+/// says nothing about the vertical; defaulting the pair together would take a
+/// script that named one axis and hinge its window about a corner it never
+/// mentioned.
+///
+/// **Outside `0..1` is kept, deliberately.** `pivot_x = 2` turns the window
+/// about a line off to its right, which is a hinge and not a mistake — a door
+/// swinging on a frame beside it — and `warp.rs` is exactly as defined there
+/// as it is at the centre. Clamping would quietly turn one deliberate effect
+/// into a different one.
+///
+/// **Non-finite is not kept.** `warp.rs` computes `loc + size * pivot` for the
+/// point the matrix turns about, so a NaN or an infinity makes that point
+/// non-finite and every vertex of the mesh with it. Nothing downstream
+/// declines to draw the result: `Mat4::project_with_w` guards with
+/// `out_w <= 1e-6`, and every comparison against a NaN is false. A window
+/// would vanish, with a damage rectangle to match, because a script divided by
+/// zero. That axis falls back to the centre and says so.
+fn pivot_from(options: Option<&Table>) -> mlua::Result<(f32, f32)> {
+    /// The middle of the window, which is what `warp.rs` computed before there
+    /// was a pivot to name.
+    const CENTRE: f32 = 0.5;
+
+    let Some(options) = options else {
+        return Ok((CENTRE, CENTRE));
+    };
+    // By key, so the two axes cannot be read into each other: there is one
+    // body and it is given the name of the axis it is answering for.
+    let axis = |key: &str| -> mlua::Result<f32> {
+        let Some(fraction) = options.get::<Option<f32>>(key)? else {
+            return Ok(CENTRE);
+        };
+        if !fraction.is_finite() {
+            tracing::warn!(
+                key,
+                "a pivot that is not a finite fraction would put every vertex of the window at NaN; turning about the centre on that axis"
+            );
+            return Ok(CENTRE);
+        }
+        Ok(fraction)
+    };
+    Ok((axis("pivot_x")?, axis("pivot_y")?))
+}
+
+/// A Lua table, read as an effect's parameters.
+///
+/// The bridge between `sol.present` and `crates/effects`, which has no
+/// dependencies and so cannot be handed an `mlua::Table`. Each effect asks for
+/// the parameters it has, by name, and defaults the rest -- which is what
+/// makes adding one a file in that crate and nothing here.
+///
+/// A read that errors is reported as absent. `mlua` coerces freely, so the
+/// only way to get an error out of these is a value of a kind that cannot
+/// become a number or a string at all -- a table where a spread should be --
+/// and for that the effect's own default is a better answer than refusing the
+/// whole call.
+struct Given<'a>(&'a Table);
+
+impl solium_effects::Params for Given<'_> {
+    fn number(&self, key: &str) -> Option<f64> {
+        self.0.get::<Option<f64>>(key).ok().flatten()
+    }
+
+    fn word(&self, key: &str) -> Option<String> {
+        self.0.get::<Option<String>>(key).ok().flatten()
+    }
+}
+
 /// Read a deformation out of a `sol.present` options table.
 ///
-/// One key per kind, so a script names the effect rather than describing a
-/// mesh: `genie = { x, y, width, height, progress, spread }`. The rect is the
-/// slot the window is pulled into -- a dock icon's, usually -- and `progress`
-/// defaults to all the way in, since that is what one animates towards.
-fn deform_from(options: &Table) -> mlua::Result<Option<crate::present::Deform>> {
-    let Some(genie) = options.get::<Option<Table>>("genie")? else {
+/// ```lua
+/// deform = { effect = "genie", axis = "down", spread = 1.4,
+///            to = { x = 600, y = 1040, w = 120, h = 24 } }
+/// ```
+///
+/// The effect is *named* rather than described, and the name is looked up in
+/// the engine rather than matched here -- so an effect added to
+/// `crates/effects` is available to every script the moment it compiles,
+/// exactly as a curve added to `crates/animation` is. Its parameters come out
+/// of the same table and are that effect's business, not this function's.
+///
+/// `to` is the **anchor**: what the window is being pulled into, or drawn out
+/// of. See `present::Anchor` for why naming a thing rather than a rectangle is
+/// the point of the key.
+fn deform_from(options: &Table) -> mlua::Result<Option<Deform>> {
+    let Some(deform) = options.get::<Option<Table>>("deform")? else {
         return Ok(None);
     };
-    let number = |name: &str| -> mlua::Result<f64> {
-        genie.get::<Option<f64>>(name).map(|v| v.unwrap_or(0.0))
+    let Some(name) = deform.get::<Option<String>>("effect")? else {
+        return Err(mlua::Error::runtime(
+            "a deform needs an `effect` name, such as { effect = \"genie\" }",
+        ));
     };
-    Ok(Some(crate::present::Deform::Genie {
-        slot: crate::present::logical(
-            (number("x")?, number("y")?),
-            (
-                genie.get::<Option<f64>>("width")?.unwrap_or(1.0),
-                genie.get::<Option<f64>>("height")?.unwrap_or(1.0),
-            ),
-        ),
-        progress: genie.get::<Option<f32>>("progress")?.unwrap_or(1.0),
-        spread: genie.get::<Option<f32>>("spread")?.unwrap_or(1.0),
+    // Warned about and dropped rather than refused, the way an unknown easing
+    // is: a mode naming an effect this build does not have should lose the
+    // effect and not the window. `script::shipped` is what stops one shipping.
+    let Some(effect) = solium_effects::Deform::from_name(&name, &Given(&deform)) else {
+        tracing::warn!(
+            effect = name,
+            known = ?solium_effects::Deform::all().map(|(known, _)| known),
+            "unknown effect, drawing the window undeformed"
+        );
+        return Ok(None);
+    };
+    let Some(to) = deform.get::<Option<Table>>("to")? else {
+        return Err(mlua::Error::runtime(
+            "a deform needs a `to` to aim at: { window = id }, { surface = name } or a rect",
+        ));
+    };
+    Ok(Some(Deform {
+        effect,
+        aim: aim_from(&to)?,
     }))
+}
+
+/// Read a deform's anchor: a thing to follow, or a place to aim at.
+///
+/// The two identities are the ones that matter -- they are resolved on every
+/// frame that draws, so the effect tracks a dock icon or another window as it
+/// moves. A rect aims at somewhere that does not move, such as the bottom edge
+/// of a monitor, and is honest about being a snapshot because there is nothing
+/// there to track.
+fn aim_from(to: &Table) -> mlua::Result<Aim> {
+    if let Some(id) = to.get::<Option<u64>>("window")? {
+        return Ok(Aim::Window(id));
+    }
+    if let Some(name) = to.get::<Option<String>>("surface")? {
+        return Ok(Aim::Surface(name));
+    }
+    let Some(rect) = rect_from(to)? else {
+        return Err(mlua::Error::runtime(
+            "a deform's `to` needs { window = id }, { surface = name } or a rect (x, y, w, h)",
+        ));
+    };
+    Ok(Aim::Rect(rect))
+}
+
+/// Read a selection out of a `sol.group` table.
+///
+/// ```lua
+/// sol.group("desk-2", {
+///     windows  = { 3, 7 },
+///     surfaces = { "wallpaper-2" },
+///     monitors = { "DP-1" },      -- everything drawn there
+///     monitor  = "DP-1",          -- which instance of each surface above
+/// })
+/// ```
+///
+/// Every key is optional and an absent one is an empty list, so a selection of
+/// nothing is spellable and does nothing — which is what a mode building one
+/// desk per monitor per workspace produces for the cells that are empty.
+fn selection_from(options: &Table) -> mlua::Result<Selection> {
+    let names = |key: &str| -> mlua::Result<Vec<String>> {
+        match options.get::<Option<Table>>(key)? {
+            Some(list) => list.sequence_values::<String>().collect(),
+            None => Ok(Vec::new()),
+        }
+    };
+    let windows = match options.get::<Option<Table>>("windows")? {
+        Some(list) => list.sequence_values::<u64>().collect::<mlua::Result<_>>()?,
+        None => Vec::new(),
+    };
+    Ok(Selection {
+        windows,
+        surfaces: names("surfaces")?,
+        monitors: names("monitors")?,
+        on: options.get::<Option<String>>("monitor")?,
+    })
+}
+
+/// Read what a selection is carried by out of a `sol.present_group` table.
+///
+/// ```lua
+/// sol.present_group("desk-2", { x = -2560, opacity = 0.4, rotate_y = 8 })
+/// ```
+///
+/// `x` and `y` are a **displacement** and not a destination, which is the one
+/// way this reads differently from `sol.present`: a selection has no rectangle
+/// of its own to be moved to. `rotate_*` and `perspective` are read by the same
+/// `transform_from` a window's own matrix comes from, so the two spell a
+/// rotation identically.
+///
+/// **`z`, `pivot_x` and `pivot_y` are deliberately not read here**, and it is
+/// not an oversight to be tidied up by copying the two lines from
+/// `sol.present`. They are the two fields of a frame a selection cannot carry:
+///
+/// * A **pivot** would have to replace each member's own, because a member is
+///   drawn through one matrix turning about one point, and `Shift::apply`
+///   composes the group's matrix onto the member's. That contradicts the
+///   promise this whole primitive is built on — "a window tilted inside a
+///   moving desk stays tilted *within* it" — and it still would not be the
+///   thing a script asking for it wants, which is the desk turning as one
+///   about a point. That needs a *rectangle for the group*, which no selection
+///   has; `group.rs`'s `Shift::matrix` already names it as the honest limit of
+///   this stage.
+/// * A **depth** would reach only some of a selection. `z` orders the pane
+///   walk in `render.rs` and nothing else: scripted surfaces are drawn in
+///   fixed layer passes, in declaration order, carried and faded but never
+///   sorted. So a desk raised by `z` would lift its windows above the desk
+///   next door and leave its own wallpaper behind — the one failure a
+///   selection exists to make impossible.
+///
+/// Both are a *node's* answer, which is where the spec puts them, and
+/// `sol.present` is how a script gives one. An unknown key in this table is
+/// ignored like any other, so a script that writes one gets no window in the
+/// wrong place — it gets nothing, which is the mild half of this note.
+fn shift_from(options: &Table) -> mlua::Result<crate::group::Shift> {
+    Ok(crate::group::Shift {
+        dx: options.get::<Option<f64>>("x")?.unwrap_or(0.0),
+        dy: options.get::<Option<f64>>("y")?.unwrap_or(0.0),
+        opacity: options.get::<Option<f32>>("opacity")?.unwrap_or(1.0),
+        matrix: transform_from(options)?.unwrap_or(Mat4::IDENTITY),
+    })
+}
+
+/// What a call said about its own timing, before it is laid over the ambient
+/// one `sol.animate` set.
+///
+/// Read outside the pending buffer and applied inside it, because reading a Lua
+/// table can fail and the buffer is held by a closure that cannot. Two options
+/// rather than an `AnimationSpec`, so "said nothing about the easing" and
+/// "asked for the default easing" stay different answers.
+///
+/// `sol.present_group` takes a table of its own because a mode carrying two
+/// selections at different speeds in one dispatch cannot say so with an ambient
+/// setting. Absent, it is the ambient setting, so the two calls feel the same as
+/// every other pair in this file.
+fn motion_from(options: Option<&Table>) -> mlua::Result<(Option<Duration>, Option<Curve>)> {
+    let Some(options) = options else {
+        return Ok((None, None));
+    };
+    Ok((
+        options
+            .get::<Option<u64>>("duration")?
+            .map(Duration::from_millis),
+        easing_from(options)?,
+    ))
+}
+
+impl AnimationSpec {
+    /// This, with whatever a call actually named.
+    const fn with(self, duration: Option<Duration>, easing: Option<Curve>) -> Self {
+        Self {
+            duration: match duration {
+                Some(duration) => duration,
+                None => self.duration,
+            },
+            easing: match easing {
+                Some(easing) => easing,
+                None => self.easing,
+            },
+        }
+    }
 }
 
 /// Read a list of columns out of a Lua table.
@@ -2091,6 +2553,497 @@ mod tests {
         }
     }
 
+    /// **`sol.decoration` is still `sol.pane`.**
+    ///
+    /// The setting was renamed when a style stopped being one QML file and
+    /// became a folder. `sol.decoration` stays because an `init.lua` someone
+    /// wrote before that calls it by name, and Lua gives no warning for a call
+    /// to a nil field -- it raises, the script that raised is abandoned, and a
+    /// configuration that used to work comes up with no bindings and no
+    /// layouts. One line to keep, and this is what says the line is there.
+    ///
+    /// Both are driven, and the *same* command has to come back from each: an
+    /// alias bound to some other function would pass a test that only checked
+    /// `sol.decoration` was callable.
+    #[test]
+    fn the_old_name_for_sol_pane_still_works() {
+        let directory = std::env::temp_dir().join("solium-script-test-pane-alias");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+P", function() sol.pane("border") end)
+            sol.bind("Super+D", function() sol.decoration("border") end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let named = |scripts: &mut Scripts, combo: &str| {
+            let outcome = scripts.key(combo, empty_snapshot());
+            assert!(outcome.handled, "{combo} was not handled");
+            match outcome.commands.as_slice() {
+                [Command::Decoration { name }] => name.clone(),
+                other => panic!("expected one style command from {combo}, got {other:?}"),
+            }
+        };
+
+        assert_eq!(named(&mut scripts, "super+p").as_deref(), Some("border"));
+        assert_eq!(
+            named(&mut scripts, "super+d").as_deref(),
+            Some("border"),
+            "the old name reaches the same command as the new one"
+        );
+    }
+
+    /// **A `user.lua` written before the rename still chooses a style.**
+    ///
+    /// The migration path the `sol.decoration` alias does *not* cover, and the
+    /// one that would have broken quietly. `config.lua` merges the user's table
+    /// over its defaults key by key, so a file setting the old `decoration`
+    /// leaves `pane` at `"top"` -- their choice read, merged, and thrown away,
+    /// with the shipped default on screen and nothing anywhere saying why.
+    ///
+    /// It runs the **shipped** `config.lua`, not a copy: the temporary
+    /// directory holds only `init.lua` and `user.lua`, and `Scripts::load` puts
+    /// that directory ahead of the shipped one on `package.path` -- so
+    /// `require("user")` finds the fixture and `require("config")` finds the
+    /// real thing. That is what makes this a test of the file under review
+    /// rather than of a restatement of it.
+    ///
+    /// Both halves, because they are two edits with one purpose:
+    ///
+    /// * `config.pane` is the old key's value, which is the read-across;
+    /// * `config.decoration` is `nil`, which is the stale key not surviving the
+    ///   merge into the table the compositor reads.
+    ///
+    /// Guarded on a real `~/.config/solium`, which comes *first* on that path:
+    /// a developer with their own `user.lua` would have it answer instead of
+    /// the fixture, and the assertion would then be about their configuration.
+    #[test]
+    fn a_user_file_using_the_old_key_still_chooses_a_style() {
+        let Some(own) = Scripts::user_config_dir() else {
+            return;
+        };
+        if own.join("user.lua").exists() || own.join("config.lua").exists() {
+            // This machine's own configuration would decide it, not the fixture.
+            return;
+        }
+
+        let directory = std::env::temp_dir().join("solium-script-test-old-key");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        std::fs::write(
+            directory.join("user.lua"),
+            "return { decoration = \"border\" }\n",
+        )
+        .expect("writing the fixture user.lua");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            local config = require("config")
+            sol.bind("Super+P", function()
+                sol.pane(config.pane)
+                sol.status(tostring(config.decoration))
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+p", empty_snapshot());
+        assert!(outcome.handled);
+
+        match outcome.commands.as_slice() {
+            [Command::Decoration { name }] => assert_eq!(
+                name.as_deref(),
+                Some("border"),
+                "a user.lua setting the old `decoration` key still names the style"
+            ),
+            other => panic!("expected one style command, got {other:?}"),
+        }
+        assert_eq!(
+            outcome.status.as_deref(),
+            Some("nil"),
+            "and the old key does not survive into the configuration table"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A snapshot with nothing in it, for the tests that only want a call made.
+    fn empty_snapshot() -> Snapshot {
+        Snapshot {
+            keyboard: crate::keymap::State::initial(),
+            windows: Vec::new(),
+            monitors: Vec::new(),
+            work_area: Rect::default(),
+            cursor: (0.0, 0.0),
+        }
+    }
+
+    /// **A script names an effect, and what comes back is the engine's.**
+    ///
+    /// The round trip nothing else covers: `crates/effects` has thorough unit
+    /// tests and knows nothing about Lua, and `script::shipped` reads names out
+    /// of files without running them. This is the join -- an effect resolved by
+    /// name, its parameters read through `Given`, and both kinds of anchor.
+    ///
+    /// The anchor is the half worth pinning. `{ window = 9 }` must survive as
+    /// an *identity* all the way to the command, because the moment it becomes
+    /// a rectangle here it is a rectangle measured when the key was pressed.
+    #[test]
+    fn a_script_names_an_effect_and_the_engine_answers() {
+        let directory = std::env::temp_dir().join("solium-script-test-deform");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+1", function()
+                sol.present(1, { deform = { effect = "genie", axis = "left",
+                                            spread = 2.5,
+                                            to = { x = 10, y = 20, w = 30, h = 40 } } })
+                sol.present(2, { deform = { effect = "genie", to = { window = 9 } } })
+                sol.present(3, { deform = { effect = "nonsense", to = { window = 9 } } })
+                sol.present(4, {})
+                sol.present(5, { deform = { effect = "genie", to = { surface = "dock" } } })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+1", Snapshot::default());
+        let deforms: Vec<Option<Deform>> = outcome
+            .commands
+            .iter()
+            .map(|command| match command {
+                Command::Present { deform, .. } => deform.clone(),
+                other => panic!("expected a present command, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(deforms.len(), 5);
+
+        assert_eq!(
+            deforms[0],
+            Some(Deform {
+                effect: solium_effects::Deform::Genie {
+                    // Not named, so the effect's own default: all the way in,
+                    // which is what one animates towards.
+                    progress: 1.0,
+                    spread: 2.5,
+                    axis: solium_effects::Axis::Left,
+                },
+                aim: Aim::Rect(Rect {
+                    x: 10.0,
+                    y: 20.0,
+                    w: 30.0,
+                    h: 40.0
+                }),
+            })
+        );
+        assert_eq!(
+            deforms[1],
+            Some(Deform {
+                effect: solium_effects::Deform::Genie {
+                    progress: 1.0,
+                    spread: 1.0,
+                    axis: solium_effects::Axis::Down,
+                },
+                aim: Aim::Window(9),
+            })
+        );
+        // An effect this build does not have loses the effect, not the window.
+        assert_eq!(deforms[2], None);
+        assert_eq!(deforms[3], None);
+        // **A surface survives this far as a name.** It becomes a
+        // `scripted::SurfaceId` in `Solium::aimed`, which is the first place
+        // that can see whether there is a surface by that name -- and the id is
+        // what keeps `present::Frame` `Copy`.
+        assert_eq!(
+            deforms[4],
+            Some(Deform {
+                effect: solium_effects::Deform::Genie {
+                    progress: 1.0,
+                    spread: 1.0,
+                    axis: solium_effects::Axis::Down,
+                },
+                aim: Aim::Surface("dock".to_owned()),
+            })
+        );
+    }
+
+    /// **A script says how deep a window is drawn and what it turns about.**
+    ///
+    /// All of that pair's surface in one script: both keys read, a table
+    /// mentioning neither producing exactly the frame every window has had
+    /// until now, and each pivot axis defaulting on its own -- `pivot_x = 0`
+    /// means the left edge and says nothing about the vertical, so a script
+    /// naming one axis must not be given two.
+    ///
+    /// **The two pivot numbers are deliberately different, and neither is a
+    /// default.** `(0.5, 0.5)` and `(0.0, 0.0)` are each their own transpose,
+    /// so a fixture built from either cannot tell `pivot_x` read into the
+    /// wrong half of the pair from the code being right. `(0.25, 1.0)` can,
+    /// and the two one-axis cases pin the same swap from the other side:
+    /// naming only `pivot_x` must move the *first* number and only that one.
+    #[test]
+    fn a_script_says_how_deep_a_window_is_and_what_it_turns_about() {
+        let directory = std::env::temp_dir().join("solium-script-test-depth");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+3", function()
+                sol.present(1, { z = 2.5, pivot_x = 0.25, pivot_y = 1.0 })
+                -- All four, because `rect_from` refuses half a rect: a table
+                -- that mentions neither new key still has to be a table a
+                -- script could really write.
+                sol.present(2, { x = 10, y = 20, w = 300, h = 200 })
+                sol.present(3, { pivot_x = 0.25 })
+                sol.present(4, { pivot_y = 1.0 })
+                sol.present(5)
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+3", Snapshot::default());
+        let drawn = presented(&outcome.commands);
+        assert_eq!(drawn.len(), 5);
+
+        assert!(
+            (drawn[0].0 - 2.5).abs() < f32::EPSILON,
+            "the depth the script asked for, got {}",
+            drawn[0].0
+        );
+        assert_eq!(drawn[0].1, (0.25, 1.0), "x into x, y into y");
+
+        // A table mentioning neither is the frame every window on the machine
+        // has had until now: depth zero, which ties with every other window
+        // and so keeps the order the stack gave them, turning about its own
+        // centre.
+        assert!((drawn[1].0 - 0.0).abs() < f32::EPSILON);
+        assert_eq!(drawn[1].1, (0.5, 0.5));
+
+        // One axis named leaves the other in the middle. Asserted from both
+        // sides, because one of them alone is satisfied by a reader that
+        // defaults the pair together on whichever axis it was given.
+        assert_eq!(drawn[2].1, (0.25, 0.5), "only the horizontal moved");
+        assert_eq!(drawn[3].1, (0.5, 1.0), "only the vertical moved");
+
+        // And no options table at all answers the same as a table that says
+        // nothing -- `sol.present(id)` clears a window back to its own
+        // geometry, and it must not sort or hinge differently for it.
+        assert!((drawn[4].0 - 0.0).abs() < f32::EPSILON);
+        assert_eq!(drawn[4].1, (0.5, 0.5));
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A number no window can be drawn with is dropped, per key and per
+    /// axis.**
+    ///
+    /// One division reaches NaN from a script, and the two fields answer it
+    /// very differently if nothing stops it here.
+    ///
+    /// A **pivot** is the dangerous one. `warp.rs` computes
+    /// `loc + size * pivot` for the point the matrix turns about, so a
+    /// non-finite one makes that centre non-finite and every vertex of the
+    /// mesh with it -- and nothing further down declines to draw the result,
+    /// because `Mat4::project_with_w` guards with `out_w <= 1e-6` and every
+    /// comparison against a NaN is false. The window disappears and its damage
+    /// rectangle is nonsense, from a typo.
+    ///
+    /// A **depth** is quieter to look at and no safer. `render::by_depth`
+    /// answers `Equal` when `partial_cmp` declines, so a NaN ties with 1.0 and
+    /// with 2.0 while those two do not tie with each other -- not a total
+    /// order, and `slice::sort_by` handed one of those **may panic**. That is
+    /// the render walk, so the failure is the session going black.
+    ///
+    /// So both fall back to the default and say so in the log -- the answer
+    /// `deform_from` gives an effect this build does not have, and
+    /// `easing_from` an easing nobody wrote: the script loses the key it
+    /// mistyped and keeps its window. An **infinite depth is kept**, in both
+    /// directions, because it orders perfectly well: `z = math.huge` is a
+    /// legible spelling of "above everything" and `-math.huge` of "behind
+    /// everything". Both are asserted, because a guard written
+    /// `z.is_nan() || z == f32::NEG_INFINITY` passes every other case here.
+    #[test]
+    fn a_depth_or_a_pivot_that_cannot_be_drawn_with_falls_back() {
+        let directory = std::env::temp_dir().join("solium-script-test-nonfinite");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+4", function()
+                sol.present(1, { z = 0/0, pivot_x = 0.25 })
+                sol.present(2, { pivot_x = 0/0, pivot_y = 1.0 })
+                sol.present(3, { pivot_x = 0.25, pivot_y = 1/0 })
+                sol.present(4, { pivot_y = -1/0 })
+                sol.present(5, { z = 1/0 })
+                sol.present(6, { z = -1/0 })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+4", Snapshot::default());
+        let drawn = presented(&outcome.commands);
+        assert_eq!(drawn.len(), 6);
+
+        // The key that was wrong is the only key that loses anything: the
+        // pivot beside the NaN depth is the one the script wrote.
+        assert!(
+            (drawn[0].0 - 0.0).abs() < f32::EPSILON,
+            "a NaN depth is zero"
+        );
+        assert_eq!(drawn[0].1, (0.25, 0.5));
+
+        // And the axis that was wrong is the only axis. This is the second
+        // reading of the transpose: a NaN given as `pivot_x` must come back as
+        // a centred *first* number beside the 1.0 that was given as `pivot_y`.
+        assert_eq!(drawn[1].1, (0.5, 1.0), "the horizontal fell back, alone");
+        assert_eq!(
+            drawn[2].1,
+            (0.25, 0.5),
+            "and an infinity no less than a NaN"
+        );
+        assert_eq!(drawn[3].1, (0.5, 0.5), "in either direction");
+
+        // A depth is not a coordinate and an infinite one sorts, so it is the
+        // one non-finite number here that survives -- **in both directions**.
+        // Asserted from each end because a guard that refused only one of them
+        // (`z.is_nan() || z == f32::NEG_INFINITY`, the plausible one: NaN and
+        // the negative infinity are what a division by zero yields when the
+        // numerator went wrong) passes every other case in this test.
+        assert!(
+            drawn[4].0.is_infinite() && drawn[4].0 > 0.0,
+            "an infinite depth orders, so it is kept, got {}",
+            drawn[4].0
+        );
+        assert!(
+            drawn[5].0.is_infinite() && drawn[5].0 < 0.0,
+            "and so does a negative one, which means behind everything, got {}",
+            drawn[5].0
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The depth and pivot of each `Present` in a batch, in order.
+    fn presented(commands: &[Command]) -> Vec<(f32, (f32, f32))> {
+        commands
+            .iter()
+            .map(|command| match command {
+                Command::Present { z, pivot, .. } => (*z, *pivot),
+                other => panic!("expected a present command, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// **A script names a selection, and both halves of it come back.**
+    ///
+    /// The round trip for the other primitive this file gained: who is in a
+    /// group, and what carrying it means. The displacement is the part worth
+    /// pinning -- `x` on `sol.present_group` is a *delta* where `x` on
+    /// `sol.present` is a destination, because a selection has no rectangle of
+    /// its own to be moved to, and reading it as a destination would put every
+    /// member of every group in the same place.
+    #[test]
+    fn a_script_names_a_selection_and_says_where_to_carry_it() {
+        let directory = std::env::temp_dir().join("solium-script-test-group");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+2", function()
+                sol.animate({ duration = 300, easing = "inOutQuad" })
+                sol.group("desk-2", {
+                    windows = { 3, 7 },
+                    surfaces = { "wallpaper-2" },
+                    monitors = { "DP-1" },
+                    monitor = "DP-1",
+                })
+                sol.present_group("desk-2", { x = -2560, opacity = 0.5 })
+                sol.present_group("desk-1", { y = 40 }, { duration = 90 })
+                sol.present_group_clear("desk-3")
+                sol.group("desk-4", false)
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+2", Snapshot::default());
+        assert_eq!(outcome.commands.len(), 5);
+
+        match &outcome.commands[0] {
+            Command::Group {
+                name,
+                selection: Some(selection),
+                animation,
+            } => {
+                assert_eq!(name, "desk-2");
+                assert_eq!(selection.windows, vec![3, 7]);
+                assert_eq!(selection.surfaces, vec!["wallpaper-2".to_owned()]);
+                assert_eq!(selection.monitors, vec!["DP-1".to_owned()]);
+                assert_eq!(selection.on.as_deref(), Some("DP-1"));
+                // A membership change is animated too, and by the ambient
+                // setting: that is how long a window takes to get back to where
+                // it was looking when it changes desks.
+                assert_eq!(animation.duration, Duration::from_millis(300));
+            }
+            other => panic!("expected a group command, got {other:?}"),
+        }
+
+        match &outcome.commands[1] {
+            Command::PresentGroup {
+                name,
+                to,
+                animation,
+            } => {
+                assert_eq!(name, "desk-2");
+                assert_eq!(to.offset(), (-2560.0, 0.0));
+                assert!((to.opacity - 0.5).abs() < f32::EPSILON);
+                assert_eq!(animation.duration, Duration::from_millis(300));
+                assert_eq!(animation.easing, Curve::InOutQuad);
+            }
+            other => panic!("expected a present_group command, got {other:?}"),
+        }
+
+        // Its own table overrides the ambient duration and keeps the easing.
+        match &outcome.commands[2] {
+            Command::PresentGroup { animation, to, .. } => {
+                assert_eq!(to.offset(), (0.0, 40.0));
+                assert_eq!(animation.duration, Duration::from_millis(90));
+                assert_eq!(animation.easing, Curve::InOutQuad);
+            }
+            other => panic!("expected a present_group command, got {other:?}"),
+        }
+
+        assert!(
+            matches!(&outcome.commands[3], Command::ClearGroup { name, .. } if name == "desk-3")
+        );
+        // `false` removes a selection, the same spelling `sol.surface` takes.
+        assert!(matches!(
+            &outcome.commands[4],
+            Command::Group {
+                name,
+                selection: None,
+                ..
+            } if name == "desk-4"
+        ));
+    }
+
     #[test]
     fn a_failing_script_does_not_swallow_the_key() {
         let directory = std::env::temp_dir().join("solium-script-test-error");
@@ -2108,5 +3061,496 @@ mod tests {
         // disappearing into a broken script.
         assert!(!outcome.handled);
         assert!(outcome.commands.is_empty());
+    }
+}
+
+/// **The configuration that ships may only ask for things the compositor has.**
+///
+/// `init.lua` asked for an easing called `inOutCubic` and the engine had no
+/// such curve. `parse_easing` warned, fell back to the default, and the session
+/// carried on -- so the genie was quietly the wrong animation for as long as it
+/// took somebody to read a hardware log and notice five identical warnings in
+/// it. Nothing in the gate was looking, because nothing in the gate reads Lua
+/// for anything but syntax: `solium --check` loads the scripts, and a name
+/// inside a binding's body is not looked up until the binding runs.
+///
+/// That is a class rather than an incident. A script names things -- easings,
+/// events, layers, QML scenes, decorations, keys -- and every one of those
+/// lookups either warns and carries on or, in the case of an event and a key,
+/// misses in complete silence. So this walks `lua/*.lua` and resolves each name
+/// through the same function the compositor uses at run time.
+///
+/// **What it cannot see.** Only names written as literals. `shell.lua` takes
+/// its scene from the environment and `workspaces.lua` builds `"super+" ..
+/// index` in a loop; a name assembled at run time is outside this and outside
+/// any static check. Lua comments are stripped, so a documented example that is
+/// deliberately a placeholder -- a path into somebody's home directory -- does
+/// not fail a build.
+#[cfg(test)]
+mod shipped {
+    use super::{Curve, normalise_combo};
+
+    /// The Lua the compositor ships, as `(file, text)`.
+    ///
+    /// From `CARGO_MANIFEST_DIR` rather than a path relative to the process,
+    /// because a test's working directory is the workspace root and this file
+    /// should not have to know that.
+    fn scripts() -> Vec<(String, String)> {
+        let directory = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/lua"));
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, String)> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|end| end == "lua"))
+            .filter_map(|path| {
+                let name = path.file_name()?.to_str()?.to_owned();
+                Some((name, std::fs::read_to_string(&path).ok()?))
+            })
+            .collect();
+        found.sort();
+        // A check that walks an empty directory passes, which is the one way
+        // this could be green and mean nothing at all.
+        assert!(
+            found.len() >= 8,
+            "found {} shipped scripts in {}; the walk is broken, not the scripts",
+            found.len(),
+            directory.display()
+        );
+        found
+    }
+
+    /// One line with its Lua comment removed.
+    ///
+    /// `--` outside a string starts a comment. Tracked rather than searched for
+    /// because `config.lua` has a `"module 'user' not found"` in it and a naive
+    /// cut would one day land inside a string like that one.
+    fn code(line: &str) -> &str {
+        let bytes = line.as_bytes();
+        let mut quoted = false;
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' if quoted => index += 1,
+                b'"' => quoted = !quoted,
+                b'-' if !quoted && bytes.get(index + 1) == Some(&b'-') => return &line[..index],
+                _ => {}
+            }
+            index += 1;
+        }
+        line
+    }
+
+    /// Every double-quoted literal that follows `marker`, with where it was.
+    ///
+    /// `marker` is matched literally and the literal must come next, with only
+    /// spaces between: `easing =` finds `easing = "outCubic"` and `sol.on(`
+    /// finds `sol.on("open", ...)`. Anything else after the marker -- a
+    /// variable, a table, a concatenation -- is skipped rather than guessed at.
+    /// That is the limit this module states up front, and it is why
+    /// `shell.lua`'s `scene = scene` never appears here.
+    fn named(text: &str, marker: &str) -> Vec<(usize, String)> {
+        // An empty marker matches at every position and consumes none of them,
+        // so the walk below would never move. Refused here rather than left to
+        // a caller, because the symptom is a test run that never finishes --
+        // which is how this was found.
+        assert!(!marker.is_empty(), "a marker has to be something");
+        let mut found = Vec::new();
+        for (number, line) in text.lines().enumerate() {
+            let line = code(line);
+            let mut from = 0;
+            while let Some(at) = line[from..].find(marker) {
+                let after = from + at + marker.len();
+                from = after;
+                let rest = line[after..].trim_start_matches(' ');
+                let Some(rest) = rest.strip_prefix('"') else {
+                    continue;
+                };
+                let Some(end) = rest.find('"') else {
+                    continue;
+                };
+                found.push((number + 1, rest[..end].to_owned()));
+            }
+        }
+        found
+    }
+
+    /// Every double-quoted literal in a chunk of Lua, in order.
+    ///
+    /// For a list rather than an assignment: `{ "top", "left", ... }` has no
+    /// marker in front of each item, only in front of the whole thing.
+    fn quoted(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for line in text.lines() {
+            let mut rest = code(line);
+            while let Some(at) = rest.find('"') {
+                let after = &rest[at + 1..];
+                let Some(end) = after.find('"') else {
+                    break;
+                };
+                found.push(after[..end].to_owned());
+                rest = &after[end + 1..];
+            }
+        }
+        found
+    }
+
+    /// Everything in the shipped Lua that follows `marker`, for every file.
+    fn everywhere(marker: &str) -> Vec<(String, usize, String)> {
+        scripts()
+            .into_iter()
+            .flat_map(|(file, text)| {
+                named(&text, marker)
+                    .into_iter()
+                    .map(move |(line, value)| (file.clone(), line, value))
+            })
+            .collect()
+    }
+
+    /// Where the QML that ships lives.
+    fn shipped_qml() -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml"))
+    }
+
+    /// **Every easing the shipped configuration asks for exists.**
+    ///
+    /// The one that did not: `sol.animate({ duration = 520, easing =
+    /// "inOutCubic" })`, in `init.lua` for `super+m` and again in `tweaks.lua`
+    /// for the genie tweak. `Curve::from_name` knew five names and that was not
+    /// one of them, so both fell back to `outCubic` -- a different animation,
+    /// chosen by nobody, announced only in a log line.
+    #[test]
+    fn every_easing_named_is_one_the_engine_has() {
+        let asked = everywhere("easing =");
+        assert!(!asked.is_empty(), "no easings found; the scan is broken");
+        for (file, line, name) in asked {
+            assert!(
+                Curve::from_name(&name).is_some(),
+                "{file}:{line} asks for easing {name:?}, which Curve::from_name cannot read. \
+                 Names: {:?}",
+                Curve::all().map(|(known, _)| known)
+            );
+        }
+    }
+
+    /// **Every effect the shipped configuration asks for exists.**
+    ///
+    /// The easing case above, one layer over. `sol.present` takes `deform = {
+    /// effect = "..." }` and the name is resolved in `crates/effects` rather
+    /// than matched in `script.rs`, which is what makes adding *fold* or
+    /// *curl* a file in that crate — and which also means a misspelling is no
+    /// longer a Lua error but a warning and an undeformed window, seen by
+    /// nobody who was not reading the log.
+    #[test]
+    fn every_effect_named_is_one_the_engine_has() {
+        let asked = everywhere("effect =");
+        assert!(!asked.is_empty(), "no effects found; the scan is broken");
+        for (file, line, name) in asked {
+            assert!(
+                solium_effects::Deform::from_name(&name, &()).is_some(),
+                "{file}:{line} asks for effect {name:?}, which Deform::from_name cannot read. \
+                 Names: {:?}",
+                solium_effects::Deform::all().map(|(known, _)| known)
+            );
+        }
+    }
+
+    /// **And every axis, which is worse when it is wrong.**
+    ///
+    /// An unknown *effect* is at least logged. An unknown parameter cannot be:
+    /// `crates/effects` has no logger by construction, and a word it cannot
+    /// read is indistinguishable there from one nobody wrote — so a genie
+    /// asked to sweep `"downwards"` silently sweeps `down`, which is right
+    /// four times in four and wrong the once somebody puts the dock on the
+    /// left.
+    #[test]
+    fn every_axis_named_is_one_the_engine_has() {
+        let asked = everywhere("axis =");
+        assert!(!asked.is_empty(), "no axes found; the scan is broken");
+        for (file, line, name) in asked {
+            assert!(
+                solium_effects::Axis::from_name(&name).is_some(),
+                "{file}:{line} asks for axis {name:?}, which Axis::from_name cannot read. \
+                 Names: {:?}",
+                solium_effects::Axis::all().map(|(known, _)| known)
+            );
+        }
+    }
+
+    /// **Every event a shipped script listens for is one the compositor sends.**
+    ///
+    /// Worse than an unknown easing, because there is no warning at all:
+    /// `sol.on` puts the handler in a table under whatever name it was given,
+    /// and a name nothing dispatches is a handler that is simply never called.
+    /// A layout that misspells `"monitors"` does not fail -- it stops
+    /// rearranging when a screen is unplugged, which reads as a compositor bug.
+    ///
+    /// The vocabulary is read out of `script.rs` itself rather than listed
+    /// here, because a list is a second copy and two copies of a vocabulary
+    /// drifting apart is the defect this whole module exists for.
+    #[test]
+    fn every_event_listened_for_is_one_that_is_sent() {
+        // The production half of this file. Cut at the first `#[cfg(test)]`
+        // because everything below it -- including this test -- talks *about*
+        // `call_listeners` and would otherwise be counted as calling it.
+        const SOURCE: &str = include_str!("script.rs");
+        let Some(production) = SOURCE.split("#[cfg(test)]").next() else {
+            panic!("script.rs is empty, which cannot be");
+        };
+        let dispatched: Vec<String> = named(production, "call_listeners(sol,")
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+
+        // The scrape has to see every dispatch there is, or it narrows the
+        // vocabulary in silence and this test starts agreeing with anything.
+        // One `call_listeners` is the definition; the rest are calls.
+        let calls = production.matches("call_listeners").count() - 1;
+        assert_eq!(
+            dispatched.len(),
+            calls,
+            "{calls} dispatches in script.rs but only {} are `call_listeners(sol, \"name\")`; \
+             one of them is written some other way and this check cannot see it",
+            dispatched.len()
+        );
+        assert!(
+            calls >= 8,
+            "only {calls} dispatches found; the scan is broken"
+        );
+
+        for (file, line, event) in everywhere("sol.on(") {
+            assert!(
+                dispatched.contains(&event),
+                "{file}:{line} listens for {event:?}, which nothing dispatches. \
+                 Events: {dispatched:?}"
+            );
+        }
+    }
+
+    /// **Every layer a shipped surface names is one that exists.**
+    ///
+    /// `Layer::parse` answers `None` and `unwrap_or_default` turns that into
+    /// `Background`, with no warning anywhere. A bar that asked for `"Top"` and
+    /// got the background is a bar drawn underneath every window on the screen,
+    /// and the symptom is that the bar has vanished.
+    #[test]
+    fn every_layer_named_is_one_that_exists() {
+        let asked = everywhere("layer =");
+        assert!(!asked.is_empty(), "no layers found; the scan is broken");
+        for (file, line, name) in asked {
+            assert!(
+                crate::scripted::Layer::parse(&name).is_some(),
+                "{file}:{line} puts a surface on layer {name:?}, which is not one of \
+                 background, bottom, top, overlay"
+            );
+        }
+    }
+
+    /// **Every QML scene a shipped script names is one that ships.**
+    ///
+    /// Two lookups, because there are two kinds of scene and a script writes
+    /// them the same way: a scripted surface's, found on the QML search path by
+    /// `scripted::find_scene`, and a loading scene's, which is a name under
+    /// `qml/loading`. A scene that is not there is an `ERROR` and a hole in the
+    /// picture -- `sol.surface` says "no such QML scene" and draws nothing.
+    ///
+    /// The resolved path has to land inside the shipped QML directory. Without
+    /// that, a developer with their own `~/.config/solium/qml/wallpaper.qml`
+    /// would have a green test for a file that does not ship.
+    #[test]
+    fn every_scene_named_is_one_that_ships() {
+        let shipped = shipped_qml();
+        let asked = everywhere("scene =");
+        assert!(!asked.is_empty(), "no scenes found; the scan is broken");
+        for (file, line, name) in asked {
+            let surface = crate::scripted::find_scene(&name)
+                .is_some_and(|path| path.starts_with(&shipped) && path.is_file());
+            let loading = shipped
+                .join("loading")
+                .join(format!("{name}.qml"))
+                .is_file();
+            assert!(
+                surface || loading,
+                "{file}:{line} names scene {name:?}, and there is no {name} in \
+                 {} or in its loading directory",
+                shipped.display()
+            );
+        }
+    }
+
+    /// **Every surface a shipped selection names is one a shipped script
+    /// declares.**
+    ///
+    /// `sol.group` is the third place a script writes a surface's name down, and
+    /// the quietest of the three. A name nothing has declared is not an error:
+    /// the selection simply does not contain it, so the group is declared, the
+    /// transform is applied, and the wallpaper stays exactly where it was —
+    /// which is the bug this whole item exists to remove, wearing a typo.
+    ///
+    /// Both halves are read as literals, so what this can see is bounded the way
+    /// the module header says. The shipped desks build their surface names from
+    /// a workspace index (`wallpaper.for_desk`), and a name assembled at run time
+    /// is outside this and outside any static check — so the *membership* side
+    /// may legitimately be empty. What is asserted non-empty is the declaration
+    /// side, which proves the scan itself still works on this corpus; a literal
+    /// written into a group tomorrow is checked against it from that day on.
+    #[test]
+    fn every_surface_a_selection_names_is_one_that_is_declared() {
+        let declared: Vec<String> = everywhere("sol.surface(")
+            .into_iter()
+            .map(|(_, _, name)| name)
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "no `sol.surface` declarations found; the scan is broken"
+        );
+
+        // Every literal inside a `surfaces = { ... }` list, with its file.
+        let mut asked: Vec<(String, usize, String)> = Vec::new();
+        for (file, text) in scripts() {
+            for (line, rest) in surface_lists(&text) {
+                for name in quoted(&rest) {
+                    asked.push((file.clone(), line, name));
+                }
+            }
+        }
+        for (file, line, name) in asked {
+            assert!(
+                declared.contains(&name),
+                "{file}:{line} puts surface {name:?} in a selection, and nothing                  declares one by that name. Declared: {declared:?}"
+            );
+        }
+    }
+
+    /// The text of each `surfaces = { ... }` list in a chunk of Lua, with the
+    /// line it starts on.
+    ///
+    /// A list rather than an assignment, so [`named`] cannot see it: there is no
+    /// marker in front of each item, only in front of the whole thing. Single
+    /// line only, which is how every one of them is written and what the whole
+    /// of this module can see.
+    fn surface_lists(text: &str) -> Vec<(usize, String)> {
+        let mut found = Vec::new();
+        for (number, line) in text.lines().enumerate() {
+            let line = code(line);
+            let Some(at) = line.find("surfaces = {") else {
+                continue;
+            };
+            let rest = &line[at..];
+            let end = rest.find('}').unwrap_or(rest.len());
+            found.push((number + 1, rest[..end].to_owned()));
+        }
+        found
+    }
+
+    /// **Every pane style the shipped configuration names is one that ships.**
+    ///
+    /// A name that is nowhere is a frame that fails to build once per window --
+    /// every window undecorated, and a log line each.
+    ///
+    /// Resolved through `decoration::ships` rather than by joining a path onto
+    /// the name here, which is this module's own rule -- "resolves each name
+    /// through the same function the compositor uses at run time" -- and which
+    /// this test was the one exception to. It matters rather than being a
+    /// tidy-up, and Task 7 is where it would have bitten: the eight names
+    /// `config.lua` has always carried stopped being files under
+    /// `qml/decorations` and became folders under `qml/panes` on one commit,
+    /// and a hand-joined `<name>.qml` would have gone red for all eight while
+    /// the compositor drew them perfectly. Through the resolver there was
+    /// nothing to remember.
+    ///
+    /// Both markers, because the setting is `pane` and `decoration` is still
+    /// read: a user.lua written before the rename still names a style, and a
+    /// name that has to resolve is a name this has to check. `everywhere` sees
+    /// only the shipped scripts, so what this really pins is that the alias in
+    /// `config.lua` cannot be left pointing at a style that was deleted.
+    #[test]
+    fn every_pane_style_named_is_one_that_ships() {
+        let ships = crate::decoration::ships();
+        // The walk before anything is decided by it: a catalogue that came back
+        // empty would pass every name below by having no opinion, which is the
+        // one way this can be green and mean nothing.
+        assert!(
+            ships.len() >= 8,
+            "this build offers {} styles, which is fewer than the eight that \
+             `config.lua` documents -- the walk is broken, not the configuration",
+            ships.len()
+        );
+        let mut asked = everywhere("pane =");
+        asked.extend(everywhere("decoration ="));
+        assert!(
+            !asked.is_empty(),
+            "no pane styles found; the scan is broken"
+        );
+        for (file, line, name) in asked {
+            // `none` is a real setting and draws no frame at all, deliberately.
+            assert!(
+                name == "none" || ships.iter().any(|offered| offered.name == name),
+                "{file}:{line} asks for pane style {name:?}, and this build ships no style \
+                 of that name -- it ships {:?}",
+                ships
+                    .iter()
+                    .map(|offered| offered.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// **Every key a shipped script binds is spelled the way a key arrives.**
+    ///
+    /// A binding is a table lookup on a string. `input::combo_for` builds that
+    /// string from `xkb::keysym_get_name` and `normalise_combo` lowercases it,
+    /// so a binding whose key is not that exact spelling is not a binding at
+    /// all -- it is an entry in a table nothing will ever look up, with no
+    /// warning at load and nothing at the press but a `no script has bound
+    /// this` at info.
+    ///
+    /// Round-tripped rather than merely resolved: `keysym_from_name` is
+    /// forgiving and `keysym_get_name` is not, and it is the second one that
+    /// decides what a key is called at run time.
+    ///
+    /// Only the bindings written as literals. `workspaces.lua` builds nine of
+    /// them from a loop counter and they cannot be read from the text -- see
+    /// this module's header.
+    ///
+    /// And it checks the *spelling*, not that the key can be reached. Those are
+    /// not the same question, because `combo_for` names the key from
+    /// `modified_sym` -- the keysym with the modifiers already applied. A letter
+    /// survives that (`shift+q` gives `Q`, which lowercases back to `q`) and a
+    /// digit does not: on a `us` layout `shift+1` arrives as `exclam`, so
+    /// `workspaces.lua`'s `"super+shift+" .. index` binds nine combinations
+    /// nothing will ever produce. Spelled perfectly and unreachable. Fixing it
+    /// means changing which keysym every binding in the compositor is matched
+    /// on, which is not something to do without a keyboard in front of you.
+    #[test]
+    fn every_key_bound_is_spelled_the_way_it_arrives() {
+        use smithay::input::keyboard::xkb;
+
+        let bound = everywhere("sol.bind(");
+        assert!(!bound.is_empty(), "no bindings found; the scan is broken");
+        for (file, line, combo) in bound {
+            let combo = normalise_combo(&combo);
+            let Some(key) = combo.rsplit('+').next() else {
+                continue;
+            };
+            // A combo built by concatenation -- `"super+" .. index` -- reaches
+            // this as a bare `super+` with nothing after it. There is no key
+            // here to check; the header says so.
+            if key.is_empty() {
+                continue;
+            }
+            let keysym = xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE);
+            assert!(
+                keysym != xkb::keysyms::KEY_NoSymbol.into(),
+                "{file}:{line} binds {combo:?}, and xkb has no key called {key:?}"
+            );
+            let canonical = xkb::keysym_get_name(keysym).to_ascii_lowercase();
+            assert_eq!(
+                canonical, key,
+                "{file}:{line} binds {combo:?}, but that key arrives called {canonical:?} -- \
+                 the binding would never fire"
+            );
+        }
     }
 }

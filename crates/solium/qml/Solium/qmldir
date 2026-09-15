@@ -1,2 +1,12 @@
 module Solium
 singleton Theme 1.0 Theme.qml
+PaneStyle 1.0 PaneStyle.qml
+Layer 1.0 Layer.qml
+
+# The groups inside a PaneStyle. Internal because a style writes `insets.top`
+# and `client.shadow.blur` and never names these -- they exist so QML can
+# resolve those paths against a declared type, which is the only reason they
+# are types at all. See Insets.qml.
+internal Insets Insets.qml
+internal ClientTreatment ClientTreatment.qml
+internal ClientShadow ClientShadow.qml

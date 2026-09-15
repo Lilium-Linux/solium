@@ -124,6 +124,59 @@ window is travelling between. `Curve::from_name` is what scripts bind to, so a
 curve added to the engine is immediately available to every mode and to the
 preview without touching the renderer.
 
+### So are the shapes
+
+`crates/effects` is the same crate again for the other half of a transform: the
+vertex deformations a rectangle and a matrix cannot express — a genie, and
+whatever fold, curl or page turn comes next. Same empty `[dependencies]`, same
+unit tests, same wasm preview with live sliders, and the same reason.
+
+It has a second reason the animation engine does not, and it is the harder one:
+**the damage tracker needs a deformed window's bounding box before anything is
+drawn, and a shader cannot tell it one.** So a vertex function stays CPU-side
+and parametric — a name and some numbers, never user code — while a *fragment*
+effect can be arbitrary GLSL, because a bad one is a wrong picture and a bad
+damage rect is a corrupt screen. See
+`docs/superpowers/specs/2026-09-12-panes-and-effects-design.md`.
+
+The split with the compositor is the anchor. A deformation morphs between two
+rectangles, and the far one is named rather than given: `deform = { effect =
+"genie", to = { window = id } }` carries an *identity*, which `Solium::aimed_at`
+resolves on the frame that draws it. A rectangle read out of a Lua table when
+the binding was pressed aims at where the dock icon was half a second ago, which
+is the stale-copy failure `docs/shell-boundary.md` already rules out for
+everything else. `crates/effects` never sees the identity — it has no idea what
+a pane is, which is what keeps it testable without a session.
+
+`Deform::from_name` is what scripts bind to, exactly as `Curve::from_name` is,
+and `script::shipped` checks the shipped Lua against both.
+
+### And a transform names a selection
+
+`present::Frame` says how *one* pane is drawn. `group::Shift` says how a **named
+set** of things is drawn — windows, `sol.surface` surfaces, whole monitors —
+and the two compose: a member is drawn at its own transform plus every selection
+it is in.
+
+That is one mechanism rather than three. A whole-screen effect is a selection
+that is an output; a set of windows moving as one is a named set; and a
+workspace is its windows plus its own background, which is why the workspace
+slide stops leaving the wallpaper behind. Nothing in the compositor knows what a
+wallpaper is; it travels because `workspaces.lua` put it in the selection.
+
+Two decisions worth knowing:
+
+**Membership lives on the group**, not in a table keyed by `PaneId` beside the
+panes. A group owns its members and its own in-flight transform and both leave
+when it does, so a selection naming a window that has closed resolves to nothing
+and costs a `u64`. That is the same rule `Pane` follows for its frame, its
+timers and its capture buffer.
+
+**A node in no selection pays nothing.** `Shift::apply` on an identity shift
+returns the frame it was given, and the first thing anything asks is whether any
+selection exists at all. A compositor that routed every window through new
+arithmetic to support a group nobody declared would have made every frame worse.
+
 **Backend independence.** The transform layer talks to Smithay's `Renderer` and
 `Frame` traits, never to GLES directly. Scaling and cross-fading textures is
 unremarkable work that GLES2 does well; the reasons to want Vulkan later are

@@ -1,0 +1,315 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Solium effects preview</title>
+<!--
+  A test harness for Solium's vertex deformations. Deliberately plain.
+
+  The window is a grid of flat quads because that is exactly what the compositor
+  draws: `warp::mesh` cuts the same cells, in the same order, and hands them to
+  GLES. Drawing anything smoother here would be this page flattering an effect
+  the screen will not.
+
+  The engine is compiled to WebAssembly and *called* from this page, so the
+  shape tuned here is the code that bends real windows. A copy of `place` in
+  JavaScript would drift invisibly — the page would still bend something.
+
+  What is deliberately not here is *timing*. Progress sweeps linearly, because
+  which curve carries it is `crates/animation`'s question and that crate has its
+  own preview with its own plot. Keeping the two apart is also what keeps this
+  crate's `[dependencies]` empty, which is what makes an effect testable without
+  a compositor at all.
+
+  Regenerate with dev/preview.
+-->
+<style>
+  :root { color-scheme: dark; --bg:#101216; --line:#2a2f3a; --text:#e6e9ef;
+          --dim:#848c9c; --accent:#7aa2f7; --anchor:#e0af68; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--text);
+         font:13px/1.6 system-ui, sans-serif; display:flex; gap:24px;
+         flex-wrap:wrap; align-items:flex-start; }
+  /* A fixed-width panel. `flex:1` gave it half a 2560px window and sliders a
+     metre long. */
+  aside { flex:0 0 320px; display:flex; flex-direction:column; gap:14px; }
+
+  #stage { width:800px; height:450px; flex:none; display:block;
+           background:#0a0b0e; border:1px solid var(--line); border-radius:4px; }
+
+  .field { display:flex; align-items:center; gap:10px; }
+  .field label { width:78px; color:var(--dim); }
+  .field output { width:58px; text-align:right; font-variant-numeric:tabular-nums; }
+  input[type=range] { flex:1; accent-color:var(--accent); }
+  select { flex:1; background:#0a0b0e; color:var(--text);
+           border:1px solid var(--line); border-radius:3px; padding:4px 6px; }
+  button { background:transparent; color:var(--text); border:1px solid var(--line);
+           border-radius:3px; padding:6px 14px; cursor:pointer; font-size:13px; }
+  button.on { border-color:var(--accent); color:var(--accent); }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row label { color:var(--dim); }
+  #status { color:var(--dim); min-height:3em; }
+  #config { width:100%; background:#0a0b0e; color:var(--text); resize:vertical;
+            border:1px solid var(--line); border-radius:3px; padding:8px;
+            font:11px/1.5 monospace; }
+  hr { border:0; border-top:1px solid var(--line); margin:2px 0; }
+</style>
+
+<canvas id="stage" width="800" height="450"></canvas>
+
+<aside>
+  <div class="field"><label for="effect">effect</label><select id="effect"></select></div>
+  <div class="field"><label for="axis">axis</label><select id="axis"></select></div>
+
+  <hr>
+
+  <div class="field"><label for="progress">progress</label>
+    <input type="range" id="progress" min="0" max="100" step="1" value="55">
+    <output id="progressOut"></output></div>
+  <div class="field"><label for="spread">spread</label>
+    <input type="range" id="spread" min="0" max="500" step="5" value="140">
+    <output id="spreadOut"></output></div>
+
+  <hr>
+
+  <div class="field"><label for="anchorX">to x</label>
+    <input type="range" id="anchorX" min="0" max="1600" step="4" value="740">
+    <output id="anchorXOut"></output></div>
+  <div class="field"><label for="anchorY">to y</label>
+    <input type="range" id="anchorY" min="0" max="900" step="4" value="856">
+    <output id="anchorYOut"></output></div>
+  <div class="field"><label for="anchorW">to w</label>
+    <input type="range" id="anchorW" min="8" max="800" step="4" value="120">
+    <output id="anchorWOut"></output></div>
+  <div class="field"><label for="anchorH">to h</label>
+    <input type="range" id="anchorH" min="8" max="800" step="4" value="24">
+    <output id="anchorHOut"></output></div>
+
+  <hr>
+
+  <div class="field"><label for="speed">speed</label>
+    <input type="range" id="speed" min="10" max="200" step="5" value="100">
+    <output id="speedOut"></output></div>
+  <div class="row"><button id="play">Play</button><button id="loop">Loop</button>
+    <label><input type="checkbox" id="cells" checked> cells</label></div>
+  <div id="status"></div>
+  <textarea id="config" readonly rows="11" spellcheck="false"
+            title="paste into ~/.config/solium/init.lua"></textarea>
+</aside>
+
+<script>
+"use strict";
+
+// Injected by dev/preview, in the engine's own order — the exported functions
+// take an index into `Deform::all()` and `Axis::all()`, so a list written out
+// here would select the wrong one the first time somebody inserted a name
+// rather than appending it.
+const EFFECTS = /*EFFECTS*/ null;
+const AXES = /*AXES*/ null;
+const WASM_BASE64 = /*WASM*/ "";
+
+// Solium's own coordinates, so a scenario reads the way the compositor sees it.
+const OUTPUT = { w: 1600, h: 900 };
+const SCALE = 800 / OUTPUT.w;
+// A plausible window: not centred, so a genie towards a corner is visibly
+// asymmetric rather than a mirror of itself.
+const WINDOW = { x: 380, y: 120, w: 820, h: 560 };
+
+const el = id => document.getElementById(id);
+let engine = null;
+
+/* ---------- the engine: everything about *shape* ---------- */
+
+const anchor = () => ({
+  x: +el("anchorX").value, y: +el("anchorY").value,
+  w: +el("anchorW").value, h: +el("anchorH").value,
+});
+const spread = () => +el("spread").value / 100;
+
+// The grid is read out of the engine's own memory: it writes the points into a
+// fixed buffer and returns how many, so nothing is allocated on either side of
+// the boundary.
+function mesh(progress) {
+  const effect = +el("effect").value, axis = +el("axis").value;
+  const to = anchor();
+  const written = engine.solium_effect_grid(
+    effect, axis, progress, spread(),
+    WINDOW.x, WINDOW.y, WINDOW.w, WINDOW.h,
+    to.x, to.y, to.w, to.h);
+  return {
+    points: new Float64Array(engine.memory.buffer,
+                             engine.solium_effect_scratch(), written * 2),
+    columns: engine.solium_effect_columns(effect, axis),
+    rows: engine.solium_effect_rows(effect, axis),
+  };
+}
+
+/* ---------- drawing ---------- */
+
+// The window's own colours, by where in it a cell came from. Bands rather than
+// a flat fill because a flat one hides the whole point: a genie *stretches*,
+// and the neck is where the bands pull apart.
+function fill(u, v) {
+  if (v < 0.08) return "#3d4a63";
+  const band = (Math.floor(u * 6) + Math.floor(v * 6)) % 2;
+  return band ? "#243350" : "#1b2740";
+}
+
+function draw(progress) {
+  const canvas = el("stage"), ctx = canvas.getContext("2d");
+  const ratio = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (canvas.width !== W * ratio || canvas.height !== H * ratio) {
+    canvas.width = W * ratio;
+    canvas.height = H * ratio;
+  }
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const { points, columns, rows } = mesh(progress);
+  const at = (column, row) => {
+    const i = (row * (columns + 1) + column) * 2;
+    return [points[i] * SCALE, points[i + 1] * SCALE];
+  };
+
+  // Where the window sits when nothing is deforming it, so how far the sheet
+  // has travelled is readable rather than remembered.
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = "#2a2f3a";
+  ctx.strokeRect(WINDOW.x * SCALE, WINDOW.y * SCALE,
+                 WINDOW.w * SCALE, WINDOW.h * SCALE);
+  ctx.setLineDash([]);
+
+  // The cells, in the order and at the resolution the compositor cuts them.
+  const showCells = el("cells").checked;
+  ctx.lineWidth = 0.5;
+  ctx.strokeStyle = "rgba(0,0,0,0.35)";
+  for (let row = 0; row < rows; row++) {
+    for (let column = 0; column < columns; column++) {
+      const quad = [at(column, row), at(column + 1, row),
+                    at(column + 1, row + 1), at(column, row + 1)];
+      ctx.beginPath();
+      ctx.moveTo(quad[0][0], quad[0][1]);
+      for (const [x, y] of quad.slice(1)) ctx.lineTo(x, y);
+      ctx.closePath();
+      ctx.fillStyle = fill((column + 0.5) / columns, (row + 0.5) / rows);
+      ctx.fill();
+      if (showCells) ctx.stroke();
+    }
+  }
+
+  // The window's top edge, so which way up the sheet ended is never a guess.
+  ctx.strokeStyle = "#e6e9ef";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let column = 0; column <= columns; column++) {
+    const [x, y] = at(column, 0);
+    column ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.stroke();
+
+  // And what it is aimed at.
+  const to = anchor();
+  ctx.strokeStyle = "#e0af68";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(to.x * SCALE, to.y * SCALE, to.w * SCALE, to.h * SCALE);
+}
+
+/* ---------- config, ready to paste ---------- */
+
+function configLines() {
+  const to = anchor();
+  return `-- ~/.config/solium/init.lua
+sol.animate({ duration = 520, easing = "inOutCubic" })
+sol.present(window.id, {
+    deform = {
+        effect = "${EFFECTS[+el("effect").value]}",
+        axis = "${AXES[+el("axis").value]}",
+        spread = ${spread().toFixed(2)},
+        to = { x = ${to.x}, y = ${to.y}, w = ${to.w}, h = ${to.h} },
+    },
+})`;
+}
+
+/* ---------- playback ---------- */
+
+let looping = false, playing = false;
+
+// Linear, and deliberately: see the comment at the top of this file. What is
+// being judged here is the shape at a given progress, and an easing on top of
+// it only makes two things hard to tell apart.
+function play() {
+  if (playing) return;
+  playing = true;
+  const total = 1000 / (+el("speed").value / 100);
+  const started = performance.now();
+
+  (function frame(now) {
+    const elapsed = (now ?? started) - started;
+    const progress = Math.min(elapsed / total, 1);
+    el("progress").value = String(Math.round(progress * 100));
+    el("progressOut").textContent = progress.toFixed(2);
+    draw(progress);
+    if (elapsed < total) return void requestAnimationFrame(frame);
+    playing = false;
+    if (looping) setTimeout(() => { refresh(0); setTimeout(play, 180); }, 420);
+  })(started);
+}
+
+/* ---------- wiring ---------- */
+
+function refresh(force) {
+  const progress = force === undefined ? +el("progress").value / 100 : force;
+  if (force !== undefined) el("progress").value = String(Math.round(force * 100));
+
+  el("progressOut").textContent = progress.toFixed(2);
+  el("spreadOut").textContent = spread().toFixed(2);
+  el("speedOut").textContent = (+el("speed").value / 100).toFixed(2) + "x";
+  for (const id of ["anchorX", "anchorY", "anchorW", "anchorH"]) {
+    el(id + "Out").textContent = el(id).value;
+  }
+
+  const effect = +el("effect").value, axis = +el("axis").value;
+  const columns = engine.solium_effect_columns(effect, axis);
+  const rows = engine.solium_effect_rows(effect, axis);
+  // The grid follows the axis, and this is where you can see that it does: the
+  // fine subdivision has to be the one the phase runs along, or a dock at the
+  // side gets eight steps of phase and plays as a flipbook.
+  el("status").textContent =
+    `${columns} x ${rows} cells, ${columns * rows * 2} triangles. ` +
+    `Phase runs ${AXES[axis] === "left" || AXES[axis] === "right" ? "across" : "down"}, ` +
+    `so the fine subdivision is the ${columns > rows ? "columns" : "rows"}.`;
+  el("config").value = configLines();
+  draw(progress);
+}
+
+function boot() {
+  EFFECTS.forEach((name, index) => el("effect").add(new Option(name, index)));
+  AXES.forEach((name, index) => el("axis").add(new Option(name, index)));
+
+  for (const id of ["effect", "axis", "progress", "spread", "speed",
+                    "anchorX", "anchorY", "anchorW", "anchorH"]) {
+    el(id).oninput = () => refresh();
+    el(id).onchange = () => refresh();
+  }
+  el("cells").onchange = () => refresh();
+  window.addEventListener("resize", () => refresh());
+
+  el("play").onclick = () => { refresh(0); play(); };
+  el("loop").onclick = () => {
+    looping = !looping;
+    el("loop").classList.toggle("on", looping);
+    if (looping) { refresh(0); play(); }
+  };
+
+  refresh();
+}
+
+if (!WASM_BASE64 || !EFFECTS || !AXES) {
+  el("status").textContent = "no engine embedded — generate with dev/preview";
+} else {
+  // Embedded rather than fetched: file:// blocks fetching a sibling, and
+  // needing a web server to look at an effect is the friction this removes.
+  WebAssembly.instantiate(Uint8Array.from(atob(WASM_BASE64), c => c.charCodeAt(0)), {})
+    .then(module => { engine = module.instance.exports; boot(); })
+    .catch(err => { el("status").textContent = "engine failed to load: " + err; });
+}
+</script>

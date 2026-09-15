@@ -1,9 +1,7 @@
-// A border that lights up where the cursor is, with a titlebar above it.
+// The one layer of `panes/reactive`: the lit border and the bar above it.
 //
-// The pointer is delivered to the frame while it is anywhere over the window,
-// so the glow can follow the cursor across the client area rather than only
-// along the frame's own band. A `MouseArea` over the whole frame reads it;
-// nothing here has to know where the client stops.
+// A `MouseArea` over the whole layer reads the pointer; nothing here has to
+// know where the client stops.
 
 import QtQuick
 import Solium
@@ -11,10 +9,16 @@ import Solium
 Item {
     id: frame
 
-    property int insetTop: 30
-    property int insetRight: 4
-    property int insetBottom: 4
-    property int insetLeft: 4
+    // What this layer paints, set by the compositor from the `insets` that
+    // `Pane.qml` declares. A style reserves space once for the whole pane, so
+    // the number lives in the manifest and every layer is told it — the space
+    // reserved and the space painted cannot be two different numbers, which is
+    // what putting `insets` on `PaneStyle` rather than on `Layer` was for.
+    //
+    // Zero is what this reads if the file is built outside a pane — by
+    // `--check-qml`, say — and drawing nothing is the honest answer there.
+    property int insetTop: 0
+    property int insetLeft: 0
 
     property string title: ""
     property bool focused: false
@@ -41,7 +45,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         color: "transparent"
-        radius: 8
+        radius: 0
         border { width: 1; color: frame.focused ? Theme.edge : Theme.edgeInactive }
     }
 
@@ -53,10 +57,9 @@ Item {
         opacity: frame.pointerInside ? 1.0 : 0.0
         Behavior on opacity { NumberAnimation { duration: 200 } }
 
-        // Concentric rings rather than a radial gradient: the scene is
-        // rasterised in software, where QML's Gradient is linear-only and
-        // ShaderEffect does not run at all. Twelve circles of falling opacity
-        // is a soft edge for the price of twelve circles.
+        // A flat square, not a soft one. Software rasterisation has no radial
+        // gradient and no ShaderEffect, so a glow here meant stacking alpha
+        // discs — which is a lot of blending to say "the pointer is there".
         Item {
             id: glow
 
@@ -67,27 +70,13 @@ Item {
             x: tracker.mouseX
             y: tracker.mouseY
 
-            // Eight rings rather than twelve: each is a full alpha-blended
-            // circle rasterised on the CPU, and the falloff is indisguishable.
-            Repeater {
-                model: 8
-
-                Rectangle {
-                    required property int index
-
-                    readonly property real step: (index + 1) / 8
-
-                    // Radii bunched towards the centre and a constant alpha
-                    // per disc: what makes the middle bright is how many discs
-                    // overlap there, not how opaque any one of them is.
-                    width: 30 + Math.pow(step, 0.7) * 210
-                    height: width
-                    radius: width / 2
-                    x: -width / 2
-                    y: -height / 2
-                    color: Theme.accent
-                    opacity: 0.12
-                }
+            Rectangle {
+                width: 90
+                height: 90
+                x: -width / 2
+                y: -height / 2
+                color: Theme.accent
+                opacity: 0.15
             }
         }
 

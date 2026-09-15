@@ -57,6 +57,30 @@ fn main() {
         }
     }
 
+    // EGL, for the GPU scene path in host.cpp: importing the compositor's
+    // dmabuf as a texture and fencing the frame afterwards are both EGL, and Qt
+    // neither re-exports them nor offers an equivalent. Not optional even though
+    // the GPU path is — host.cpp references these symbols unconditionally, so
+    // without them the link fails a long way from the cause.
+    //
+    // libGLESv2 is deliberately *not* linked: the handful of plain GL calls go
+    // through QOpenGLFunctions, which is by definition the GL that Qt's own RHI
+    // is driving. See import_dmabuf_texture.
+    match pkg_config::Config::new().probe("egl") {
+        Ok(egl) => {
+            for path in &egl.include_paths {
+                build.include(path);
+            }
+        }
+        Err(err) => {
+            eprintln!("error: EGL development files not found: {err}");
+            eprintln!("       Debian/Ubuntu: libegl-dev");
+            eprintln!("       Fedora:        mesa-libEGL-devel");
+            eprintln!("       Arch:          mesa");
+            std::process::exit(1);
+        }
+    }
+
     // compat.h declares Q_OBJECT types — properties and signals are the whole
     // point of them — so it needs moc, which host.cpp deliberately never did.
     let out: PathBuf = std::env::var_os("OUT_DIR")

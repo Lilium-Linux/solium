@@ -9,6 +9,12 @@
 //! own — frame included — and that texture is what gets bent. It costs a pass
 //! and a texture per deformed window, which is why only deformed windows pay
 //! it.
+//!
+//! The pass is per frame and the texture is not. A window's size does not
+//! change because it is being warped — `present.rs`'s first rule — so the
+//! texture is made once, kept on the pane and drawn into again on every frame
+//! of the animation. See [`Scratch`], which is the same argument `Screens`
+//! makes forty lines further down and which was never applied here.
 
 use smithay::{
     backend::{
@@ -20,27 +26,196 @@ use smithay::{
         },
     },
     desktop::Window,
-    utils::{Buffer as BufferCoords, Physical, Rectangle, Scale, Size, Transform},
+    utils::{Buffer as BufferCoords, Logical, Physical, Rectangle, Scale, Size, Transform},
 };
 
-use crate::state::Solium;
+use crate::{pane::PaneId, qml::paint::Kept, state::Solium};
+
+/// How many textures one pane keeps for its own captures.
+///
+/// **One, because a pane is captured once a frame at one size.**
+/// `render::prepare` walks the panes once per frame and calls [`capture`] *or*
+/// [`capture_client`] at most once for each, at that pane's own monitor's
+/// scale. It picks between them rather than doing both, which is what keeps
+/// this one: a warped window and a rounded one want different sizes, so a pane
+/// doing both at once would thrash a cache of one. There is never a second
+/// size live to alternate with — which is exactly the case `qml::paint`'s cap
+/// of two does exist for: one scene drawn on both sides of a bezel, once per
+/// output, at two scales, every frame.
+///
+/// The arithmetic says the same from the other side. A capture of an ordinary
+/// 1150x850 window is 1150 x 850 x 4 = 3.9 MB, and 2300 x 1700 x 4 = 15.6 MB
+/// of it on a 2x monitor. One per pane holding one at once: an overview of
+/// twenty windows is 78 MB, or 313 MB at 2x. A cap of two would be 156 MB and
+/// 626 MB for a second entry nothing can ever ask for.
+///
+/// **Read that as a steady state and not a worst case.** It was written when a
+/// capture meant a warp -- every mode that deforms windows deforms all of
+/// them, but only while it is running. A `client.radius` does not stop, so a
+/// styled session holds one of these per *visible* styled window for as long
+/// as the session lasts. Visible is what bounds it, and it is bounded
+/// deliberately: `render::prepare` skips a pane no monitor shows and hands its
+/// texture back through [`Scratch::release`], because a hidden workspace is
+/// parked a screen away rather than unmapped and would otherwise be paid for
+/// in full, forever.
+///
+/// What it costs when the size does change — a client resizing mid-warp, a
+/// window crossing onto a monitor at another scale — is today's behaviour and
+/// nothing worse: one allocation, exactly as before this existed.
+const KEPT: usize = 1;
+
+/// The texture a pane's captures are drawn into, kept across frames.
+///
+/// **A buffer, not a picture.** [`capture`] clears and redraws the whole of it
+/// on every frame, so what is reused is the allocation and never the image.
+/// There is therefore no invalidation to get wrong: a window whose client is
+/// painting, or whose title just changed, is as correct through this as it was
+/// without it. That is the difference between this and `qml::paint`'s [`Kept`],
+/// which keeps a *finished picture* and has to be told when Qt has a new one.
+///
+/// It is also why the key is the pixel size alone. `Drawn` carries the scale as
+/// well, because the host is handed both and one buffer size holds two
+/// different pictures at two scales; here it holds no picture at all, and a
+/// buffer of the right number of pixels is the right buffer whatever last drew
+/// into it. The scale reaches the key anyway, through the size it multiplies.
+///
+/// **Owned by the [`crate::pane::Pane`], as a field.** Not a
+/// `HashMap<PaneId, _>` beside the panes: five such tables were deleted the
+/// change before this one because they had to be reconciled by hand and two of
+/// them could disagree, and 3.9 MB that has to be swept is a worse thing to
+/// leave behind than a stale boolean.
+///
+/// Generic over what it keeps only so the policy can be tested without a GPU —
+/// [`Kept`]'s own reason, and the only reason there is any coverage of this at
+/// all. `cargo test` runs in a container with no render node (see
+/// `dev/gate.sh`), so nothing in a test can hold a real `GlesTexture`.
+#[derive(Debug)]
+pub(crate) struct Scratch<T = GlesTexture> {
+    kept: Kept<Size<i32, Physical>, T>,
+}
+
+impl<T> Default for Scratch<T> {
+    fn default() -> Self {
+        Self {
+            kept: Kept::keeping(KEPT),
+        }
+    }
+}
+
+impl<T: Clone> Scratch<T> {
+    /// The texture to draw a capture of `size` into, making one only when what
+    /// is in hand is the wrong size.
+    ///
+    /// `make` is the allocation this whole change exists to stop doing every
+    /// frame. It is a closure rather than the `&mut GlesRenderer` it wraps so
+    /// that the two lines deciding whether to call it can be *counted* in a
+    /// test, which is the only way this path is observable without a GPU.
+    fn texture<E>(
+        &mut self,
+        size: Size<i32, Physical>,
+        make: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        if let Some(held) = self.kept.get(size) {
+            return Ok(held.clone());
+        }
+        let made = make()?;
+        // Kept as well as handed out, not instead of: a `GlesTexture` is an
+        // `Arc`, so this is a refcount rather than a second buffer, and the
+        // caller's handle going away at the end of the frame is what makes
+        // the cache the only thing still holding it.
+        self.kept.push(size, made.clone());
+        Ok(made)
+    }
+
+    /// Give back whatever is being kept.
+    ///
+    /// A pane that is not being warped this frame has no use for megabytes of
+    /// texture, and there is no later frame on which handing it back gets
+    /// cheaper — so a mode that warps every window on screen and is then left
+    /// would otherwise leave one behind per window for the rest of the
+    /// session. Called by `render::prepare` for every pane it does not
+    /// capture, which is all of them on an ordinary desktop.
+    ///
+    /// Replacing the [`Kept`] rather than emptying it, because there is no
+    /// `clear` and `current(_, true)` is the *invalidation* `qml::paint` needs
+    /// rather than this. Either way the values are dropped, which is the half
+    /// that frees anything: the `GlesTexture` is the last thing holding the
+    /// `EGLImage`, which holds EGL's reference on the buffer — `Kept::push`
+    /// sets that chain out in full for eviction and it is the same chain here.
+    pub(crate) fn release(&mut self) {
+        self.kept = Kept::keeping(KEPT);
+    }
+}
+
+/// The pixel size a window's capture needs, at `scale`.
+///
+/// **Read from the window's own geometry and from nothing the warp is doing**,
+/// which is the whole reason a cache keyed on it ever hits. `present.rs`'s
+/// first rule is that a transform never changes real geometry: the matrix, the
+/// deform and the animated `Frame::rect` are applied to this texture
+/// afterwards, by `warp::mesh`, and not one of them is read here. So a window
+/// bending through a genie is captured at the same size on every frame of it.
+///
+/// The sizes that do change it are all one-offs — the client actually resizing,
+/// its frame's insets changing, the window crossing onto a monitor at another
+/// scale — and each costs exactly the one allocation it used to cost every
+/// frame.
+fn pixels(outer: Size<i32, Logical>, scale: f64) -> Size<i32, Physical> {
+    (
+        ((f64::from(outer.w) * scale).ceil() as i32).max(1),
+        ((f64::from(outer.h) * scale).ceil() as i32).max(1),
+    )
+        .into()
+}
+
+/// The same, rounded the way the **surfaces** round.
+///
+/// [`pixels`] ceils, which never leaves the warp short of a row, and the warp
+/// keeps it. [`capture_client`] cannot, and the reason has nothing to do with
+/// rows: it is that a third party measures the same window and has to agree.
+///
+/// `WaylandSurfaceRenderElement::opaque_regions` sizes a surface's opaque
+/// region with `to_i32_round` (`element/surface.rs:353-356`), and
+/// `render::elements` places the drawn rect with `to_physical_precise_round`.
+/// A capture sized with `ceil` is, at a fractional scale, one pixel wider than
+/// both — 1149 logical at 1.25 is 1437 against 1436 — and that last column is a
+/// column no surface ever claims and no surface ever draws into. `covers` then
+/// answers false, `opaque_of` answers `None`, and **every rounded window on
+/// that output silently gives up its opaque region for good**: Task 5's
+/// behaviour reverts to Task 4's on exactly the machines a fractional scale is
+/// ordinary on, with nothing on screen to say so.
+///
+/// Rounding here makes all three `round(logical * scale)` — the same function
+/// of the same numbers, so they agree by construction rather than by luck. It
+/// also removes the sub-pixel squeeze `render::elements` recorded when the
+/// texture was the wider of the two, rather than documenting it a second time.
+///
+/// `.max(1)` for [`pixels`]' reason: a driver refuses a zero-sized allocation,
+/// and `round` reaches zero half a pixel sooner than `ceil` does.
+fn client_pixels(outer: Size<i32, Logical>, scale: f64) -> Size<i32, Physical> {
+    let rounded: Size<i32, Physical> = outer.to_physical_precise_round(scale);
+    (rounded.w.max(1), rounded.h.max(1)).into()
+}
 
 /// Draw `window` flat at its real size, frame and all, into a texture.
 ///
 /// Returns the texture and the size it was drawn at, so a caller can map
 /// texture coordinates back onto the window's own rectangle.
+///
+/// The texture belongs to `pane` and outlives the frame; see [`Scratch`]. The
+/// pane is passed in rather than looked up with `Panes::id_of`, because the
+/// one caller is iterating panes and already holds it — and because a capture
+/// with nowhere to keep its texture would be back to allocating one a frame,
+/// which is a case worth not having rather than one worth handling.
 pub(crate) fn capture(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
+    pane: PaneId,
     window: &Window,
     scale: f64,
 ) -> Option<(GlesTexture, Size<i32, Physical>)> {
     let outer = state.outer_geometry(window)?;
-    let size: Size<i32, Physical> = (
-        ((f64::from(outer.size.w) * scale).ceil() as i32).max(1),
-        ((f64::from(outer.size.h) * scale).ceil() as i32).max(1),
-    )
-        .into();
+    let size = pixels(outer.size, scale);
 
     // Built at the origin rather than at the window's position: the texture is
     // the window's own space, and where it ends up on screen is the warp's
@@ -50,20 +225,114 @@ pub(crate) fn capture(
         tracing::warn!("a warped window had nothing to draw offscreen");
         return None;
     }
+    let texture = into_scratch(state, renderer, pane, size, &elements, scale)?;
+    Some((texture, size))
+}
 
-    // The buffer is measured in buffer pixels, which for an offscreen target
-    // are the physical pixels it was asked for. Converting through logical
-    // space first — as this did — divides by the scale twice.
-    let buffer_size: Size<i32, BufferCoords> = (size.w, size.h).into();
-    let mut texture = match renderer.create_buffer(Fourcc::Abgr8888, buffer_size) {
-        Ok(texture) => texture,
-        Err(err) => {
-            tracing::warn!(
-                ?err,
-                ?buffer_size,
-                "no offscreen buffer for a warped window"
-            );
-            return None;
+/// Draw `window`'s **client and nothing else** at its real size, into a
+/// texture.
+///
+/// The sibling of [`capture`], and the difference is the whole reason there
+/// are two. That one draws the window as it appears — frame, layers, popups —
+/// because a warp bends the whole thing as one object. This one draws only the
+/// application's own surface tree, because what a `client.radius` masks is the
+/// *client*: its frame is Qt's and rounds itself from `clientRadius` (see
+/// `LayerScene::build`), and its popups are separate windows that must not be
+/// clipped to it.
+///
+/// Which means this must not be called for a window that is also being warped:
+/// the two want different sizes out of the one texture a pane keeps, and
+/// `render::prepare` picks between them rather than doing both.
+///
+/// The surface tree is drawn at `-window.geometry().loc`, so the texture is
+/// exactly the window's geometry rectangle. A client that draws its own shadow
+/// outside that rectangle — `set_window_geometry` is how it says so — has the
+/// shadow clipped off by this, which is a real limit and the right one: the
+/// rectangle being masked is the one the client called its window.
+///
+/// The `bool` is whether the client covered the whole capture with opaque
+/// regions of its own, and it exists because the texture is **cleared to
+/// transparent** before anything is drawn into it. Nothing else about the
+/// result says whether its pixels are opaque: a terminal at 80% background, a
+/// GTK app rounding its own corners, a client that has not painted all of its
+/// geometry yet all produce a capture with holes in it. `pass::opaque_of` will
+/// not claim any of the texture opaque unless this is true, which keeps the
+/// rounded path's claim a subset of what the same client's surfaces claimed on
+/// the ordinary one.
+pub(crate) fn capture_client(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: PaneId,
+    window: &Window,
+    scale: f64,
+) -> Option<(GlesTexture, Size<i32, Physical>, bool)> {
+    let real = state.real_geometry(window)?;
+    // Rounded and not ceiled, and it is the `opaque` below that needs it: see
+    // [`client_pixels`], where the one-pixel disagreement it avoids is spelled
+    // out.
+    let size = client_pixels(real.size, scale);
+
+    let elements = crate::render::client_elements(renderer, window, scale);
+    if elements.is_empty() {
+        // Debug and not warn: a client with nothing mapped yet is ordinary and
+        // reaches here on the frames between its window appearing and its
+        // first buffer. `render::elements` draws it as it always did.
+        tracing::debug!("a client with an effect had nothing to draw offscreen");
+        return None;
+    }
+    // Asked before the draw, and of the elements rather than of the texture: a
+    // texture cannot be asked what it contains without reading it back.
+    //
+    // `pass::placed` is the sum, and it is a named function rather than a
+    // closure so that the direction of it is pinned by a test: this diff calls
+    // the same sum fatal one file over.
+    let output_scale = Scale::from(scale);
+    let opaque = crate::pass::covers(
+        size,
+        elements.iter().flat_map(|element| {
+            crate::pass::placed(
+                element.geometry(output_scale).loc,
+                element.opaque_regions(output_scale),
+            )
+        }),
+    );
+    let texture = into_scratch(state, renderer, pane, size, &elements, scale)?;
+    Some((texture, size, opaque))
+}
+
+/// Draw `elements` into the pane's own texture at `size`, and hand it back.
+///
+/// The half [`capture`] and [`capture_client`] share: what differs between
+/// them is *what* is drawn and how big, and everything from the allocation to
+/// the fence is the same. Written once because the two halves that are easy to
+/// get wrong — releasing the framebuffer on every path out, and waiting on the
+/// fence rather than dropping it — are the ones nobody notices twice.
+fn into_scratch(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: PaneId,
+    size: Size<i32, Physical>,
+    elements: &[crate::render::Element],
+    scale: f64,
+) -> Option<GlesTexture> {
+    // The pane's own texture, made once and then reused for as long as the
+    // window stays this size. `state` and `renderer` are separate borrows --
+    // the renderer is not reached through the state -- so the closure can hold
+    // one while the pane holds the other.
+    let mut texture = {
+        let scratch = state.panes.get_mut(pane)?.scratch_mut();
+        // The buffer is measured in buffer pixels, which for an offscreen
+        // target are the physical pixels it was asked for. Converting through
+        // logical space first — as this did — divides by the scale twice.
+        let buffer_size: Size<i32, BufferCoords> = (size.w, size.h).into();
+        match scratch.texture(size, || {
+            renderer.create_buffer(Fourcc::Abgr8888, buffer_size)
+        }) {
+            Ok(texture) => texture,
+            Err(err) => {
+                tracing::warn!(?err, ?buffer_size, "no offscreen buffer for a capture");
+                return None;
+            }
         }
     };
 
@@ -80,6 +349,10 @@ pub(crate) fn capture(
         };
         // The renderer stays borrowed for as long as the frame lives, so the
         // release cannot happen in here; the frame's own scope ends first.
+        //
+        // Nothing that touches a QML scene may run between here and the end of
+        // this scope; see `qml::no_frame_in_flight`.
+        let _frame = crate::qml::frame_in_flight();
         match renderer.render(&mut framebuffer, size, Transform::Normal) {
             Err(err) => {
                 tracing::warn!(?err, "could not render into the offscreen buffer");
@@ -95,11 +368,13 @@ pub(crate) fn capture(
                     });
 
                 let whole = [Rectangle::from_size(size)];
-                for element in &elements {
+                for element in elements {
                     let source = element.src();
                     let destination = element.geometry(Scale::from(scale));
-                    // Damage is the whole texture: it was just created, so nothing in
-                    // it is worth preserving.
+                    // Damage is the whole texture, and stays so now that the
+                    // texture is reused: the clear above threw away everything
+                    // the last frame left in it, so there is nothing to
+                    // preserve whether or not this buffer is new.
                     if let Err(err) = element.draw(&mut frame, source, destination, &whole, &[]) {
                         tracing::warn!(?err, "a window did not render offscreen");
                     }
@@ -127,7 +402,7 @@ pub(crate) fn capture(
     };
 
     crate::warp::release_framebuffer(renderer);
-    drawn.then_some((texture, size))
+    drawn.then_some(texture)
 }
 
 /// One monitor's worth of picture, drawn into a texture of its own.
@@ -147,6 +422,10 @@ pub(crate) struct Screens {
     /// would be several hundred megabytes a second of texture churn on a
     /// development path, and would make the leak check in `dev/leak.sh` read
     /// like a leak.
+    ///
+    /// The same reasoning, and for a long time the only place it was written
+    /// down: [`Scratch`] is it applied to the per-window path, where there is
+    /// one per warped window rather than one per monitor.
     textures: Vec<(Size<i32, Physical>, GlesTexture)>,
 }
 
@@ -197,7 +476,7 @@ impl Screens {
         renderer: &mut GlesRenderer,
         prepared: &crate::render::Prepared,
         index: usize,
-        screen: Rectangle<i32, smithay::utils::Logical>,
+        screen: Rectangle<i32, Logical>,
         scale: f64,
     ) -> Option<(GlesTexture, Size<i32, Physical>)> {
         let size: Size<i32, Physical> = (
@@ -226,6 +505,7 @@ impl Screens {
                     return None;
                 }
             };
+            let _frame = crate::qml::frame_in_flight();
             match renderer.render(&mut framebuffer, size, Transform::Normal) {
                 Err(err) => {
                     tracing::warn!(?err, index, "could not render a monitor");
@@ -273,5 +553,327 @@ impl Screens {
 
         crate::warp::release_framebuffer(renderer);
         drawn.then_some((texture, size))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use smithay::utils::{Logical, Physical, Size};
+
+    use super::{KEPT, Scratch, client_pixels, pixels};
+
+    /// An ordinary window, the same one `qml::paint`'s tests measure and the
+    /// one both caps are argued from: 1150 x 850 x 4 = 3.9 MB.
+    fn window() -> Size<i32, Logical> {
+        (1150, 850).into()
+    }
+
+    /// What a texture costs, at four bytes a pixel.
+    fn bytes(size: Size<i32, Physical>) -> i64 {
+        i64::from(size.w) * i64::from(size.h) * 4
+    }
+
+    /// A GBM buffer, which is freed when the last handle on it goes.
+    ///
+    /// Modelled rather than counted directly, because that is the shape of the
+    /// thing: a `GlesTexture` is an `Arc<GlesTextureInternal>`, `capture` hands
+    /// one out and [`Scratch`] keeps another, and the memory comes back when
+    /// both are gone. A counter on the *handle* would say two buffers were
+    /// freed where there was one.
+    struct Buffer(Rc<Cell<u32>>);
+    impl Drop for Buffer {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    impl std::fmt::Debug for Buffer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Buffer")
+        }
+    }
+
+    /// A handle on one. Cloning is a refcount, exactly as `GlesTexture`'s is.
+    #[derive(Clone, Debug)]
+    struct Handle(Rc<Buffer>);
+    impl Handle {
+        fn on(freed: &Rc<Cell<u32>>) -> Self {
+            Self(Rc::new(Buffer(Rc::clone(freed))))
+        }
+
+        /// How many handles name this buffer.
+        fn handles(&self) -> usize {
+            Rc::strong_count(&self.0)
+        }
+    }
+
+    /// **A genie costs one texture, not one a frame.**
+    ///
+    /// The defect this exists for. `render::prepare` calls `capture` once per
+    /// warped pane per frame and `capture` called `create_buffer` every time,
+    /// unconditionally — forty lines above a comment saying that allocating a
+    /// texture per frame is hundreds of megabytes a second, which was written
+    /// about `Screens` and never applied to the window path beside it. At the
+    /// 3.9 MB of an ordinary window, a 60-frame genie was 234 MB of GBM
+    /// churned for one animation of one window, and every mode that deforms
+    /// windows deforms *every* window on screen.
+    ///
+    /// The genie here is real rather than decorative, because the question
+    /// worth asking about a cache keyed on size is whether a warped window
+    /// holds still long enough to hit it. It does, and the two assertions are
+    /// the two halves of why: the window is measurably bending, and the size
+    /// `capture` reads never moves. A transform is applied to this texture
+    /// afterwards, by `warp::mesh`; `present.rs`'s first rule is that it never
+    /// changes the geometry the texture is sized from.
+    ///
+    /// Arithmetic, and it needs neither Qt nor a GPU — which is the only
+    /// reason there is any coverage of this at all. `cargo test` runs in a
+    /// container with no render node, so no test can hold a real
+    /// `GlesTexture`, and `dev/wirecheck` does not link this crate.
+    #[test]
+    fn a_genie_costs_one_texture_and_not_one_a_frame() {
+        const FRAMES: u16 = 60;
+
+        let outer = window();
+        let rect =
+            crate::present::for_effects(crate::present::logical((0.0, 0.0), (1150.0, 850.0)));
+        let slot =
+            crate::present::for_effects(crate::present::logical((40.0, 1000.0), (64.0, 32.0)));
+
+        let mut scratch: Scratch<u32> = Scratch::default();
+        let mut allocations = 0_u32;
+        let mut bottom_edge = Vec::new();
+
+        for step in 0..=FRAMES {
+            let deform = solium_effects::Deform::Genie {
+                progress: f32::from(step) / f32::from(FRAMES),
+                spread: 0.5,
+                axis: solium_effects::Axis::Down,
+            };
+            // Where the middle of the window's bottom edge is drawn this
+            // frame. This is what a warp changes.
+            bottom_edge.push(deform.place(rect, slot, 0.5, 1.0));
+
+            // And this is what `capture` asks for, which is not that.
+            let size = pixels(outer, 1.0);
+            let _texture = scratch
+                .texture(size, || {
+                    allocations += 1;
+                    Ok::<u32, ()>(allocations)
+                })
+                .expect("a counting allocator cannot fail");
+        }
+
+        assert_ne!(
+            bottom_edge.first(),
+            bottom_edge.last(),
+            "the window never moved, so this proves nothing about a warp"
+        );
+        assert_eq!(
+            allocations,
+            1,
+            "a texture per frame of the genie: {} allocations, {} MB",
+            FRAMES,
+            i64::from(FRAMES) * bytes(pixels(outer, 1.0)) / 1_000_000
+        );
+    }
+
+    /// **The cap is one, and a resize replaces rather than joins.**
+    ///
+    /// One because a pane is captured once a frame at one size: `prepare`
+    /// walks the panes once and calls `capture` at most once for each, at that
+    /// pane's own monitor's scale. Nothing here alternates, which is the case
+    /// `qml::paint`'s cap of two exists for — one scene drawn on both sides of
+    /// a bezel, once per output, every frame.
+    ///
+    /// A second entry would be 3.9 MB per warped pane that nothing can ever
+    /// ask for: 78 MB across the twenty windows an overview warps at once, and
+    /// 313 MB of it on a 2x monitor.
+    ///
+    /// And the eviction has to *free*, or the cap is a number with nothing
+    /// under it. The chain is the one `Kept::push` sets out: dropping the
+    /// entry drops the `GlesTexture`, which is the last thing holding the
+    /// `EGLImage`, which holds EGL's reference on the buffer.
+    #[test]
+    fn a_resized_window_replaces_its_texture_rather_than_keeping_both() {
+        assert_eq!(KEPT, 1, "the arithmetic in this test is the cap's");
+
+        let freed = Rc::new(Cell::new(0));
+        let mut scratch: Scratch<Handle> = Scratch::default();
+
+        // A window being dragged wider, a pixel at a time, while it is warped.
+        for width in [1150, 1151, 1152] {
+            let size = pixels((width, 850).into(), 1.0);
+            let _texture = scratch
+                .texture(size, || Ok::<Handle, ()>(Handle::on(&freed)))
+                .expect("a counting allocator cannot fail");
+        }
+        assert_eq!(
+            freed.get(),
+            2,
+            "the cache held every size it was ever asked for"
+        );
+
+        // The one it is still holding is the last, not the first.
+        let mut more = 0_u32;
+        let size = pixels((1152, 850).into(), 1.0);
+        let texture = scratch
+            .texture(size, || {
+                more += 1;
+                Ok::<Handle, ()>(Handle::on(&freed))
+            })
+            .expect("a counting allocator cannot fail");
+        assert_eq!(more, 0, "the size it was last asked for was not kept");
+
+        // Both handles, in the order the compositor lets them go: the caller's
+        // at the end of the frame, the cache's when the pane does.
+        drop(texture);
+        assert_eq!(freed.get(), 2, "the cache stopped holding the texture");
+        drop(scratch);
+        assert_eq!(freed.get(), 3, "dropping the pane kept its texture alive");
+    }
+
+    /// **A pane that stops warping hands its texture back.**
+    ///
+    /// Without this the bound is "one texture per pane that has *ever* been
+    /// warped", which on a desktop where overview has been opened once is
+    /// every window on it — 78 MB held for the rest of the session with
+    /// nothing on screen to show for it. `render::prepare` calls this for
+    /// every pane it does not capture, which is all of them on a still screen.
+    #[test]
+    fn a_pane_that_stops_warping_gives_the_texture_back() {
+        let freed = Rc::new(Cell::new(0));
+        let mut scratch: Scratch<Handle> = Scratch::default();
+        let size = pixels(window(), 1.0);
+
+        let texture = scratch
+            .texture(size, || Ok::<Handle, ()>(Handle::on(&freed)))
+            .expect("a counting allocator cannot fail");
+        assert_eq!(freed.get(), 0);
+        // Two handles on one buffer while the capture is in flight: the
+        // cache's and this caller's. That is the whole of why the cache keeps
+        // a clone rather than the value, and why releasing it frees anything.
+        assert_eq!(texture.handles(), 2, "the cache did not keep a handle");
+        drop(texture);
+
+        scratch.release();
+        assert_eq!(
+            freed.get(),
+            1,
+            "a pane that is not being warped kept its texture"
+        );
+
+        // And it is a release rather than a poisoning: the next warp allocates
+        // again instead of getting nothing.
+        let mut again = 0_u32;
+        let _texture = scratch
+            .texture(size, || {
+                again += 1;
+                Ok::<Handle, ()>(Handle::on(&freed))
+            })
+            .expect("a counting allocator cannot fail");
+        assert_eq!(again, 1, "a released pane could not be warped again");
+    }
+
+    /// **The scale is not separately part of the key, and does not need to be.**
+    ///
+    /// `qml::paint`'s `Drawn` carries the pixels *and* the scale because one
+    /// buffer size holds two different pictures at two scales — the host is
+    /// handed both and lays the scene out from the pair. What [`Scratch`]
+    /// keeps is not a picture: `capture` clears and redraws the whole texture
+    /// on every frame, so a buffer with the right number of pixels is the
+    /// right buffer whatever last drew into it.
+    ///
+    /// The scale still decides the key, through the size it multiplies, which
+    /// is what makes a window crossing to a 2x monitor a miss rather than a
+    /// window drawn at half its resolution.
+    #[test]
+    fn a_window_crossing_to_a_2x_monitor_asks_for_a_different_buffer() {
+        let outer = window();
+        assert_eq!(pixels(outer, 1.0), Size::from((1150, 850)));
+        assert_eq!(pixels(outer, 2.0), Size::from((2300, 1700)));
+        // A fractional scale rounds up, so the texture is never short of a row.
+        assert_eq!(pixels(outer, 1.5), Size::from((1725, 1275)));
+
+        // The numbers every cap above is argued from.
+        assert_eq!(bytes(pixels(outer, 1.0)), 3_910_000);
+        assert_eq!(bytes(pixels(outer, 2.0)), 15_640_000);
+
+        let mut scratch: Scratch<u32> = Scratch::default();
+        let mut allocations = 0_u32;
+        for scale in [1.0, 1.0, 2.0, 2.0] {
+            let _texture = scratch
+                .texture(pixels(outer, scale), || {
+                    allocations += 1;
+                    Ok::<u32, ()>(allocations)
+                })
+                .expect("a counting allocator cannot fail");
+        }
+        assert_eq!(
+            allocations, 2,
+            "the two monitors did not each get a buffer of their own"
+        );
+    }
+
+    /// A window of no size is still given a texture rather than a zero-sized
+    /// allocation the driver would refuse.
+    #[test]
+    fn a_window_with_no_size_still_asks_for_a_pixel() {
+        assert_eq!(pixels((0, 0).into(), 1.0), Size::from((1, 1)));
+        assert_eq!(pixels((1, 1).into(), 0.1), Size::from((1, 1)));
+        // `round` reaches zero half a pixel sooner than `ceil` does, so the
+        // client capture needs the same floor and needs it more often.
+        assert_eq!(client_pixels((0, 0).into(), 1.0), Size::from((1, 1)));
+        assert_eq!(client_pixels((1, 1).into(), 0.4), Size::from((1, 1)));
+    }
+
+    /// **The client capture rounds, and the warp still ceils.**
+    ///
+    /// Not a preference between two roundings: `pass::covers` asks whether the
+    /// client's surfaces covered the capture, and a surface's opaque region is
+    /// sized with `to_i32_round` (`element/surface.rs:353-356`). A capture one
+    /// pixel wider than that has a column no surface claims and no surface
+    /// draws into, so `covers` is false, `opaque_of` is `None`, and every
+    /// rounded window on a fractional-scale output gives up its opaque region
+    /// permanently -- Task 5 reverting to Task 4 with nothing on screen to say
+    /// so.
+    ///
+    /// 1149 at 1.25 is the case `render::elements` records: 1436.25, which
+    /// ceils to 1437 and rounds to 1436. Both are asserted, in one test,
+    /// because the bug is the *difference* between them and a test of either
+    /// alone would not have caught it.
+    ///
+    /// What this cannot check is the thing that matters: whether a real
+    /// client's real opaque regions then cover a real capture. Nothing here
+    /// can build one. It pins that the two functions agree on the number, which
+    /// is the half that was wrong.
+    #[test]
+    fn the_client_capture_is_measured_the_way_a_surface_measures_itself() {
+        let width: Size<i32, Logical> = (1149, 850).into();
+        assert_eq!(pixels(width, 1.25).w, 1437, "the warp still ceils");
+        assert_eq!(
+            client_pixels(width, 1.25).w,
+            1436,
+            "and the client capture rounds, as `render::elements` and \
+             `WaylandSurfaceRenderElement::opaque_regions` both do"
+        );
+        // And a fraction on the OTHER side of a half, because 1149 x 1.25 is
+        // 1436.25 and truncating gives 1436 too -- so the case above cannot
+        // tell rounding from flooring, and a later "simplification" to
+        // `to_i32_floor` would pass it while re-opening the one-pixel
+        // disagreement in the other direction.
+        let over: Size<i32, Logical> = (1151, 850).into();
+        assert_eq!(
+            client_pixels(over, 1.25).w,
+            1439,
+            "1151 x 1.25 is 1438.75, which rounds up -- flooring gives 1438 \
+             and puts the capture a pixel inside `dst` again"
+        );
+
+        // Where there is nothing to disagree about, they agree.
+        for scale in [1.0, 2.0] {
+            assert_eq!(pixels(width, scale), client_pixels(width, scale));
+        }
     }
 }
