@@ -1331,7 +1331,64 @@ impl Solium {
                 tracing::info!(monitor = name, scale, "scale");
             }
             output.change_current_state(None, None, Some(Scale::Fractional(scale)), None);
+
+            // `wl_surface.preferred_buffer_scale` reaches an existing client
+            // for free on its next commit (`commit`, below, sends it on every
+            // one). `wp_fractional_scale_v1` does not: `new_fractional_scale`
+            // answers it once, when a client first asks, and nothing calls it
+            // again on its own. Without this, a window opened before a
+            // `super+shift+r` rescale keeps drawing at the scale it had at
+            // startup, upscaled by the compositor -- issue #99. Only reached
+            // when the scale actually changed, by the `continue` above.
+            self.resend_fractional_scale(&output);
         }
+    }
+
+    /// Re-tell every surface on `output` the fractional scale it should draw
+    /// at, once `scale_outputs` has actually changed that output's scale.
+    ///
+    /// Per window, not per output: `fractional_scale_for` reads each
+    /// surface's *own* output rather than being handed this one, so a window
+    /// on some other monitor is never touched even though this function only
+    /// runs for the monitor that changed, and one straddling two monitors at
+    /// different scales is told the one it actually reads its scale from.
+    ///
+    /// Walks every window's full surface tree -- subsurfaces and popups, not
+    /// just the toplevel -- the same way `send_frame` and
+    /// `take_presentation_feedback` already do elsewhere in this file.
+    ///
+    /// Writes through the `SurfaceData` `with_surfaces` already hands its
+    /// callback, rather than looking it up again with `with_states`: that
+    /// lookup takes the same per-surface lock `with_surfaces` is already
+    /// holding while it calls this closure, and a second, nested attempt on
+    /// it from the same thread is a self-deadlock, not a wait -- found by
+    /// this function's own test hanging instead of failing.
+    fn resend_fractional_scale(&self, output: &Output) {
+        for window in self.space.elements_for_output(output) {
+            window.with_surfaces(|surface, states| {
+                let scale = self.fractional_scale_for(surface);
+                with_fractional_scale(states, |fractional| {
+                    fractional.set_preferred_scale(scale);
+                });
+            });
+        }
+    }
+
+    /// The fractional scale a surface should draw itself at: its own
+    /// window's own output, or the active one for a surface not placed yet.
+    ///
+    /// Shared by `new_fractional_scale`, which answers a client's first ask,
+    /// and `resend_fractional_scale`, which repeats the answer when an
+    /// output's scale changes after that -- one copy of "what scale is this
+    /// surface drawn at" rather than two that can drift apart. Deliberately
+    /// just the computation: how the answer gets written back to the surface
+    /// differs between the two callers, and that part is not shared -- see
+    /// `resend_fractional_scale`'s own doc comment for why.
+    fn fractional_scale_for(&self, surface: &WlSurface) -> f64 {
+        self.window_for(surface)
+            .and_then(|window| self.space.outputs_for_element(&window).first().cloned())
+            .or_else(|| self.active_output())
+            .map_or(1.0, |output| output.current_scale().fractional_scale())
     }
 
     /// Arrange anchored surfaces on every monitor.
@@ -4339,21 +4396,15 @@ smithay::delegate_xdg_activation!(Solium);
 impl FractionalScaleHandler for Solium {
     /// A client has asked what scale it is really drawn at.
     ///
-    /// Answered from the output it is on rather than from a constant, so the
-    /// answer stays right the day an output is not 1x. A surface not on any
-    /// output yet is told the active monitor's scale, which is the one it is
-    /// about to be on — and with two monitors at different scales, being told
-    /// the *first* one's would be a client rendering at the wrong size on
-    /// whichever screen it actually opened on.
+    /// `fractional_scale_for` has the answer, and how it is worked out; this
+    /// is only the protocol's first-ask moment. The other one -- an output's
+    /// scale changing later, after a client already asked -- is
+    /// `resend_fractional_scale`, called from `scale_outputs`.
     fn new_fractional_scale(
         &mut self,
         surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     ) {
-        let scale = self
-            .window_for(&surface)
-            .and_then(|window| self.space.outputs_for_element(&window).first().cloned())
-            .or_else(|| self.active_output())
-            .map_or(1.0, |output| output.current_scale().fractional_scale());
+        let scale = self.fractional_scale_for(&surface);
         with_states(&surface, |states| {
             with_fractional_scale(states, |fractional| {
                 fractional.set_preferred_scale(scale);
