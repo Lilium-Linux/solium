@@ -580,7 +580,7 @@ fn start_on_gpu(import_path: &CStr) -> bool {
 /// means the host waited on the CPU with `glFinish` instead, which is correct
 /// and only costs a stall.
 fn preflight(target: target::Target) -> Result<bool> {
-    let qml = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/probe.qml"));
+    let qml = crate::assets::qml().join("probe.qml");
     let mut scene = Scene::gpu(&qml, PREFLIGHT_SIDE, PREFLIGHT_SIDE, target, None)?;
     // A scene is dirty the moment it is built, so this always renders. `None`
     // would mean Qt thought a scene it has never drawn was already up to date,
@@ -758,18 +758,46 @@ pub(crate) fn set_windows(json: &str) {
 /// path beside the compositor's. Overridable so a whole design system can be
 /// swapped without rebuilding, which is most of the point of it being QML.
 fn import_path() -> std::ffi::OsString {
+    // Still the first word, and deliberately the *whole* answer rather than a
+    // prefix: someone who names a path is replacing the search, not adding to
+    // it. Unchanged by the move to `crate::assets`, which only decided where
+    // the shipped half is.
     if let Some(path) = std::env::var_os("SOLIUM_QML_PATH") {
         return path;
     }
-    let own = concat!(env!("CARGO_MANIFEST_DIR"), "/qml");
-    let shim = concat!(env!("CARGO_MANIFEST_DIR"), "/qml/compat");
+    search_path(user_qml_dir().as_deref(), &crate::assets::qml())
+}
+
+/// The import path, given the two roots it is built from.
+///
+/// Split out of [`import_path`] so the order can be asserted about without an
+/// environment — `SOLIUM_QML_PATH` and `$XDG_CONFIG_HOME` are process-global
+/// and `cargo test` is one process on several threads, so a test that set them
+/// would be testing whichever thread got there last. `style::resolve` was split
+/// from `style::find` for the same reason and is worth reading beside this.
+///
+/// Built as `OsString` rather than through `format!`, because a path is bytes:
+/// `Path::display` is lossy and a home directory that is not UTF-8 would have
+/// produced a search path with `U+FFFD` in it, pointing nowhere.
+fn search_path(user: Option<&Path>, shipped: &Path) -> std::ffi::OsString {
     // The user's directory first, for the same reason the Lua search path puts
     // it first: dropping `Solium/Theme.qml` into ~/.config/solium/qml should
     // restyle every frame and every surface, without copying the rest.
-    match user_qml_dir() {
-        Some(user) => std::ffi::OsString::from(format!("{}:{own}:{shim}", user.display())),
-        None => std::ffi::OsString::from(format!("{own}:{shim}")),
+    let mut path = std::ffi::OsString::new();
+    for part in user
+        .map(Path::to_path_buf)
+        .into_iter()
+        // The compositor's own modules, then the compatibility shim under
+        // them: shell code brought in from elsewhere imports `Quickshell.*`,
+        // and it must not be able to shadow `Solium.*` by doing so.
+        .chain([shipped.to_path_buf(), shipped.join("compat")])
+    {
+        if !path.is_empty() {
+            path.push(":");
+        }
+        path.push(part);
     }
+    path
 }
 
 /// `~/.config/solium/qml`, if it exists.
@@ -1598,5 +1626,112 @@ mod tests {
     fn the_assertion_fires() {
         let _frame = super::frame_in_flight();
         super::no_frame_in_flight("a test");
+    }
+}
+
+/// The import path's order.
+///
+/// Nothing here starts Qt: [`search_path`] is string work over two directories,
+/// and the point of having split it out is that its order can be read off
+/// without a QML engine, a display or an environment.
+#[cfg(test)]
+mod search_path_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::search_path;
+
+    /// The parts of a search path, in order.
+    fn parts(path: &std::ffi::OsStr) -> Vec<PathBuf> {
+        path.to_string_lossy()
+            .split(':')
+            .map(PathBuf::from)
+            .collect()
+    }
+
+    /// The property the whole design rests on: a `Solium/Theme.qml` dropped
+    /// into the user's directory is the one Qt resolves, with nothing else
+    /// copied.
+    ///
+    /// Asserted as a *position*, not as a path. The shipped half moved to
+    /// `crate::assets` and could move again; what may not change is that the
+    /// user's directory is in front of it.
+    #[test]
+    fn the_user_directory_comes_before_the_shipped_one() {
+        let user = Path::new("/home/someone/.config/solium/qml");
+        let shipped = Path::new("/usr/share/solium/qml");
+        let parts = parts(&search_path(Some(user), shipped));
+        let user_at = parts.iter().position(|part| part == user);
+        let shipped_at = parts.iter().position(|part| part == shipped);
+        assert!(
+            user_at < shipped_at,
+            "the user's directory must shadow the shipped one: {parts:?}"
+        );
+    }
+
+    /// And the compatibility shim is under both, so foreign shell code
+    /// importing `Quickshell.*` cannot shadow the compositor's own modules.
+    #[test]
+    fn the_compat_shim_is_last() {
+        let shipped = Path::new("/usr/share/solium/qml");
+        let parts = parts(&search_path(
+            Some(Path::new("/home/someone/.config/solium/qml")),
+            shipped,
+        ));
+        assert_eq!(
+            parts,
+            vec![
+                PathBuf::from("/home/someone/.config/solium/qml"),
+                shipped.to_path_buf(),
+                shipped.join("compat"),
+            ]
+        );
+    }
+
+    /// No user directory is one fewer entry, not an empty one — a leading
+    /// colon is an entry, and it names the process's working directory.
+    #[test]
+    fn no_user_directory_leaves_no_empty_entry() {
+        let shipped = Path::new("/usr/share/solium/qml");
+        let path = search_path(None, shipped);
+        assert_eq!(
+            parts(&path),
+            vec![shipped.to_path_buf(), shipped.join("compat")]
+        );
+        assert!(
+            !path.to_string_lossy().starts_with(':'),
+            "an empty first entry would put the working directory on the path"
+        );
+    }
+
+    /// A home directory that is not UTF-8 survives, which `format!` over
+    /// `Path::display` did not: it substituted `U+FFFD` and produced an entry
+    /// pointing at a directory that does not exist.
+    #[test]
+    fn a_path_that_is_not_utf8_is_not_mangled() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let raw = std::ffi::OsStr::from_bytes(b"/home/\xff/.config/solium/qml");
+        let path = search_path(Some(Path::new(raw)), Path::new("/usr/share/solium/qml"));
+        assert!(
+            path.as_bytes().starts_with(raw.as_bytes()),
+            "the user's directory was rewritten on its way onto the path"
+        );
+    }
+
+    /// The real composition, with the resolver's real answer: whatever
+    /// `crate::assets` decided, the user's directory still goes in front of it.
+    ///
+    /// `SOLIUM_QML_PATH` is not exercised here on purpose. It is read by
+    /// `import_path` and returned whole before this function is reached, and
+    /// setting a process-global variable to prove that would be a test racing
+    /// every other test in the binary — which is what splitting this out of
+    /// `import_path` was for.
+    #[test]
+    fn the_shipped_half_is_whatever_assets_resolved() {
+        let user = Path::new("/home/someone/.config/solium/qml");
+        let shipped = crate::assets::qml();
+        assert_eq!(
+            parts(&search_path(Some(user), &shipped)),
+            vec![user.to_path_buf(), shipped.clone(), shipped.join("compat")]
+        );
     }
 }

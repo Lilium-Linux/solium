@@ -1100,6 +1100,41 @@ pub(crate) fn elements(
             ratio(client.size.h, real.size.h),
         ));
 
+        // Popups go in ahead of the sandwich, which means above all of it.
+        //
+        // They used to be emitted inside `Piece::Client`, under a comment
+        // saying they are above the window they belong to. True of the client
+        // and false of the frame: `PANE_ORDER` puts `Above` and `Frame` in the
+        // list first, earlier is nearer the front, so the titlebar was already
+        // there and drew over them. A Firefox menu opened near the top of its
+        // window came out sliced in half by its own titlebar.
+        //
+        // Ahead of `Above` too, not merely ahead of `Frame`. A menu is the
+        // frontmost thing its window owns while it is up -- that is what a
+        // grab means -- and a style's overlay layer covering one would be the
+        // same bug with a different layer's name on it.
+        if let Some(surface) = window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone())
+        {
+            for (popup, offset) in PopupManager::popups_for_surface(&surface) {
+                let popup_origin =
+                    origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
+                let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                    render_elements_from_surface_tree(
+                        renderer,
+                        popup.wl_surface(),
+                        popup_origin,
+                        output_scale,
+                        frame.opacity,
+                        Kind::Unspecified,
+                    );
+                elements.extend(popup_elements.into_iter().map(|element| {
+                    Element::Window(RescaleRenderElement::from_element(element, origin, factor))
+                }));
+            }
+        }
+
         // **This is the sandwich.** The client goes into the list between the
         // layers its own style produced -- `above` and `frame` are already in
         // by the time `Piece::Client` comes round, and `behind` follows it --
@@ -1116,30 +1151,8 @@ pub(crate) fn elements(
         pane_pieces(&mut elements, |elements, piece| match piece {
             Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
             Piece::Client => {
-                // Popups first: they are above the window they belong to.
-                if let Some(surface) = window
-                    .toplevel()
-                    .map(|toplevel| toplevel.wl_surface().clone())
-                {
-                    for (popup, offset) in PopupManager::popups_for_surface(&surface) {
-                        let popup_origin = origin
-                            + (offset - popup.geometry().loc).to_physical_precise_round(scale);
-                        let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                            render_elements_from_surface_tree(
-                                renderer,
-                                popup.wl_surface(),
-                                popup_origin,
-                                output_scale,
-                                frame.opacity,
-                                Kind::Unspecified,
-                            );
-                        elements.extend(popup_elements.into_iter().map(|element| {
-                            Element::Window(RescaleRenderElement::from_element(
-                                element, origin, factor,
-                            ))
-                        }));
-                    }
-                }
+                // Popups are not here: they went in above the whole sandwich,
+                // before this walk started. See the comment there.
 
                 // An effect that reads the node's own pixels cannot be an
                 // element laid over the client, because it needs the client's

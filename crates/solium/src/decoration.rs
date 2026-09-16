@@ -1942,7 +1942,7 @@ fn bare(style: Option<&str>) -> bool {
 /// here are bundles under `panes/` now. Kept as the bottom of the file lookup
 /// for the reason [`decoration_directories`] gives.
 pub(crate) fn shipped_decorations() -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/decorations"))
+    crate::assets::qml().join("decorations")
 }
 
 /// Expand a leading `~`, since this is read from an environment variable and

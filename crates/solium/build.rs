@@ -6,6 +6,12 @@
 use std::path::PathBuf;
 
 fn main() {
+    // The datadir a packager bakes in, read by `option_env!` in `assets.rs`.
+    // Declared here so changing it rebuilds: an `option_env!` whose value has
+    // moved on and whose crate has not been touched would otherwise keep the
+    // old constant, and the symptom of that is an installed binary looking in
+    // the previous prefix.
+    println!("cargo:rerun-if-env-changed=SOLIUM_DATADIR");
     println!("cargo:rerun-if-changed=qml/host.cpp");
     println!("cargo:rerun-if-changed=qml/host.h");
     println!("cargo:rerun-if-changed=qml/compat.cpp");

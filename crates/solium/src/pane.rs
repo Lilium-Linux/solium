@@ -769,7 +769,9 @@ pub(crate) fn loading_source(chosen: Option<&str>) -> PathBuf {
 }
 
 fn shipped(name: &str) -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/loading")).join(format!("{name}.qml"))
+    crate::assets::qml()
+        .join("loading")
+        .join(format!("{name}.qml"))
 }
 
 /// Expand a leading `~`, since this comes from an environment variable and
@@ -822,6 +824,52 @@ mod tests {
         assert_eq!(pane.slot(), where_it_was);
         assert!(!pane.is_loading());
         assert!(!pane.awaits(&[42]), "a pane with content awaits nothing");
+    }
+
+    /// **What `show_if_new`'s placement guard (state.rs) relies on.** That
+    /// function is the placement path for issue #100's XWayland half: an
+    /// override-redirect window (a Steam context menu) arrives already
+    /// placed by its own client, `take_unmanaged_pane` calls `unmanage` on
+    /// its pane, and `show_if_new` must then never size or move it -- in
+    /// either of its two branches -- on this commit or any later one.
+    ///
+    /// `show_if_new` itself cannot be exercised here. Like
+    /// `adoption_keeps_the_identity_and_the_slot` above, nothing in this
+    /// crate's tests can build a real `Window`, X11-backed or otherwise, so
+    /// this pins the contract its guard depends on instead: `managed` must
+    /// actually flip, and flipping it must be the *only* thing that
+    /// happens. A test that stopped at `managed()` would pass even if
+    /// `unmanage` also reset the slot to a default -- which would defeat the
+    /// guard just as thoroughly as `show_if_new` never asking it to -- so
+    /// the geometry is asserted too: the slot a pane already has when it
+    /// becomes unmanaged is "the geometry it was mapped with" for a real
+    /// override-redirect window, and it must survive untouched.
+    #[test]
+    fn an_unmanaged_pane_keeps_the_slot_it_was_mapped_with() {
+        let mapped_with = Rectangle::new((640, 360).into(), (220, 140).into());
+        let mut pane = Pane::loading(
+            "steam-menu",
+            None,
+            mapped_with,
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
+        assert!(pane.managed(), "a pane is managed until told otherwise");
+
+        pane.unmanage();
+
+        assert!(
+            !pane.managed(),
+            "unmanage must flip the exact flag show_if_new's guard and \
+             snapshot's window-list filter both read"
+        );
+        assert_eq!(
+            pane.slot(),
+            mapped_with,
+            "and must do nothing else -- the geometry a pane was mapped \
+             with is what the placement guard exists to protect"
+        );
     }
 
     #[test]
