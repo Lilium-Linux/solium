@@ -282,7 +282,7 @@ fn pointer_motion<B: InputBackend>(
     if under.is_none() {
         state.pointer.show(CursorImageStatus::default_named());
     }
-    assert_chrome(state, location, pointer.is_grabbed());
+    state.assert_cursor(location, pointer.is_grabbed());
 
     pointer.motion(
         state,
@@ -298,37 +298,6 @@ fn pointer_motion<B: InputBackend>(
     // changing. Without this the pointer only moved when something else
     // happened to want a frame -- which on a still screen is never.
     state.redraw = true;
-}
-
-/// Say what the pointer is over the compositor's own chrome, or stop saying.
-///
-/// **Read off the same `chrome_under` a press is, and that is the point.**
-/// Issue #108: the compositor computed which resize edge the pointer was over
-/// and never told the pointer, so dragging a corner resized a window with an
-/// arrow still showing; and over the band between a window's top and its
-/// titlebar it left the client's own resize cursor up while a press there ran
-/// the move grab. One hit test cannot describe one action and perform another.
-/// A second, parallel hit test for the cursor could, which is why there is not
-/// one.
-///
-/// **Not while a drag is in progress.** A resize grab takes the pointer off
-/// the border it started on within a pixel of movement -- the window follows,
-/// but the pointer is ahead of it, and past the window's edge entirely once
-/// the drag hits a minimum size or a screen edge. Recomputing would drop the
-/// resize cursor mid-drag and hand the pointer back to whatever client the
-/// cursor happened to be over, which is the one moment the shape must not
-/// change. Holding the last assertion for the length of the grab is also what
-/// makes a move drag keep the arrow.
-fn assert_chrome(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
-    if grabbed {
-        return;
-    }
-    let icon = state
-        .chrome_under(location)
-        .map(|under| under.chrome.cursor());
-    if state.pointer.assert(icon) {
-        state.redraw = true;
-    }
 }
 
 /// Motion from a device that reports movement, not position — a real mouse.
@@ -373,7 +342,7 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
         // compositor says what the pointer is. Same reason for the repetition
         // -- this is the path a real mouse takes, and #108 was reported on the
         // hardware.
-        assert_chrome(state, location, pointer.is_grabbed());
+        state.assert_cursor(location, pointer.is_grabbed());
 
         // As in `pointer_motion`: while the session is locked, nothing of the
         // session's may notice the pointer going past. Repeated here rather
@@ -645,6 +614,17 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         return;
     }
 
+    // The next three checks are `state::claim_of`, in its order, and that is
+    // not a coincidence to be maintained by hand: the pointer's shape is read
+    // off the same rule through `Solium::claim_under`, so wherever this defers
+    // the pointer defers with it. Each one is *acted* on here rather than in
+    // the rule because acting needs things a value cannot carry -- a surface to
+    // deliver the press to, a click to trigger, an `Under` to start a grab
+    // from. What must not drift is which of them wins, and that is decided in
+    // one place. The first fix for #108 made only the third link agree, which
+    // left the pointer promising a resize over an overview thumbnail and over
+    // the bottom edge of a bar.
+    //
     // Scripted surfaces above the windows see the press before clients do, and
     // only when nothing is being dragged. A bar, a panel, an overlay: all the
     // same path, and the compositor knows what none of them are for.
@@ -774,6 +754,21 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             && let Some(outer) = state.outer_geometry(&window)
         {
             state.focus_window(&window, serial);
+            let edges = resize::quadrant(outer, location);
+            // #108's first symptom on the *other* resize gesture: the border
+            // drag now names its cursor because `chrome_under` answered before
+            // the press, and this one had nothing to read -- so `super` and the
+            // right button dragged a window's corner about with an I-beam
+            // showing, for as long as the drag lasted. Asserted here rather
+            // than found by a hit test because there is no border under the
+            // pointer to find: the quadrant *is* the answer, and it is known
+            // only at the moment the grab starts. It holds for the drag for the
+            // same reason a border drag's does -- `Solium::assert_cursor`
+            // declines to recompute while the pointer is grabbed -- and the
+            // first motion after the release puts it back.
+            if state.pointer.assert(Some(resize::cursor(edges))) {
+                state.redraw = true;
+            }
             let start_data = GrabStartData {
                 focus: None,
                 button,
@@ -781,12 +776,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             };
             pointer.set_grab(
                 state,
-                resize::ResizeGrab::new(
-                    start_data,
-                    window,
-                    resize::quadrant(outer, location),
-                    outer,
-                ),
+                resize::ResizeGrab::new(start_data, window, edges, outer),
                 serial,
                 Focus::Clear,
             );

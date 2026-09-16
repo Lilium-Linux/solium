@@ -275,6 +275,14 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // for exactly that reason. See `pacing::Phase`.
     let _prep = crate::pacing::span(crate::pacing::Phase::Prep);
     state.memory_report();
+    // What the pointer is standing on can change without the pointer moving --
+    // a window slides under it, a mode opens -- and there is no input event for
+    // that. Asked here rather than in `Solium::settle`, which runs *after* the
+    // frame it settles: a titlebar arriving under a still pointer was drawn
+    // once with the shape it had a moment ago and corrected only on the frame
+    // the self-inflicted damage bought. This is before any cursor element is
+    // built, so the shape this finds is the shape this frame draws.
+    state.reassert_cursor();
     // Every QML animation in the process, advanced once for this frame --
     // decorations, the cursor, the shell. Whether any scene then has something
     // new to draw is each scene's own answer.

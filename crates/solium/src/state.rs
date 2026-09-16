@@ -655,6 +655,76 @@ pub(crate) fn chrome_of(on_frame: bool, edges: ResizeEdge) -> Option<Chrome> {
     }
 }
 
+/// Who a press at a point belongs to, before any client sees it.
+///
+/// [`Chrome`] is one link of this and not the whole of it, which is what the
+/// first pass at #108 got wrong: the cursor was read off `chrome_under` alone
+/// while [`crate::input`]'s `pointer_button` consults two other things first,
+/// so in a mode — or over a scripted bar — the pointer went on describing a
+/// resize that the press was never going to perform. Same bug, one altitude up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Claim {
+    /// A scripted surface above the windows takes it: a bar, a panel, an
+    /// overlay. What it does with the press is the script's business and the
+    /// compositor has nothing to say about it.
+    Surface,
+    /// A mode owns input — `sol.grab(true)`, which is overview. Every press is
+    /// the mode's, whatever is drawn under the pointer.
+    Mode,
+    /// The compositor's own chrome: a frame's band, or a resize border.
+    Chrome(Chrome),
+    /// None of the compositor's: the press reaches a window or a client.
+    Nothing,
+}
+
+impl Claim {
+    /// The cursor the compositor asserts, or `None` to say nothing and leave
+    /// the pointer to whoever owns the point.
+    ///
+    /// **Only `Chrome` names a shape.** The other three are the compositor
+    /// declining to describe the press, which is the whole content of this
+    /// finding: a thumbnail's corner in overview is within eight pixels of a
+    /// window edge and `chrome_under` will happily call it `BottomRight`, but
+    /// the press there focuses the window and leaves the mode. A pointer that
+    /// promised a resize would be #108's second symptom again, on a key
+    /// combination used every day.
+    pub(crate) fn cursor(self) -> Option<CursorIcon> {
+        match self {
+            Self::Chrome(chrome) => Some(chrome.cursor()),
+            Self::Surface | Self::Mode | Self::Nothing => None,
+        }
+    }
+}
+
+/// `pointer_button`'s precedence chain, as a rule rather than as a sequence of
+/// early returns.
+///
+/// The three links are asked in the order the press asks them, and the order is
+/// the point: a scripted overlay above the windows is offered the press before
+/// a mode is consulted, and a mode before any chrome. `pointer_button` is where
+/// each answer is *acted* on — it has a surface to deliver to, a click to
+/// trigger and an [`Under`] to start a grab from, none of which fit in a value
+/// — but which one wins is decided here, and the pointer's shape is read off
+/// the result rather than off the last link alone.
+///
+/// Pure, and taking the links already answered, for the same reason
+/// [`chrome_of`] is: a `Solium` needs a `Display` and cannot be stood up in a
+/// unit test, so a rule that lives inside one is a rule that is checked by
+/// running the compositor and noticing. Which is how both halves of #108 were
+/// found.
+pub(crate) fn claim_of(surface: bool, mode: bool, chrome: Option<Chrome>) -> Claim {
+    if surface {
+        return Claim::Surface;
+    }
+    if mode {
+        return Claim::Mode;
+    }
+    match chrome {
+        Some(chrome) => Claim::Chrome(chrome),
+        None => Claim::Nothing,
+    }
+}
+
 /// Whether a point in a pane's own coordinates lands on its frame rather than
 /// on its client.
 ///
@@ -2776,6 +2846,53 @@ impl Solium {
         self.panes.iter().any(|pane| pane.closing_at().is_some())
     }
 
+    /// Who a press at `location` would belong to.
+    ///
+    /// The three links of [`claim_of`], fetched in the order `pointer_button`
+    /// fetches them. Read-only: the surface link is a geometric claim rather
+    /// than a delivery, for the reasons [`Self::surface_claiming`] gives.
+    pub(crate) fn claim_under(&self, location: Point<f64, Logical>) -> Claim {
+        claim_of(
+            self.surface_claiming(true, location).is_some(),
+            self.script_grab,
+            self.chrome_under(location).map(|under| under.chrome),
+        )
+    }
+
+    /// Say what the pointer is over the compositor's own chrome, or stop
+    /// saying.
+    ///
+    /// **The one writer of the assertion, and it follows the press's whole
+    /// precedence chain rather than its last link.** Issue #108 is the pointer
+    /// describing an action other than the one a press will take, and the first
+    /// fix for it read [`Self::chrome_under`] alone — which is the third thing
+    /// `pointer_button` asks and not the first. So a thumbnail's corner in
+    /// overview drew `NwseResize` while the press focused the window and left
+    /// the mode, and the bottom edge of a scripted bar drew `NsResize` while
+    /// the press went to the bar. [`Self::claim_under`] is the whole chain, and
+    /// `Claim::cursor` says nothing for every link that is not chrome: where
+    /// the press defers, the pointer defers with it.
+    ///
+    /// **Not while a drag is in progress.** A resize grab takes the pointer off
+    /// the border it started on within a pixel of movement — the window
+    /// follows, but the pointer is ahead of it, and past the window's edge
+    /// entirely once the drag hits a minimum size or a screen edge.
+    /// Recomputing would drop the resize cursor mid-drag and hand the pointer
+    /// back to whatever client the cursor happened to be over, which is the one
+    /// moment the shape must not change. Holding the last assertion for the
+    /// length of the grab is also what makes a move drag keep the arrow, and
+    /// what lets `input::pointer_button` assert a shape *as* it starts a grab
+    /// and have it stay for the drag.
+    pub(crate) fn assert_cursor(&mut self, location: Point<f64, Logical>, grabbed: bool) {
+        if grabbed {
+            return;
+        }
+        let icon = self.claim_under(location).cursor();
+        if self.pointer.assert(icon) {
+            self.redraw = true;
+        }
+    }
+
     /// Say again what the pointer is over, for a pointer that has not moved.
     ///
     /// **The other half of #108, and the one a motion handler cannot reach.**
@@ -2786,28 +2903,26 @@ impl Solium {
     /// standing still, and there is no motion event for that. Without this a
     /// titlebar that slid under the pointer would keep whatever resize arrow
     /// was being shown a moment ago, which is the same disagreement between
-    /// the shape and the action, arrived at from the other direction.
+    /// the shape and the action, arrived at from the other direction. Entering
+    /// overview is the same crossing: nothing moved but the claim, and the
+    /// pointer has to hear about it.
+    ///
+    /// **Called from [`crate::render::prepare`], not from [`Self::settle`].**
+    /// `settle` runs after the frame it settles, so a titlebar sliding under a
+    /// stationary pointer was drawn once with the previous shape and only
+    /// corrected on the frame the self-inflicted damage bought. `prepare` runs
+    /// once per frame ahead of every output, before any cursor element is
+    /// built, so the shape this finds is the shape that frame draws.
     ///
     /// Once a frame is enough, and cheap: [`crate::cursor::Pointer::assert`]
     /// answers `false` when nothing changed, so the ordinary case costs one
     /// hit test and no damage. A frame that is not drawn is a screen on which
     /// nothing moved, so there is nothing to have missed.
-    fn reassert_cursor(&mut self) {
+    pub(crate) fn reassert_cursor(&mut self) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
-        // Held for the length of a drag, for the reasons `input::assert_chrome`
-        // gives: a resize grab leaves the border it started on immediately, and
-        // the cursor must not follow it off.
-        if pointer.is_grabbed() {
-            return;
-        }
-        let icon = self
-            .chrome_under(pointer.current_location())
-            .map(|under| under.chrome.cursor());
-        if self.pointer.assert(icon) {
-            self.redraw = true;
-        }
+        self.assert_cursor(pointer.current_location(), pointer.is_grabbed());
     }
 
     /// Retire transforms that have landed, and say whether anything still
@@ -2816,7 +2931,6 @@ impl Solium {
     /// Every pane is visited deliberately: a short-circuiting check would leave
     /// later panes transformed forever.
     pub(crate) fn settle(&mut self, now: std::time::Duration) -> bool {
-        self.reassert_cursor();
         let mut animating = false;
         for pane in self.panes.iter() {
             animating |= present::settle(pane, now);
@@ -3760,15 +3874,50 @@ impl Solium {
         location: Point<f64, Logical>,
         pressed: Option<bool>,
     ) -> bool {
-        if self.surfaces.iter().all(|surface| !surface.interactive()) {
+        let Some((output, id, area)) = self.surface_claiming(above_windows, location) else {
+            return false;
+        };
+        let Some(surface) = self.surfaces.get_mut(id) else {
+            return false;
+        };
+        if !surface.pointer(&output, area, location.x, location.y, pressed) {
+            // The area contained the point — `surface_claiming` said so — so
+            // the only way back here is an instance that would not build, which
+            // is a scene that failed to load and logged as much. It draws
+            // nothing and it takes nothing.
             return false;
         }
-        let Some(output) = monitor::at(&self.space, location) else {
-            return false;
-        };
-        let Some(geometry) = self.space.output_geometry(&output) else {
-            return false;
-        };
+        self.redraw = true;
+        self.settle_surfaces();
+        true
+    }
+
+    /// Which scripted surface, if any, claims `location` on its side of the
+    /// windows.
+    ///
+    /// **Split out of [`Self::surface_pointer`] so the pointer can ask the
+    /// question without answering it.** The cursor has to know whether a press
+    /// here would be taken by a bar or a panel — that is the second half of
+    /// this finding — and the one thing it must not do is *deliver* to find
+    /// out: `surface_pointer` pushes hover into the scene and damages the
+    /// screen, and [`Self::reassert_cursor`] runs every frame. A probe with
+    /// those side effects would repaint the session continuously for as long as
+    /// the pointer rested on a bar, and would run a scene's hover handlers on a
+    /// pointer that never moved.
+    ///
+    /// So the geometry is here and the delivery is there, and there is still
+    /// one predicate: `surface_pointer` reaches its surface through this and
+    /// cannot pick a different one.
+    fn surface_claiming(
+        &self,
+        above_windows: bool,
+        location: Point<f64, Logical>,
+    ) -> Option<(Output, crate::scripted::SurfaceId, Rectangle<i32, Logical>)> {
+        if self.surfaces.iter().all(|surface| !surface.interactive()) {
+            return None;
+        }
+        let output = monitor::at(&self.space, location)?;
+        let geometry = self.space.output_geometry(&output)?;
         let primary = self.primary_output();
 
         // Topmost first, so a surface drawn over another gets the press.
@@ -3787,7 +3936,7 @@ impl Solium {
             // which is the same rule a window follows. Without it, a wallpaper
             // that slid away with its workspace goes on eating clicks on the
             // workspace that replaced it.
-            let candidates: Vec<(crate::scripted::SurfaceId, Rectangle<i32, Logical>)> = self
+            let claimed = self
                 .surfaces
                 .iter()
                 .filter(|surface| surface.interactive() && surface.layer() == layer)
@@ -3795,19 +3944,12 @@ impl Solium {
                     let area = surface.area_on(&output, geometry, primary.as_ref())?;
                     Some((surface.id(), self.carried(surface.id(), &output, area)))
                 })
-                .collect();
-            for (id, area) in candidates {
-                let Some(surface) = self.surfaces.get_mut(id) else {
-                    continue;
-                };
-                if surface.pointer(&output, area, location.x, location.y, pressed) {
-                    self.redraw = true;
-                    self.settle_surfaces();
-                    return true;
-                }
+                .find(|(_, area)| area.to_f64().contains(location));
+            if let Some((id, area)) = claimed {
+                return Some((output, id, area));
             }
         }
-        false
+        None
     }
 
     /// Act on whatever a scripted surface asked for.
@@ -5494,6 +5636,14 @@ mod tests {
         )
     }
 
+    /// The whole of [`claim_of`] at a point of that window, with the two links
+    /// above the chrome supplied by the caller: `surface` is an interactive
+    /// scripted surface above the windows claiming the point, `mode` is a
+    /// script grab held — `sol.grab(true)`, which is overview.
+    fn claim_at(point: (f64, f64), surface: bool, mode: bool) -> Claim {
+        claim_of(surface, mode, chrome_at(point))
+    }
+
     /// **Issue #108, and the assertion the fix is actually for.**
     ///
     /// The cursor and the press must be reading the same answer, because the
@@ -5506,11 +5656,20 @@ mod tests {
     /// a drag moved the window.
     ///
     /// What is pinned here is that no point can be claimed by both: whatever
-    /// [`chrome_of`] answers is *the* answer, and [`Chrome::cursor`] is a
-    /// function of it rather than of a second hit test. A test that checked
-    /// only the edge-to-icon mapping would pass with the second symptom still
-    /// in place, which is why the sweep below is the body of this test and the
-    /// named points are only the landmarks.
+    /// [`claim_of`] answers is *the* answer, and the cursor is a function of it
+    /// rather than of a second hit test. A test that checked only the
+    /// edge-to-icon mapping would pass with the second symptom still in place,
+    /// which is why the sweep below is the body of this test and the named
+    /// points are only the landmarks.
+    ///
+    /// **The chrome is one link of three, and the first version of this test
+    /// swept only that one.** It was green while the pointer still promised a
+    /// resize over an overview thumbnail and over the bottom edge of a scripted
+    /// bar, because it never held a script grab and never put a surface over
+    /// the point — so it exercised exactly the world in which the bug does not
+    /// appear. The sweep is now run in all four worlds, and the deferring ones
+    /// are checked against the count of pixels the chrome *would* have claimed,
+    /// so a chain that quietly stopped deferring could not leave this passing.
     #[test]
     fn the_pointer_and_the_press_cannot_claim_different_things() {
         let (outer, insets) = framed();
@@ -5533,7 +5692,7 @@ mod tests {
         // The frame takes it, because the frame is what a press there does.
         assert_eq!(chrome_at((300.0, 104.0)), Some(Chrome::Frame));
         assert_eq!(
-            chrome_at((300.0, 104.0)).map(Chrome::cursor),
+            claim_at((300.0, 104.0), false, false).cursor(),
             Some(CursorIcon::Default),
             "the band that moves the window must not draw a resize cursor: \
              that is #108's second symptom"
@@ -5550,12 +5709,13 @@ mod tests {
         // The first symptom: the bottom-right corner resizes, and now looks
         // like it. Nothing is reserved along the bottom or the right, so the
         // corner is the client's pixels and the border's claim alone.
+        let corner = (497.0, 397.0);
         assert_eq!(
-            chrome_at((497.0, 397.0)),
+            chrome_at(corner),
             Some(Chrome::Resize(ResizeEdge::BottomRight))
         );
         assert_eq!(
-            chrome_at((497.0, 397.0)).map(Chrome::cursor),
+            claim_at(corner, false, false).cursor(),
             Some(CursorIcon::NwseResize)
         );
 
@@ -5564,40 +5724,128 @@ mod tests {
         assert_eq!(chrome_at((300.0, 250.0)), None);
         assert_eq!(chrome_at((900.0, 900.0)), None);
 
-        // And the whole neighbourhood of the window, a pixel at a time.
-        for y in 80..=420 {
-            for x in 80..=520 {
-                let location = Point::<f64, Logical>::from((f64::from(x), f64::from(y)));
-                let framed_here = on_frame(outer.size, insets, location - outer.loc.to_f64());
-                let edges = resize::border_edges(outer, location);
-                match chrome_of(framed_here, edges) {
-                    Some(Chrome::Frame) => assert!(
-                        framed_here,
-                        "a press at {location:?} would not hit the frame, but \
-                         the pointer says it would"
-                    ),
-                    Some(Chrome::Resize(edges)) => {
-                        assert!(
-                            !framed_here,
-                            "a press at {location:?} moves the window, and the \
-                             pointer offered to resize it {edges:?}"
-                        );
-                        assert_ne!(edges, ResizeEdge::None);
-                        assert_eq!(
-                            Chrome::Resize(edges).cursor(),
-                            resize::cursor(edges),
-                            "the cursor over a border is the border's own, \
-                             whatever else is on screen"
-                        );
+        // **A mode holds the grab: overview.** `lua/overview.lua` sets it and
+        // hit-tests its own thumbnails, and `pointer_button` hands every press
+        // to the mode before it looks at any chrome -- so a press on that same
+        // corner focuses the window and leaves overview. Offering
+        // `NwseResize` there is the pointer describing an action that will not
+        // happen, which is the whole of #108, on `super+space`.
+        assert_eq!(claim_at(corner, false, true), Claim::Mode);
+        assert_eq!(
+            claim_at(corner, false, true).cursor(),
+            None,
+            "in a mode the press is the mode's, so the pointer promises nothing"
+        );
+        assert_eq!(claim_at((300.0, 104.0), false, true).cursor(), None);
+
+        // **A scripted surface takes the press.** The bottom eight pixels of a
+        // `layer = "top"` bar are within reach of a maximised window's top
+        // edge, and the tweaks panel is a full-height overlay down the right of
+        // one. The press goes to the panel; the border cursor would have said
+        // it resized the window.
+        assert_eq!(claim_at(corner, true, false), Claim::Surface);
+        assert_eq!(
+            claim_at(corner, true, false).cursor(),
+            None,
+            "the press is the surface's, so the pointer leaves the shape to it"
+        );
+        assert_eq!(claim_at((300.0, 104.0), true, false).cursor(), None);
+
+        // And the order between the two, which is the order `pointer_button`
+        // asks them in: a surface above the windows is offered the press before
+        // the mode is consulted.
+        assert_eq!(claim_of(true, true, None), Claim::Surface);
+        assert_eq!(claim_of(false, false, None), Claim::Nothing);
+        assert_eq!(claim_of(false, false, None).cursor(), None);
+
+        // And the whole neighbourhood of the window, a pixel at a time, in
+        // each of the four worlds the two links above the chrome make.
+        let mut chrome_pixels = 0_u32;
+        let mut deferred_pixels = 0_u32;
+        for (surface, mode) in [(false, false), (true, false), (false, true), (true, true)] {
+            for y in 80..=420 {
+                for x in 80..=520 {
+                    let location = Point::<f64, Logical>::from((f64::from(x), f64::from(y)));
+                    let framed_here = on_frame(outer.size, insets, location - outer.loc.to_f64());
+                    let edges = resize::border_edges(outer, location);
+                    let chrome = chrome_of(framed_here, edges);
+                    if !surface && !mode && chrome.is_some() {
+                        chrome_pixels += 1;
                     }
-                    None => assert!(
-                        !framed_here && edges == ResizeEdge::None,
-                        "the compositor asserts nothing at {location:?} while \
-                         claiming to own it"
-                    ),
+                    if (surface || mode) && chrome.is_some() {
+                        deferred_pixels += 1;
+                    }
+                    match claim_of(surface, mode, chrome) {
+                        Claim::Surface => {
+                            assert!(
+                                surface,
+                                "nothing was over {location:?} and the pointer \
+                                 stood aside for it"
+                            );
+                            assert_eq!(claim_of(surface, mode, chrome).cursor(), None);
+                        }
+                        Claim::Mode => {
+                            assert!(
+                                mode && !surface,
+                                "no mode holds the grab at {location:?}, or a \
+                                 surface should have taken it first"
+                            );
+                            assert_eq!(claim_of(surface, mode, chrome).cursor(), None);
+                        }
+                        Claim::Chrome(Chrome::Frame) => {
+                            assert!(
+                                !surface && !mode,
+                                "a press at {location:?} would never reach the \
+                                 frame, and the pointer says it would"
+                            );
+                            assert!(
+                                framed_here,
+                                "a press at {location:?} would not hit the \
+                                 frame, but the pointer says it would"
+                            );
+                        }
+                        Claim::Chrome(Chrome::Resize(edges)) => {
+                            assert!(
+                                !surface && !mode,
+                                "a press at {location:?} would never reach the \
+                                 resize border, and the pointer offered to drag \
+                                 it {edges:?}"
+                            );
+                            assert!(
+                                !framed_here,
+                                "a press at {location:?} moves the window, and \
+                                 the pointer offered to resize it {edges:?}"
+                            );
+                            assert_ne!(edges, ResizeEdge::None);
+                            assert_eq!(
+                                Chrome::Resize(edges).cursor(),
+                                resize::cursor(edges),
+                                "the cursor over a border is the border's own, \
+                                 whatever else is on screen"
+                            );
+                        }
+                        Claim::Nothing => assert!(
+                            !surface && !mode && !framed_here && edges == ResizeEdge::None,
+                            "the compositor asserts nothing at {location:?} \
+                             while claiming to own it"
+                        ),
+                    }
                 }
             }
         }
+
+        // The deferring worlds are only worth sweeping if the chrome had
+        // something to say at those pixels, which is what made the first
+        // version of this test green over a live disagreement. Three of the
+        // four worlds defer, so the same pixels are counted three times.
+        assert!(chrome_pixels > 0, "the sweep never crossed any chrome");
+        assert_eq!(
+            deferred_pixels,
+            chrome_pixels * 3,
+            "every pixel the chrome would have claimed must be one the pointer \
+             gave up in each of the three worlds where the press never gets \
+             there"
+        );
     }
 
     /// The frame band is the insets and only the insets.

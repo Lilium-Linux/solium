@@ -444,6 +444,35 @@ mod tests {
         // edge a drag can reach -- see `state::chrome_of`.
         assert_eq!(border_edges(window, (300.0, 93.0).into()), ResizeEdge::Top);
         assert_eq!(border_edges(window, (300.0, 91.0).into()), ResizeEdge::None);
+        // And the pixel itself, which the two above straddled: 92 is exactly
+        // `RESIZE_BORDER` from the top edge at 100, and it is the last one that
+        // counts. Skipping the boundary is skipping the only value the
+        // comparison can get wrong -- 93 and 91 pass with `<` or `<=` alike.
+        assert_eq!(border_edges(window, (300.0, 92.0).into()), ResizeEdge::Top);
+
+        // The far side is *not* its mirror, and it is worth saying so rather
+        // than leaving it to be rediscovered. `edges_at` measures distance and
+        // is closed at both ends, but `border_edges` first asks a half-open
+        // rectangle: `grown` runs from 92 up to but not including 408, so the
+        // top and left edges reach a full eight pixels out and the bottom and
+        // right reach eight minus an epsilon. Nobody can hit a tenth of a pixel
+        // with a mouse and the asymmetry is invisible in use, so it is pinned
+        // as it stands rather than papered over -- growing the rectangle by one
+        // to even it up would make `RESIZE_BORDER` mean nine on two sides.
+        assert_eq!(
+            edges_at(window, (300.0, 408.0).into()),
+            ResizeEdge::Bottom,
+            "the distance test is closed at both ends"
+        );
+        assert_eq!(
+            border_edges(window, (300.0, 408.0).into()),
+            ResizeEdge::None,
+            "and the half-open rectangle is what shortens the far side"
+        );
+        assert_eq!(
+            border_edges(window, (300.0, 407.0).into()),
+            ResizeEdge::Bottom
+        );
     }
 
     /// Every edge names its own cursor, and the two diagonals are not the same
