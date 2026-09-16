@@ -44,6 +44,8 @@ use smithay::{
     utils::{Rectangle, Transform},
 };
 
+use crate::qml::paint::Kept;
+
 /// How big the pointer is when nobody has said, in logical pixels.
 ///
 /// 24 is the size `cursor.qml` was drawn at and the size every desktop ships
@@ -55,11 +57,19 @@ pub(crate) const SIZE: i32 = 24;
 ///
 /// Not taste. The pointer is held as a square buffer per output scale, so this
 /// number is multiplied by the scale and then squared: 1024 logical pixels at
-/// 2x is a 16 MB pointer, kept, per name. The floor is 1 rather than 0 because
-/// a zero-sized buffer allocates cleanly, uploads cleanly and draws nothing —
-/// an invisible pointer arrived at without a single error, which is the exact
-/// failure this module's neighbour was written to stop happening.
-const SIZES: std::ops::RangeInclusive<i32> = 1..=256;
+/// 2x is a 16 MB pointer, kept, per name.
+///
+/// **The floor is the same argument as the ceiling and not a formality.** A
+/// zero-sized buffer allocates cleanly, uploads cleanly and draws nothing — an
+/// invisible pointer arrived at without a single error, which is the exact
+/// failure this module's neighbour was written to stop happening. A floor of 1
+/// only moved that: `XCURSOR_SIZE=1` is a pointer one pixel across, and one to
+/// three pixels of white arrow on a desktop is not meaningfully more findable
+/// than none. Eight is the smallest square anyone could hit with a mouse and it
+/// costs nothing to refuse what is under it — a size that is refused falls
+/// through to the next source, so what a session with `XCURSOR_SIZE=1` gets is
+/// the built-in [`SIZE`] and a line in the log, not a clamp to 8.
+const SIZES: std::ops::RangeInclusive<i32> = 8..=256;
 
 /// The largest scale a monitor may be configured at; see `config.lua`.
 ///
@@ -68,6 +78,22 @@ const SIZES: std::ops::RangeInclusive<i32> = 1..=256;
 /// those two want different numbers is the day sharing one constant would have
 /// been the bug.
 const MAX_SCALE: i32 = 8;
+
+/// How many *device sizes* of a theme's cursors are kept at once.
+///
+/// The same number and the same argument as `cursor.rs`'s `KEPT`, which bounds
+/// the QML pointer's buffers: one entry per monitor scale in use, two is the
+/// realistic count, and the exposure being guarded is a script animating an
+/// output's scale — which mints a fresh device size per step and would
+/// otherwise keep every one of them for the life of the session.
+///
+/// The cap is on sizes and not on *names* because those are two different
+/// shapes of key. The names are the closed w3c set — thirty-six of them, all of
+/// which will be asked for again — so capping those would evict entries that
+/// are certainly wanted; the sizes are an unbounded function of what some
+/// output claimed its scale was. So a size going means all of its names go with
+/// it, which is also the only eviction that frees a useful amount at once.
+const SIZES_KEPT: usize = 4;
 
 /// What `config.lua` said about the pointer.
 ///
@@ -227,7 +253,11 @@ pub(crate) fn pixels(size: i32, scale: f64) -> i32 {
     // Clamped rather than trusted: `scale` reaches here from an output, and a
     // NaN or a wild value would otherwise become an allocation. `clamp` on a
     // value that started as NaN would panic, so the cast above is allowed to
-    // saturate first — `as i32` of NaN is 0, which the floor then lifts to 1.
+    // saturate first — `as i32` of NaN is 0, which the floor then lifts to
+    // `*SIZES.start()`. This is the one place a size *is* clamped rather than
+    // refused, and rightly: it is a scale gone wrong rather than a setting,
+    // there is no next source to fall through to, and drawing something is the
+    // whole of what this module's neighbour is for.
     scaled.clamp(*SIZES.start(), *SIZES.end() * MAX_SCALE)
 }
 
@@ -321,21 +351,28 @@ pub(crate) struct Theme {
     name: String,
     theme: xcursor::CursorTheme,
     /// One answer per cursor name and device size, **including the negative
-    /// one**.
+    /// one**, in at most [`SIZES_KEPT`] device sizes.
     ///
-    /// `None` under a key means "this theme has no such cursor at this size",
+    /// `None` under a name means "this theme has no such cursor at this size",
     /// and keeping that is the point rather than an accident. Without it, a
     /// theme missing `grab` would walk the whole icon search path — every
     /// inherited theme, every directory in `XCURSOR_PATH` — on every frame for
     /// as long as a window is being dragged, to arrive at the same answer each
     /// time.
     ///
-    /// Unbounded, unlike `Kept` next door, and that is a judgment rather than
-    /// an oversight: the keys are cursor *names*, of which the whole w3c set
-    /// is thirty-six, times the handful of device sizes a machine's monitors
-    /// produce. Thirty-six 48-pixel cursors is about 330 KB. A cache with a
-    /// cap here would evict entries that will certainly be asked for again.
-    ready: HashMap<(String, i32), Option<Ready>>,
+    /// **Nested rather than keyed on the pair, and bounded on the outer key.**
+    /// The names are a closed set and are held whole; the sizes are whatever
+    /// some output claimed its scale was, so they are the half that can grow
+    /// without limit and they go through the same [`Kept`] the QML pointer's
+    /// buffers do. What one entry costs is not the *requested* size — [`make`]
+    /// stores the theme's own nearest image, so asking for 2048 from a theme
+    /// whose author drew 64 keeps a 64-pixel image, 16 KB — but there are
+    /// thirty-six names under each size, and a scale animation asks for a new
+    /// size per step. Unbounded, that is the whole w3c set re-rasterised and
+    /// kept per step, for ever.
+    ///
+    /// [`make`]: Theme::make
+    ready: Kept<i32, HashMap<String, Option<Ready>>>,
 }
 
 impl Theme {
@@ -360,7 +397,7 @@ impl Theme {
         Some(Self {
             name: name.to_owned(),
             theme,
-            ready: HashMap::new(),
+            ready: Kept::keeping(SIZES_KEPT),
         })
     }
 
@@ -384,7 +421,7 @@ impl Theme {
         if !self.has(name, pixels) {
             return None;
         }
-        self.ready.get(&(name.to_owned(), pixels))?.as_ref()
+        self.ready.get(pixels)?.get(name)?.as_ref()
     }
 
     /// Whether this theme has `name` at `pixels`, doing the work once.
@@ -402,8 +439,7 @@ impl Theme {
     /// machine with no GPU and no cursor themes at all — without one. Only
     /// `Pointer::themed` needs a renderer, and only to upload.
     pub(crate) fn has(&mut self, name: &str, pixels: i32) -> bool {
-        let key = (name.to_owned(), pixels);
-        if let Some(known) = self.ready.get(&key) {
+        if let Some(known) = self.ready.get(pixels).and_then(|at| at.get(name)) {
             return known.is_some();
         }
         let made = self.make(name, pixels);
@@ -416,7 +452,16 @@ impl Theme {
                 "the cursor theme has no such cursor"
             );
         }
-        self.ready.insert(key, made);
+        // A size that is not held yet gets a map of its own, which is what may
+        // evict the oldest size; see [`SIZES_KEPT`]. `push` before the insert
+        // rather than after, so the entry being recorded is the one that
+        // survives it.
+        if self.ready.get(pixels).is_none() {
+            self.ready.push(pixels, HashMap::new());
+        }
+        if let Some(at) = self.ready.get_mut(pixels) {
+            at.insert(name.to_owned(), made);
+        }
         has
     }
 
@@ -427,7 +472,7 @@ impl Theme {
     /// that turned out to be unreadable — all of them mean the same thing to
     /// the caller, which is "draw ours instead", and all of them are
     /// per-cursor rather than per-session. The one-line `debug!` in
-    /// [`Theme::rasterised`] is the whole of what they are worth; the loud line
+    /// [`Theme::has`] is the whole of what they are worth; the loud line
     /// belongs at [`Theme::load`], where a missing *theme* is diagnosed once.
     fn make(&self, name: &str, pixels: i32) -> Option<Ready> {
         let path = self.theme.load_icon(name)?;
@@ -476,7 +521,8 @@ mod tests {
     use crate::cursor::shape;
 
     use super::{
-        Configured, Environment, NOT_INSTALLED, Ready, SIZE, Settings, Theme, nearest, pixels,
+        Configured, Environment, NOT_INSTALLED, Ready, SIZE, SIZES_KEPT, Settings, Theme, nearest,
+        pixels,
     };
 
     fn configured(theme: Option<&str>, size: Option<i32>) -> Configured {
@@ -567,6 +613,32 @@ mod tests {
             Settings::resolve(&configured(None, Some(-4)), &environment(None, Some("32"))).size,
             32,
             "a refused configured size still leaves the environment its turn"
+        );
+    }
+
+    /// And a size too small to find falls through the same way a zero does.
+    ///
+    /// `XCURSOR_SIZE=1` is accepted arithmetic and an unusable pointer: one to
+    /// three white pixels on a desktop is not meaningfully more findable than
+    /// none, which is the failure [`SIZES`] exists to refuse. Falling *through*
+    /// rather than clamping is what makes the refusal useful — a session that
+    /// set it in some startup script years ago gets the built-in size and a
+    /// line in the log, not a pointer eight pixels across it never asked for.
+    #[test]
+    fn a_size_too_small_to_find_falls_through() {
+        assert_eq!(
+            Settings::resolve(&Configured::default(), &environment(None, Some("1"))).size,
+            SIZE
+        );
+        assert_eq!(
+            Settings::resolve(&configured(None, Some(3)), &environment(None, Some("16"))).size,
+            16,
+            "a refused configured size still leaves the environment its turn"
+        );
+        assert_eq!(
+            Settings::resolve(&configured(None, Some(8)), &Environment::default()).size,
+            8,
+            "and the floor itself is a size, not the first one refused"
         );
     }
 
@@ -667,6 +739,44 @@ mod tests {
         assert!(
             name.is_some(),
             "no spelling of the I-beam was found in an installed theme"
+        );
+    }
+
+    /// A theme's cache does not grow without limit as the device size moves.
+    ///
+    /// The exposure is the one `cursor.rs`'s `KEPT` names: a script animating
+    /// an output's scale asks for a fresh device size every step, and every
+    /// step here is the whole w3c name set rasterised again and kept. The QML
+    /// pointer has been capped at four sizes since it was written; this side
+    /// holds far more per size and was not.
+    ///
+    /// Machine-dependent and skipped rather than failed when this box has no
+    /// cursor themes, the same guard and for the same reason as the two disk
+    /// tests above: the subject is a real theme's files.
+    #[test]
+    fn a_themes_cache_is_bounded_in_device_sizes() {
+        let Some(mut found) = ["default", "Adwaita", "breeze_cursors"]
+            .into_iter()
+            .find_map(Theme::load)
+        else {
+            return;
+        };
+        // A scale animation, in the shape it reaches here: one new device size
+        // per step, each asked about under more than one name.
+        for pixels in 16..=64 {
+            found.has("default", pixels);
+            found.has("left_ptr", pixels);
+        }
+        assert!(
+            found.ready.count() <= SIZES_KEPT,
+            "a theme kept {} device sizes at once, over the cap of {SIZES_KEPT}",
+            found.ready.count()
+        );
+        // And the cap did not cost the thing the cache is for: the size still
+        // being asked about is still in hand, with its names under it.
+        assert!(
+            found.ready.get(64).is_some_and(|at| !at.is_empty()),
+            "the size most recently asked for was the one evicted"
         );
     }
 

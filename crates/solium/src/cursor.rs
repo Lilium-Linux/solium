@@ -106,11 +106,22 @@ const HOTSPOT: (i32, i32) = (0, 0);
 /// animates an output's scale would otherwise mint a buffer per step and keep
 /// every one of them.
 ///
+/// **The same exposure exists twice and is now capped twice**, which is the
+/// part of this worth saying: `theme::Theme`'s cache of rasterised cursors is
+/// keyed on a device size too, is reached from the same per-output-per-frame
+/// call, and would grow under the same animated scale — so it is bounded at
+/// `theme::SIZES_KEPT`, the same four, by the same [`Kept`]. What differs is
+/// what a size costs. Here it is one buffer: the pointer is the configured
+/// size, which is 24 logical pixels by default and at most 256, so an entry is
+/// 2.3 KB at the default and 1x, 9.2 KB at 2x, and 1 MB at the largest size a
+/// setting may name on a 2x screen. There it is one buffer per cursor *name*,
+/// thirty-six of them, each the theme's own nearest image rather than the size
+/// asked for.
+///
 /// Four rather than the two `qml::paint`'s own [`Kept`] uses, and the reason is
-/// the buffer. A pointer is 24 logical pixels square, so an entry is 2.3 KB at
-/// 1x and 9.2 KB at 2x — a generous guard costs nothing here. A window frame is
-/// a whole window, 3.9 MB of it on an ordinary one, and there is one per
-/// window; see `KEPT` in `qml/paint.rs` for that arithmetic.
+/// the same arithmetic from the other end: a window frame is a whole window,
+/// 3.9 MB of it on an ordinary one, and there is one per window — see `KEPT` in
+/// `qml/paint.rs`. A generous guard costs nothing at pointer sizes.
 const KEPT: usize = 4;
 
 /// How a rasterised pointer reaches the screen.
@@ -695,25 +706,46 @@ impl Pointer {
     /// `super+shift+r`. Doing nothing when nothing changed matters: this is
     /// reached on every reload, and re-loading the theme would throw away
     /// every rasterised cursor to arrive back at the same ones.
+    ///
+    /// **Returns whether the pointer's picture may now be different**, which
+    /// the caller turns into damage. A reload that changed only the cursor
+    /// theme or size is a change nothing else on screen notices: the backends
+    /// draw on damage, and a stationary pointer produces none, so without the
+    /// answer the new pointer appears whenever something unrelated next
+    /// happens to redraw. `false` is the overwhelmingly common case — a reload
+    /// that changed a keybinding — and costs the caller nothing.
     pub(crate) fn configure(
         &mut self,
         configured: &theme::Configured,
         environment: &theme::Environment,
-    ) {
+    ) -> bool {
         let settings = theme::Settings::resolve(configured, environment);
-        if settings == self.settings {
-            return;
+        // **A reload is also a second chance to find a theme that was not
+        // installed last time**, and that is why an unchanged setting is not
+        // by itself a reason to stop. `Loaded::Missing` is a settled answer
+        // deliberately — see [`Loaded`] — but what settles it is a frame, not a
+        // reload: installing the theme `config.lua` already names and pressing
+        // `super+shift+r` did nothing at all, which contradicts `config.lua`'s
+        // own "trying a theme out is `super+shift+r`". Asking again here costs
+        // one directory walk per keypress, not one per frame.
+        //
+        // Only when a theme is actually named: with none, `load` reaches
+        // `Missing` without touching the disk and there is nothing to retry.
+        let retry = settings.theme.is_some() && matches!(self.loaded, Loaded::Missing);
+        if settings == self.settings && !retry {
+            return false;
         }
         tracing::debug!(
             theme = settings.theme.as_deref().unwrap_or("<none: Solium's own>"),
             size = settings.size,
             "pointer"
         );
-        // Only a different *name* is worth looking for again. A size change
-        // does not invalidate a theme — `Theme` keys its cache on the device
-        // size too, so the new size simply misses and the old entries stay
-        // useful for whichever monitor is still asking for them.
-        if settings.theme != self.settings.theme {
+        // Only a different *name* is worth looking for again — or a name whose
+        // last answer was "not installed". A size change does not invalidate a
+        // theme: `Theme` keys its cache on the device size too, so the new size
+        // simply misses and the old entries stay useful for whichever monitor
+        // is still asking for them.
+        if retry || settings.theme != self.settings.theme {
             self.loaded = Loaded::Unasked;
             // A new theme is new news: whatever the old one's cursors failed
             // to do, the next failure is worth hearing about again.
@@ -723,6 +755,7 @@ impl Pointer {
             art.set_size(settings.size);
         }
         self.settings = settings;
+        true
     }
 
     /// The pointer as something to draw, at `location` on an output at
@@ -1130,6 +1163,16 @@ mod tests {
     /// same function, so a change to one is a change to both. At 1x the bug
     /// this guards is invisible, which is why the assertion that matters is
     /// the 2x one.
+    ///
+    /// **Read the name for exactly what it says, which is less than it
+    /// sounds.** This asserts that the right *number* is computed. It says
+    /// nothing about whether `cursor.qml` then draws anything that size, and
+    /// for the whole of #81 it did not: the arrow was in a hard-coded 24-unit
+    /// item, so a configured 48 padded the buffer and a configured 16 clipped
+    /// the arrow's tail, and this test passed through both. What it takes to
+    /// ask the other question is a real Qt and a real buffer — see "the QML
+    /// pointer is drawn at the size it is given" in `dev/wirecheck`, which
+    /// measures the drawn extent and is where that claim now lives.
     #[test]
     fn the_configured_size_reaches_the_qml_pointer_scaled() {
         let mut pointer = Pointer::default();
@@ -1142,6 +1185,101 @@ mod tests {
         );
         assert_eq!(theme::pixels(pointer.settings.size, 1.0), 32);
         assert_eq!(theme::pixels(pointer.settings.size, 2.0), 64);
+    }
+
+    /// A reload that changed nothing asks for no frame, and one that changed
+    /// the pointer asks for one.
+    ///
+    /// The answer is what `Command::Cursor` turns into damage. Both backends
+    /// draw on damage and a stationary pointer produces none, so a
+    /// `super+shift+r` that changed only the cursor size would otherwise show
+    /// the new pointer at the next unrelated redraw — while trying a size out,
+    /// that is when the mouse is next jiggled. The other half matters as much:
+    /// a reload that changed a keybinding must not schedule a frame, or every
+    /// reload costs a full composite of every output for nothing.
+    ///
+    /// Settled with a first call rather than asserted against
+    /// `Pointer::default`, which resolves from this machine's real environment
+    /// and so is not a known value in a test.
+    #[test]
+    fn only_a_reload_that_changed_the_pointer_asks_for_a_frame() {
+        let mut pointer = Pointer::default();
+        let environment = theme::Environment::default();
+        let configured = theme::Configured {
+            theme: None,
+            size: Some(32),
+        };
+        pointer.configure(&configured, &environment);
+        assert!(
+            !pointer.configure(&configured, &environment),
+            "a reload that changed nothing at all asked for a frame"
+        );
+        assert!(
+            pointer.configure(
+                &theme::Configured {
+                    theme: None,
+                    size: Some(48),
+                },
+                &environment
+            ),
+            "a reload that changed the pointer's size did not ask for a frame"
+        );
+    }
+
+    /// A theme that was not installed last time is looked for again on a
+    /// reload, with the configuration unchanged.
+    ///
+    /// **`config.lua`'s own words are "trying a theme out is
+    /// `super+shift+r`"**, and the obvious way to try one out is to name it,
+    /// find the pointer unchanged, install it, and press the key again. That
+    /// did nothing: [`Loaded::Missing`] is a settled answer — rightly, because
+    /// re-walking the icon search path per *frame* is a syscall storm — but
+    /// `configure` returned early on unchanged settings, so nothing ever put it
+    /// back. A reload is a keypress, not a frame.
+    #[test]
+    fn a_reload_looks_again_for_a_theme_that_was_not_installed() {
+        let mut pointer = Pointer::default();
+        let environment = theme::Environment::default();
+        let configured = theme::Configured {
+            theme: Some(theme::NOT_INSTALLED.to_owned()),
+            size: Some(24),
+        };
+        pointer.configure(&configured, &environment);
+        assert!(pointer.ready(CursorIcon::Default, 24).is_none());
+        assert!(
+            matches!(pointer.loaded, Loaded::Missing),
+            "the missing theme was not settled, so there is nothing to retry"
+        );
+
+        assert!(
+            pointer.configure(&configured, &environment),
+            "the same config.lua, pressed again after installing the theme, was a no-op"
+        );
+        assert!(
+            matches!(pointer.loaded, Loaded::Unasked),
+            "and the theme was not looked for again"
+        );
+    }
+
+    /// But a session with *no* theme named has nothing to look for, and must
+    /// not be put back to `Unasked` on every reload.
+    ///
+    /// The negative half of the test above. `load` reaches `Missing` without
+    /// touching the disk when there is no name, so retrying it is pure churn —
+    /// and, through the answer, a frame on every `super+shift+r` for ever.
+    #[test]
+    fn a_reload_with_no_theme_named_looks_for_nothing() {
+        let mut pointer = Pointer::default();
+        let environment = theme::Environment::default();
+        let configured = theme::Configured::default();
+        pointer.configure(&configured, &environment);
+        assert!(pointer.ready(CursorIcon::Default, 24).is_none());
+        assert!(matches!(pointer.loaded, Loaded::Missing));
+        assert!(
+            !pointer.configure(&configured, &environment),
+            "a reload with no cursor theme configured asked for a frame"
+        );
+        assert!(matches!(pointer.loaded, Loaded::Missing));
     }
 
     /// The pointer's own use of the shared cache, at the pointer's own cap.

@@ -851,6 +851,52 @@ fn draw_and_read(
     Ok(pixels)
 }
 
+/// The bounding box of everything drawn in a `w`x`h` ARGB8888 readback, as
+/// `(min_x, min_y, max_x, max_y)`, or nothing if the buffer is empty.
+///
+/// Only meaningful against a buffer [`wipe`] cleared to transparent first: what
+/// counts as drawn is any pixel with a byte in it, which includes the faintest
+/// antialiased edge. That is deliberate — the question being asked is *how far
+/// the drawing reaches*, and a threshold would answer a slightly different one
+/// and would have to be defended against every future change to the stroke.
+///
+/// The one step up from the `nonzero` count next door, and the reason it is
+/// worth taking for exactly one scene is in the pointer's case below: a count
+/// cannot tell a pointer drawn at the size it was given from the same pointer
+/// drawn at 24 in a bigger buffer, because both are the same number of bytes.
+fn drawn_extent(raw: &[u8], w: i32, h: i32) -> Option<(i32, i32, i32, i32)> {
+    let width = usize::try_from(w).ok()?;
+    let height = usize::try_from(h).ok()?;
+    let row = width.checked_mul(4)?;
+    if row == 0 {
+        return None;
+    }
+    let (mut min_x, mut min_y) = (usize::MAX, usize::MAX);
+    let (mut max_x, mut max_y) = (0usize, 0usize);
+    let mut anything = false;
+    for (y, line) in raw.chunks_exact(row).take(height).enumerate() {
+        for (x, pixel) in line.chunks_exact(4).enumerate() {
+            if pixel.iter().all(|byte| *byte == 0) {
+                continue;
+            }
+            anything = true;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    if !anything {
+        return None;
+    }
+    Some((
+        i32::try_from(min_x).ok()?,
+        i32::try_from(min_y).ok()?,
+        i32::try_from(max_x).ok()?,
+        i32::try_from(max_y).ok()?,
+    ))
+}
+
 /// Read a dmabuf straight back, with no element and no draw in between.
 ///
 /// Import it as a texture, bind that as a framebuffer, copy it out. What it
@@ -2119,6 +2165,144 @@ fn main() -> Result<()> {
                  rate for as long as the compositor is running -- or a `Behavior` was added \
                  to one of those two in the QML, which is a real animation and wants \
                  writing before the first tick rather than after it"
+            ));
+        }
+        kept_scenes.push(built);
+        kept_buffers.push(buffer);
+    }
+
+    // ------------------------------------------------------------------
+    // And the pointer is drawn at the size it was given.
+    //
+    // **The one claim in #81 that nothing could see.** `cursor.rs` sizes the
+    // scene to the configured `cursor.size` -- or `XCURSOR_SIZE`, whichever
+    // `cursor::theme::Settings` resolved -- and `host.cpp` puts that logical
+    // size on the root item. `cursor.qml` then has to *use* it. While the arrow
+    // was drawn in literal units in a hard-coded 24-unit item it did not, and
+    // the setting was half inert in one direction and destructive in the other:
+    // `size = 48` padded the buffer around a 24-pixel arrow, and
+    // `XCURSOR_SIZE=16` cut the arrow's tail off, because the path ran to
+    // y≈19.3 in a render target 16 pixels tall. A clipped pointer on the arm
+    // `cursor.rs` calls its floor -- the one a machine with no cursor theme
+    // installed is guaranteed to get -- is the invisible-pointer failure
+    // wearing a smaller hat.
+    //
+    // `cargo test` cannot ask. `cursor::tests` has
+    // `the_configured_size_reaches_the_qml_pointer_scaled`, which asserts the
+    // arithmetic `Cursor::element` does on its first line and nothing about
+    // what Qt then draws -- so it passed, correctly, through both defects. The
+    // question is what a real Qt puts in a real buffer, and this is the only
+    // thing in the gate with one.
+    //
+    // Nor can the `nonzero` count above: a 24-pixel arrow in a 48-pixel buffer
+    // is exactly as many non-zero bytes as a 24-pixel arrow in a 24-pixel one.
+    // What separates them is *where the drawing reaches*, so this measures the
+    // bounding box and compares it against the buffer.
+    //
+    // Four sizes, and the two on the ends are what make it an instrument rather
+    // than a snapshot of today: 16 is under the old hard-coded 24 and 96 is far
+    // over it, so a pointer that ignores its item fails at both ends. Measured
+    // both ways in this process, against the pre-fix `cursor.qml` with nothing
+    // else in the tree changed:
+    //
+    //     16x16: (0, 0)..(14, 15) -- 0.94 across, 1.00 down   [clipped]
+    //     48x48: (0, 0)..(14, 20) -- 0.31 across, 0.44 down   [inert]
+    //
+    // Anything that only ever draws 24 units passes at 24 alone, which is
+    // exactly how this shipped.
+    println!("\n=== the QML pointer is drawn at the size it is given ===");
+    // What the drawing's own proportions are, measured off the file: the path
+    // reaches 12.9 across and 18.3 down in a 24-unit square, and the 1.6-unit
+    // stroke adds half of itself at each end -- so 14.5 by 19.9 of 24, which is
+    // 0.60 by 0.83. What comes back is 0.61-0.62 by 0.83-0.88, the top of that
+    // spread being 16 and 24, where an antialiased edge and the round join at
+    // the tail are a larger share of a small buffer. `drawn_extent` counts the
+    // faintest of them deliberately; the alternative is a threshold that would
+    // have to be defended against every future change to the stroke.
+    //
+    // So the bands are wide, and on purpose twice over: these are proportions
+    // of a drawing that is allowed to be redrawn. What they are narrow enough
+    // to catch is a pointer not scaling with its item at all, which is the pair
+    // of readings above.
+    const ACROSS: std::ops::RangeInclusive<f64> = 0.50..=0.78;
+    const DOWN: std::ops::RangeInclusive<f64> = 0.72..=0.96;
+    let cursor_qml = repo().join("crates/solium/qml/cursor.qml");
+    let cursor_path = CString::new(cursor_qml.as_os_str().as_encoded_bytes())?;
+    for edge in [16, 24, 48, 96] {
+        let buffer = target::allocate(&gbm, edge, edge)
+            .with_context(|| format!("the {edge}x{edge} pointer's buffer"))?;
+        wipe(&mut renderer, &buffer.dmabuf, edge, edge)?;
+        let (fd, stride, modifier, fourcc) = buffer.as_ffi().context("as_ffi")?;
+        let built = unsafe {
+            solium_qml_scene_new_gpu(
+                cursor_path.as_ptr(),
+                edge,
+                edge,
+                fd,
+                stride,
+                modifier,
+                fourcc,
+                std::ptr::null(),
+            )
+        };
+        restore(&renderer)?;
+        if built.is_null() {
+            return Err(anyhow!(
+                "a GPU host could not build the pointer at {edge}x{edge}"
+            ));
+        }
+        // Scale 1, whatever `WIRECHECK_SCALE` says, and deliberately: what is
+        // in question is the *logical* size reaching the QML, and `host.cpp`
+        // divides the device size by the scale to get it. At 1 the two are the
+        // same number and the fractions below are the drawing's own
+        // proportions rather than a scale's. The scale itself is pinned
+        // elsewhere in this run, and by `theme::pixels`' own unit tests.
+        unsafe { solium_qml_scene_resize(built, edge, edge, 1.0) };
+        tick(&mut clock, FRAME_MS);
+        let mut fence: c_int = -1;
+        let rendered = unsafe { solium_qml_scene_render_gpu(built, &raw mut fence) };
+        restore(&renderer)?;
+        if rendered != 1 {
+            return Err(anyhow!(
+                "the {edge}x{edge} pointer returned {rendered} from render_gpu"
+            ));
+        }
+        if fence >= 0 {
+            wait_for(&mut renderer, unsafe { OwnedFd::from_raw_fd(fence) })?;
+        }
+        let raw = read_dmabuf(&mut renderer, &buffer.dmabuf, edge, edge)?;
+        let Some((min_x, min_y, max_x, max_y)) = drawn_extent(&raw, edge, edge) else {
+            return Err(anyhow!(
+                "the pointer drew nothing at all at {edge}x{edge}, in a buffer this wiped first"
+            ));
+        };
+        let across = f64::from(max_x - min_x + 1) / f64::from(edge);
+        let down = f64::from(max_y - min_y + 1) / f64::from(edge);
+        println!(
+            "  {edge}x{edge}: drawn ({min_x}, {min_y})..({max_x}, {max_y}) — {across:.2} across \
+             and {down:.2} down of the buffer"
+        );
+        // The hotspot, which is the other half of this and is not cosmetic.
+        // `cursor.rs`'s `HOTSPOT` is (0, 0) and the buffer is placed by
+        // subtracting it, so the arrow's point has to be in the corner of the
+        // image at *every* size -- a pointer whose point is a few pixels off
+        // what it points at is maddening to use and almost invisible in a
+        // screenshot. An inset that did not scale with the size would put it
+        // one pixel out at 24 and four out at 256.
+        if min_x != 0 || min_y != 0 {
+            return Err(anyhow!(
+                "the {edge}x{edge} pointer's drawing starts at ({min_x}, {min_y}) and not at the \
+                 corner. `cursor.rs` places the buffer by subtracting HOTSPOT = (0, 0), so the \
+                 arrow's tip is now that far from what it points at"
+            ));
+        }
+        if !ACROSS.contains(&across) || !DOWN.contains(&down) {
+            return Err(anyhow!(
+                "the pointer fills {across:.2} x {down:.2} of a {edge}x{edge} buffer, wanted \
+                 {ACROSS:?} x {DOWN:?}. The arrow is drawn in a 24-unit square scaled to the \
+                 item, so the fraction is the same at every size: too small means it is still \
+                 drawing in absolute units and the configured size only pads the buffer, and \
+                 1.00 means the drawing runs off the edge and the pointer is clipped"
             ));
         }
         kept_scenes.push(built);
