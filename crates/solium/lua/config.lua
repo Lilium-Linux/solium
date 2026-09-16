@@ -115,11 +115,15 @@ local defaults = {
     --           ~/.local/share/icons or /usr/share/icons. `ls /usr/share/icons`
     --           lists the ones this machine has. Naming one here takes
     --           precedence over `XCURSOR_THEME`.
-    --   size    how big the pointer is, in *logical* pixels, between 1 and
+    --   size    how big the pointer is, in *logical* pixels, between 8 and
     --           256. Multiplied by each monitor's scale, so 24 is 24 pixels on
     --           a 1x screen and 48 device pixels on a 2x one -- which is why a
     --           single number is still right on a desk with monitors at
     --           different scales. Takes precedence over `XCURSOR_SIZE`.
+    --           Outside that range it is ignored, with a line in the log, and
+    --           the next source has its turn -- not clamped, because a pointer
+    --           three pixels across is as hard to find as no pointer at all
+    --           and nobody meant to ask for one.
     --
     -- So the order is: what is written here, then the environment, then 24
     -- logical pixels and no theme at all.

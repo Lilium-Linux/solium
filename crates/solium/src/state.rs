@@ -1996,14 +1996,25 @@ impl Solium {
                     // `XCURSOR_THEME` that was exported after the compositor
                     // started. Two `env::var` calls per reload.
                     //
-                    // Nothing is redrawn from here and nothing needs to be: the
-                    // pointer is rebuilt for every output on every frame (see
-                    // `render::cursor`), and pointer motion brings its own
-                    // frames. `Pointer::configure` does nothing at all when
-                    // the answer is the same as last time, which on a reload
-                    // that changed a keybinding is every time.
-                    self.pointer
-                        .configure(&configured, &crate::cursor::theme::Environment::read());
+                    // And a reload that really did change the pointer damages
+                    // the screen. The pointer is rebuilt for every output on
+                    // every *frame* (see `render::cursor`), which is not the
+                    // same as there being a frame: both backends draw on
+                    // damage, and a pointer sitting still produces none. So a
+                    // `super+shift+r` that changed only the cursor theme or
+                    // size would otherwise show the new pointer whenever
+                    // something unrelated next happened to redraw — which,
+                    // while trying a theme out, is when the mouse is jiggled.
+                    //
+                    // `configure` answers `false` when nothing changed, which
+                    // on a reload that changed a keybinding is every time, so
+                    // the ordinary reload still schedules nothing.
+                    if self
+                        .pointer
+                        .configure(&configured, &crate::cursor::theme::Environment::read())
+                    {
+                        self.redraw = true;
+                    }
                 }
                 Command::Decoration { name } => {
                     // The slots windows occupy are kept; what changes is how
@@ -4971,8 +4982,23 @@ impl SeatHandler for Solium {
     /// between its own two mechanisms cannot leave a fragment of the other
     /// behind. See `cursor::Pointer::show`, which is the only writer and where
     /// the precedence between all three sources is set out.
+    ///
+    /// **And it damages the screen, which is not optional.** Both backends draw
+    /// only when something has changed — `tty.rs`'s loop and `winit.rs`'s make
+    /// the same test, each with a comment arguing for it — and a client's reply
+    /// to `wl_pointer.enter` arrives a round trip *after* the motion that
+    /// provoked it, by which time the frame that motion caused has already been
+    /// drawn. Without this, moving onto a text field and stopping leaves the
+    /// old arrow sitting there until something unrelated damages the screen,
+    /// and jiggling the mouse is the only way to see the I-beam.
+    ///
+    /// It cost nothing before #24 only because `Named(_)` was discarded, so the
+    /// picture genuinely did not change. It is now the main visible path of the
+    /// whole feature, and a feature that only works while the mouse is moving
+    /// reads as a broken one.
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
         self.pointer.show(image);
+        self.redraw = true;
     }
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
 }
