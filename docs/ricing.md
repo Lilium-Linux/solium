@@ -15,7 +15,7 @@ it already had — so a typo costs a line of output rather than your windows.
 
 ## The thirty-second version
 
-Write `~/.config/solium/user.lua` with only what you want changed:
+Write `~/.config/solium/init.lua` with only what you want changed:
 
 ```lua
 return {
@@ -44,7 +44,7 @@ Three guides go deeper than the recipes below:
 
 | what | where |
 |---|---|
-| your settings | `~/.config/solium/user.lua` |
+| your settings | `~/.config/solium/init.lua` |
 | your bindings and layout | `~/.config/solium/init.lua` |
 | one module, replaced | `~/.config/solium/tiling.lua`, `scrolling.lua`, … |
 | your pane styles | `~/.config/solium/qml/panes/<name>/` |

@@ -106,7 +106,7 @@ open      = { motion = { duration = 200, easing = "outCubic" }, scale = 0.92 },
 loading   = { fade = 180 },
 ```
 
-So changing how tiling feels is one line in `~/.config/solium/user.lua`:
+So changing how tiling feels is one line in `~/.config/solium/init.lua`:
 
 ```lua
 return { tiling = { motion = { duration = 160, easing = "outBack" } } }
