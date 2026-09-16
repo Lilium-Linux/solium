@@ -3268,6 +3268,46 @@ impl Solium {
             return;
         }
 
+        // A client that never negotiates still gets a frame.
+        //
+        // `Frame::Pending` reserves `TITLEBAR_HEIGHT` -- see `insets_for` --
+        // on the understanding that a frame is on its way. Until this, the
+        // only things that ever built one were `decorate`, driven by
+        // `xdg_decoration`, and two special cases (a launch placeholder and
+        // leaving fullscreen). So a client that never binds that protocol
+        // reserved a titlebar for the life of its window and had none drawn.
+        //
+        // That is not a rare case. Firefox does not bind it, and no XWayland
+        // client can -- Steam included. Issue #103, measured nested: exactly
+        // 32 rows of unpainted space above Firefox's first painted row, beside
+        // a real titlebar on a terminal in the same session.
+        //
+        // Server-side is already what `new_decoration` offers unasked, on the
+        // grounds that the frame is part of the desktop's look. This extends
+        // that to the clients that never ask: having no opinion gets the same
+        // answer as not having expressed one yet. A client that later asks for
+        // client-side is still obeyed -- `decorate` takes it to `Frame::None`
+        // and removes this.
+        //
+        // `Pending` is the whole condition and it is exact: a negotiated
+        // server-side frame is already `Styled`, a negotiated client-side one
+        // is already `None`, and `insert` itself returns early on `Styled`.
+        // What is left is only "nobody has decided", which is this.
+        //
+        // Ahead of the sizing below, because a frame changes the insets that
+        // `fitted_size` and `initial_placement` both read.
+        if self
+            .panes
+            .get(pane)
+            .is_some_and(|pane| matches!(pane.frame(), crate::pane::Frame::Pending))
+        {
+            let real = self.real_geometry(window);
+            let width = real.map_or(TITLEBAR_HEIGHT * 20, |real| real.size.w);
+            let height = real.map_or(TITLEBAR_HEIGHT * 15, |real| real.size.h);
+            self.decorations
+                .insert(&mut self.panes, pane, width, height);
+        }
+
         // A client that mapped into a window which was already open takes
         // that window's shape. The layout placed it before the application
         // existed and was told it opened then; doing either again would move a
