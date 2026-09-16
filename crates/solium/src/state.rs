@@ -574,15 +574,30 @@ fn inner(outer: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logic
 /// An xdg toplevel is asked and answers on its own schedule; an X11 window is
 /// simply told, position included, because X11 has no separate notion of the
 /// manager's opinion.
+///
+/// Refuses outright for an override-redirect X11 window, before ever calling
+/// `configure`. Smithay already rejects that call on its own account
+/// (`X11SurfaceError::UnsupportedForOverrideRedirect`) — OR means the client
+/// picked its own geometry and no manager may second-guess it — so this
+/// early return changes no behaviour by itself; smithay was already refusing
+/// it, which is the `could not size an X11 window` warning this removes.
+/// What the early return buys is a single place that knows the rule: every
+/// caller of `size_window` funnels through here, so "never size an OR
+/// window" is enforced once, for all four call sites and whatever is added
+/// later, instead of each of them having to remember to ask first.
 fn size_window(window: &Window, client: Rectangle<i32, Logical>) {
     if let Some(toplevel) = window.toplevel() {
         toplevel.with_pending_state(|state| state.size = Some(client.size));
         toplevel.send_pending_configure();
         return;
     }
-    if let Some(x11) = window.x11_surface()
-        && let Err(err) = x11.configure(Some(client))
-    {
+    let Some(x11) = window.x11_surface() else {
+        return;
+    };
+    if x11.is_override_redirect() {
+        return;
+    }
+    if let Err(err) = x11.configure(Some(client)) {
         tracing::warn!(?err, "could not size an X11 window");
     }
 }
@@ -3212,6 +3227,60 @@ impl Solium {
             return;
         };
         if !self.panes.get(pane).is_some_and(present::mark_shown) {
+            return;
+        }
+
+        // An unmanaged pane is already where it belongs, and everything below
+        // this line sizes, places or animates -- all three wrong for it.
+        //
+        // Override-redirect is X11 for "do not manage me": a menu, a tooltip,
+        // a drag icon. `mapped_override_redirect_window` has already mapped it
+        // at the position its client chose, and `take_unmanaged_pane` marked
+        // the pane so. Marking it shown above is still right -- it is on
+        // screen -- but it is the last thing this function may do to it.
+        //
+        // Issue #100, from the reporter's log opening a Steam context menu:
+        //
+        //     WARN could not size an X11 window err=UnsupportedForOverrideRedirect
+        //
+        // That warning is the harmless half. `size_window` asks smithay to
+        // configure an override-redirect surface and is refused, which costs a
+        // line in the log and nothing else. The damage is the next statement:
+        // `initial_placement` picks a location and `map_element` *succeeds* at
+        // moving the menu there, so it opens away from the pointer and the
+        // layout treats it as a window.
+        //
+        // Hence the guard here and not inside `size_window`: the failing call
+        // is not the one doing the harm, and a guard there would have silenced
+        // the warning while leaving the menu misplaced.
+        //
+        // This is the second leak of its kind -- see the comment in
+        // `xwayland.rs`'s `mapped_override_redirect_window`, where unmanaged
+        // windows reached the list a layout reads and dragging a text
+        // selection reflowed the desktop. Both were one path forgetting to
+        // ask; if a third appears, the question belongs inside whatever those
+        // paths call rather than at a fourth call site.
+        if !self.panes.get(pane).is_some_and(Pane::managed) {
+            return;
+        }
+
+        // An unmanaged pane places itself -- see `Pane::managed` -- and
+        // everything past this point is this function computing a size and a
+        // location to impose on one. Both branches below do that (one from a
+        // remembered slot, the other from a fresh fit-and-cascade), so the
+        // question is asked once, here, ahead of either, instead of being
+        // patched into whichever branch a bug happened to be found in.
+        //
+        // This is the second time an unmanaged pane has needed guarding
+        // against a layout that does not know to ask. The first is the
+        // comment on `mapped_override_redirect_window` in xwayland.rs, about
+        // the window list `snapshot` builds from every pane. This is a
+        // different list -- there isn't one; this function reads the pane
+        // and the window directly -- so it needed its own guard, but it is
+        // the same invariant: an override-redirect window (a Steam context
+        // menu, say) arrives already placed by its own client and must never
+        // be reconsidered by ours.
+        if !self.panes.get(pane).is_some_and(Pane::managed) {
             return;
         }
 
