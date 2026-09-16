@@ -18,14 +18,36 @@
 //!    before #24**, and its absence was not a degraded cursor but *no cursor
 //!    change at all*: a toolkit that only ever names shapes got the arrow over
 //!    a text field, over a resize edge, over everything.
-//! 3. **Nobody said, so the compositor's own.** Over the desktop, over a
-//!    frame, as soon as the pointer leaves a client — `input/mod.rs` puts
-//!    `Named(Default)` back, because a cursor belonging to a window the
-//!    pointer has left is a cursor that vanishes the moment that window
-//!    closes.
+//! 3. **The compositor's own**, in two different senses that are worth
+//!    keeping apart. *Nobody said*: as soon as the pointer leaves a client,
+//!    `input/mod.rs` puts `Named(Default)` back through [`Pointer::show`],
+//!    because a cursor belonging to a window the pointer has left is a cursor
+//!    that vanishes the moment that window closes. *We say*: over a titlebar
+//!    or a resize border the compositor asserts a cursor through
+//!    [`Pointer::assert`] — the arrow over chrome, the matching double arrow
+//!    over each of the eight resize edges — and that assertion outranks both
+//!    client sources rather than joining the queue with them. See the
+//!    precedence below for where the boundary between the two rules is.
 //!
-//! **The precedence is last-writer-wins, and that is the protocol's rule
-//! rather than a shortcut of ours.** Both client-side sources are gated by
+//! **The precedence is last-writer-wins *over a client's own surface*, and
+//! the compositor's outright over the compositor's own chrome.** The boundary
+//! is where the pixels stop being the client's, and it is not a refinement:
+//! the two rules would otherwise contradict each other, because a client whose
+//! surface extends under our frame — every CSD toolkit, whose shadow margin is
+//! part of its buffer — is still the last writer while the pointer is over a
+//! titlebar it does not own. That is issue #108's second symptom: a resize
+//! cursor, set by the client for its own shadow's resize affordance, sitting
+//! over a band where a press runs the compositor's *move* grab. The pointer
+//! was not missing a shape; it was confidently describing a different action
+//! from the one that would happen.
+//!
+//! So [`Pointer::assert`] is a separate, non-destructive override, held for as
+//! long as the pointer is over a frame or a resize border and released the
+//! moment it is not; `Solium::chrome_under` is the one hit test that decides
+//! which, and the *same* answer is what a press acts on. Within a client's own
+//! surface nothing below changes:
+//!
+//! Both client-side sources are gated by
 //! smithay on the serial of the most recent `wl_pointer.enter` — `set_cursor`
 //! in `wayland/seat/pointer.rs` and `set_shape` in `wayland/cursor_shape.rs`
 //! call the same `allow_setting_cursor` — so a client can only speak while the
@@ -611,6 +633,20 @@ pub(crate) struct Pointer {
     /// `pub(crate)` and assigned from four places before #24; a third source
     /// writing to it is exactly the change that makes that untenable.
     status: CursorImageStatus,
+    /// What the compositor asserts over its own chrome, over the top of
+    /// `status`, or `None` where the pointer is somewhere a client decides.
+    ///
+    /// **A second field rather than a fourth writer of `status`, and the
+    /// difference is the whole point.** A write to `status` is destructive:
+    /// stamping the arrow over a titlebar there would throw away the cursor
+    /// the client under it had set, and the pointer moving back onto that
+    /// client would show the arrow until the client happened to set it again
+    /// — which for a toolkit that only re-asserts on `wl_pointer.enter` can be
+    /// never, since a CSD client's surface extends under our frame and the
+    /// pointer never left it. Kept beside it, the assertion is something the
+    /// compositor can simply stop making: `assert(None)` and the client's own
+    /// cursor is back, untouched and exact.
+    chrome: Option<CursorIcon>,
     /// The theme and size, after `config.lua`, the environment and the
     /// built-in default have been consulted in that order. See
     /// [`theme::Settings::resolve`], which is where that order is argued.
@@ -634,6 +670,7 @@ impl Default for Pointer {
     fn default() -> Self {
         Self {
             status: CursorImageStatus::default_named(),
+            chrome: None,
             // Resolved from the environment straight away, rather than waiting
             // for `sol.cursor`. `lua/init.lua` does call it, but a user who
             // copied `init.lua` into ~/.config/solium before this setting
@@ -673,6 +710,33 @@ impl Pointer {
         self.status = image;
     }
 
+    /// Assert a cursor of the compositor's own over its chrome, or stop
+    /// asserting one.
+    ///
+    /// `Some` outranks every source [`Pointer::show`] carries, for as long as
+    /// it is held; `None` hands the pointer straight back to whatever the
+    /// client last set, unchanged. That is the whole of the precedence the
+    /// module header now draws a boundary at: over a client's own surface the
+    /// rule is last-writer-wins, and over the compositor's chrome it is the
+    /// compositor's, because a client is entitled to describe its own window
+    /// and is not entitled to describe our titlebar.
+    ///
+    /// **Returns whether the picture may now be different**, which the caller
+    /// turns into damage. The render loop draws on damage and a stationary
+    /// pointer produces none, so a cursor that changed without the pointer
+    /// moving — a window that slid its titlebar under it — would otherwise not
+    /// appear until something unrelated happened to redraw. That was the
+    /// finding fixed in `f6d459f` for `cursor_image`, arrived at from the
+    /// other direction; answering `false` for the overwhelmingly common
+    /// no-change case keeps the per-frame caller free.
+    pub(crate) fn assert(&mut self, icon: Option<CursorIcon>) -> bool {
+        if self.chrome == icon {
+            return false;
+        }
+        self.chrome = icon;
+        true
+    }
+
     /// What to draw this frame.
     ///
     /// **The only reader, because it is not a pure getter**: a client's cursor
@@ -692,6 +756,15 @@ impl Pointer {
     /// aborted this suite before. What is testable is that the three sources
     /// replace each other cleanly, and the tests below do that.
     pub(crate) fn showing(&mut self) -> CursorImageStatus {
+        // The compositor's own chrome answers before anything a client said,
+        // and deliberately does not disturb it: `status` is still whatever the
+        // client set, waiting for the pointer to move back over it. Checked
+        // before the dead-surface downgrade below because a client's cursor
+        // surface dying while the pointer is over our titlebar is not a
+        // question this frame has to answer -- and the downgrade is a write.
+        if let Some(icon) = self.chrome {
+            return CursorImageStatus::Named(icon);
+        }
         if let CursorImageStatus::Surface(surface) = &self.status
             && !surface.alive()
         {
@@ -1043,6 +1116,63 @@ mod tests {
             pointer.showing(),
             CursorImageStatus::Named(CursorIcon::Default)
         ));
+    }
+
+    /// **Over the compositor's own chrome the compositor wins, and the
+    /// client's cursor survives the override.**
+    ///
+    /// The boundary the module header draws, as behaviour. Issue #108's second
+    /// symptom is the first half: a client is the last writer while the
+    /// pointer is over a titlebar its shadow extends under, and last-writer
+    /// -wins is the wrong rule there. The second half is why this is a
+    /// separate field rather than a fourth `show` — a CSD client sets its
+    /// cursor on `wl_pointer.enter`, the pointer never leaves its surface to
+    /// cross our frame, so a destructive override would leave the arrow up
+    /// over the client's own window until it happened to speak again.
+    ///
+    /// `assert` answering whether anything changed is asserted with it,
+    /// because the render loop is damage-driven and the per-frame caller in
+    /// `Solium::reassert_cursor` would otherwise either redraw every frame or
+    /// need to remember the last value itself.
+    #[test]
+    fn the_compositor_outranks_a_client_over_its_own_chrome() {
+        let mut pointer = Pointer::default();
+
+        // A client names a shape over its own window.
+        pointer.show(CursorImageStatus::Named(CursorIcon::Text));
+
+        // The pointer crosses onto a resize border, which is ours.
+        assert!(pointer.assert(Some(CursorIcon::NwseResize)));
+        assert!(matches!(
+            pointer.showing(),
+            CursorImageStatus::Named(CursorIcon::NwseResize)
+        ));
+        assert!(
+            !pointer.assert(Some(CursorIcon::NwseResize)),
+            "the same assertion again is not a change, and a caller that ran \
+             every frame would damage the screen forever"
+        );
+
+        // Along the border to the titlebar: still ours, different shape.
+        assert!(pointer.assert(Some(CursorIcon::Default)));
+        assert!(matches!(
+            pointer.showing(),
+            CursorImageStatus::Named(CursorIcon::Default)
+        ));
+
+        // And back over the client, which never spoke again because the
+        // pointer never left its surface.
+        assert!(pointer.assert(None));
+        assert!(
+            matches!(
+                pointer.showing(),
+                CursorImageStatus::Named(CursorIcon::Text)
+            ),
+            "the client's cursor must come back exactly, or a toolkit that \
+             only sets its cursor on enter is left with our arrow over its \
+             text field"
+        );
+        assert!(!pointer.assert(None));
     }
 
     /// Reading the pointer twice without a write in between is the same

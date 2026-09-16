@@ -37,7 +37,7 @@ use crate::{
     decoration::Decoration,
     pane::Pane,
     script,
-    state::{Request, Solium},
+    state::{Chrome, Request, Solium},
 };
 
 use grab::MoveGrab;
@@ -282,6 +282,7 @@ fn pointer_motion<B: InputBackend>(
     if under.is_none() {
         state.pointer.show(CursorImageStatus::default_named());
     }
+    assert_chrome(state, location, pointer.is_grabbed());
 
     pointer.motion(
         state,
@@ -297,6 +298,37 @@ fn pointer_motion<B: InputBackend>(
     // changing. Without this the pointer only moved when something else
     // happened to want a frame -- which on a still screen is never.
     state.redraw = true;
+}
+
+/// Say what the pointer is over the compositor's own chrome, or stop saying.
+///
+/// **Read off the same `chrome_under` a press is, and that is the point.**
+/// Issue #108: the compositor computed which resize edge the pointer was over
+/// and never told the pointer, so dragging a corner resized a window with an
+/// arrow still showing; and over the band between a window's top and its
+/// titlebar it left the client's own resize cursor up while a press there ran
+/// the move grab. One hit test cannot describe one action and perform another.
+/// A second, parallel hit test for the cursor could, which is why there is not
+/// one.
+///
+/// **Not while a drag is in progress.** A resize grab takes the pointer off
+/// the border it started on within a pixel of movement -- the window follows,
+/// but the pointer is ahead of it, and past the window's edge entirely once
+/// the drag hits a minimum size or a screen edge. Recomputing would drop the
+/// resize cursor mid-drag and hand the pointer back to whatever client the
+/// cursor happened to be over, which is the one moment the shape must not
+/// change. Holding the last assertion for the length of the grab is also what
+/// makes a move drag keep the arrow.
+fn assert_chrome(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
+    if grabbed {
+        return;
+    }
+    let icon = state
+        .chrome_under(location)
+        .map(|under| under.chrome.cursor());
+    if state.pointer.assert(icon) {
+        state.redraw = true;
+    }
 }
 
 /// Motion from a device that reports movement, not position — a real mouse.
@@ -337,6 +369,11 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
         if under.is_none() {
             state.pointer.show(CursorImageStatus::default_named());
         }
+        // And as in `pointer_motion`: over the compositor's own chrome the
+        // compositor says what the pointer is. Same reason for the repetition
+        // -- this is the path a real mouse takes, and #108 was reported on the
+        // hardware.
+        assert_chrome(state, location, pointer.is_grabbed());
 
         // As in `pointer_motion`: while the session is locked, nothing of the
         // session's may notice the pointer going past. Repeated here rather
@@ -584,12 +621,15 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // acts on the session that is supposed to be sealed.
     //
     // This is not belt and braces over the checks in `window_under` and
-    // `frame_under`. `resize_target` walks the panes itself and asks neither
-    // of them, so before this guard existed a press near where a window's
-    // edge used to be started a resize grab: dragging the mouse on a locked
-    // screen resized a window nobody could see, and it was still that size
-    // when the session unlocked. Found by doing exactly that and measuring
-    // the window afterwards.
+    // `chrome_under`. The resize border used to be a walk of its own that
+    // asked neither of them, so before this guard existed a press near where a
+    // window's edge used to be started a resize grab: dragging the mouse on a
+    // locked screen resized a window nobody could see, and it was still that
+    // size when the session unlocked. Found by doing exactly that and
+    // measuring the window afterwards. There is one hit test now and its own
+    // lock guard covers the border too, which makes this the second of two
+    // rather than the only one -- and it stays, because everything below it is
+    // an interpretation and not all of it goes through `chrome_under`.
     if state.lock.is_some() {
         pointer.button(
             state,
@@ -623,75 +663,98 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         return;
     }
 
-    // A press on a frame belongs to the frame: it either hits a button or
-    // starts a drag, and either way no client should see it.
+    // A press on the compositor's own chrome is the compositor's: a frame's
+    // button, a move drag, or a resize from an edge. None of it reaches a
+    // client.
+    //
+    // **The same `chrome_under` the pointer's shape was read off on the way
+    // here**, which is issue #108: the frame and the resize border overlap,
+    // the press had always resolved the overlap in the frame's favour, and
+    // nothing told the pointer -- so the band below a window's top edge drew
+    // whatever resize cursor a CSD client had set for its shadow and then
+    // moved the window when pressed. Asking one predicate for both is what
+    // makes that disagreement unrepresentable; two hit tests, however
+    // carefully written, drift.
+    //
+    // The resize border is checked before the ordinary click handling and
+    // before the drag modifier, as it always was, because the edge is the
+    // narrower target and whoever is on it meant to be.
     if !pointer.is_grabbed()
-        && let Some((id, window, local)) = state.frame_under(location)
+        && let Some(under) = state.chrome_under(location)
     {
-        let pressed = button_state == ButtonState::Pressed;
-        let on_button = state
-            .panes
-            .get_mut(id)
-            .and_then(Pane::decoration_mut)
-            .is_some_and(|decoration| {
-                decoration.pointer(local.x, local.y, Some(pressed));
-                decoration.on_button()
-            });
+        match under.chrome {
+            Chrome::Frame => {
+                let pressed = button_state == ButtonState::Pressed;
+                let id = under.pane;
+                let local = under.local;
+                let on_button = state
+                    .panes
+                    .get_mut(id)
+                    .and_then(Pane::decoration_mut)
+                    .is_some_and(|decoration| {
+                        decoration.pointer(local.x, local.y, Some(pressed));
+                        decoration.on_button()
+                    });
 
-        // Acted on release, so a press that lands on the wrong button can be
-        // dragged off it and abandoned.
-        if let Some(action) = state
-            .panes
-            .get_mut(id)
-            .and_then(Pane::decoration_mut)
-            .and_then(Decoration::take_action)
-        {
-            state.frame_action(id, action);
-        }
+                // Acted on release, so a press that lands on the wrong button
+                // can be dragged off it and abandoned.
+                if let Some(action) = state
+                    .panes
+                    .get_mut(id)
+                    .and_then(Pane::decoration_mut)
+                    .and_then(Decoration::take_action)
+                {
+                    state.frame_action(id, action);
+                }
 
-        // Focus and dragging need a window. A frame around one that is still
-        // loading has neither, and its buttons work anyway -- which is the
-        // point of giving it a frame: an application that is not coming can be
-        // dismissed before it arrives.
-        if pressed && let Some(window) = window {
-            state.focus_window(&window, serial);
-            if !on_button && let Some(geometry) = state.real_geometry(&window) {
-                let start_data = GrabStartData {
-                    focus: None,
-                    button,
-                    location,
-                };
-                pointer.set_grab(
-                    state,
-                    MoveGrab::new(start_data, window, geometry.loc),
-                    serial,
-                    Focus::Clear,
-                );
+                // Focus and dragging need a window. A frame around one that is
+                // still loading has neither, and its buttons work anyway --
+                // which is the point of giving it a frame: an application that
+                // is not coming can be dismissed before it arrives.
+                if pressed && let Some(window) = under.window {
+                    state.focus_window(&window, serial);
+                    if !on_button && let Some(geometry) = state.real_geometry(&window) {
+                        let start_data = GrabStartData {
+                            focus: None,
+                            button,
+                            location,
+                        };
+                        pointer.set_grab(
+                            state,
+                            MoveGrab::new(start_data, window, geometry.loc),
+                            serial,
+                            Focus::Clear,
+                        );
+                    }
+                }
+                return;
             }
+            Chrome::Resize(edges) if button_state == ButtonState::Pressed => {
+                // `pane_chrome` does not report a resize border without a
+                // window to resize, so this is that guarantee restated rather
+                // than a case that happens.
+                if let Some(window) = under.window {
+                    state.focus_window(&window, serial);
+                    let start_data = GrabStartData {
+                        focus: None,
+                        button,
+                        location,
+                    };
+                    pointer.set_grab(
+                        state,
+                        resize::ResizeGrab::new(start_data, window, edges, under.outer),
+                        serial,
+                        Focus::Clear,
+                    );
+                }
+                return;
+            }
+            // A *release* over a resize border is nobody's. The grab begins on
+            // the press and ends by releasing that grab, so a release reaching
+            // here belongs to whatever is underneath -- which is what it did
+            // when the border was a second `if` gated on `Pressed`.
+            Chrome::Resize(_) => {}
         }
-        return;
-    }
-
-    // An edge drag resizes. Checked before the ordinary click handling, and
-    // before the drag modifier, because the edge is the narrower target and
-    // whoever is on it meant to be.
-    if button_state == ButtonState::Pressed
-        && !pointer.is_grabbed()
-        && let Some((window, edges, outer)) = state.resize_target(location)
-    {
-        state.focus_window(&window, serial);
-        let start_data = GrabStartData {
-            focus: None,
-            button,
-            location,
-        };
-        pointer.set_grab(
-            state,
-            resize::ResizeGrab::new(start_data, window, edges, outer),
-            serial,
-            Focus::Clear,
-        );
-        return;
     }
 
     if button_state == ButtonState::Pressed && !pointer.is_grabbed() {

@@ -2333,7 +2333,7 @@ mod tests {
     /// **The pointer arrives in each layer's own canvas, and a leave stays
     /// outside it.**
     ///
-    /// `x` and `y` come from `Solium::decorated_under` and `frame_under`, both
+    /// `x` and `y` come from `Solium::decorated_under` and `chrome_under`, both
     /// of which measure from the pane's outer corner. A bleeding layer's scene
     /// no longer starts there, so without the shift every button in it would be
     /// `bleedLeft` to the right of where the pointer really was — the close

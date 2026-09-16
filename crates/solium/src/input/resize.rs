@@ -12,10 +12,10 @@
 use smithay::{
     desktop::Window,
     input::pointer::{
-        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
-        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
-        GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData, MotionEvent, PointerGrab,
-        PointerInnerHandle, RelativeMotionEvent,
+        AxisFrame, ButtonEvent, CursorIcon, GestureHoldBeginEvent, GestureHoldEndEvent,
+        GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
+        GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData,
+        MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
     },
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
@@ -77,6 +77,62 @@ pub(crate) fn edges_at(outer: Rectangle<i32, Logical>, point: Point<f64, Logical
         (_, _, true, _) => ResizeEdge::Left,
         (_, _, _, true) => ResizeEdge::Right,
         _ => ResizeEdge::None,
+    }
+}
+
+/// The edges a press at `point` would drag, or `None` if it would drag none.
+///
+/// The whole of the resize region, in one place: the border reaches
+/// [`RESIZE_BORDER`] either side of every edge, so a point is on it only if it
+/// is inside `drawn` grown by that much. [`edges_at`] cannot answer that on its
+/// own — it measures the distance to each of the four *lines* and knows nothing
+/// of the rectangle they bound, so a point a mile above the window and four
+/// pixels to the left of its left edge comes back `Left`. The grown rectangle
+/// is what rules that out, and it lived at the one call site until the cursor
+/// became a second reader of the same region.
+pub(crate) fn border_edges(
+    drawn: Rectangle<i32, Logical>,
+    point: Point<f64, Logical>,
+) -> ResizeEdge {
+    let grown = Rectangle::new(
+        (drawn.loc.x - RESIZE_BORDER, drawn.loc.y - RESIZE_BORDER).into(),
+        (
+            drawn.size.w + RESIZE_BORDER * 2,
+            drawn.size.h + RESIZE_BORDER * 2,
+        )
+            .into(),
+    );
+    if !grown.to_f64().contains(point) {
+        return ResizeEdge::None;
+    }
+    edges_at(drawn, point)
+}
+
+/// The pointer the compositor shows over a resize border.
+///
+/// Four pictures for eight edges, and the pairing is the one every desktop
+/// uses: a double-headed arrow lies along the axis the drag moves, so the two
+/// corners on a diagonal share one cursor — top-left and bottom-right pull the
+/// same line in opposite directions, which is `NwseResize`, and top-right with
+/// bottom-left is `NeswResize`. These are the w3c names the `cursor-shape`
+/// protocol speaks; [`crate::cursor::shape`] turns each of them into the file
+/// an XCursor theme actually ships, so what is chosen here is a *meaning* and
+/// not a picture.
+///
+/// `ResizeEdge::None` is not a resize target at all — [`border_edges`] returns
+/// it for every point that is not near an edge — and it answers with the arrow
+/// rather than with an `Option` because the arrow is what the compositor shows
+/// over anything of its own it has nothing more specific to say about. The
+/// trailing arm is the same answer for the same reason: `ResizeEdge` is a
+/// protocol enum and `#[non_exhaustive]`, so it is a future edge rather than an
+/// impossible case.
+pub(crate) fn cursor(edges: ResizeEdge) -> CursorIcon {
+    match edges {
+        ResizeEdge::Top | ResizeEdge::Bottom => CursorIcon::NsResize,
+        ResizeEdge::Left | ResizeEdge::Right => CursorIcon::EwResize,
+        ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorIcon::NwseResize,
+        ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorIcon::NeswResize,
+        _ => CursorIcon::Default,
     }
 }
 
@@ -357,6 +413,69 @@ mod tests {
         // wide as it looks, and misses.
         assert_eq!(edges_at(window, (94.0, 250.0).into()), ResizeEdge::Left);
         assert_eq!(edges_at(window, (106.0, 250.0).into()), ResizeEdge::Left);
+    }
+
+    /// The border is a region, not four unbounded lines.
+    ///
+    /// [`edges_at`] answers `Left` for a point a mile above the window, because
+    /// all it measures is the distance to the left edge's *line*. That was
+    /// harmless while the only caller checked the grown rectangle first and
+    /// stopped being harmless the moment the cursor became a second reader: a
+    /// pointer nowhere near a window would have drawn a resize arrow.
+    #[test]
+    fn the_border_stops_where_the_window_does() {
+        let window = rect(100, 100, 400, 300);
+        assert_eq!(
+            edges_at(window, (102.0, -900.0).into()),
+            ResizeEdge::Left,
+            "the control: the naked edge test claims a point nowhere near the \
+             window, which is why `border_edges` exists"
+        );
+        assert_eq!(
+            border_edges(window, (102.0, -900.0).into()),
+            ResizeEdge::None
+        );
+        assert_eq!(
+            border_edges(window, (102.0, 103.0).into()),
+            ResizeEdge::TopLeft
+        );
+        // Eight pixels outside is still the border; nine is not. This is the
+        // outside half of it, which is the only part of a framed window's top
+        // edge a drag can reach -- see `state::chrome_of`.
+        assert_eq!(border_edges(window, (300.0, 93.0).into()), ResizeEdge::Top);
+        assert_eq!(border_edges(window, (300.0, 91.0).into()), ResizeEdge::None);
+    }
+
+    /// Every edge names its own cursor, and the two diagonals are not the same
+    /// one.
+    ///
+    /// Issue #108's first symptom was that dragging a corner resized the window
+    /// with the pointer still an arrow, so what this pins is the mapping that
+    /// was missing entirely. The pairing matters as much as the coverage: a
+    /// `NwseResize` on all four corners looks right in a screenshot of one
+    /// corner and wrong on the other diagonal, which is the sort of thing
+    /// nobody notices until they are dragging the top-right of a window.
+    #[test]
+    fn every_edge_names_the_cursor_that_lies_along_it() {
+        assert_eq!(cursor(ResizeEdge::Top), CursorIcon::NsResize);
+        assert_eq!(cursor(ResizeEdge::Bottom), CursorIcon::NsResize);
+        assert_eq!(cursor(ResizeEdge::Left), CursorIcon::EwResize);
+        assert_eq!(cursor(ResizeEdge::Right), CursorIcon::EwResize);
+        assert_eq!(cursor(ResizeEdge::TopLeft), CursorIcon::NwseResize);
+        assert_eq!(cursor(ResizeEdge::BottomRight), CursorIcon::NwseResize);
+        assert_eq!(cursor(ResizeEdge::TopRight), CursorIcon::NeswResize);
+        assert_eq!(cursor(ResizeEdge::BottomLeft), CursorIcon::NeswResize);
+        assert_ne!(
+            cursor(ResizeEdge::TopLeft),
+            cursor(ResizeEdge::TopRight),
+            "the two diagonals are mirror images and must not share a cursor"
+        );
+        assert_eq!(
+            cursor(ResizeEdge::None),
+            CursorIcon::Default,
+            "no edge is the compositor's own arrow, not a resize arrow for an \
+             edge that is not there"
+        );
     }
 
     #[test]
