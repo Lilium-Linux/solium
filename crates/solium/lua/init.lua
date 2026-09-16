@@ -18,7 +18,7 @@ sol.monitors(config.monitors)
 -- means the configuration says nothing, and `XCURSOR_THEME`/`XCURSOR_SIZE`
 -- are what the pointer follows -- which is what the rest of the machine
 -- already does. See `config.lua`.
-sol.cursor(config.cursor)
+sol.cursor_theme(config.cursor)
 
 -- Only reachable when the compositor was started with --debug-mode, but the
 -- entries are declared either way: what costs nothing to declare should not
