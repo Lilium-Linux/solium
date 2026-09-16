@@ -485,7 +485,7 @@ fn qml_path() -> PathBuf {
     if let Some(path) = std::env::var_os("SOLIUM_QML_CURSOR") {
         return PathBuf::from(path);
     }
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/cursor.qml"))
+    crate::assets::qml().join("cursor.qml")
 }
 
 /// The pointer as the compositor holds it: what to show, and what to draw it
