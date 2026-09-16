@@ -3260,26 +3260,10 @@ impl Solium {
         // selection reflowed the desktop. Both were one path forgetting to
         // ask; if a third appears, the question belongs inside whatever those
         // paths call rather than at a fourth call site.
-        if !self.panes.get(pane).is_some_and(Pane::managed) {
-            return;
-        }
-
-        // An unmanaged pane places itself -- see `Pane::managed` -- and
-        // everything past this point is this function computing a size and a
-        // location to impose on one. Both branches below do that (one from a
-        // remembered slot, the other from a fresh fit-and-cascade), so the
-        // question is asked once, here, ahead of either, instead of being
-        // patched into whichever branch a bug happened to be found in.
         //
-        // This is the second time an unmanaged pane has needed guarding
-        // against a layout that does not know to ask. The first is the
-        // comment on `mapped_override_redirect_window` in xwayland.rs, about
-        // the window list `snapshot` builds from every pane. This is a
-        // different list -- there isn't one; this function reads the pane
-        // and the window directly -- so it needed its own guard, but it is
-        // the same invariant: an override-redirect window (a Steam context
-        // menu, say) arrives already placed by its own client and must never
-        // be reconsidered by ours.
+        // Asked here, ahead of both branches below -- one places from a
+        // remembered slot, the other from a fresh fit -- rather than inside
+        // whichever branch a bug happened to surface in.
         if !self.panes.get(pane).is_some_and(Pane::managed) {
             return;
         }
