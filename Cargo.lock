@@ -1679,6 +1679,8 @@ dependencies = [
  "solium-layout",
  "tracing",
  "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]
