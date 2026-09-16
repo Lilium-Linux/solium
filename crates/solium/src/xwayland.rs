@@ -64,6 +64,25 @@ use crate::{pane::Pane, state::Solium};
 /// `None` is an ordinary window, and that is not a guess: EWMH says a window
 /// with no `_NET_WM_WINDOW_TYPE` is to be treated as `Normal`, and every X11
 /// client old enough not to set the property is relying on it.
+///
+/// **Three of these six are judgement calls, and the list is not as uniform as
+/// it looks.** `DropdownMenu`, `PopupMenu` and `Tooltip` are the ones EWMH
+/// itself describes as typically override-redirect, so they are safe.
+///
+/// `Menu` is the awkward one. EWMH names it alongside `Toolbar` for *torn-off*
+/// menus -- a menu the user has pinned into a window of its own -- and
+/// `Toolbar` is deliberately NOT in this list for that reason. A torn-off menu
+/// classified here maps bare, with nothing that will ever place or move it.
+/// It is included anyway because the bug being fixed is Steam's dropdowns, a
+/// torn-off menu is a Motif-and-Tk-era shape that almost nothing ships in
+/// 2026, and a dropdown landing in the tiling layout is a much worse day than
+/// a torn-off menu landing where its client put it. If a real torn-off menu
+/// turns up misplaced, this is the line to revisit first.
+///
+/// `Notification` and `Splash` are in for placement but their lifetime is not
+/// the "gone on the next click" of a menu; a splash whose client expects the
+/// window manager to centre it will now stay wherever it asked, which for a
+/// client that asks for (0, 0) means the corner.
 const fn places_itself(kind: Option<WmWindowType>) -> bool {
     matches!(
         kind,
@@ -411,7 +430,18 @@ impl XwmHandler for Solium {
         let Some(element) = element else {
             return;
         };
-        if !window.is_override_redirect() && self.panes.of(&element).is_some_and(Pane::managed) {
+        // `is_none_or`, not `is_some_and`: a window in the space with no pane
+        // is unknown, and unknown has to mean *managed*, which is this file's
+        // default everywhere else. `is_some_and` answered false for that case
+        // and so fell through to honouring the client's own coordinates --
+        // the opposite of the safe reading, for the one state nobody can
+        // currently construct.
+        //
+        // Unreachable today, since both map paths take a pane synchronously.
+        // But `Panes::sync` mints a pane for exactly this state, so the code
+        // already concedes the gap is possible, and being right about it costs
+        // one word.
+        if !window.is_override_redirect() && self.panes.of(&element).is_none_or(Pane::managed) {
             return;
         }
         self.space.map_element(element, geometry.loc, false);
