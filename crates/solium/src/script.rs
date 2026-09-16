@@ -409,7 +409,7 @@ impl Scripts {
             }
         }
 
-        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/lua/init.lua"))
+        crate::assets::lua().join("init.lua")
     }
 
     /// Load the configuration script and everything it pulls in.
@@ -444,7 +444,13 @@ impl Scripts {
             // resolving — so the documented way to start ("replace the entry
             // point, require everything that ships, add your own") could not
             // work at all. Found by running the example out of the guide.
-            let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+            //
+            // *Where* the shipped directory is stopped being a constant here
+            // when the compositor became installable: `crate::assets` answers
+            // that once, for the Lua and the QML together. What is local to
+            // this function is only the order.
+            let shipped_lua = crate::assets::lua();
+            let shipped = shipped_lua.display();
             let mut search = format!("{directory}/?.lua;{shipped}/?.lua;{path}");
             if let Some(user) = Self::user_config_dir() {
                 search = format!("{}/?.lua;{search}", user.display());

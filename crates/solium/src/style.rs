@@ -197,12 +197,13 @@ pub(crate) struct Style {
 
 /// The bundles that ship with the compositor.
 ///
-/// Baked from `CARGO_MANIFEST_DIR`, which is what `qml::import_path` already
-/// does with `qml/` and for the same reason: there is no install step in this
-/// tree yet, so a path fixed at build time is at least true of the build that
-/// fixed it. Both move together on the day there is one.
+/// `panes/` under wherever this build's QML turned out to be, which is
+/// `crate::assets`' business rather than this module's. It used to be baked
+/// from `CARGO_MANIFEST_DIR` here, in the same breath as `qml::import_path`
+/// did it there, and the comment promised the two would move together on the
+/// day there was an install step. This is that day; see `assets.rs`.
 pub(crate) fn shipped() -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes"))
+    crate::assets::qml().join("panes")
 }
 
 /// `panes/` under the user's QML directory, if they have one.
