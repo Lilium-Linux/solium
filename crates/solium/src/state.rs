@@ -2324,10 +2324,35 @@ impl Solium {
             let in_outer = present::to_window_space(frame, outer, location);
             let in_window = in_outer - outer.loc.to_f64() - inset;
 
+            // Into the *buffer's* coordinates, which is what `surface_under`
+            // wants and is not the same point.
+            //
+            // A client that draws its own decorations commits a surface bigger
+            // than its window: the invisible resize shadow is part of the
+            // buffer, and `xdg_surface.set_window_geometry` is how it says
+            // which sub-rectangle is the real window. `geometry().loc` is that
+            // offset -- around (26, 26) for a GTK application.
+            //
+            // `in_window` above is relative to the window the user can see.
+            // Smithay's `Window::surface_under` ends in
+            // `under_from_surface_tree(&surface, point, (0, 0), ..)` -- offset
+            // zero -- so the point it expects is relative to the surface tree
+            // root, the buffer origin. Its own `SpaceElement` wrapper puts that
+            // origin at `location - geometry().loc`
+            // (`desktop/space/mod.rs:510`), so the two differ by exactly
+            // `geometry().loc`, and dropping it is issue #101: every click in
+            // Firefox and in Qt applications landed a shadow's width up and
+            // left of where it was aimed, which for a row of buttons means the
+            // one next door.
+            //
+            // Zero for a client with no decorations of its own, so a terminal
+            // never noticed.
+            let in_buffer = in_window + window.geometry().loc.to_f64();
+
             if let Some((surface, surface_offset)) =
-                window.surface_under(in_window, WindowSurfaceType::ALL)
+                window.surface_under(in_buffer, WindowSurfaceType::ALL)
             {
-                let in_surface = in_window - surface_offset.to_f64();
+                let in_surface = in_buffer - surface_offset.to_f64();
                 return Some((surface, location - in_surface));
             }
         }
