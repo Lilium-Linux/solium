@@ -1,0 +1,155 @@
+name: Release
+
+# A merge to `release` builds, verifies, and attaches a source tarball to a
+# DRAFT GitHub Release. Nothing becomes public without a human pressing
+# publish -- a release people may already have fetched is unpleasant to
+# retract, and a draft costs one click.
+on:
+  push:
+    branches: [release]
+
+# Read-only by default. The one job that needs to write does so explicitly,
+# and only `contents`. No stored secrets are involved anywhere here: the
+# automatic GITHUB_TOKEN is scoped to this repository and expires when the
+# run ends.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Deliberately a copy of ci.yml's checks rather than a dependency on them.
+  # `release` is the branch where being sure matters most, and a release that
+  # trusted a green run on some ancestor commit would be trusting a merge
+  # nobody tested. It costs a few minutes.
+  verify:
+    runs-on: ubuntu-latest
+    # Fedora, not the runner's Ubuntu: this needs Qt 6 Quick >= 6.5 and Ubuntu
+    # ships 6.4.2. Keep in step with dev/Containerfile's FEDORA_VERSION and
+    # with ci.yml.
+    container: registry.fedoraproject.org/fedora:44
+    steps:
+      # Before the checkout, because actions/checkout silently downloads a
+      # tarball when git is missing, leaving no history for anything later.
+      - name: System dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git gcc gcc-c++ make pkgconf-pkg-config \
+            wayland-devel libinput-devel systemd-devel libseat-devel \
+            libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
+            libdrm-devel libdisplay-info-devel \
+            qt6-qtbase-devel qt6-qtdeclarative-devel
+
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # Lua is not read by any of the above: a syntax error in config.lua
+      # compiles and tests perfectly cleanly, then starts a compositor with no
+      # scripts at all. That shipped past a green gate once.
+      - name: Scripts
+        run: ./target/debug/solium --check
+
+  draft:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history: `git archive` below is fine shallow, but a shallow
+          # clone has no tags, and the duplicate-tag guard needs to see them.
+          fetch-depth: 0
+
+      # The version is Cargo.toml's, not a hand-typed input, so the thing that
+      # identifies a release is the same thing the binary reports at startup.
+      # A release whose tag and `--version` disagree is a bug report nobody
+      # can act on.
+      - name: Read the version
+        id: version
+        run: |
+          version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "no version in Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      # Refuse rather than overwrite. Re-running with an unchanged version is
+      # the normal way this fires, and silently replacing the artifact of an
+      # existing tag would make "v0.1.0" mean two different trees.
+      - name: Refuse a version that already exists
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if git rev-parse "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag already exists -- bump version in Cargo.toml" >&2
+            exit 1
+          fi
+
+      # The source tarball is the real artifact, and for a compositor that is
+      # not a compromise. A vendored C dependency compiles against whatever
+      # libc builds it, so a binary built here starts only on a matching
+      # glibc; and smithay links the system's libseat, libinput, libdrm and
+      # Mesa, which are exactly the libraries that cannot be bundled. Every
+      # comparable compositor ships source plus per-distro recipes for the
+      # same reasons.
+      #
+      # `git archive` takes the committed tree only -- no target/, no local
+      # edits, no .git -- so what is published is what is in the repository.
+      # zstd ships in the GitHub-hosted Ubuntu image, but a release that fails
+      # on a missing compressor is a bad way to find out the image changed.
+      - name: Ensure zstd
+        run: command -v zstd >/dev/null || sudo apt-get install -y zstd
+
+      - name: Source tarball
+        run: |
+          git archive --format=tar --prefix="solium-${{ steps.version.outputs.version }}/" HEAD \
+            | zstd -19 -o "solium-${{ steps.version.outputs.version }}.tar.zst"
+          sha256sum "solium-${{ steps.version.outputs.version }}.tar.zst" \
+            > "solium-${{ steps.version.outputs.version }}.tar.zst.sha256"
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          tag="${{ steps.version.outputs.tag }}"
+          gh release create "$tag" \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --notes "Source release of Solium $version.
+
+          Built and verified from \`$GITHUB_SHA\`.
+
+          **Installing:** build from source — see the README. Per-distro
+          packaging recipes are tracked in #66; until that lands, an installed
+          copy cannot find its QML and Lua assets outside the build tree.
+
+          \`\`\`sh
+          tar --zstd -xf solium-$version.tar.zst
+          cd solium-$version
+          cargo build --release
+          \`\`\`" \
+            "solium-$version.tar.zst" \
+            "solium-$version.tar.zst.sha256"
