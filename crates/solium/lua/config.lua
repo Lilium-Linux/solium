@@ -132,7 +132,9 @@ local defaults = {
     -- theme happens not to have. Copy `qml/cursor.qml` into
     -- ~/.config/solium/qml/ to change it.
     --
-    -- Applied on reload, so trying a theme out is `super+shift+r`.
+    -- Applied on reload, so trying a theme out is `super+shift+r`. The
+    -- compositor call is `sol.cursor_theme(...)`; `sol.cursor()` is a
+    -- different function that answers with where the pointer is.
     cursor = {},
 
     -- The monitors.

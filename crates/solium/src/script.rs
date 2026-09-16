@@ -1482,8 +1482,20 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `cursor::theme::Settings::resolve`, which is where it is written down.
     //
     // Takes effect immediately, so `super+shift+r` is how a theme is tried.
+    //
+    // **`cursor_theme` and not `cursor`, and that name is a bug fix rather
+    // than a preference.** `sol.cursor` was already taken: it is the getter
+    // above that returns where the pointer *is*, and `tiling.lua` calls it on
+    // every window open to decide which pane the new window splits. Registering
+    // a second function under the same key silently replaced it, so every
+    // `sol.on("open")` failed with "error converting Lua nil to table" and no
+    // window opened in a tiled layout was ever placed. Nothing caught it:
+    // `sol.set` overwrites without complaint, the compositor starts, `--check`
+    // passes, and the unit tests for each of the two functions pass
+    // individually because each calls its own. Only running it showed it. See
+    // `two_functions_cannot_share_one_name` below, which is now the guard.
     sol.set(
-        "cursor",
+        "cursor_theme",
         lua.create_function(|lua, options: mlua::Table| {
             let mut configured = crate::cursor::theme::Configured::default();
             // `theme` read as a `Value` and matched rather than as an
@@ -2731,8 +2743,8 @@ mod tests {
 
     /// A configured cursor theme and size reach the compositor as written.
     ///
-    /// The wiring between `sol.cursor` and `Command::Cursor`, which is the one
-    /// part of the cursor work that no test in `cursor.rs` can reach: that
+    /// The wiring between `sol.cursor_theme` and `Command::Cursor`, which is the
+    /// one part of the cursor work that no test in `cursor.rs` can reach: that
     /// module's tests start from a `Configured` that they built themselves.
     #[test]
     fn a_configured_cursor_theme_reaches_the_compositor() {
@@ -2744,7 +2756,7 @@ mod tests {
             &config,
             r#"
             sol.bind("Super+C", function()
-                sol.cursor({ theme = "Fixture", size = 40 })
+                sol.cursor_theme({ theme = "Fixture", size = 40 })
             end)
             "#,
         )
@@ -2796,7 +2808,7 @@ mod tests {
             r#"
             local config = require("config")
             sol.bind("Super+C", function()
-                sol.cursor(config.cursor)
+                sol.cursor_theme(config.cursor)
             end)
             "#,
         )
@@ -2813,6 +2825,65 @@ mod tests {
                  XCURSOR_SIZE can never win"
             ),
             other => panic!("expected one cursor command, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// `sol.cursor` is still where the pointer is, and setting the theme is a
+    /// different name.
+    ///
+    /// **The regression this exists for shipped, and was invisible to the
+    /// gate.** #81 registered the theme setter under `sol.cursor`, which was
+    /// already the getter that answers with the pointer's position. `sol.set`
+    /// replaces without complaining, so the getter simply stopped existing.
+    /// What broke was `tiling.lua`, which asks where the pointer is on every
+    /// window open to decide which pane the new window splits: every
+    /// `sol.on("open")` failed with "error converting Lua nil to table", and
+    /// no window opened in a tiled layout was placed. Nothing caught it — the
+    /// compositor starts, `--check` passes, and each function's own test
+    /// passes because each calls its own name. It took running the thing.
+    ///
+    /// So this asserts the pair, in one script, in one dispatch: the position
+    /// comes back as the numbers the snapshot was built with, *and* the theme
+    /// reaches the compositor as a command. Either name overwriting the other
+    /// fails this, whichever way round it is done.
+    #[test]
+    fn two_functions_cannot_share_one_name() {
+        let directory = std::env::temp_dir().join("solium-script-test-cursor-names");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+C", function()
+                local at = sol.cursor()
+                sol.status(string.format("%d,%d", at.x, at.y))
+                sol.cursor_theme({ theme = "Fixture" })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let mut snapshot = empty_snapshot();
+        snapshot.cursor = (12.0, 34.0);
+        let outcome = scripts.key("super+c", snapshot);
+        assert!(
+            outcome.handled,
+            "the listener failed, which is exactly how the collision showed up"
+        );
+        assert_eq!(
+            outcome.status.as_deref(),
+            Some("12,34"),
+            "sol.cursor() did not answer with the pointer's position"
+        );
+        match outcome.commands.as_slice() {
+            [Command::Cursor(configured)] => {
+                assert_eq!(configured.theme.as_deref(), Some("Fixture"));
+            }
+            other => panic!("sol.cursor_theme() did not reach the compositor: {other:?}"),
         }
 
         let _ = std::fs::remove_dir_all(&directory);
