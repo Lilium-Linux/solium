@@ -27,8 +27,9 @@ use smithay::{
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_layer_shell,
     delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
-        LayerSurface, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output,
-        utils::under_from_surface_tree,
+        LayerSurface, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
+        PopupUngrabStrategy, Space, Window, WindowSurfaceType, find_popup_root_surface,
+        get_popup_toplevel_coords, layer_map_for_output, utils::under_from_surface_tree,
     },
     input::{
         Seat, SeatHandler, SeatState,
@@ -3964,6 +3965,11 @@ impl CompositorHandler for Solium {
             }
         }
         self.popups.commit(surface);
+        // After `popups.commit`, which is what moves a popup from the unmapped
+        // list into its tree on its first commit. Ordering is not load-bearing
+        // — `find_popup` searches both lists — but the configure answers the
+        // commit that has just been applied, so it reads in the right order.
+        self.configure_popup(surface);
         self.configure_layer(surface);
     }
 }
@@ -4081,7 +4087,24 @@ impl XdgShellHandler for Solium {
         // anything, so the tidying has to live there or happen twice.
     }
 
-    fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+    /// A client is opening a menu, a tooltip or a combo-box list.
+    ///
+    /// The positioner is the client's entire description of *where*: an anchor
+    /// rectangle in its parent's coordinates, an edge of that rectangle to
+    /// hang from, a direction to hang in, and — the part this handler exists
+    /// for — the set of adjustments it permits us to make if the result would
+    /// not fit on the screen. Until #100 the argument was named `_positioner`
+    /// and dropped, which left Smithay's own initial geometry standing: the
+    /// raw `get_geometry()` set in `xdg_surface::GetPopup`, which honours the
+    /// anchor and the gravity and nothing else. A menu opened near an edge was
+    /// drawn partly off the screen, and the part that was missing was the part
+    /// with the entries in it.
+    ///
+    /// Placed before the popup is tracked so that the first geometry the popup
+    /// tree — and therefore the renderer — ever reads is the constrained one;
+    /// there is no frame in which the wrong position is on screen.
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        self.place_popup(&surface, positioner);
         // Tracking failure here is not fatal: the popup simply will not be
         // positioned, which is better than ending the session.
         if let Err(err) = self.popups.track_popup(surface.into()) {
@@ -4089,7 +4112,148 @@ impl XdgShellHandler for Solium {
         }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+    /// `xdg_popup.grab` — a client asking that a menu own input until it is
+    /// dismissed.
+    ///
+    /// This is what makes a menu behave like a menu. The client asks for the
+    /// grab; in return the compositor promises three things, none of which
+    /// this did while it was an empty stub: a press anywhere outside the
+    /// popup's own client dismisses the whole chain rather than reaching what
+    /// it landed on, keyboard focus follows the chain so arrow keys and Escape
+    /// go to the menu instead of the document behind it, and when the chain
+    /// ends both are handed back to the surface the menu came from. Firefox
+    /// asks for this for every context menu, so without it a menu opened and
+    /// then could not be closed, dismissed or driven.
+    ///
+    /// **What releases it, because a grab that is never released leaves a
+    /// session in which nothing can be clicked.** There are three exits and
+    /// all of them are Smithay's, which is the argument for using its grabs
+    /// rather than writing our own:
+    ///
+    /// * A press outside the grabbing client. `PopupPointerGrab::button`
+    ///   compares the client of the surface under the pointer with the client
+    ///   of the current grab, dismisses every popup in the chain, and calls
+    ///   `handle.unset_grab`. Unsetting a pointer grab runs its `unset`, and
+    ///   `PopupPointerGrab::unset` is what takes the keyboard grab off too —
+    ///   so the click that closes the menu releases both devices.
+    /// * The client destroying the popup. `PopupGrab::has_ended` then answers
+    ///   true, and the next pointer motion or key press through either grab
+    ///   unsets it. Motion arrives constantly whenever the pointer is in use,
+    ///   and `popups.cleanup()` runs every frame from both backends, so this
+    ///   is not a path that waits on the client for anything.
+    /// * The root toplevel dying. `has_ended` covers that as well: it is
+    ///   `!self.root.alive() || !self.toplevel_grab.active()`.
+    ///
+    /// A refused grab releases nothing because it takes nothing: every early
+    /// return below happens before `set_grab` is called, except the one that
+    /// has already called `ungrab` to undo what `grab_popup` recorded.
+    fn grab(&mut self, surface: PopupSurface, seat: WlSeat, serial: Serial) {
+        let Some(seat) = Seat::<Self>::from_resource(&seat) else {
+            return;
+        };
+        let popup = PopupKind::Xdg(surface);
+
+        // The root is computed here rather than left to `grab_popup`, and this
+        // is not tidiness. `PopupManager::grab_popup` opens with
+        // `assert_eq!(root.wl_surface(), find_popup_root_surface(&popup)?)` —
+        // an assertion in a library we cannot annotate, in a compositor with
+        // no supervisor to restart it. Deriving the focus we pass from the
+        // same function it checks against is the only way to know the two
+        // agree. A popup whose parent chain is already dead answers `Err` and
+        // is refused here, before the assertion can be reached.
+        //
+        // Passing the root surface itself works because Solium's
+        // `SeatHandler::KeyboardFocus` is a bare `WlSurface` — see the
+        // `SeatHandler` impl. A compositor with a richer focus target would
+        // have to look the window up; we do not, and that also means a menu
+        // rooted in a layer surface (a bar's own menu) is grabbable on the
+        // same path as one rooted in a window.
+        let Ok(root) = find_popup_root_surface(&popup) else {
+            tracing::debug!("refused a popup grab: the popup has no live root");
+            return;
+        };
+
+        // A stale serial is a refusal, not a crash. `grab_popup` returns
+        // `Err` for a popup that is already mapped, one whose parent was
+        // dismissed, and one that is not the topmost — and posts the protocol
+        // error itself where the protocol calls for one, so there is nothing
+        // to do here but decline and say so.
+        let mut grab = match self.popups.grab_popup(root, popup, &seat, serial) {
+            Ok(grab) => grab,
+            Err(err) => {
+                tracing::debug!(?err, "refused a popup grab");
+                return;
+            }
+        };
+
+        let keyboard = seat.get_keyboard();
+        let pointer = seat.get_pointer();
+        // `previous_serial` is the serial of the parent popup's grab, so a
+        // submenu opening inside its parent's grab is recognised as the same
+        // chain rather than as a stranger trying to steal the device.
+        let chain = grab.previous_serial().unwrap_or_else(|| grab.serial());
+
+        // Both devices are tested before either is taken. Anvil checks them
+        // one at a time and calls `ungrab` from the middle, which can leave a
+        // keyboard grab already installed for a chain that was then dismissed;
+        // it recovers on the next key, but there is no reason to enter that
+        // state. The case this refuses in practice is a client asking for a
+        // menu grab while one of Solium's own grabs is running — a window
+        // being dragged by `MoveGrab` or resized by `ResizeGrab` — where
+        // handing the pointer to a popup would abandon the drag mid-motion.
+        let keyboard_free = keyboard.as_ref().is_none_or(|keyboard| {
+            may_grab(
+                keyboard.is_grabbed(),
+                keyboard.has_grab(serial),
+                keyboard.has_grab(chain),
+            )
+        });
+        let pointer_free = pointer.as_ref().is_none_or(|pointer| {
+            may_grab(
+                pointer.is_grabbed(),
+                pointer.has_grab(serial),
+                pointer.has_grab(chain),
+            )
+        });
+        if !(keyboard_free && pointer_free) {
+            // `grab_popup` has already recorded this popup in the seat's grab
+            // chain, so declining now means undoing that — otherwise the next
+            // popup would be told its parent holds a grab that nothing is
+            // servicing. `All` rather than `Topmost` because the chain this
+            // one was appended to is being abandoned with it.
+            grab.ungrab(PopupUngrabStrategy::All);
+            tracing::debug!("refused a popup grab: a device is grabbed by something else");
+            return;
+        }
+
+        if let Some(keyboard) = keyboard {
+            // Keyboard before pointer, and the order matters. Installing the
+            // pointer grab runs the *previous* pointer grab's `unset`, which
+            // for a parent popup's `PopupPointerGrab` tries to take the
+            // keyboard grab off again. It only does so if the keyboard grab's
+            // serial is the parent's, so setting ours first is what makes a
+            // submenu keep the keyboard instead of handing it back to the
+            // window while its menu is still open.
+            let focus = grab.current_grab();
+            keyboard.set_focus(self, focus.clone(), serial);
+            // Solium moves the selection focus with the keyboard focus
+            // everywhere else it sets one — see `focus_window` — and a menu
+            // opened from an unfocused window is exactly the case where the
+            // two would otherwise part company: the popup would take the
+            // keyboard while the clipboard still answered to whoever had it
+            // before. Both are per-client, so for the ordinary case of a menu
+            // in the already-focused window this changes nothing.
+            self.focus_selection(focus.as_ref());
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+        if let Some(pointer) = pointer {
+            // `Focus::Keep`, not `Focus::Clear` as Solium's move and resize
+            // grabs use: those want the pointer to stop pointing at anything
+            // for the duration, whereas a menu is being pointed *at* and must
+            // keep receiving enter/motion so its entries highlight.
+            pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        }
+    }
 
     /// A window asking for the whole screen.
     ///
@@ -4241,21 +4405,151 @@ impl XdgShellHandler for Solium {
         );
     }
 
+    /// A popup asking to be moved — a submenu re-anchoring as the pointer
+    /// walks down its parent, or a reactive popup whose window has moved.
+    ///
+    /// Through `place_popup` for the same reason `new_popup` is: this used to
+    /// take the positioner's raw geometry, so a submenu that opened inside the
+    /// screen and then repositioned towards an edge was pushed off it by the
+    /// very request meant to keep it visible.
     fn reposition_request(
         &mut self,
         surface: PopupSurface,
         positioner: PositionerState,
         token: u32,
     ) {
-        surface.with_pending_state(|state| {
-            state.geometry = positioner.get_geometry();
-            state.positioner = positioner;
-        });
+        self.place_popup(&surface, positioner);
         surface.send_repositioned(token);
     }
 }
 
+/// Whether a popup grab may take a device that something already holds.
+///
+/// The three arguments are what the seat can answer about one device: whether
+/// it is grabbed at all, whether the grab's serial is the one this popup is
+/// being grabbed with, and whether it is the serial of the parent popup's
+/// grab. A free device is takeable; so is one already held by this chain,
+/// which is the submenu case and the common one. Anything else belongs to
+/// somebody — one of Solium's own move or resize grabs, or another client's
+/// menu — and the request is declined.
+///
+/// Booleans rather than the handles themselves so the rule can be tested
+/// without a seat, a client and a live popup, none of which exist in a unit
+/// test. See `a_grab_held_by_a_stranger_is_refused`.
+const fn may_grab(grabbed: bool, this_popup: bool, its_parent: bool) -> bool {
+    !grabbed || this_popup || its_parent
+}
+
+/// The rectangle a popup has to stay inside, in the coordinates its positioner
+/// speaks.
+///
+/// A positioner's geometry is relative to the *parent surface's* window
+/// geometry, and the screen is in the compositor's coordinates, so the two
+/// have to be brought together before `get_unconstrained_geometry` can compare
+/// them. Two translations separate them: where the root toplevel's window
+/// geometry sits on the desktop, and — for a submenu — how far down the chain
+/// of parent popups this one hangs.
+///
+/// Expressed as a subtraction from the screen rather than an addition to the
+/// popup because the popup's position is the unknown: it is what the
+/// positioner is about to work out.
+fn popup_target(
+    screen: Rectangle<i32, Logical>,
+    root: Point<i32, Logical>,
+    parents: Point<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    Rectangle::new(screen.loc - root - parents, screen.size)
+}
+
 impl Solium {
+    /// Work out where a popup goes and put it in the pending state.
+    ///
+    /// The positioner is stored alongside the geometry because a *reactive*
+    /// popup is re-constrained later, when its window moves or the screen
+    /// changes, and the rules to re-run it with are the ones the client sent
+    /// with the original request.
+    ///
+    /// The unconstrained geometry when there is a screen to constrain
+    /// against, and the client's own placement when there is not — a popup
+    /// rooted in something that is not a mapped window, which today means a
+    /// layer surface's menu. That fallback is the behaviour this whole path
+    /// replaces, so the worst case is what every popup used to get.
+    fn place_popup(&self, surface: &PopupSurface, positioner: PositionerState) {
+        let geometry = match self.popup_screen(surface, positioner) {
+            Some(target) => positioner.get_unconstrained_geometry(target),
+            None => positioner.get_geometry(),
+        };
+        surface.with_pending_state(|state| {
+            state.positioner = positioner;
+            state.geometry = geometry;
+        });
+    }
+
+    /// The screen a popup must fit on, in its positioner's coordinates.
+    ///
+    /// The monitor under the popup's *anchor point* rather than the one its
+    /// window is mostly on. They differ exactly where it matters: a window
+    /// straddling two screens has a right-click menu that belongs to whichever
+    /// screen the pointer was over, and constraining it to the other one would
+    /// shove it back across the seam it was opened on.
+    fn popup_screen(
+        &self,
+        surface: &PopupSurface,
+        positioner: PositionerState,
+    ) -> Option<Rectangle<i32, Logical>> {
+        let popup = PopupKind::Xdg(surface.clone());
+        let root = find_popup_root_surface(&popup).ok()?;
+        let window = self.window_for(&root)?;
+        // `element_location` is the window *geometry* origin, which is the
+        // origin a positioner measures from — not the buffer origin, which for
+        // a client with its own shadows is a couple of dozen pixels up and
+        // left of it. `real_geometry` is that pairing, and `render.rs` places
+        // popups against the same point.
+        let real = self.real_geometry(&window)?;
+        let parents = get_popup_toplevel_coords(&popup);
+        let anchor = real.loc + parents + positioner.get_anchor_point();
+        let output = self.output_at(anchor)?;
+        let screen = self.space.output_geometry(&output)?;
+        Some(popup_target(screen, real.loc, parents))
+    }
+
+    /// Send a popup its first configure, so it can draw.
+    ///
+    /// The same omission `configure_layer` was written for, and with the same
+    /// consequence: xdg-shell forbids a client to attach a buffer before it
+    /// has been configured once, Smithay deliberately leaves the initial
+    /// configure to the compositor, and nothing here was sending one. A menu
+    /// was created, tracked, and then waited forever for an event that was
+    /// never coming — which is why Firefox's context menus did not merely
+    /// appear in the wrong place, they did not appear.
+    ///
+    /// It also matters to the placement above. `PopupKind::location`, which is
+    /// what the renderer positions a popup by, reads the *current* geometry,
+    /// and `current` is only taken from the client's ack — so until a
+    /// configure goes out, every popup's position stays at the default of
+    /// (0, 0) no matter what `place_popup` computed.
+    ///
+    /// On commit rather than at `new_popup` because that is what the protocol
+    /// says: the configure answers the surface's first commit. Sending one
+    /// earlier would carry a size the client had not finished asking for.
+    fn configure_popup(&mut self, surface: &WlSurface) {
+        // Only xdg popups. An input-method popup is positioned by the
+        // text-input protocol and has no configure of this kind.
+        let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface) else {
+            return;
+        };
+        if popup.is_initial_configure_sent() {
+            return;
+        }
+        if let Err(err) = popup.send_configure() {
+            // Not fatal, and not ours to retry: the two failures Smithay
+            // reports here are a client too old to be re-configured and a
+            // non-reactive positioner, both of which mean the popup keeps the
+            // geometry it already has.
+            tracing::warn!(?err, "could not configure a popup");
+        }
+    }
+
     /// Validate a client's request to start a drag.
     ///
     /// A client may only be dragged from a press it actually received: the
@@ -4832,5 +5126,129 @@ mod tests {
         let in_bleed = smithay::utils::Point::<f64, smithay::utils::Logical>::from((70.0, 120.0));
         assert!(canvas.to_f64().contains(in_bleed));
         assert!(!outer.to_f64().contains(in_bleed));
+    }
+
+    /// **#100, the Wayland half: a menu near a screen edge was drawn off it.**
+    ///
+    /// `new_popup` took the positioner as `_positioner` and dropped it, which
+    /// left Smithay's `get_geometry()` standing — anchor and gravity honoured,
+    /// `constraint_adjustment` ignored. This walks the arithmetic of the case
+    /// that produces: a window whose right edge is near the right edge of a
+    /// 1920-wide screen, and a context menu anchored at that edge opening
+    /// rightwards.
+    ///
+    /// Both directions are asserted. The first assertion is the bug — the
+    /// placement the old code produced is *outside* the screen — and the
+    /// second is the fix. Without the first, a `popup_target` that returned
+    /// something absurdly large would pass the test by making every placement
+    /// look fine.
+    ///
+    /// It is a unit test of arithmetic rather than of `place_popup`, because
+    /// `place_popup` needs a live `PopupSurface`, which needs a client. What
+    /// it does pin is the part that was wrong: the translation between the
+    /// compositor's coordinates and the positioner's, which is `popup_target`,
+    /// and the fact that we ask for the *unconstrained* geometry.
+    #[test]
+    fn a_menu_at_the_screen_edge_is_flipped_back_onto_it() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_positioner::{
+            Anchor, ConstraintAdjustment, Gravity,
+        };
+
+        let screen = at(0, 0, 1920, 1080);
+        // A window whose right edge is at x = 1900, twenty pixels short of the
+        // screen's.
+        let window = at(1400, 100, 500, 800);
+
+        // What a toolkit sends for a menu hung off a control near that edge:
+        // anchored on the right of a small widget, opening rightwards, and
+        // allowed to flip on either axis if that does not fit.
+        let positioner = PositionerState {
+            rect_size: (200, 300).into(),
+            anchor_rect: at(450, 200, 10, 10),
+            anchor_edges: Anchor::Right,
+            gravity: Gravity::Right,
+            constraint_adjustment: ConstraintAdjustment::FlipX | ConstraintAdjustment::FlipY,
+            ..PositionerState::default()
+        };
+
+        // No parent popups: this menu hangs off the toplevel itself.
+        let parents = Point::<i32, Logical>::from((0, 0));
+        let target = popup_target(screen, window.loc, parents);
+
+        // The placement before the fix, in compositor coordinates.
+        let unconstrained = positioner.get_geometry();
+        let on_screen = |geometry: Rectangle<i32, Logical>| {
+            Rectangle::new(window.loc + parents + geometry.loc, geometry.size)
+        };
+        assert!(
+            !screen.contains_rect(on_screen(unconstrained)),
+            "the test case has stopped reaching off the screen, so it no \
+             longer pins anything: {:?}",
+            on_screen(unconstrained)
+        );
+
+        // And after it.
+        let constrained = positioner.get_unconstrained_geometry(target);
+        assert!(
+            screen.contains_rect(on_screen(constrained)),
+            "a popup that was allowed to flip is still off the screen: {:?}",
+            on_screen(constrained)
+        );
+        // Flipped rather than merely shrunk: the size the client asked for is
+        // the size it gets, which is the difference between a menu with its
+        // entries in it and a menu with a scrollbar.
+        assert_eq!(constrained.size, positioner.rect_size);
+    }
+
+    /// A submenu is measured from its parent popup, not from the window.
+    ///
+    /// `get_popup_toplevel_coords` is the second of the two translations in
+    /// `popup_target`, and it is the one with nothing else to catch it: a
+    /// first-level menu has a zero offset, so dropping the term entirely would
+    /// leave every test that uses one passing. The screen a submenu is
+    /// constrained against has to be moved by how far down the chain it hangs,
+    /// or the deeper it goes the more room it thinks it has.
+    #[test]
+    fn a_submenu_is_offset_by_the_chain_above_it() {
+        let screen = at(0, 0, 1920, 1080);
+        let root = Point::<i32, Logical>::from((1400, 100));
+        let parents = Point::<i32, Logical>::from((250, 60));
+
+        let direct = popup_target(screen, root, (0, 0).into());
+        let nested = popup_target(screen, root, parents);
+
+        assert_eq!(nested.loc, direct.loc - parents);
+        assert_eq!(nested.size, screen.size);
+        // A point that is the top-left of the screen in compositor
+        // coordinates is the top-left of the target in either popup's own.
+        assert_eq!(root + parents + nested.loc, screen.loc);
+    }
+
+    /// **The refusal path a stale serial takes.**
+    ///
+    /// A client may ask for a popup grab with any serial it likes, including
+    /// one from an event that is long gone or one it never received. The
+    /// compositor's answer has to be "no" — `grab` declines and returns —
+    /// rather than an assertion or an unwrap, because there is nothing above a
+    /// compositor to restart it.
+    ///
+    /// `may_grab` is the half of that decision that can be pinned without a
+    /// client: the seat answers three booleans about a device and this decides
+    /// whether a popup may take it. The other half — `grab_popup` returning
+    /// `Err` for a popup that is already mapped, orphaned, or not the topmost
+    /// — is Smithay's, and `grab` handles it by logging and returning; see the
+    /// `match` there.
+    #[test]
+    fn a_grab_held_by_a_stranger_is_refused() {
+        // Nothing holds the device: the ordinary case, a menu opening while
+        // the compositor is idle.
+        assert!(may_grab(false, false, false));
+        // This chain already holds it. A submenu opening inside its parent's
+        // grab arrives here, and refusing it would break every nested menu.
+        assert!(may_grab(true, true, false));
+        assert!(may_grab(true, false, true));
+        // Somebody else holds it -- one of Solium's own move or resize grabs,
+        // or a serial this client made up. Declined.
+        assert!(!may_grab(true, false, false));
     }
 }
