@@ -1430,10 +1430,16 @@ fn cursor(
         // is the only thing smithay will put on the DRM cursor plane, so on the
         // GPU path Qt draws into a dmabuf and `cursor.rs` reads it straight
         // back out into one. See `cursor::Backing`, where that trade is argued.
-        CursorImageStatus::Named(_) => state
+        // A themed cursor is a memory buffer too, from a file rather than from
+        // Qt, so it reaches the plane by the same route.
+        //
+        // The name is passed along now rather than discarded: it picks a cursor
+        // out of the configured XCursor theme, and the QML pointer that used to
+        // be the only answer here is what is drawn when there is no theme or
+        // the theme has nothing under that name. See `cursor::Pointer::element`.
+        CursorImageStatus::Named(icon) => state
             .pointer
-            .art()
-            .and_then(|cursor| cursor.element(renderer, location, scale))
+            .element(renderer, icon, location, scale)
             .into_iter()
             .collect(),
     }

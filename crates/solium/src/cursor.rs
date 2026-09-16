@@ -1,15 +1,25 @@
 //! The pointer.
 //!
-//! Two cases, and both have to work. A client that sets its own cursor gets it
-//! drawn — an I-beam over text, a resize arrow on an edge — and everything else
-//! gets ours, drawn from QML through the same design system as the window
-//! frames, so the pointer belongs to the same look as the rest.
+//! Three cases now, and all three have to work. A client that sets its own
+//! cursor gets it drawn — an I-beam over text, a resize arrow on an edge.
+//! Everything else gets a cursor from the configured XCursor theme, so that
+//! the pointer matches what every other application on the machine draws; see
+//! [`theme`], which is where that arrived and why. And when there is no theme
+//! — none configured, none in the environment, or a name nothing on disk
+//! answers to — everything else gets *ours*, drawn from QML through the same
+//! design system as the window frames.
 //!
-//! Nested, none of this existed: the host compositor drew the cursor over our
-//! window and we never had to think about it. On the hardware nothing else
-//! will, and an invisible pointer is not a cosmetic problem — it is
+//! **The QML pointer is not a fallback that was left lying around; it is the
+//! floor.** It is deliberate, it is what a session with no theme configured
+//! shows, and it is the only arm here that cannot fail for want of a file on
+//! disk. Nested, none of this existed: the host compositor drew the cursor
+//! over our window and we never had to think about it. On the hardware nothing
+//! else will, and an invisible pointer is not a cosmetic problem — it is
 //! indistinguishable from input being dead, which is exactly how it was
-//! reported the first time this ran on a real screen.
+//! reported the first time this ran on a real screen. A machine with no cursor
+//! themes installed must end up at the QML pointer, never at nothing.
+
+pub(crate) mod theme;
 
 use std::path::PathBuf;
 
@@ -26,7 +36,7 @@ use smithay::{
             gles::GlesRenderer,
         },
     },
-    input::pointer::CursorImageStatus,
+    input::pointer::{CursorIcon, CursorImageStatus},
     utils::{Logical, Point, Rectangle, Transform},
 };
 
@@ -38,10 +48,7 @@ use crate::{
     render::Element,
 };
 
-/// How big the cursor image is, in logical pixels.
-const SIZE: i32 = 24;
-
-/// Where the point of the arrow is within that image.
+/// Where the point of the arrow is within the QML image.
 ///
 /// The arrow is drawn with its tip in the top-left corner, so the buffer is
 /// placed at the pointer position directly. Kept named rather than assumed,
@@ -144,6 +151,14 @@ enum Backing {
 pub(crate) struct Cursor {
     scene: qml::Scene,
     backing: Backing,
+    /// How big it is, in **logical** pixels — the resolved setting, not a
+    /// constant, since `config.lua` and `XCURSOR_SIZE` can both name it. See
+    /// [`theme::Settings`].
+    ///
+    /// Logical, and multiplied by each output's scale in [`Cursor::element`]
+    /// through [`theme::pixels`]; the same function the themed path uses, so
+    /// the two pointers cannot disagree about how big a pointer is.
+    size: i32,
     /// One uploadable buffer per device size the pointer has been asked for.
     ///
     /// Keyed on one edge because a pointer is square. The window frames use the
@@ -173,28 +188,42 @@ pub(crate) struct Cursor {
 }
 
 impl Cursor {
-    pub(crate) fn new() -> Result<Self> {
+    /// `size` is logical pixels; see [`Cursor::size`].
+    pub(crate) fn new(size: i32) -> Result<Self> {
         qml::start()?;
-        // `SIZE` square to begin with, which at 1x is also the size it stays.
+        // `size` square to begin with, which at 1x is also the size it stays.
         // It is *not* a scene that is never resized, whatever its buffer being
         // one picture might suggest: 24 is 24 *logical* pixels, so the pointer
         // crossing onto a 2x monitor needs a 48-pixel one and the GPU path
         // rebinds onto a new buffer to get it. See `Cursor::element`.
-        let scene = qml::Scene::for_host(&qml_path(), SIZE, SIZE, None)?;
+        let scene = qml::Scene::for_host(&qml_path(), size, size, None)?;
         Ok(Self {
             scene,
             backing: if qml::on_gpu() {
                 // The size the scene really is, unlike the shell surfaces:
                 // there is nothing to discover about a pointer's size, so it is
                 // allocated right the first time and only a new scale moves it.
-                Backing::Gpu(Gpu::new((SIZE, SIZE)))
+                Backing::Gpu(Gpu::new((size, size)))
             } else {
                 Backing::Memory
             },
+            size,
             buffers: Kept::keeping(KEPT),
             drawing: Said::default(),
             uploading: Said::default(),
         })
+    }
+
+    /// Draw at a different logical size from now on, after a reload.
+    ///
+    /// Nothing is thrown away and nothing needs to be. `buffers` is keyed on
+    /// the *device* edge, and the pixels for a 48-pixel pointer are the same
+    /// 48-pixel pointer whether they came from 24 logical at 2x or 48 logical
+    /// at 1x — `cursor.qml` has no size-dependent content. What changes is the
+    /// logical size those pixels are drawn at, and that is read from here
+    /// fresh on every call rather than cached anywhere.
+    fn set_size(&mut self, size: i32) {
+        self.size = size;
     }
 
     /// The cursor as something to draw, at `location`.
@@ -214,16 +243,17 @@ impl Cursor {
         location: Point<f64, Logical>,
         scale: f64,
     ) -> Option<Element> {
-        // 24 logical pixels, whatever the monitor is. On a 2x display that is
-        // a 48-pixel image, and drawing the 24-pixel one there would leave a
-        // pointer a quarter of the size it should be -- which on a HiDPI panel
-        // is a pointer you cannot find, and this module exists because an
-        // invisible pointer reads as input being dead.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a cursor is 24 logical pixels"
-        )]
-        let edge = ((f64::from(SIZE) * scale).round() as i32).max(1);
+        // `self.size` logical pixels, whatever the monitor is. On a 2x display
+        // that is twice as many device pixels, and drawing the 1x image there
+        // would leave a pointer a quarter of the size it should be -- which on
+        // a HiDPI panel is a pointer you cannot find, and this module exists
+        // because an invisible pointer reads as input being dead.
+        //
+        // Through `theme::pixels` rather than multiplied here, so that the QML
+        // pointer and a themed one cannot end up disagreeing about how big a
+        // pointer is at a given scale. That function is where the reasoning
+        // for keeping the setting logical lives.
+        let edge = theme::pixels(self.size, scale);
 
         // Anything kept is the *previous* picture when Qt has something new,
         // and the render below is about to spend the flag that says so. The
@@ -278,10 +308,10 @@ impl Cursor {
             (location.y - f64::from(HOTSPOT.1)) * scale,
         );
 
-        // The whole buffer in its own pixels, mapped down to 24 logical
-        // pixels, which the output scale takes back up to `held`. When `held`
-        // is `edge` — every case but a frozen scene — those two are the same
-        // number, which is also what `copy_element_to_cursor_bo` requires
+        // The whole buffer in its own pixels, mapped down to `self.size`
+        // logical pixels, which the output scale takes back up to `held`. When
+        // `held` is `edge` — every case but a frozen scene — those two are the
+        // same number, which is also what `copy_element_to_cursor_bo` requires
         // before it will use the plane's fast path: it refuses any element
         // whose src and drawn size disagree.
         let source = Rectangle::from_size((f64::from(held), f64::from(held)).into());
@@ -291,7 +321,7 @@ impl Cursor {
             buffer,
             None,
             Some(source),
-            Some((SIZE, SIZE).into()),
+            Some((self.size, self.size).into()),
             Kind::Cursor,
         );
         match uploaded {
@@ -488,6 +518,26 @@ fn qml_path() -> PathBuf {
     crate::assets::qml().join("cursor.qml")
 }
 
+/// Whether the configured theme has been looked for yet, and what came back.
+///
+/// `Missing` is a settled answer and not a retry. A theme that is not
+/// installed will not appear part-way through a session, and walking the whole
+/// icon search path — every inherited theme, every directory in
+/// `XCURSOR_PATH` — to find that out again on every frame is how a pointer
+/// turns into a syscall storm. `configure` is the only thing that puts this
+/// back to `Unasked`, and only when the theme's *name* changed.
+#[derive(Debug, Default)]
+enum Loaded {
+    #[default]
+    Unasked,
+    /// No theme configured, or the configured one is not installed. Either
+    /// way, the QML pointer is what gets drawn.
+    Missing,
+    /// Boxed because it carries a cache of rasterised cursors and the other
+    /// two arms are empty; an enum is as big as its widest one.
+    Theme(Box<theme::Theme>),
+}
+
 /// The pointer as the compositor holds it: what to show, and what to draw it
 /// with.
 ///
@@ -498,23 +548,262 @@ fn qml_path() -> PathBuf {
 pub(crate) struct Pointer {
     /// What the pointer should look like, as clients and Smithay set it.
     pub(crate) status: CursorImageStatus,
+    /// The theme and size, after `config.lua`, the environment and the
+    /// built-in default have been consulted in that order. See
+    /// [`theme::Settings::resolve`], which is where that order is argued.
+    settings: theme::Settings,
+    /// The theme's cursors, looked for once. See [`Loaded`].
+    loaded: Loaded,
     art: Option<Cursor>,
     /// Set once QML has failed, so a broken scene costs one error and not one
     /// per frame for the life of the session.
     unavailable: bool,
+    /// Whether uploading a *themed* cursor has failed and said so.
+    ///
+    /// Separate from `Cursor::uploading` next door for the reason that one is
+    /// separate from `Cursor::drawing`: these are two different failures with
+    /// two different causes, and a shared latch means whichever happens second
+    /// is the one nobody ever hears about.
+    theming: Said,
 }
 
 impl Default for Pointer {
     fn default() -> Self {
         Self {
             status: CursorImageStatus::default_named(),
+            // Resolved from the environment straight away, rather than waiting
+            // for `sol.cursor`. `lua/init.lua` does call it, but a user who
+            // copied `init.lua` into ~/.config/solium before this setting
+            // existed has one that does not — and `XCURSOR_THEME` being
+            // honoured must not depend on a line in a file they wrote last
+            // year. Two `env::var` calls; the theme itself is still lazy.
+            settings: theme::Settings::resolve(
+                &theme::Configured::default(),
+                &theme::Environment::read(),
+            ),
+            loaded: Loaded::Unasked,
             art: None,
             unavailable: false,
+            theming: Said::default(),
         }
     }
 }
 
 impl Pointer {
+    /// Apply what the configuration said, over what the environment says.
+    ///
+    /// Called from `Command::Cursor`, so it runs again on every
+    /// `super+shift+r`. Doing nothing when nothing changed matters: this is
+    /// reached on every reload, and re-loading the theme would throw away
+    /// every rasterised cursor to arrive back at the same ones.
+    pub(crate) fn configure(
+        &mut self,
+        configured: &theme::Configured,
+        environment: &theme::Environment,
+    ) {
+        let settings = theme::Settings::resolve(configured, environment);
+        if settings == self.settings {
+            return;
+        }
+        tracing::debug!(
+            theme = settings.theme.as_deref().unwrap_or("<none: Solium's own>"),
+            size = settings.size,
+            "pointer"
+        );
+        // Only a different *name* is worth looking for again. A size change
+        // does not invalidate a theme — `Theme` keys its cache on the device
+        // size too, so the new size simply misses and the old entries stay
+        // useful for whichever monitor is still asking for them.
+        if settings.theme != self.settings.theme {
+            self.loaded = Loaded::Unasked;
+            // A new theme is new news: whatever the old one's cursors failed
+            // to do, the next failure is worth hearing about again.
+            self.theming.worked();
+        }
+        if let Some(art) = self.art.as_mut() {
+            art.set_size(settings.size);
+        }
+        self.settings = settings;
+    }
+
+    /// The pointer as something to draw, at `location` on an output at
+    /// `scale`.
+    ///
+    /// **Two arms, and the order between them is the whole feature.** A themed
+    /// cursor first, because that is the one that matches the rest of the
+    /// machine. Solium's own QML pointer second, and it is reached by every
+    /// route the first arm can fail by: no theme configured, a theme that is
+    /// not installed, a theme that has this cursor under no name it knows, a
+    /// cursor file that is malformed, an upload that was refused. None of
+    /// those is allowed to end in nothing being drawn.
+    pub(crate) fn element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        icon: CursorIcon,
+        location: Point<f64, Logical>,
+        scale: f64,
+    ) -> Option<Element> {
+        // Logical size times this output's scale, at the point of use. See
+        // `theme::pixels`.
+        let pixels = theme::pixels(self.settings.size, scale);
+        if let Some(element) = self.themed(renderer, icon, pixels, location, scale) {
+            return Some(element);
+        }
+        self.art()
+            .and_then(|cursor| cursor.element(renderer, location, scale))
+    }
+
+    /// The themed cursor for `icon` at `pixels` device pixels, if there is
+    /// one.
+    ///
+    /// Returns `None` rather than complaining for every ordinary way of not
+    /// having one — those are diagnosed once each, where they happen, in
+    /// [`theme::Theme`]. The `warn!` here is for the one case that is a real
+    /// fault: a cursor that was found and rasterised and then would not
+    /// upload.
+    fn themed(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        icon: CursorIcon,
+        pixels: i32,
+        location: Point<f64, Logical>,
+        scale: f64,
+    ) -> Option<Element> {
+        // Taken out by value rather than held as a borrow, so that the `Said`
+        // below is still reachable. The buffer is an `Arc` and an id behind
+        // that derive, so the clone is a refcount and shares the imported
+        // texture with the copy the theme keeps — not a second image.
+        let (size, hotspot, buffer) = {
+            let ready = self.ready(icon, pixels)?;
+            (ready.size, ready.hotspot, ready.buffer.clone())
+        };
+
+        // `scale` is divided by below, and a division is not a place to take an
+        // output's word for anything: a zero or a NaN would make the quotient
+        // infinite and the cast saturate to a two-billion-pixel logical size.
+        // `theme::pixels` guards its own multiplication for the same reason.
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+
+        // Both in device pixels, and the hotspot is already in the image's own
+        // pixels, so it is subtracted *after* the scale rather than through
+        // it — unlike the QML pointer's, which is logical because it is a
+        // constant we wrote. Getting this backwards puts every I-beam and
+        // every resize arrow a few pixels off what it points at, which is
+        // maddening to use and almost impossible to see in a screenshot.
+        let position = (
+            location.x * scale - f64::from(hotspot.0),
+            location.y * scale - f64::from(hotspot.1),
+        );
+
+        // Drawn one device pixel per image pixel, which is why the logical
+        // size below is the image's size divided back out by the scale rather
+        // than `self.settings.size`. A theme has the sizes its author drew: ask
+        // for 48 from a theme that only has 32 and this draws the 32 at its own
+        // size instead of stretching it, which is what libxcursor, wlroots and
+        // every other consumer of these files do.
+        //
+        // It is also what keeps the hardware cursor plane reachable *when the
+        // arithmetic comes out even*, which is the honest version of that
+        // claim: `copy_element_to_cursor_bo` refuses any element whose source
+        // and drawn sizes disagree, and `round(edge / scale) * scale` is `edge`
+        // exactly at integer scales and at any fractional scale the theme has a
+        // matching size for. A 32-pixel image on a 1.5x output is the case
+        // where it does not come out even, and there the pointer composites
+        // rather than flying on the plane — a cost, not a fault, and visible
+        // only as a slightly busier frame.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "an image edge is at most SIZES.end() * MAX_SCALE; see theme::pixels"
+        )]
+        let logical = |edge: i32| ((f64::from(edge) / scale).round() as i32).max(1);
+        let source = Rectangle::from_size((f64::from(size.0), f64::from(size.1)).into());
+        let uploaded = MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            position,
+            &buffer,
+            None,
+            Some(source),
+            Some((logical(size.0), logical(size.1)).into()),
+            Kind::Cursor,
+        );
+        match uploaded {
+            Ok(element) => {
+                self.theming.worked();
+                Some(Element::Chrome(element))
+            }
+            Err(err) => {
+                self.theming.once(|| {
+                    tracing::warn!(
+                        ?err,
+                        cursor = icon.name(),
+                        "could not upload a themed cursor; falling back to Solium's own pointer. \
+                         Said once until one uploads again"
+                    );
+                });
+                None
+            }
+        }
+    }
+
+    /// The themed cursor for `icon` at `pixels`, or nothing.
+    ///
+    /// **This is the whole of the decision between the two pointers**, and it
+    /// is its own function because it needs no renderer: loading a theme and
+    /// turning an xcursor file into a `MemoryRenderBuffer` is a directory walk,
+    /// a file read and a memcpy. So the case that matters most here — a
+    /// machine with no cursor themes installed ending at Solium's own pointer
+    /// rather than at nothing — is assertable in a unit test with no GPU, no
+    /// Qt and no theme on disk, and the tests below assert it through this
+    /// exact call rather than through a re-implementation of it.
+    ///
+    /// `alt_names` are the legacy X11 spellings `cursor_icon` keeps for
+    /// exactly this purpose: a theme with `left_ptr` and no `default` is
+    /// ordinary rather than broken, and skipping them would make perfectly
+    /// good themes look as though they had no cursors at all.
+    fn ready(&mut self, icon: CursorIcon, pixels: i32) -> Option<&theme::Ready> {
+        self.load();
+        let Loaded::Theme(found) = &mut self.loaded else {
+            return None;
+        };
+        found.ready(icon.name(), icon.alt_names(), pixels)
+    }
+
+    /// Look for the configured theme, once. See [`Loaded`].
+    fn load(&mut self) {
+        if !matches!(self.loaded, Loaded::Unasked) {
+            return;
+        }
+        let Some(name) = self.settings.theme.clone() else {
+            // Not a failure and not worth a line: no theme configured and none
+            // in the environment is the default, and the QML pointer is what
+            // it means.
+            self.loaded = Loaded::Missing;
+            return;
+        };
+        match theme::Theme::load(&name) {
+            Some(found) => {
+                tracing::info!(theme = %name, size = self.settings.size, "cursor theme");
+                self.loaded = Loaded::Theme(Box::new(found));
+            }
+            None => {
+                // Loud, once, because this is a *named* theme that is not
+                // there — someone asked for it and is about to wonder why the
+                // pointer does not match the rest of their desktop. Loud and
+                // not fatal: the line below says what is drawn instead, and
+                // what is drawn instead is a visible pointer.
+                tracing::warn!(
+                    theme = %name,
+                    "no cursor theme by that name is installed; drawing Solium's own pointer"
+                );
+                self.loaded = Loaded::Missing;
+            }
+        }
+    }
+
     /// Our own arrow, built the first time it is needed.
     ///
     /// Built lazily because a compositor that cannot start QML should still
@@ -522,7 +811,7 @@ impl Pointer {
     /// to launch on a machine where the display is the only way to see why.
     pub(crate) fn art(&mut self) -> Option<&mut Cursor> {
         if self.art.is_none() && !self.unavailable {
-            match Cursor::new() {
+            match Cursor::new(self.settings.size) {
                 Ok(cursor) => self.art = Some(cursor),
                 Err(err) => {
                     tracing::error!(?err, "no cursor: the pointer will be invisible");
@@ -536,7 +825,79 @@ impl Pointer {
 
 #[cfg(test)]
 mod tests {
-    use super::{KEPT, Kept};
+    use smithay::input::pointer::CursorIcon;
+
+    use super::{KEPT, Kept, Loaded, Pointer, theme};
+
+    /// A configured theme that is not installed must end at Solium's own
+    /// pointer, and not at nothing.
+    ///
+    /// **This is the one that would have been a black screen.** The QML
+    /// pointer is the floor of this module — the header says why, and it is
+    /// the same reason the module exists at all — so the failure to guard
+    /// against is not "the theme did not load" but "the theme did not load and
+    /// nothing was drawn instead". `Pointer::element` has exactly two arms and
+    /// `ready` returning `None` is what sends it to the second; asserting on
+    /// that call is asserting on the real branch rather than on a copy of it.
+    ///
+    /// No GPU, no Qt and no theme on disk are needed to say this, which is the
+    /// point: a machine with no cursor themes installed at all is precisely
+    /// the machine this has to be true on.
+    #[test]
+    fn a_theme_that_will_not_load_falls_back_to_our_own_pointer() {
+        let mut pointer = Pointer::default();
+        pointer.configure(
+            &theme::Configured {
+                theme: Some(theme::NOT_INSTALLED.to_owned()),
+                size: Some(32),
+            },
+            &theme::Environment::default(),
+        );
+        assert_eq!(pointer.settings.size, 32, "the size is still honoured");
+        assert!(
+            pointer.ready(CursorIcon::Default, 32).is_none(),
+            "a theme that is not installed produced a themed cursor"
+        );
+        assert!(
+            matches!(pointer.loaded, Loaded::Missing),
+            "and it was not left to be looked for again on the next frame"
+        );
+    }
+
+    /// Configuring no theme at all is the default, and it is also the QML
+    /// pointer — not an error, and not a reason to go looking on disk.
+    #[test]
+    fn no_theme_configured_is_our_own_pointer() {
+        let mut pointer = Pointer::default();
+        pointer.configure(
+            &theme::Configured::default(),
+            &theme::Environment::default(),
+        );
+        assert_eq!(pointer.settings.theme, None);
+        assert!(pointer.ready(CursorIcon::Default, 24).is_none());
+    }
+
+    /// And the size that reaches the QML pointer is the configured one times
+    /// the output scale.
+    ///
+    /// `Cursor::element` cannot be called without Qt and a renderer, so what
+    /// is pinned is the arithmetic it does on its first line — through the
+    /// same function, so a change to one is a change to both. At 1x the bug
+    /// this guards is invisible, which is why the assertion that matters is
+    /// the 2x one.
+    #[test]
+    fn the_configured_size_reaches_the_qml_pointer_scaled() {
+        let mut pointer = Pointer::default();
+        pointer.configure(
+            &theme::Configured {
+                theme: None,
+                size: Some(32),
+            },
+            &theme::Environment::default(),
+        );
+        assert_eq!(theme::pixels(pointer.settings.size, 1.0), 32);
+        assert_eq!(theme::pixels(pointer.settings.size, 2.0), 64);
+    }
 
     /// The pointer's own use of the shared cache, at the pointer's own cap.
     ///
