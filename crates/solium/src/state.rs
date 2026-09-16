@@ -1408,9 +1408,28 @@ impl Solium {
     }
 
     /// The window with keyboard focus, if any.
+    ///
+    /// A focused *popup* answers with the window it belongs to, because that is
+    /// what everything asking this question means. A popup grab moves keyboard
+    /// focus onto the menu's own surface -- that is how a menu receives Escape
+    /// and arrow keys -- but `window_for` matches toplevels only, so without
+    /// this the answer would be `None` for as long as a menu is open.
+    ///
+    /// Three things read it and all three were wrong that way: a titlebar drew
+    /// unfocused on every right-click, `snapshot`'s `focused` went null so a
+    /// Lua layout saw no focused window, and `settle_focus` treated the gap as
+    /// "nothing is focused" and moved the selection. The menu is a part of its
+    /// window, not a rival to it.
     pub(crate) fn focused_window(&self) -> Option<Window> {
         let surface = self.seat.get_keyboard()?.current_focus()?;
-        self.window_for(&surface)
+        if let Some(window) = self.window_for(&surface) {
+            return Some(window);
+        }
+        // Only a popup has a root to find; for anything else this is the same
+        // `None` the line above already produced.
+        let popup = self.popups.find_popup(&surface)?;
+        let root = find_popup_root_surface(&popup).ok()?;
+        self.window_for(&root)
     }
 
     pub(crate) fn is_focused(&self, window: &Window) -> bool {
