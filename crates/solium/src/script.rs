@@ -276,6 +276,14 @@ pub(crate) enum Command {
     /// How a window behaves between being asked for and its application
     /// arriving. See `Loading`.
     Loading(Loading),
+    /// Which XCursor theme the pointer is drawn from, and how big it is.
+    ///
+    /// Carries what the *configuration* said and nothing else — `None` in a
+    /// field means "`config.lua` did not say", which is what lets
+    /// `XCURSOR_THEME` and `XCURSOR_SIZE` be consulted next. The precedence is
+    /// resolved in `cursor::theme::Settings::resolve`, not here, so that it is
+    /// in one place and testable without Lua.
+    Cursor(crate::cursor::theme::Configured),
 }
 
 /// What the compositor does with a window whose application has not connected.
@@ -1457,6 +1465,48 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Loading(loading.clone()));
+            })
+        })?,
+    )?;
+
+    // The pointer's XCursor theme and its size, in logical pixels.
+    //
+    // A table, the same shape as `sol.loading` above and for the same reason:
+    // a setting added later does not change the call. What is *different* is
+    // what an absent key means. `sol.loading` leaves the compositor's default
+    // standing; here an absent key means "the configuration did not say", and
+    // the environment gets its turn -- `XCURSOR_THEME` and `XCURSOR_SIZE` are
+    // what every other application on this machine follows, so a compositor
+    // that overwrote them with defaults of its own would be the one thing on
+    // screen drawing a different pointer. The order is resolved in
+    // `cursor::theme::Settings::resolve`, which is where it is written down.
+    //
+    // Takes effect immediately, so `super+shift+r` is how a theme is tried.
+    sol.set(
+        "cursor",
+        lua.create_function(|lua, options: mlua::Table| {
+            let mut configured = crate::cursor::theme::Configured::default();
+            // `theme` read as a `Value` and matched rather than as an
+            // `Option<String>`: mlua *errors* on anything that is not
+            // string-like instead of answering None, and the `?` would take
+            // the whole handler down with it -- which is how bezier easings
+            // once silently stopped working. Same reasoning as `scene` above.
+            if let Ok(Value::String(name)) = options.get::<Value>("theme")
+                && let Ok(name) = name.to_str()
+                && !name.is_empty()
+            {
+                configured.theme = Some(name.to_string());
+            }
+            // A size out of range is not refused here. `Settings::resolve` is
+            // the one place that decides what a size that is not a size means,
+            // and it needs to see it to fall through to the environment rather
+            // than to a clamp -- a second opinion in this line would agree
+            // with it today and be free to drift.
+            if let Some(size) = options.get::<Option<i32>>("size")? {
+                configured.size = Some(size);
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Cursor(configured.clone()));
             })
         })?,
     )?;
@@ -2675,6 +2725,95 @@ mod tests {
             Some("nil"),
             "and the old key does not survive into the configuration table"
         );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A configured cursor theme and size reach the compositor as written.
+    ///
+    /// The wiring between `sol.cursor` and `Command::Cursor`, which is the one
+    /// part of the cursor work that no test in `cursor.rs` can reach: that
+    /// module's tests start from a `Configured` that they built themselves.
+    #[test]
+    fn a_configured_cursor_theme_reaches_the_compositor() {
+        let directory = std::env::temp_dir().join("solium-script-test-cursor");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+C", function()
+                sol.cursor({ theme = "Fixture", size = 40 })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+c", empty_snapshot());
+        assert!(outcome.handled);
+        match outcome.commands.as_slice() {
+            [Command::Cursor(configured)] => {
+                assert_eq!(configured.theme.as_deref(), Some("Fixture"));
+                assert_eq!(configured.size, Some(40));
+            }
+            other => panic!("expected one cursor command, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The shipped `config.lua` says nothing about the cursor, and that is
+    /// the setting.**
+    ///
+    /// The one property of this configuration surface that a plausible-looking
+    /// edit would destroy without failing anything else. `cursor = {}` is not
+    /// an empty placeholder waiting to be filled in with sensible defaults:
+    /// writing `cursor = { size = 24 }` there would make the configuration
+    /// *always* have an opinion, `XCURSOR_SIZE` would never be reached, and
+    /// the precedence tests in `cursor::theme` would all still pass because
+    /// they never read this file.
+    ///
+    /// Runs the shipped `config.lua` rather than a copy, the same way the
+    /// old-key test above does and with the same guard on a real
+    /// `~/.config/solium`, which would otherwise answer first.
+    #[test]
+    fn the_shipped_configuration_leaves_the_cursor_to_the_environment() {
+        let Some(own) = Scripts::user_config_dir() else {
+            return;
+        };
+        if own.join("user.lua").exists() || own.join("config.lua").exists() {
+            return;
+        }
+
+        let directory = std::env::temp_dir().join("solium-script-test-cursor-default");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            local config = require("config")
+            sol.bind("Super+C", function()
+                sol.cursor(config.cursor)
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+c", empty_snapshot());
+        assert!(outcome.handled);
+        match outcome.commands.as_slice() {
+            [Command::Cursor(configured)] => assert_eq!(
+                configured,
+                &crate::cursor::theme::Configured::default(),
+                "the shipped config.lua names a cursor theme or size, so XCURSOR_THEME and \
+                 XCURSOR_SIZE can never win"
+            ),
+            other => panic!("expected one cursor command, got {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(&directory);
     }

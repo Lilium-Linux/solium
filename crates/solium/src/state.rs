@@ -1968,6 +1968,22 @@ impl Solium {
                         self.loading = loading;
                     }
                 }
+                Command::Cursor(configured) => {
+                    // The environment is re-read here rather than cached at
+                    // startup, because this also runs on `super+shift+r` and a
+                    // reload is the one moment a session can pick up an
+                    // `XCURSOR_THEME` that was exported after the compositor
+                    // started. Two `env::var` calls per reload.
+                    //
+                    // Nothing is redrawn from here and nothing needs to be: the
+                    // pointer is rebuilt for every output on every frame (see
+                    // `render::cursor`), and pointer motion brings its own
+                    // frames. `Pointer::configure` does nothing at all when
+                    // the answer is the same as last time, which on a reload
+                    // that changed a keybinding is every time.
+                    self.pointer
+                        .configure(&configured, &crate::cursor::theme::Environment::read());
+                }
                 Command::Decoration { name } => {
                     // The slots windows occupy are kept; what changes is how
                     // much of each slot the frame takes, so every client is

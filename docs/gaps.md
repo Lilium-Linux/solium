@@ -97,7 +97,7 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 | [#80](https://github.com/Lilium-Linux/solium/issues/80) runtime rotation | `transform` is read from the configuration at startup; a tablet cannot rotate when it is turned |
 | [#42](https://github.com/Lilium-Linux/solium/issues/42) absolute devices | a touchscreen is glued to the first monitor |
 | [#64](https://github.com/Lilium-Linux/solium/issues/64) suspend and resume | never tested. logind pauses and resumes the session's devices; whether Solium comes back is unknown |
-| [#81](https://github.com/Lilium-Linux/solium/issues/81) cursor themes | the pointer is drawn from QML, which is deliberate, but `XCURSOR_THEME` is what every other application on the machine follows and there is no way to match it |
+| [#81](https://github.com/Lilium-Linux/solium/issues/81) cursor themes | **closed.** `config.cursor` names an XCursor theme and a logical size; `XCURSOR_THEME` and `XCURSOR_SIZE` are followed where it says nothing; the QML pointer is still what is drawn when neither does, when the theme is not installed, or for a shape the theme has not got. Size is multiplied by each output's scale. What is *not* done is [#24](https://github.com/Lilium-Linux/solium/issues/24): shape names still arrive only through `CursorImageStatus::Named`, and `wp_cursor_shape_v1` would resolve through the same loader |
 
 ### Correctness and confidence
 
