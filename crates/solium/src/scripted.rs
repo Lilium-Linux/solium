@@ -364,7 +364,7 @@ pub(crate) fn find_scene(name: &str) -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let own = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml")).join(name);
+    let own = crate::assets::qml().join(name);
     own.is_file().then_some(own)
 }
 

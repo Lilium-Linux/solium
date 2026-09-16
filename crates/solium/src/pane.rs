@@ -769,7 +769,9 @@ pub(crate) fn loading_source(chosen: Option<&str>) -> PathBuf {
 }
 
 fn shipped(name: &str) -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/loading")).join(format!("{name}.qml"))
+    crate::assets::qml()
+        .join("loading")
+        .join(format!("{name}.qml"))
 }
 
 /// Expand a leading `~`, since this comes from an environment variable and

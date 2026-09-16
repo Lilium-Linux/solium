@@ -8,6 +8,7 @@
 // that reasoning does not apply to a test binary.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
+mod assets;
 mod capture;
 mod cursor;
 mod decoration;
@@ -198,6 +199,9 @@ fn main() -> Result<()> {
 
     log_panics();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting solium");
+    // Where this build's QML and Lua turned out to be, said once and early. If
+    // they are nowhere, this is the line that says so -- see `assets`.
+    assets::announce();
 
     // Nested when there is a compositor to nest in, on the hardware otherwise.
     // `--probe` reports what the hardware offers without taking it, which is
