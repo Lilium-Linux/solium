@@ -271,14 +271,16 @@ fn pointer_motion<B: InputBackend>(
 
     let under = state.surface_under(location);
 
-    // Over nothing of a client's, the cursor is the compositor's again. The
-    // status is whatever the last client set it to, and a client only sets it
-    // while the pointer is over its surface -- so without this the pointer
-    // keeps a cursor belonging to a window it has left, and once that surface
-    // is gone there is nothing to draw at all: an invisible pointer over the
-    // desktop, which is exactly where you need to see it.
+    // Over nothing of a client's, the cursor is the compositor's again -- the
+    // third of the three sources `cursor.rs`'s header sets out. The status is
+    // whatever the last client set it to, by either of its two mechanisms, and
+    // a client only sets it while the pointer is over its surface -- so
+    // without this the pointer keeps a cursor belonging to a window it has
+    // left, and once that surface is gone there is nothing to draw at all: an
+    // invisible pointer over the desktop, which is exactly where you need to
+    // see it.
     if under.is_none() {
-        state.pointer.status = CursorImageStatus::default_named();
+        state.pointer.show(CursorImageStatus::default_named());
     }
 
     pointer.motion(
@@ -333,7 +335,7 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
         // compositor's again. This is the path a real mouse takes, so leaving
         // it out is leaving it broken on the hardware and fixed nested.
         if under.is_none() {
-            state.pointer.status = CursorImageStatus::default_named();
+            state.pointer.show(CursorImageStatus::default_named());
         }
 
         // As in `pointer_motion`: while the session is locked, nothing of the

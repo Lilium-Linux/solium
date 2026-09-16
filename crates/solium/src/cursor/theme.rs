@@ -28,10 +28,14 @@
 //! how big, which of a file's several sizes, and — the part that matters most
 //! — what happens when the answer to any of those is "there isn't one".
 //!
-//! **Nothing here resolves `wp_cursor_shape_v1`.** That is #24 and the next
-//! phase. [`Theme::ready`] takes a plain name and a list of alternatives
-//! precisely so that phase has something to resolve a shape *through* rather
-//! than beside.
+//! **Nothing here resolves `wp_cursor_shape_v1`, and that is still the
+//! design.** #24 landed on top of this and put the resolving in
+//! [`super::shape`], which turns a named shape into an ordered list of
+//! spellings and asks [`Theme::has`] about each in turn. This module answers
+//! only "does this theme have a file called *that*". Which names to ask about
+//! is a question about the protocol and about X11's vocabulary, not about the
+//! theme, and keeping the two apart is what lets the whole shape-to-name
+//! mapping be asserted with no theme on disk at all.
 
 use std::collections::HashMap;
 
@@ -360,42 +364,36 @@ impl Theme {
         })
     }
 
-    /// The cursor called `name` — or, failing that, one of `alternatives` — at
-    /// `pixels` device pixels.
+    /// The cursor called exactly `name`, at `pixels` device pixels.
     ///
-    /// Two lists rather than one because they are not equal in standing.
-    /// `name` is the w3c name, which is what `wp_cursor_shape_v1` will speak
-    /// in #24 and what a theme written this decade uses; `alternatives` are the
-    /// legacy X11 names `cursor_icon` keeps for exactly this, and a theme with
-    /// `left_ptr` and no `default` is still common enough that skipping them
-    /// would make this feature look broken on perfectly ordinary desktops.
+    /// One name and no alternatives, because choosing between spellings is
+    /// [`super::shape`]'s job and not this one's: by the time a name reaches
+    /// here it is the one [`super::shape::resolve`] found this theme to have,
+    /// which is why the [`Theme::has`] call below is a cache hit rather than a
+    /// second directory walk.
     ///
-    /// Takes `&str` and not a `CursorIcon`, so that #24 has something to
-    /// resolve a shape *through*.
+    /// Takes `&str` and not a `CursorIcon` for the reason the module header
+    /// gives — a theme knows about files, not about protocol enumerations.
     ///
     /// `None` is an ordinary answer and not an error: it means this theme does
     /// not have this cursor, and the caller draws Solium's own instead.
-    pub(crate) fn ready(
-        &mut self,
-        name: &str,
-        alternatives: &[&str],
-        pixels: i32,
-    ) -> Option<&Ready> {
-        // Which name this theme actually has, resolved first and looked up
-        // second. One pass that both rasterised and returned a borrow would
-        // hold `self` mutably across the loop, and the loop has to be able to
-        // try the next name.
-        let mut found = None;
-        for candidate in std::iter::once(name).chain(alternatives.iter().copied()) {
-            if self.rasterised(candidate, pixels) {
-                found = Some(candidate.to_owned());
-                break;
-            }
+    pub(crate) fn ready(&mut self, name: &str, pixels: i32) -> Option<&Ready> {
+        // Resolved first and looked up second, rather than one pass that both
+        // rasterises and returns a borrow: `has` takes `&mut self` and the
+        // borrow it would leave behind outlives the `if`.
+        if !self.has(name, pixels) {
+            return None;
         }
-        self.ready.get(&(found?, pixels))?.as_ref()
+        self.ready.get(&(name.to_owned(), pixels))?.as_ref()
     }
 
     /// Whether this theme has `name` at `pixels`, doing the work once.
+    ///
+    /// **This is the predicate [`super::shape::resolve`] walks a chain of
+    /// spellings with**, which is why it is `pub(crate)` and separate from
+    /// [`Theme::ready`]: the caller has to be able to ask about four or five
+    /// names and take the first that answers, and a method that handed back a
+    /// borrow could only be asked once.
     ///
     /// Deliberately does not need a renderer, and that is what makes the
     /// fallback testable: turning an xcursor file into a `MemoryRenderBuffer`
@@ -403,7 +401,7 @@ impl Theme {
     /// cursor at this size" can be asked — and asserted, in a unit test, on a
     /// machine with no GPU and no cursor themes at all — without one. Only
     /// `Pointer::themed` needs a renderer, and only to upload.
-    fn rasterised(&mut self, name: &str, pixels: i32) -> bool {
+    pub(crate) fn has(&mut self, name: &str, pixels: i32) -> bool {
         let key = (name.to_owned(), pixels);
         if let Some(known) = self.ready.get(&key) {
             return known.is_some();
@@ -473,6 +471,10 @@ pub(crate) const NOT_INSTALLED: &str = "solium-test-theme-that-cannot-exist-4f2a
 
 #[cfg(test)]
 mod tests {
+    use smithay::input::pointer::CursorIcon;
+
+    use crate::cursor::shape;
+
     use super::{
         Configured, Environment, NOT_INSTALLED, Ready, SIZE, Settings, Theme, nearest, pixels,
     };
@@ -617,9 +619,10 @@ mod tests {
     /// subject is the disk has to say so rather than fail on a build box.
     ///
     /// What it is worth is that it is the only thing covering the *whole* disk
-    /// path in one go — search the icon directories, follow what a theme
-    /// inherits, read the file, pick a size, copy the bytes in the order DRM
-    /// wants them. Every other test here stubs one piece of that.
+    /// path in one go — resolve the shape's spellings, search the icon
+    /// directories, follow what a theme inherits, read the file, pick a size,
+    /// copy the bytes in the order DRM wants them. Every other test here and
+    /// in `super::shape` stubs one piece of that.
     #[test]
     fn an_installed_theme_hands_back_a_cursor() {
         // "default" is the redirect theme nearly every distribution installs
@@ -631,13 +634,40 @@ mod tests {
         else {
             return;
         };
+        // Through `shape::resolve` rather than a name picked here, so that this
+        // exercises the same walk a client naming a shape takes.
+        let name = shape::resolve(CursorIcon::Default, |candidate| found.has(candidate, 24))
+            .expect("an installed theme has an arrow under one of its names");
         let ready = found
-            .ready("default", &["left_ptr", "arrow"], 24)
-            .expect("an installed theme has an arrow under one of those names");
+            .ready(name, 24)
+            .expect("the name the walk just found is one this theme has");
         assert!(ready.size.0 > 0 && ready.size.1 > 0);
         // The hotspot is inside the image, which is the invariant a cursor
         // drawn at the wrong offset would break.
         assert!(ready.hotspot.0 <= ready.size.0 && ready.hotspot.1 <= ready.size.1);
+    }
+
+    /// And a real theme really does answer to a legacy spelling for a shape it
+    /// has never heard the modern name of.
+    ///
+    /// Machine-dependent and skipped the same way, and worth having anyway:
+    /// every other assertion about the fallback chain is against a closure we
+    /// wrote, so this is the only place the chain meets a directory of files
+    /// somebody else laid out. `Text` is the one to ask about because `xterm`
+    /// is present in effectively every theme ever shipped.
+    #[test]
+    fn an_installed_theme_answers_a_shape_under_whichever_name_it_has() {
+        let Some(mut found) = ["default", "Adwaita", "breeze_cursors"]
+            .into_iter()
+            .find_map(Theme::load)
+        else {
+            return;
+        };
+        let name = shape::resolve(CursorIcon::Text, |candidate| found.has(candidate, 24));
+        assert!(
+            name.is_some(),
+            "no spelling of the I-beam was found in an installed theme"
+        );
     }
 
     /// One image per nominal size, as a theme file holds them.

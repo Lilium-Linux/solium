@@ -1,13 +1,53 @@
 //! The pointer.
 //!
-//! Three cases now, and all three have to work. A client that sets its own
-//! cursor gets it drawn — an I-beam over text, a resize arrow on an edge.
-//! Everything else gets a cursor from the configured XCursor theme, so that
-//! the pointer matches what every other application on the machine draws; see
-//! [`theme`], which is where that arrived and why. And when there is no theme
-//! — none configured, none in the environment, or a name nothing on disk
-//! answers to — everything else gets *ours*, drawn from QML through the same
-//! design system as the window frames.
+//! # Three sources, and the precedence between them
+//!
+//! Something has to decide what the pointer looks like at any instant, and
+//! three different things are entitled to say. Listed in the order they
+//! arrive rather than in any order of rank:
+//!
+//! 1. **A client hands over pixels.** `wl_pointer.set_cursor` with a surface:
+//!    the client rasterised a cursor itself and we draw its buffer, hotspot
+//!    and all. `CursorImageStatus::Surface`, and `render.rs` draws it as a
+//!    surface tree rather than through this module.
+//! 2. **A client names a shape.** `wp_cursor_shape_device_v1.set_shape`: the
+//!    client says "this is a text field" and leaves the picture to us. smithay
+//!    hands it over as `CursorImageStatus::Named`, and what becomes of that
+//!    name is the rest of this module — see [`shape`], which turns it into
+//!    something a theme has a file under. **This is the arm that did not exist
+//!    before #24**, and its absence was not a degraded cursor but *no cursor
+//!    change at all*: a toolkit that only ever names shapes got the arrow over
+//!    a text field, over a resize edge, over everything.
+//! 3. **Nobody said, so the compositor's own.** Over the desktop, over a
+//!    frame, as soon as the pointer leaves a client — `input/mod.rs` puts
+//!    `Named(Default)` back, because a cursor belonging to a window the
+//!    pointer has left is a cursor that vanishes the moment that window
+//!    closes.
+//!
+//! **The precedence is last-writer-wins, and that is the protocol's rule
+//! rather than a shortcut of ours.** Both client-side sources are gated by
+//! smithay on the serial of the most recent `wl_pointer.enter` — `set_cursor`
+//! in `wayland/seat/pointer.rs` and `set_shape` in `wayland/cursor_shape.rs`
+//! call the same `allow_setting_cursor` — so a client can only speak while the
+//! pointer is genuinely over its surface. There is no contest between two
+//! clients to arbitrate, and ranking the two client mechanisms against each
+//! other would only let us disagree with a toolkit about which of its own two
+//! it meant. What *does* have to be guaranteed is that each write replaces the
+//! last **whole**, so that a client alternating between a named shape and its
+//! own buffer — ordinary enough: a toolkit naming `text` over a field and
+//! attaching a bitmap for a drag — never leaves a fragment of the previous one
+//! behind. That is [`Pointer::show`], the only writer, and
+//! [`Pointer::showing`], the only reader, which is also where a surface that
+//! has since died turns back into the compositor's arrow.
+//!
+//! # And underneath two of the three, two ways to draw a name
+//!
+//! Sources two and three both end in a *name*, and a name is drawn from the
+//! configured XCursor theme where there is one, so that the pointer matches
+//! what every other application on the machine draws; see [`theme`], which is
+//! where that arrived and why. When there is no theme — none configured, none
+//! in the environment, or a name nothing on disk answers to — a name is drawn
+//! from *ours*, from QML, through the same design system as the window frames.
 //!
 //! **The QML pointer is not a fallback that was left lying around; it is the
 //! floor.** It is deliberate, it is what a session with no theme configured
@@ -17,8 +57,11 @@
 //! else will, and an invisible pointer is not a cosmetic problem — it is
 //! indistinguishable from input being dead, which is exactly how it was
 //! reported the first time this ran on a real screen. A machine with no cursor
-//! themes installed must end up at the QML pointer, never at nothing.
+//! themes installed must end up at the QML pointer, never at nothing — and a
+//! *shape* the theme has never heard of must end up at the theme's own arrow
+//! before it ever gets that far, which is [`shape::resolve`].
 
+pub(crate) mod shape;
 pub(crate) mod theme;
 
 use std::path::PathBuf;
@@ -37,7 +80,7 @@ use smithay::{
         },
     },
     input::pointer::{CursorIcon, CursorImageStatus},
-    utils::{Logical, Point, Rectangle, Transform},
+    utils::{IsAlive as _, Logical, Point, Rectangle, Transform},
 };
 
 use crate::{
@@ -546,8 +589,17 @@ enum Loaded {
 /// module exists to have fixed.
 #[derive(Debug)]
 pub(crate) struct Pointer {
-    /// What the pointer should look like, as clients and Smithay set it.
-    pub(crate) status: CursorImageStatus,
+    /// What the pointer should look like, as of whichever of the three sources
+    /// spoke most recently. See the module header for what those are.
+    ///
+    /// **Private, and that is the point of this field rather than an
+    /// afterthought.** It is written only through [`Pointer::show`] and read
+    /// only through [`Pointer::showing`], so that "each source replaces the
+    /// last whole" and "a dead surface becomes the arrow" are two lines that
+    /// exist once instead of invariants every caller has to remember. It was
+    /// `pub(crate)` and assigned from four places before #24; a third source
+    /// writing to it is exactly the change that makes that untenable.
+    status: CursorImageStatus,
     /// The theme and size, after `config.lua`, the environment and the
     /// built-in default have been consulted in that order. See
     /// [`theme::Settings::resolve`], which is where that order is argued.
@@ -590,6 +642,53 @@ impl Default for Pointer {
 }
 
 impl Pointer {
+    /// Take what one of the three sources has just said the pointer is.
+    ///
+    /// **The only writer of `status`, and the whole of the precedence between
+    /// the three.** The precedence is that the most recent caller wins
+    /// outright, and the module header argues why that is the protocol's
+    /// answer rather than a convenient one; the *mechanism* is that this
+    /// assigns rather than merges, so nothing of the previous source survives
+    /// the call. A client that names `text` over its entry field and then
+    /// attaches a bitmap for a drag gets the bitmap and no trace of the
+    /// I-beam, and the same in reverse — which is the stale pointer this
+    /// replaces a scattering of direct assignments to prevent.
+    ///
+    /// Callers, one per source: `SeatHandler::cursor_image` in `state.rs`
+    /// carries both client-side ones (`Named` is `wp_cursor_shape_v1`, since
+    /// `wl_pointer.set_cursor` can only produce `Surface` or `Hidden`), and
+    /// the two motion handlers in `input/mod.rs` carry the compositor's own.
+    pub(crate) fn show(&mut self, image: CursorImageStatus) {
+        self.status = image;
+    }
+
+    /// What to draw this frame.
+    ///
+    /// **The only reader, because it is not a pure getter**: a client's cursor
+    /// surface can be destroyed while the pointer is still over that client,
+    /// and `render.rs` drawing a dead surface's tree produces no elements and
+    /// therefore no pointer at all. `input/mod.rs` already puts the arrow back
+    /// when the pointer *moves off* a client, which covers the ordinary case
+    /// and not this one: a window that dies under a stationary pointer leaves
+    /// nothing to draw and no motion to notice it with, and the session looks
+    /// like input has stopped. Downgrading here rather than watching for
+    /// surface destruction keeps it to one check on a path that already runs
+    /// every frame.
+    ///
+    /// Not unit-tested, and said plainly rather than covered over: a
+    /// `WlSurface` cannot be conjured without a display, and standing one up
+    /// inside the test binary is the process-global-state trap that has
+    /// aborted this suite before. What is testable is that the three sources
+    /// replace each other cleanly, and the tests below do that.
+    pub(crate) fn showing(&mut self) -> CursorImageStatus {
+        if let CursorImageStatus::Surface(surface) = &self.status
+            && !surface.alive()
+        {
+            self.status = CursorImageStatus::default_named();
+        }
+        self.status.clone()
+    }
+
     /// Apply what the configuration said, over what the environment says.
     ///
     /// Called from `Command::Cursor`, so it runs again on every
@@ -629,13 +728,25 @@ impl Pointer {
     /// The pointer as something to draw, at `location` on an output at
     /// `scale`.
     ///
+    /// `icon` reaches here from either of the two sources that end in a name —
+    /// a client's `wp_cursor_shape_v1.set_shape`, or the compositor's own
+    /// arrow — and nothing below distinguishes them, deliberately: a shape a
+    /// client named and a shape we named are the same request for the same
+    /// picture, and a session where the two were themed differently would be
+    /// the split-personality pointer this whole area exists to have closed.
+    ///
     /// **Two arms, and the order between them is the whole feature.** A themed
     /// cursor first, because that is the one that matches the rest of the
     /// machine. Solium's own QML pointer second, and it is reached by every
     /// route the first arm can fail by: no theme configured, a theme that is
-    /// not installed, a theme that has this cursor under no name it knows, a
-    /// cursor file that is malformed, an upload that was refused. None of
-    /// those is allowed to end in nothing being drawn.
+    /// not installed, a theme that has neither this cursor nor an arrow under
+    /// any name it knows, a cursor file that is malformed, an upload that was
+    /// refused. None of those is allowed to end in nothing being drawn.
+    ///
+    /// Note where the *shape* fallback sits relative to these two: it is
+    /// inside the first arm, not beside it. A shape the theme has not got
+    /// becomes the theme's own arrow in [`shape::resolve`] and never reaches
+    /// the second arm at all, so a themed session stays wholly themed.
     pub(crate) fn element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -760,16 +871,23 @@ impl Pointer {
     /// Qt and no theme on disk, and the tests below assert it through this
     /// exact call rather than through a re-implementation of it.
     ///
-    /// `alt_names` are the legacy X11 spellings `cursor_icon` keeps for
-    /// exactly this purpose: a theme with `left_ptr` and no `default` is
-    /// ordinary rather than broken, and skipping them would make perfectly
-    /// good themes look as though they had no cursors at all.
+    /// Which name to ask the theme for is [`shape`]'s answer and not this
+    /// function's: a shape names a *meaning*, an xcursor theme is a directory
+    /// of files named in X11's vocabulary, and the two do not line up
+    /// one-for-one. So this walks the chain `shape::resolve` produces — the
+    /// w3c name the client used, then every legacy spelling — and only then
+    /// looks the winner up. A theme with `hand2` and no `pointer` is ordinary
+    /// rather than broken, and asking for one name would make most themes on
+    /// disk look as though they had almost no cursors at all.
     fn ready(&mut self, icon: CursorIcon, pixels: i32) -> Option<&theme::Ready> {
         self.load();
         let Loaded::Theme(found) = &mut self.loaded else {
             return None;
         };
-        found.ready(icon.name(), icon.alt_names(), pixels)
+        // Resolved to a `&'static str` first, so the borrow the predicate
+        // holds on `found` is over before the lookup needs its own.
+        let name = shape::resolve(icon, |candidate| found.has(candidate, pixels))?;
+        found.ready(name, pixels)
     }
 
     /// Look for the configured theme, once. See [`Loaded`].
@@ -825,9 +943,136 @@ impl Pointer {
 
 #[cfg(test)]
 mod tests {
-    use smithay::input::pointer::CursorIcon;
+    use smithay::input::pointer::{CursorIcon, CursorImageStatus};
 
     use super::{KEPT, Kept, Loaded, Pointer, theme};
+
+    /// Each source replaces the last whole, so nothing of the previous one
+    /// survives.
+    ///
+    /// **The switch the issue is explicit about**: a toolkit that names `text`
+    /// over its entry field and then hands over its own bitmap for a drag —
+    /// and back again — must show exactly what it last asked for. The
+    /// mechanism is that [`Pointer::show`] assigns rather than merges, and the
+    /// value of pinning it is that it is the kind of invariant that survives
+    /// right up until somebody adds a "keep the old one if the new one is
+    /// unavailable" branch, which is how a stale pointer gets written.
+    ///
+    /// `Hidden` stands in for the client-pixels source here: it is the arm of
+    /// `wl_pointer.set_cursor` that carries no surface, and a `WlSurface`
+    /// cannot be conjured without a display — standing one up inside the test
+    /// binary is the process-global-state trap that has aborted this suite
+    /// before. What the substitution costs is real and small: it exercises
+    /// every transition except the one whose payload is a surface.
+    #[test]
+    fn each_source_replaces_the_last_whole() {
+        let mut pointer = Pointer::default();
+        assert!(
+            matches!(
+                pointer.showing(),
+                CursorImageStatus::Named(CursorIcon::Default)
+            ),
+            "a fresh pointer is the compositor's own arrow"
+        );
+
+        // A client names a shape.
+        pointer.show(CursorImageStatus::Named(CursorIcon::Text));
+        assert!(matches!(
+            pointer.showing(),
+            CursorImageStatus::Named(CursorIcon::Text)
+        ));
+
+        // The same client names a different one; the I-beam is gone.
+        pointer.show(CursorImageStatus::Named(CursorIcon::Pointer));
+        assert!(matches!(
+            pointer.showing(),
+            CursorImageStatus::Named(CursorIcon::Pointer)
+        ));
+
+        // It sets its own cursor instead -- here, to nothing at all.
+        pointer.show(CursorImageStatus::Hidden);
+        assert!(
+            matches!(pointer.showing(), CursorImageStatus::Hidden),
+            "a named shape outlived the client setting its own cursor"
+        );
+
+        // And back to naming a shape, which is the direction a stale pointer
+        // would show up in.
+        pointer.show(CursorImageStatus::Named(CursorIcon::Grabbing));
+        assert!(matches!(
+            pointer.showing(),
+            CursorImageStatus::Named(CursorIcon::Grabbing)
+        ));
+
+        // The compositor takes it back when the pointer leaves the client.
+        pointer.show(CursorImageStatus::default_named());
+        assert!(matches!(
+            pointer.showing(),
+            CursorImageStatus::Named(CursorIcon::Default)
+        ));
+    }
+
+    /// Reading the pointer twice without a write in between is the same
+    /// answer.
+    ///
+    /// [`Pointer::showing`] takes `&mut self` because it can downgrade a dead
+    /// surface, which makes "is it a getter" a fair question to have an answer
+    /// to: for every status that is not a surface it must be one, or the
+    /// pointer would flicker between frames with nothing having changed.
+    #[test]
+    fn reading_the_pointer_does_not_change_it() {
+        let mut pointer = Pointer::default();
+        pointer.show(CursorImageStatus::Named(CursorIcon::NwseResize));
+        let first = pointer.showing();
+        let second = pointer.showing();
+        assert!(matches!(
+            (first, second),
+            (
+                CursorImageStatus::Named(CursorIcon::NwseResize),
+                CursorImageStatus::Named(CursorIcon::NwseResize)
+            )
+        ));
+    }
+
+    /// A shape no theme can supply still ends at a *drawable* pointer, with no
+    /// theme installed at all.
+    ///
+    /// The end of the chain the issue asks for, asserted at the end rather
+    /// than in the middle: `shape::resolve` turns an unavailable shape into
+    /// the theme's arrow, and when there is no theme even that fails — at
+    /// which point `Pointer::element` falls through to the QML pointer.
+    /// `ready` returning `None` is precisely what sends it there, and what
+    /// must never happen is `ready` returning `None` *and* the caller having
+    /// nowhere to go.
+    ///
+    /// `ZoomIn` because hardly any theme on disk has it, so it is the
+    /// realistic unavailable shape rather than a contrived one.
+    #[test]
+    fn an_unavailable_shape_still_reaches_a_drawable_pointer() {
+        let mut pointer = Pointer::default();
+        pointer.configure(
+            &theme::Configured {
+                theme: Some(theme::NOT_INSTALLED.to_owned()),
+                size: Some(24),
+            },
+            &theme::Environment::default(),
+        );
+        for icon in [
+            CursorIcon::ZoomIn,
+            CursorIcon::ContextMenu,
+            CursorIcon::Text,
+        ] {
+            assert!(
+                pointer.ready(icon, 24).is_none(),
+                "{} produced a themed cursor with no theme installed",
+                icon.name()
+            );
+        }
+        assert!(
+            matches!(pointer.loaded, Loaded::Missing),
+            "and the missing theme was not left to be looked for again per shape"
+        );
+    }
 
     /// A configured theme that is not installed must end at Solium's own
     /// pointer, and not at nothing.

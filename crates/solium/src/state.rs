@@ -9,6 +9,7 @@ use std::time::Duration;
 use smithay::output::{Output, Scale};
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
+use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::fractional_scale::{
     FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
 };
@@ -333,6 +334,21 @@ pub(crate) struct Solium {
     /// lock ends. Advice, taken at unlock. See `cursor_position_hint`.
     pub(crate) constraint_hint: Option<Point<f64, Logical>>,
 
+    /// Letting a client *name* the cursor it wants instead of drawing one.
+    ///
+    /// Without it a toolkit has to rasterise every cursor itself and hand over
+    /// pixels, and the ones that no longer do — which is the modern default,
+    /// because naming a shape is how a client gets the compositor's theme
+    /// rather than a guess at it — got no cursor change at all. Not a subtle
+    /// failure: a text field showed the arrow, a resize edge showed the arrow,
+    /// everything showed the arrow. The name is resolved through the same
+    /// XCursor theme the rest of the pointer uses; see `cursor::shape`.
+    #[expect(
+        dead_code,
+        reason = "registers wp_cursor_shape_manager_v1; dropping it would remove the global"
+    )]
+    pub(crate) cursor_shape_state: CursorShapeManagerState,
+
     /// Cropping and scaling a surface without the client redrawing it.
     ///
     /// How a video player presents a frame decoded at one size at another size
@@ -647,6 +663,11 @@ impl Solium {
             relative_pointer_state: RelativePointerManagerState::new::<Self>(&display_handle),
             pointer_constraints_state: PointerConstraintsState::new::<Self>(&display_handle),
             constraint_hint: None,
+            // Version 2, which smithay's `new` asks for unconditionally: it
+            // adds `dnd-ask` and `all-resize` to the shape enum, and a client
+            // bound at version 1 simply never sends them. `cursor::shape` maps
+            // both, so there is nothing to gate.
+            cursor_shape_state: CursorShapeManagerState::new::<Self>(&display_handle),
             pending_selection: None,
             activation_state: XdgActivationState::new::<Self>(&display_handle),
             viewporter_state: ViewporterState::new::<Self>(&display_handle),
@@ -4935,14 +4956,38 @@ impl SeatHandler for Solium {
         &mut self.seat_state
     }
 
+    /// Both client-side cursor sources arrive here, and which one it was is
+    /// readable off the variant.
+    ///
+    /// `Surface` and `Hidden` are `wl_pointer.set_cursor`: the client
+    /// rasterised a cursor itself and we draw its pixels. `Named` is
+    /// `wp_cursor_shape_v1.set_shape` — the only thing that can produce one,
+    /// since `set_cursor` carries a surface or nothing — and it means the
+    /// client named a shape and left the picture to us. Dropping either on the
+    /// floor leaves every application with our arrow, which for the named case
+    /// is exactly what #24 was: a text field that never showed an I-beam.
+    ///
+    /// Through `show` rather than assigned, so that a client alternating
+    /// between its own two mechanisms cannot leave a fragment of the other
+    /// behind. See `cursor::Pointer::show`, which is the only writer and where
+    /// the precedence between all three sources is set out.
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
-        // A client sets its own cursor when the pointer is over it — an I-beam
-        // over text, a resize arrow on an edge. Dropping this on the floor
-        // leaves every application with our arrow.
-        self.pointer.status = image;
+        self.pointer.show(image);
     }
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
 }
+
+/// Required by smithay's `wp_cursor_shape_v1` dispatch, and empty on purpose.
+///
+/// The protocol hands out a shape device for a `wl_pointer` *or* for a
+/// `zwp_tablet_tool_v2`, so its `Dispatch` impl is bound on `TabletSeatHandler`
+/// whether or not the compositor has tablets — see
+/// `wayland/cursor_shape.rs:240`. Solium advertises no tablet manager, so no
+/// client can ever hold a `zwp_tablet_tool_v2` to ask for one, and
+/// `tablet_tool_image` is unreachable rather than unimplemented. The default
+/// body discards the image, which is the right thing for a cursor that has no
+/// device to be drawn for.
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Solium {}
 
 impl DmabufHandler for Solium {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
@@ -5051,6 +5096,11 @@ delegate_xdg_shell!(Solium);
 delegate_xdg_decoration!(Solium);
 delegate_layer_shell!(Solium);
 delegate_seat!(Solium);
+// Routes `wp_cursor_shape_manager_v1` and the per-pointer device it hands out.
+// smithay's dispatch turns a `set_shape` into `SeatHandler::cursor_image` with
+// a `CursorImageStatus::Named`, so the handler for this protocol is the seat
+// handler above rather than a trait of its own.
+smithay::delegate_cursor_shape!(Solium);
 delegate_output!(Solium);
 delegate_data_device!(Solium);
 smithay::delegate_primary_selection!(Solium);

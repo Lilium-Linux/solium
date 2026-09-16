@@ -128,9 +128,14 @@ local defaults = {
     -- `qml/cursor.qml`, through the same design system as the window frames,
     -- and that is what you get with nothing set here, with nothing in the
     -- environment, or with a theme named that turns out not to be installed --
-    -- the log says which. It is also what you get for any one cursor shape a
-    -- theme happens not to have. Copy `qml/cursor.qml` into
-    -- ~/.config/solium/qml/ to change it.
+    -- the log says which. Copy `qml/cursor.qml` into ~/.config/solium/qml/ to
+    -- change it.
+    --
+    -- A shape your theme does *not* have is the one case that does not reach
+    -- it. Applications name the cursor they want -- an I-beam over text, a
+    -- resize arrow on an edge -- and a theme is free to have drawn only some
+    -- of them; the missing ones fall back to that theme's own arrow, so a
+    -- themed session stays wholly themed rather than mixing two designs.
     --
     -- Applied on reload, so trying a theme out is `super+shift+r`. The
     -- compositor call is `sol.cursor_theme(...)`; `sol.cursor()` is a
