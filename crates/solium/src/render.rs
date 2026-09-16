@@ -1388,7 +1388,11 @@ fn cursor(
     // it to a half-cursor at the exact moment it crosses.
     let location = pointer.current_location() + shift;
 
-    match state.pointer.status.clone() {
+    // `showing` rather than the field, which is now private. It is the one
+    // reader, and it is where a cursor surface destroyed under a stationary
+    // pointer turns back into the compositor's arrow instead of into a
+    // surface tree that produces no elements. See `cursor::Pointer::showing`.
+    match state.pointer.showing() {
         CursorImageStatus::Hidden => Vec::new(),
         CursorImageStatus::Surface(surface) => {
             // The hotspot is where *in the image* the pointer actually points,
