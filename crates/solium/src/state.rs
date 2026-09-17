@@ -675,6 +675,104 @@ pub(crate) fn chrome_of(on_frame: bool, edges: ResizeEdge) -> Option<Chrome> {
     }
 }
 
+/// What one pane makes of a point — which is a wider question than whether
+/// that pane's chrome is under it.
+///
+/// **[`Self::Client`] is the answer that was missing, and it is the whole of
+/// issue #111.** A hit test that only ever says "my chrome, or nothing"
+/// cannot express *occlusion*: a pane whose client covers the point answers
+/// the same "nothing" as a pane the point falls nowhere near, so a walk down
+/// the stack carries on past a window that is plainly on top and hands the
+/// point to whatever is underneath. What that looked like in use: two
+/// overlapping windows, a press on the upper one's client where the lower
+/// one's titlebar happened to lie beneath, and the *lower* window raised and
+/// took focus. A titlebar took clicks through the window covering it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaneHit<T> {
+    /// This pane's own chrome is under the point, and the walk has its answer.
+    Chrome(T),
+    /// The point is inside what this pane draws, but on its client rather than
+    /// on its chrome. The client owns it and the walk stops here with nothing:
+    /// everything below this pane is covered at that point.
+    Client,
+    /// The point is not this pane's at all. Keep descending.
+    Miss,
+}
+
+impl<T> PaneHit<T> {
+    /// Carry a chrome answer into whatever the caller wanted to say about it,
+    /// leaving the two stopping answers alone.
+    fn map<U>(self, chrome: impl FnOnce(T) -> U) -> PaneHit<U> {
+        match self {
+            Self::Chrome(found) => PaneHit::Chrome(chrome(found)),
+            Self::Client => PaneHit::Client,
+            Self::Miss => PaneHit::Miss,
+        }
+    }
+}
+
+/// One pane's complete answer about a point, from the two things that decide
+/// it.
+///
+/// `covers` is whether the point is inside the pane's *drawn* rectangle, and
+/// it is only consulted once the chrome has declined — the frame band and the
+/// resize border are both settled by [`chrome_of`] before this is asked
+/// anything. That order is what keeps the inside half of a resize border
+/// working: it lies within the drawn rect, so a rule that tested `covers`
+/// first would call it the client's and swallow it.
+///
+/// A pane can claim chrome while `covers` is false, and that is not a
+/// contradiction: [`resize::border_edges`] reaches [`resize::RESIZE_BORDER`]
+/// pixels *outside* the window, over whatever is drawn behind it. Such a point
+/// is chrome and the walk stops on it.
+pub(crate) fn pane_hit_of(chrome: Option<Chrome>, covers: bool) -> PaneHit<Chrome> {
+    match (chrome, covers) {
+        (Some(chrome), _) => PaneHit::Chrome(chrome),
+        (None, true) => PaneHit::Client,
+        (None, false) => PaneHit::Miss,
+    }
+}
+
+/// The chrome under a point, given what every pane makes of it, topmost first.
+///
+/// **One pass, and the first pane with anything to say ends it.** This is the
+/// fix for issue #111 stated as a rule: a pane that covers the point answers
+/// [`PaneHit::Client`], which stops the walk with `None`, and the panes below
+/// it are never asked. Before this the walk could only be stopped by a *match*,
+/// so a covering window was indistinguishable from an absent one and the point
+/// fell through to a lower window's titlebar.
+///
+/// **The two-pass shape this replaces hid the same fault twice.** It ran the
+/// whole stack for [`Chrome::Frame`] and then the whole stack again for
+/// [`Chrome::Resize`], which meant a lower window's titlebar beat a higher
+/// window's resize border as well. That ordering was deliberate once, and the
+/// reasoning written down for it was that the outside half of a border lies
+/// over whatever is behind, so a titlebar visible there ought to win. The
+/// reasoning is wrong for the same reason #111 is: it compares two regions
+/// without ever asking which window is on top. Asking each pane for its
+/// complete answer, in stacking order, decides both cases with one rule — the
+/// higher window's border wins, because the higher window is on top.
+///
+/// Generic over what a pane answers with, and taking the answers rather than
+/// the panes, for the reason [`chrome_of`] and [`claim_of`] are written the
+/// same way: a `Solium` needs a `Display` and cannot be stood up in a unit
+/// test, and a stacking rule that can only be exercised by running the
+/// compositor is a rule that goes untested until somebody notices it on
+/// hardware. Which is how #111 was found.
+///
+/// The iterator is walked lazily and abandoned at the first answer, so a pane
+/// under a covering window is never hit-tested at all.
+pub(crate) fn topmost_chrome<T>(stack: impl IntoIterator<Item = PaneHit<T>>) -> Option<T> {
+    for hit in stack {
+        match hit {
+            PaneHit::Chrome(chrome) => return Some(chrome),
+            PaneHit::Client => return None,
+            PaneHit::Miss => {}
+        }
+    }
+    None
+}
+
 /// Who a press at a point belongs to, before any client sees it.
 ///
 /// [`Chrome`] is one link of this and not the whole of it, which is what the
@@ -2339,14 +2437,20 @@ impl Solium {
     /// failure mode this shape is chosen against, because two hit tests drift
     /// and the bug comes back wearing a different face.
     ///
-    /// **Every frame first, and only then every resize border.** The obvious
-    /// single walk — classify each pane top-down and stop at the first that
-    /// claims anything — is wrong, and wrong in a way that is easy to miss: the
-    /// outside half of a window's resize border lies *outside* that window,
-    /// over whatever is drawn behind it, and a titlebar there belongs to the
-    /// window you can see rather than to the one whose edge happens to be eight
-    /// pixels away. So the frames are asked over the whole stack before any
-    /// border is, which is the order a press already had.
+    /// **One walk, topmost first, and the first pane with anything to say ends
+    /// it — including when what it says is "my client owns this".** That last
+    /// case is issue #111 and is what [`topmost_chrome`] exists to state. This
+    /// walk used to ask every pane for a [`Chrome::Frame`] and then every pane
+    /// again for a [`Chrome::Resize`], and in neither pass could a pane stop the
+    /// descent by *covering* the point: [`Self::pane_chrome`] returned the same
+    /// `None` for "the point is on my client" as for "the point is nowhere near
+    /// me". So a press on the top window, at a spot where a lower window's
+    /// titlebar lay underneath, raised and focused the lower window — a
+    /// titlebar taking clicks through whatever covered it.
+    ///
+    /// The two-pass shape hid the same fault a second time, which the single
+    /// pass fixes for free; [`topmost_chrome`] has the argument, along with why
+    /// the ordering the two passes were written for was itself mistaken.
     pub(crate) fn chrome_under(&self, location: Point<f64, Logical>) -> Option<Under> {
         // A titlebar is the compositor's own surface, so it would otherwise
         // still take clicks with the session locked -- close and maximise
@@ -2360,19 +2464,15 @@ impl Solium {
         }
         let now = self.clock.now();
 
-        self.panes
-            .iter()
-            .rev()
-            .find_map(|pane| {
-                self.pane_chrome(pane, location, now)
-                    .filter(|under| matches!(under.chrome, Chrome::Frame))
-            })
-            .or_else(|| {
-                self.panes.iter().rev().find_map(|pane| {
-                    self.pane_chrome(pane, location, now)
-                        .filter(|under| matches!(under.chrome, Chrome::Resize(_)))
-                })
-            })
+        // `rev` because `panes` is in stacking order, bottom-first, and the
+        // rule is topmost-first -- which is now load-bearing in a way it was
+        // not before, since the first pane to cover the point ends the walk.
+        topmost_chrome(
+            self.panes
+                .iter()
+                .rev()
+                .map(|pane| self.pane_chrome(pane, location, now)),
+        )
     }
 
     /// What one pane's chrome makes of a point.
@@ -2394,13 +2494,22 @@ impl Solium {
     /// a rectangle of nothing and the pane's slot is still the truth. Every
     /// other hit test in this file already went through `pane_outer`; this is
     /// the one that did not.
+    ///
+    /// **Three answers rather than two, which is issue #111.** A pane covering
+    /// the point with its client says so ([`PaneHit::Client`]) instead of
+    /// declining, because declining is what a pane the point misses entirely
+    /// does and [`Solium::chrome_under`]'s walk has to tell those apart. A pane
+    /// with no geometry yet is a [`PaneHit::Miss`]: it draws nothing, so there
+    /// is nothing for it to cover the point with.
     fn pane_chrome(
         &self,
         pane: &Pane,
         location: Point<f64, Logical>,
         now: std::time::Duration,
-    ) -> Option<Under> {
-        let outer = self.pane_outer(pane)?;
+    ) -> PaneHit<Under> {
+        let Some(outer) = self.pane_outer(pane) else {
+            return PaneHit::Miss;
+        };
         let drawn = self.drawn_at(pane, outer, now);
         let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
 
@@ -2430,17 +2539,20 @@ impl Solium {
             )
                 .into(),
         );
-        let chrome = chrome_of(framed, resize::border_edges(drawn_rect, location))?;
-
         // A resize needs a window to resize. A frame does not: a frame around a
         // window whose application has not arrived still has working buttons,
         // which is the point of giving it one, so the window stays an `Option`
         // and only the resize arm insists on it.
+        //
+        // Declining here drops through to the occlusion test below rather than
+        // out of the function, which is the #111-shaped difference: a loading
+        // window still covers what is behind it, and a press on the inside half
+        // of its border is its client's and nobody else's.
         let window = pane.client().cloned();
-        if matches!(chrome, Chrome::Resize(_)) && window.is_none() {
-            return None;
-        }
-        Some(Under {
+        let chrome = chrome_of(framed, resize::border_edges(drawn_rect, location))
+            .filter(|chrome| window.is_some() || !matches!(chrome, Chrome::Resize(_)));
+
+        pane_hit_of(chrome, drawn.rect.contains(location)).map(|chrome| Under {
             chrome,
             pane: pane.id(),
             window,
@@ -6005,6 +6117,233 @@ mod tests {
             !on_frame(outer.size, Insets::NONE, local(200.0, 0.0)),
             "a decoration that reserves nothing owns no band, and its clicks \
              belong to the window under it"
+        );
+    }
+
+    /// One pane of a stack, as the pure rules see it: where it is drawn, and
+    /// what its frame reserves.
+    ///
+    /// No presentation transform, so the drawn rect *is* the outer rect and a
+    /// screen point differs from a pane-local one only by the pane's corner.
+    /// That is the situation #111 was reported in — two ordinary overlapping
+    /// windows on the desktop, neither of them in a mode — and it keeps the
+    /// arithmetic below readable enough to check by hand. A built decoration is
+    /// assumed, which both windows in the report had.
+    #[derive(Clone, Copy)]
+    struct Stacked {
+        outer: Rectangle<i32, Logical>,
+        insets: Insets,
+    }
+
+    impl Stacked {
+        /// A framed window at a corner: a titlebar across the top and nothing
+        /// else reserved, which is [`framed`]'s shape at an arbitrary place.
+        fn window(at: (i32, i32), size: (i32, i32)) -> Self {
+            Self {
+                outer: Rectangle::new(at.into(), size.into()),
+                insets: Insets {
+                    top: TITLEBAR_HEIGHT,
+                    ..Insets::NONE
+                },
+            }
+        }
+
+        /// What [`Solium::pane_chrome`] makes of a point, composed out of the
+        /// same rules in the same order it composes them: the frame band, then
+        /// the resize border, and the occlusion test only once both have
+        /// declined.
+        fn hit(self, point: (f64, f64)) -> PaneHit<Chrome> {
+            let location = Point::<f64, Logical>::from(point);
+            let covers = self.outer.to_f64().contains(location);
+            let framed = covers
+                && on_frame(
+                    self.outer.size,
+                    self.insets,
+                    location - self.outer.loc.to_f64(),
+                );
+            pane_hit_of(
+                chrome_of(framed, resize::border_edges(self.outer, location)),
+                covers,
+            )
+        }
+    }
+
+    /// The walk as it stood before #111: every pane's frame over the whole
+    /// stack, and only then every pane's resize border, with a pane that merely
+    /// *covers* the point stopping nothing.
+    ///
+    /// Kept rather than deleted so the bug is pinned and not only the fix. A
+    /// test that asserts the new answer alone stays green against a walk that
+    /// never occludes anything — which is how this fault survived #108's
+    /// rewrite of the very same function, and why each test below measures both
+    /// rules at the same point.
+    ///
+    /// `stack` is topmost-first, as [`Solium::chrome_under`]'s `rev` makes it.
+    fn two_pass(stack: &[Stacked], point: (f64, f64)) -> Option<Chrome> {
+        let claimed = |frames: bool| {
+            stack.iter().find_map(|pane| match pane.hit(point) {
+                PaneHit::Chrome(Chrome::Frame) if frames => Some(Chrome::Frame),
+                PaneHit::Chrome(Chrome::Resize(edges)) if !frames => Some(Chrome::Resize(edges)),
+                _ => None,
+            })
+        };
+        claimed(true).or_else(|| claimed(false))
+    }
+
+    /// **Issue #111, as reported: a titlebar took clicks through the window
+    /// covering it.**
+    ///
+    /// Two overlapping windows. A press on the *top* one, at a point where the
+    /// lower one's titlebar happened to lie underneath, focused and raised the
+    /// lower window. The walk searched only for chrome, so the top window —
+    /// whose client covers the point and which therefore had no chrome to
+    /// offer — did not stop the descent, and the lower window's titlebar was
+    /// found beneath it.
+    ///
+    /// The last assertion is the control, and it was run red before the fix:
+    /// with the first assertion pointed at `two_pass` the test fails with
+    /// `Some(Frame)` against an expected `None`, which is the reported
+    /// behaviour reproduced in a unit test rather than on hardware.
+    #[test]
+    fn a_covered_titlebar_does_not_take_the_click() {
+        let lower = Stacked::window((100, 100), (400, 300));
+        let upper = Stacked::window((60, 60), (400, 300));
+        let stack = [upper, lower];
+
+        // (300, 116) is 56px down into the upper window: past its 32px titlebar
+        // and 160px clear of its nearest resize border, so it is that window's
+        // client and nothing else. The same point is 16px down into the lower
+        // window, inside its titlebar and clear of its top border -- so the two
+        // windows genuinely disagree here, which is what makes the walk's
+        // answer worth anything.
+        let point = (300.0, 116.0);
+        assert_eq!(
+            upper.hit(point),
+            PaneHit::Client,
+            "the top window covers this point with its client"
+        );
+        assert_eq!(
+            lower.hit(point),
+            PaneHit::Chrome(Chrome::Frame),
+            "and the lower window's titlebar is underneath it, which is the \
+             whole setup"
+        );
+
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(point))),
+            None,
+            "a press on the top window's client is the client's, and the \
+             titlebar buried under it may not have it"
+        );
+        assert_eq!(
+            two_pass(&stack, point),
+            Some(Chrome::Frame),
+            "the walk this replaced hands the point to the covered titlebar, \
+             which is the bug"
+        );
+    }
+
+    /// The higher window owns the overlap in *both* directions, which is the
+    /// second fault the two-pass shape was hiding.
+    ///
+    /// Because every pane's frame was tried before any pane's resize border, a
+    /// lower window's titlebar also beat a higher window's border. One pass
+    /// asking each pane for its complete answer settles this with the same rule
+    /// that settles the covered titlebar: whoever is on top and has something
+    /// to say, says it.
+    ///
+    /// A resize border legitimately reaches [`resize::RESIZE_BORDER`] pixels
+    /// *outside* its own window, over whatever is drawn behind — so the winning
+    /// pane here is one the point does not even land on. That is why the
+    /// occlusion test is asked last and never first: asked first it would call
+    /// the *inside* half of the same border the client's and eat it, which the
+    /// final assertion pins.
+    #[test]
+    fn a_higher_border_beats_a_lower_titlebar() {
+        let lower = Stacked::window((100, 100), (400, 300));
+        // A small window whose bottom edge, y = 120, falls inside the lower
+        // window's titlebar band.
+        let upper = Stacked::window((150, 20), (200, 100));
+        let stack = [upper, lower];
+
+        let border = (250.0, 124.0);
+        assert_eq!(
+            upper.hit(border),
+            PaneHit::Chrome(Chrome::Resize(ResizeEdge::Bottom)),
+            "4px below the upper window's bottom edge is its resize border, \
+             and outside the window it belongs to"
+        );
+        assert_eq!(
+            lower.hit(border),
+            PaneHit::Chrome(Chrome::Frame),
+            "and 24px down into the lower window's titlebar"
+        );
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(border))),
+            Some(Chrome::Resize(ResizeEdge::Bottom)),
+            "the border belongs to the window on top"
+        );
+        assert_eq!(
+            two_pass(&stack, border),
+            Some(Chrome::Frame),
+            "where the rule this replaced gave it to the window underneath"
+        );
+
+        // And the half of that border that lies *inside* its own window is
+        // still chrome: the point is within the drawn rect, so a rule that
+        // tested occlusion before the border would have swallowed it and left
+        // every window resizable only from the outside.
+        let inside = (300.0, 355.0);
+        assert!(
+            Stacked::window((60, 60), (400, 300))
+                .outer
+                .to_f64()
+                .contains(Point::<f64, Logical>::from(inside))
+        );
+        assert_eq!(
+            Stacked::window((60, 60), (400, 300)).hit(inside),
+            PaneHit::Chrome(Chrome::Resize(ResizeEdge::Bottom))
+        );
+    }
+
+    /// A point no window covers still descends, which is the case the fix must
+    /// not break: [`PaneHit::Miss`] and [`PaneHit::Client`] are both "no chrome
+    /// here" and only one of them may stop the walk.
+    #[test]
+    fn a_point_nothing_covers_still_descends() {
+        let lower = Stacked::window((100, 100), (400, 300));
+        let upper = Stacked::window((150, 20), (200, 100));
+        let stack = [upper, lower];
+
+        // 92px to the right of the upper window -- well past its border -- and
+        // 10px down into the lower window's titlebar.
+        let past = (450.0, 110.0);
+        assert_eq!(upper.hit(past), PaneHit::Miss);
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(past))),
+            Some(Chrome::Frame),
+            "a window that is not there covers nothing, and the titlebar \
+             beside it is still pressable"
+        );
+        assert_eq!(
+            two_pass(&stack, past),
+            Some(Chrome::Frame),
+            "which the rule this replaced also got right -- only the covered \
+             case differs"
+        );
+
+        // Bare desktop: every pane misses and the walk runs out.
+        let desktop = (700.0, 700.0);
+        assert_eq!(upper.hit(desktop), PaneHit::Miss);
+        assert_eq!(lower.hit(desktop), PaneHit::Miss);
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(desktop))),
+            None
+        );
+        assert_eq!(
+            topmost_chrome(std::iter::empty::<PaneHit<Chrome>>()),
+            None,
+            "and a desktop with no windows on it at all"
         );
     }
 
