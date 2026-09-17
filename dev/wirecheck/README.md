@@ -108,6 +108,39 @@ here; what stops that regressing is that `Scene::gpu_sized` and
 `Scene::with_properties` are now private to `qml.rs` and `Scene::for_host` is the
 only way in from outside it.
 
+**And that the pointer is drawn at the size it was given.** `cursor.qml` is
+built at 16, 24, 48 and 96, and what is measured is the bounding box of
+everything drawn in a buffer wiped transparent first. The arrow is laid out in a
+24-unit square scaled to the item, so it fills the same fraction of the buffer at
+every size — 0.60 across by 0.83 down geometrically, 0.61–0.62 by 0.83–0.88 as
+read back, the top of that spread being the small buffers where an antialiased
+edge is a larger share of the box.
+
+This is the one claim in #81 that nothing else in the gate could see, in either
+direction. `cursor.rs` sizes the scene to the configured `cursor.size` and
+`host.cpp` puts that logical size on the root item; while the arrow was drawn in
+literal units in a hard-coded 24-unit item it ignored both, so `size = 48` padded
+the buffer around a 24-pixel arrow and `XCURSOR_SIZE=16` cut the arrow's tail
+off. `cargo test` cannot ask — `the_configured_size_reaches_the_qml_pointer_scaled`
+asserts the arithmetic `Cursor::element` does and nothing about what Qt then
+draws, so it passed through both — and neither can the byte count above, because
+a 24-pixel arrow in a 48-pixel buffer is exactly as many non-zero bytes as a
+24-pixel arrow in a 24-pixel one.
+
+The two sizes on the ends are what make it an instrument rather than a snapshot
+of today. Measured both ways in one process, against the pre-fix `cursor.qml`
+with nothing else in the tree changed:
+
+```
+16x16: (0, 0)..(14, 15) -- 0.94 across, 1.00 down   [clipped]
+48x48: (0, 0)..(14, 20) -- 0.31 across, 0.44 down   [inert]
+```
+
+At 24 alone it passes, which is exactly how this shipped. The bounding box also has to start at (0, 0)
+at every size: `cursor.rs` places the buffer by subtracting `HOTSPOT`, which is
+(0, 0), so the arrow's tip has to be in the corner or the pointer points a few
+pixels away from what it is over.
+
 **And whether the host can say that a scene is animating — both ways.**
 `solium_qml_scene_animating`, which is what `render::Drawn` gates the next frame
 on. It is a claim about *Qt* and not about anything in this repository: that a

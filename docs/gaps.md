@@ -22,8 +22,8 @@ protocol at all.
 `ext_idle_notifier_v1` · `zwp_idle_inhibit_manager_v1` · `wp_presentation` ·
 `wp_viewporter` · `wp_fractional_scale_manager_v1` · `zwp_linux_dmabuf_v1` ·
 `zwp_relative_pointer_manager_v1` · `zwp_pointer_constraints_v1` ·
-`zwp_primary_selection_device_manager_v1`, plus `xwayland_shell_v1` to the X
-server only.
+`zwp_primary_selection_device_manager_v1` · `wp_cursor_shape_manager_v1`, plus
+`xwayland_shell_v1` to the X server only.
 
 ---
 
@@ -36,7 +36,7 @@ Each of these is a day where somebody stops using the compositor.
 | ~~[#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout~~ | **done**, and the entry that used to be here was wrong: it said every session was US QWERTY with no way to change it. `XkbConfig::default()` is empty names, and xkbcommon reads `XKB_DEFAULT_LAYOUT` when they are, so that always worked. What was actually missing was a *setting* — and the repeat rate, which no environment variable reaches |
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) `text-input-v3`, `input-method-v2` | no CJK, no compose key, no emoji picker, no on-screen keyboard — and the on-screen keyboard is what a phone is |
 | [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | written and never run against a real cable — see the backend row below |
-| [#24](https://github.com/Lilium-Linux/solium/issues/24) `cursor-shape-v1` | clients fall back today, so it costs nothing — until one does not |
+| ~~[#24](https://github.com/Lilium-Linux/solium/issues/24) `cursor-shape-v1`~~ | **done**, and the entry that used to be here was too kind: it said clients fall back, so it costs nothing. They do not all fall back. A toolkit that only ever *names* a shape got no cursor change at all — the arrow over a text field, the arrow over a resize edge — because the global was not advertised and there was nothing else for it to say. The global is now there and the name resolves through the same XCursor theme as the rest of the pointer, with the X11 spellings walked in turn: `pointer` is `hand2`, `text` is `xterm`, and a shape the theme has under no name it knows falls back to that theme's own arrow rather than to Solium's. See `cursor/shape.rs` |
 | [#50](https://github.com/Lilium-Linux/solium/issues/50) `ext-foreign-toplevel-list` | a dock cannot list windows or switch to them, so Lilium's own shell cannot have a task switcher |
 | [#51](https://github.com/Lilium-Linux/solium/issues/51) `wlr-output-management` | monitors live in a file; nothing can move one at runtime and `kanshi` cannot work |
 | [#52](https://github.com/Lilium-Linux/solium/issues/52) data-control | no clipboard manager can work |
@@ -97,7 +97,7 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 | [#80](https://github.com/Lilium-Linux/solium/issues/80) runtime rotation | `transform` is read from the configuration at startup; a tablet cannot rotate when it is turned |
 | [#42](https://github.com/Lilium-Linux/solium/issues/42) absolute devices | a touchscreen is glued to the first monitor |
 | [#64](https://github.com/Lilium-Linux/solium/issues/64) suspend and resume | never tested. logind pauses and resumes the session's devices; whether Solium comes back is unknown |
-| [#81](https://github.com/Lilium-Linux/solium/issues/81) cursor themes | the pointer is drawn from QML, which is deliberate, but `XCURSOR_THEME` is what every other application on the machine follows and there is no way to match it |
+| [#81](https://github.com/Lilium-Linux/solium/issues/81) cursor themes | **closed.** `config.cursor` names an XCursor theme and a logical size; `XCURSOR_THEME` and `XCURSOR_SIZE` are followed where it says nothing; the QML pointer is still what is drawn when neither does, when the theme is not installed, or for a shape the theme has not got. Size is multiplied by each output's scale. [#24](https://github.com/Lilium-Linux/solium/issues/24) then landed on top of it, and does resolve through this loader: `Theme::has` is the predicate `cursor/shape.rs` walks a chain of spellings with |
 
 ### Correctness and confidence
 
