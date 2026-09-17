@@ -25,6 +25,7 @@ use smithay::{
     },
     desktop::{PopupManager, Window, layer_map_for_output},
     input::pointer::{CursorImageAttributes, CursorImageStatus},
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::Scale,
     wayland::compositor::with_states,
 };
@@ -811,6 +812,33 @@ pub(crate) fn elements(
         return elements;
     }
 
+    // The drag icon: whatever a client attached to the drag it started, at the
+    // pointer, above everything the session owns. Issue #57 is that this was
+    // never drawn at all.
+    //
+    // **Here, and not beside the pointer above, because of the lock.** A drag
+    // icon is a client's surface with a client's pixels in it, and
+    // `ext-session-lock` exists to say that none of those reach a locked
+    // screen. The early return a few lines up is that promise, and putting the
+    // icon below it means the icon inherits it -- rather than a second `if
+    // state.lock.is_some()` of its own, which is a thing a later change can
+    // forget to update while the one above it goes on looking correct. The
+    // pointer itself is above the return on purpose and is not the same case:
+    // it is the compositor's own arrow or a theme's, and a lock screen you
+    // cannot aim at is a lock screen you cannot type a password into.
+    //
+    // Everything after this point is the session -- scripted bars, anchored
+    // layers, windows -- so the icon is above all of it and below only the
+    // pointer, which is where the thing being dragged belongs: under the tip
+    // of the cursor that is carrying it.
+    //
+    // Gated on `with_cursor` for the same reason the pointer is: a screencopy
+    // that asked not to have the mouse in it did not ask to have half a drag
+    // in it either.
+    if with_cursor {
+        elements.extend(drag_icon(state, renderer, output_scale, scale, shift));
+    }
+
     // Scripted surfaces at the top layer: above the windows, and below the
     // client surfaces on the same layer -- a real bar covers a scripted one,
     // because the client was installed on purpose.
@@ -1372,6 +1400,108 @@ fn scripted(
     drawn
 }
 
+/// Where *in the image* the pointer actually points, as the client set it.
+///
+/// Zero for a surface no client ever passed to `wl_pointer.set_cursor`, which
+/// is the only thing that fills this in — checked against
+/// `wayland/seat/pointer.rs`, where `CursorImageAttributes` is inserted. A drag
+/// icon is therefore always zero here today, and the call is still made rather
+/// than skipped: see [`drag_icon`], which explains what would have to change
+/// for it not to be.
+fn hotspot(surface: &WlSurface) -> smithay::utils::Point<i32, smithay::utils::Logical> {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .get::<Mutex<CursorImageAttributes>>()
+            .and_then(|attributes| attributes.lock().ok())
+            .map(|attributes| attributes.hotspot)
+            .unwrap_or_default()
+    })
+}
+
+/// Where a picture carried by the pointer has its top-left corner, in the
+/// output's own logical coordinates.
+///
+/// **The subtraction is the content, and its sign is the whole of it.** The
+/// hotspot is a point measured *inside* the image — the tip of an arrow, the
+/// middle of a crosshair — so the image's corner has to go that far up and
+/// left of where the pointer is for that point to land on the pointer.
+/// Adding instead puts an I-beam's tip a few pixels off the text it is meant
+/// to be between, and puts a crosshair's centre a whole image away from what
+/// is being aimed at.
+///
+/// Pure, and taking the two points already fetched, so the rule can be pinned:
+/// the alternative is a `Solium` and a `GlesRenderer`, neither of which a unit
+/// test in this crate can build, and a sign that is only checked by running
+/// the compositor is a sign that is checked by somebody noticing.
+fn origin_at(
+    pointer: smithay::utils::Point<f64, smithay::utils::Logical>,
+    hotspot: smithay::utils::Point<i32, smithay::utils::Logical>,
+) -> smithay::utils::Point<i32, smithay::utils::Logical> {
+    pointer.to_i32_round() - hotspot
+}
+
+/// The surface a client attached to the drag it is running, at the pointer.
+///
+/// **Issue #57: nothing drew this.** The data reached the other window and the
+/// drop landed, so a drag between two windows worked — invisibly, for its whole
+/// length, which is indistinguishable from one that failed and is why people
+/// let go over the wrong window. See `Solium::dnd_icon` for why the surface has
+/// to be kept when the drag starts rather than asked for here.
+///
+/// Drawn through `Kind::Unspecified` rather than `Kind::Cursor`, and that is
+/// not cosmetic: `Kind::Cursor` is what offers an element to the DRM cursor
+/// plane, there is one such plane, and the pointer itself is already on it.
+/// Marking the icon as well would have two elements competing for one plane
+/// every frame of every drag — at best the icon is composited anyway, at worst
+/// it takes the plane and the pointer is the thing that disappears.
+///
+/// **A client that positions its icon with `wl_surface.offset` is not honoured
+/// yet, and that is a known limit.** The accumulated delta lives in
+/// `SurfaceAttributes::buffer_delta`, and nothing in smithay's renderer reads
+/// it — `grep -rn buffer_delta` over 0.7's `src` finds it only in
+/// `wayland/compositor`, never in `backend/renderer`, so
+/// `render_elements_from_surface_tree` places the root at exactly the origin it
+/// is given. Toolkits use that request to line the icon's grab point up with
+/// the cursor, so a dragged tab will sit down and right of where it was picked
+/// up by however far into it the press landed. Closing it means accumulating
+/// the delta per commit onto the stored icon, which is a change to
+/// `CompositorHandler::commit` and its own piece of work; an icon in roughly
+/// the right place is not what #57 is about.
+fn drag_icon(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    output_scale: Scale<f64>,
+    scale: f64,
+    shift: smithay::utils::Point<f64, smithay::utils::Logical>,
+) -> Vec<Element> {
+    let (Some(icon), Some(pointer)) = (state.dnd_icon(), state.seat.get_pointer()) else {
+        return Vec::new();
+    };
+    // Every output draws it at its own offset and lets the renderer discard the
+    // ones it misses, for the same reason `cursor` does: an icon crossing a
+    // bezel has to be on both screens, and choosing one would cut it in half at
+    // exactly the moment it is being carried across.
+    let location = pointer.current_location() + shift;
+    // Always zero today — `hotspot` says why — so this is the pointer's own
+    // position, which is where the protocol puts an icon's top-left corner. It
+    // is read rather than assumed because the day a drag icon does carry a
+    // hotspot, the arithmetic that places it should already be the arithmetic
+    // that places every other picture the pointer carries.
+    let origin = origin_at(location, hotspot(&icon)).to_physical_precise_round(scale);
+    render_elements_from_surface_tree::<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>(
+        renderer,
+        &icon,
+        origin,
+        output_scale,
+        1.0,
+        Kind::Unspecified,
+    )
+    .into_iter()
+    .map(Element::Window2)
+    .collect()
+}
+
 /// The pointer, however it is currently set.
 ///
 /// A client that has set its own cursor gets that surface drawn; everything
@@ -1403,19 +1533,7 @@ fn cursor(
     match state.pointer.showing() {
         CursorImageStatus::Hidden => Vec::new(),
         CursorImageStatus::Surface(surface) => {
-            // The hotspot is where *in the image* the pointer actually points,
-            // and the client is the only one that knows: drawing at the plain
-            // location puts an I-beam's tip a few pixels off the text it is
-            // meant to be between.
-            let hotspot = with_states(&surface, |states| {
-                states
-                    .data_map
-                    .get::<Mutex<CursorImageAttributes>>()
-                    .and_then(|attributes| attributes.lock().ok())
-                    .map(|attributes| attributes.hotspot)
-                    .unwrap_or_default()
-            });
-            let origin = (location.to_i32_round() - hotspot).to_physical_precise_round(scale);
+            let origin = origin_at(location, hotspot(&surface)).to_physical_precise_round(scale);
             let surface_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
                     renderer,
@@ -1631,8 +1749,96 @@ pub(crate) fn ratio(drawn: f64, real: i32) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Drawn, Painted, by_depth, ratio};
+    use super::{Drawn, Painted, by_depth, origin_at, ratio};
     use crate::qml::qt_test::on_the_qt_thread;
+
+    /// **The hotspot comes off the pointer's position, it is not added to it.**
+    ///
+    /// Both pictures the pointer carries are placed by [`origin_at`] — the
+    /// cursor surface a client set, and now the icon a client attached to a
+    /// drag (#57). A sign error here does not look like an offset: a 24-pixel
+    /// I-beam whose hotspot is its middle would be drawn a whole image below
+    /// and right of the text it is between, and a drag icon would trail the
+    /// cursor instead of sitting under it.
+    #[test]
+    fn a_hotspot_moves_the_picture_up_and_left_of_the_pointer() {
+        let pointer = smithay::utils::Point::<f64, smithay::utils::Logical>::from((100.0, 200.0));
+
+        assert_eq!(
+            origin_at(pointer, (0, 0).into()),
+            smithay::utils::Point::from((100, 200)),
+            "a picture whose hot point is its own corner sits exactly at the \
+             pointer -- which is where the protocol puts a drag icon, since \
+             nothing ever gives one a hotspot"
+        );
+        // Rules out the addition: that would answer (112, 212).
+        assert_eq!(
+            origin_at(pointer, (12, 12).into()),
+            smithay::utils::Point::from((88, 188)),
+            "a hot point twelve pixels into the image puts the image's corner \
+             twelve pixels up and left, so the hot point lands on the pointer"
+        );
+        // A negative hotspot is legal -- `wl_pointer.set_cursor` takes plain
+        // signed integers and a client may name a point outside its own
+        // surface -- so the arithmetic is asserted in that direction too rather
+        // than only on the half that a clamp would also pass.
+        assert_eq!(
+            origin_at(pointer, (-5, 5).into()),
+            smithay::utils::Point::from((105, 195))
+        );
+        // The rounding is the pointer's, and it is `round` rather than a
+        // truncation: a pointer halfway between two pixels belongs to the
+        // nearer one, and truncating would bias every sub-pixel position of
+        // every cursor and every drag icon towards the origin.
+        assert_eq!(
+            origin_at((99.6, 199.4).into(), (0, 0).into()),
+            smithay::utils::Point::from((100, 199))
+        );
+    }
+
+    /// **A drag icon must not be drawn over a locked screen, and what stops it
+    /// is where its call sits in [`super::elements`].**
+    ///
+    /// This is a test of the source text, which is not how anything else here
+    /// is checked and wants justifying. The behaviour cannot be reached from a
+    /// unit test: `elements` needs a `GlesRenderer`, which needs a GPU that the
+    /// build container does not have and that `cargo test` has no way to
+    /// stand up. The alternative was a second `if state.lock.is_some()` inside
+    /// the drag-icon path, which *would* be testable -- and which is exactly
+    /// the shape of guard this compositor has already been bitten by, because
+    /// two guards drift and the one that is forgotten is the one that leaks a
+    /// client's pixels onto a lock screen. See the guard's own comment in
+    /// `input::pointer_button` for the same argument from the other side.
+    ///
+    /// So the single guard stays the early return, and the claim that the icon
+    /// is below it is pinned here instead of being left to a reader. What this
+    /// proves is only the ordering of two statements; it would not notice a
+    /// third path that drew the icon from somewhere else entirely.
+    #[test]
+    fn the_drag_icon_is_emitted_below_the_lock_screens_early_return() {
+        let source = include_str!("render.rs");
+
+        let lock = source
+            .find("if let Some(lock) = state.lock.as_ref() {")
+            .expect("`elements` still guards the locked session");
+        // The early return *inside* that block, rather than the block's start:
+        // what matters is that the icon is unreachable once the lock has
+        // returned, not merely that it is written further down the file.
+        let returned = source[lock..]
+            .find("return elements;")
+            .map(|at| lock + at)
+            .expect("the lock guard still returns the frame it has built");
+        let icon = source
+            .find("elements.extend(drag_icon(")
+            .expect("`elements` still draws the drag icon");
+
+        assert!(
+            icon > returned,
+            "the drag icon is emitted at byte {icon}, above the lock screen's \
+             early return at {returned} -- a locked session would draw a \
+             client's surface over the lock screen"
+        );
+    }
 
     /// A QML scene's two answers, with Qt's exact behaviour.
     ///

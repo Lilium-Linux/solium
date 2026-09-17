@@ -755,6 +755,15 @@ impl Pointer {
     /// inside the test binary is the process-global-state trap that has
     /// aborted this suite before. What is testable is that the three sources
     /// replace each other cleanly, and the tests below do that.
+    ///
+    /// That trap turns out to be narrower than this reads, and #57 measured
+    /// it: `state::tests::drag_icon` stands up a display and a real client and
+    /// exercises the identical downgrade on a drag icon's surface. What aborts
+    /// is a *Qt scene* built in a process already holding a libwayland
+    /// connection, so a fixture that opens no toplevel is safe. Doing the same
+    /// here needs a client that commits a cursor surface, which is more
+    /// fixture than this one line has earned -- but it is a cost, not an
+    /// impossibility, and the distinction matters to whoever reads this next.
     pub(crate) fn showing(&mut self) -> CursorImageStatus {
         // The compositor's own chrome answers before anything a client said,
         // and deliberately does not disturb it: `status` is still whatever the
