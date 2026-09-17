@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use smithay::output::{Output, Scale};
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
+use smithay::utils::{IsAlive as _, Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::fractional_scale::{
     FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
@@ -43,7 +43,7 @@ use smithay::{
         },
         wayland_server::{
             Client, DisplayHandle,
-            protocol::{wl_seat::WlSeat, wl_surface::WlSurface},
+            protocol::{wl_data_source::WlDataSource, wl_seat::WlSeat, wl_surface::WlSurface},
         },
     },
     wayland::seat::WaylandFocus,
@@ -176,6 +176,26 @@ pub(crate) struct Solium {
     pub(crate) output_manager_state: OutputManagerState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device_state: DataDeviceState,
+
+    /// The surface a client attached to the drag it started, while that drag
+    /// lasts.
+    ///
+    /// **Issue #57: without this the drag is invisible.** Smithay offers the
+    /// icon exactly once, as an argument to [`ClientDndGrabHandler::started`],
+    /// and then keeps its own copy only so that it can drop it — see
+    /// `selection/data_device/dnd_grab.rs`, where `self.icon = None` is the
+    /// last thing `DnDGrab::drop` does and no accessor ever exposes it. A
+    /// compositor that does not take it here has no route back to it.
+    ///
+    /// Nothing else notices it is missing: the offers are negotiated and the
+    /// drop lands, so dragging between two windows *works*, silently, with
+    /// nothing under the cursor for the whole gesture. Which reads as a drag
+    /// that failed, and gets let go over the wrong window.
+    ///
+    /// `None` between drags. Read through [`Self::dnd_icon`] rather than
+    /// directly: a client can die mid-drag and leave a dead surface here.
+    dnd_icon: Option<WlSurface>,
+
     #[expect(
         dead_code,
         reason = "registers the xdg-decoration global; dropping it would remove it"
@@ -831,6 +851,7 @@ impl Solium {
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
+            dnd_icon: None,
             loading: crate::script::Loading::default(),
             hovered_frame: None,
             reported_at: std::time::Duration::ZERO,
@@ -2891,6 +2912,30 @@ impl Solium {
         if self.pointer.assert(icon) {
             self.redraw = true;
         }
+    }
+
+    /// The drag icon to draw, if there is a live one.
+    ///
+    /// **The dead-surface downgrade is the point of having a reader at all**,
+    /// and it is the same one [`crate::cursor::Pointer::showing`] does for a
+    /// client's cursor surface, for the same reason. A client that dies
+    /// mid-drag never reaches [`ClientDndGrabHandler::dropped`]: the grab is
+    /// unset when the buttons come up, and if the application is gone the
+    /// buttons may never come up — the pointer is still grabbed by a `DnDGrab`
+    /// whose origin no longer exists. So the field can outlive the client, and
+    /// a destroyed surface handed to `render_elements_from_surface_tree` is a
+    /// tree with no buffer in it: nothing drawn, and a stale icon kept forever.
+    /// Clearing it on read gets rid of both.
+    ///
+    /// Takes `&mut self` because of that write, which is why this is not a
+    /// plain getter.
+    pub(crate) fn dnd_icon(&mut self) -> Option<WlSurface> {
+        if let Some(icon) = self.dnd_icon.as_ref()
+            && !icon.alive()
+        {
+            self.dnd_icon = None;
+        }
+        self.dnd_icon.clone()
     }
 
     /// Say again what the pointer is over, for a pointer that has not moved.
@@ -5434,7 +5479,54 @@ impl PrimarySelectionHandler for Solium {
     }
 }
 
-impl ClientDndGrabHandler for Solium {}
+impl ClientDndGrabHandler for Solium {
+    /// A client has started a drag, and this is the only moment its icon is
+    /// offered. See [`Solium::dnd_icon`] for why nothing can ask for it later.
+    ///
+    /// `icon` is `None` for a drag the client chose not to illustrate, which is
+    /// ordinary and not a failure — a text selection dragged inside one window
+    /// often has no icon at all. Stored as-is: the surface already carries the
+    /// `dnd_icon` role, which smithay gave it in `data_device::device.rs`
+    /// before this is called and which is what stops the same surface being a
+    /// cursor or a toplevel at the same time.
+    ///
+    /// No cursor assertion is made here, and that is deliberate. The drag
+    /// installs a `DnDGrab` on the pointer, so `pointer.is_grabbed()` is true
+    /// for its whole length and [`Solium::assert_cursor`] already declines to
+    /// say anything while grabbed — the drag owns the pointer until it ends,
+    /// exactly as a resize drag does, and it needs no flag of its own to say
+    /// so. Whatever shape was showing when the drag began is the shape it keeps.
+    fn started(
+        &mut self,
+        _source: Option<WlDataSource>,
+        icon: Option<WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = icon;
+        // The icon appears at the pointer on the next frame and nothing else
+        // on screen has changed, so without this a drag started without moving
+        // the mouse would draw nothing until something unrelated redrew.
+        self.redraw = true;
+    }
+
+    /// The buttons came up. Whether the drop was accepted or refused, the icon
+    /// stops being drawn now.
+    ///
+    /// **This is the reliable end of a drag, and the only one.** `DnDGrab`
+    /// implements `PointerGrab::unset` (and `TouchGrab::unset`) as a call to
+    /// its own `drop`, and `drop` calls this — so a grab taken away by
+    /// something else, a cancelled touch, and an ordinary button release all
+    /// arrive here. Clearing anywhere else would leave the icon painted over
+    /// the session after the gesture that owned it was over.
+    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
+        self.dnd_icon = None;
+        // The icon was drawn last frame and will not be this one. Nothing else
+        // damages that region, so a drop onto a still window would otherwise
+        // leave the icon on screen until the next unrelated frame.
+        self.redraw = true;
+    }
+}
+
 impl ServerDndGrabHandler for Solium {}
 
 delegate_compositor!(Solium);
@@ -6341,5 +6433,239 @@ mod tests {
         // Somebody else holds it -- one of Solium's own move or resize grabs,
         // or a serial this client made up. Declined.
         assert!(!may_grab(true, false, false));
+    }
+    /// **A drag owns the pointer, so the compositor stops describing what is
+    /// under it.**
+    ///
+    /// A client that starts a drag gets a `DnDGrab` installed on the pointer,
+    /// so `PointerHandle::is_grabbed` is true for the whole gesture -- checked
+    /// against smithay 0.7's `selection/data_device/device.rs`, which calls
+    /// `set_grab` with it, and `input/pointer/mod.rs`, where `is_grabbed` is
+    /// `!matches!(guard.grab, GrabStatus::None)`. That is the machinery, and it
+    /// is why a drag needs no flag of its own: [`Solium::assert_cursor`]
+    /// already declines to recompute while the pointer is grabbed.
+    ///
+    /// What it buys is that dragging a file across a window's edge does not
+    /// make the pointer offer a resize. The press that would perform that
+    /// resize cannot happen -- the button is already down and belongs to the
+    /// drag -- so a resize arrow there is #108's symptom again, arrived at from
+    /// a fourth direction, and it would flicker on and off along every edge the
+    /// drag crosses.
+    ///
+    /// The `false` half is what makes this able to fail: the same call with no
+    /// grab clears the shape, so an `assert_cursor` that had lost its early
+    /// return would clear it in both.
+    #[test]
+    fn a_grabbed_pointer_keeps_the_shape_it_had() {
+        let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+            .expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+
+        // Where a border drag leaves the pointer: `input::pointer_button`
+        // asserts the shape as it starts the grab, precisely so that it holds
+        // for the drag. A DnD grab arrives at the same place by a different
+        // road -- whatever was showing when the buttons went down.
+        assert!(state.pointer.assert(Some(CursorIcon::NwseResize)));
+
+        // Nothing is mapped, so the hit test under this point claims nothing
+        // and the compositor's answer for it is "say nothing" -- which is a
+        // *write*, and the one the grab has to suppress.
+        let location = Point::<f64, Logical>::from((300.0, 300.0));
+        assert_eq!(state.claim_under(location), Claim::Nothing);
+        assert_eq!(state.claim_under(location).cursor(), None);
+
+        state.assert_cursor(location, true);
+        assert_eq!(
+            state.pointer.showing(),
+            CursorImageStatus::Named(CursorIcon::NwseResize),
+            "a grab owns the pointer until it ends, so crossing anything \
+             underneath must not change the shape"
+        );
+
+        state.assert_cursor(location, false);
+        assert_eq!(
+            state.pointer.showing(),
+            CursorImageStatus::default_named(),
+            "and the first motion after the grab ends hands the pointer back \
+             to the ordinary hit test"
+        );
+    }
+    /// **Issue #57's state machine: the icon is kept for exactly one drag.**
+    ///
+    /// Needs a real `WlSurface`, and one cannot be conjured: smithay offers no
+    /// constructor, and `wl_surface`'s server-side user data type is private,
+    /// so `Client::create_resource` cannot name it either. A client has to ask
+    /// over the wire. That is the same conclusion `scale_resend` above reaches
+    /// for `ToplevelSurface`, and this fixture is deliberately its smaller
+    /// half: one global, one surface, no `xdg_shell`, no buffer, no output.
+    ///
+    /// **Nothing here may build a Qt scene**, which is why no toplevel is
+    /// opened and none is needed. A window mapped inside a process that is
+    /// already holding a raw libwayland connection aborts the whole test
+    /// binary -- see the long note in `scale_resend`, which found that the hard
+    /// way. A bare `wl_surface` never reaches `new_toplevel`, so no decoration
+    /// is ever built for it.
+    mod drag_icon {
+        use super::*;
+        use smithay::reexports::wayland_server::Display;
+        use std::os::unix::net::UnixStream;
+        use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
+        use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
+
+        /// The client side: `wl_compositor` and nothing else, because a
+        /// surface is the whole of what is wanted.
+        #[derive(Debug, Default)]
+        struct Client {
+            compositor: Option<wl_compositor::WlCompositor>,
+        }
+
+        impl Dispatch<wl_registry::WlRegistry, ()> for Client {
+            fn event(
+                state: &mut Self,
+                registry: &wl_registry::WlRegistry,
+                event: wl_registry::Event,
+                (): &(),
+                _conn: &Connection,
+                qh: &QueueHandle<Self>,
+            ) {
+                let wl_registry::Event::Global {
+                    name, interface, ..
+                } = event
+                else {
+                    return;
+                };
+                if interface == "wl_compositor" {
+                    state.compositor = Some(registry.bind(name, 1, qh, ()));
+                }
+            }
+        }
+
+        wayland_client::delegate_noop!(Client: ignore wl_compositor::WlCompositor);
+        wayland_client::delegate_noop!(Client: ignore wl_surface::WlSurface);
+
+        /// Start a drag, drop it, start a second one, and destroy the surface
+        /// under that one.
+        ///
+        /// One test rather than three because the fixture is the expensive
+        /// part -- a display, a socket pair and a round trip -- and because
+        /// each step is the next step's precondition: "cleared on drop" says
+        /// nothing unless something was there to be cleared.
+        #[test]
+        fn an_icon_lasts_one_drag_and_outlives_neither_the_drop_nor_its_surface() {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+
+            let (server_side, client_side) =
+                UnixStream::pair().expect("a socket pair for the test client");
+            let served = display
+                .handle()
+                .insert_client(server_side, std::sync::Arc::new(ClientState::default()))
+                .expect("inserting the test client");
+            let conn = Connection::from_socket(client_side).expect("wrapping the client socket");
+            let mut event_queue = conn.new_event_queue::<Client>();
+            let qh = event_queue.handle();
+            let mut client = Client::default();
+
+            conn.display().get_registry(&qh, ());
+            conn.flush().expect("flushing get_registry");
+            display
+                .dispatch_clients(&mut state)
+                .expect("dispatching get_registry");
+            display
+                .flush_clients()
+                .expect("flushing the registry snapshot");
+            // Safe to block: the server wrote the whole registry on the line
+            // above and nothing but this thread drives it, so these bytes are
+            // already in the kernel buffer. Same argument as `scale_resend`'s
+            // one blocking read.
+            event_queue
+                .blocking_dispatch(&mut client)
+                .expect("reading the registry snapshot");
+
+            let compositor = client.compositor.clone().expect("wl_compositor bound");
+            let asked = compositor.create_surface(&qh, ());
+            conn.flush().expect("flushing create_surface");
+            display
+                .dispatch_clients(&mut state)
+                .expect("dispatching create_surface");
+
+            // The compositor's own handle on the surface the client just made.
+            // The protocol id is the same number on both sides of one
+            // connection, which is what makes this lookup exact rather than a
+            // search for "the only surface around".
+            let icon: WlSurface = served
+                .object_from_protocol_id(&display.handle(), asked.id().protocol_id())
+                .expect("the compositor made a wl_surface for the request");
+
+            // Taken once: every call below needs it, and it cannot be read
+            // out of `state` in the same expression that borrows `state`
+            // mutably.
+            let seat = state.seat.clone();
+
+            // A drag with no icon is ordinary -- a text selection dragged
+            // inside one window often has none -- and must leave nothing
+            // behind to be drawn.
+            ClientDndGrabHandler::started(&mut state, None, None, seat.clone());
+            assert!(
+                state.dnd_icon().is_none(),
+                "a drag the client chose not to illustrate draws nothing"
+            );
+
+            // The drag the issue is about.
+            state.redraw = false;
+            ClientDndGrabHandler::started(&mut state, None, Some(icon.clone()), seat.clone());
+            assert_eq!(
+                state.dnd_icon().as_ref(),
+                Some(&icon),
+                "the icon is offered exactly once, at the start of the drag, \
+                 and keeping it is the whole of #57"
+            );
+            assert!(
+                state.redraw,
+                "the icon appears at a pointer that has not moved, so nothing \
+                 else on screen damages the region it is about to occupy"
+            );
+
+            // The buttons come up. `DnDGrab::unset` calls its own `drop`,
+            // which calls this, so a cancelled or stolen grab arrives here
+            // too -- checked against smithay 0.7's `dnd_grab.rs`.
+            state.redraw = false;
+            ClientDndGrabHandler::dropped(&mut state, None, true, seat.clone());
+            assert!(
+                state.dnd_icon.is_none(),
+                "the drag is over, so the icon stops being drawn -- otherwise \
+                 it stays painted over the session that outlived it"
+            );
+            assert!(state.redraw, "and the frame that removes it has to happen");
+
+            // A drop that nobody accepted ends the drag just as thoroughly.
+            ClientDndGrabHandler::started(&mut state, None, Some(icon.clone()), seat.clone());
+            ClientDndGrabHandler::dropped(&mut state, None, false, seat.clone());
+            assert!(state.dnd_icon.is_none());
+
+            // **The client goes away mid-drag**, which never reaches `dropped`:
+            // the grab is only unset when the buttons come up, and an
+            // application that is gone will not be raising any. Destroying the
+            // surface is the same road a disconnect takes -- every object the
+            // client owned is destroyed -- and it is the deterministic half.
+            ClientDndGrabHandler::started(&mut state, None, Some(icon.clone()), seat.clone());
+            assert!(state.dnd_icon().is_some());
+            asked.destroy();
+            conn.flush().expect("flushing the surface destroy");
+            display
+                .dispatch_clients(&mut state)
+                .expect("dispatching the surface destroy");
+            assert!(!icon.alive(), "the fixture destroyed the surface");
+            assert!(
+                state.dnd_icon().is_none(),
+                "a dead surface produces no render elements, so keeping one \
+                 is a drag icon that is never drawn and never cleared"
+            );
+            assert!(
+                state.dnd_icon.is_none(),
+                "and the reader clears the field rather than filtering it on \
+                 every frame for the rest of the session"
+            );
+        }
     }
 }
