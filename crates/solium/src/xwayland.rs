@@ -248,12 +248,15 @@ impl XwmHandler for Solium {
             // Deliberately the same two lines as
             // `mapped_override_redirect_window`: placed where the client
             // asked, and given an *unmanaged* pane. The pane is what keeps it
-            // out of the window list a layout reads (`snapshot`) and past
-            // `show_if_new`'s placement guard, so nothing here ever sizes it,
-            // moves it, or reflows the desktop around something that will be
-            // gone on the next click. Both of those guards ask `Pane::managed`
-            // and nothing else, which is why the only thing needed to land on
-            // the right side of them is `take_unmanaged_pane`.
+            // out of the window list a layout reads (`snapshot`), past
+            // `show_if_new`'s placement guard, and out of the chrome the
+            // compositor offers (`state::chrome_offered`) -- so nothing here
+            // ever sizes it, moves it, reflows the desktop around something
+            // that will be gone on the next click, or draws a resize cursor
+            // over a menu `size_window` would refuse to resize anyway. All
+            // three of those guards ask `Pane::managed` and nothing else,
+            // which is why the only thing needed to land on the right side of
+            // them is `take_unmanaged_pane`.
             self.space.map_element(element.clone(), asked_for, true);
             self.take_unmanaged_pane(element);
             return;

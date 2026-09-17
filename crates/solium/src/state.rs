@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use smithay::output::{Output, Scale};
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
+use smithay::utils::{IsAlive as _, Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::fractional_scale::{
     FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
@@ -43,7 +43,7 @@ use smithay::{
         },
         wayland_server::{
             Client, DisplayHandle,
-            protocol::{wl_seat::WlSeat, wl_surface::WlSurface},
+            protocol::{wl_data_source::WlDataSource, wl_seat::WlSeat, wl_surface::WlSurface},
         },
     },
     wayland::seat::WaylandFocus,
@@ -176,6 +176,26 @@ pub(crate) struct Solium {
     pub(crate) output_manager_state: OutputManagerState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device_state: DataDeviceState,
+
+    /// The surface a client attached to the drag it started, while that drag
+    /// lasts.
+    ///
+    /// **Issue #57: without this the drag is invisible.** Smithay offers the
+    /// icon exactly once, as an argument to [`ClientDndGrabHandler::started`],
+    /// and then keeps its own copy only so that it can drop it — see
+    /// `selection/data_device/dnd_grab.rs`, where `self.icon = None` is the
+    /// last thing `DnDGrab::drop` does and no accessor ever exposes it. A
+    /// compositor that does not take it here has no route back to it.
+    ///
+    /// Nothing else notices it is missing: the offers are negotiated and the
+    /// drop lands, so dragging between two windows *works*, silently, with
+    /// nothing under the cursor for the whole gesture. Which reads as a drag
+    /// that failed, and gets let go over the wrong window.
+    ///
+    /// `None` between drags. Read through [`Self::dnd_icon`] rather than
+    /// directly: a client can die mid-drag and leave a dead surface here.
+    dnd_icon: Option<WlSurface>,
+
     #[expect(
         dead_code,
         reason = "registers the xdg-decoration global; dropping it would remove it"
@@ -655,6 +675,169 @@ pub(crate) fn chrome_of(on_frame: bool, edges: ResizeEdge) -> Option<Chrome> {
     }
 }
 
+/// What one pane makes of a point — which is a wider question than whether
+/// that pane's chrome is under it.
+///
+/// **[`Self::Client`] is the answer that was missing, and it is the whole of
+/// issue #111.** A hit test that only ever says "my chrome, or nothing"
+/// cannot express *occlusion*: a pane whose client covers the point answers
+/// the same "nothing" as a pane the point falls nowhere near, so a walk down
+/// the stack carries on past a window that is plainly on top and hands the
+/// point to whatever is underneath. What that looked like in use: two
+/// overlapping windows, a press on the upper one's client where the lower
+/// one's titlebar happened to lie beneath, and the *lower* window raised and
+/// took focus. A titlebar took clicks through the window covering it.
+///
+/// **[`Self::Halo`] is the answer the first fix for #111 was missing.** A
+/// pane's chrome and the pixels it paints are not the same region: a resize
+/// border reaches [`resize::RESIZE_BORDER`] pixels *outside* the window, over
+/// whatever is drawn behind it. A claim made out there is not backed by
+/// anything the pane draws, so it cannot be settled by stacking order — see
+/// [`topmost_chrome`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaneHit<T> {
+    /// This pane's own chrome is under the point *and* this pane draws there.
+    /// The walk has its answer.
+    Chrome(T),
+    /// This pane's chrome is under the point but the pane draws nothing there:
+    /// the outside half of a resize border, hanging over whatever is behind.
+    /// A claim, but the weakest one — see [`topmost_chrome`].
+    Halo(T),
+    /// The point is inside what this pane draws, but on its client rather than
+    /// on its chrome. The client owns it and the walk stops here with nothing:
+    /// everything below this pane is covered at that point.
+    Client,
+    /// The point is not this pane's at all. Keep descending.
+    Miss,
+}
+
+impl<T> PaneHit<T> {
+    /// Carry a chrome answer into whatever the caller wanted to say about it,
+    /// leaving the two stopping answers alone.
+    fn map<U>(self, chrome: impl FnOnce(T) -> U) -> PaneHit<U> {
+        match self {
+            Self::Chrome(found) => PaneHit::Chrome(chrome(found)),
+            Self::Halo(found) => PaneHit::Halo(chrome(found)),
+            Self::Client => PaneHit::Client,
+            Self::Miss => PaneHit::Miss,
+        }
+    }
+}
+
+/// One pane's complete answer about a point, from the two things that decide
+/// it.
+///
+/// `covers` is whether the point is inside the pane's *drawn* rectangle, and
+/// it never suppresses a chrome claim — the frame band and the resize border
+/// are both settled by [`chrome_of`] first, and `covers` only grades the
+/// claim that came out. That is what keeps the inside half of a resize border
+/// working: it lies within the drawn rect, so a rule that answered
+/// [`PaneHit::Client`] wherever `covers` held would swallow it and leave every
+/// window resizable only from outside.
+///
+/// **The four answers are the two questions crossed, and the cross is the
+/// point.** A pane can claim chrome while `covers` is false — a border reaches
+/// [`resize::RESIZE_BORDER`] pixels outside the window — and that claim is a
+/// [`PaneHit::Halo`] rather than a [`PaneHit::Chrome`] precisely because the
+/// pane paints nothing there to back it up. Collapsing the two, which is what
+/// taking `(Some(chrome), _)` did, hands a window's empty margin authority over
+/// pixels another window is visibly drawing.
+pub(crate) fn pane_hit_of(chrome: Option<Chrome>, covers: bool) -> PaneHit<Chrome> {
+    match (chrome, covers) {
+        (Some(chrome), true) => PaneHit::Chrome(chrome),
+        (Some(chrome), false) => PaneHit::Halo(chrome),
+        (None, true) => PaneHit::Client,
+        (None, false) => PaneHit::Miss,
+    }
+}
+
+/// Which of its chrome a pane is allowed to offer at all, before any point is
+/// considered.
+///
+/// Two gates, and both are about what a press there could actually *do*:
+///
+/// - **`managed`.** An unmanaged pane is one its client placed and owns: an
+///   X11 menu, a tooltip, a dropdown. Nothing here ever sizes it or moves it —
+///   `show_if_new` and `snapshot` both ask [`crate::pane::Pane::managed`] and
+///   nothing else — and `size_window` refuses an override-redirect surface
+///   outright. So a resize border eight pixels outside a Steam menu is a
+///   cursor promising a drag that cannot happen, and a press there starts a
+///   `ResizeGrab` that does nothing instead of dismissing the menu. Such a
+///   pane still *occludes*, which is [`pane_hit_of`]'s business and not this
+///   one's: covering is a fact about pixels, offering chrome is a claim about
+///   what a press means.
+/// - **`window`.** A resize needs a window to resize. A frame does not: a
+///   frame around a window whose application has not arrived still has working
+///   buttons, which is the point of giving it one.
+pub(crate) fn chrome_offered(
+    managed: bool,
+    window: bool,
+    framed: bool,
+    edges: ResizeEdge,
+) -> Option<Chrome> {
+    if !managed {
+        return None;
+    }
+    chrome_of(framed, edges).filter(|chrome| window || !matches!(chrome, Chrome::Resize(_)))
+}
+
+/// The chrome under a point, given what every pane makes of it, topmost first.
+///
+/// **One pass, and the first pane with anything to say ends it.** This is the
+/// fix for issue #111 stated as a rule: a pane that covers the point answers
+/// [`PaneHit::Client`], which stops the walk with `None`, and the panes below
+/// it are never asked. Before this the walk could only be stopped by a *match*,
+/// so a covering window was indistinguishable from an absent one and the point
+/// fell through to a lower window's titlebar.
+///
+/// **A halo is the weakest claim there is, and that is the correction to the
+/// first fix.** [`PaneHit::Halo`] — chrome outside the pane's own drawn rect —
+/// is remembered and the walk carries on, so it is used only if nothing below
+/// paints that pixel. It beats bare desktop, which is what makes an edge
+/// grabbable from outside at all, and it loses to any lower pane that actually
+/// draws there.
+///
+/// The rule that stood here briefly was that a higher pane's border simply wins,
+/// "because the higher window is on top". That is unanswerable at a pixel the
+/// higher pane does not occupy: an upper window's edge floating four pixels
+/// above a lower window's close button drew `NsResize` over a visibly drawn,
+/// clickable control, and a press there started a resize grab instead of
+/// closing the window. Stacking order decides who owns a pixel among the panes
+/// that *draw* it; a pane drawing nothing there is not in that contest. Which
+/// is also why the two-pass shape this replaces was not wrong for the reason
+/// #111's fix first gave: running every frame before any border did give a
+/// lower titlebar the point, and at a point outside the upper window that
+/// happens to be the right answer. It was wrong because it reached it without
+/// consulting stacking order at all, so it got the covered-titlebar case
+/// (#111) and the *inside* half of a higher border wrong by the same omission.
+///
+/// Generic over what a pane answers with, and taking the answers rather than
+/// the panes, for the reason [`chrome_of`] and [`claim_of`] are written the
+/// same way: a `Solium` needs a `Display` and cannot be stood up in a unit
+/// test, and a stacking rule that can only be exercised by running the
+/// compositor is a rule that goes untested until somebody notices it on
+/// hardware. Which is how #111 was found.
+///
+/// The iterator is walked lazily and abandoned at the first pane that claims
+/// the point with something it draws, so a pane under a covering window is
+/// never hit-tested at all. A halo alone does not abandon it: what is under
+/// the halo is exactly the question.
+pub(crate) fn topmost_chrome<T>(stack: impl IntoIterator<Item = PaneHit<T>>) -> Option<T> {
+    // The topmost halo, kept because the walk cannot yet tell whether anything
+    // below draws where it hangs. Later halos are lower and never displace it:
+    // among panes that all merely hover over a point, the top one still wins.
+    let mut halo = None;
+    for hit in stack {
+        match hit {
+            PaneHit::Chrome(chrome) => return Some(chrome),
+            PaneHit::Client => return None,
+            PaneHit::Halo(chrome) => halo = halo.or(Some(chrome)),
+            PaneHit::Miss => {}
+        }
+    }
+    halo
+}
+
 /// Who a press at a point belongs to, before any client sees it.
 ///
 /// [`Chrome`] is one link of this and not the whole of it, which is what the
@@ -831,6 +1014,7 @@ impl Solium {
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
+            dnd_icon: None,
             loading: crate::script::Loading::default(),
             hovered_frame: None,
             reported_at: std::time::Duration::ZERO,
@@ -2318,14 +2502,22 @@ impl Solium {
     /// failure mode this shape is chosen against, because two hit tests drift
     /// and the bug comes back wearing a different face.
     ///
-    /// **Every frame first, and only then every resize border.** The obvious
-    /// single walk — classify each pane top-down and stop at the first that
-    /// claims anything — is wrong, and wrong in a way that is easy to miss: the
-    /// outside half of a window's resize border lies *outside* that window,
-    /// over whatever is drawn behind it, and a titlebar there belongs to the
-    /// window you can see rather than to the one whose edge happens to be eight
-    /// pixels away. So the frames are asked over the whole stack before any
-    /// border is, which is the order a press already had.
+    /// **One walk, topmost first, and the first pane that claims the point with
+    /// something it *draws* ends it — including when what it claims is "my
+    /// client owns this".** That last case is issue #111 and is what
+    /// [`topmost_chrome`] exists to state. This walk used to ask every pane for
+    /// a [`Chrome::Frame`] and then every pane again for a [`Chrome::Resize`],
+    /// and in neither pass could a pane stop the descent by *covering* the
+    /// point: [`Self::pane_chrome`] returned the same `None` for "the point is
+    /// on my client" as for "the point is nowhere near me". So a press on the
+    /// top window, at a spot where a lower window's titlebar lay underneath,
+    /// raised and focused the lower window — a titlebar taking clicks through
+    /// whatever covered it.
+    ///
+    /// "Something it draws" is the qualification the first fix was missing: a
+    /// resize border hanging in the empty margin outside its own window claims
+    /// the point only against bare desktop, and yields to whatever a lower pane
+    /// paints there. [`topmost_chrome`] has the argument.
     pub(crate) fn chrome_under(&self, location: Point<f64, Logical>) -> Option<Under> {
         // A titlebar is the compositor's own surface, so it would otherwise
         // still take clicks with the session locked -- close and maximise
@@ -2339,19 +2531,16 @@ impl Solium {
         }
         let now = self.clock.now();
 
-        self.panes
-            .iter()
-            .rev()
-            .find_map(|pane| {
-                self.pane_chrome(pane, location, now)
-                    .filter(|under| matches!(under.chrome, Chrome::Frame))
-            })
-            .or_else(|| {
-                self.panes.iter().rev().find_map(|pane| {
-                    self.pane_chrome(pane, location, now)
-                        .filter(|under| matches!(under.chrome, Chrome::Resize(_)))
-                })
-            })
+        // `rev` because `panes` is in stacking order, bottom-first, and the
+        // rule is topmost-first -- which is now load-bearing in a way it was
+        // not before, since the first pane to cover the point ends the walk,
+        // and a halo is only kept until a lower pane is found drawing under it.
+        topmost_chrome(
+            self.panes
+                .iter()
+                .rev()
+                .map(|pane| self.pane_chrome(pane, location, now)),
+        )
     }
 
     /// What one pane's chrome makes of a point.
@@ -2373,13 +2562,35 @@ impl Solium {
     /// a rectangle of nothing and the pane's slot is still the truth. Every
     /// other hit test in this file already went through `pane_outer`; this is
     /// the one that did not.
+    ///
+    /// **Four answers rather than two, which is issue #111 and its
+    /// correction.** A pane covering the point with its client says so
+    /// ([`PaneHit::Client`]) instead of declining, because declining is what a
+    /// pane the point misses entirely does and [`Solium::chrome_under`]'s walk
+    /// has to tell those apart. A pane with no geometry yet is a
+    /// [`PaneHit::Miss`]: it draws nothing, so there is nothing for it to cover
+    /// the point with. And chrome the pane claims *outside* what it draws is a
+    /// [`PaneHit::Halo`], which is a claim the walk may yet overrule — the one
+    /// question `covers` answers that the chrome tests cannot.
+    ///
+    /// `drawn.rect.contains(location)` is what `covers` is, in both places it
+    /// is asked: the frame band already required it, and [`pane_hit_of`] grades
+    /// the resize border by the same rectangle. Not `outer`, and not the
+    /// client rect — where a pane is *drawn* is where it paints, which in a
+    /// mode is its thumbnail and nowhere near where the window lives.
+    ///
+    /// What a pane may offer at all is [`chrome_offered`]'s, including the
+    /// `managed` gate: an unmanaged pane occludes like any other and offers no
+    /// chrome whatsoever.
     fn pane_chrome(
         &self,
         pane: &Pane,
         location: Point<f64, Logical>,
         now: std::time::Duration,
-    ) -> Option<Under> {
-        let outer = self.pane_outer(pane)?;
+    ) -> PaneHit<Under> {
+        let Some(outer) = self.pane_outer(pane) else {
+            return PaneHit::Miss;
+        };
         let drawn = self.drawn_at(pane, outer, now);
         let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
 
@@ -2409,17 +2620,22 @@ impl Solium {
             )
                 .into(),
         );
-        let chrome = chrome_of(framed, resize::border_edges(drawn_rect, location))?;
-
-        // A resize needs a window to resize. A frame does not: a frame around a
-        // window whose application has not arrived still has working buttons,
-        // which is the point of giving it one, so the window stays an `Option`
-        // and only the resize arm insists on it.
+        // What this pane is allowed to offer -- the `managed` and `window`
+        // gates -- is `chrome_offered`'s, and both of them decline by answering
+        // `None` here rather than by returning out of the function. That is the
+        // #111-shaped difference: a loading window, and a client-placed menu,
+        // both still cover what is behind them, and a press on either is its
+        // own and nobody else's. Occluding is a fact about pixels; offering
+        // chrome is a claim about what a press would do.
         let window = pane.client().cloned();
-        if matches!(chrome, Chrome::Resize(_)) && window.is_none() {
-            return None;
-        }
-        Some(Under {
+        let chrome = chrome_offered(
+            pane.managed(),
+            window.is_some(),
+            framed,
+            resize::border_edges(drawn_rect, location),
+        );
+
+        pane_hit_of(chrome, drawn.rect.contains(location)).map(|chrome| Under {
             chrome,
             pane: pane.id(),
             window,
@@ -2621,6 +2837,22 @@ impl Solium {
     ///
     /// Hit-testing follows the transform: in overview a window is clickable
     /// where the thumbnail is, not where the window lives.
+    ///
+    /// **The walk stops at the first pane that covers the point, whether or not
+    /// that pane has a window to hand back.** This is issue #111 in the third
+    /// of the three walks: `client()?` used to sit inside a `find_map`, where
+    /// `None` means "keep looking" rather than "stop", so a window still
+    /// loading — drawn, on screen, under the cursor and with no client yet —
+    /// was descended straight past. `chrome_under` now correctly answers
+    /// nothing over its body, `pointer_button` falls through to click-to-focus,
+    /// and this raised and focused the window *behind* it. Same reasoning and
+    /// the same line as [`Self::surface_under`], which has always got this
+    /// right by holding its `?` in a `for` loop instead.
+    ///
+    /// `pane_outer` rather than `outer_geometry` for the same reason, and it is
+    /// what makes stopping possible at all: `outer_geometry` needs the window,
+    /// so the old shape could not ask whether a client-less pane covered the
+    /// point even in principle.
     pub(crate) fn window_under(
         &self,
         location: Point<f64, Logical>,
@@ -2632,14 +2864,20 @@ impl Solium {
             return None;
         }
         let now = self.clock.now();
-        self.panes.iter().rev().find_map(|pane| {
-            let window = pane.client()?;
-            let outer = self.outer_geometry(window)?;
+        for pane in self.panes.iter().rev() {
+            let Some(outer) = self.pane_outer(pane) else {
+                continue;
+            };
             if !self.drawn_at(pane, outer, now).rect.contains(location) {
-                return None;
+                continue;
             }
-            Some((window.clone(), self.real_geometry(window)?))
-        })
+            // Covered. A pane whose application has not arrived has no window
+            // to focus -- but it is on screen and it is under the cursor, so
+            // nothing behind it may be focused or raised by this press either.
+            let window = pane.client()?;
+            return Some((window.clone(), self.real_geometry(window)?));
+        }
+        None
     }
 
     /// The surface at a point, and the origin to measure it from.
@@ -2891,6 +3129,30 @@ impl Solium {
         if self.pointer.assert(icon) {
             self.redraw = true;
         }
+    }
+
+    /// The drag icon to draw, if there is a live one.
+    ///
+    /// **The dead-surface downgrade is the point of having a reader at all**,
+    /// and it is the same one [`crate::cursor::Pointer::showing`] does for a
+    /// client's cursor surface, for the same reason. A client that dies
+    /// mid-drag never reaches [`ClientDndGrabHandler::dropped`]: the grab is
+    /// unset when the buttons come up, and if the application is gone the
+    /// buttons may never come up — the pointer is still grabbed by a `DnDGrab`
+    /// whose origin no longer exists. So the field can outlive the client, and
+    /// a destroyed surface handed to `render_elements_from_surface_tree` is a
+    /// tree with no buffer in it: nothing drawn, and a stale icon kept forever.
+    /// Clearing it on read gets rid of both.
+    ///
+    /// Takes `&mut self` because of that write, which is why this is not a
+    /// plain getter.
+    pub(crate) fn dnd_icon(&mut self) -> Option<WlSurface> {
+        if let Some(icon) = self.dnd_icon.as_ref()
+            && !icon.alive()
+        {
+            self.dnd_icon = None;
+        }
+        self.dnd_icon.clone()
     }
 
     /// Say again what the pointer is over, for a pointer that has not moved.
@@ -5434,7 +5696,84 @@ impl PrimarySelectionHandler for Solium {
     }
 }
 
-impl ClientDndGrabHandler for Solium {}
+impl ClientDndGrabHandler for Solium {
+    /// A client has started a drag, and this is the only moment its icon is
+    /// offered. See [`Solium::dnd_icon`] for why nothing can ask for it later.
+    ///
+    /// `icon` is `None` for a drag the client chose not to illustrate, which is
+    /// ordinary and not a failure — a text selection dragged inside one window
+    /// often has no icon at all. Stored as-is: the surface already carries the
+    /// `dnd_icon` role, which smithay gave it in `data_device::device.rs`
+    /// before this is called and which is what stops the same surface being a
+    /// cursor or a toplevel at the same time.
+    ///
+    /// No cursor assertion is made here, and that is deliberate. A drag begun
+    /// with the pointer installs a `DnDGrab` on it, so `pointer.is_grabbed()`
+    /// is true for the whole gesture, and that one test holds *both* halves of
+    /// the pointer: [`Solium::assert_cursor`] declines to recompute `chrome`,
+    /// and [`crate::input::release_cursor`] declines to clear `status` over the
+    /// gaps the drag crosses. The drag owns the pointer until it ends, exactly
+    /// as a resize drag does, and it needs no flag of its own to say so.
+    ///
+    /// So the compositor says nothing about the shape for the length of the
+    /// drag — which is not the same as the shape being frozen, and the
+    /// difference matters. The drag's own client may still change it, and is
+    /// meant to: `wl_pointer.set_cursor` is accepted from the holder of a grab
+    /// (`wayland/seat/pointer.rs:521`, and its comment names drag and drop),
+    /// so a toolkit swapping between `dnd-copy` and `dnd-no-drop` as it crosses
+    /// drop targets reaches [`SeatHandler::cursor_image`] mid-drag and is
+    /// obeyed. What is held is the compositor's hands off it.
+    ///
+    /// **The grab is the pointer's only for a pointer-initiated drag.**
+    /// `start_drag` installs it on whichever device the start serial came from:
+    /// a pointer serial takes `PointerHandle::set_grab`, a touch serial takes
+    /// `TouchHandle::set_grab` and returns before the pointer branch is ever
+    /// reached — `selection/data_device/device.rs:95`. A drag begun with a
+    /// finger therefore leaves `pointer.is_grabbed()` false for its whole
+    /// length, and neither guard above holds anything. That is reachable rather
+    /// than hypothetical: [`Solium::new`] calls `seat.add_touch()`, and
+    /// `input::handle` routes `TouchDown` into it.
+    ///
+    /// It costs nothing today because a finger moves no pointer. Both guarded
+    /// writes sit on the pointer motion paths, so a touch drag reaches neither
+    /// unless a mouse is moved alongside the finger — and at that point the
+    /// pointer honestly is not the thing dragging, so describing what is under
+    /// it is the right answer rather than a missed one. What a touch drag does
+    /// get wrong is the icon, which `render::elements` puts at the pointer
+    /// because the pointer is the only position it has; re-deriving that from
+    /// the touch grab is the work touch support will bring, and the cursor
+    /// rules here are the pointer's and stay the pointer's.
+    fn started(
+        &mut self,
+        _source: Option<WlDataSource>,
+        icon: Option<WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = icon;
+        // The icon appears at the pointer on the next frame and nothing else
+        // on screen has changed, so without this a drag started without moving
+        // the mouse would draw nothing until something unrelated redrew.
+        self.redraw = true;
+    }
+
+    /// The buttons came up. Whether the drop was accepted or refused, the icon
+    /// stops being drawn now.
+    ///
+    /// **This is the reliable end of a drag, and the only one.** `DnDGrab`
+    /// implements `PointerGrab::unset` (and `TouchGrab::unset`) as a call to
+    /// its own `drop`, and `drop` calls this — so a grab taken away by
+    /// something else, a cancelled touch, and an ordinary button release all
+    /// arrive here. Clearing anywhere else would leave the icon painted over
+    /// the session after the gesture that owned it was over.
+    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
+        self.dnd_icon = None;
+        // The icon was drawn last frame and will not be this one. Nothing else
+        // damages that region, so a drop onto a still window would otherwise
+        // leave the icon on screen until the next unrelated frame.
+        self.redraw = true;
+    }
+}
+
 impl ServerDndGrabHandler for Solium {}
 
 delegate_compositor!(Solium);
@@ -5883,6 +6222,563 @@ mod tests {
             !on_frame(outer.size, Insets::NONE, local(200.0, 0.0)),
             "a decoration that reserves nothing owns no band, and its clicks \
              belong to the window under it"
+        );
+    }
+
+    /// One pane of a stack, as the pure rules see it: where it is drawn, and
+    /// what its frame reserves.
+    ///
+    /// No presentation transform, so the drawn rect *is* the outer rect and a
+    /// screen point differs from a pane-local one only by the pane's corner.
+    /// That is the situation #111 was reported in — two ordinary overlapping
+    /// windows on the desktop, neither of them in a mode — and it keeps the
+    /// arithmetic below readable enough to check by hand. A built decoration is
+    /// assumed, which both windows in the report had.
+    #[derive(Clone, Copy)]
+    struct Stacked {
+        outer: Rectangle<i32, Logical>,
+        insets: Insets,
+        /// Whether the client has arrived. `false` is a pane still loading: it
+        /// is drawn and it covers, its frame's buttons work, and it has no
+        /// window for a resize border to drag.
+        window: bool,
+        /// Whether the layout owns this pane. `false` is an X11 menu, tooltip
+        /// or dropdown the client placed itself.
+        managed: bool,
+    }
+
+    impl Stacked {
+        /// A framed window at a corner: a titlebar across the top and nothing
+        /// else reserved, which is [`framed`]'s shape at an arbitrary place.
+        fn window(at: (i32, i32), size: (i32, i32)) -> Self {
+            Self {
+                outer: Rectangle::new(at.into(), size.into()),
+                insets: Insets {
+                    top: TITLEBAR_HEIGHT,
+                    ..Insets::NONE
+                },
+                window: true,
+                managed: true,
+            }
+        }
+
+        /// The same pane with its application not yet arrived.
+        const fn loading(mut self) -> Self {
+            self.window = false;
+            self
+        }
+
+        /// The same pane placed by its own client: a menu, a tooltip, a
+        /// dropdown. It draws, so it covers; it is nothing's to resize or move.
+        const fn unmanaged(mut self) -> Self {
+            self.managed = false;
+            self
+        }
+
+        /// What [`Solium::pane_chrome`] makes of a point, out of the same two
+        /// functions in the same order it uses them.
+        ///
+        /// [`chrome_offered`] and [`pane_hit_of`] are called here rather than
+        /// reimplemented, which is the difference between a fixture and a
+        /// second copy of the rule: `covers` is what `pane_chrome` passes —
+        /// the *drawn* rect containing the point, which with no presentation
+        /// transform is this rect — and both of `chrome_offered`'s gates apply
+        /// exactly as they do there. A hand-rolled composition here is how the
+        /// covers-before-chrome mistake could come back with every test still
+        /// green.
+        fn hit(self, point: (f64, f64)) -> PaneHit<Chrome> {
+            let location = Point::<f64, Logical>::from(point);
+            let covers = self.outer.to_f64().contains(location);
+            let framed = covers
+                && on_frame(
+                    self.outer.size,
+                    self.insets,
+                    location - self.outer.loc.to_f64(),
+                );
+            pane_hit_of(
+                chrome_offered(
+                    self.managed,
+                    self.window,
+                    framed,
+                    resize::border_edges(self.outer, location),
+                ),
+                covers,
+            )
+        }
+    }
+
+    /// The walk as it stood before #111: every pane's frame over the whole
+    /// stack, and only then every pane's resize border, with a pane that merely
+    /// *covers* the point stopping nothing.
+    ///
+    /// Kept rather than deleted so the bug is pinned and not only the fix. A
+    /// test that asserts the new answer alone stays green against a walk that
+    /// never occludes anything — which is how this fault survived #108's
+    /// rewrite of the very same function, and why each test below measures both
+    /// rules at the same point.
+    ///
+    /// `stack` is topmost-first, as [`Solium::chrome_under`]'s `rev` makes it.
+    fn two_pass(stack: &[Stacked], point: (f64, f64)) -> Option<Chrome> {
+        let claimed = |frames: bool| {
+            stack.iter().find_map(|pane| match pane.hit(point) {
+                // Drawn or not made no difference to this walk: it asked each
+                // pane for chrome and took the first that answered.
+                PaneHit::Chrome(Chrome::Frame) | PaneHit::Halo(Chrome::Frame) if frames => {
+                    Some(Chrome::Frame)
+                }
+                PaneHit::Chrome(Chrome::Resize(edges)) | PaneHit::Halo(Chrome::Resize(edges))
+                    if !frames =>
+                {
+                    Some(Chrome::Resize(edges))
+                }
+                _ => None,
+            })
+        };
+        claimed(true).or_else(|| claimed(false))
+    }
+
+    /// The walk as `ab11731` first fixed #111: one pass, topmost first, with
+    /// *any* chrome claim winning outright whether or not the pane claiming it
+    /// draws anything at that point.
+    ///
+    /// The second control, kept for the same reason [`two_pass`] is. It got the
+    /// covered titlebar right — that was the fix — and it got a halo over a
+    /// lower pane's drawn chrome wrong, because "which window is on top" was
+    /// asked at a pixel the upper window does not occupy. Every case below
+    /// measures all three rules at the same point, so what each one gets right
+    /// and wrong is written down rather than remembered.
+    fn halo_wins(stack: &[Stacked], point: (f64, f64)) -> Option<Chrome> {
+        for pane in stack {
+            match pane.hit(point) {
+                PaneHit::Chrome(chrome) | PaneHit::Halo(chrome) => return Some(chrome),
+                PaneHit::Client => return None,
+                PaneHit::Miss => {}
+            }
+        }
+        None
+    }
+
+    /// **Issue #111, as reported: a titlebar took clicks through the window
+    /// covering it.**
+    ///
+    /// Two overlapping windows. A press on the *top* one, at a point where the
+    /// lower one's titlebar happened to lie underneath, focused and raised the
+    /// lower window. The walk searched only for chrome, so the top window —
+    /// whose client covers the point and which therefore had no chrome to
+    /// offer — did not stop the descent, and the lower window's titlebar was
+    /// found beneath it.
+    ///
+    /// The last assertion is the control, and it was run red before the fix:
+    /// with the first assertion pointed at `two_pass` the test fails with
+    /// `Some(Frame)` against an expected `None`, which is the reported
+    /// behaviour reproduced in a unit test rather than on hardware.
+    #[test]
+    fn a_covered_titlebar_does_not_take_the_click() {
+        let lower = Stacked::window((100, 100), (400, 300));
+        let upper = Stacked::window((60, 60), (400, 300));
+        let stack = [upper, lower];
+
+        // (300, 116) is 56px down into the upper window: past its 32px titlebar
+        // and 160px clear of its nearest resize border, so it is that window's
+        // client and nothing else. The same point is 16px down into the lower
+        // window, inside its titlebar and clear of its top border -- so the two
+        // windows genuinely disagree here, which is what makes the walk's
+        // answer worth anything.
+        let point = (300.0, 116.0);
+        assert_eq!(
+            upper.hit(point),
+            PaneHit::Client,
+            "the top window covers this point with its client"
+        );
+        assert_eq!(
+            lower.hit(point),
+            PaneHit::Chrome(Chrome::Frame),
+            "and the lower window's titlebar is underneath it, which is the \
+             whole setup"
+        );
+
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(point))),
+            None,
+            "a press on the top window's client is the client's, and the \
+             titlebar buried under it may not have it"
+        );
+        assert_eq!(
+            two_pass(&stack, point),
+            Some(Chrome::Frame),
+            "the walk this replaced hands the point to the covered titlebar, \
+             which is the bug"
+        );
+        assert_eq!(
+            halo_wins(&stack, point),
+            None,
+            "and the one-pass rule that replaced it got this case right -- \
+             what it got wrong is the halo, below"
+        );
+    }
+
+    /// **A resize border hanging outside its own window loses to anything a
+    /// lower pane actually draws, and beats bare desktop.**
+    ///
+    /// A border reaches [`resize::RESIZE_BORDER`] pixels *outside* the window it
+    /// belongs to, over whatever is behind. Out there the pane draws nothing, so
+    /// the claim is not backed by a single pixel and "which window is on top"
+    /// has no answer: an upper window's bottom edge floating four pixels above a
+    /// lower window's close button is not on top of that button in any sense a
+    /// user would recognise. It is beside it. The button is what is drawn there
+    /// and the button takes the press.
+    ///
+    /// The halo still wins over the desktop, which is the only reason an edge
+    /// can be grabbed from outside at all — and its *inside* half still wins
+    /// outright, since there the pane does draw the pixel it is claiming.
+    ///
+    /// Three rules are measured at every point: the corrected one, the
+    /// [`two_pass`] walk from before #111, and [`halo_wins`] as #111 was first
+    /// fixed. The first case is the one that separates them.
+    #[test]
+    fn a_halo_loses_to_what_a_lower_pane_draws() {
+        let lower = Stacked::window((100, 100), (400, 300));
+        // Overlapping the top-right of the lower window, where its close button
+        // is. The bottom edge, y = 120, floats inside the lower window's
+        // titlebar band -- drawn, and 30px clear of the lower window's own
+        // right border, so the only things meeting here are one window's empty
+        // margin and another window's buttons.
+        let upper = Stacked::window((300, 20), (200, 100));
+        let stack = [upper, lower];
+
+        let button = (470.0, 124.0);
+        assert_eq!(
+            upper.hit(button),
+            PaneHit::Halo(Chrome::Resize(ResizeEdge::Bottom)),
+            "4px below the upper window's bottom edge is its resize border, and \
+             outside everything that window draws"
+        );
+        assert_eq!(
+            lower.hit(button),
+            PaneHit::Chrome(Chrome::Frame),
+            "and 24px down into the lower window's titlebar, which is drawn"
+        );
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(button))),
+            Some(Chrome::Frame),
+            "the titlebar is drawn there and the border is not, so the press is \
+             the button's"
+        );
+        assert_eq!(
+            two_pass(&stack, button),
+            Some(Chrome::Frame),
+            "which the walk from before #111 also answered -- it was not wrong \
+             here, only wrong about why, having never asked which pane was on \
+             top at all"
+        );
+        assert_eq!(
+            halo_wins(&stack, button),
+            Some(Chrome::Resize(ResizeEdge::Bottom)),
+            "where #111's first fix drew NsResize over a visible close button \
+             and started a resize grab on it"
+        );
+
+        // The same halo over a lower window's *client*, which is drawn just as
+        // surely as its titlebar is. Nothing is offered and the client keeps
+        // its own cursor: a window's margin does not reach through the window
+        // under it.
+        let deeper = Stacked::window((300, 20), (200, 180));
+        let body = (470.0, 204.0);
+        assert_eq!(
+            deeper.hit(body),
+            PaneHit::Halo(Chrome::Resize(ResizeEdge::Bottom))
+        );
+        assert_eq!(lower.hit(body), PaneHit::Client);
+        assert_eq!(
+            topmost_chrome([deeper, lower].iter().map(|pane| pane.hit(body))),
+            None
+        );
+        assert_eq!(
+            two_pass(&[deeper, lower], body),
+            Some(Chrome::Resize(ResizeEdge::Bottom)),
+            "and here the older walk is wrong too, so neither rule this \
+             replaces got the halo right"
+        );
+
+        // Over the desktop the halo is the best claim there is, and it must
+        // still win: this is what makes an edge grabbable from outside, and a
+        // rule that demanded a pane draw what it claims would take every
+        // window's outer border away.
+        let sky = (400.0, 16.0);
+        assert_eq!(
+            upper.hit(sky),
+            PaneHit::Halo(Chrome::Resize(ResizeEdge::Top)),
+            "4px above the upper window's top edge"
+        );
+        assert_eq!(lower.hit(sky), PaneHit::Miss);
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(sky))),
+            Some(Chrome::Resize(ResizeEdge::Top)),
+            "nothing is drawn under the halo, so the halo has it"
+        );
+        assert_eq!(two_pass(&stack, sky), Some(Chrome::Resize(ResizeEdge::Top)));
+        assert_eq!(
+            halo_wins(&stack, sky),
+            Some(Chrome::Resize(ResizeEdge::Top))
+        );
+
+        // And the half of that border that lies *inside* its own window is
+        // chrome outright: the pane draws the pixel it is claiming, so it wins
+        // over everything below and is never downgraded to a halo. A rule that
+        // answered `Client` wherever the drawn rect contained the point would
+        // have swallowed it and left every window resizable only from outside.
+        let inside = (300.0, 355.0);
+        let alone = Stacked::window((60, 60), (400, 300));
+        assert!(
+            alone
+                .outer
+                .to_f64()
+                .contains(Point::<f64, Logical>::from(inside))
+        );
+        assert_eq!(
+            alone.hit(inside),
+            PaneHit::Chrome(Chrome::Resize(ResizeEdge::Bottom))
+        );
+        assert_eq!(
+            topmost_chrome([alone, lower].iter().map(|pane| pane.hit(inside))),
+            Some(Chrome::Resize(ResizeEdge::Bottom)),
+            "and it beats the lower window it is drawn over, which is the half \
+             of #111's fix that was right"
+        );
+    }
+
+    /// **A halo over two panes takes the topmost one's, and a lower pane's
+    /// border does not reach up through a window covering it.**
+    ///
+    /// The tie-break the corrected rule needs and the covered case it must not
+    /// lose. Remembering a halo and carrying on is only safe if the *first* one
+    /// is kept: two stacked windows whose edges both hang over the same strip
+    /// of desktop are an ordinary sight, and the answer there is still the one
+    /// on top.
+    #[test]
+    fn the_topmost_halo_is_the_one_kept() {
+        // Two windows 6px apart with a strip of desktop between them: the
+        // upper's bottom border and the lower's top border both hang over it,
+        // and they name opposite edges, so which one the walk keeps is
+        // legible in the answer.
+        let upper = Stacked::window((100, 100), (200, 100));
+        let lower = Stacked::window((100, 206), (200, 100));
+        let below = (200.0, 202.0);
+
+        assert_eq!(
+            upper.hit(below),
+            PaneHit::Halo(Chrome::Resize(ResizeEdge::Bottom)),
+            "2px below the upper window"
+        );
+        assert_eq!(
+            lower.hit(below),
+            PaneHit::Halo(Chrome::Resize(ResizeEdge::Top)),
+            "and 4px above the lower one"
+        );
+        assert_eq!(
+            topmost_chrome([upper, lower].iter().map(|pane| pane.hit(below))),
+            Some(Chrome::Resize(ResizeEdge::Bottom)),
+            "two halos over the same desktop, and the topmost is the one kept"
+        );
+        assert_eq!(
+            topmost_chrome([lower, upper].iter().map(|pane| pane.hit(below))),
+            Some(Chrome::Resize(ResizeEdge::Top)),
+            "stack them the other way and the answer follows the stacking order"
+        );
+
+        // A lower window's border, under a window that covers where it hangs.
+        // The border is the lower window's own and the point is still the upper
+        // window's client: a halo is a claim on the desktop, not a tunnel.
+        let over = Stacked::window((60, 150), (400, 200));
+        assert_eq!(over.hit(below), PaneHit::Client);
+        assert_eq!(
+            topmost_chrome([over, upper].iter().map(|pane| pane.hit(below))),
+            None,
+            "the covering window's client owns it, and the border reaching up \
+             from underneath does not"
+        );
+    }
+
+    /// **An unmanaged pane occludes and offers nothing.**
+    ///
+    /// An X11 menu, tooltip or dropdown is placed by its client and owned by
+    /// it: `size_window` refuses an override-redirect surface, and nothing in
+    /// the layout moves one. So a resize border eight pixels outside a Steam or
+    /// GTK menu is a cursor promising a drag that cannot happen, and a press
+    /// there starts a `ResizeGrab` that does nothing when it should have
+    /// dismissed the menu. The single-pass walk made that worse before this
+    /// gate: the phantom border beat a lower window's real titlebar.
+    ///
+    /// Covering is untouched, which is the half that was always right — the
+    /// menu is drawn and a press on it is the menu's.
+    #[test]
+    fn an_unmanaged_pane_occludes_but_offers_no_chrome() {
+        let lower = Stacked::window((100, 100), (400, 300));
+        let menu = Stacked::window((300, 20), (200, 100)).unmanaged();
+        let stack = [menu, lower];
+
+        // The same point as the halo case above: 4px below the menu's bottom
+        // edge, over the lower window's titlebar.
+        let button = (470.0, 124.0);
+        assert_eq!(
+            menu.hit(button),
+            PaneHit::Miss,
+            "a menu has no resize border to offer, inside or out"
+        );
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(button))),
+            Some(Chrome::Frame),
+            "so the titlebar under it is pressable, phantom border or not"
+        );
+
+        // And on the menu itself: covered, and the press is the client's.
+        let on_menu = (400.0, 60.0);
+        assert_eq!(menu.hit(on_menu), PaneHit::Client);
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(on_menu))),
+            None,
+            "a press on a menu is the menu's, which is what occluding means"
+        );
+
+        // The inside half of the border it would otherwise have offered is the
+        // client's too, rather than a resize of something nothing may resize.
+        let edge = (400.0, 116.0);
+        assert_eq!(
+            Stacked::window((300, 20), (200, 100)).hit(edge),
+            PaneHit::Chrome(Chrome::Resize(ResizeEdge::Bottom)),
+            "a managed window of the same shape would offer this"
+        );
+        assert_eq!(menu.hit(edge), PaneHit::Client);
+    }
+
+    /// A pane whose application has not arrived offers its frame and not its
+    /// border, and covers either way.
+    ///
+    /// The `window.is_some()` half of [`chrome_offered`]: a frame around a
+    /// loading window has working buttons, which is the point of drawing one,
+    /// and there is nothing yet for a resize to resize. What it must not do is
+    /// let the window behind it take the press, which is issue #111 again with
+    /// a different pane on top.
+    #[test]
+    fn a_loading_pane_offers_its_frame_and_not_its_border() {
+        let lower = Stacked::window((100, 100), (400, 300));
+        let loading = Stacked::window((300, 20), (200, 100)).loading();
+        let stack = [loading, lower];
+
+        assert_eq!(
+            loading.hit((400.0, 30.0)),
+            PaneHit::Chrome(Chrome::Frame),
+            "its titlebar is drawn and its buttons work"
+        );
+        assert_eq!(
+            loading.hit((400.0, 116.0)),
+            PaneHit::Client,
+            "and its bottom border is not offered, so the point is simply \
+             inside what it draws"
+        );
+        assert_eq!(
+            loading.hit((470.0, 124.0)),
+            PaneHit::Miss,
+            "nor is the half of that border outside it"
+        );
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit((400.0, 80.0)))),
+            None,
+            "a press on a loading window's body is its own, not the window \
+             behind it"
+        );
+    }
+
+    /// **The cursor is composed from the same walk, so an occluded border does
+    /// not promise a resize.**
+    ///
+    /// #108's finding one altitude up: the pointer's shape is read off
+    /// [`claim_of`] rather than off any second hit test, so whatever the walk
+    /// declines to claim is a point the compositor says nothing about. Without
+    /// this the fix would be half-applied — presses landing correctly while the
+    /// pointer went on describing the resize that the press no longer performs,
+    /// which is exactly the symptom #108 was filed for.
+    #[test]
+    fn an_occluded_border_promises_no_resize_cursor() {
+        let lower = Stacked::window((100, 100), (400, 300));
+        let upper = Stacked::window((300, 20), (200, 100));
+        let stack = [upper, lower];
+        let cursor_at = |point| {
+            claim_of(
+                false,
+                false,
+                topmost_chrome(stack.iter().map(|pane| pane.hit(point))),
+            )
+            .cursor()
+        };
+
+        // Over the lower window's close button, under the upper window's halo:
+        // the frame's own arrow, and not the resize the halo would have asked
+        // for.
+        assert_eq!(cursor_at((470.0, 124.0)), Some(CursorIcon::Default));
+        assert_eq!(
+            claim_of(false, false, halo_wins(&stack, (470.0, 124.0))).cursor(),
+            Some(CursorIcon::NsResize),
+            "which is the pointer #111's first fix drew over that button"
+        );
+
+        // Over the desktop above the upper window, where the halo is the whole
+        // claim: the resize cursor, because the press really would resize.
+        assert_eq!(cursor_at((400.0, 16.0)), Some(CursorIcon::NsResize));
+
+        // And on the upper window's client, over the lower window's titlebar:
+        // nothing at all, so the client's own cursor stands. This is #111's
+        // point and the reason `chrome_under` is the only hit test.
+        let covered = Stacked::window((60, 60), (400, 300));
+        assert_eq!(
+            claim_of(
+                false,
+                false,
+                topmost_chrome([covered, lower].iter().map(|pane| pane.hit((300.0, 116.0)))),
+            )
+            .cursor(),
+            None
+        );
+    }
+
+    /// A point no window covers still descends, which is the case the fix must
+    /// not break: [`PaneHit::Miss`] and [`PaneHit::Client`] are both "no chrome
+    /// here" and only one of them may stop the walk.
+    #[test]
+    fn a_point_nothing_covers_still_descends() {
+        let lower = Stacked::window((100, 100), (400, 300));
+        let upper = Stacked::window((150, 20), (200, 100));
+        let stack = [upper, lower];
+
+        // 92px to the right of the upper window -- well past its border -- and
+        // 10px down into the lower window's titlebar.
+        let past = (450.0, 110.0);
+        assert_eq!(upper.hit(past), PaneHit::Miss);
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(past))),
+            Some(Chrome::Frame),
+            "a window that is not there covers nothing, and the titlebar \
+             beside it is still pressable"
+        );
+        assert_eq!(
+            two_pass(&stack, past),
+            Some(Chrome::Frame),
+            "which the rule this replaced also got right -- only the covered \
+             case differs"
+        );
+
+        // Bare desktop: every pane misses and the walk runs out.
+        let desktop = (700.0, 700.0);
+        assert_eq!(upper.hit(desktop), PaneHit::Miss);
+        assert_eq!(lower.hit(desktop), PaneHit::Miss);
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(desktop))),
+            None
+        );
+        assert_eq!(
+            topmost_chrome(std::iter::empty::<PaneHit<Chrome>>()),
+            None,
+            "and a desktop with no windows on it at all"
         );
     }
 
@@ -6341,5 +7237,239 @@ mod tests {
         // Somebody else holds it -- one of Solium's own move or resize grabs,
         // or a serial this client made up. Declined.
         assert!(!may_grab(true, false, false));
+    }
+    /// **A drag owns the pointer, so the compositor stops describing what is
+    /// under it.**
+    ///
+    /// A client that starts a drag gets a `DnDGrab` installed on the pointer,
+    /// so `PointerHandle::is_grabbed` is true for the whole gesture -- checked
+    /// against smithay 0.7's `selection/data_device/device.rs`, which calls
+    /// `set_grab` with it, and `input/pointer/mod.rs`, where `is_grabbed` is
+    /// `!matches!(guard.grab, GrabStatus::None)`. That is the machinery, and it
+    /// is why a drag needs no flag of its own: [`Solium::assert_cursor`]
+    /// already declines to recompute while the pointer is grabbed.
+    ///
+    /// What it buys is that dragging a file across a window's edge does not
+    /// make the pointer offer a resize. The press that would perform that
+    /// resize cannot happen -- the button is already down and belongs to the
+    /// drag -- so a resize arrow there is #108's symptom again, arrived at from
+    /// a fourth direction, and it would flicker on and off along every edge the
+    /// drag crosses.
+    ///
+    /// The `false` half is what makes this able to fail: the same call with no
+    /// grab clears the shape, so an `assert_cursor` that had lost its early
+    /// return would clear it in both.
+    #[test]
+    fn a_grabbed_pointer_keeps_the_shape_it_had() {
+        let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+            .expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+
+        // Where a border drag leaves the pointer: `input::pointer_button`
+        // asserts the shape as it starts the grab, precisely so that it holds
+        // for the drag. A DnD grab arrives at the same place by a different
+        // road -- whatever was showing when the buttons went down.
+        assert!(state.pointer.assert(Some(CursorIcon::NwseResize)));
+
+        // Nothing is mapped, so the hit test under this point claims nothing
+        // and the compositor's answer for it is "say nothing" -- which is a
+        // *write*, and the one the grab has to suppress.
+        let location = Point::<f64, Logical>::from((300.0, 300.0));
+        assert_eq!(state.claim_under(location), Claim::Nothing);
+        assert_eq!(state.claim_under(location).cursor(), None);
+
+        state.assert_cursor(location, true);
+        assert_eq!(
+            state.pointer.showing(),
+            CursorImageStatus::Named(CursorIcon::NwseResize),
+            "a grab owns the pointer until it ends, so crossing anything \
+             underneath must not change the shape"
+        );
+
+        state.assert_cursor(location, false);
+        assert_eq!(
+            state.pointer.showing(),
+            CursorImageStatus::default_named(),
+            "and the first motion after the grab ends hands the pointer back \
+             to the ordinary hit test"
+        );
+    }
+    /// **Issue #57's state machine: the icon is kept for exactly one drag.**
+    ///
+    /// Needs a real `WlSurface`, and one cannot be conjured: smithay offers no
+    /// constructor, and `wl_surface`'s server-side user data type is private,
+    /// so `Client::create_resource` cannot name it either. A client has to ask
+    /// over the wire. That is the same conclusion `scale_resend` above reaches
+    /// for `ToplevelSurface`, and this fixture is deliberately its smaller
+    /// half: one global, one surface, no `xdg_shell`, no buffer, no output.
+    ///
+    /// **Nothing here may build a Qt scene**, which is why no toplevel is
+    /// opened and none is needed. A window mapped inside a process that is
+    /// already holding a raw libwayland connection aborts the whole test
+    /// binary -- see the long note in `scale_resend`, which found that the hard
+    /// way. A bare `wl_surface` never reaches `new_toplevel`, so no decoration
+    /// is ever built for it.
+    mod drag_icon {
+        use super::*;
+        use smithay::reexports::wayland_server::Display;
+        use std::os::unix::net::UnixStream;
+        use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
+        use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
+
+        /// The client side: `wl_compositor` and nothing else, because a
+        /// surface is the whole of what is wanted.
+        #[derive(Debug, Default)]
+        struct Client {
+            compositor: Option<wl_compositor::WlCompositor>,
+        }
+
+        impl Dispatch<wl_registry::WlRegistry, ()> for Client {
+            fn event(
+                state: &mut Self,
+                registry: &wl_registry::WlRegistry,
+                event: wl_registry::Event,
+                (): &(),
+                _conn: &Connection,
+                qh: &QueueHandle<Self>,
+            ) {
+                let wl_registry::Event::Global {
+                    name, interface, ..
+                } = event
+                else {
+                    return;
+                };
+                if interface == "wl_compositor" {
+                    state.compositor = Some(registry.bind(name, 1, qh, ()));
+                }
+            }
+        }
+
+        wayland_client::delegate_noop!(Client: ignore wl_compositor::WlCompositor);
+        wayland_client::delegate_noop!(Client: ignore wl_surface::WlSurface);
+
+        /// Start a drag, drop it, start a second one, and destroy the surface
+        /// under that one.
+        ///
+        /// One test rather than three because the fixture is the expensive
+        /// part -- a display, a socket pair and a round trip -- and because
+        /// each step is the next step's precondition: "cleared on drop" says
+        /// nothing unless something was there to be cleared.
+        #[test]
+        fn an_icon_lasts_one_drag_and_outlives_neither_the_drop_nor_its_surface() {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+
+            let (server_side, client_side) =
+                UnixStream::pair().expect("a socket pair for the test client");
+            let served = display
+                .handle()
+                .insert_client(server_side, std::sync::Arc::new(ClientState::default()))
+                .expect("inserting the test client");
+            let conn = Connection::from_socket(client_side).expect("wrapping the client socket");
+            let mut event_queue = conn.new_event_queue::<Client>();
+            let qh = event_queue.handle();
+            let mut client = Client::default();
+
+            conn.display().get_registry(&qh, ());
+            conn.flush().expect("flushing get_registry");
+            display
+                .dispatch_clients(&mut state)
+                .expect("dispatching get_registry");
+            display
+                .flush_clients()
+                .expect("flushing the registry snapshot");
+            // Safe to block: the server wrote the whole registry on the line
+            // above and nothing but this thread drives it, so these bytes are
+            // already in the kernel buffer. Same argument as `scale_resend`'s
+            // one blocking read.
+            event_queue
+                .blocking_dispatch(&mut client)
+                .expect("reading the registry snapshot");
+
+            let compositor = client.compositor.clone().expect("wl_compositor bound");
+            let asked = compositor.create_surface(&qh, ());
+            conn.flush().expect("flushing create_surface");
+            display
+                .dispatch_clients(&mut state)
+                .expect("dispatching create_surface");
+
+            // The compositor's own handle on the surface the client just made.
+            // The protocol id is the same number on both sides of one
+            // connection, which is what makes this lookup exact rather than a
+            // search for "the only surface around".
+            let icon: WlSurface = served
+                .object_from_protocol_id(&display.handle(), asked.id().protocol_id())
+                .expect("the compositor made a wl_surface for the request");
+
+            // Taken once: every call below needs it, and it cannot be read
+            // out of `state` in the same expression that borrows `state`
+            // mutably.
+            let seat = state.seat.clone();
+
+            // A drag with no icon is ordinary -- a text selection dragged
+            // inside one window often has none -- and must leave nothing
+            // behind to be drawn.
+            ClientDndGrabHandler::started(&mut state, None, None, seat.clone());
+            assert!(
+                state.dnd_icon().is_none(),
+                "a drag the client chose not to illustrate draws nothing"
+            );
+
+            // The drag the issue is about.
+            state.redraw = false;
+            ClientDndGrabHandler::started(&mut state, None, Some(icon.clone()), seat.clone());
+            assert_eq!(
+                state.dnd_icon().as_ref(),
+                Some(&icon),
+                "the icon is offered exactly once, at the start of the drag, \
+                 and keeping it is the whole of #57"
+            );
+            assert!(
+                state.redraw,
+                "the icon appears at a pointer that has not moved, so nothing \
+                 else on screen damages the region it is about to occupy"
+            );
+
+            // The buttons come up. `DnDGrab::unset` calls its own `drop`,
+            // which calls this, so a cancelled or stolen grab arrives here
+            // too -- checked against smithay 0.7's `dnd_grab.rs`.
+            state.redraw = false;
+            ClientDndGrabHandler::dropped(&mut state, None, true, seat.clone());
+            assert!(
+                state.dnd_icon.is_none(),
+                "the drag is over, so the icon stops being drawn -- otherwise \
+                 it stays painted over the session that outlived it"
+            );
+            assert!(state.redraw, "and the frame that removes it has to happen");
+
+            // A drop that nobody accepted ends the drag just as thoroughly.
+            ClientDndGrabHandler::started(&mut state, None, Some(icon.clone()), seat.clone());
+            ClientDndGrabHandler::dropped(&mut state, None, false, seat.clone());
+            assert!(state.dnd_icon.is_none());
+
+            // **The client goes away mid-drag**, which never reaches `dropped`:
+            // the grab is only unset when the buttons come up, and an
+            // application that is gone will not be raising any. Destroying the
+            // surface is the same road a disconnect takes -- every object the
+            // client owned is destroyed -- and it is the deterministic half.
+            ClientDndGrabHandler::started(&mut state, None, Some(icon.clone()), seat.clone());
+            assert!(state.dnd_icon().is_some());
+            asked.destroy();
+            conn.flush().expect("flushing the surface destroy");
+            display
+                .dispatch_clients(&mut state)
+                .expect("dispatching the surface destroy");
+            assert!(!icon.alive(), "the fixture destroyed the surface");
+            assert!(
+                state.dnd_icon().is_none(),
+                "a dead surface produces no render elements, so keeping one \
+                 is a drag icon that is never drawn and never cleared"
+            );
+            assert!(
+                state.dnd_icon.is_none(),
+                "and the reader clears the field rather than filtering it on \
+                 every frame for the rest of the session"
+            );
+        }
     }
 }
