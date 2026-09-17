@@ -271,17 +271,9 @@ fn pointer_motion<B: InputBackend>(
 
     let under = state.surface_under(location);
 
-    // Over nothing of a client's, the cursor is the compositor's again -- the
-    // third of the three sources `cursor.rs`'s header sets out. The status is
-    // whatever the last client set it to, by either of its two mechanisms, and
-    // a client only sets it while the pointer is over its surface -- so
-    // without this the pointer keeps a cursor belonging to a window it has
-    // left, and once that surface is gone there is nothing to draw at all: an
-    // invisible pointer over the desktop, which is exactly where you need to
-    // see it.
-    if under.is_none() {
-        state.pointer.show(CursorImageStatus::default_named());
-    }
+    // The two halves of the pointer, both of them held by the same grab: see
+    // `release_cursor` for `status` and `Solium::assert_cursor` for `chrome`.
+    release_cursor(state, under.is_none(), pointer.is_grabbed());
     state.assert_cursor(location, pointer.is_grabbed());
 
     pointer.motion(
@@ -334,10 +326,10 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
     if !locked {
         // As in `pointer_motion`: over nothing of a client's, the cursor is the
         // compositor's again. This is the path a real mouse takes, so leaving
-        // it out is leaving it broken on the hardware and fixed nested.
-        if under.is_none() {
-            state.pointer.show(CursorImageStatus::default_named());
-        }
+        // it out is leaving it broken on the hardware and fixed nested -- and
+        // the same goes for the grab test inside it, since a drag with a real
+        // mouse arrives here and not above.
+        release_cursor(state, under.is_none(), pointer.is_grabbed());
         // And as in `pointer_motion`: over the compositor's own chrome the
         // compositor says what the pointer is. Same reason for the repetition
         // -- this is the path a real mouse takes, and #108 was reported on the
@@ -525,6 +517,41 @@ fn confine(
     // No screens at all. Nothing is on the desktop to be off the edge of, so
     // the pointer is left where it was asked to go.
     nearest.map_or(location, |(at, _)| at)
+}
+
+/// Hand the pointer back to the compositor's own arrow, over nothing of a
+/// client's.
+///
+/// The third of the three sources `cursor.rs`'s header sets out. `status` is
+/// whatever the last client set it to, by either of its two mechanisms, and a
+/// client only sets it while the pointer is over its surface — so without this
+/// the pointer keeps a cursor belonging to a window it has left, and once that
+/// surface is gone there is nothing to draw at all: an invisible pointer over
+/// the desktop, which is exactly where you need to see it.
+///
+/// **Not while something holds the pointer, and that is not tidiness — it is
+/// the same rule as [`Solium::assert_cursor`]'s reaching the other half of the
+/// pointer.** `assert_cursor` guards `chrome`; this guards `status`, and
+/// `status` is the half a drag writes. Smithay lets it: `wl_pointer.set_cursor`
+/// is accepted from whoever holds the grab — `wayland/seat/pointer.rs:521`,
+/// whose own comment reads *"Allow client if there is a pointer grab for that
+/// client. Like drag and drop"* — which is how a `dnd-copy` or `dnd-move` shape
+/// gets onto the pointer at all.
+///
+/// A drag crosses gaps. Over the desktop between two windows, over the space a
+/// tiled layout leaves, over anything Solium draws and no client owns,
+/// `surface_under` is `None`; without the grab test the first such gap would
+/// replace the drag's shape with the plain arrow and leave it there for the
+/// rest of the gesture, because the client has no reason to send `set_cursor`
+/// again until the pointer re-enters one of its surfaces. A drag that is still
+/// accepting drops would look like one that had stopped — the pointer
+/// describing something other than what is happening, which is #108's finding
+/// arrived at from a fourth direction.
+fn release_cursor(state: &mut Solium, unclaimed: bool, grabbed: bool) {
+    if !unclaimed || grabbed {
+        return;
+    }
+    state.pointer.show(CursorImageStatus::default_named());
 }
 
 /// Focus whatever the pointer is over, if the profile says so.
@@ -988,9 +1015,11 @@ fn absolute_location<B: InputBackend>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Request, combo_for, confine, escape};
+    use super::{Request, Solium, combo_for, confine, escape, release_cursor};
     use smithay::{
         input::keyboard::{Keysym, ModifiersState},
+        input::pointer::{CursorIcon, CursorImageStatus},
+        reexports::wayland_server::Display,
         utils::Rectangle,
     };
 
@@ -1163,5 +1192,76 @@ mod tests {
     #[test]
     fn with_no_screens_the_pointer_is_left_where_it_was_put() {
         assert_eq!(confine(&[], (640.0, 480.0).into()), (640.0, 480.0).into());
+    }
+
+    /// **A drag keeps its own shape across the gaps it crosses.**
+    ///
+    /// `state::tests::a_grabbed_pointer_keeps_the_shape_it_had` pins the other
+    /// half of this — `Solium::assert_cursor` holding `chrome` — and this pins
+    /// the half the motion handlers own. They are two different guards on two
+    /// different fields, and the drag-icon review found the second one missing
+    /// while the first was there and tested, so testing only `assert_cursor`
+    /// is what let it through.
+    ///
+    /// The shape being defended is the client's own. Smithay accepts
+    /// `wl_pointer.set_cursor` from whoever holds the grab
+    /// (`wayland/seat/pointer.rs:521`), so `dnd-copy` and `dnd-move` land in
+    /// `status` mid-drag by design; the compositor clearing it on the first
+    /// gap between two windows would leave a plain arrow for the rest of the
+    /// gesture, which reads as a drag that stopped accepting.
+    ///
+    /// Run against a real [`Solium`] rather than a bare `cursor::Pointer`,
+    /// because a `Pointer` in isolation cannot tell the two callers apart and
+    /// the bug was in the callers. One display, no client, no surface and no
+    /// toplevel: the fixture note in `state::tests::drag_icon` sets out why
+    /// anything more than that has aborted this binary before.
+    #[test]
+    fn a_grabbed_pointer_keeps_the_shape_its_drag_set() {
+        let display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+
+        // Where `wl_data_device.start_drag` leaves the pointer: the client
+        // holds the grab, so its `set_cursor` is accepted and the shape
+        // reaches `status` through `SeatHandler::cursor_image`.
+        state
+            .pointer
+            .show(CursorImageStatus::Named(CursorIcon::Copy));
+
+        // The first gap. Nothing of a client's is under the pointer, which on
+        // the ungrabbed path is the compositor's cue to put its arrow back --
+        // and is a *write*, which is the one the grab has to suppress.
+        release_cursor(&mut state, true, true);
+        assert_eq!(
+            state.pointer.showing(),
+            CursorImageStatus::Named(CursorIcon::Copy),
+            "a drag crossing the desktop between two windows must keep the \
+             shape its client set; clearing it here leaves a plain arrow for \
+             the rest of the gesture, because the client has no reason to say \
+             it again"
+        );
+
+        // The half that makes this able to fail: the same call holding
+        // nothing is the pointer being handed back to the compositor, which is
+        // the whole reason `release_cursor` exists. A gate that had swallowed
+        // both would pass the assertion above and break every window exit.
+        release_cursor(&mut state, true, false);
+        assert_eq!(
+            state.pointer.showing(),
+            CursorImageStatus::default_named(),
+            "a pointer that merely left a window, with nothing holding it, \
+             gets the compositor's arrow back"
+        );
+
+        // And the other axis, unchanged by any of this: over a client's own
+        // surface nothing is cleared, grab or no grab.
+        state
+            .pointer
+            .show(CursorImageStatus::Named(CursorIcon::Text));
+        release_cursor(&mut state, false, false);
+        assert_eq!(
+            state.pointer.showing(),
+            CursorImageStatus::Named(CursorIcon::Text),
+            "a pointer over a client's surface is that client's to describe"
+        );
     }
 }

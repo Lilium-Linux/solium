@@ -5490,12 +5490,42 @@ impl ClientDndGrabHandler for Solium {
     /// before this is called and which is what stops the same surface being a
     /// cursor or a toplevel at the same time.
     ///
-    /// No cursor assertion is made here, and that is deliberate. The drag
-    /// installs a `DnDGrab` on the pointer, so `pointer.is_grabbed()` is true
-    /// for its whole length and [`Solium::assert_cursor`] already declines to
-    /// say anything while grabbed — the drag owns the pointer until it ends,
-    /// exactly as a resize drag does, and it needs no flag of its own to say
-    /// so. Whatever shape was showing when the drag began is the shape it keeps.
+    /// No cursor assertion is made here, and that is deliberate. A drag begun
+    /// with the pointer installs a `DnDGrab` on it, so `pointer.is_grabbed()`
+    /// is true for the whole gesture, and that one test holds *both* halves of
+    /// the pointer: [`Solium::assert_cursor`] declines to recompute `chrome`,
+    /// and [`crate::input::release_cursor`] declines to clear `status` over the
+    /// gaps the drag crosses. The drag owns the pointer until it ends, exactly
+    /// as a resize drag does, and it needs no flag of its own to say so.
+    ///
+    /// So the compositor says nothing about the shape for the length of the
+    /// drag — which is not the same as the shape being frozen, and the
+    /// difference matters. The drag's own client may still change it, and is
+    /// meant to: `wl_pointer.set_cursor` is accepted from the holder of a grab
+    /// (`wayland/seat/pointer.rs:521`, and its comment names drag and drop),
+    /// so a toolkit swapping between `dnd-copy` and `dnd-no-drop` as it crosses
+    /// drop targets reaches [`SeatHandler::cursor_image`] mid-drag and is
+    /// obeyed. What is held is the compositor's hands off it.
+    ///
+    /// **The grab is the pointer's only for a pointer-initiated drag.**
+    /// `start_drag` installs it on whichever device the start serial came from:
+    /// a pointer serial takes `PointerHandle::set_grab`, a touch serial takes
+    /// `TouchHandle::set_grab` and returns before the pointer branch is ever
+    /// reached — `selection/data_device/device.rs:95`. A drag begun with a
+    /// finger therefore leaves `pointer.is_grabbed()` false for its whole
+    /// length, and neither guard above holds anything. That is reachable rather
+    /// than hypothetical: [`Solium::new`] calls `seat.add_touch()`, and
+    /// `input::handle` routes `TouchDown` into it.
+    ///
+    /// It costs nothing today because a finger moves no pointer. Both guarded
+    /// writes sit on the pointer motion paths, so a touch drag reaches neither
+    /// unless a mouse is moved alongside the finger — and at that point the
+    /// pointer honestly is not the thing dragging, so describing what is under
+    /// it is the right answer rather than a missed one. What a touch drag does
+    /// get wrong is the icon, which `render::elements` puts at the pointer
+    /// because the pointer is the only position it has; re-deriving that from
+    /// the touch grab is the work touch support will bring, and the cursor
+    /// rules here are the pointer's and stay the pointer's.
     fn started(
         &mut self,
         _source: Option<WlDataSource>,
