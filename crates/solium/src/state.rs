@@ -9,6 +9,7 @@ use std::time::Duration;
 use smithay::output::{Output, Scale};
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size};
+use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::fractional_scale::{
     FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
 };
@@ -33,7 +34,7 @@ use smithay::{
     },
     input::{
         Seat, SeatHandler, SeatState,
-        pointer::{CursorImageStatus, Focus, GrabStartData},
+        pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData},
     },
     reexports::{
         wayland_protocols::xdg::{
@@ -333,6 +334,21 @@ pub(crate) struct Solium {
     /// lock ends. Advice, taken at unlock. See `cursor_position_hint`.
     pub(crate) constraint_hint: Option<Point<f64, Logical>>,
 
+    /// Letting a client *name* the cursor it wants instead of drawing one.
+    ///
+    /// Without it a toolkit has to rasterise every cursor itself and hand over
+    /// pixels, and the ones that no longer do — which is the modern default,
+    /// because naming a shape is how a client gets the compositor's theme
+    /// rather than a guess at it — got no cursor change at all. Not a subtle
+    /// failure: a text field showed the arrow, a resize edge showed the arrow,
+    /// everything showed the arrow. The name is resolved through the same
+    /// XCursor theme the rest of the pointer uses; see `cursor::shape`.
+    #[expect(
+        dead_code,
+        reason = "registers wp_cursor_shape_manager_v1; dropping it would remove the global"
+    )]
+    pub(crate) cursor_shape_state: CursorShapeManagerState,
+
     /// Cropping and scaling a surface without the client redrawing it.
     ///
     /// How a video player presents a frame decoded at one size at another size
@@ -558,6 +574,186 @@ fn ancestry(pid: u32) -> Vec<u32> {
     family
 }
 
+/// Which region of the compositor's own chrome a point is in.
+///
+/// Carries no window and no pane on purpose: this is the part that is a
+/// *rule* rather than a lookup, and [`Under`] is what carries the rest. See
+/// [`Solium::chrome_under`] for what a press and the pointer each do with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Chrome {
+    /// The frame's band — the titlebar, its buttons, and any border the
+    /// decoration reserved. A press here is the frame's: a button, or a drag
+    /// that moves the window.
+    Frame,
+    /// A resize border, and which edges a drag from it would pull.
+    Resize(ResizeEdge),
+}
+
+impl Chrome {
+    /// The cursor the compositor asserts over this region.
+    ///
+    /// Over a frame this is the plain arrow rather than a move cursor, and
+    /// deliberately: a titlebar is not only a drag handle — it carries buttons
+    /// that are pressed, not dragged — and every desktop shows the ordinary
+    /// pointer over one. What matters for #108 is that it is the
+    /// *compositor's* arrow and overrides whatever the client last set,
+    /// because a client drawing its own resize affordance in the shadow margin
+    /// under our titlebar is exactly the case that went wrong.
+    pub(crate) fn cursor(self) -> CursorIcon {
+        match self {
+            Self::Frame => CursorIcon::Default,
+            Self::Resize(edges) => resize::cursor(edges),
+        }
+    }
+}
+
+/// The compositor's own chrome under a point: which region, which pane, and
+/// the two things a press there needs.
+#[derive(Clone, Debug)]
+pub(crate) struct Under {
+    /// What is under the pointer, and therefore both what a press does and
+    /// what the pointer is drawn as.
+    pub(crate) chrome: Chrome,
+    pub(crate) pane: crate::pane::PaneId,
+    /// The pane's window, when its application has arrived. `None` is a frame
+    /// around a window that is still loading, whose buttons work anyway.
+    /// [`Solium::pane_chrome`] never reports a resize border without one.
+    pub(crate) window: Option<Window>,
+    /// The point in the pane's own coordinates, which is what a decoration
+    /// hit-tests its buttons against.
+    pub(crate) local: Point<f64, Logical>,
+    /// The pane's outer rectangle, which a resize drag measures from.
+    pub(crate) outer: Rectangle<i32, Logical>,
+}
+
+/// Which region a point belongs to, given what each of the two tests said
+/// about it — and the only place the overlap between them is resolved.
+///
+/// **The overlap is real, not theoretical.** A window with a titlebar has a
+/// band below its top edge that is inside the frame *and* within
+/// [`resize::RESIZE_BORDER`] of the top edge, so both tests answer yes for the
+/// same pixel. The frame takes it, for the plain reason that the frame is what
+/// a press there does: `pointer_button` has always checked the frame before
+/// the resize border, and nothing about the pointer's shape is allowed to
+/// disagree with that. The top edge is still draggable from the outside half
+/// of its border, which is over the desktop rather than over the titlebar, and
+/// now says so.
+///
+/// Written as a function taking two booleans-worth of answer rather than as a
+/// `match` inside [`Solium::pane_chrome`] so that the rule can be pinned: a
+/// `Solium` needs a `Display` and cannot be built in a unit test, and a rule
+/// that can only be exercised by running the compositor is a rule that goes
+/// untested until somebody notices it on hardware. Which is how #108 was
+/// found.
+pub(crate) fn chrome_of(on_frame: bool, edges: ResizeEdge) -> Option<Chrome> {
+    if on_frame {
+        return Some(Chrome::Frame);
+    }
+    match edges {
+        ResizeEdge::None => None,
+        edges => Some(Chrome::Resize(edges)),
+    }
+}
+
+/// Who a press at a point belongs to, before any client sees it.
+///
+/// [`Chrome`] is one link of this and not the whole of it, which is what the
+/// first pass at #108 got wrong: the cursor was read off `chrome_under` alone
+/// while [`crate::input`]'s `pointer_button` consults two other things first,
+/// so in a mode — or over a scripted bar — the pointer went on describing a
+/// resize that the press was never going to perform. Same bug, one altitude up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Claim {
+    /// A scripted surface above the windows takes it: a bar, a panel, an
+    /// overlay. What it does with the press is the script's business and the
+    /// compositor has nothing to say about it.
+    Surface,
+    /// A mode owns input — `sol.grab(true)`, which is overview. Every press is
+    /// the mode's, whatever is drawn under the pointer.
+    Mode,
+    /// The compositor's own chrome: a frame's band, or a resize border.
+    Chrome(Chrome),
+    /// None of the compositor's: the press reaches a window or a client.
+    Nothing,
+}
+
+impl Claim {
+    /// The cursor the compositor asserts, or `None` to say nothing and leave
+    /// the pointer to whoever owns the point.
+    ///
+    /// **Only `Chrome` names a shape.** The other three are the compositor
+    /// declining to describe the press, which is the whole content of this
+    /// finding: a thumbnail's corner in overview is within eight pixels of a
+    /// window edge and `chrome_under` will happily call it `BottomRight`, but
+    /// the press there focuses the window and leaves the mode. A pointer that
+    /// promised a resize would be #108's second symptom again, on a key
+    /// combination used every day.
+    pub(crate) fn cursor(self) -> Option<CursorIcon> {
+        match self {
+            Self::Chrome(chrome) => Some(chrome.cursor()),
+            Self::Surface | Self::Mode | Self::Nothing => None,
+        }
+    }
+}
+
+/// `pointer_button`'s precedence chain, as a rule rather than as a sequence of
+/// early returns.
+///
+/// The three links are asked in the order the press asks them, and the order is
+/// the point: a scripted overlay above the windows is offered the press before
+/// a mode is consulted, and a mode before any chrome. `pointer_button` is where
+/// each answer is *acted* on — it has a surface to deliver to, a click to
+/// trigger and an [`Under`] to start a grab from, none of which fit in a value
+/// — but which one wins is decided here, and the pointer's shape is read off
+/// the result rather than off the last link alone.
+///
+/// Pure, and taking the links already answered, for the same reason
+/// [`chrome_of`] is: a `Solium` needs a `Display` and cannot be stood up in a
+/// unit test, so a rule that lives inside one is a rule that is checked by
+/// running the compositor and noticing. Which is how both halves of #108 were
+/// found.
+pub(crate) fn claim_of(surface: bool, mode: bool, chrome: Option<Chrome>) -> Claim {
+    if surface {
+        return Claim::Surface;
+    }
+    if mode {
+        return Claim::Mode;
+    }
+    match chrome {
+        Some(chrome) => Claim::Chrome(chrome),
+        None => Claim::Nothing,
+    }
+}
+
+/// Whether a point in a pane's own coordinates lands on its frame rather than
+/// on its client.
+///
+/// The band is everything inside the pane's outer rectangle that the insets
+/// reserve — a titlebar across the top, a bar down a side, a border all round,
+/// whatever the decoration asked for — and the complement is the client's,
+/// wherever the frame chose to draw itself inside it. A decoration that
+/// reserves nothing owns no band at all, and its clicks belong to the window
+/// under it.
+///
+/// The outer bound is part of the predicate and not a caller's business: the
+/// insets say how far in the client starts, so without it every point above a
+/// window would be "not the client" and therefore the titlebar.
+pub(crate) fn on_frame(
+    size: Size<i32, Logical>,
+    insets: Insets,
+    local: Point<f64, Logical>,
+) -> bool {
+    let pane = Rectangle::new(Point::from((0.0, 0.0)), size.to_f64());
+    let client = Rectangle::new(
+        Point::from((f64::from(insets.left), f64::from(insets.top))),
+        Size::from((
+            f64::from(size.w - insets.horizontal()),
+            f64::from(size.h - insets.vertical()),
+        )),
+    );
+    pane.contains(local) && !client.contains(local)
+}
+
 /// The client's rect inside an outer one, once the frame has taken its share.
 fn inner(outer: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logical> {
     Rectangle::new(
@@ -647,6 +843,11 @@ impl Solium {
             relative_pointer_state: RelativePointerManagerState::new::<Self>(&display_handle),
             pointer_constraints_state: PointerConstraintsState::new::<Self>(&display_handle),
             constraint_hint: None,
+            // Version 2, which smithay's `new` asks for unconditionally: it
+            // adds `dnd-ask` and `all-resize` to the shape enum, and a client
+            // bound at version 1 simply never sends them. `cursor::shape` maps
+            // both, so there is nothing to gate.
+            cursor_shape_state: CursorShapeManagerState::new::<Self>(&display_handle),
             pending_selection: None,
             activation_state: XdgActivationState::new::<Self>(&display_handle),
             viewporter_state: ViewporterState::new::<Self>(&display_handle),
@@ -1968,6 +2169,33 @@ impl Solium {
                         self.loading = loading;
                     }
                 }
+                Command::Cursor(configured) => {
+                    // The environment is re-read here rather than cached at
+                    // startup, because this also runs on `super+shift+r` and a
+                    // reload is the one moment a session can pick up an
+                    // `XCURSOR_THEME` that was exported after the compositor
+                    // started. Two `env::var` calls per reload.
+                    //
+                    // And a reload that really did change the pointer damages
+                    // the screen. The pointer is rebuilt for every output on
+                    // every *frame* (see `render::cursor`), which is not the
+                    // same as there being a frame: both backends draw on
+                    // damage, and a pointer sitting still produces none. So a
+                    // `super+shift+r` that changed only the cursor theme or
+                    // size would otherwise show the new pointer whenever
+                    // something unrelated next happened to redraw — which,
+                    // while trying a theme out, is when the mouse is jiggled.
+                    //
+                    // `configure` answers `false` when nothing changed, which
+                    // on a reload that changed a keybinding is every time, so
+                    // the ordinary reload still schedules nothing.
+                    if self
+                        .pointer
+                        .configure(&configured, &crate::cursor::theme::Environment::read())
+                    {
+                        self.redraw = true;
+                    }
+                }
                 Command::Decoration { name } => {
                     // The slots windows occupy are kept; what changes is how
                     // much of each slot the frame takes, so every client is
@@ -2070,51 +2298,133 @@ impl Solium {
         }
     }
 
-    /// The window and edges a press at `location` would resize, if any.
+    /// The compositor's own chrome under `location`, if any.
     ///
-    /// Searched topmost first, and only over the edges: the middle of a window
-    /// belongs to the client.
-    pub(crate) fn resize_target(
-        &self,
-        location: Point<f64, Logical>,
-    ) -> Option<(Window, ResizeEdge, Rectangle<i32, Logical>)> {
+    /// **The single hit test behind both what a press does and what the pointer
+    /// looks like, and that is the whole of issue #108.** The two regions
+    /// overlap — the outer eight pixels of a titlebar are inside the top resize
+    /// border — and before this there was nothing that resolved the overlap
+    /// once. A press resolved it by asking `frame_under` first and
+    /// `resize_target` second, so the band below a window's top edge moved the
+    /// window. The pointer resolved it not at all: the compositor asked for no
+    /// cursor but the default, so whatever a client had last set stayed on
+    /// screen, and a CSD toolkit that names a resize shape for its own shadow
+    /// margin left a resize arrow sitting over a band that moves. The pointer
+    /// was not merely missing a shape; it was confidently describing a
+    /// different action from the one a press would take.
+    ///
+    /// Callers get the answer and never the ingredients, so a second, parallel
+    /// hit test for the cursor cannot be written by accident — which is the
+    /// failure mode this shape is chosen against, because two hit tests drift
+    /// and the bug comes back wearing a different face.
+    ///
+    /// **Every frame first, and only then every resize border.** The obvious
+    /// single walk — classify each pane top-down and stop at the first that
+    /// claims anything — is wrong, and wrong in a way that is easy to miss: the
+    /// outside half of a window's resize border lies *outside* that window,
+    /// over whatever is drawn behind it, and a titlebar there belongs to the
+    /// window you can see rather than to the one whose edge happens to be eight
+    /// pixels away. So the frames are asked over the whole stack before any
+    /// border is, which is the order a press already had.
+    pub(crate) fn chrome_under(&self, location: Point<f64, Logical>) -> Option<Under> {
+        // A titlebar is the compositor's own surface, so it would otherwise
+        // still take clicks with the session locked -- close and maximise
+        // included. The resize border used to sit outside this guard, since
+        // `resize_target` walked the panes itself and asked nothing: a press
+        // near where a window's edge used to be started a resize grab on a
+        // locked screen, and the window was still that size when the session
+        // unlocked. There is one guard now because there is one hit test.
+        if self.lock.is_some() {
+            return None;
+        }
         let now = self.clock.now();
 
-        self.panes.iter().rev().find_map(|pane| {
-            let window = pane.client()?;
-            let outer = self.outer_geometry(window)?;
-            // Against where the window is *drawn*: a window in a mode should be
-            // resized by its thumbnail's edge or not at all, never by an edge
-            // that is somewhere else on screen.
-            let drawn = self.drawn_at(pane, outer, now).rect;
-            let grown = Rectangle::new(
-                (
-                    drawn.loc.x.round() as i32 - resize::RESIZE_BORDER,
-                    drawn.loc.y.round() as i32 - resize::RESIZE_BORDER,
-                )
-                    .into(),
-                (
-                    drawn.size.w.round() as i32 + resize::RESIZE_BORDER * 2,
-                    drawn.size.h.round() as i32 + resize::RESIZE_BORDER * 2,
-                )
-                    .into(),
-            );
-            if !grown.to_f64().contains(location) {
-                return None;
-            }
+        self.panes
+            .iter()
+            .rev()
+            .find_map(|pane| {
+                self.pane_chrome(pane, location, now)
+                    .filter(|under| matches!(under.chrome, Chrome::Frame))
+            })
+            .or_else(|| {
+                self.panes.iter().rev().find_map(|pane| {
+                    self.pane_chrome(pane, location, now)
+                        .filter(|under| matches!(under.chrome, Chrome::Resize(_)))
+                })
+            })
+    }
 
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "a drawn rect is screen-sized"
-            )]
-            let drawn_rect = Rectangle::new(
-                (drawn.loc.x.round() as i32, drawn.loc.y.round() as i32).into(),
-                (drawn.size.w.round() as i32, drawn.size.h.round() as i32).into(),
-            );
-            match resize::edges_at(drawn_rect, location) {
-                ResizeEdge::None => None,
-                edges => Some((window.clone(), edges, outer)),
-            }
+    /// What one pane's chrome makes of a point.
+    ///
+    /// **Two regions in two coordinate spaces, and both of those spaces are
+    /// deliberate.** The frame's band is hit-tested in the pane's *own*
+    /// coordinates, because the frame is rasterised at its unscaled size: a
+    /// titlebar drawn at two-thirds size in overview must still be measured
+    /// against the QML that was drawn at full size, or its buttons move out
+    /// from under the cursor. The resize border is hit-tested where the window
+    /// is *drawn*, because a window in a mode should be resized by its
+    /// thumbnail's edge or not at all, never by an edge that is somewhere else
+    /// on screen. Both were already true separately; what was missing is that
+    /// they meet, and [`chrome_of`] is where they are reconciled.
+    ///
+    /// `pane_outer` rather than `outer_geometry`, which is what the resize half
+    /// used to reach for. They agree for a mapped, sized window and differ for
+    /// one that has mapped and not yet answered a size, where the space reports
+    /// a rectangle of nothing and the pane's slot is still the truth. Every
+    /// other hit test in this file already went through `pane_outer`; this is
+    /// the one that did not.
+    fn pane_chrome(
+        &self,
+        pane: &Pane,
+        location: Point<f64, Logical>,
+        now: std::time::Duration,
+    ) -> Option<Under> {
+        let outer = self.pane_outer(pane)?;
+        let drawn = self.drawn_at(pane, outer, now);
+        let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
+
+        // Only a *built* frame has a band to press. A pane reserving room for
+        // one that has not arrived reports insets -- `insets_of` answers for
+        // `Frame::Pending` on purpose, so the window does not change shape the
+        // moment its frame appears -- but there is no titlebar there yet for a
+        // click to land on, and there never was: this is the `decoration()?`
+        // that gated `frame_under`.
+        let framed = pane.decoration().is_some()
+            && drawn.rect.contains(location)
+            && on_frame(outer.size, self.insets_of(pane.id()), in_outer);
+
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a drawn rect is screen-sized"
+        )]
+        let drawn_rect = Rectangle::new(
+            (
+                drawn.rect.loc.x.round() as i32,
+                drawn.rect.loc.y.round() as i32,
+            )
+                .into(),
+            (
+                drawn.rect.size.w.round() as i32,
+                drawn.rect.size.h.round() as i32,
+            )
+                .into(),
+        );
+        let chrome = chrome_of(framed, resize::border_edges(drawn_rect, location))?;
+
+        // A resize needs a window to resize. A frame does not: a frame around a
+        // window whose application has not arrived still has working buttons,
+        // which is the point of giving it one, so the window stays an `Option`
+        // and only the resize arm insists on it.
+        let window = pane.client().cloned();
+        if matches!(chrome, Chrome::Resize(_)) && window.is_none() {
+            return None;
+        }
+        Some(Under {
+            chrome,
+            pane: pane.id(),
+            window,
+            local: in_outer,
+            outer,
         })
     }
 
@@ -2437,55 +2747,6 @@ impl Solium {
         None
     }
 
-    /// The frame at a point, with the point in the frame's own coordinates.
-    ///
-    /// Frame-local rather than compositor coordinates because the frame is
-    /// rasterised at its unscaled size: a titlebar drawn at two-thirds size in
-    /// overview must still be hit-tested against the QML that was drawn at full
-    /// size, or its buttons move out from under the cursor.
-    pub(crate) fn frame_under(
-        &self,
-        location: Point<f64, Logical>,
-    ) -> Option<(crate::pane::PaneId, Option<Window>, Point<f64, Logical>)> {
-        // A titlebar is the compositor's own surface, so it would otherwise
-        // still take clicks with the session locked -- close and maximise
-        // included.
-        if self.lock.is_some() {
-            return None;
-        }
-        let now = self.clock.now();
-
-        self.panes.iter().rev().find_map(|pane| {
-            // Only a built frame has anything to hit. A pane reserving room for
-            // one that has not arrived owns no pixels for a click to land on.
-            pane.decoration()?;
-            let outer = self.pane_outer(pane)?;
-            let drawn = self.drawn_at(pane, outer, now);
-            if !drawn.rect.contains(location) {
-                return None;
-            }
-
-            let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
-            let insets = self.insets_of(pane.id());
-            // The frame is the band between the outer rect and the client: a
-            // point inside the client is the client's, wherever the frame put
-            // its bar. A decoration that reserves nothing owns no band at all,
-            // and its clicks belong to the window under it.
-            let client = Rectangle::new(
-                (f64::from(insets.left), f64::from(insets.top)).into(),
-                (
-                    f64::from(outer.size.w - insets.horizontal()),
-                    f64::from(outer.size.h - insets.vertical()),
-                )
-                    .into(),
-            );
-            if client.contains(in_outer) {
-                return None;
-            }
-            Some((pane.id(), pane.client().cloned(), in_outer))
-        })
-    }
-
     /// Ask a window to close, once it has finished leaving.
     ///
     /// A close is a request the client may refuse, so the compositor cannot
@@ -2583,6 +2844,85 @@ impl Solium {
         // in the same position, and is the reason this is a second pass rather
         // than a flag gathered during the first.
         self.panes.iter().any(|pane| pane.closing_at().is_some())
+    }
+
+    /// Who a press at `location` would belong to.
+    ///
+    /// The three links of [`claim_of`], fetched in the order `pointer_button`
+    /// fetches them. Read-only: the surface link is a geometric claim rather
+    /// than a delivery, for the reasons [`Self::surface_claiming`] gives.
+    pub(crate) fn claim_under(&self, location: Point<f64, Logical>) -> Claim {
+        claim_of(
+            self.surface_claiming(true, location).is_some(),
+            self.script_grab,
+            self.chrome_under(location).map(|under| under.chrome),
+        )
+    }
+
+    /// Say what the pointer is over the compositor's own chrome, or stop
+    /// saying.
+    ///
+    /// **The one writer of the assertion, and it follows the press's whole
+    /// precedence chain rather than its last link.** Issue #108 is the pointer
+    /// describing an action other than the one a press will take, and the first
+    /// fix for it read [`Self::chrome_under`] alone — which is the third thing
+    /// `pointer_button` asks and not the first. So a thumbnail's corner in
+    /// overview drew `NwseResize` while the press focused the window and left
+    /// the mode, and the bottom edge of a scripted bar drew `NsResize` while
+    /// the press went to the bar. [`Self::claim_under`] is the whole chain, and
+    /// `Claim::cursor` says nothing for every link that is not chrome: where
+    /// the press defers, the pointer defers with it.
+    ///
+    /// **Not while a drag is in progress.** A resize grab takes the pointer off
+    /// the border it started on within a pixel of movement — the window
+    /// follows, but the pointer is ahead of it, and past the window's edge
+    /// entirely once the drag hits a minimum size or a screen edge.
+    /// Recomputing would drop the resize cursor mid-drag and hand the pointer
+    /// back to whatever client the cursor happened to be over, which is the one
+    /// moment the shape must not change. Holding the last assertion for the
+    /// length of the grab is also what makes a move drag keep the arrow, and
+    /// what lets `input::pointer_button` assert a shape *as* it starts a grab
+    /// and have it stay for the drag.
+    pub(crate) fn assert_cursor(&mut self, location: Point<f64, Logical>, grabbed: bool) {
+        if grabbed {
+            return;
+        }
+        let icon = self.claim_under(location).cursor();
+        if self.pointer.assert(icon) {
+            self.redraw = true;
+        }
+    }
+
+    /// Say again what the pointer is over, for a pointer that has not moved.
+    ///
+    /// **The other half of #108, and the one a motion handler cannot reach.**
+    /// The compositor asserts its cursor when the pointer crosses into a
+    /// titlebar or onto a resize border — but the crossing can also be the
+    /// *window's*: a layout change, an animation landing, a workspace switch,
+    /// a window resized by a script all move chrome under a pointer that is
+    /// standing still, and there is no motion event for that. Without this a
+    /// titlebar that slid under the pointer would keep whatever resize arrow
+    /// was being shown a moment ago, which is the same disagreement between
+    /// the shape and the action, arrived at from the other direction. Entering
+    /// overview is the same crossing: nothing moved but the claim, and the
+    /// pointer has to hear about it.
+    ///
+    /// **Called from [`crate::render::prepare`], not from [`Self::settle`].**
+    /// `settle` runs after the frame it settles, so a titlebar sliding under a
+    /// stationary pointer was drawn once with the previous shape and only
+    /// corrected on the frame the self-inflicted damage bought. `prepare` runs
+    /// once per frame ahead of every output, before any cursor element is
+    /// built, so the shape this finds is the shape that frame draws.
+    ///
+    /// Once a frame is enough, and cheap: [`crate::cursor::Pointer::assert`]
+    /// answers `false` when nothing changed, so the ordinary case costs one
+    /// hit test and no damage. A frame that is not drawn is a screen on which
+    /// nothing moved, so there is nothing to have missed.
+    pub(crate) fn reassert_cursor(&mut self) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        self.assert_cursor(pointer.current_location(), pointer.is_grabbed());
     }
 
     /// Retire transforms that have landed, and say whether anything still
@@ -2961,10 +3301,11 @@ impl Solium {
     /// The decorated window under `location`, frame or client, and where the
     /// pointer lands in its frame's own space.
     ///
-    /// Wider than `frame_under` on purpose: a decoration that glows where the
-    /// cursor is has to be told about the cursor while it is over the client,
-    /// which is the client's surface and reports nothing to us. Ownership of
-    /// clicks is still decided by `frame_under`; this is only for looking.
+    /// Wider than [`Self::chrome_under`] on purpose: a decoration that glows
+    /// where the cursor is has to be told about the cursor while it is over
+    /// the client, which is the client's surface and reports nothing to us.
+    /// Ownership of clicks -- and, since #108, the pointer's shape -- is still
+    /// decided by `chrome_under`; this is only for looking.
     pub(crate) fn decorated_under(
         &self,
         location: Point<f64, Logical>,
@@ -3533,15 +3874,50 @@ impl Solium {
         location: Point<f64, Logical>,
         pressed: Option<bool>,
     ) -> bool {
-        if self.surfaces.iter().all(|surface| !surface.interactive()) {
+        let Some((output, id, area)) = self.surface_claiming(above_windows, location) else {
+            return false;
+        };
+        let Some(surface) = self.surfaces.get_mut(id) else {
+            return false;
+        };
+        if !surface.pointer(&output, area, location.x, location.y, pressed) {
+            // The area contained the point — `surface_claiming` said so — so
+            // the only way back here is an instance that would not build, which
+            // is a scene that failed to load and logged as much. It draws
+            // nothing and it takes nothing.
             return false;
         }
-        let Some(output) = monitor::at(&self.space, location) else {
-            return false;
-        };
-        let Some(geometry) = self.space.output_geometry(&output) else {
-            return false;
-        };
+        self.redraw = true;
+        self.settle_surfaces();
+        true
+    }
+
+    /// Which scripted surface, if any, claims `location` on its side of the
+    /// windows.
+    ///
+    /// **Split out of [`Self::surface_pointer`] so the pointer can ask the
+    /// question without answering it.** The cursor has to know whether a press
+    /// here would be taken by a bar or a panel — that is the second half of
+    /// this finding — and the one thing it must not do is *deliver* to find
+    /// out: `surface_pointer` pushes hover into the scene and damages the
+    /// screen, and [`Self::reassert_cursor`] runs every frame. A probe with
+    /// those side effects would repaint the session continuously for as long as
+    /// the pointer rested on a bar, and would run a scene's hover handlers on a
+    /// pointer that never moved.
+    ///
+    /// So the geometry is here and the delivery is there, and there is still
+    /// one predicate: `surface_pointer` reaches its surface through this and
+    /// cannot pick a different one.
+    fn surface_claiming(
+        &self,
+        above_windows: bool,
+        location: Point<f64, Logical>,
+    ) -> Option<(Output, crate::scripted::SurfaceId, Rectangle<i32, Logical>)> {
+        if self.surfaces.iter().all(|surface| !surface.interactive()) {
+            return None;
+        }
+        let output = monitor::at(&self.space, location)?;
+        let geometry = self.space.output_geometry(&output)?;
         let primary = self.primary_output();
 
         // Topmost first, so a surface drawn over another gets the press.
@@ -3560,7 +3936,7 @@ impl Solium {
             // which is the same rule a window follows. Without it, a wallpaper
             // that slid away with its workspace goes on eating clicks on the
             // workspace that replaced it.
-            let candidates: Vec<(crate::scripted::SurfaceId, Rectangle<i32, Logical>)> = self
+            let claimed = self
                 .surfaces
                 .iter()
                 .filter(|surface| surface.interactive() && surface.layer() == layer)
@@ -3568,19 +3944,12 @@ impl Solium {
                     let area = surface.area_on(&output, geometry, primary.as_ref())?;
                     Some((surface.id(), self.carried(surface.id(), &output, area)))
                 })
-                .collect();
-            for (id, area) in candidates {
-                let Some(surface) = self.surfaces.get_mut(id) else {
-                    continue;
-                };
-                if surface.pointer(&output, area, location.x, location.y, pressed) {
-                    self.redraw = true;
-                    self.settle_surfaces();
-                    return true;
-                }
+                .find(|(_, area)| area.to_f64().contains(location));
+            if let Some((id, area)) = claimed {
+                return Some((output, id, area));
             }
         }
-        false
+        None
     }
 
     /// Act on whatever a scripted surface asked for.
@@ -4919,14 +5288,53 @@ impl SeatHandler for Solium {
         &mut self.seat_state
     }
 
+    /// Both client-side cursor sources arrive here, and which one it was is
+    /// readable off the variant.
+    ///
+    /// `Surface` and `Hidden` are `wl_pointer.set_cursor`: the client
+    /// rasterised a cursor itself and we draw its pixels. `Named` is
+    /// `wp_cursor_shape_v1.set_shape` — the only thing that can produce one,
+    /// since `set_cursor` carries a surface or nothing — and it means the
+    /// client named a shape and left the picture to us. Dropping either on the
+    /// floor leaves every application with our arrow, which for the named case
+    /// is exactly what #24 was: a text field that never showed an I-beam.
+    ///
+    /// Through `show` rather than assigned, so that a client alternating
+    /// between its own two mechanisms cannot leave a fragment of the other
+    /// behind. See `cursor::Pointer::show`, which is the only writer and where
+    /// the precedence between all three sources is set out.
+    ///
+    /// **And it damages the screen, which is not optional.** Both backends draw
+    /// only when something has changed — `tty.rs`'s loop and `winit.rs`'s make
+    /// the same test, each with a comment arguing for it — and a client's reply
+    /// to `wl_pointer.enter` arrives a round trip *after* the motion that
+    /// provoked it, by which time the frame that motion caused has already been
+    /// drawn. Without this, moving onto a text field and stopping leaves the
+    /// old arrow sitting there until something unrelated damages the screen,
+    /// and jiggling the mouse is the only way to see the I-beam.
+    ///
+    /// It cost nothing before #24 only because `Named(_)` was discarded, so the
+    /// picture genuinely did not change. It is now the main visible path of the
+    /// whole feature, and a feature that only works while the mouse is moving
+    /// reads as a broken one.
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
-        // A client sets its own cursor when the pointer is over it — an I-beam
-        // over text, a resize arrow on an edge. Dropping this on the floor
-        // leaves every application with our arrow.
-        self.pointer.status = image;
+        self.pointer.show(image);
+        self.redraw = true;
     }
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
 }
+
+/// Required by smithay's `wp_cursor_shape_v1` dispatch, and empty on purpose.
+///
+/// The protocol hands out a shape device for a `wl_pointer` *or* for a
+/// `zwp_tablet_tool_v2`, so its `Dispatch` impl is bound on `TabletSeatHandler`
+/// whether or not the compositor has tablets — see
+/// `wayland/cursor_shape.rs:240`. Solium advertises no tablet manager, so no
+/// client can ever hold a `zwp_tablet_tool_v2` to ask for one, and
+/// `tablet_tool_image` is unreachable rather than unimplemented. The default
+/// body discards the image, which is the right thing for a cursor that has no
+/// device to be drawn for.
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Solium {}
 
 impl DmabufHandler for Solium {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
@@ -5035,6 +5443,11 @@ delegate_xdg_shell!(Solium);
 delegate_xdg_decoration!(Solium);
 delegate_layer_shell!(Solium);
 delegate_seat!(Solium);
+// Routes `wp_cursor_shape_manager_v1` and the per-pointer device it hands out.
+// smithay's dispatch turns a `set_shape` into `SeatHandler::cursor_image` with
+// a `CursorImageStatus::Named`, so the handler for this protocol is the seat
+// handler above rather than a trait of its own.
+smithay::delegate_cursor_shape!(Solium);
 delegate_output!(Solium);
 delegate_data_device!(Solium);
 smithay::delegate_primary_selection!(Solium);
@@ -5152,8 +5565,8 @@ mod tests {
     /// to explain it.
     ///
     /// **It passed the moment it was written, and that is the point.** Every
-    /// hit-test in this file — `frame_under`, `decorated_under`, `window_under`,
-    /// `surface_under` and `resize_target` — reaches its pane through
+    /// hit-test in this file — `chrome_under`, `decorated_under`,
+    /// `window_under` and `surface_under` — reaches its pane through
     /// [`Solium::pane_outer`], and the two that own a decoration gate on
     /// `drawn.rect.contains(location)` before a layer is asked anything at all.
     /// So the invariant holds by construction and nothing *states* it: the
@@ -5172,7 +5585,7 @@ mod tests {
     /// | control | measured |
     /// |---|---|
     /// | `canvas` returning `outer` — the state before Task 5 | fails on the first assertion, but so do `decoration::tests::a_canvas_is_the_pane_grown_by_its_bleed` and `no_bleed_means_the_canvas_is_the_pane`, which pin it already |
-    /// | `frame_under` **and** `decorated_under` switched to the canvas, through `decoration::spread` | the whole suite still passes, 201 of 201 |
+    /// | the frame band **and** `decorated_under` switched to the canvas, through `decoration::spread` | the whole suite still passes, 201 of 201 |
     ///
     /// The regression is instead caught with a real pointer, which is what the
     /// task's step 4 is for: two panes side by side under `bleedy`, a press
@@ -5196,6 +5609,281 @@ mod tests {
         let in_bleed = smithay::utils::Point::<f64, smithay::utils::Logical>::from((70.0, 120.0));
         assert!(canvas.to_f64().contains(in_bleed));
         assert!(!outer.to_f64().contains(in_bleed));
+    }
+
+    /// An ordinary framed window: 400x300 at (100, 100) under a titlebar and
+    /// nothing else reserved, which is the shape both of #108's symptoms were
+    /// reported on.
+    fn framed() -> (Rectangle<i32, Logical>, Insets) {
+        (
+            Rectangle::new((100, 100).into(), (400, 300).into()),
+            Insets {
+                top: TITLEBAR_HEIGHT,
+                ..Insets::NONE
+            },
+        )
+    }
+
+    /// What [`Solium::pane_chrome`] makes of a point of that window, with the
+    /// pane drawn where the layout put it — no transform, so a screen point
+    /// and a pane-local point differ only by the pane's corner.
+    fn chrome_at(point: (f64, f64)) -> Option<Chrome> {
+        let (outer, insets) = framed();
+        let location = Point::<f64, Logical>::from(point);
+        chrome_of(
+            on_frame(outer.size, insets, location - outer.loc.to_f64()),
+            resize::border_edges(outer, location),
+        )
+    }
+
+    /// The whole of [`claim_of`] at a point of that window, with the two links
+    /// above the chrome supplied by the caller: `surface` is an interactive
+    /// scripted surface above the windows claiming the point, `mode` is a
+    /// script grab held — `sol.grab(true)`, which is overview.
+    fn claim_at(point: (f64, f64), surface: bool, mode: bool) -> Claim {
+        claim_of(surface, mode, chrome_at(point))
+    }
+
+    /// **Issue #108, and the assertion the fix is actually for.**
+    ///
+    /// The cursor and the press must be reading the same answer, because the
+    /// bug was that they were not. The frame's band and the resize border
+    /// genuinely overlap — the top `RESIZE_BORDER` pixels of a titlebar are
+    /// within reach of the window's top edge — and the press had always
+    /// resolved that in the frame's favour while the pointer resolved it not
+    /// at all, leaving whatever a CSD client had set for its own shadow's
+    /// resize affordance. So in that band the pointer drew a resize arrow and
+    /// a drag moved the window.
+    ///
+    /// What is pinned here is that no point can be claimed by both: whatever
+    /// [`claim_of`] answers is *the* answer, and the cursor is a function of it
+    /// rather than of a second hit test. A test that checked only the
+    /// edge-to-icon mapping would pass with the second symptom still in place,
+    /// which is why the sweep below is the body of this test and the named
+    /// points are only the landmarks.
+    ///
+    /// **The chrome is one link of three, and the first version of this test
+    /// swept only that one.** It was green while the pointer still promised a
+    /// resize over an overview thumbnail and over the bottom edge of a scripted
+    /// bar, because it never held a script grab and never put a surface over
+    /// the point — so it exercised exactly the world in which the bug does not
+    /// appear. The sweep is now run in all four worlds, and the deferring ones
+    /// are checked against the count of pixels the chrome *would* have claimed,
+    /// so a chain that quietly stopped deferring could not leave this passing.
+    #[test]
+    fn the_pointer_and_the_press_cannot_claim_different_things() {
+        let (outer, insets) = framed();
+
+        // The overlap is real, not theoretical -- without this the sweep's
+        // "never both" would be vacuously true and would stay true if somebody
+        // shrank the titlebar to nothing.
+        let contested = Point::<f64, Logical>::from((300.0, 104.0));
+        assert!(
+            on_frame(outer.size, insets, contested - outer.loc.to_f64()),
+            "four pixels below the top edge is inside a {TITLEBAR_HEIGHT}px \
+             titlebar"
+        );
+        assert_ne!(
+            resize::border_edges(outer, contested),
+            ResizeEdge::None,
+            "and inside the top resize border, which is what the two disagreed \
+             about"
+        );
+        // The frame takes it, because the frame is what a press there does.
+        assert_eq!(chrome_at((300.0, 104.0)), Some(Chrome::Frame));
+        assert_eq!(
+            claim_at((300.0, 104.0), false, false).cursor(),
+            Some(CursorIcon::Default),
+            "the band that moves the window must not draw a resize cursor: \
+             that is #108's second symptom"
+        );
+
+        // Four pixels *above* the top edge is outside the window, so the frame
+        // has no claim on it and the border does. This is where dragging the
+        // top edge still works, and it now says so.
+        assert_eq!(
+            chrome_at((300.0, 96.0)),
+            Some(Chrome::Resize(ResizeEdge::Top))
+        );
+
+        // The first symptom: the bottom-right corner resizes, and now looks
+        // like it. Nothing is reserved along the bottom or the right, so the
+        // corner is the client's pixels and the border's claim alone.
+        let corner = (497.0, 397.0);
+        assert_eq!(
+            chrome_at(corner),
+            Some(Chrome::Resize(ResizeEdge::BottomRight))
+        );
+        assert_eq!(
+            claim_at(corner, false, false).cursor(),
+            Some(CursorIcon::NwseResize)
+        );
+
+        // The middle of the client is nobody's chrome, which is what leaves a
+        // client free to name its own cursor over its own window.
+        assert_eq!(chrome_at((300.0, 250.0)), None);
+        assert_eq!(chrome_at((900.0, 900.0)), None);
+
+        // **A mode holds the grab: overview.** `lua/overview.lua` sets it and
+        // hit-tests its own thumbnails, and `pointer_button` hands every press
+        // to the mode before it looks at any chrome -- so a press on that same
+        // corner focuses the window and leaves overview. Offering
+        // `NwseResize` there is the pointer describing an action that will not
+        // happen, which is the whole of #108, on `super+space`.
+        assert_eq!(claim_at(corner, false, true), Claim::Mode);
+        assert_eq!(
+            claim_at(corner, false, true).cursor(),
+            None,
+            "in a mode the press is the mode's, so the pointer promises nothing"
+        );
+        assert_eq!(claim_at((300.0, 104.0), false, true).cursor(), None);
+
+        // **A scripted surface takes the press.** The bottom eight pixels of a
+        // `layer = "top"` bar are within reach of a maximised window's top
+        // edge, and the tweaks panel is a full-height overlay down the right of
+        // one. The press goes to the panel; the border cursor would have said
+        // it resized the window.
+        assert_eq!(claim_at(corner, true, false), Claim::Surface);
+        assert_eq!(
+            claim_at(corner, true, false).cursor(),
+            None,
+            "the press is the surface's, so the pointer leaves the shape to it"
+        );
+        assert_eq!(claim_at((300.0, 104.0), true, false).cursor(), None);
+
+        // And the order between the two, which is the order `pointer_button`
+        // asks them in: a surface above the windows is offered the press before
+        // the mode is consulted.
+        assert_eq!(claim_of(true, true, None), Claim::Surface);
+        assert_eq!(claim_of(false, false, None), Claim::Nothing);
+        assert_eq!(claim_of(false, false, None).cursor(), None);
+
+        // And the whole neighbourhood of the window, a pixel at a time, in
+        // each of the four worlds the two links above the chrome make.
+        let mut chrome_pixels = 0_u32;
+        let mut deferred_pixels = 0_u32;
+        for (surface, mode) in [(false, false), (true, false), (false, true), (true, true)] {
+            for y in 80..=420 {
+                for x in 80..=520 {
+                    let location = Point::<f64, Logical>::from((f64::from(x), f64::from(y)));
+                    let framed_here = on_frame(outer.size, insets, location - outer.loc.to_f64());
+                    let edges = resize::border_edges(outer, location);
+                    let chrome = chrome_of(framed_here, edges);
+                    if !surface && !mode && chrome.is_some() {
+                        chrome_pixels += 1;
+                    }
+                    if (surface || mode) && chrome.is_some() {
+                        deferred_pixels += 1;
+                    }
+                    match claim_of(surface, mode, chrome) {
+                        Claim::Surface => {
+                            assert!(
+                                surface,
+                                "nothing was over {location:?} and the pointer \
+                                 stood aside for it"
+                            );
+                            assert_eq!(claim_of(surface, mode, chrome).cursor(), None);
+                        }
+                        Claim::Mode => {
+                            assert!(
+                                mode && !surface,
+                                "no mode holds the grab at {location:?}, or a \
+                                 surface should have taken it first"
+                            );
+                            assert_eq!(claim_of(surface, mode, chrome).cursor(), None);
+                        }
+                        Claim::Chrome(Chrome::Frame) => {
+                            assert!(
+                                !surface && !mode,
+                                "a press at {location:?} would never reach the \
+                                 frame, and the pointer says it would"
+                            );
+                            assert!(
+                                framed_here,
+                                "a press at {location:?} would not hit the \
+                                 frame, but the pointer says it would"
+                            );
+                        }
+                        Claim::Chrome(Chrome::Resize(edges)) => {
+                            assert!(
+                                !surface && !mode,
+                                "a press at {location:?} would never reach the \
+                                 resize border, and the pointer offered to drag \
+                                 it {edges:?}"
+                            );
+                            assert!(
+                                !framed_here,
+                                "a press at {location:?} moves the window, and \
+                                 the pointer offered to resize it {edges:?}"
+                            );
+                            assert_ne!(edges, ResizeEdge::None);
+                            assert_eq!(
+                                Chrome::Resize(edges).cursor(),
+                                resize::cursor(edges),
+                                "the cursor over a border is the border's own, \
+                                 whatever else is on screen"
+                            );
+                        }
+                        Claim::Nothing => assert!(
+                            !surface && !mode && !framed_here && edges == ResizeEdge::None,
+                            "the compositor asserts nothing at {location:?} \
+                             while claiming to own it"
+                        ),
+                    }
+                }
+            }
+        }
+
+        // The deferring worlds are only worth sweeping if the chrome had
+        // something to say at those pixels, which is what made the first
+        // version of this test green over a live disagreement. Three of the
+        // four worlds defer, so the same pixels are counted three times.
+        assert!(chrome_pixels > 0, "the sweep never crossed any chrome");
+        assert_eq!(
+            deferred_pixels,
+            chrome_pixels * 3,
+            "every pixel the chrome would have claimed must be one the pointer \
+             gave up in each of the three worlds where the press never gets \
+             there"
+        );
+    }
+
+    /// The frame band is the insets and only the insets.
+    ///
+    /// Two directions, because getting it wrong either way is a bug with a
+    /// face: too wide and a strip of the client stops taking clicks, too
+    /// narrow and the titlebar has a dead line along one edge. The outer bound
+    /// is asserted separately -- it is what stops every point above a window
+    /// from counting as its titlebar, which is the mistake a "not the client
+    /// rect" test makes on its own.
+    #[test]
+    fn the_frame_band_is_what_the_insets_reserved() {
+        let (outer, insets) = framed();
+        let local = |x: f64, y: f64| Point::<f64, Logical>::from((x, y));
+
+        assert!(on_frame(outer.size, insets, local(200.0, 0.0)));
+        assert!(on_frame(
+            outer.size,
+            insets,
+            local(200.0, f64::from(TITLEBAR_HEIGHT) - 1.0)
+        ));
+        assert!(
+            !on_frame(outer.size, insets, local(200.0, f64::from(TITLEBAR_HEIGHT))),
+            "the first row below the bar is the client's"
+        );
+        assert!(
+            !on_frame(outer.size, insets, local(200.0, -1.0)),
+            "a point above the window is not its titlebar"
+        );
+        assert!(
+            !on_frame(outer.size, insets, local(200.0, 500.0)),
+            "nor is a point below it, which reserves nothing"
+        );
+        assert!(
+            !on_frame(outer.size, Insets::NONE, local(200.0, 0.0)),
+            "a decoration that reserves nothing owns no band, and its clicks \
+             belong to the window under it"
+        );
     }
 
     /// **Issue #99: a rescale left already-open windows blurry.**

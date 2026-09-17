@@ -100,6 +100,52 @@ local defaults = {
     -- returns the layout names, which one is active, and the repeat settings.
     keyboard = {},
 
+    -- The pointer.
+    --
+    -- Empty means "whatever the session already said", exactly as `keyboard`
+    -- above does and for the same reason: `XCURSOR_THEME` and `XCURSOR_SIZE`
+    -- are what GTK, Qt and every other toolkit on this machine follow. A
+    -- display manager or a `~/.profile` usually sets them, and a compositor
+    -- that quietly overrode them would be the one thing on screen drawing a
+    -- different pointer from everything else.
+    --
+    --     cursor = { theme = "Adwaita", size = 24 },
+    --
+    --   theme   the name of an XCursor theme -- a directory under ~/.icons,
+    --           ~/.local/share/icons or /usr/share/icons. `ls /usr/share/icons`
+    --           lists the ones this machine has. Naming one here takes
+    --           precedence over `XCURSOR_THEME`.
+    --   size    how big the pointer is, in *logical* pixels, between 8 and
+    --           256. Multiplied by each monitor's scale, so 24 is 24 pixels on
+    --           a 1x screen and 48 device pixels on a 2x one -- which is why a
+    --           single number is still right on a desk with monitors at
+    --           different scales. Takes precedence over `XCURSOR_SIZE`.
+    --           Outside that range it is ignored, with a line in the log, and
+    --           the next source has its turn -- not clamped, because a pointer
+    --           three pixels across is as hard to find as no pointer at all
+    --           and nobody meant to ask for one.
+    --
+    -- So the order is: what is written here, then the environment, then 24
+    -- logical pixels and no theme at all.
+    --
+    -- **No theme is not a missing pointer.** Solium draws its own from
+    -- `qml/cursor.qml`, through the same design system as the window frames,
+    -- and that is what you get with nothing set here, with nothing in the
+    -- environment, or with a theme named that turns out not to be installed --
+    -- the log says which. Copy `qml/cursor.qml` into ~/.config/solium/qml/ to
+    -- change it.
+    --
+    -- A shape your theme does *not* have is the one case that does not reach
+    -- it. Applications name the cursor they want -- an I-beam over text, a
+    -- resize arrow on an edge -- and a theme is free to have drawn only some
+    -- of them; the missing ones fall back to that theme's own arrow, so a
+    -- themed session stays wholly themed rather than mixing two designs.
+    --
+    -- Applied on reload, so trying a theme out is `super+shift+r`. The
+    -- compositor call is `sol.cursor_theme(...)`; `sol.cursor()` is a
+    -- different function that answers with where the pointer is.
+    cursor = {},
+
     -- The monitors.
     --
     -- Empty means "work it out": every connected screen is driven, left to

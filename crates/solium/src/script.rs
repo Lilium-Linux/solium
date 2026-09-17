@@ -276,6 +276,14 @@ pub(crate) enum Command {
     /// How a window behaves between being asked for and its application
     /// arriving. See `Loading`.
     Loading(Loading),
+    /// Which XCursor theme the pointer is drawn from, and how big it is.
+    ///
+    /// Carries what the *configuration* said and nothing else — `None` in a
+    /// field means "`config.lua` did not say", which is what lets
+    /// `XCURSOR_THEME` and `XCURSOR_SIZE` be consulted next. The precedence is
+    /// resolved in `cursor::theme::Settings::resolve`, not here, so that it is
+    /// in one place and testable without Lua.
+    Cursor(crate::cursor::theme::Configured),
 }
 
 /// What the compositor does with a window whose application has not connected.
@@ -1457,6 +1465,92 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Loading(loading.clone()));
+            })
+        })?,
+    )?;
+
+    // The pointer's XCursor theme and its size, in logical pixels.
+    //
+    // An optional table, the same shape as `sol.loading` above and for the
+    // same reason: a setting added later does not change the call. What is
+    // *different* is what an absent key means. `sol.loading` leaves the
+    // compositor's default standing; here an absent key -- or no table at
+    // all, which is the same answer -- means "the configuration did not say", and
+    // the environment gets its turn -- `XCURSOR_THEME` and `XCURSOR_SIZE` are
+    // what every other application on this machine follows, so a compositor
+    // that overwrote them with defaults of its own would be the one thing on
+    // screen drawing a different pointer. The order is resolved in
+    // `cursor::theme::Settings::resolve`, which is where it is written down.
+    //
+    // Takes effect immediately, so `super+shift+r` is how a theme is tried.
+    //
+    // **`cursor_theme` and not `cursor`, and that name is a bug fix rather
+    // than a preference.** `sol.cursor` was already taken: it is the getter
+    // above that returns where the pointer *is*, and `tiling.lua` calls it on
+    // every window open to decide which pane the new window splits. Registering
+    // a second function under the same key silently replaced it, so every
+    // `sol.on("open")` failed with "error converting Lua nil to table" and no
+    // window opened in a tiled layout was ever placed. Nothing caught it:
+    // `sol.set` overwrites without complaint, the compositor starts, `--check`
+    // passes, and the unit tests for each of the two functions pass
+    // individually because each calls its own. Only running it showed it. See
+    // `two_functions_cannot_share_one_name` below, which is now the guard.
+    sol.set(
+        "cursor_theme",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            // **`Option<Table>`, like `sol.keyboard` and `sol.monitors`, and
+            // for the same reason those two have it.** The documented way to
+            // override the configuration is a single `~/.config/solium/
+            // config.lua`, and a copy written before this setting existed has
+            // no `cursor` key at all -- so shipped `lua/init.lua` calls
+            // `sol.cursor_theme(nil)` and a `Table` parameter fails the *whole
+            // configuration*, not just the pointer. No layouts, no bindings,
+            // no decorations, over a setting nobody asked for. That is the
+            // same class of break as the `sol.cursor` name collision above,
+            // which silently stopped every window being placed.
+            //
+            // Absent is not "reset it": it means the configuration did not
+            // say, which is the default `Configured` below, which is what lets
+            // `XCURSOR_THEME` and `XCURSOR_SIZE` have their turn.
+            let options = options.unwrap_or(lua.create_table()?);
+            let mut configured = crate::cursor::theme::Configured::default();
+            // `theme` read as a `Value` and matched rather than as an
+            // `Option<String>`: mlua *errors* on anything that is not
+            // string-like instead of answering None, and the `?` would take
+            // the whole handler down with it -- which is how bezier easings
+            // once silently stopped working. Same reasoning as `scene` above.
+            if let Ok(Value::String(name)) = options.get::<Value>("theme")
+                && let Ok(name) = name.to_str()
+                && !name.is_empty()
+            {
+                configured.theme = Some(name.to_string());
+            }
+            // And `size` the same way, for the same reason. `size = "big"` and
+            // `size = 24.5` are both mlua *conversion errors* rather than a
+            // None, and an `Option<i32>` with a `?` on it would take the whole
+            // configuration down over a typo in one field -- exactly what the
+            // line above is written the way it is to avoid.
+            //
+            // A size out of *range* is a different thing and is not refused
+            // here. `Settings::resolve` is the one place that decides what a
+            // size that is not a size means, and it needs to see it to fall
+            // through to the environment rather than to a clamp -- a second
+            // opinion in this line would agree with it today and be free to
+            // drift. That is only true of numbers, which is what is passed on;
+            // a value that is not a number at all is not a size `resolve`
+            // could be shown.
+            match options.get::<Value>("size") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => match value.as_i32() {
+                    Some(size) => configured.size = Some(size),
+                    None => tracing::warn!(
+                        size = ?value,
+                        "cursor size is not a whole number; ignoring it"
+                    ),
+                },
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Cursor(configured.clone()));
             })
         })?,
     )?;
@@ -2675,6 +2769,266 @@ mod tests {
             Some("nil"),
             "and the old key does not survive into the configuration table"
         );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A configured cursor theme and size reach the compositor as written.
+    ///
+    /// The wiring between `sol.cursor_theme` and `Command::Cursor`, which is the
+    /// one part of the cursor work that no test in `cursor.rs` can reach: that
+    /// module's tests start from a `Configured` that they built themselves.
+    #[test]
+    fn a_configured_cursor_theme_reaches_the_compositor() {
+        let directory = std::env::temp_dir().join("solium-script-test-cursor");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+C", function()
+                sol.cursor_theme({ theme = "Fixture", size = 40 })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+c", empty_snapshot());
+        assert!(outcome.handled);
+        match outcome.commands.as_slice() {
+            [Command::Cursor(configured)] => {
+                assert_eq!(configured.theme.as_deref(), Some("Fixture"));
+                assert_eq!(configured.size, Some(40));
+            }
+            other => panic!("expected one cursor command, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The shipped `config.lua` says nothing about the cursor, and that is
+    /// the setting.**
+    ///
+    /// The one property of this configuration surface that a plausible-looking
+    /// edit would destroy without failing anything else. `cursor = {}` is not
+    /// an empty placeholder waiting to be filled in with sensible defaults:
+    /// writing `cursor = { size = 24 }` there would make the configuration
+    /// *always* have an opinion, `XCURSOR_SIZE` would never be reached, and
+    /// the precedence tests in `cursor::theme` would all still pass because
+    /// they never read this file.
+    ///
+    /// Runs the shipped `config.lua` rather than a copy, the same way the
+    /// old-key test above does and with the same guard on a real
+    /// `~/.config/solium`, which would otherwise answer first.
+    #[test]
+    fn the_shipped_configuration_leaves_the_cursor_to_the_environment() {
+        let Some(own) = Scripts::user_config_dir() else {
+            return;
+        };
+        if own.join("user.lua").exists() || own.join("config.lua").exists() {
+            return;
+        }
+
+        let directory = std::env::temp_dir().join("solium-script-test-cursor-default");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            local config = require("config")
+            sol.bind("Super+C", function()
+                sol.cursor_theme(config.cursor)
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+c", empty_snapshot());
+        assert!(outcome.handled);
+        match outcome.commands.as_slice() {
+            [Command::Cursor(configured)] => assert_eq!(
+                configured,
+                &crate::cursor::theme::Configured::default(),
+                "the shipped config.lua names a cursor theme or size, so XCURSOR_THEME and \
+                 XCURSOR_SIZE can never win"
+            ),
+            other => panic!("expected one cursor command, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A configuration with no `cursor` key at all still loads.**
+    ///
+    /// The documented way to change one setting is a single
+    /// `~/.config/solium/config.lua`, and shipped `init.lua` calls
+    /// `sol.cursor_theme(config.cursor)` against it. A copy written before this
+    /// setting existed — which is every copy made before #81 — has no `cursor`
+    /// key, so that call is `sol.cursor_theme(nil)`. Taking a `Table` made that
+    /// an error at load, and an error at load is not a pointer that falls back:
+    /// it is *no configuration*, no layouts, no bindings and no decorations,
+    /// over a setting the user never heard of.
+    ///
+    /// The same class of break as `two_functions_cannot_share_one_name` below,
+    /// and the same shape of guard. `sol.keyboard` and `sol.monitors` take an
+    /// optional table for exactly this reason.
+    ///
+    /// Asserted at load *and* in a binding, because those are two different
+    /// call sites with two different consequences: the one in `init.lua` runs
+    /// while the configuration is being built, and the one under a key runs
+    /// after.
+    #[test]
+    fn a_configuration_that_says_nothing_about_the_cursor_still_loads() {
+        let directory = std::env::temp_dir().join("solium-script-test-cursor-nil");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            -- A user's own config.lua, written before the cursor setting
+            -- existed: no `cursor` key, so this is sol.cursor_theme(nil).
+            local config = { pane = {} }
+            sol.cursor_theme(config.cursor)
+            sol.bind("Super+C", function()
+                sol.cursor_theme(config.cursor)
+                sol.status("alive")
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config)
+            .expect("a configuration with no cursor key failed to load at all");
+        let outcome = scripts.key("super+c", empty_snapshot());
+        assert!(outcome.handled);
+        assert_eq!(outcome.status.as_deref(), Some("alive"));
+        match outcome.commands.as_slice() {
+            [Command::Cursor(configured)] => assert_eq!(
+                configured,
+                &crate::cursor::theme::Configured::default(),
+                "no table is not 'reset it': it means the configuration did not say, so \
+                 XCURSOR_THEME and XCURSOR_SIZE still get their turn"
+            ),
+            other => panic!("expected one cursor command, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// And a `size` that is not a whole number is ignored rather than fatal.
+    ///
+    /// `Settings::resolve` is the one place that decides what a size *out of
+    /// range* means, and it is handed the number to decide about. A value that
+    /// is not a number is a different thing: mlua answers an `Option<i32>` with
+    /// a conversion *error* for `"big"` and for `24.5`, and a `?` on it would
+    /// take the whole configuration down — the same failure as the missing
+    /// table above, reached through a typo in one field. The `theme` key eight
+    /// lines above has always read this way; this makes the pair agree.
+    #[test]
+    fn a_cursor_size_that_is_not_a_number_is_ignored_and_not_fatal() {
+        let directory = std::env::temp_dir().join("solium-script-test-cursor-size");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+C", function()
+                sol.cursor_theme({ theme = "Fixture", size = "big" })
+            end)
+            sol.bind("Super+D", function()
+                sol.cursor_theme({ theme = "Fixture", size = 24.5 })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        for key in ["super+c", "super+d"] {
+            let outcome = scripts.key(key, empty_snapshot());
+            assert!(
+                outcome.handled,
+                "{key}: the listener failed, so the whole configuration went with it"
+            );
+            match outcome.commands.as_slice() {
+                [Command::Cursor(configured)] => {
+                    assert_eq!(
+                        configured.theme.as_deref(),
+                        Some("Fixture"),
+                        "{key}: the rest of the table was lost with the bad size"
+                    );
+                    assert_eq!(
+                        configured.size, None,
+                        "{key}: a size that is not a whole number reached the compositor"
+                    );
+                }
+                other => panic!("{key}: expected one cursor command, got {other:?}"),
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// `sol.cursor` is still where the pointer is, and setting the theme is a
+    /// different name.
+    ///
+    /// **The regression this exists for shipped, and was invisible to the
+    /// gate.** #81 registered the theme setter under `sol.cursor`, which was
+    /// already the getter that answers with the pointer's position. `sol.set`
+    /// replaces without complaining, so the getter simply stopped existing.
+    /// What broke was `tiling.lua`, which asks where the pointer is on every
+    /// window open to decide which pane the new window splits: every
+    /// `sol.on("open")` failed with "error converting Lua nil to table", and
+    /// no window opened in a tiled layout was placed. Nothing caught it — the
+    /// compositor starts, `--check` passes, and each function's own test
+    /// passes because each calls its own name. It took running the thing.
+    ///
+    /// So this asserts the pair, in one script, in one dispatch: the position
+    /// comes back as the numbers the snapshot was built with, *and* the theme
+    /// reaches the compositor as a command. Either name overwriting the other
+    /// fails this, whichever way round it is done.
+    #[test]
+    fn two_functions_cannot_share_one_name() {
+        let directory = std::env::temp_dir().join("solium-script-test-cursor-names");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+C", function()
+                local at = sol.cursor()
+                sol.status(string.format("%d,%d", at.x, at.y))
+                sol.cursor_theme({ theme = "Fixture" })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let mut snapshot = empty_snapshot();
+        snapshot.cursor = (12.0, 34.0);
+        let outcome = scripts.key("super+c", snapshot);
+        assert!(
+            outcome.handled,
+            "the listener failed, which is exactly how the collision showed up"
+        );
+        assert_eq!(
+            outcome.status.as_deref(),
+            Some("12,34"),
+            "sol.cursor() did not answer with the pointer's position"
+        );
+        match outcome.commands.as_slice() {
+            [Command::Cursor(configured)] => {
+                assert_eq!(configured.theme.as_deref(), Some("Fixture"));
+            }
+            other => panic!("sol.cursor_theme() did not reach the compositor: {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(&directory);
     }

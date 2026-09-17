@@ -1681,6 +1681,7 @@ dependencies = [
  "tracing-subscriber",
  "wayland-client",
  "wayland-protocols",
+ "xcursor",
 ]
 
 [[package]]

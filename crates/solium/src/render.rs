@@ -275,6 +275,14 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // for exactly that reason. See `pacing::Phase`.
     let _prep = crate::pacing::span(crate::pacing::Phase::Prep);
     state.memory_report();
+    // What the pointer is standing on can change without the pointer moving --
+    // a window slides under it, a mode opens -- and there is no input event for
+    // that. Asked here rather than in `Solium::settle`, which runs *after* the
+    // frame it settles: a titlebar arriving under a still pointer was drawn
+    // once with the shape it had a moment ago and corrected only on the frame
+    // the self-inflicted damage bought. This is before any cursor element is
+    // built, so the shape this finds is the shape this frame draws.
+    state.reassert_cursor();
     // Every QML animation in the process, advanced once for this frame --
     // decorations, the cursor, the shell. Whether any scene then has something
     // new to draw is each scene's own answer.
@@ -1388,7 +1396,11 @@ fn cursor(
     // it to a half-cursor at the exact moment it crosses.
     let location = pointer.current_location() + shift;
 
-    match state.pointer.status.clone() {
+    // `showing` rather than the field, which is now private. It is the one
+    // reader, and it is where a cursor surface destroyed under a stationary
+    // pointer turns back into the compositor's arrow instead of into a
+    // surface tree that produces no elements. See `cursor::Pointer::showing`.
+    match state.pointer.showing() {
         CursorImageStatus::Hidden => Vec::new(),
         CursorImageStatus::Surface(surface) => {
             // The hotspot is where *in the image* the pointer actually points,
@@ -1430,10 +1442,16 @@ fn cursor(
         // is the only thing smithay will put on the DRM cursor plane, so on the
         // GPU path Qt draws into a dmabuf and `cursor.rs` reads it straight
         // back out into one. See `cursor::Backing`, where that trade is argued.
-        CursorImageStatus::Named(_) => state
+        // A themed cursor is a memory buffer too, from a file rather than from
+        // Qt, so it reaches the plane by the same route.
+        //
+        // The name is passed along now rather than discarded: it picks a cursor
+        // out of the configured XCursor theme, and the QML pointer that used to
+        // be the only answer here is what is drawn when there is no theme or
+        // the theme has nothing under that name. See `cursor::Pointer::element`.
+        CursorImageStatus::Named(icon) => state
             .pointer
-            .art()
-            .and_then(|cursor| cursor.element(renderer, location, scale))
+            .element(renderer, icon, location, scale)
             .into_iter()
             .collect(),
     }
