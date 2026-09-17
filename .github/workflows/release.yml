@@ -7,6 +7,14 @@ name: Release
 on:
   push:
     branches: [release]
+  workflow_dispatch:
+    inputs:
+      level:
+        description: "Version bump"
+        required: false
+        default: patch
+        type: choice
+        options: [patch, minor, major]
 
 # Read-only by default. The one job that needs to write does so explicitly,
 # and only `contents`. No stored secrets are involved anywhere here: the
@@ -80,29 +88,80 @@ jobs:
           # clone has no tags, and the duplicate-tag guard needs to see them.
           fetch-depth: 0
 
-      # The version is Cargo.toml's, not a hand-typed input, so the thing that
-      # identifies a release is the same thing the binary reports at startup.
-      # A release whose tag and `--version` disagree is a bug report nobody
-      # can act on.
-      - name: Read the version
+      # The version lives in Cargo.toml, so the tag and what the binary reports
+      # at startup cannot disagree -- a release where they differ is a bug
+      # report nobody can act on.
+      #
+      # Bumped here rather than by hand, so merging stage into release is the
+      # whole of making a release. **Patch by default**, because most releases
+      # are a handful of fixes and a patch number never promises more than
+      # happened. A release that deserves more says so: put `[minor]` or
+      # `[major]` in the merge commit's message, or run the workflow by hand
+      # and choose. Over-claiming is the failure that matters -- a user who
+      # upgrades 0.1.4 -> 0.1.5 and finds a breaking change was misled, and one
+      # who upgrades to 0.2.0 for three bug fixes was not.
+      - name: Bump the version
         id: version
         run: |
-          version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
-          if [ -z "$version" ]; then
+          current=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$current" ]; then
             echo "no version in Cargo.toml" >&2
             exit 1
           fi
+
+          level="${{ github.event.inputs.level }}"
+          if [ -z "$level" ]; then
+            subject=$(git log -1 --pretty=%B)
+            case "$subject" in
+              *'[major]'*) level=major ;;
+              *'[minor]'*) level=minor ;;
+              *)           level=patch ;;
+            esac
+          fi
+
+          IFS=. read -r major minor patch <<EOF
+          $current
+          EOF
+          case "$level" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+            *) echo "unknown bump level: $level" >&2; exit 1 ;;
+          esac
+          version="$major.$minor.$patch"
+
+          echo "$current -> $version ($level)"
+          # Only the workspace's own version, which is the first `version =`
+          # in the file. A dependency's version further down is not ours to
+          # touch.
+          sed -i "0,/^version *= *\".*\"/s//version    = \"$version\"/" Cargo.toml
+          grep -q "^version *= *\"$version\"" Cargo.toml || {
+            echo "the bump did not take" >&2; exit 1; }
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "level=$level" >> "$GITHUB_OUTPUT"
 
-      # Refuse rather than overwrite. Re-running with an unchanged version is
-      # the normal way this fires, and silently replacing the artifact of an
-      # existing tag would make "v0.1.0" mean two different trees.
+      # Committed back, so `release` always carries the version it published
+      # and the next bump counts from it rather than from whatever stage had.
+      - name: Commit the bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock 2>/dev/null || git add Cargo.toml
+          git commit -m "release ${{ steps.version.outputs.tag }} (${{ steps.version.outputs.level }})"
+          git push origin HEAD:release
+
+      # Refuse rather than overwrite. The bump above makes a collision unlikely
+      # rather than impossible: a tag made by hand, or a run against a release
+      # branch whose bump commit did not land, would both arrive here. Silently
+      # replacing the artifact of an existing tag would make one version name
+      # two different trees, which is the one thing a version may never do.
       - name: Refuse a version that already exists
         run: |
           tag="${{ steps.version.outputs.tag }}"
           if git rev-parse "refs/tags/$tag" >/dev/null 2>&1; then
-            echo "$tag already exists -- bump version in Cargo.toml" >&2
+            echo "$tag already exists -- release is out of step with its tags" >&2
             exit 1
           fi
 
