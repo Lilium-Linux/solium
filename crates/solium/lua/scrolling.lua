@@ -18,6 +18,30 @@ local workspaces = require("workspaces")
 local modes = require("modes")
 local monitors = require("monitors")
 
+-- **`views` does not survive a reload, and that is named here rather than
+-- fixed.**
+--
+-- #116's commit message predicted that the next piece of script state to matter
+-- would be a third one, after `workspaces` and `modes`. This is it, and it is
+-- the one `sol.keep` cannot take: a strip is userdata owned by
+-- `crates/layout`, `sol.keep` holds plain data by construction, and nothing on
+-- `restore` rebuilds one from anything. So `super+shift+r` in a scrolling
+-- session comes back with `modes.current` still saying "scrolling" -- correctly;
+-- that half is kept -- and every strip built fresh underneath it.
+--
+-- What is lost is more than the widths. `scrolling.started` runs `adopt`, so
+-- every visible window is inserted again in `sol.windows()` order and
+-- membership does return. The *arrangement* does not: the order columns were
+-- moved into, which windows were stacked together with `super+comma`, each
+-- column's width, which column is active, and where the view sits. Every window
+-- is there and the strip is not the one you built.
+--
+-- Deliberately out of scope for #116. Keeping it needs a strip that can be
+-- written out as plain data and read back -- a save/restore pair in
+-- `crates/layout` and a `sol.layout.scroller` that takes what it hands back --
+-- which is a change to the layout crate and the host rather than a line of this
+-- file. Until then the honest summary of a reload is that it keeps which layout
+-- is in charge and not how that layout had arranged itself.
 local scrolling = { active = false, views = {} }
 
 -- One strip per workspace per monitor.

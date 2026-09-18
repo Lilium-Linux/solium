@@ -368,6 +368,45 @@ end)
 -- is the same gap `sol.keep` fills at the top of this file, and this is the
 -- other half of it. A cold start sweeps nothing because there is nothing there
 -- to sweep, and that is why `restore` does not fire at startup.
+--
+-- ## And nothing may still be pointing at one of them
+--
+-- Forgetting the abandoned desks is only half the sweep, and shipping the
+-- first half alone made a *new* way to lose a window -- one the bug above did
+-- not have, because before `sol.keep` both of these tables were wiped by every
+-- reload. `columns = 4` edited to `columns = 2` left:
+--
+--   * a window whose `of` said 4 in no selection at all. `regroup` loops
+--     `1..count`, so nothing names it; it is drawn over whatever is in view, on
+--     top of the windows that belong there; `visible()` filters it out, so no
+--     layout arranges it; and `go` clamps to `count()`, so no key switches to
+--     where it thinks it is.
+--   * every surviving desk carried off-stage, when `showing` was the one that
+--     pointed past the end. The offsets below are worked out relative to the
+--     cell the monitor is showing, so a monitor showing workspace 4 puts desks
+--     1 and 2 three and two screens to its left and nothing on screen at all --
+--     which is the reported fault again, reached by the other door.
+--
+-- Clamped rather than cleared: a window kept on the last workspace is a window
+-- you can walk to, where one reset to workspace 1 has quietly moved.
+--
+-- A window whose *monitor* vanished needs nothing here. `of` holds a workspace
+-- and not a screen, so it stays a valid index; `regroup` builds desks only for
+-- the monitors that exist, and the window is grouped on whichever screen it now
+-- reports. That is the difference between the two tables: `showing` is keyed by
+-- monitor and may hold entries for screens that are gone, which cost nothing
+-- because every loop here is over `sol.monitors()`.
+--
+-- Assigning to a key `pairs` has already produced is defined; only adding one
+-- is not, and this only ever lowers a value that is there.
+local function clamp(held, count)
+    for key, index in pairs(held) do
+        if index > count then
+            held[key] = count
+        end
+    end
+end
+
 sol.on("restore", function()
     local count = workspaces.count()
     for _, monitor in ipairs(sol.monitors()) do
@@ -375,6 +414,8 @@ sol.on("restore", function()
             sol.group(desk(monitor.name, index), false)
         end
     end
+    clamp(workspaces.of, count)
+    clamp(workspaces.showing, count)
 end)
 
 -- And membership follows the windows. Only the membership -- no `sol.animate`
