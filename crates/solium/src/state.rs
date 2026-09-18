@@ -2482,6 +2482,63 @@ impl Solium {
         }
     }
 
+    /// Whether a selection is carrying every window off every screen.
+    ///
+    /// **The recovery path is part of issue #116.** The session that found it
+    /// had every window drawn two screen-widths to the left, nothing on any
+    /// monitor but a wallpaper, and no key that brought it back — `super+1`
+    /// early-returned because the scripts believed workspace 1 was already in
+    /// view. What would have saved it was one line saying where everything had
+    /// gone. The compositor knew; nothing asked it.
+    ///
+    /// **The compositor cannot tell a lost desktop from an empty workspace,
+    /// and does not pretend to.** They are the same picture: in both, every
+    /// window is in a selection carried off screen and the desk in view has
+    /// none. The difference is intent, and intent lives in the scripts. So
+    /// this is asked at the one moment where the answer is worth having
+    /// either way — the end of [`Self::reload`], which is both the keypress
+    /// that lost the desktop and the keypress anyone reaches for when
+    /// something on screen has gone wrong. Asking it on every script event
+    /// instead would warn about every empty workspace anybody switched to,
+    /// and a warning that is usually wrong is one nobody reads.
+    ///
+    /// `None` when nothing is grouped, when there are no screens, or when
+    /// there are no windows — none of which is a question with an answer.
+    ///
+    /// Measured through [`Self::drawn_at`], which is the same function the
+    /// renderer uses to place a pane: asking `Groups` for the offset
+    /// separately would be a second answer to "where is this window", and two
+    /// answers drift.
+    fn everything_is_off_stage(&self) -> Option<bool> {
+        if self.groups.is_empty() {
+            return None;
+        }
+        let screens: Vec<Rectangle<i32, Logical>> = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output))
+            .collect();
+        if screens.is_empty() {
+            return None;
+        }
+        let now = self.clock.now();
+        let mut any = false;
+        for pane in self.panes.iter() {
+            if !pane.managed() {
+                continue;
+            }
+            let Some(outer) = self.pane_outer(pane) else {
+                continue;
+            };
+            any = true;
+            let drawn = self.drawn_at(pane, outer, now).rect;
+            if screens.iter().any(|screen| screen.to_f64().overlaps(drawn)) {
+                return Some(false);
+            }
+        }
+        any.then_some(true)
+    }
+
     /// The compositor's own chrome under `location`, if any.
     ///
     /// **The single hit test behind both what a press does and what the pointer
@@ -4057,9 +4114,42 @@ impl Solium {
     /// decoration is the same one keystroke as editing a binding. A file that
     /// fails to load leaves the running configuration alone: a typo should
     /// cost a log line, not the session.
+    ///
+    /// ## A reload replaces the scripts, not the session
+    ///
+    /// The session is older than the scripts reading it. The windows, the
+    /// monitors, the workspace in view and the layout in charge all outlive
+    /// `super+shift+r`; the Lua state does not. So the second half of a reload
+    /// is putting the new scripts back in touch with the session they have
+    /// inherited, and it has two parts, both of which are the contract on
+    /// [`Scripts::load_carrying`]:
+    ///
+    ///  * `Scripts::kept` and `load_carrying` hand back what the old scripts
+    ///    asked to keep, *before* the new ones run, so a script's top level
+    ///    sees its own state rather than its defaults;
+    ///  * `restore`, `monitors` and `layout` re-announce the world, in that
+    ///    order, so nothing has to be kept that could be recomputed.
+    ///
+    /// **The order is the same one a hotplug uses** — see
+    /// [`Self::settle_monitors`] — with `restore` in front of it. That is not
+    /// a coincidence to be tidied away later: "the screens are not the screens
+    /// you knew" is exactly a new script set's position, and a layout that
+    /// handles a monitor arriving already handles this.
+    ///
+    /// **This is what issue #116 was.** Only `layout` reached the new scripts,
+    /// and only by accident: shipped `init.lua` calls `sol.monitors`, whose
+    /// command happens to trigger a relayout. `workspaces.lua` regrouped every
+    /// window onto desk 1 from that `layout` while desk 1 was still carried
+    /// two screen-widths off-stage by the *previous* session's view, and
+    /// nothing put it back — `super+1` did not, because the fresh Lua state
+    /// believed workspace 1 was already showing.
     pub(crate) fn reload(&mut self) {
         let path = Scripts::config_path();
-        match Scripts::load(&path) {
+        // Collected before the new configuration is even read, because reading
+        // it is what may fail, and the failure path has to leave the running
+        // scripts -- and therefore their keep -- untouched.
+        let carried = self.scripts.as_ref().map(Scripts::kept).unwrap_or_default();
+        match Scripts::load_carrying(&path, carried) {
             Ok(scripts) => {
                 crate::qml::clear_cache();
                 let style = self.decorations.style().map(ToOwned::to_owned);
@@ -4073,8 +4163,31 @@ impl Solium {
                 self.decorations.set_style(&mut self.panes, None);
                 self.decorations.set_style(&mut self.panes, style);
                 self.start_scripts(Some(scripts));
+                // The re-announcement, in the order the doc comment states.
+                // Three dispatches and not one, each with its own snapshot,
+                // because what `monitors` does changes what `layout` is
+                // looking at -- `workspaces.lua` moves every desk in the first
+                // and arranges the windows on the one in view in the second.
+                self.trigger_restored();
+                self.trigger_monitors_changed();
+                self.trigger_relayout();
                 self.redraw = true;
                 tracing::info!(config = %path.display(), "configuration reloaded");
+                // And then look at what that produced. See
+                // `everything_is_off_stage` for why this is asked here and
+                // nowhere else -- briefly, a reload is both the keypress that
+                // lost the desktop and the keypress anybody reaches for when
+                // it is gone, so it is the one moment where the answer is
+                // worth having whichever way it comes out.
+                if self.everything_is_off_stage() == Some(true) {
+                    tracing::warn!(
+                        "after this reload every window is drawn outside every screen. If that \
+                         is not simply a workspace with nothing on it, a selection is carrying \
+                         the desktop off-stage and only something that names that selection can \
+                         carry it back: switch workspace away and back again, which re-states \
+                         where every desk sits"
+                    );
+                }
             }
             Err(err) => {
                 tracing::error!(?err, config = %path.display(), "reload failed, keeping what was running");
@@ -4473,6 +4586,21 @@ impl Solium {
             return;
         };
         let outcome = scripts.monitors_changed(snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
+    /// Tell the scripts they have replaced a running session's, not started one.
+    ///
+    /// Called from [`Self::reload`] and from nowhere else: a cold start has
+    /// nothing to restore, and firing it there would make the event mean
+    /// "loaded", which is a thing a script's own top level already is.
+    fn trigger_restored(&mut self) {
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.restored(snapshot);
         self.scripts = Some(scripts);
         self.apply(outcome);
     }

@@ -352,6 +352,133 @@ struct Pending {
     status: Option<String>,
 }
 
+/// What a script handed the host to hold while the Lua state is replaced.
+///
+/// Plain data, because that is the only thing that can cross. A reload builds
+/// a whole new [`Lua`]; a table, a closure, an upvalue — every Lua value there
+/// is — dies with the old one. So what crosses is this, and it is rebuilt as a
+/// fresh table in the new state.
+///
+/// Tables are a list of pairs rather than a map for two reasons. Lua has one
+/// table type that is both a list and a dictionary, and both shipped keeps are
+/// dictionaries with keys of different types: `workspaces.of` is keyed by
+/// window id, which is an integer, and `workspaces.showing` by connector name,
+/// which is a string. And a `Vec` of pairs needs no `Hash` or `Eq` on the key,
+/// which a float key could not honestly have.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Kept {
+    Bool(bool),
+    /// Kept apart from `Number` so a window id survives as the integer it is.
+    /// Round-tripped through `f64` it would come back as `7.0`, which is a
+    /// *different table key* in Lua from `7` — so every entry in
+    /// `workspaces.of` would be unreachable by the id that wrote it.
+    Int(i64),
+    Number(f64),
+    Text(String),
+    Table(Vec<(Kept, Kept)>),
+}
+
+/// Everything kept, under the names the scripts gave it.
+pub(crate) type Keep = std::collections::HashMap<String, Kept>;
+
+/// How deep a kept table is followed.
+///
+/// A budget rather than a cycle check. A table holding itself — directly, or
+/// around through three others — would otherwise be copied until the stack ran
+/// out, and the compositor does not get to die because a configuration made a
+/// ring. Nothing that belongs in a keep is eight tables deep; what is cut is
+/// named in the log rather than dropped in silence, because half a table kept
+/// quietly is worse than a table that was not kept at all.
+const KEEP_DEPTH: usize = 8;
+
+impl Kept {
+    /// Read a Lua value, or say why it cannot be kept.
+    ///
+    /// `where_it_is` is the path from the keep's name down to this value, so a
+    /// warning names the key someone can go and look at rather than saying
+    /// "something in your table".
+    fn read(value: &Value, depth: usize, where_it_is: &str) -> Option<Self> {
+        match value {
+            Value::Boolean(flag) => Some(Self::Bool(*flag)),
+            Value::Integer(number) => Some(Self::Int(*number)),
+            Value::Number(number) => Some(Self::Number(*number)),
+            Value::String(text) => text.to_str().ok().map(|text| Self::Text(text.to_owned())),
+            Value::Table(table) => {
+                if depth >= KEEP_DEPTH {
+                    tracing::warn!(
+                        key = where_it_is,
+                        depth = KEEP_DEPTH,
+                        "a kept table is deeper than the host will follow; this branch of it \
+                         will not survive the next reload"
+                    );
+                    return None;
+                }
+                let mut pairs = Vec::new();
+                for (key, value) in table.pairs::<Value, Value>().flatten() {
+                    let named = format!("{where_it_is}.{}", describe(&key));
+                    let (Some(key), Some(value)) = (
+                        Self::read(&key, depth + 1, &named),
+                        Self::read(&value, depth + 1, &named),
+                    ) else {
+                        continue;
+                    };
+                    pairs.push((key, value));
+                }
+                Some(Self::Table(pairs))
+            }
+            // `nil` is not a failure: a key that has been cleared is a key that
+            // is not there, and Lua's own iteration never yields one.
+            Value::Nil => None,
+            other => {
+                tracing::warn!(
+                    key = where_it_is,
+                    kind = other.type_name(),
+                    "only plain data survives a reload, and this is not plain data; it will be \
+                     missing from the keep when the configuration is read again"
+                );
+                None
+            }
+        }
+    }
+
+    /// Build it again, in the Lua state that replaced the one it came from.
+    fn into_value(self, lua: &Lua) -> mlua::Result<Value> {
+        Ok(match self {
+            Self::Bool(flag) => Value::Boolean(flag),
+            Self::Int(number) => Value::Integer(number),
+            Self::Number(number) => Value::Number(number),
+            Self::Text(text) => Value::String(lua.create_string(&text)?),
+            Self::Table(pairs) => {
+                let table = lua.create_table()?;
+                for (key, value) in pairs {
+                    table.set(key.into_value(lua)?, value.into_value(lua)?)?;
+                }
+                Value::Table(table)
+            }
+        })
+    }
+}
+
+/// A Lua value as a log line should name it.
+fn describe(value: &Value) -> String {
+    match value {
+        Value::Integer(number) => number.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.to_string_lossy(),
+        other => format!("<{}>", other.type_name()),
+    }
+}
+
+/// What the configuration being replaced asked to keep, waiting in the new Lua
+/// state for `sol.keep` to claim it.
+///
+/// App data rather than a field on [`Scripts`], because `sol.keep` is called
+/// while the configuration is still being *read* — the whole point is that a
+/// script's top level has its state back before it does anything with it — and
+/// at that moment there is no `Scripts` yet, only a `Lua`.
+#[derive(Debug, Default)]
+struct Carried(Keep);
+
 /// The Lua runtime and the scripts loaded into it.
 #[derive(Debug)]
 pub(crate) struct Scripts {
@@ -420,11 +547,60 @@ impl Scripts {
         crate::assets::lua().join("init.lua")
     }
 
-    /// Load the configuration script and everything it pulls in.
+    /// Load the configuration script and everything it pulls in, cold.
+    ///
+    /// Nothing is carried, because at startup there is nothing to carry. A
+    /// reload goes through [`Self::load_carrying`].
     pub(crate) fn load(config: &Path) -> Result<Self> {
+        Self::load_carrying(config, Keep::new())
+    }
+
+    /// Everything the running scripts asked the host to keep.
+    ///
+    /// Read off the *old* `Scripts` before the new ones are built, which is
+    /// the only moment both exist. Reading rather than moving: a load that
+    /// fails leaves the running configuration alone — a typo costs a log line,
+    /// not the session — and that promise only holds if collecting the keep
+    /// cannot damage the scripts it was collected from.
+    pub(crate) fn kept(&self) -> Keep {
+        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
+            return Keep::new();
+        };
+        let Ok(keeps) = sol.get::<Table>("_keeps") else {
+            return Keep::new();
+        };
+        keeps
+            .pairs::<String, Value>()
+            .filter_map(Result::ok)
+            .filter_map(|(name, value)| Kept::read(&value, 0, &name).map(|kept| (name, kept)))
+            .collect()
+    }
+
+    /// Load the configuration again, handing back what the last one kept.
+    ///
+    /// ## What a script is entitled to know after a reload
+    ///
+    /// This is the contract, and it is deliberately short, because everything
+    /// in it is something the host has to keep true for ever:
+    ///
+    ///  1. **Whatever it handed to `sol.keep`, and nothing else.** A reload
+    ///     throws the whole Lua state away, so a script's own variables are
+    ///     gone by construction. `sol.keep` is the one exception, it is opt-in,
+    ///     and it holds plain data only — see [`Kept`].
+    ///  2. **The world as it now is, re-announced.** `restore`, then
+    ///     `monitors`, then `layout` — see [`crate::state::Solium::reload`].
+    ///     A script that can rebuild itself from `sol.windows()` and
+    ///     `sol.monitors()` needs no keep at all.
+    ///
+    /// Anything else a script believed is gone, and that is the point: the
+    /// alternative is every script inventing its own answer, which is what
+    /// `workspaces.lua` and `modes.lua` had each done — differently, and one
+    /// of them wrongly. See the comment at the top of `lua/modes.lua`.
+    pub(crate) fn load_carrying(config: &Path, carried: Keep) -> Result<Self> {
         let lua = Lua::new();
         lua.set_app_data(Pending::default());
         lua.set_app_data(Snapshot::default());
+        lua.set_app_data(Carried(carried));
 
         let sol = build_api(&lua).map_err(failed("building the script API"))?;
         lua.globals()
@@ -606,6 +782,22 @@ impl Scripts {
     /// test found.
     pub(crate) fn monitors_changed(&mut self, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "monitors", ()))
+    }
+
+    /// These scripts have replaced a running session's, rather than started one.
+    ///
+    /// The first half of the reload contract on [`Self::load_carrying`], and
+    /// the half a keep cannot cover. `sol.keep` gives a script its *data* back;
+    /// this is the moment it may act on it — after every script has loaded, so
+    /// a mode restored here can be sure the layout it names has registered
+    /// itself, which it cannot be at its own top level.
+    ///
+    /// It does not fire at startup, and that asymmetry is the whole meaning of
+    /// the event: a cold start has nothing to restore, and a script that
+    /// listens for this is saying "this is what I do differently when I am not
+    /// the first configuration this session has had".
+    pub(crate) fn restored(&mut self, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "restore", ()))
     }
 
     /// A scripted surface was pressed and asked for something.
@@ -863,6 +1055,59 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     let sol = lua.create_table()?;
     sol.set("_bindings", lua.create_table()?)?;
     sol.set("_handlers", lua.create_table()?)?;
+    sol.set("_keeps", lua.create_table()?)?;
+
+    // State that outlives `super+shift+r`.
+    //
+    //     local state = sol.keep("workspaces", { showing = {}, of = {} })
+    //
+    // Answers the table the last configuration had under this name, or the
+    // defaults on the first load. Mutate it in place and the next reload gets
+    // what you left in it; see [`Kept`] for what may be in one.
+    //
+    // **Why this is the host's job and not a script's.** Two shipped scripts
+    // had already invented an answer to surviving a reload, and neither could
+    // have got it right, because only the host knows when the Lua state dies.
+    // `workspaces.lua` reasoned about the *compositor's* lifetime instead —
+    // a selection outlives a reload, so it swept sixteen desk names once per
+    // session to clear ones a shorter arrangement had abandoned. `modes.lua`
+    // reasoned about nothing at all: it declared `current = "floating"` at its
+    // top level, which is true at startup and a lie after every reload, with
+    // every window still sitting in the tile a layout put it in.
+    //
+    // Those are the same defect. A script cannot see the seam it is being cut
+    // at, so the seam is where the mechanism belongs.
+    sol.set(
+        "keep",
+        lua.create_function(|lua, (name, defaults): (String, Table)| {
+            let sol: Table = lua.globals().get("sol")?;
+            let keeps: Table = sol.get("_keeps")?;
+            // Asked for twice under one name — two scripts sharing it, or one
+            // module required from two places — is the same table both times.
+            // Handing out a second would make whichever was harvested last the
+            // only one kept, which is a loss nothing would report.
+            if let Value::Table(already) = keeps.get::<Value>(name.as_str())? {
+                return Ok(already);
+            }
+            // Cloned out, and the borrow of the app data dropped, before any
+            // table is built: `into_value` calls back into Lua.
+            let carried = lua
+                .app_data_ref::<Carried>()
+                .and_then(|carried| carried.0.get(&name).cloned());
+            let table = match carried {
+                // Only a table is claimable. A keep that came back as a number
+                // would mean the script changed shape between reloads, and the
+                // defaults it just passed are the better answer.
+                Some(kept @ Kept::Table(_)) => match kept.into_value(lua)? {
+                    Value::Table(table) => table,
+                    _ => defaults,
+                },
+                _ => defaults,
+            };
+            keeps.set(name, &table)?;
+            Ok(table)
+        })?,
+    )?;
 
     sol.set(
         "windows",
@@ -3421,6 +3666,227 @@ mod tests {
         // disappearing into a broken script.
         assert!(!outcome.handled);
         assert!(outcome.commands.is_empty());
+    }
+
+    /// Who each named selection holds, after a batch of commands.
+    ///
+    /// Folded rather than indexed, because `regroup` re-declares every desk on
+    /// every event and a test that asserted on `commands[4]` would be pinning
+    /// the order of a loop over monitors.
+    fn membership(commands: &[Command]) -> std::collections::HashMap<String, Vec<u64>> {
+        let mut out = std::collections::HashMap::new();
+        for command in commands {
+            if let Command::Group {
+                name,
+                selection: Some(selection),
+                ..
+            } = command
+            {
+                out.insert(name.clone(), selection.windows.clone());
+            }
+        }
+        out
+    }
+
+    /// Where each named selection was last asked to sit, after a batch.
+    fn carried(commands: &[Command]) -> std::collections::HashMap<String, (f64, f64)> {
+        let mut out = std::collections::HashMap::new();
+        for command in commands {
+            match command {
+                Command::PresentGroup { name, to, .. } => {
+                    out.insert(name.clone(), to.offset());
+                }
+                Command::ClearGroup { name, .. } => {
+                    out.insert(name.clone(), (0.0, 0.0));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// One 1600x900 screen and three windows on it, for the reload test.
+    fn one_screen(windows: &[u64]) -> Snapshot {
+        Snapshot {
+            keyboard: crate::keymap::State::initial(),
+            windows: windows
+                .iter()
+                .map(|id| WindowInfo {
+                    id: *id,
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 800.0,
+                        h: 600.0,
+                    },
+                    drawn: Rect::default(),
+                    title: String::new(),
+                    focused: false,
+                    monitor: "test-1".to_owned(),
+                })
+                .collect(),
+            monitors: vec![MonitorInfo {
+                name: "test-1".to_owned(),
+                area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1600.0,
+                    h: 900.0,
+                },
+                whole: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1600.0,
+                    h: 900.0,
+                },
+                scale: 1.0,
+                focused: true,
+                primary: true,
+                transform: "normal".to_owned(),
+            }],
+            work_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1600.0,
+                h: 900.0,
+            },
+            cursor: (0.0, 0.0),
+        }
+    }
+
+    /// **A reload does not lose the session, which is the whole of issue #116.**
+    ///
+    /// The bug as it was reported: `super+shift+r` on workspace 3, and the
+    /// desktop is drawn two screen-widths off-stage with no key that brings it
+    /// back. Underneath it are three separate losses, and this drives all
+    /// three through the same sequence `Solium::reload` runs -- `kept` and
+    /// `load_carrying`, then `restore`, `monitors`, `layout`:
+    ///
+    ///  * which workspace each monitor is showing, so the desks are carried
+    ///    relative to the one in view and not to desk 1;
+    ///  * which workspace each *window* is on, so three windows on two desks
+    ///    are still on two desks rather than swept onto one;
+    ///  * which layout is in charge, because a tiled session that comes back
+    ///    believing it is floating toggles the wrong way on the next key.
+    ///
+    /// It runs the **shipped** `workspaces.lua`, `modes.lua` and `tiling.lua`
+    /// rather than copies, which is what makes it a test of the files under
+    /// review. That also means a developer's own `~/.config/solium` would
+    /// answer `require` ahead of them -- it comes first on `package.path` --
+    /// so the run is skipped there rather than asserting about somebody's
+    /// configuration. The same guard, for the same reason, as
+    /// `a_user_file_using_the_old_key_still_chooses_a_style`.
+    #[test]
+    fn a_reload_keeps_the_workspace_the_windows_and_the_layout() {
+        if let Some(own) = Scripts::user_config_dir()
+            && (own.join("config.lua").exists()
+                || own.join("user.lua").exists()
+                || own.join("workspaces.lua").exists()
+                || own.join("modes.lua").exists())
+        {
+            return;
+        }
+
+        let directory = std::env::temp_dir().join("solium-script-test-reload");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            local workspaces = require("workspaces")
+            local modes = require("modes")
+            local tiling = require("tiling")
+
+            sol.bind("super+f1", function()
+                modes.use("tiling")
+                workspaces.go(3)
+            end)
+
+            -- What the session believes about itself, in one string, so the
+            -- assertions read the scripts' own answer rather than a
+            -- reconstruction of it.
+            sol.bind("super+f2", function()
+                sol.status(string.format(
+                    "%d %s", workspaces.on("test-1"), tostring(tiling.active)))
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let first = &[7_u64, 8];
+        let all = &[7_u64, 8, 9];
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        // The screens arrive, which is the moment the desks can be built at
+        // all -- a script's top level runs before any output is placed.
+        scripts.monitors_changed(one_screen(first));
+        // Two windows open on workspace 1, then the session moves to 3 with
+        // tiling on, and a third window opens there.
+        scripts.opened(7, one_screen(first));
+        scripts.opened(8, one_screen(first));
+        scripts.key("super+f1", one_screen(first));
+        scripts.opened(9, one_screen(all));
+
+        let before = scripts.key("super+f2", one_screen(all));
+        assert_eq!(
+            before.status.as_deref(),
+            Some("3 true"),
+            "the session was not set up: this is before any reload"
+        );
+
+        // Exactly what `Solium::reload` does, in the order it does it.
+        let carried_over = scripts.kept();
+        let mut scripts =
+            Scripts::load_carrying(&config, carried_over).expect("reloading the test script");
+        let restored = scripts.restored(one_screen(all));
+        let monitors = scripts.monitors_changed(one_screen(all));
+        let layout = scripts.relayout(one_screen(all));
+
+        let after = scripts.key("super+f2", one_screen(all));
+        assert_eq!(
+            after.status.as_deref(),
+            Some("3 true"),
+            "after the reload the scripts believe they are somewhere else: the workspace in \
+             view and the layout in charge are both part of the session, not of the file"
+        );
+
+        let mut commands = restored.commands;
+        commands.extend(monitors.commands);
+        commands.extend(layout.commands);
+
+        let who = membership(&commands);
+        assert_eq!(
+            who.get("desk-1@test-1").map(Vec::as_slice),
+            Some([7, 8].as_slice()),
+            "the windows that were on workspace 1 are not on desk 1 any more; \
+             memberships found: {who:?}"
+        );
+        assert_eq!(
+            who.get("desk-3@test-1").map(Vec::as_slice),
+            Some([9].as_slice()),
+            "the window that was on workspace 3 is not on desk 3 any more; \
+             memberships found: {who:?}"
+        );
+
+        // And the desks sit relative to the one in view. Desk 3 is what is
+        // being looked at, so it is carried nowhere; desk 1 is two cells to
+        // its left, at 1600 x 1.06 each. Off by this is the off-stage
+        // desktop the issue was reported as.
+        let where_they_sit = carried(&commands);
+        assert_eq!(
+            where_they_sit.get("desk-3@test-1"),
+            Some(&(0.0, 0.0)),
+            "the workspace in view is not at the origin; offsets: {where_they_sit:?}"
+        );
+        let (dx, dy) = where_they_sit
+            .get("desk-1@test-1")
+            .copied()
+            .unwrap_or_default();
+        assert!(
+            (dx - (-2.0 * 1600.0 * 1.06)).abs() < 0.5 && dy == 0.0,
+            "desk 1 sits at {dx},{dy}, which is not two screens to the left of desk 3"
+        );
     }
 }
 

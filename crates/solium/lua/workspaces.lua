@@ -44,12 +44,42 @@ local wallpaper = require("wallpaper")
 -- connector can have, so it cannot collide with a real one.
 local TOGETHER = "*all*"
 
-local workspaces = {
-    settings = config.workspaces,
+-- What the session is, as opposed to what this file is.
+--
+-- **This is issue #116.** Both of these used to be plain `{}` at this file's
+-- top level, and a reload runs this file again -- so `super+shift+r` on
+-- workspace 3 came back believing every monitor was showing workspace 1 and
+-- that no window belonged to any workspace in particular. `regroup` then swept
+-- every window onto desk 1, which the *previous* session had left carried two
+-- screen-widths off-stage, and the desktop was simply gone. `super+1` could
+-- not bring it back, because `go` returns early when you are already on the
+-- workspace asked for and this file believed you were.
+--
+-- `sol.keep` hands these two tables back across the reload, and it belongs to
+-- the script host rather than to this file. This file had already tried to
+-- answer the question by itself once -- the desk sweep at the bottom, which
+-- reasoned about the *compositor's* lifetime because that was the only
+-- lifetime it could see -- and got the timing wrong for exactly that reason. A
+-- script cannot see the seam it is being cut at, so the mechanism lives where
+-- the cut is made.
+--
+-- `carried` is deliberately *not* kept. It is a cache of what the compositor
+-- was last told, and the compositor still knows: re-stating an offset a
+-- selection is already at starts an animation from a place to itself, which
+-- costs a frame and changes nothing. Keeping it would mean keeping a claim
+-- about compositor state that a shorter arrangement -- the sweep below -- is
+-- allowed to invalidate.
+local kept = sol.keep("workspaces", {
     -- Which workspace each monitor is showing, by monitor name.
     showing = {},
     -- Which workspace each window belongs to, by window id.
     of = {},
+})
+
+local workspaces = {
+    settings = config.workspaces,
+    showing = kept.showing,
+    of = kept.of,
     -- Where each desk was last asked to sit, by selection name. See `apply`.
     carried = {},
 }
@@ -132,16 +162,9 @@ local function desk(monitor, index)
     return "desk-" .. index .. "@" .. monitor
 end
 
--- How many desk names to clear when the arrangement shrinks.
---
--- A selection is the compositor's until something takes the name away, and it
--- survives `super+shift+r` the same way a surface and a window's transform do.
--- So a reload that goes from eight workspaces to four would otherwise leave
--- four selections carrying windows a screen away with nothing left to bring
--- them back. Swept once per session, which is the only moment the count can
--- have changed.
+-- How many desk names to clear when the arrangement shrinks. See the sweep at
+-- the bottom of this file.
 local MAX_DESKS = 16
-local swept = false
 
 -- Who is on which desk, and where each desk sits.
 --
@@ -186,13 +209,7 @@ function workspaces.regroup()
             end
             sol.group(desk(monitor.name, index), members)
         end
-        if not swept then
-            for index = count + 1, MAX_DESKS do
-                sol.group(desk(monitor.name, index), false)
-            end
-        end
     end
-    swept = #sol.monitors() > 0
 end
 
 -- Carry every desk to where it sits relative to the one its monitor is showing.
@@ -328,8 +345,36 @@ end)
 -- of them. This is also the first moment there are any monitors to build them
 -- from: a script's top level runs before the compositor has placed a single
 -- output, so declaring them there would declare nothing.
+--
+-- And, since the reload contract puts this event after `restore`, it is also
+-- what carries every desk back to where the restored `showing` says it sits.
 sol.on("monitors", function()
     workspaces.apply()
+end)
+
+-- A shorter arrangement than the last configuration had leaves desks behind.
+--
+-- A selection is the compositor's until something takes the name away: it
+-- outlives `super+shift+r` exactly as a surface and a window's transform do.
+-- So a reload that goes from eight workspaces to four would otherwise leave
+-- four selections still carrying windows a screen away, with nothing left that
+-- names them and so no way to carry them back.
+--
+-- This file used to do the sweep on the first `regroup` of a session, behind a
+-- `swept` flag, with a comment claiming that was "the only moment the count can
+-- have changed". It was not: the count changes when the configuration is
+-- edited, which is the reload, which is *this* moment. The flag existed because
+-- there was no event meaning "the scripts were replaced" to hang it on -- which
+-- is the same gap `sol.keep` fills at the top of this file, and this is the
+-- other half of it. A cold start sweeps nothing because there is nothing there
+-- to sweep, and that is why `restore` does not fire at startup.
+sol.on("restore", function()
+    local count = workspaces.count()
+    for _, monitor in ipairs(sol.monitors()) do
+        for index = count + 1, MAX_DESKS do
+            sol.group(desk(monitor.name, index), false)
+        end
+    end
 end)
 
 -- And membership follows the windows. Only the membership -- no `sol.animate`
