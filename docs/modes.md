@@ -145,8 +145,16 @@ means "re-run what you already hold".
 
 **`resize` gives you the pointer's position, not a delta.** Deliberately: a
 delta would be measured against a layout your own last response just changed,
-and the windows shake for as long as the button is held. `horizontal` and
-`vertical` say which axes the dragged edge can move.
+and the windows shake for as long as the button is held.
+
+**`horizontal` and `vertical` are the *sides* being dragged**, not the axes:
+`"left"` or `"right"`, `"top"` or `"bottom"`, and `nil` for an axis this drag
+does not move. A corner drag fills both, because a corner drag moves one seam
+per axis. They were booleans until #120, and a boolean cannot choose a seam: a
+window sitting on the right of a vertical split has that split's seam on its
+*left*, so "the horizontal axis is in play" was true whichever edge the hand
+was on, and dragging the right edge moved the left one instead. Hand the side
+straight to `tree:drag_seam`.
 
 **`click` only arrives while you hold input.** `sol.grab_input(true)` takes keys
 and clicks away from clients, which is what a mode needs while it owns the
@@ -384,9 +392,17 @@ tree:remove(id)
 tree:contains(id)
 tree:windows()
 tree:layout(options)      -- the slots, to hand to sol.place
-tree:resize(id, share)
-tree:drag_seam(id, "width", x, y, options)
+tree:resize(id, "width", share)            -- keyboard: an axis
+tree:drag_seam(id, "right", x, y, options) -- pointer: a side
 ```
+
+The two resize calls take different things on purpose. A drag names a side —
+the hand is on one specific edge, and which seam moves follows from that. A
+keypress names only an axis: `super+equal` means "wider" and says nothing about
+which neighbour gives up the room, so `resize` prefers the seam on the right or
+below and falls back to the other, with positive `share` always growing the
+window. Either way, a window flush against its container on that side has no
+seam there and nothing happens — the screen edge is not a seam.
 
 `options` is a monitor's work area with `gap` and `split` added. Passing the
 monitor in rather than the tree asking for it is what lets one tree per

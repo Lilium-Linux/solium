@@ -889,15 +889,24 @@ impl Scripts {
     ///
     /// Offered to layouts before the compositor resizes anything, so a tiled
     /// window can move its seam instead of growing over its neighbour.
+    ///
+    /// `(id, x, y, horizontal, vertical)`, where `x, y` is where the pointer
+    /// **is** — not how far it moved — and the last two are the *side* of the
+    /// window being dragged on each axis: `"left"`/`"right"`,
+    /// `"top"`/`"bottom"`, or nil where that axis is not in play. They were a
+    /// pair of booleans until #120; a script that only tested them for
+    /// truthiness still reads the same, because a side is truthy and nil is
+    /// not, but one that passes them on now passes on something a layout can
+    /// choose a seam from. See [`crate::input::resize::sides`].
     pub(crate) fn resized(
         &mut self,
         id: u64,
         at: (f64, f64),
-        edges: (bool, bool),
+        sides: (Option<&'static str>, Option<&'static str>),
         snapshot: Snapshot,
     ) -> Outcome {
         self.dispatch(snapshot, move |sol| {
-            call_listeners(sol, "resize", (id, at.0, at.1, edges.0, edges.1))
+            call_listeners(sol, "resize", (id, at.0, at.1, sides.0, sides.1))
         })
     }
 
@@ -1053,6 +1062,43 @@ fn tuning(options: &Table) -> mlua::Result<Settings> {
             .get::<Option<f64>>("split")?
             .unwrap_or(defaults.split),
     })
+}
+
+/// Which way a script means a seam to run.
+///
+/// "width" is the seam that bounds a window's width, and that seam is cut
+/// *vertically*. The two names disagree, which is exactly why this is a named
+/// function: `axis == "width"` producing `Vertical` reads like a bug at the
+/// call site, and has been reported as one.
+///
+/// Anything else is "height", because the caller is a keyboard binding
+/// choosing between two axes and there is no third answer to fall back to.
+/// [`edge_named`] is stricter for the opposite reason: it has four answers and
+/// a wrong guess moves a seam the user did not touch.
+fn axis_named(name: &str) -> solium_layout::tree::Axis {
+    if name == "width" {
+        solium_layout::tree::Axis::Vertical
+    } else {
+        solium_layout::tree::Axis::Horizontal
+    }
+}
+
+/// Which side of a window a script means.
+///
+/// The spellings are the ones the `resize` event emits — see
+/// [`crate::input::resize::sides`] — so the ordinary script is passing back a
+/// value the compositor just handed it and cannot misspell. `None` for
+/// anything else, so a hand-written one is told rather than silently given a
+/// side it did not ask for.
+fn edge_named(name: &str) -> Option<solium_layout::tree::Edge> {
+    use solium_layout::tree::Edge;
+    match name {
+        "left" => Some(Edge::Left),
+        "right" => Some(Edge::Right),
+        "top" => Some(Edge::Top),
+        "bottom" => Some(Edge::Bottom),
+        _ => None,
+    }
 }
 
 /// A Lua number, whatever Lua happened to store it as.
@@ -2789,22 +2835,36 @@ impl mlua::UserData for TilingTree {
             Ok(())
         });
 
-        methods.add_method_mut("resize", |_, this, (id, by): (u64, f64)| {
-            this.0.resize(id, by);
+        // The keyboard path: `axis` is "width" or "height" and `by` is a signed
+        // fraction that always *grows* the window when positive, whichever of
+        // the two seams beside it has room to give. An axis and not an edge
+        // because a keypress names no side — `super+equal` means "wider" and
+        // nothing about which neighbour pays for it. See `Tiling::resize`.
+        methods.add_method_mut("resize", |_, this, (id, axis, by): (u64, String, f64)| {
+            this.0.resize(id, axis_named(&axis), by);
             Ok(())
         });
 
-        // `axis` is "width" or "height": which way the seam being dragged runs.
+        // The drag path: `edge` is the side the pointer has hold of, which is
+        // what the `resize` event hands the script. Not an axis — see
+        // `Tiling::drag_seam` for why an axis picks the wrong seam for two of
+        // the four sides.
         methods.add_method_mut(
             "drag_seam",
-            |_, this, (id, axis, x, y, options): (u64, String, f64, f64, Table)| {
-                let axis = if axis == "width" {
-                    solium_layout::tree::Axis::Vertical
-                } else {
-                    solium_layout::tree::Axis::Horizontal
+            |_, this, (id, edge, x, y, options): (u64, String, f64, f64, Table)| {
+                let Some(edge) = edge_named(&edge) else {
+                    // Named rather than guessed at. Falling back to a side
+                    // would move a seam the user did not grab, which is the
+                    // failure #120 was, and a script with a typo would see it
+                    // as the compositor being wrong.
+                    tracing::warn!(
+                        edge,
+                        "not a side a window has; expected left, right, top or bottom"
+                    );
+                    return Ok(());
                 };
                 this.0
-                    .drag_seam(id, axis, (x, y), area(&options)?, tuning(&options)?);
+                    .drag_seam(id, edge, (x, y), area(&options)?, tuning(&options)?);
                 Ok(())
             },
         );
