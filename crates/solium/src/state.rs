@@ -554,6 +554,23 @@ pub(crate) struct Solium {
     /// so.
     pub(crate) resize_hold: Option<crate::resizing::Held>,
 
+    /// An edge drag whose button has come up, and when.
+    ///
+    /// **Recorded whether or not there is a hold to tell**, which is the point
+    /// of it. A hold is not born when the gesture starts: `input::resize`'s
+    /// `motion` records a request and `Self::hold_resize` turns it into a hold
+    /// at the *frame*, so a press, a motion and a release inside one dispatch
+    /// batch — a quick nudge of a border, which is well under sixteen
+    /// milliseconds — all happen before any hold exists. `Self::release_resize`
+    /// would then have nothing to write to, and the hold born a moment later
+    /// would believe its gesture was still going, for ever.
+    ///
+    /// So the release is written down instead of dropped, and the hold born
+    /// afterwards is born already released. Cleared at the end of any frame
+    /// that leaves no hold behind: nothing else can consume it by then, and a
+    /// `Window` kept here is a client kept alive.
+    resize_ended: Option<(Window, Duration)>,
+
     /// What `config.lua` said about resizing. See [`crate::resizing::Fill`].
     pub(crate) resizing: crate::resizing::Settings,
 
@@ -1158,6 +1175,7 @@ impl Solium {
             pending_drop: None,
             pending_resize: None,
             resize_hold: None,
+            resize_ended: None,
             resizing: crate::resizing::Settings::default(),
             redraw: true,
             animating: false,
@@ -3599,7 +3617,13 @@ impl Solium {
                     // slot, the space and the client together. Nothing for a
                     // hold to arbitrate, and a hold left over from a drag that
                     // has since been claimed would fight it.
-                    self.drop_resize_hold();
+                    //
+                    // This window's hold and no other's, which is the same care
+                    // `begin_resize` takes and for the same reason: a hold on
+                    // some other window is a gesture this one knows nothing
+                    // about, and dropping it abandons that window's rectangle
+                    // half-reconciled.
+                    self.drop_resize_hold_for(&request.window);
                 } else {
                     self.hold_resize(&request, now);
                 }
@@ -3611,7 +3635,16 @@ impl Solium {
         // Whether or not the pointer moved this frame: a hold outlives the
         // gesture by however long the client takes to answer the last
         // configure, and something has to be watching for that answer.
-        self.settle_resize_hold(now) || dragged
+        let settled = self.settle_resize_hold(now);
+        // A recorded release exists to be handed to a hold that had not been
+        // born yet. If no hold survived this frame, nothing can be: the only
+        // thing that creates one is `hold_resize`, and the only thing that
+        // reaches that is a motion from a grab which the release has already
+        // ended. See [`Self::resize_ended`].
+        if self.resize_hold.is_none() {
+            self.resize_ended = None;
+        }
+        settled || dragged
     }
 
     /// Whether this pane's slot is the authority on its window's size just now.
@@ -3626,6 +3659,17 @@ impl Solium {
     pub(crate) fn resize_fill(&self, pane: crate::pane::PaneId) -> Option<crate::resizing::Fill> {
         let held = self.resize_hold.as_ref()?;
         (held.pane == pane).then(|| held.hold.fill(self.resizing.fill))
+    }
+
+    /// Which of this pane's edges a live drag is pulling, or `None` if none is.
+    ///
+    /// For a fill that does not stretch: the picture has to stay against the
+    /// edges that are standing still, or it travels with the pointer and the
+    /// window's contents slide about inside their own frame. See
+    /// [`crate::resizing::Fill::Hold`].
+    pub(crate) fn resize_pins(&self, pane: crate::pane::PaneId) -> Option<(bool, bool)> {
+        let held = self.resize_hold.as_ref()?;
+        (held.pane == pane).then(|| held.hold.pins())
     }
 
     /// The slot a held window's pane is keeping, if this is that window.
@@ -3653,14 +3697,35 @@ impl Solium {
     ///
     /// Holds on other windows are left alone: one of those expiring reconciles
     /// its own window correctly and has nothing to do with this drag.
-    pub(crate) fn begin_resize(&mut self, window: &Window) {
+    ///
+    /// **Reconciled rather than abandoned, and the rectangle it lands on is the
+    /// answer.** Simply forgetting the old hold leaves the pane's slot holding
+    /// a size the client never agreed to with nothing left watching for the
+    /// answer, so `pane_geometry` falls back to `real_geometry` — the drag's
+    /// origin paired with the client's old size, which is issue #113's
+    /// rectangle exactly, for every frame until the new drag's first motion.
+    /// Ending it the way the deadline would ends it *somewhere*, which is all
+    /// the next gesture needs.
+    ///
+    /// Returning the rectangle is what stops that reconciliation being visible:
+    /// a `ResizeGrab` computes every frame from the rectangle it was given, so
+    /// a caller that read one before this ran would drag from a rectangle this
+    /// has since changed and the window would jump on the first motion.
+    /// `None` for a window with no pane, which is not a case any caller can
+    /// reach — every one of them found the window through a pane — and each has
+    /// its own rectangle to fall back on.
+    pub(crate) fn begin_resize(&mut self, window: &Window) -> Option<Rectangle<i32, Logical>> {
         if self
             .resize_hold
             .as_ref()
             .is_some_and(|held| &held.window == window)
         {
-            self.drop_resize_hold();
+            let taken = window.geometry().size;
+            self.adopt_resize(taken);
         }
+        // Whatever gesture that record belonged to, it is not this one.
+        self.resize_ended = None;
+        self.pane_outer_of(self.panes.id_of(window)?)
     }
 
     /// Let go of a hold without reconciling anything.
@@ -3671,6 +3736,48 @@ impl Solium {
     /// rectangle now.
     fn drop_resize_hold(&mut self) {
         self.resize_hold = None;
+    }
+
+    /// The same, for one window's hold and nobody else's.
+    fn drop_resize_hold_for(&mut self, window: &Window) {
+        if self
+            .resize_hold
+            .as_ref()
+            .is_some_and(|held| &held.window == window)
+        {
+            self.drop_resize_hold();
+        }
+    }
+
+    /// End a hold by letting the client's own size win.
+    ///
+    /// The rule [`crate::resizing::Settle::Adopt`] names, in one place because
+    /// two things reach it: the deadline expiring, and a fresh gesture arriving
+    /// before it does. Either way the rectangle the old hold was waiting on
+    /// will never be agreed, and the slot has to stop claiming it — pinned to
+    /// the edges that drag was not holding, or the gesture ends by moving the
+    /// one edge the user never touched.
+    fn adopt_resize(&mut self, taken: Size<i32, Logical>) {
+        let Some(held) = self.resize_hold.as_ref() else {
+            return;
+        };
+        let (window, pane) = (held.window.clone(), held.pane);
+        let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
+            self.drop_resize_hold();
+            return;
+        };
+        let landed = held.hold.anchored(slot, taken);
+        self.drop_resize_hold();
+        if let Some(pane) = self.panes.get_mut(pane) {
+            pane.set_slot(landed);
+        }
+        self.map_stacked(window, landed.loc, false);
+        self.redraw = true;
+        tracing::debug!(
+            asked = ?slot.size,
+            given = ?taken,
+            "a client settled at a size of its own"
+        );
     }
 
     /// Put the pane where the drag says, now, and let the client catch up.
@@ -3688,7 +3795,6 @@ impl Solium {
     /// disagreement issue #84 is about, for no gain, and would break every
     /// reader of `real_geometry` for the length of a drag.
     fn hold_resize(&mut self, request: &ResizeRequest, now: Duration) {
-        let client = inner(request.wanted, self.frame_insets(&request.window));
         let Some(pane) = self.panes.id_of(&request.window) else {
             // A window with no pane has nowhere to hold a rectangle. That is
             // not a case anyone should reach — `sync_panes` gives every client
@@ -3697,6 +3803,19 @@ impl Solium {
             self.resize_to(&request.window, request.wanted);
             return;
         };
+        // **`insets_of`, which is what every reader of this slot uses.**
+        // `frame_insets` is the other spelling and it answers differently for
+        // `Frame::Pending`: `is_decorated` is false there, so it reserves
+        // nothing, while `insets_for` reserves a titlebar so that a window does
+        // not change shape when its frame arrives. A pane whose decoration
+        // failed to build is `Pending` *permanently* — see
+        // `decoration::Decorations::insert` — so writing the slot with one
+        // spelling and reading it back with the other would re-grow the
+        // rectangle by a titlebar on every frame of the drag: the top edge a
+        // titlebar above where the pointer is and a client sized that much too
+        // tall. The round trip `pane_outer(inner(wanted)) == wanted` that this
+        // whole fix rests on holds only when both halves ask the same question.
+        let client = inner(request.wanted, self.insets_of(pane));
         if let Some(held) = self.panes.get_mut(pane) {
             held.set_slot(client);
         }
@@ -3715,12 +3834,31 @@ impl Solium {
             // which a grab cannot do but a script rebinding one could. Either
             // way the previous hold is over and its window keeps whatever
             // rectangle it last had.
+            //
+            // **Born knowing whether its gesture is still going.** It very
+            // often is not: the button comes up during input dispatch and this
+            // runs at the frame, so every gesture quick enough to fit in one
+            // dispatch batch arrives here already over. A hold that took
+            // `released: None` regardless would wait for a release that has
+            // already happened, which never comes again — see
+            // [`Self::resize_ended`] and `resizing::Hold::new`.
             _ => {
                 size_window(&request.window, client);
+                let released = self
+                    .resize_ended
+                    .as_ref()
+                    .filter(|(ended, _)| ended == &request.window)
+                    .map(|&(_, at)| at);
                 self.resize_hold = Some(crate::resizing::Held {
                     window: request.window.clone(),
                     pane,
-                    hold: crate::resizing::Hold::new(request.edges, size, client.size, now),
+                    hold: crate::resizing::Hold::new(
+                        request.edges,
+                        size,
+                        client.size,
+                        now,
+                        released,
+                    ),
                 });
             }
         }
@@ -3733,10 +3871,23 @@ impl Solium {
     /// gesture ended on until the client answers or the deadline runs out; see
     /// `settle_resize_hold`.
     ///
+    /// **Records the release whether or not there is a hold to record it on**,
+    /// which is the whole of why a gesture can always be let go of. See
+    /// [`Self::resize_ended`].
+    ///
     /// Called from inside the pointer grab, so it must not touch the seat. It
-    /// does not: a clock, a pane's slot, and one configure.
+    /// does not: a clock, a pane's slot, the request the last motion left
+    /// behind, and one configure.
     pub(crate) fn release_resize(&mut self, window: &Window) {
         let now = self.clock.now();
+        // **Written down first, and unconditionally.** There may be no hold yet
+        // — a press, a motion and this release inside one dispatch batch all
+        // run before the frame that creates one — and a release that went
+        // unrecorded because there was nothing to record it on would leave the
+        // hold born a moment later waiting for it for ever. See
+        // [`Self::resize_ended`].
+        self.resize_ended = Some((window.clone(), now));
+
         let Some(held) = self.resize_hold.as_ref() else {
             return;
         };
@@ -3747,12 +3898,28 @@ impl Solium {
             self.drop_resize_hold();
             return;
         };
+        // **The rectangle the gesture ended on, which is not always the slot's.**
+        // The last motion of a drag is routinely still sitting in
+        // `pending_resize` when the button comes up — a grab's callbacks run
+        // during input dispatch and `settle_resize` runs at the frame — so the
+        // slot is one motion out of date here. Telling the client the stale size
+        // sends two configures for one release, and if it answers the first,
+        // `Hold::note` records that as a refusal of a size it was never offered:
+        // `settle` then takes the `declined == asked` path and adopts the
+        // *pre-release* rectangle on the spot, throwing away the end of the
+        // drag rather than waiting for the answer to the size that was.
+        let pane = held.pane;
+        let client = self
+            .pending_resize
+            .as_ref()
+            .filter(|request| &request.window == window)
+            .map_or(slot, |request| inner(request.wanted, self.insets_of(pane)));
         let size = window.geometry().size;
         let Some(held) = self.resize_hold.as_mut() else {
             return;
         };
-        let tell = held.hold.release(slot.size, size, now);
-        size_window(window, Rectangle::new(slot.loc, tell));
+        let tell = held.hold.release(client.size, size, now);
+        size_window(window, Rectangle::new(client.loc, tell));
         self.redraw = true;
     }
 
@@ -3775,10 +3942,6 @@ impl Solium {
             return false;
         }
         let size = window.geometry().size;
-        let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
-            self.drop_resize_hold();
-            return false;
-        };
         let Some(held) = self.resize_hold.as_mut() else {
             return false;
         };
@@ -3798,18 +3961,7 @@ impl Solium {
             // issue #115 becoming visible rather than staying hidden behind a
             // blur.
             crate::resizing::Settle::Adopt(taken) => {
-                let landed = held.hold.anchored(slot, taken);
-                self.drop_resize_hold();
-                if let Some(pane) = self.panes.get_mut(pane) {
-                    pane.set_slot(landed);
-                }
-                self.map_stacked(window, landed.loc, false);
-                self.redraw = true;
-                tracing::debug!(
-                    asked = ?slot.size,
-                    given = ?taken,
-                    "a client settled at a size of its own"
-                );
+                self.adopt_resize(taken);
                 true
             }
         }
@@ -8229,6 +8381,333 @@ mod tests {
                 wanted.loc,
                 "the slot is authoritative for the size, not for where the \
                  window is; nothing here may add a fourth opinion about that"
+            );
+        }
+
+        /// **The round trip this whole fix rests on, with a frame's insets in
+        /// it, on all eight edges.**
+        ///
+        /// `hold_resize` writes the pane's slot as `inner(wanted)` and every
+        /// reader grows it back with `pane_outer`, so `pane_outer(inner(wanted))
+        /// == wanted` is what makes the dragged rectangle survive the trip. It
+        /// held for zero insets whichever spelling was used, which is why a
+        /// window with no frame could not catch this: `frame_insets` asks
+        /// `is_decorated` — `Styled` and nothing else — while every reader goes
+        /// through `insets_of`, which reserves a titlebar for `Frame::Pending`
+        /// so a window does not change shape when its frame arrives.
+        ///
+        /// `Frame::Pending` is not a moment, it is where a pane whose
+        /// decoration *failed to build* stays for good — see
+        /// `decoration::Decorations::insert`, which logs and leaves it there. So
+        /// the two spellings disagreeing meant that for those windows the slot
+        /// grew by a titlebar on every frame of a drag: the top edge landing a
+        /// titlebar above the rectangle under the pointer, and the client asked
+        /// for a size a titlebar too tall.
+        ///
+        /// Set by hand rather than by failing a build, because building a frame
+        /// needs Qt and a Qt scene in a process holding a libwayland connection
+        /// aborts the test binary (see the #99 test). The state is the same
+        /// state; how a pane got into it is `decoration.rs`'s business.
+        #[test]
+        fn a_framed_window_is_dragged_to_the_rectangle_the_pointer_asks_for() {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            state
+                .decorations
+                .set_style(&mut state.panes, Some("none".to_string()));
+
+            let (conn, event_queue, client) = connect(&mut display, &mut state);
+            let qh = event_queue.handle();
+            let (window, _toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+
+            // A pane reserving room for a frame that is never coming.
+            state
+                .panes
+                .get_mut(pane)
+                .expect("the pane is here")
+                .set_frame(crate::pane::Frame::Pending);
+            assert!(
+                !state.is_decorated(&window),
+                "`Pending` is not decorated, which is exactly why the two \
+                 spellings of the insets disagree about it"
+            );
+            assert_eq!(
+                state.insets_of(pane).top,
+                TITLEBAR_HEIGHT,
+                "and it reserves a titlebar all the same, or this test is about \
+                 two things that agree"
+            );
+
+            for edges in [
+                ResizeEdge::Top,
+                ResizeEdge::Bottom,
+                ResizeEdge::Left,
+                ResizeEdge::Right,
+                ResizeEdge::TopLeft,
+                ResizeEdge::TopRight,
+                ResizeEdge::BottomLeft,
+                ResizeEdge::BottomRight,
+            ] {
+                // A fresh gesture each time, which also reconciles the previous
+                // one rather than leaving it hanging.
+                let before = state
+                    .begin_resize(&window)
+                    .expect("a mapped pane has a rectangle");
+
+                // Twenty pixels out of whichever edges this drag holds, with
+                // the opposite ones standing still. `resized` is where that
+                // arithmetic lives and it is tested beside itself; what is
+                // being checked here is only that the rectangle survives the
+                // compositor.
+                let (left, top) = (
+                    crate::input::resize::pulls_left(edges),
+                    crate::input::resize::pulls_top(edges),
+                );
+                let right = matches!(
+                    edges,
+                    ResizeEdge::Right | ResizeEdge::TopRight | ResizeEdge::BottomRight
+                );
+                let bottom = matches!(
+                    edges,
+                    ResizeEdge::Bottom | ResizeEdge::BottomLeft | ResizeEdge::BottomRight
+                );
+                let wanted = Rectangle::new(
+                    (
+                        before.loc.x - i32::from(left) * 20,
+                        before.loc.y - i32::from(top) * 20,
+                    )
+                        .into(),
+                    (
+                        before.size.w + i32::from(left || right) * 20,
+                        before.size.h + i32::from(top || bottom) * 20,
+                    )
+                        .into(),
+                );
+                assert_ne!(wanted, before, "every edge has to actually move one");
+                state.pending_resize = Some(ResizeRequest {
+                    window: window.clone(),
+                    wanted,
+                    at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                    edges,
+                    horizontal: left || right,
+                    vertical: top || bottom,
+                });
+                state.settle_resize();
+
+                assert_eq!(
+                    state
+                        .pane_outer_of(pane)
+                        .expect("a mapped pane has a rectangle"),
+                    wanted,
+                    "the drag asked for this rectangle and {edges:?} did not get \
+                     it: the slot is written with one spelling of the frame's \
+                     insets and read back with another"
+                );
+                // And the client is asked for what is left inside the frame,
+                // not for the whole of it.
+                assert_eq!(
+                    state
+                        .panes
+                        .get(pane)
+                        .expect("the pane is here")
+                        .slot()
+                        .size
+                        .h,
+                    wanted.size.h - TITLEBAR_HEIGHT,
+                    "a titlebar's worth of the dragged rectangle belongs to the \
+                     frame, so the client must not be sized the whole of it"
+                );
+            }
+        }
+
+        /// **A whole gesture inside one dispatch batch, which is an ordinary
+        /// quick nudge of a border.**
+        ///
+        /// The press, the motion and the release all land in one calloop
+        /// dispatch — sixteen milliseconds is plenty — and `settle_resize` runs
+        /// at the frame *after* all three. So the hold is born after the
+        /// gesture it belongs to has already ended: `ResizeGrab::motion` only
+        /// records `pending_resize`, and `hold_resize` is what turns that into a
+        /// `Hold`.
+        ///
+        /// A hold that cannot observe its own release never sets `released`,
+        /// and `Hold::settle` answers `Waiting` unconditionally without one. The
+        /// hold is then **permanent**: `holding_resize` stays true for ever,
+        /// `pane_geometry` keeps answering the slot, and every later size the
+        /// client chooses for itself is stretched into a rectangle from a drag
+        /// that finished minutes ago. A window soft until something drags it
+        /// again.
+        ///
+        /// So what this waits for is the deadline, which is the *only* thing
+        /// that can end this gesture: the fixture's client answers nothing at
+        /// all. Slept rather than faked because `present::Clock` reads the
+        /// monotonic clock through — see its own documentation for why it has no
+        /// settable "now" to lie to.
+        #[test]
+        fn a_gesture_that_ends_before_its_first_frame_still_lets_go() {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            // See the #99 test: a Qt scene in a process holding a libwayland
+            // connection of its own aborts the whole test binary.
+            state
+                .decorations
+                .set_style(&mut state.panes, Some("none".to_string()));
+
+            let (conn, event_queue, client) = connect(&mut display, &mut state);
+            let qh = event_queue.handle();
+            let (window, _toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            let before = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
+
+            // The press.
+            state.begin_resize(&window);
+            // The motion. `ResizeGrab::motion` records and does not apply, so
+            // this is the whole of what a motion does before a frame.
+            let wanted = Rectangle::new(
+                (before.loc.x + 20, before.loc.y + 12).into(),
+                (before.size.w - 20, before.size.h - 12).into(),
+            );
+            state.pending_resize = Some(ResizeRequest {
+                window: window.clone(),
+                wanted,
+                at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                edges: ResizeEdge::TopLeft,
+                horizontal: true,
+                vertical: true,
+            });
+            // And the release, still with no frame in between: this is
+            // `ResizeGrab::unset`, which is where the button coming up lands.
+            state.release_resize(&window);
+
+            // *Now* the frame. This is where the hold is born, and it is born
+            // into a gesture that is already over.
+            state.settle_resize();
+            assert!(
+                state.holding_resize(pane),
+                "the frame after the release is where this hold is born; if no \
+                 hold is created at all then this test is about nothing"
+            );
+            assert_eq!(
+                window.geometry().size,
+                before.size,
+                "the fixture's client never commits a second buffer, which is \
+                 what leaves the deadline as the only thing that can end this"
+            );
+
+            // Past the deadline, and one more frame to notice it.
+            std::thread::sleep(crate::resizing::PATIENCE + std::time::Duration::from_millis(100));
+            state.settle_resize();
+            assert!(
+                !state.holding_resize(pane),
+                "the hold outlived its own gesture's deadline, so it will outlive \
+                 everything: `pane_geometry` answers the slot for as long as this \
+                 is true and the client's own size is stretched into it for ever"
+            );
+            assert_eq!(
+                state
+                    .pane_geometry(state.panes.get(pane).expect("the pane is still here"))
+                    .expect("a mapped pane has a rectangle"),
+                state
+                    .real_geometry(&window)
+                    .expect("a mapped window has a rectangle"),
+                "once the hold is gone the slot and the space agree again, which \
+                 is what makes the stretch exactly 1"
+            );
+        }
+
+        /// **The same defect by the other route: a hold dropped mid-gesture and
+        /// re-created after the release.**
+        ///
+        /// `settle_resize` drops the hold on any frame a layout claims the
+        /// drag — `trigger_resize` answering true — and creates a fresh one on
+        /// any frame it does not. A script whose answer changes between two
+        /// frames therefore destroys a hold and builds another, and if the
+        /// second one is built on the frame *after* the button came up it is
+        /// built into a gesture that is already over. Identical outcome to the
+        /// quick-nudge case and a completely different way in, which is why the
+        /// release is recorded on the compositor rather than guarded at each
+        /// place a hold is made.
+        ///
+        /// The drop is driven directly here rather than through a Lua layout:
+        /// `drop_resize_hold_for` *is* the line `settle_resize` runs when a
+        /// layout claims the drag, and standing up a script that changes its
+        /// mind between frames would test mlua rather than this.
+        #[test]
+        fn a_hold_rebuilt_after_the_release_is_rebuilt_already_released() {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            state
+                .decorations
+                .set_style(&mut state.panes, Some("none".to_string()));
+
+            let (conn, event_queue, client) = connect(&mut display, &mut state);
+            let qh = event_queue.handle();
+            let (window, _toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            let before = state
+                .begin_resize(&window)
+                .expect("a mapped pane has a rectangle");
+
+            let dragged = |state: &mut Solium, by: i32| {
+                let wanted = Rectangle::new(
+                    (before.loc.x + by, before.loc.y + by).into(),
+                    (before.size.w - by, before.size.h - by).into(),
+                );
+                state.pending_resize = Some(ResizeRequest {
+                    window: window.clone(),
+                    wanted,
+                    at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                    edges: ResizeEdge::TopLeft,
+                    horizontal: true,
+                    vertical: true,
+                });
+            };
+
+            // A frame of ordinary drag, so a hold exists to be dropped.
+            dragged(&mut state, 8);
+            state.settle_resize();
+            assert!(state.holding_resize(pane), "the drag is live");
+
+            // The frame a layout claims it.
+            state.drop_resize_hold_for(&window);
+            assert!(!state.holding_resize(pane));
+
+            // The button comes up with no hold to tell, and the frame after it
+            // carries the last motion — which is where a hold is made again.
+            state.release_resize(&window);
+            dragged(&mut state, 12);
+            state.settle_resize();
+            assert!(
+                state.holding_resize(pane),
+                "the post-release frame is where the second hold is born; \
+                 without one there is nothing here to go wrong"
+            );
+
+            std::thread::sleep(crate::resizing::PATIENCE + std::time::Duration::from_millis(100));
+            state.settle_resize();
+            assert!(
+                !state.holding_resize(pane),
+                "the second hold never heard about the release that preceded it, \
+                 so nothing can ever end it"
             );
         }
     }
