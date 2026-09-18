@@ -110,9 +110,11 @@ function scrolling.apply(animation)
     -- A second pass, because a dialog on one screen may belong to a window on
     -- another. Dialogs are in no strip, so this is the only thing that places
     -- them.
-    for _, each in ipairs(screens) do
-        dialogs.place(each, visible, options(each.monitor.name), placed)
-    end
+    --
+    -- `options` itself rather than one screen's: a dialog goes onto its
+    -- *parent's* monitor, and handing it this screen's area is what pinned a
+    -- cross-screen dialog to the wrong edge. See `dialogs.place`.
+    dialogs.place(visible, options, placed)
 end
 
 -- Follow the strip's own idea of focus, so the keyboard goes where the view
@@ -216,6 +218,7 @@ sol.on("close", function(id)
     -- Ids are never reused, so a stale entry here would not put the wrong
     -- window back -- it would simply accumulate for the life of the session.
     scrolling.exiled[id] = nil
+    dialogs.forget(id)
     scrolling.apply(config.scrolling.snap)
 end)
 
@@ -226,9 +229,11 @@ sol.on("drop", function(id, x, y)
     if not scrolling.active then
         return
     end
-    -- A dialog dropped anywhere goes back over its parent: it is in no strip,
-    -- and the insert below is the one way it could end up in one.
-    if dialogs.floating(id) then
+    -- A dialog stays where it was dropped, and joins no strip: it is in none,
+    -- and the insert below is the one way it could end up in one. `dropped`
+    -- records the drag so the next pass does not undo it -- as an offset from
+    -- the parent, so the dialog still follows the window it belongs to.
+    if dialogs.dropped(id) then
         scrolling.apply(config.scrolling.snap)
         return
     end

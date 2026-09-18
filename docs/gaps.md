@@ -6,8 +6,9 @@ list, so that nothing is missing because nobody thought to look for it.
 Written by asking the compositor rather than by remembering: the "have" list
 below is `wayland-info` against a running Solium, and the "missing" list is
 every protocol in `wayland-protocols`, `wayland-protocols-wlr` and
-`wayland-protocols-misc` that is not in it. Twenty-two globals in, about forty
-out.
+`wayland-protocols-misc` that is not in it. Twenty-four globals in, about forty
+out — the list below is the count, and it has grown twice since it was written:
+`wp_cursor_shape_manager_v1` with #24 and `xdg_wm_dialog_v1` with #72.
 
 Everything here is on the tracker now: writing this page found thirty-one gaps
 that were not, and they were filed as #53–#83. The largest of them was not a

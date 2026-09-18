@@ -113,11 +113,24 @@ const fn places_itself(kind: Option<WmWindowType>) -> bool {
 /// **`Dialog` stands in for modality rather than stating it, and the
 /// substitution is forced.** A Wayland client says "modal" outright, through
 /// `xdg_dialog_v1.set_modal`. X11's equivalent is `_NET_WM_STATE_MODAL`, and
-/// smithay 0.7 does not read it out for us: `X11Surface` offers
-/// `is_maximized`, `is_fullscreen`, `is_minimized`, `is_activated` and
-/// `is_decorated`, and there is no sixth (`xwayland/xwm/surface.rs`). Reading
-/// the property here would mean our own X connection alongside the one the
-/// window manager already holds, for a distinction that barely exists in
+/// smithay 0.7 will not tell us what the client put there.
+///
+/// It looks at first as though it would. `X11Surface::is_popup()` exists and is
+/// documented as that exact atom (`xwayland/xwm/surface.rs`). What it reads is
+/// `net_state`, and `net_state` is not the client's property: it starts empty at
+/// `CreateNotify` and the only thing that ever writes to it is
+/// `change_net_state`, which is *us* — `set_maximized`, `set_fullscreen`,
+/// `set_minimized`, `set_activated`. smithay never ingests the window's own
+/// `_NET_WM_STATE`, and says so where it would: `update_properties` reads title,
+/// class, protocols, hints, transient-for and window type, with a comment that
+/// `_NET_WM_STATE` is the window manager's to keep. The `_NET_WM_STATE` client
+/// *message* is handled, and only for maximise and fullscreen; an `_NET_WM_STATE_MODAL`
+/// in one is dropped on the floor. So `is_popup()` answers false for every modal
+/// dialog a client ever mapped, and can only ever echo something we set
+/// ourselves — a flag we never set.
+///
+/// Reading the property directly would mean our own X connection alongside the
+/// one the window manager already holds, for a distinction that barely exists in
 /// practice: an X11 client that types a window `Dialog` has a transient prompt,
 /// and floating a non-modal one over its parent is what every window manager
 /// before this one did with it.
@@ -305,7 +318,7 @@ impl XwmHandler for Solium {
             self.take_unmanaged_pane(element);
             return;
         }
-        self.space.map_element(element.clone(), (0, 0), true);
+        self.map_stacked(element.clone(), (0, 0), true);
         self.take_pane(element);
     }
 
