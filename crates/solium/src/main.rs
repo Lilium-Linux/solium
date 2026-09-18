@@ -28,6 +28,7 @@ mod pass;
 mod present;
 mod qml;
 mod render;
+mod resizing;
 mod screencopy;
 mod script;
 mod scripted;

@@ -402,6 +402,37 @@ local defaults = {
         fade = 180,
     },
 
+    -- What a window looks like while you are dragging its edge.
+    --
+    -- A client cannot be resized; it can only be *asked*, and it answers when
+    -- it gets round to it -- a few milliseconds for a terminal, rather more
+    -- for a browser. The compositor no longer waits for that answer: the
+    -- rectangle you are dragging is what it draws, from the first frame, and
+    -- the client's last picture fills it until the real one arrives. This
+    -- decides what that filling looks like, which is entirely taste.
+    resize = {
+        -- "stretch" scales the last picture into the new rectangle. Smooth,
+        -- momentarily soft while a slow client catches up, and what most
+        -- compositors do. The default.
+        --
+        -- "hold" leaves the picture at its own size where there is room for
+        -- it, so nothing is resampled and what you see uncovered as the window
+        -- grows is the pane underneath. Crisp instead of smooth. A window
+        -- being made *smaller* is still scaled down, because a picture larger
+        -- than the window it is in would spill over its neighbour.
+        --
+        -- "scene" draws the window's QML scene over it -- the same one a
+        -- window wears before its application has painted. Today that only
+        -- reaches a window resized before its application ever arrived;
+        -- anywhere else it behaves as "hold".
+        --
+        -- Whatever this says, a client that *refuses* the size it is offered
+        -- -- Firefox will not go under its minimum width -- stops being
+        -- stretched the moment it says so, and the window takes the size the
+        -- client chose when you let go of the edge.
+        fill = "stretch",
+    },
+
     tiling = {
         -- Where a split falls, as a share of the window being divided.
         -- Hyprland calls this dwindle:default_split_ratio.

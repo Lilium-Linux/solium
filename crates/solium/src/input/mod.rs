@@ -742,6 +742,9 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                 // than a case that happens.
                 if let Some(window) = under.window {
                     state.focus_window(&window, serial);
+                    // Before the grab, so the new drag cannot inherit the
+                    // previous one's unsettled hold. See `begin_resize`.
+                    state.begin_resize(&window);
                     let start_data = GrabStartData {
                         focus: None,
                         button,
@@ -796,6 +799,9 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             if state.pointer.assert(Some(resize::cursor(edges))) {
                 state.redraw = true;
             }
+            // See `begin_resize`: the previous drag's hold outlives its grab
+            // by up to a quarter second, and this one must not inherit it.
+            state.begin_resize(&window);
             let start_data = GrabStartData {
                 focus: None,
                 button,
