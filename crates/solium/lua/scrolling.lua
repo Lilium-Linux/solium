@@ -33,7 +33,16 @@ local function view_for(monitor)
     monitor = monitor or (monitors.active() or {}).name
     local key = monitors.key(workspaces.on(monitor), monitor)
     if not scrolling.views[key] then
-        scrolling.views[key] = sol.layout.scroller()
+        -- The whole section, not a repackaging of it: `sol.layout.scroller`
+        -- reads `widths` and `default_width` and ignores the rest. Handed over
+        -- here, once per strip, rather than through `options()` -- which is
+        -- rebuilt on every keystroke, and the widths cannot change between two
+        -- of them.
+        --
+        -- This call took no argument until #117, which is the whole reason
+        -- those two settings were documented and read by nothing: the strip
+        -- used the constant list in `crates/layout/src/scroller.rs` instead.
+        scrolling.views[key] = sol.layout.scroller(config.scrolling)
     end
     return scrolling.views[key]
 end

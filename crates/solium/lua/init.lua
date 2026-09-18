@@ -201,3 +201,14 @@ sol.bind("super+g", function()
         end
     end
 end)
+
+-- The configuration's own bindings, last.
+--
+-- Last on purpose, not merely at the end. `sol.bind` lets the later call win,
+-- so reading `config.bindings` after every shipped binding -- this file's and
+-- each mode script's -- is the whole mechanism by which a user's `super+q`
+-- takes over from the one above instead of being quietly overwritten by it.
+-- Moved up, this would still work for combinations nobody else uses, which is
+-- the worst way for it to break: fine until somebody rebinds a key that
+-- matters. Keep it last in your own `init.lua` too.
+require("bindings")

@@ -13,13 +13,32 @@ Two commands are worth knowing first:
 is reported with the file and the line, and the running session keeps whatever
 it already had — so a typo costs a line of output rather than your windows.
 
+It also reports the quieter failure: a setting the defaults do not define.
+`tilling = { split = 0.6 }` is perfectly good Lua and merges in perfectly
+cleanly, and then nothing ever reads it — so `--check` names it, suggests what
+you probably meant, and exits non-zero.
+
+```
+  2 unrecognised setting(s) -- written, merged, and read by nothing:
+    open.scal                   did you mean open.scale?
+    tilling                     did you mean tiling?
+```
+
+Three things it cannot see, so that its silence means something: the contents
+of a list (`monitors` entries are replaced whole and not descended into), the
+keys inside `keyboard`, `cursor` and `bindings` — the first two are checked
+against a list, the third accepts anything you can press — and a value of the
+wrong *type*, since `gap = "12"` is a recognised key.
+
 ## The thirty-second version
 
 **Two files, and the difference matters.** `user.lua` is *settings*: a table of
 what you want changed, merged over the defaults, and everything you do not
-mention keeps shipping. `init.lua` is the *entry point* — writing one replaces
-the shipped configuration entirely, bindings and layouts included, and is what
-you want only when you are rewriting the session rather than adjusting it.
+mention keeps shipping. Bindings are settings too — there is a `bindings`
+section, so adding a key does not cost you the second file. `init.lua` is the
+*entry point* — writing one replaces the shipped configuration entirely,
+layouts and modes included, and is what you want only when you are rewriting
+the session rather than adjusting it.
 
 Almost everything on this page is `user.lua`.
 
@@ -53,8 +72,8 @@ Three guides go deeper than the recipes below:
 
 | what | where |
 |---|---|
-| your settings | `~/.config/solium/user.lua` |
-| your bindings and layout | `~/.config/solium/init.lua` — replaces the shipped entry point |
+| your settings, bindings included | `~/.config/solium/user.lua` |
+| a whole session of your own | `~/.config/solium/init.lua` — replaces the shipped entry point |
 | one module, replaced | `~/.config/solium/tiling.lua`, `scrolling.lua`, … |
 | your pane styles | `~/.config/solium/qml/panes/<name>/` |
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
@@ -553,19 +572,54 @@ directly. y may leave 0..1 — that is what overshoot is.
 
 ### Your own bindings
 
-`~/.config/solium/init.lua` replaces the entry point. It can still `require`
-everything that ships, so starting from the shipped one and adding to it is
-three lines:
+A `bindings` section in `user.lua`, merged like every other section:
+
+```lua
+return {
+    bindings = {
+        ["super+b"]       = "firefox",
+        ["super+shift+s"] = { "sh", "-c", "grim -g \"$(slurp)\"" },
+        ["super+n"]       = function() sol.spawn("kitty", "-e", "nvim") end,
+        ["super+g"]       = false,
+    },
+}
+```
+
+A string is a command line split on spaces; a list is one already split, for an
+argument with a space in it; a function is anything else, with the whole `sol`
+API in scope; `false` removes a shipped binding outright.
+
+**A binding here replaces a shipped one on the same combination.** On purpose:
+refusing a clash would let you add a binding and forbid you to change one, and
+changing one is what most people come here for. It is not silent — `solium
+--check` marks every combination this section took over, and lists the ones it
+removed:
+
+```
+    super+b                     config.bindings
+    super+q                     config.bindings, replacing a shipped binding
+  1 binding(s) removed by the configuration:
+    super+g                     config.bindings
+```
+
+Reading that list is also how you find out an edit dropped a binding, and it is
+the only way to catch `super+whoops`: a combination is whatever you press, so
+nothing can check the name for you.
+
+Writing your own `~/.config/solium/init.lua` is the other way, and is for
+rewriting the session rather than adding to it — it replaces the entry point
+whole. It can still `require` everything that ships, including `bindings`,
+which must stay **last**: `sol.bind` lets the later call win, and that ordering
+is what puts your `config.bindings` on top of the shipped ones.
 
 ```lua
 require("modes")
 require("tiling")
 
 sol.bind("super+return", function() sol.spawn("kitty") end)
-```
 
-`solium --check` prints every binding it registered, which is how you find out
-that an edit dropped one.
+require("bindings")
+```
 
 ### Your own mode
 
