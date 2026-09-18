@@ -1,7 +1,15 @@
 # The road to a public preview
 
-**Written 2026-09-07.** Where the compositor stands, what has to be true before
-strangers run it, and the order to do it in.
+**Written 2026-09-07. Revised 2026-09-18** after the first day of using it for
+real work rather than developing it. Where the compositor stands, what has to
+be true before strangers run it, and the order to do it in.
+
+The revision matters more than the original. Everything the first version
+gated on was a *protocol* or a *platform* — multi-monitor, HiDPI, screencopy,
+session lock — and all of it is done. What a day of ordinary use found instead
+was that the three things Solium is actually *for* each have something in them
+that makes the experience worse than the architecture deserves. None of it
+appeared on the first list, and none of it was found by the test suite.
 
 ## Where it stands
 
@@ -41,8 +49,47 @@ predicts.
 
 ## What has to be true first
 
-**Blocking.** A preview without these is not something a second person can
-use.
+**Blocking, by which of Solium's own ideas it breaks.** A preview exists to
+show what a compositor is *for*. Solium's three claims are that its layouts
+are scripts, that its chrome is QML and belongs to one design system, and that
+you can change either while it runs. Each of the three currently has something
+in it that undermines the claim.
+
+### The layouts are the pitch
+
+| | why |
+|---|---|
+| [#113](https://github.com/Lilium-Linux/solium/issues/113) resize shakes | the pane's rect follows the *client's* size, so during a drag the edge opposite the one you are holding is what moves. Felt every time a window is touched, and worse the slower the client -- Firefox visibly worse than kitty |
+| [#115](https://github.com/Lilium-Linux/solium/issues/115) minimum size is never read | a client that refuses to shrink overflows its tile, and every window beside it is wrong too, because the arrangement was computed as though the refusal never happened |
+| `tiling.adopt` | prunes windows on workspaces no monitor is showing out of their own trees, and its blind re-insert halves whichever window was topmost -- the one you were just using |
+| fullscreen fires no event | so `tiling.apply` yanks a fullscreen video back into its tile, frameless, the next time any window opens |
+
+### The chrome is the differentiator
+
+| | why |
+|---|---|
+| [#102](https://github.com/Lilium-Linux/solium/issues/102) no decoration policy | a GTK dialog gets Solium's titlebar *and* keeps its own rounded body underneath. Two decorations on one window, and no way to say "this one draws its own". The cost #103 knowingly accepted, and this is what settles it |
+
+### Changing it while it runs is the other differentiator, and it is the weakest
+
+| | why |
+|---|---|
+| reload loses the session's state | `super+shift+r` does not re-fire `monitors`, so workspace state empties, every window lands on desk 1, and stale travel draws the desktop two screen-widths off-stage. Recovery is `super+2` then `super+1`, and nothing says so |
+| `user.lua` cannot add a binding | it is a settings table merged over the defaults; bindings live in `init.lua`, and writing one of those replaces the whole session. So "add a keybinding" currently means adopting 200 lines you did not write |
+| the config surface lies in three places | `scrolling.widths`, `scrolling.default_width`, `open.motion` and `open.scale` are read by nothing; `open.lua` hardcodes values that disagree with what `config.lua` advertises; and `merge` validates nothing, so `tilling = {...}` is accepted in silence and `--check` says ok |
+
+**This is the one to fix first.** "Edit a file, press a key, watch it change"
+is the sentence a preview is sold on, and today that key can eat the desktop.
+
+### Still blocking, and unchanged
+
+| | why |
+|---|---|
+| [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | there is none. A preview nobody can install is a preview nobody tries. **Deliberately last**: a preview people can install and then hit the reload bug is worse than one they cannot install yet. The asset half is done -- an installed binary finds its own QML and Lua -- so what remains is recipes |
+
+### Done since this was written
+
+
 
 | | why |
 |---|---|
@@ -54,14 +101,25 @@ use.
 | ~~[#27](https://github.com/Lilium-Linux/solium/issues/27) session lock~~ | **done.** `ext-session-lock-v1`, and it fails locked rather than open |
 
 **Shippable as documented gaps.** Real holes, but ones a preview can name and
-survive: [#26](https://github.com/Lilium-Linux/solium/issues/26) IME, [#33](https://github.com/Lilium-Linux/solium/issues/33) the ~190KB-per-window leak,
-[#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug, [#56](https://github.com/Lilium-Linux/solium/issues/56) window rules. Named in the README rather
-than discovered, and [docs/gaps.md](gaps.md) is the full list.
+survive: [#26](https://github.com/Lilium-Linux/solium/issues/26) IME,
+[#52](https://github.com/Lilium-Linux/solium/issues/52) no clipboard manager,
+[#83](https://github.com/Lilium-Linux/solium/issues/83) portals never tested
+end to end, [#56](https://github.com/Lilium-Linux/solium/issues/56) window
+rules. Named in the README rather than discovered, and
+[docs/gaps.md](gaps.md) is the full list.
 
-**Not features, and do them anyway.** CI runs the gate but not the checks under
-`dev/` — and until it was moved onto Fedora it did not run the gate either: it
-had failed on every push since the day it was added, because Ubuntu ships Qt
-6.4 and this needs 6.5. Two gates testing different toolchains is one gate.
+Two entries left this list rather than being fixed, and the difference is
+worth keeping. [#43](https://github.com/Lilium-Linux/solium/issues/43)
+hotplug is **done and closed**. [#33](https://github.com/Lilium-Linux/solium/issues/33),
+the ~190KB-per-window leak, was **re-measured and is not reproducible**:
+`dev/leak.sh` over 40 windows in four settled cycles returns to within ±1 MB
+of baseline, with file descriptors two *below* it. The number in that issue's
+title should not be quoted until a soak on real hardware says otherwise.
+
+**Not features, and do them anyway.** CI now runs on Fedora 44, gates `stage`
+and `release`, and has been green on every push since — the Ubuntu-versus-Qt
+problem that made it silently useless is fixed. It still does not run the
+checks under `dev/`. Two gates testing different toolchains is one gate.
 
 The compositor has also never been soaked — left running unattended for hours
 with window churn — because that could not be done on the development host.
