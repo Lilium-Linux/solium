@@ -75,6 +75,7 @@ use smithay::{
                 PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
                 XdgToplevelSurfaceData,
                 decoration::{XdgDecorationHandler, XdgDecorationState},
+                dialog::{XdgDialogHandler, XdgDialogState},
             },
         },
         shm::{ShmHandler, ShmState},
@@ -88,7 +89,7 @@ use crate::{
     layer, monitor,
     pane::Pane,
     present::{self, Clock, Frame},
-    script::{AnimationSpec, Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
+    script::{AnimationSpec, Command, Outcome, Parentage, Rect, Scripts, Snapshot, WindowInfo},
 };
 
 /// Whether `rect` lands on any of `screens`.
@@ -171,6 +172,18 @@ pub(crate) struct Solium {
 
     pub(crate) compositor_state: CompositorState,
     pub(crate) xdg_shell_state: XdgShellState,
+    /// The `xdg_wm_dialog_v1` global, so a client can say a toplevel is a modal
+    /// dialog.
+    ///
+    /// Nothing ever reads this field, and it is not dead: the global lives for
+    /// exactly as long as the `XdgDialogState` that created it, so dropping it
+    /// would take `xdg_dialog_v1` off the registry and a client that had
+    /// already bound it would be talking to nothing. That is the same contract
+    /// every other `*_state` field above is held under -- see the comment at
+    /// the top of this struct -- which is why it sits with them rather than
+    /// being constructed and discarded in `new`.
+    #[allow(dead_code)]
+    pub(crate) xdg_dialog_state: XdgDialogState,
     pub(crate) shm_state: ShmState,
     #[allow(dead_code)]
     pub(crate) output_manager_state: OutputManagerState,
@@ -1011,6 +1024,7 @@ impl Solium {
         Self {
             compositor_state: CompositorState::new::<Self>(&display_handle),
             xdg_shell_state: XdgShellState::new::<Self>(&display_handle),
+            xdg_dialog_state: XdgDialogState::new::<Self>(&display_handle),
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
@@ -2146,6 +2160,15 @@ impl Solium {
                         .output_of(outer)
                         .map(|output| output.name())
                         .unwrap_or_default(),
+                    // A pane with no client yet is a reserved slot, and a
+                    // reserved slot has no client to have said either of these
+                    // things -- so it is an ordinary window until one arrives,
+                    // and the `modal_changed` that arrives with it re-runs the
+                    // layout.
+                    modal: pane.client().is_some_and(|window| self.is_modal(window)),
+                    parent: pane
+                        .client()
+                        .map_or(Parentage::None, |window| self.parent_of(window)),
                 })
             })
             .collect();
@@ -2177,6 +2200,73 @@ impl Solium {
             work_area: self.work_area().map(to_rect).unwrap_or_default(),
             cursor: (cursor.x, cursor.y),
         }
+    }
+
+    /// Whether a layout should float this window over the one waiting on it.
+    ///
+    /// Two protocols, one question, and they are not symmetrical: Wayland has a
+    /// flag that means exactly this, and X11 does not, so the X11 side reads
+    /// the window type instead. The whole of that argument is in
+    /// `xwayland::floats_over_its_parent`; what is here is only the lookup.
+    fn is_modal(&self, window: &Window) -> bool {
+        if let Some(toplevel) = window.toplevel() {
+            return with_states(toplevel.wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    // A poisoned lock is a panic somewhere else in this
+                    // process, and the honest answer to "is this modal" at that
+                    // point is "no" -- an ordinary window, laid out the
+                    // ordinary way. `unwrap` here would turn one panic into
+                    // two, in a compositor with nothing to restart it.
+                    .and_then(|data| data.lock().ok())
+                    .is_some_and(|attributes| attributes.modal)
+            });
+        }
+        window
+            .x11_surface()
+            .is_some_and(|surface| crate::xwayland::floats_over_its_parent(surface.window_type()))
+    }
+
+    /// Which window this one belongs to, as far as this compositor can tell.
+    ///
+    /// The distinction [`Parentage`] exists for is made here and only here: a
+    /// parent that was named and cannot be found is `Unknown`, and a parent
+    /// that was never named is `None`. Both end up as "no rect to centre on" in
+    /// a layout, but only one of them means something has gone missing.
+    fn parent_of(&self, window: &Window) -> Parentage {
+        if let Some(toplevel) = window.toplevel() {
+            let Some(parent) = toplevel.parent() else {
+                return Parentage::None;
+            };
+            return self
+                .window_for(&parent)
+                .and_then(|window| self.panes.id_of(&window))
+                .map_or(Parentage::Unknown, |pane| Parentage::Window(pane.get()));
+        }
+
+        let Some(surface) = window.x11_surface() else {
+            return Parentage::None;
+        };
+        // `WM_TRANSIENT_FOR`, which smithay reads at `CreateNotify` and again
+        // on every property change. It holds an X11 window id rather than a
+        // surface, so the match is against the id side -- and a client that
+        // points it at the root window, which is a common way of saying "I am
+        // transient for the session", names an id no element here has and comes
+        // out `Unknown`. That is the right answer: there is no window to centre
+        // on.
+        let Some(parent) = surface.is_transient_for() else {
+            return Parentage::None;
+        };
+        self.space
+            .elements()
+            .find(|element| {
+                element
+                    .x11_surface()
+                    .is_some_and(|surface| surface.window_id() == parent)
+            })
+            .and_then(|element| self.panes.id_of(element))
+            .map_or(Parentage::Unknown, |pane| Parentage::Window(pane.get()))
     }
 
     /// Run whatever a key combination is bound to, and apply what it asked for.
@@ -4775,6 +4865,23 @@ impl XdgShellHandler for Solium {
         }
     }
 
+    /// `xdg_toplevel.set_parent` — a window saying which window it belongs to.
+    ///
+    /// Re-run the layout, for the same reason `modal_changed` does: a modal
+    /// dialog is centred on its parent, so the answer to "where does it go"
+    /// just changed. It matters more than it looks, because the order is not
+    /// the one you would guess. GTK4 creates the toplevel, maps it, and calls
+    /// `set_parent` and `set_modal` in whichever order the widget tree settles
+    /// in -- so a dialog can easily be laid out once while its parent is still
+    /// `Parentage::None`, land in the middle of the screen, and never move
+    /// again. Without this, that is the last word.
+    ///
+    /// Cheap enough not to need a guard: the layout runs off a snapshot, and a
+    /// window whose place has not changed is placed where it already is.
+    fn parent_changed(&mut self, _surface: ToplevelSurface) {
+        self.trigger_relayout();
+    }
+
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         // Told before the window is forgotten, so a script can still ask which
         // one it was. Bound before the call, so the borrow of `space` ends
@@ -5776,10 +5883,80 @@ impl ClientDndGrabHandler for Solium {
 
 impl ServerDndGrabHandler for Solium {}
 
+/// `xdg_dialog_v1` -- a client saying a toplevel is a modal dialog.
+///
+/// The protocol is one flag on an object hung off a toplevel, and smithay
+/// already keeps it: `set_modal`/`unset_modal` write
+/// `XdgToplevelSurfaceRoleAttributes::modal`, and this handler is told only
+/// when the value *changes* (`wayland/shell/xdg/dialog.rs` returns early when
+/// it does not). So there is no state to mirror here; there is only the fact
+/// that the layout's input just changed, and something has to say so.
+///
+/// ## What a non-modal dialog gets, and why
+///
+/// The protocol makes modality a flag on a dialog object rather than the
+/// meaning of the object, so a client may create an `xdg_dialog_v1` for a
+/// toplevel and never call `set_modal`. **Such a window gets the ordinary
+/// treatment here: it is laid out like any other, with a share of the screen.**
+///
+/// It is worth being plain that this is not a free choice: with smithay 0.7 it
+/// is the only one that can be implemented. Nothing reaches this compositor
+/// when a dialog object is created. `XdgDialogHandler` has exactly one method,
+/// the `modal_changed` below, and creating the object changes no flag; the
+/// object itself is stored in `XdgShellSurfaceUserData::dialog`, which is
+/// `pub(crate)` to smithay and has no accessor (`shell/xdg/handlers/surface.rs`
+/// -- read the source, not the docs). So "this toplevel is a dialog but not a
+/// modal one" is a state Solium cannot observe at all. Taking the other branch
+/// would mean dispatching `xdg_wm_dialog_v1` ourselves and keeping a second
+/// copy of state smithay already holds, which is how two answers to one
+/// question get out of step.
+///
+/// That said, it is also the answer this would pick with the field in hand, and
+/// that matters more than which one is cheap. What the protocol actually
+/// *defines* for a non-modal dialog is nothing: `set_modal` is described as the
+/// hint that the window must be addressed before its parent can be used again,
+/// and the dialog object without it carries no stated behaviour, only the
+/// possibility of future hints. The whole argument for lifting a window out of
+/// the arrangement is that it is blocking the window underneath it and will be
+/// gone in a moment. A dialog that blocks nothing has neither half of that: a
+/// non-modal find bar or a colour picker is a window somebody keeps open beside
+/// their document, and floating it in the middle of the screen, over the
+/// document, is a worse answer than tiling it. Compare the X11 side, where the
+/// same question is decided the same way for the same reason:
+/// `xwayland::floats_over_its_parent` floats `Dialog` and not `Utility`.
+///
+/// If a toolkit is ever found creating dialog objects for prompts and leaving
+/// `set_modal` unsent, this is the paragraph to revisit -- and the revision
+/// would start with smithay, not here.
+impl XdgDialogHandler for Solium {
+    /// Re-run the layout, because a window just left the arrangement or
+    /// rejoined it.
+    ///
+    /// `trigger_relayout` and nothing else. The alternative -- placing the
+    /// dialog from here -- would put a second opinion about where a window goes
+    /// next to the layout scripts' one, and the two would disagree the first
+    /// time somebody wrote their own `tiling.lua`. Where a modal dialog goes is
+    /// a layout question; that it *is* one is the only thing the compositor
+    /// knows and the only thing it says.
+    ///
+    /// This is also what makes `unset_modal` work at all. Without it, a dialog
+    /// that stopped being modal would sit floating until some unrelated event
+    /// happened to re-run the layout, which on a quiet desktop is never.
+    fn modal_changed(&mut self, toplevel: ToplevelSurface, is_modal: bool) {
+        let id = self
+            .window_for(toplevel.wl_surface())
+            .and_then(|window| self.panes.id_of(&window))
+            .map(crate::pane::PaneId::get);
+        tracing::debug!(?id, is_modal, "a toplevel changed its modal hint");
+        self.trigger_relayout();
+    }
+}
+
 delegate_compositor!(Solium);
 delegate_shm!(Solium);
 delegate_xdg_shell!(Solium);
 delegate_xdg_decoration!(Solium);
+smithay::delegate_xdg_dialog!(Solium);
 delegate_layer_shell!(Solium);
 delegate_seat!(Solium);
 // Routes `wp_cursor_shape_manager_v1` and the per-pointer device it hands out.

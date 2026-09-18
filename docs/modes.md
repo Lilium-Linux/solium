@@ -153,7 +153,8 @@ screen. Release it when you leave, or nothing will ever reach a window again.
 ## What a mode can ask
 
 ```lua
-sol.windows()          -- every window: id, rect, drawn, title, focused, monitor
+sol.windows()          -- every window: id, rect, drawn, title, focused, monitor,
+                       --                modal, parent
 sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale,
                        --                 transform, focused, primary
 sol.monitor()          -- the active monitor's work area
@@ -169,6 +170,19 @@ id that no longer exists do nothing rather than failing.
 `rect` is where the window lives; `drawn` is where it is being drawn right now,
 which in a mode is somewhere else. Read `drawn` when you care what the user is
 looking at, `rect` when you care what the layout thinks.
+
+`modal` is a window that says it is a modal dialog — a save prompt, a
+permissions box — and `parent` is the window it belongs to. A layout should
+leave a modal out of its arrangement and put it over its parent; `dialogs.lua`
+is that policy, shared by `tiling.lua` and `scrolling.lua` so the two cannot
+disagree.
+
+`parent` has three values and it is worth knowing why. It is the parent's id
+when there is a window to point at, `false` when the client named a parent that
+is not on screen — not mapped yet, not ours, or closed while its dialog was
+still up — and absent when no parent was ever named. So `if window.parent then`
+is the right question for "have I got something to centre on", and
+`window.parent == false` is how you tell a lost parent from no parent at all.
 
 `skip` on `window_at` exists because of one specific bug: a new window is
 already mapped and under the pointer, so asking "what am I pointing at" without
