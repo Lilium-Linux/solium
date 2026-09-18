@@ -117,7 +117,7 @@ list.
 ## Configuring it
 
 Everything is a file you write, and none of it needs the compositor rebuilt.
-`~/.config/solium/init.lua` holds only what you want changed; your own QML in
+`~/.config/solium/user.lua` holds only what you want changed; your own QML in
 `~/.config/solium/qml` shadows what ships, file by file — drop in a single
 `Solium/Theme.qml` and every frame and surface restyles without copying the
 rest. See **[docs/ricing.md](docs/ricing.md)**.

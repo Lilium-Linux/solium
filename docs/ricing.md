@@ -15,7 +15,16 @@ it already had — so a typo costs a line of output rather than your windows.
 
 ## The thirty-second version
 
-Write `~/.config/solium/init.lua` with only what you want changed:
+**Two files, and the difference matters.** `user.lua` is *settings*: a table of
+what you want changed, merged over the defaults, and everything you do not
+mention keeps shipping. `init.lua` is the *entry point* — writing one replaces
+the shipped configuration entirely, bindings and layouts included, and is what
+you want only when you are rewriting the session rather than adjusting it.
+
+Almost everything on this page is `user.lua`.
+
+
+Write `~/.config/solium/user.lua` with only what you want changed:
 
 ```lua
 return {
@@ -44,8 +53,8 @@ Three guides go deeper than the recipes below:
 
 | what | where |
 |---|---|
-| your settings | `~/.config/solium/init.lua` |
-| your bindings and layout | `~/.config/solium/init.lua` |
+| your settings | `~/.config/solium/user.lua` |
+| your bindings and layout | `~/.config/solium/init.lua` — replaces the shipped entry point |
 | one module, replaced | `~/.config/solium/tiling.lua`, `scrolling.lua`, … |
 | your pane styles | `~/.config/solium/qml/panes/<name>/` |
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
