@@ -123,17 +123,71 @@ fn log_panics() {
 /// Reports the bindings it registered as well as any error, because "it
 /// parsed" is not the question a ricer is asking -- "did my binding survive
 /// the edit" is.
+///
+/// ## Why a file that loads can still fail this
+///
+/// It used to answer that question for bindings alone, and answer "ok" to
+/// everything else. `config.lua` merges a `user.lua` over its defaults key by
+/// key and validated nothing, so `tilling = { split = 0.6 }` was merged in as a
+/// new section, read by nothing, for ever -- and the one command whose entire
+/// job is telling you whether your configuration worked said it loaded fine
+/// (#117). It had. It just was not doing what the file said.
+///
+/// So an unrecognised setting exits non-zero, and that is deliberate. The
+/// question is not "did Lua run" -- a syntax error already answered that -- it
+/// is "will this configuration do what I wrote", and a key nothing reads means
+/// no. It also makes this usable from a script or a pre-commit hook, which a
+/// command that always succeeds is not.
 fn check_config() -> anyhow::Result<()> {
     let path = script::Scripts::config_path();
     println!("checking {}", path.display());
     match script::Scripts::load(&path) {
         Ok(scripts) => {
-            let bindings = scripts.binding_names();
+            let bindings = scripts.bindings();
             println!("  ok: {} binding(s)", bindings.len());
             for binding in bindings {
-                println!("    {binding}");
+                // Padded so the notes line up into a column of their own, and
+                // only when there is a note -- most configurations have none,
+                // and trailing space on every line of the common case is
+                // noise.
+                match binding.note {
+                    Some(note) => println!("    {:<28}{note}", binding.combo),
+                    None => println!("    {}", binding.combo),
+                }
             }
-            Ok(())
+
+            // A binding taken away is the one thing the list above cannot
+            // show: in a list of what survived, a key removed on purpose looks
+            // exactly like one that never existed.
+            let unbound = scripts.unbound();
+            if !unbound.is_empty() {
+                println!(
+                    "  {} binding(s) removed by the configuration:",
+                    unbound.len()
+                );
+                for binding in unbound {
+                    match binding.note {
+                        Some(note) => println!("    {:<28}{note}", binding.combo),
+                        None => println!("    {}", binding.combo),
+                    }
+                }
+            }
+
+            let unknown = scripts.unknown_settings();
+            if unknown.is_empty() {
+                return Ok(());
+            }
+            println!(
+                "  {} unrecognised setting(s) -- written, merged, and read by nothing:",
+                unknown.len()
+            );
+            for setting in unknown {
+                match setting.meant {
+                    Some(meant) => println!("    {:<28}did you mean {meant}?", setting.key),
+                    None => println!("    {}", setting.key),
+                }
+            }
+            std::process::exit(1);
         }
         Err(err) => {
             // Printed rather than only returned: this is a command someone
