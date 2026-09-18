@@ -274,16 +274,19 @@ end)
 -- where the division falls. Returning a command tells the compositor we took
 -- it, so it does not also resize the window directly.
 --
--- `horizontal` and `vertical` are the *sides* the pointer has hold of --
--- "left" or "right", "top" or "bottom", and nil for an axis that is not being
--- dragged. They were plain booleans until #120, and a boolean is not enough to
+-- `horizontal_side` and `vertical_side` are the *sides* the pointer has hold
+-- of -- "left" or "right", "top" or "bottom", and nil for an axis that is not
+-- being dragged. Named for the side and not the axis because the value is a
+-- side: `horizontal` holding "left" invites the reader to test it as a
+-- boolean, which is the very mistake below.
+-- They were plain booleans until #120, and a boolean is not enough to
 -- choose a seam with: a window that is the right-hand child of a vertical
 -- split has that split's seam on its *left*, so "the horizontal axis is in
 -- play" moved that seam for a drag on the window's right edge. The far side
 -- jumped 209 pixels and the side under the pointer did not move at all.
 -- Passed straight through, because the side is exactly what `drag_seam` wants
 -- and the compositor knew it all along.
-sol.on("resize", function(id, x, y, horizontal, vertical)
+sol.on("resize", function(id, x, y, horizontal_side, vertical_side)
     if not tiling.active then
         return
     end
@@ -294,11 +297,11 @@ sol.on("resize", function(id, x, y, horizontal, vertical)
     -- would shake for as long as the button was held.
     --
     -- Both arms can run: a corner drag is two drags, one seam per axis.
-    if horizontal then
-        tree:drag_seam(id, horizontal, x, y, options(monitor))
+    if horizontal_side then
+        tree:drag_seam(id, horizontal_side, x, y, options(monitor))
     end
-    if vertical then
-        tree:drag_seam(id, vertical, x, y, options(monitor))
+    if vertical_side then
+        tree:drag_seam(id, vertical_side, x, y, options(monitor))
     end
     -- Placed immediately. An animation would be chasing the pointer, and the
     -- pointer wins.
@@ -335,11 +338,30 @@ end
 
 sol.bind("super+minus", nudge("width", -0.05))
 sol.bind("super+equal", nudge("width", 0.05))
--- Height on the same keys with shift, because the other axis was reachable
--- before this change -- by accident, in the arrangements whose parent split
--- happened to be horizontal -- and losing it to fix the width would trade one
+-- Height on the same two keys, because the other axis was reachable before
+-- this change -- by accident, in the arrangements whose parent split happened
+-- to be horizontal -- and losing it to fix the width would trade one
 -- unreachable seam for another.
-sol.bind("super+shift+minus", nudge("height", -0.05))
-sol.bind("super+shift+equal", nudge("height", 0.05))
+--
+-- Ctrl and not shift, which is what these were first written as. A binding is
+-- a table lookup on the string `input::combo_for` builds, and that string
+-- names the key from `modified_sym` -- the keysym with the modifiers already
+-- applied. Shift changes it: on a `us` layout shift+`-` arrives as
+-- `underscore` and shift+`=` as `plus`, so `super+shift+minus` is a spelling
+-- nothing will ever produce, and a binding nothing produces fails silently --
+-- no warning at load, and at the press only a `no script has bound this` at
+-- info. Ctrl selects no shift level, so ctrl+`-` still arrives as `minus`;
+-- `super+ctrl+left` and its three siblings in `workspaces.lua` have been live
+-- on exactly that basis. Verified against a real `us` keymap rather than
+-- assumed -- see `every_height_bind_is_a_key_that_arrives` in `script.rs`.
+--
+-- That `modified_sym` is what bindings match on at all is #121, which is not
+-- fixed here: it changes how every binding in the compositor is matched and
+-- wants a live keyboard. Ctrl is the spelling that is correct either way --
+-- when #121 lands and matching moves to the unmodified keysym, ctrl+`-` is
+-- still `minus`, whereas `super+shift+underscore` would work today and die on
+-- that commit.
+sol.bind("super+ctrl+minus", nudge("height", -0.05))
+sol.bind("super+ctrl+equal", nudge("height", 0.05))
 
 return tiling

@@ -2836,10 +2836,19 @@ impl mlua::UserData for TilingTree {
         });
 
         // The keyboard path: `axis` is "width" or "height" and `by` is a signed
-        // fraction that always *grows* the window when positive, whichever of
-        // the two seams beside it has room to give. An axis and not an edge
-        // because a keypress names no side — `super+equal` means "wider" and
-        // nothing about which neighbour pays for it. See `Tiling::resize`.
+        // fraction that always *grows* the window when positive, from whichever
+        // of the two seams beside it exists. An axis and not an edge because a
+        // keypress names no side — `super+equal` means "wider" and nothing
+        // about which neighbour pays for it. See `Tiling::resize`.
+        //
+        // Existence and not room, which this said before and `Tiling::resize`'s
+        // own doc has always had right. The trailing seam is preferred and the
+        // leading one is a fallback only when there is no trailing seam at all
+        // — the window is against its container on that side. A trailing seam
+        // that exists but is already at the 0.95 clamp does nothing, and does
+        // not hand the press to the seam on the other side. That is the
+        // behaviour; whether it is the behaviour a user expects is a separate
+        // question from whether the comment describes it.
         methods.add_method_mut("resize", |_, this, (id, axis, by): (u64, String, f64)| {
             this.0.resize(id, axis_named(&axis), by);
             Ok(())
@@ -5647,6 +5656,95 @@ mod shipped {
                 canonical, key,
                 "{file}:{line} binds {combo:?}, but that key arrives called {canonical:?} -- \
                  the binding would never fire"
+            );
+        }
+    }
+
+    /// **The two height binds in `tiling.lua` are combinations a `us` keyboard
+    /// can actually produce.**
+    ///
+    /// Reachability, which the test above deliberately does not check: it asks
+    /// whether a key is *spelled* the way xkb names it, and `underscore` passes
+    /// that while being a combination no one can press with the modifiers the
+    /// binding also names.
+    ///
+    /// So this goes the other way round. It starts from the physical keys --
+    /// `AE11` and `AE12`, the `-` and `=` of the top row, which are evdev 12
+    /// and 13 and so xkb keycodes 20 and 21 -- presses them under the modifiers
+    /// the bindings name, and builds the string `input::combo_for` would build.
+    /// A real keymap compiled from the real `us` rules, because the question is
+    /// what xkb does and not what anyone believes it does.
+    ///
+    /// The shift case is asserted too, and asserted as *not* arriving. That is
+    /// the reason these are bound on ctrl, and without it here the next reader
+    /// tidies them back to the shift spelling this branch started with -- it
+    /// looks more natural, it passes the spelling test, and it is dead. #121 is
+    /// the underlying defect: bindings match on `modified_sym`, so every
+    /// shifted non-letter in the compositor is unreachable, nine
+    /// `super+shift+<digit>` in `workspaces.lua` among them. Fixing that is not
+    /// this branch's work. Choosing a spelling that is correct before *and*
+    /// after it is.
+    #[test]
+    fn every_height_bind_is_a_key_that_arrives() {
+        use smithay::input::keyboard::xkb;
+
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let Some(keymap) = xkb::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            "us",
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        ) else {
+            // No xkb rules on this machine means no keymap to ask, and a test
+            // that invented an answer here would be worse than one that says
+            // it could not look.
+            panic!("no `us` keymap; xkb data is missing, so this proves nothing");
+        };
+        let shift = keymap.mod_get_index(xkb::MOD_NAME_SHIFT);
+        let ctrl = keymap.mod_get_index(xkb::MOD_NAME_CTRL);
+        let logo = keymap.mod_get_index(xkb::MOD_NAME_LOGO);
+
+        // What `combo_for` produces for a press of `code` while `mask` is held.
+        // The modifier order is that function's fixed one, and `normalise_combo`
+        // is the very function it finishes with, so this is the whole of the
+        // string a binding is looked up by.
+        let arrives = |code: u32, mask: u32, names: &str| -> String {
+            let mut state = xkb::State::new(&keymap);
+            state.update_mask(mask, 0, 0, 0, 0, 0);
+            let sym = state.key_get_one_sym(code.into());
+            normalise_combo(&format!("{names}{}", xkb::keysym_get_name(sym)))
+        };
+
+        let minus = 20;
+        let equal = 21;
+        let with_ctrl = (1 << ctrl) | (1 << logo);
+        let with_shift = (1 << shift) | (1 << logo);
+
+        // What `tiling.lua` binds, and what the keyboard sends. These have to
+        // be the same string or the binding is an entry in a table nothing
+        // looks up.
+        for (code, bound) in [(minus, "super+ctrl+minus"), (equal, "super+ctrl+equal")] {
+            let sent = arrives(code, with_ctrl, "ctrl+super+");
+            assert_eq!(
+                sent,
+                normalise_combo(bound),
+                "`tiling.lua` binds {bound:?}, and that keypress arrives as {sent:?}"
+            );
+        }
+
+        // And the spelling not to go back to. `underscore` and `plus` are what
+        // shift makes of these keys, so `super+shift+minus` names a press that
+        // does not exist.
+        for (code, tempting) in [(minus, "super+shift+minus"), (equal, "super+shift+equal")] {
+            let sent = arrives(code, with_shift, "shift+super+");
+            assert_ne!(
+                sent,
+                normalise_combo(tempting),
+                "{tempting:?} looks reachable now; if shift has stopped changing \
+                 the keysym then #121 has landed and this test wants rewriting"
             );
         }
     }

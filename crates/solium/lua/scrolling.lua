@@ -317,8 +317,16 @@ end)
 -- reader sees the defect instead of inheriting the belief: dividing a screen
 -- coordinate by the monitor's width does not give a fraction of anything, and
 -- an edge drag in the scrolling layout jumps the column wide on the first
--- motion. Tracked separately.
+-- motion. Tracked as #122.
 sol.on("resize", function(id, x, _)
+    -- `x == 0` is doing duty as "no drag", and it does not mean that: it means
+    -- the pointer is at screen x 0, which is a real place a real drag can
+    -- reach -- the leftmost column of the leftmost monitor. The guard is left
+    -- as it is because changing it is part of giving this handler an absolute
+    -- position to work from, which is #122 and not this branch. Written down
+    -- rather than quietly tidied, so the next reader does not have to
+    -- rediscover that the condition is a sentinel wearing a coordinate's
+    -- clothes.
     if not scrolling.active or x == 0 then
         return
     end

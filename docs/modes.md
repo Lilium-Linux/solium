@@ -125,7 +125,7 @@ sol.on("open",   function(id) end)                 -- a window's life began
 sol.on("close",  function(id) end)                 -- it is going
 sol.on("focus",  function(id) end)                 -- the keyboard moved
 sol.on("drop",   function(id, x, y) end)           -- a drag finished
-sol.on("resize", function(id, x, y, horizontal, vertical) end)
+sol.on("resize", function(id, x, y, horizontal_side, vertical_side) end)
 sol.on("scroll", function(dx, dy) end)             -- a modified wheel turn
 sol.on("click",  function(x, y) end)               -- only while grabbing input
 sol.on("layout", function() end)                   -- the room windows get changed
@@ -133,7 +133,7 @@ sol.on("monitors", function() end)                 -- the screens are not the sc
 sol.on("restore",  function() end)                 -- you have replaced a running session
 ```
 
-Four of these are worth reading twice.
+Five of these are worth reading twice.
 
 **`open` fires when the window opens, which is before its application exists.**
 A window's life begins when the user asks for the program. Your mode is told
@@ -147,7 +147,7 @@ means "re-run what you already hold".
 delta would be measured against a layout your own last response just changed,
 and the windows shake for as long as the button is held.
 
-**`horizontal` and `vertical` are the *sides* being dragged**, not the axes:
+**`horizontal_side` and `vertical_side` are the *sides* being dragged**, not the axes:
 `"left"` or `"right"`, `"top"` or `"bottom"`, and `nil` for an axis this drag
 does not move. A corner drag fills both, because a corner drag moves one seam
 per axis. They were booleans until #120, and a boolean cannot choose a seam: a
