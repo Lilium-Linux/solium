@@ -26,7 +26,7 @@ use smithay::{
     desktop::{PopupManager, Window, layer_map_for_output},
     input::pointer::{CursorImageAttributes, CursorImageStatus},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::Scale,
+    utils::{Logical, Point, Scale},
     wayland::compositor::with_states,
 };
 
@@ -1140,12 +1140,44 @@ pub(crate) fn elements(
         // second scaling path and nothing new in the element list. When the
         // client commits the size it was asked for the two sizes are equal
         // again and the window is pixel-exact. See `crate::resizing`.
-        let origin = client.loc.to_physical_precise_round(scale);
-        let factor = Scale::from(crate::resizing::factor(
-            state.resize_fill(pane),
-            client.size,
-            real.size,
-        ));
+        let (across, down) =
+            crate::resizing::factor(state.resize_fill(pane), client.size, real.size);
+        let factor = Scale::from((across, down));
+
+        let corner = client.loc.to_physical_precise_round(scale);
+
+        // **A picture that is not stretched stays against the edges the drag is
+        // not moving.**
+        //
+        // `Fill::Hold` keeps the buffer at its own size where the pane has grown
+        // past it, which leaves a strip the buffer does not cover. Anchoring at
+        // the drawn rectangle's top-left puts that strip on the bottom and the
+        // right, which is correct for a bottom or right drag -- those are
+        // exactly the drags whose top-left corner is standing still -- and
+        // wrong for every drag that pulls a left or top edge, where the picture
+        // would travel with the pointer and the gap would open against the
+        // stationary edge. The whole of the window's contents would slide while
+        // the user dragged one of four corners.
+        //
+        // **Zero for a stretch, by the arithmetic rather than by a branch.** A
+        // stretched buffer covers its rectangle exactly, so the slack below is
+        // `client.size.w - real.size.w * (client.size.w / real.size.w)`, which
+        // is nothing -- the default path and every window that is not being
+        // dragged at all get `corner` back, to the bit.
+        let (pulls_left, pulls_top) = state.resize_pins(pane).unwrap_or((false, false));
+        let slack = |pulled: bool, drawn: f64, real: i32, factor: f64| {
+            if pulled {
+                (drawn - f64::from(real) * factor).max(0.0)
+            } else {
+                0.0
+            }
+        };
+        let origin = (client.loc
+            + Point::<f64, Logical>::from((
+                slack(pulls_left, client.size.w, real.size.w, across),
+                slack(pulls_top, client.size.h, real.size.h, down),
+            )))
+        .to_physical_precise_round(scale);
 
         // Popups go in ahead of the sandwich, which means above all of it.
         //
@@ -1251,8 +1283,16 @@ pub(crate) fn elements(
                     // opaque region for good on exactly the outputs a
                     // fractional scale is ordinary on. `client_pixels` carries
                     // the rest of it.
+                    //
+                    // **`corner`, not `origin`.** This path does not scale by
+                    // `factor` at all -- the capture is drawn into the whole of
+                    // the client's drawn rectangle, which is a stretch whatever
+                    // the configured fill says -- so there is no slack for a
+                    // held picture to be anchored against, and offsetting a
+                    // rectangle that is already the full width would hang it
+                    // over the edge it was meant to be pinned to.
                     let dst = smithay::utils::Rectangle::new(
-                        origin,
+                        corner,
                         client.size.to_physical_precise_round(scale),
                     );
                     elements.push(Element::Rounded(pass.at(dst, frame.opacity)));

@@ -105,7 +105,7 @@ const TELL_EVERY: Duration = Duration::from_millis(100);
 /// answers a configure in well under 100 ms even when it is dropping frames)
 /// and short enough that a client which really has hung produces one snap
 /// rather than a window stuck at the wrong size.
-const PATIENCE: Duration = Duration::from_millis(250);
+pub(crate) const PATIENCE: Duration = Duration::from_millis(250);
 
 /// What fills a pane between the drag asking for a rectangle and the client
 /// filling it.
@@ -129,6 +129,17 @@ pub(crate) enum Fill {
     /// while the pane grows is the pane beneath rather than a stretched
     /// picture. The frame still tracks the pointer exactly; only the picture
     /// inside it lags.
+    ///
+    /// **Anchored against the edges the drag is not moving**, which is what
+    /// makes that claim true for all eight of them rather than for the two easy
+    /// ones. Drawing the held buffer at the rectangle's top-left is right for a
+    /// bottom or right drag, where the top-left is exactly the corner standing
+    /// still, and wrong for every drag that pulls a left or top edge: the
+    /// picture would travel with the edge under the pointer and the uncovered
+    /// strip would open along the *stationary* edge, so the whole of the
+    /// window's contents would slide while the user dragged. [`Hold::pins`] is
+    /// the question, `render.rs` offsets by the slack it answers, and the offset
+    /// is zero for [`Fill::Stretch`] because a stretched buffer leaves no slack.
     ///
     /// **Asymmetric on purpose.** Growing the pane holds the buffer at 1.0 and
     /// leaves a strip uncovered, which is the whole idea. Shrinking it cannot
@@ -261,20 +272,48 @@ pub(crate) struct Hold {
 
 impl Hold {
     /// Take charge of a window's size, having just asked it for `asked`.
+    ///
+    /// **`released` is an argument and not a default**, and that is the whole
+    /// of the fix for a hold that could never be let go of. A hold is not
+    /// always born in the middle of its gesture: `input::resize`'s `motion`
+    /// only *records* a request and `state::Solium::hold_resize` turns it into
+    /// a hold at the frame, so a press, a motion and a release that all land in
+    /// one dispatch batch — an ordinary quick nudge of a border, well inside
+    /// sixteen milliseconds — produce a hold whose gesture has already ended.
+    /// [`Self::settle`] answers `Waiting` unconditionally while `released` is
+    /// `None`, so such a hold is **permanent**: the pane's slot outranks its
+    /// client for ever and every later size the client chooses for itself is
+    /// stretched into a rectangle from a drag that finished long ago.
+    ///
+    /// Making it a parameter is deliberately not the same as guarding the one
+    /// call site that had the bug. A creation site that does not know whether
+    /// its gesture is still going cannot compile, so the next one added has to
+    /// answer the question rather than inherit `None` by omission.
     pub(crate) const fn new(
         edges: ResizeEdge,
         client: Size<i32, Logical>,
         asked: Size<i32, Logical>,
         now: Duration,
+        released: Option<Duration>,
     ) -> Self {
         Self {
             edges,
             since: client,
             asked,
             told: now,
-            released: None,
+            released,
             declined: None,
         }
+    }
+
+    /// Whether this drag is pulling the left edge, and the top.
+    ///
+    /// The edges whose *opposite* number is standing still, which is what a
+    /// picture held at its own size has to be anchored against — see
+    /// [`Fill::Hold`] — and the same question [`Self::anchored`] asks when a
+    /// client's own size wins.
+    pub(crate) const fn pins(&self) -> (bool, bool) {
+        (pulls_left(self.edges), pulls_top(self.edges))
     }
 
     /// Notice whatever the client has said since it was last spoken to.
@@ -401,11 +440,20 @@ impl Hold {
     /// across the desktop. Adopting the size without this would end the gesture
     /// by moving the one edge the user was not touching — issue #113 again, at
     /// the last frame instead of every frame.
+    ///
+    /// **Floored at one pixel each way**, which is the same floor `state::inner`
+    /// applies and the same thing `Panes::sync` and `Solium::pane_geometry`
+    /// refuse to believe. A client's size is nothing at all between unmapping
+    /// and its next buffer, and a client that unmaps while the deadline is
+    /// running would otherwise hand the pane a slot of no size — pinned, by the
+    /// arithmetic below, to the corner the drag was not holding, and mapped
+    /// there.
     pub(crate) fn anchored(
         &self,
         slot: Rectangle<i32, Logical>,
         size: Size<i32, Logical>,
     ) -> Rectangle<i32, Logical> {
+        let size = Size::from((size.w.max(1), size.h.max(1)));
         let x = if pulls_left(self.edges) {
             slot.loc.x + slot.size.w - size.w
         } else {
@@ -477,6 +525,20 @@ mod tests {
         std::time::Duration::from_millis(millis)
     }
 
+    /// A hold born in the middle of its gesture, which is the ordinary case and
+    /// the one nearly every test below is about.
+    ///
+    /// Named rather than passing `None` eight times, so that the one test that
+    /// passes something else stands out as the case it is.
+    fn dragging(
+        edges: ResizeEdge,
+        client: Size<i32, Logical>,
+        asked: Size<i32, Logical>,
+        now: std::time::Duration,
+    ) -> Hold {
+        Hold::new(edges, client, asked, now, None)
+    }
+
     /// The arithmetic of issue #113, and the bridge that makes the fix
     /// drawable.
     ///
@@ -534,7 +596,7 @@ mod tests {
     /// it ends at is a factor of exactly 1 — pixel-exact, not nearly.
     #[test]
     fn the_stretch_ends_when_the_client_commits_the_size_it_was_asked_for() {
-        let mut hold = Hold::new(
+        let mut hold = dragging(
             ResizeEdge::BottomRight,
             size(400, 300),
             size(500, 380),
@@ -564,7 +626,7 @@ mod tests {
     /// something else resized it — a worse bug than the shake.
     #[test]
     fn a_refused_size_stops_the_stretch_instead_of_stretching_for_ever() {
-        let mut hold = Hold::new(ResizeEdge::Left, size(800, 600), size(300, 600), ms(0));
+        let mut hold = dragging(ResizeEdge::Left, size(800, 600), size(300, 600), ms(0));
         assert_eq!(
             hold.fill(Fill::Stretch),
             Fill::Stretch,
@@ -622,7 +684,7 @@ mod tests {
     /// was refused.
     #[test]
     fn a_refusal_lifts_on_an_answer_and_not_on_a_new_offer() {
-        let mut hold = Hold::new(ResizeEdge::Left, size(800, 600), size(300, 600), ms(0));
+        let mut hold = dragging(ResizeEdge::Left, size(800, 600), size(300, 600), ms(0));
         hold.settle(size(450, 600), ms(100));
         assert_eq!(hold.fill(Fill::Stretch), Fill::Hold);
         // Dragged back out, and told so.
@@ -655,7 +717,7 @@ mod tests {
     /// nothing *because* it was asked for the size it already had.
     #[test]
     fn a_client_that_never_answers_is_given_up_on_at_the_deadline() {
-        let mut hold = Hold::new(ResizeEdge::Bottom, size(400, 300), size(400, 420), ms(0));
+        let mut hold = dragging(ResizeEdge::Bottom, size(400, 300), size(400, 420), ms(0));
         hold.release(size(400, 420), size(400, 300), ms(500));
         assert_eq!(hold.settle(size(400, 300), ms(600)), Settle::Waiting);
         assert_eq!(
@@ -666,7 +728,7 @@ mod tests {
 
         // And the case that produces no commit at all: the drag came back to
         // where it started, so the configure asked for the size the client is.
-        let mut same = Hold::new(ResizeEdge::Bottom, size(400, 300), size(400, 420), ms(0));
+        let mut same = dragging(ResizeEdge::Bottom, size(400, 300), size(400, 420), ms(0));
         same.release(size(400, 300), size(400, 300), ms(500));
         assert_eq!(
             same.settle(size(400, 300), ms(501)),
@@ -678,7 +740,7 @@ mod tests {
     /// The client is asked at [`TELL_EVERY`], not at the frame rate.
     #[test]
     fn the_client_is_not_asked_more_often_than_the_throttle_allows() {
-        let mut hold = Hold::new(ResizeEdge::Right, size(400, 300), size(410, 300), ms(0));
+        let mut hold = dragging(ResizeEdge::Right, size(400, 300), size(410, 300), ms(0));
         // Sixteen milliseconds is a frame. Nothing goes out.
         assert_eq!(hold.dragged(size(420, 300), size(400, 300), ms(16)), None);
         assert_eq!(hold.dragged(size(430, 300), size(400, 300), ms(32)), None);
@@ -697,7 +759,7 @@ mod tests {
     /// the size it actually ended on.
     #[test]
     fn letting_go_always_tells_the_client_where_the_drag_ended() {
-        let mut hold = Hold::new(ResizeEdge::Right, size(400, 300), size(410, 300), ms(0));
+        let mut hold = dragging(ResizeEdge::Right, size(400, 300), size(410, 300), ms(0));
         assert_eq!(hold.dragged(size(470, 300), size(400, 300), ms(16)), None);
         assert_eq!(
             hold.release(size(473, 300), size(400, 300), ms(20)),
@@ -716,7 +778,7 @@ mod tests {
     /// an answer that cannot come, and then snapping.
     #[test]
     fn a_motion_settled_after_the_release_still_reaches_the_client() {
-        let mut hold = Hold::new(ResizeEdge::Right, size(400, 300), size(400, 300), ms(0));
+        let mut hold = dragging(ResizeEdge::Right, size(400, 300), size(400, 300), ms(0));
         // The control: six milliseconds into a live drag is throttled.
         assert_eq!(hold.dragged(size(460, 300), size(400, 300), ms(6)), None);
         // The button comes up.
@@ -748,6 +810,103 @@ mod tests {
         let (across, down) = factor(None, size(1600, 1200).to_f64(), size(800, 600));
         assert!((across - 2.0).abs() < f64::EPSILON);
         assert!((down - 2.0).abs() < f64::EPSILON);
+    }
+
+    /// **A hold born after its own gesture ended still lets go.**
+    ///
+    /// The whole gesture — press, motion, release — fits inside one dispatch
+    /// batch whenever a border is nudged quickly, and the hold is not born
+    /// until the frame after all three. A hold that took `released: None`
+    /// because that is what a fresh hold usually has would then wait for a
+    /// release that already happened, for ever: `settle` answers `Waiting`
+    /// unconditionally without one, so nothing would ever end it.
+    ///
+    /// The control below is the shape of the bug rather than a description of
+    /// it: the same hold with `None` is still `Waiting` a full second past a
+    /// deadline of a quarter of one, and would be at any time that could be
+    /// put there.
+    #[test]
+    fn a_hold_born_after_its_gesture_ended_is_still_let_go_of() {
+        let mut hold = Hold::new(
+            ResizeEdge::TopLeft,
+            size(400, 300),
+            size(380, 288),
+            ms(16),
+            Some(ms(12)),
+        );
+        // The client answers nothing at all, which is what the deadline is for.
+        assert_eq!(hold.settle(size(400, 300), ms(20)), Settle::Waiting);
+        assert_eq!(
+            hold.settle(size(400, 300), ms(12) + PATIENCE),
+            Settle::Adopt(size(400, 300)),
+            "the deadline runs from the release, and this hold was born after it"
+        );
+
+        // And the control: the same hold that never heard about its release.
+        let mut deaf = dragging(ResizeEdge::TopLeft, size(400, 300), size(380, 288), ms(16));
+        assert_eq!(
+            deaf.settle(size(400, 300), ms(12) + PATIENCE + ms(1000)),
+            Settle::Waiting,
+            "a hold that cannot observe its own release is permanent, and a \
+             permanent hold is a permanently soft window"
+        );
+    }
+
+    /// A client that goes away mid-deadline does not leave a slot of no size.
+    ///
+    /// `window.geometry().size` is nothing at all between a client unmapping
+    /// and its next buffer, and the deadline can expire in exactly that gap.
+    /// Without a floor the pane is given a zero-size rectangle pinned to the
+    /// corner the drag was not holding — and mapped there, which is a window
+    /// that cannot be grabbed to undo it.
+    #[test]
+    fn an_adopted_size_never_collapses_the_slot_to_nothing() {
+        let hold = dragging(ResizeEdge::TopLeft, size(400, 300), size(380, 288), ms(0));
+        let slot = rect(200, 100, 380, 288);
+        let landed = hold.anchored(slot, size(0, 0));
+        assert!(
+            landed.size.w > 0 && landed.size.h > 0,
+            "the same floor `inner` applies, for the same reason"
+        );
+        // Still pinned: a top-left drag gives everything back on the top left.
+        assert_eq!(
+            (landed.loc.x + landed.size.w, landed.loc.y + landed.size.h),
+            (slot.loc.x + slot.size.w, slot.loc.y + slot.size.h),
+        );
+    }
+
+    /// Which edges are standing still, for a picture that is not stretched.
+    #[test]
+    fn a_hold_says_which_edges_the_picture_has_to_stay_against() {
+        let pins = |edges| dragging(edges, size(400, 300), size(400, 300), ms(0)).pins();
+        assert_eq!(pins(ResizeEdge::TopLeft), (true, true));
+        assert_eq!(pins(ResizeEdge::BottomRight), (false, false));
+        assert_eq!(pins(ResizeEdge::Left), (true, false));
+        assert_eq!(pins(ResizeEdge::Top), (false, true));
+        assert_eq!(pins(ResizeEdge::BottomLeft), (true, false));
+        assert_eq!(pins(ResizeEdge::TopRight), (false, true));
+    }
+
+    /// The slack `render.rs` offsets a held picture by, and the fact that a
+    /// stretched one has none.
+    ///
+    /// A left drag that grows the pane holds the buffer at 1.0, so there is a
+    /// strip the buffer does not cover; it has to open along the edge under the
+    /// pointer, not along the edge standing still. A stretch covers the
+    /// rectangle exactly, so the same arithmetic offsets it by nothing and the
+    /// default path is untouched.
+    #[test]
+    fn a_held_picture_leaves_its_slack_on_the_edge_being_dragged() {
+        let drawn: Size<f64, Logical> = Size::from((900.0, 600.0));
+        let real = size(450, 600);
+        let (across, _) = factor(Some(Fill::Hold), drawn, real);
+        assert!((drawn.w - f64::from(real.w) * across - 450.0).abs() < f64::EPSILON);
+
+        let (stretched, _) = factor(Some(Fill::Stretch), drawn, real);
+        assert!(
+            (drawn.w - f64::from(real.w) * stretched).abs() < f64::EPSILON,
+            "a stretched buffer fills its rectangle, so anchoring it is a no-op"
+        );
     }
 
     #[test]
