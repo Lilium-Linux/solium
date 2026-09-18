@@ -128,11 +128,12 @@ pub(crate) struct WindowInfo {
     /// of `XdgToplevelSurfaceRoleAttributes::modal`.
     ///
     /// On X11 there is nothing equivalent to read. EWMH spells modality
-    /// `_NET_WM_STATE_MODAL`, and smithay 0.7's `X11Surface` does not surface
-    /// it — `is_maximized`, `is_fullscreen`, `is_minimized`, `is_activated`
-    /// and `is_decorated` are the whole set (`xwayland/xwm/surface.rs`). So the
-    /// window *type* stands in for it, which is the promise #104 left open:
-    /// see `xwayland::floats_over_its_parent`.
+    /// `_NET_WM_STATE_MODAL`, and smithay 0.7's `X11Surface::is_popup()` looks
+    /// like it reads exactly that and does not: the state it asks is the one the
+    /// window manager wrote, never the one the client set
+    /// (`xwayland/xwm/surface.rs`). So the window *type* stands in for it, which
+    /// is the promise #104 left open — the whole argument, and the evidence, is
+    /// in `xwayland::floats_over_its_parent`.
     pub(crate) modal: bool,
     /// Which window this one belongs to, if it said. See [`Parentage`].
     pub(crate) parent: Parentage,
@@ -4106,6 +4107,15 @@ mod dialogs {
         h: 1440.0,
     };
 
+    /// The second screen, where there are two: the same size, immediately to the
+    /// right of the first. See [`second_monitor`].
+    const BESIDE: Rect = Rect {
+        x: 2560.0,
+        y: 0.0,
+        w: 2560.0,
+        h: 1440.0,
+    };
+
     /// Both layouts, by the module that defines them and the key that turns
     /// them on. Every assertion below runs against both; see the module note.
     const LAYOUTS: [(&str, &str); 2] = [("tiling", "super+t"), ("scrolling", "super+s")];
@@ -4162,6 +4172,40 @@ mod dialogs {
         }
     }
 
+    /// The screen to the right of [`monitor`], in the one global coordinate
+    /// space the compositor has: same size, offset by its whole width.
+    ///
+    /// Not focused and not primary, because the point of it is to be the screen
+    /// nothing falls back to. Every wrong answer about where a dialog goes lands
+    /// on `DP-1` — it is the monitor at the origin, where every toplevel is
+    /// mapped, and the one `sol.monitor()` answers — so an assertion that a
+    /// dialog is on `DP-2` cannot pass by accident.
+    fn second_monitor() -> MonitorInfo {
+        MonitorInfo {
+            name: "DP-2".to_owned(),
+            area: BESIDE,
+            whole: BESIDE,
+            scale: 1.0,
+            focused: false,
+            primary: false,
+            transform: "normal".to_owned(),
+        }
+    }
+
+    /// A window the compositor has decided is on this monitor.
+    ///
+    /// Both halves, because the compositor sets both and a layout reads them
+    /// from different places: `monitor` is what `monitors.each` groups by, and
+    /// the rect is what decides the answer again on the next pass
+    /// (`Solium::output_of`). A fixture that moved one without the other would
+    /// be a state the compositor never produces.
+    fn on(monitor: &MonitorInfo, mut window: WindowInfo) -> WindowInfo {
+        window.monitor.clone_from(&monitor.name);
+        window.rect.x = monitor.area.x;
+        window.rect.y = monitor.area.y;
+        window
+    }
+
     /// A window as it is before any layout has had a say: the size its client
     /// chose, in the corner a Wayland toplevel is mapped at.
     fn window(id: u64, w: f64, h: f64) -> WindowInfo {
@@ -4190,13 +4234,29 @@ mod dialogs {
         }
     }
 
-    fn snapshot(windows: Vec<WindowInfo>) -> Snapshot {
+    /// What the compositor looked like, with these monitors and these windows.
+    ///
+    /// The monitor list is a parameter rather than a constant because it was a
+    /// constant, and a one-screen fixture cannot see a whole class of bug: every
+    /// window is mapped at (0, 0), so with one monitor every window is on the
+    /// right monitor no matter what a layout does with the answer. `work_area`
+    /// follows the focused screen, which is what `sol.monitor()` reports.
+    fn snapshot_on(monitors: Vec<MonitorInfo>, windows: Vec<WindowInfo>) -> Snapshot {
+        let work_area = monitors
+            .iter()
+            .find(|monitor| monitor.focused)
+            .or_else(|| monitors.first())
+            .map_or(AREA, |monitor| monitor.area);
         Snapshot {
             windows,
-            monitors: vec![monitor()],
-            work_area: AREA,
+            monitors,
+            work_area,
             ..Snapshot::default()
         }
+    }
+
+    fn snapshot(windows: Vec<WindowInfo>) -> Snapshot {
+        snapshot_on(vec![monitor()], windows)
     }
 
     /// Where each window was told to go, by id.
@@ -4235,16 +4295,24 @@ mod dialogs {
     ///
     /// Switching the mode on runs `started`, which adopts the windows and lays
     /// them out -- the same path a user pressing the key takes.
-    fn arrange(name: &str, windows: Vec<WindowInfo>) -> std::collections::HashMap<u64, Rect> {
+    fn arrange_on(
+        name: &str,
+        monitors: Vec<MonitorInfo>,
+        windows: Vec<WindowInfo>,
+    ) -> std::collections::HashMap<u64, Rect> {
         let (module, key) = LAYOUTS
             .iter()
             .find(|(module, _)| *module == name)
             .copied()
             .expect("a layout this module knows");
         let mut scripts = scripts(name, module);
-        let outcome = scripts.key(key, snapshot(windows));
+        let outcome = scripts.key(key, snapshot_on(monitors, windows));
         assert!(outcome.handled, "{name}: the layout key was not handled");
         placed(&outcome.commands)
+    }
+
+    fn arrange(name: &str, windows: Vec<WindowInfo>) -> std::collections::HashMap<u64, Rect> {
+        arrange_on(name, vec![monitor()], windows)
     }
 
     /// **A modal dialog takes no share of the screen.**
@@ -4333,6 +4401,121 @@ mod dialogs {
                     || !about(centre(parent).1, centre(other).1),
                 "{name}: both windows are in the same place, so centring on either \
                  proves nothing"
+            );
+        }
+    }
+
+    /// **And it follows its parent onto the other screen.**
+    ///
+    /// The case the single-monitor fixture could not see, and the reason the
+    /// fixture takes a monitor list now. Every toplevel is mapped at (0, 0) and
+    /// the compositor decides which screen a window is on from the centre of its
+    /// rect, so a dialog for a window on `DP-2` *arrives* belonging to `DP-1` —
+    /// this is the state the compositor really hands a layout, not a contrived
+    /// one. Clamp it into its own screen's work area and it is pinned to that
+    /// screen's edge; its centre stays there, so the next pass reads back the
+    /// same monitor and clamps it identically. It never converges, which is why
+    /// a second pass could exist for exactly this case and not deliver it.
+    ///
+    /// Asserted two ways on purpose. Centred on its parent is the property; on
+    /// `DP-2` at all is the one that fails loudly when the clamp is taken from
+    /// the wrong screen, because the wrong answer is not a few pixels out — it
+    /// is a whole monitor away, against the edge nearest the parent.
+    #[test]
+    fn a_modal_is_centred_on_its_parents_monitor_and_not_its_own() {
+        for (name, _) in LAYOUTS {
+            let screens = vec![monitor(), second_monitor()];
+            let out = arrange_on(
+                name,
+                screens,
+                vec![
+                    // The parent, on the second screen.
+                    on(&second_monitor(), window(1, 800.0, 600.0)),
+                    // An unrelated window on the first, so the dialog cannot
+                    // land on an empty screen and look right by default.
+                    on(&monitor(), window(2, 800.0, 600.0)),
+                    // The dialog, where the compositor puts a new toplevel: the
+                    // origin, which is the *first* screen.
+                    modal(3, 600.0, 400.0, Parentage::Window(1)),
+                ],
+            );
+
+            let parent = out.get(&1).copied().expect("the parent was placed");
+            let dialog = out.get(&3).copied().expect("the dialog was placed");
+
+            assert!(
+                parent.x >= BESIDE.x,
+                "{name}: the parent was laid out at {parent:?}, which is not on DP-2 \
+                 ({BESIDE:?}) -- the fixture is wrong before the dialog is even asked \
+                 about"
+            );
+            assert!(
+                about(centre(parent).0, centre(dialog).0)
+                    && about(centre(parent).1, centre(dialog).1),
+                "{name}: the dialog is at {dialog:?}, centred on {:?}, and its parent is \
+                 on the other screen at {parent:?}, centred on {:?}",
+                centre(dialog),
+                centre(parent)
+            );
+            assert!(
+                dialog.x >= BESIDE.x
+                    && dialog.y >= BESIDE.y
+                    && dialog.x + dialog.w <= BESIDE.x + BESIDE.w
+                    && dialog.y + dialog.h <= BESIDE.y + BESIDE.h,
+                "{name}: the dialog at {dialog:?} is not on DP-2 ({BESIDE:?}) at all -- it \
+                 was clamped into the work area of the screen it was mapped on rather \
+                 than its parent's"
+            );
+        }
+    }
+
+    /// **A modal on a modal is centred on where that modal ended up.**
+    ///
+    /// A file chooser is modal for the document and its "Replace?" prompt is
+    /// modal for the chooser: two dialogs, one waiting on the other, and nothing
+    /// arranges either of them. So the chooser's rect in this pass is one only
+    /// this pass knows — which is what `placed` is for, and a dialog has to be
+    /// written into it like any other placement.
+    ///
+    /// The prompt is listed *first*, which is the order that matters: the
+    /// snapshot is topmost first and a prompt is above the chooser that opened
+    /// it, so the naive pass reaches the child before the parent exists
+    /// anywhere. Left out of `placed`, the child falls through to the snapshot
+    /// — where its parent is still at the (0, 0) every toplevel is mapped at —
+    /// and lands in the top-left corner.
+    #[test]
+    fn a_modal_waiting_on_a_modal_is_centred_on_it() {
+        for (name, _) in LAYOUTS {
+            let out = arrange_on(
+                name,
+                vec![monitor()],
+                vec![
+                    modal(3, 300.0, 200.0, Parentage::Window(2)),
+                    modal(2, 600.0, 400.0, Parentage::Window(1)),
+                    window(1, 800.0, 600.0),
+                    window(4, 800.0, 600.0),
+                ],
+            );
+
+            let document = out.get(&1).copied().expect("the document was placed");
+            let chooser = out.get(&2).copied().expect("the chooser was placed");
+            let prompt = out.get(&3).copied().expect("the prompt was placed");
+
+            assert!(
+                about(centre(document).0, centre(chooser).0)
+                    && about(centre(document).1, centre(chooser).1),
+                "{name}: the chooser at {chooser:?} is not over the document at \
+                 {document:?}, so nothing below proves anything"
+            );
+            assert!(
+                about(centre(chooser).0, centre(prompt).0)
+                    && about(centre(chooser).1, centre(prompt).1),
+                "{name}: the prompt is at {prompt:?}, centred on {:?}, and the chooser it \
+                 is waiting on is at {chooser:?}, centred on {:?} -- the prompt was \
+                 centred on where the chooser was in the snapshot rather than on where \
+                 this pass put it",
+                centre(prompt),
+                centre(chooser)
             );
         }
     }

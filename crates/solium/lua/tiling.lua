@@ -119,9 +119,12 @@ function tiling.apply(animation)
     -- rather than its old one. Dialogs are in no tree, so this is the only
     -- thing that places them -- without it a Wayland toplevel stays in the
     -- top-left corner it was mapped at.
-    for _, each in ipairs(screens) do
-        dialogs.place(each, visible, options(each.monitor.name), placed)
-    end
+    --
+    -- One pass for every screen's dialogs, not one per screen, and `options`
+    -- itself rather than this screen's: a dialog goes onto its *parent's*
+    -- monitor, which the loop above has no way to name. Handing it one screen's
+    -- area is what pinned a cross-screen dialog to the wrong edge.
+    dialogs.place(visible, options, placed)
 end
 
 -- Bring the tree in line with what is actually on screen. Used when tiling is
@@ -223,6 +226,7 @@ sol.on("close", function(id)
     -- Ids are never reused, so a stale entry here would not put the wrong
     -- window back -- it would simply accumulate for the life of the session.
     tiling.exiled[id] = nil
+    dialogs.forget(id)
     tiling.apply()
 end)
 
@@ -232,9 +236,11 @@ sol.on("drop", function(id, x, y)
     if not tiling.active then
         return
     end
-    -- A dialog dropped anywhere goes back over its parent: it is not in the
-    -- tree, so the insert below is the one way it could get into one.
-    if dialogs.floating(id) then
+    -- A dialog stays where it was dropped, and joins no tree: it is in none,
+    -- and the insert below is the one way it could get into one. `dropped`
+    -- records the drag so the next pass does not undo it -- as an offset from
+    -- the parent, so the dialog still follows the window it belongs to.
+    if dialogs.dropped(id) then
         tiling.apply(config.tiling.snap)
         return
     end

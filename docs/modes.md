@@ -175,7 +175,18 @@ looking at, `rect` when you care what the layout thinks.
 permissions box — and `parent` is the window it belongs to. A layout should
 leave a modal out of its arrangement and put it over its parent; `dialogs.lua`
 is that policy, shared by `tiling.lua` and `scrolling.lua` so the two cannot
-disagree.
+disagree. Onto its *parent's* monitor, which is not always its own: a window is
+mapped at the origin and belongs to whichever screen that lands on, so a dialog
+for a window on the second screen arrives on the first one and has to be moved
+off it. `dialogs.place` is where that is decided, from the rect it is centred on
+rather than from the screen it was mapped on.
+
+Dragging one is allowed and sticks: `dialogs.dropped` records where it was
+dropped as an offset from its parent, so the prompt you pushed off the sentence
+it was covering stays off it, and still follows the document when the layout
+moves it. Staying *above* that document is not the layout's business at all —
+the compositor keeps a modal over its parent in the stack, whatever raises what
+(`Solium::map_stacked`).
 
 `parent` has three values and it is worth knowing why. It is the parent's id
 when there is a window to point at, `false` when the client named a parent that
