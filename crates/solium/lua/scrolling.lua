@@ -17,8 +17,13 @@ local config = require("config")
 local workspaces = require("workspaces")
 local modes = require("modes")
 local monitors = require("monitors")
+local dialogs = require("dialogs")
 
-local scrolling = { active = false, views = {} }
+-- `exiled` is the ids this layout has taken out of its strips because they are
+-- modal dialogs, and it is what makes `unset_modal` reversible: only a window
+-- that was taken out is ever put back. Same table, same reason, same name as
+-- `tiling.lua` -- see `dialogs.settle`.
+local scrolling = { active = false, views = {}, exiled = {} }
 
 -- One strip per workspace per monitor.
 --
@@ -53,19 +58,63 @@ local function view_of(id)
     return view_for(monitor), monitor
 end
 
+-- A modal dialog is in no strip, and one that stops being modal rejoins.
+--
+-- The same three lines as `tiling.lua`'s, over a different container, which is
+-- exactly the shape `dialogs.settle` exists to keep honest: what differs is
+-- how a window joins and leaves a strip, and nothing else.
+local function settle_dialogs(windows)
+    dialogs.settle(
+        scrolling.exiled,
+        windows,
+        function(id)
+            -- Every strip, not just this window's monitor's: a window dragged
+            -- to the other screen and then made modal is still in the strip it
+            -- left, and one window in two strips gets two slots.
+            for _, view in pairs(scrolling.views) do
+                view:remove(id)
+            end
+        end,
+        function(id)
+            local monitor = monitors.of(id)
+            local view = view_for(monitor)
+            if not view:contains(id) then
+                view:insert(id, options(monitor))
+            end
+        end
+    )
+end
+
 function scrolling.apply(animation)
     if not scrolling.active then
         return
     end
+    local visible = workspaces.visible()
+    settle_dialogs(visible)
+
     sol.animate(animation or config.scrolling.motion)
     -- One `sol.animate` for every screen: two strips moving at once is one
     -- movement. See docs/animation.md.
-    for _, each in ipairs(monitors.each(workspaces.visible())) do
+    local screens = monitors.each(visible)
+    -- What the strips decided, by window id, for the same reason tiling
+    -- collects it: a dialog is centred on its parent, and the snapshot says
+    -- where that parent was before this pass moved it.
+    local placed = {}
+    for _, each in ipairs(screens) do
         local view = view_for(each.monitor.name)
         for _, slot in ipairs(view:layout(options(each.monitor.name))) do
             sol.place(slot.id, slot)
+            placed[slot.id] = slot
         end
     end
+    -- A second pass, because a dialog on one screen may belong to a window on
+    -- another. Dialogs are in no strip, so this is the only thing that places
+    -- them.
+    --
+    -- `options` itself rather than one screen's: a dialog goes onto its
+    -- *parent's* monitor, and handing it this screen's area is what pinned a
+    -- cross-screen dialog to the wrong edge. See `dialogs.place`.
+    dialogs.place(visible, options, placed)
 end
 
 -- Follow the strip's own idea of focus, so the keyboard goes where the view
@@ -89,9 +138,14 @@ function scrolling.adopt()
     for _, each in ipairs(monitors.each(workspaces.visible())) do
         local view = view_for(each.monitor.name)
         for _, window in ipairs(each.windows) do
-            present[window.id] = each.monitor.name
-            if not view:contains(window.id) then
-                view:insert(window.id, options(each.monitor.name))
+            -- A dialog is deliberately absent from every strip, so `adopt` --
+            -- whose whole job is to put back whatever is missing -- has to be
+            -- told that this one is missing on purpose.
+            if not dialogs.floats(window) then
+                present[window.id] = each.monitor.name
+                if not view:contains(window.id) then
+                    view:insert(window.id, options(each.monitor.name))
+                end
             end
         end
     end
@@ -139,6 +193,19 @@ sol.on("layout", function()
 end)
 
 sol.on("open", function(id)
+    -- A dialog joins no strip. `apply` places it over its parent and records
+    -- it as exiled, so there is nothing to insert.
+    --
+    -- `apply` rather than `settle`, and that is the point of the branch:
+    -- `settle` hands the keyboard to whatever the strip thinks is focused, and
+    -- the strip has never heard of this dialog -- so a save prompt would open,
+    -- be focused by the compositor, and have the focus taken straight back off
+    -- it by the layout. A dialog that cannot be typed into is worse than one
+    -- in the wrong place.
+    if dialogs.floating(id) then
+        scrolling.apply(config.scrolling.snap)
+        return
+    end
     local view, monitor = view_of(id)
     view:insert(id, options(monitor))
     settle(config.scrolling.snap)
@@ -148,6 +215,10 @@ sol.on("close", function(id)
     for _, view in pairs(scrolling.views) do
         view:remove(id)
     end
+    -- Ids are never reused, so a stale entry here would not put the wrong
+    -- window back -- it would simply accumulate for the life of the session.
+    scrolling.exiled[id] = nil
+    dialogs.forget(id)
     scrolling.apply(config.scrolling.snap)
 end)
 
@@ -156,6 +227,14 @@ end)
 -- window at all, only pick it up and put it down again.
 sol.on("drop", function(id, x, y)
     if not scrolling.active then
+        return
+    end
+    -- A dialog stays where it was dropped, and joins no strip: it is in none,
+    -- and the insert below is the one way it could end up in one. `dropped`
+    -- records the drag so the next pass does not undo it -- as an offset from
+    -- the parent, so the dialog still follows the window it belongs to.
+    if dialogs.dropped(id) then
+        scrolling.apply(config.scrolling.snap)
         return
     end
     -- Where it *landed*: a window dragged across the boundary belongs to the

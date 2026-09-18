@@ -75,6 +75,7 @@ use smithay::{
                 PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
                 XdgToplevelSurfaceData,
                 decoration::{XdgDecorationHandler, XdgDecorationState},
+                dialog::{XdgDialogHandler, XdgDialogState},
             },
         },
         shm::{ShmHandler, ShmState},
@@ -88,7 +89,7 @@ use crate::{
     layer, monitor,
     pane::Pane,
     present::{self, Clock, Frame},
-    script::{AnimationSpec, Command, Outcome, Rect, Scripts, Snapshot, WindowInfo},
+    script::{AnimationSpec, Command, Outcome, Parentage, Rect, Scripts, Snapshot, WindowInfo},
 };
 
 /// Whether `rect` lands on any of `screens`.
@@ -171,6 +172,18 @@ pub(crate) struct Solium {
 
     pub(crate) compositor_state: CompositorState,
     pub(crate) xdg_shell_state: XdgShellState,
+    /// The `xdg_wm_dialog_v1` global, so a client can say a toplevel is a modal
+    /// dialog.
+    ///
+    /// Nothing ever reads this field, and it is not dead: the global lives for
+    /// exactly as long as the `XdgDialogState` that created it, so dropping it
+    /// would take `xdg_dialog_v1` off the registry and a client that had
+    /// already bound it would be talking to nothing. That is the same contract
+    /// every other `*_state` field above is held under -- see the comment at
+    /// the top of this struct -- which is why it sits with them rather than
+    /// being constructed and discarded in `new`.
+    #[allow(dead_code)]
+    pub(crate) xdg_dialog_state: XdgDialogState,
     pub(crate) shm_state: ShmState,
     #[allow(dead_code)]
     pub(crate) output_manager_state: OutputManagerState,
@@ -476,6 +489,14 @@ pub(crate) struct Solium {
     /// focuses the window whose column it just brought into view — and without
     /// this that answer would be reported straight back to it, forever.
     focusing: bool,
+
+    /// The pane a close is being reported for, while it is being reported.
+    ///
+    /// A closing window is still in `panes` for the length of that call, on
+    /// purpose — a script is handed an id and has to be able to look it up. The
+    /// one thing it must not still be is somebody's *parent*: see
+    /// [`Self::parented`].
+    closing: Option<crate::pane::PaneId>,
 
     /// A resize asked for by an edge drag, not yet applied.
     ///
@@ -1011,6 +1032,7 @@ impl Solium {
         Self {
             compositor_state: CompositorState::new::<Self>(&display_handle),
             xdg_shell_state: XdgShellState::new::<Self>(&display_handle),
+            xdg_dialog_state: XdgDialogState::new::<Self>(&display_handle),
             shm_state: ShmState::new::<Self>(&display_handle, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             data_device_state: DataDeviceState::new::<Self>(&display_handle),
@@ -1072,6 +1094,7 @@ impl Solium {
             programs: crate::pass::Programs::default(),
             published_windows: String::new(),
             focusing: false,
+            closing: None,
             pending_drop: None,
             pending_resize: None,
             redraw: true,
@@ -2013,7 +2036,7 @@ impl Solium {
         // flickers to the wrong one and back at the exact moment it fills.
         if let Some(window) = self.panes.get(id).and_then(Pane::client).cloned() {
             size_window(&window, slot);
-            self.space.map_element(window, slot.loc, false);
+            self.map_stacked(window, slot.loc, false);
         }
         id.get()
     }
@@ -2146,6 +2169,15 @@ impl Solium {
                         .output_of(outer)
                         .map(|output| output.name())
                         .unwrap_or_default(),
+                    // A pane with no client yet is a reserved slot, and a
+                    // reserved slot has no client to have said either of these
+                    // things -- so it is an ordinary window until one arrives,
+                    // and the `modal_changed` that arrives with it re-runs the
+                    // layout.
+                    modal: pane.client().is_some_and(|window| self.is_modal(window)),
+                    parent: pane
+                        .client()
+                        .map_or(Parentage::None, |window| self.parent_of(window)),
                 })
             })
             .collect();
@@ -2176,6 +2208,167 @@ impl Solium {
             keyboard: self.keyboard.clone(),
             work_area: self.work_area().map(to_rect).unwrap_or_default(),
             cursor: (cursor.x, cursor.y),
+        }
+    }
+
+    /// Whether a layout should float this window over the one waiting on it.
+    ///
+    /// Two protocols, one question, and they are not symmetrical: Wayland has a
+    /// flag that means exactly this, and X11 does not, so the X11 side reads
+    /// the window type instead. The whole of that argument is in
+    /// `xwayland::floats_over_its_parent`; what is here is only the lookup.
+    fn is_modal(&self, window: &Window) -> bool {
+        if let Some(toplevel) = window.toplevel() {
+            return with_states(toplevel.wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    // A poisoned lock is a panic somewhere else in this
+                    // process, and the honest answer to "is this modal" at that
+                    // point is "no" -- an ordinary window, laid out the
+                    // ordinary way. `unwrap` here would turn one panic into
+                    // two, in a compositor with nothing to restart it.
+                    .and_then(|data| data.lock().ok())
+                    .is_some_and(|attributes| attributes.modal)
+            });
+        }
+        window
+            .x11_surface()
+            .is_some_and(|surface| crate::xwayland::floats_over_its_parent(surface.window_type()))
+    }
+
+    /// A parent that was found, as a script sees it.
+    ///
+    /// `Unknown` for a pane that is on its way out, which is not a special case
+    /// so much as the honest reading of it: [`Self::trigger_close`] runs while
+    /// the dying pane is still in `panes`, because a script has to be able to
+    /// ask which window it was. Answer `Window` there and the dialog it was
+    /// waiting on is centred on the rect of a window that is going away — and
+    /// the close pass is the last one, so nothing runs again to move it off.
+    /// "Named, and cannot be pointed at" is exactly what `Unknown` means.
+    fn parented(&self, pane: crate::pane::PaneId) -> Parentage {
+        if self.closing == Some(pane) {
+            return Parentage::Unknown;
+        }
+        Parentage::Window(pane.get())
+    }
+
+    /// Which window this one belongs to, as far as this compositor can tell.
+    ///
+    /// The distinction [`Parentage`] exists for is made here and only here: a
+    /// parent that was named and cannot be found is `Unknown`, and a parent
+    /// that was never named is `None`. Both end up as "no rect to centre on" in
+    /// a layout, but only one of them means something has gone missing.
+    fn parent_of(&self, window: &Window) -> Parentage {
+        if let Some(toplevel) = window.toplevel() {
+            let Some(parent) = toplevel.parent() else {
+                return Parentage::None;
+            };
+            return self
+                .window_for(&parent)
+                .and_then(|window| self.panes.id_of(&window))
+                .map_or(Parentage::Unknown, |pane| self.parented(pane));
+        }
+
+        let Some(surface) = window.x11_surface() else {
+            return Parentage::None;
+        };
+        // `WM_TRANSIENT_FOR`, which smithay reads at `CreateNotify` and again
+        // on every property change. It holds an X11 window id rather than a
+        // surface, so the match is against the id side -- and a client that
+        // points it at the root window, which is a common way of saying "I am
+        // transient for the session", names an id no element here has and comes
+        // out `Unknown`. That is the right answer: there is no window to centre
+        // on.
+        let Some(parent) = surface.is_transient_for() else {
+            return Parentage::None;
+        };
+        self.space
+            .elements()
+            .find(|element| {
+                element
+                    .x11_surface()
+                    .is_some_and(|surface| surface.window_id() == parent)
+            })
+            .and_then(|element| self.panes.id_of(element))
+            .map_or(Parentage::Unknown, |pane| self.parented(pane))
+    }
+
+    /// Put a window in the stack, and keep whatever is waiting on it above it.
+    ///
+    /// **The one way a managed window is mapped or raised.** Use this rather
+    /// than `self.space.map_element`, which cannot know the one thing that has
+    /// to be true afterwards.
+    ///
+    /// A modal dialog is the window that is holding its parent up: "Discard
+    /// changes?" is the only thing on screen you are allowed to answer, and the
+    /// document behind it is not going to accept a keystroke until you have. So
+    /// a modal has to be *above* the window it belongs to, and nothing in the
+    /// stack says so on its own. Focusing the parent raised it — one click on a
+    /// strip of it left showing, or one pointer crossing with
+    /// `focus_follows_mouse` — and the prompt went behind the window that was
+    /// waiting on the answer, where it cannot be found and cannot be dismissed.
+    ///
+    /// **Here rather than in `focus_window`**, which is where the symptom was
+    /// seen and not where the cause is. Every raise has the same effect, and
+    /// there are a dozen: a click, a fullscreen, a maximise, a client mapping,
+    /// a layout pass. `Space::map_element` takes the element out of the stack
+    /// and pushes it back on top whatever `activate` says — that flag only
+    /// decides who is told they are focused — so *every* call is a restack, and
+    /// a rule kept at one caller is a rule broken at eleven.
+    ///
+    /// This is also why it is not a z-index: a modal belongs above its own
+    /// parent, not above everybody, and a second window's prompt has no claim
+    /// over the first window's.
+    pub(crate) fn map_stacked(
+        &mut self,
+        window: Window,
+        location: impl Into<Point<i32, Logical>>,
+        activate: bool,
+    ) {
+        self.space.map_element(window.clone(), location, activate);
+        self.lift_modals_over(&window);
+    }
+
+    /// Put every modal waiting on this window back above it, and their own
+    /// modals above them.
+    ///
+    /// The chain is not hypothetical: a file chooser is modal for the document
+    /// and its "Replace?" prompt is modal for the chooser, so raising the
+    /// document has to lift two windows and in that order.
+    ///
+    /// `lifted` is what stops a client that names a cycle of parents — which
+    /// neither `xdg_toplevel.set_parent` nor `WM_TRANSIENT_FOR` forbids — from
+    /// walking for ever: each window is raised at most once.
+    fn lift_modals_over(&mut self, window: &Window) {
+        let Some(pane) = self.panes.id_of(window) else {
+            return;
+        };
+        let mut over = vec![pane];
+        let mut lifted: Vec<crate::pane::PaneId> = Vec::new();
+        while let Some(parent) = over.pop() {
+            // Collected before anything moves: raising borrows the space, and
+            // restacking the list being walked is how one gets skipped.
+            let children: Vec<Window> = self
+                .space
+                .elements()
+                .filter(|element| self.is_modal(element))
+                .filter(|element| self.parent_of(element) == Parentage::Window(parent.get()))
+                .cloned()
+                .collect();
+            for child in children {
+                let Some(id) = self.panes.id_of(&child) else {
+                    continue;
+                };
+                if lifted.contains(&id) {
+                    continue;
+                }
+                lifted.push(id);
+                // `false`: this is about the stack, not about focus. A dialog
+                // lifted because its parent was clicked has not been clicked.
+                self.space.raise_element(&child, false);
+                over.push(id);
+            }
         }
     }
 
@@ -2653,7 +2846,7 @@ impl Solium {
         let client = inner(outer, self.frame_insets(window));
 
         size_window(window, client);
-        self.space.map_element(window.clone(), client.loc, false);
+        self.map_stacked(window.clone(), client.loc, false);
     }
 
     /// Move and resize a window for real, gliding it there from where it was.
@@ -2715,7 +2908,7 @@ impl Solium {
             size_window(&window, client);
             // `false`: laying out must not restack. A tiling arrangement that
             // reordered windows every time it ran would fight the user's focus.
-            self.space.map_element(window, client.loc, false);
+            self.map_stacked(window, client.loc, false);
         }
         // And the pane is told either way. For a mapped window this is what
         // `sync_panes` would write next frame anyway; for a pane whose
@@ -3466,7 +3659,7 @@ impl Solium {
             }
         });
         toplevel.send_pending_configure();
-        self.space.map_element(window.clone(), location, true);
+        self.map_stacked(window.clone(), location, true);
         tracing::debug!(maximized, "window maximise toggled");
     }
 
@@ -3889,7 +4082,7 @@ impl Solium {
         // changes what covers what. Both are the screen changing.
         self.redraw = true;
         // `true` restacks: a clicked window comes to the front.
-        self.space.map_element(window.clone(), location, true);
+        self.map_stacked(window.clone(), location, true);
 
         if let Some(keyboard) = self.seat.get_keyboard() {
             // The window's own surface, so this works for an X11 window as
@@ -4025,7 +4218,7 @@ impl Solium {
             // negotiated its decorations in between has a different amount of
             // room than it was first told.
             size_window(window, slot);
-            self.space.map_element(window.clone(), slot.loc, false);
+            self.map_stacked(window.clone(), slot.loc, false);
             return;
         }
 
@@ -4036,7 +4229,7 @@ impl Solium {
         if size != window.geometry().size {
             size_window(window, Rectangle::new(location, size));
         }
-        self.space.map_element(window.clone(), location, true);
+        self.map_stacked(window.clone(), location, true);
 
         // How a window appears is a script's decision — that is what makes the
         // dock-icon genie a script rather than a feature. The built-in is only
@@ -4489,7 +4682,15 @@ impl Solium {
 
     pub(crate) fn trigger_close(&mut self, pane: crate::pane::PaneId) {
         let id = pane.get();
+        // Only for the snapshot, and the snapshot is the whole of what a script
+        // sees. The pane is still here -- it is retired in `sync_panes`, a frame
+        // from now -- so a dialog waiting on this window would otherwise be
+        // re-centred on the rect of the window that is leaving, and this pass is
+        // the last one: nothing runs again to take it off the window that moves
+        // into that space. See [`Self::parented`].
+        self.closing = Some(pane);
         let snapshot = self.snapshot();
+        self.closing = None;
         let Some(mut scripts) = self.scripts.take() else {
             return;
         };
@@ -4762,7 +4963,7 @@ impl XdgShellHandler for Solium {
         surface.send_configure();
 
         let window = Window::new_wayland_window(surface.clone());
-        self.space.map_element(window.clone(), (0, 0), true);
+        self.map_stacked(window.clone(), (0, 0), true);
         // On the same line as the map, so nothing can observe a mapped window
         // that has no pane -- `trigger_open` is about to ask for its id.
         self.adopt_or_open(window);
@@ -4773,6 +4974,23 @@ impl XdgShellHandler for Solium {
             keyboard.set_focus(self, Some(focused.clone()), SERIAL_COUNTER.next_serial());
             self.focus_selection(Some(&focused));
         }
+    }
+
+    /// `xdg_toplevel.set_parent` — a window saying which window it belongs to.
+    ///
+    /// Re-run the layout, for the same reason `modal_changed` does: a modal
+    /// dialog is centred on its parent, so the answer to "where does it go"
+    /// just changed. It matters more than it looks, because the order is not
+    /// the one you would guess. GTK4 creates the toplevel, maps it, and calls
+    /// `set_parent` and `set_modal` in whichever order the widget tree settles
+    /// in -- so a dialog can easily be laid out once while its parent is still
+    /// `Parentage::None`, land in the middle of the screen, and never move
+    /// again. Without this, that is the last word.
+    ///
+    /// Cheap enough not to need a guard: the layout runs off a snapshot, and a
+    /// window whose place has not changed is placed where it already is.
+    fn parent_changed(&mut self, _surface: ToplevelSurface) {
+        self.trigger_relayout();
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
@@ -5030,7 +5248,7 @@ impl XdgShellHandler for Solium {
         if let Some(pane) = self.panes.get_mut(id) {
             pane.set_slot(screen);
         }
-        self.space.map_element(window, screen.loc, true);
+        self.map_stacked(window, screen.loc, true);
         self.redraw = true;
         tracing::debug!(?screen, "a window went fullscreen");
     }
@@ -5078,7 +5296,7 @@ impl XdgShellHandler for Solium {
             if let Some(pane) = self.panes.get_mut(id) {
                 pane.set_slot(back);
             }
-            self.space.map_element(window, back.loc, true);
+            self.map_stacked(window, back.loc, true);
         }
         self.trigger_relayout();
         self.redraw = true;
@@ -5776,10 +5994,80 @@ impl ClientDndGrabHandler for Solium {
 
 impl ServerDndGrabHandler for Solium {}
 
+/// `xdg_dialog_v1` -- a client saying a toplevel is a modal dialog.
+///
+/// The protocol is one flag on an object hung off a toplevel, and smithay
+/// already keeps it: `set_modal`/`unset_modal` write
+/// `XdgToplevelSurfaceRoleAttributes::modal`, and this handler is told only
+/// when the value *changes* (`wayland/shell/xdg/dialog.rs` returns early when
+/// it does not). So there is no state to mirror here; there is only the fact
+/// that the layout's input just changed, and something has to say so.
+///
+/// ## What a non-modal dialog gets, and why
+///
+/// The protocol makes modality a flag on a dialog object rather than the
+/// meaning of the object, so a client may create an `xdg_dialog_v1` for a
+/// toplevel and never call `set_modal`. **Such a window gets the ordinary
+/// treatment here: it is laid out like any other, with a share of the screen.**
+///
+/// It is worth being plain that this is not a free choice: with smithay 0.7 it
+/// is the only one that can be implemented. Nothing reaches this compositor
+/// when a dialog object is created. `XdgDialogHandler` has exactly one method,
+/// the `modal_changed` below, and creating the object changes no flag; the
+/// object itself is stored in `XdgShellSurfaceUserData::dialog`, which is
+/// `pub(crate)` to smithay and has no accessor (`shell/xdg/handlers/surface.rs`
+/// -- read the source, not the docs). So "this toplevel is a dialog but not a
+/// modal one" is a state Solium cannot observe at all. Taking the other branch
+/// would mean dispatching `xdg_wm_dialog_v1` ourselves and keeping a second
+/// copy of state smithay already holds, which is how two answers to one
+/// question get out of step.
+///
+/// That said, it is also the answer this would pick with the field in hand, and
+/// that matters more than which one is cheap. What the protocol actually
+/// *defines* for a non-modal dialog is nothing: `set_modal` is described as the
+/// hint that the window must be addressed before its parent can be used again,
+/// and the dialog object without it carries no stated behaviour, only the
+/// possibility of future hints. The whole argument for lifting a window out of
+/// the arrangement is that it is blocking the window underneath it and will be
+/// gone in a moment. A dialog that blocks nothing has neither half of that: a
+/// non-modal find bar or a colour picker is a window somebody keeps open beside
+/// their document, and floating it in the middle of the screen, over the
+/// document, is a worse answer than tiling it. Compare the X11 side, where the
+/// same question is decided the same way for the same reason:
+/// `xwayland::floats_over_its_parent` floats `Dialog` and not `Utility`.
+///
+/// If a toolkit is ever found creating dialog objects for prompts and leaving
+/// `set_modal` unsent, this is the paragraph to revisit -- and the revision
+/// would start with smithay, not here.
+impl XdgDialogHandler for Solium {
+    /// Re-run the layout, because a window just left the arrangement or
+    /// rejoined it.
+    ///
+    /// `trigger_relayout` and nothing else. The alternative -- placing the
+    /// dialog from here -- would put a second opinion about where a window goes
+    /// next to the layout scripts' one, and the two would disagree the first
+    /// time somebody wrote their own `tiling.lua`. Where a modal dialog goes is
+    /// a layout question; that it *is* one is the only thing the compositor
+    /// knows and the only thing it says.
+    ///
+    /// This is also what makes `unset_modal` work at all. Without it, a dialog
+    /// that stopped being modal would sit floating until some unrelated event
+    /// happened to re-run the layout, which on a quiet desktop is never.
+    fn modal_changed(&mut self, toplevel: ToplevelSurface, is_modal: bool) {
+        let id = self
+            .window_for(toplevel.wl_surface())
+            .and_then(|window| self.panes.id_of(&window))
+            .map(crate::pane::PaneId::get);
+        tracing::debug!(?id, is_modal, "a toplevel changed its modal hint");
+        self.trigger_relayout();
+    }
+}
+
 delegate_compositor!(Solium);
 delegate_shm!(Solium);
 delegate_xdg_shell!(Solium);
 delegate_xdg_decoration!(Solium);
+smithay::delegate_xdg_dialog!(Solium);
 delegate_layer_shell!(Solium);
 delegate_seat!(Solium);
 // Routes `wp_cursor_shape_manager_v1` and the per-pointer device it hands out.
@@ -6782,26 +7070,20 @@ mod tests {
         );
     }
 
-    /// **Issue #99: a rescale left already-open windows blurry.**
+    /// The tests that need a client on the other end of a socket.
     ///
-    /// Two protocols tell a client what scale to draw at. `commit`'s call to
-    /// `send_surface_state` resends `wl_surface.preferred_buffer_scale` on
-    /// every commit, so an existing client picks up a new output scale the
-    /// moment it next draws. `new_fractional_scale` answers the other one,
-    /// `wp_fractional_scale_v1`, but only when a client asks -- once, ever,
-    /// per surface, and nothing called it again when `scale_outputs` changed
-    /// a monitor's scale later. A window opened before a `super+shift+r`
-    /// rescale kept the scale it was told at startup, and the compositor
-    /// upscaled its buffer to fill the larger area the new scale gave it.
-    ///
-    /// This needs a real client, not a bare `WlSurface`: `Window` only wraps
-    /// a real `ToplevelSurface`, and Smithay gives no way to fabricate one
-    /// except a client asking for it over the wire. `wl-probe` (see its own
-    /// `Cargo.toml`) exists in this workspace for the identical reason -- some
-    /// protocol claims can only be checked from the client's side -- and its
+    /// A bare `WlSurface` is not enough for any of them: `Window` only wraps a
+    /// real `ToplevelSurface`, and Smithay gives no way to fabricate one except
+    /// a client asking for it over the wire. Anything that is *state a client
+    /// sets* -- the scale it was told, the parent it named, the modal flag it
+    /// raised -- can only be reached from this side. `wl-probe` (see its own
+    /// `Cargo.toml`) exists in this workspace for the identical reason, and its
     /// dependencies are what make this affordable here: `wayland-client` and
     /// `wayland-protocols`'s `client` feature were already in the lockfile.
-    mod scale_resend {
+    ///
+    /// The module was one test's and was named after it. It is two now, and the
+    /// fixture was always the expensive part of it.
+    mod real_client {
         use super::*;
         use smithay::output::{Mode, PhysicalProperties, Subpixel};
         use smithay::reexports::wayland_server::Display;
@@ -6811,16 +7093,21 @@ mod tests {
             wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
         };
         use wayland_client::{Connection, Dispatch, QueueHandle};
+        use wayland_protocols::xdg::dialog::v1::client::{xdg_dialog_v1, xdg_wm_dialog_v1};
         use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
-        /// The client side of the fixture. Binds exactly the three globals a
-        /// window needs and nothing else -- there is no renderer on this end
-        /// to answer anything more, and none of what follows needs one.
+        /// The client side of the fixture. Binds exactly the globals a window
+        /// needs and nothing else -- there is no renderer on this end to answer
+        /// anything more, and none of what follows needs one.
         #[derive(Debug, Default)]
         struct Client {
             compositor: Option<wl_compositor::WlCompositor>,
             wm_base: Option<xdg_wm_base::XdgWmBase>,
             shm: Option<wl_shm::WlShm>,
+            /// The global #72 added. Bound here because "the client said modal"
+            /// is not a thing the server side can say on a client's behalf --
+            /// which is the whole reason this test is in this module.
+            dialogs: Option<xdg_wm_dialog_v1::XdgWmDialogV1>,
         }
 
         impl Dispatch<wl_registry::WlRegistry, ()> for Client {
@@ -6842,11 +7129,14 @@ mod tests {
                     "wl_compositor" => state.compositor = Some(registry.bind(name, 1, qh, ())),
                     "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
                     "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
+                    "xdg_wm_dialog_v1" => state.dialogs = Some(registry.bind(name, 1, qh, ())),
                     _ => {}
                 }
             }
         }
 
+        wayland_client::delegate_noop!(Client: ignore xdg_wm_dialog_v1::XdgWmDialogV1);
+        wayland_client::delegate_noop!(Client: ignore xdg_dialog_v1::XdgDialogV1);
         wayland_client::delegate_noop!(Client: ignore wl_compositor::WlCompositor);
         wayland_client::delegate_noop!(Client: ignore wl_surface::WlSurface);
         wayland_client::delegate_noop!(Client: ignore wl_shm::WlShm);
@@ -6882,18 +7172,62 @@ mod tests {
             file.into()
         }
 
+        /// A client on the other end of a socketpair, with every global this
+        /// compositor has already in its registry.
+        ///
+        /// The queue comes back rather than a handle to it, because a
+        /// `QueueHandle` borrows its queue and the caller has to own one.
+        fn connect(
+            display: &mut Display<Solium>,
+            state: &mut Solium,
+        ) -> (Connection, wayland_client::EventQueue<Client>, Client) {
+            let (server_side, client_side) = UnixStream::pair().expect("a socketpair");
+            display
+                .handle()
+                .insert_client(server_side, std::sync::Arc::new(ClientState::default()))
+                .expect("inserting the test client");
+            let conn = Connection::from_socket(client_side).expect("wrapping the client socket");
+            let mut event_queue = conn.new_event_queue::<Client>();
+            let qh = event_queue.handle();
+            let mut client = Client::default();
+
+            conn.display().get_registry(&qh, ());
+            conn.flush().expect("flushing get_registry");
+            display
+                .dispatch_clients(state)
+                .expect("dispatching get_registry");
+            display
+                .flush_clients()
+                .expect("flushing the registry snapshot");
+            // The one blocking read in this fixture: it is safe because the
+            // server has, on the line above, already written the response --
+            // every global this compositor has -- onto the socket. Blocking
+            // here waits on bytes that are already in the kernel buffer, not
+            // on the server, which nothing is driving but this same thread.
+            event_queue
+                .blocking_dispatch(&mut client)
+                .expect("reading the registry snapshot");
+
+            (conn, event_queue, client)
+        }
+
         /// Opens one window through the real protocol: a surface, an
         /// `xdg_toplevel`, and a tiny committed buffer, so `new_toplevel` maps
         /// a `Window` with a real, non-zero bounding box at `(0, 0)` -- where
         /// every window is first mapped; the caller repositions it from
         /// there. Returns the newly-mapped `Window`.
+        ///
+        /// The client's own `xdg_toplevel` comes back with it, because some of
+        /// what a window is only exists on that side: `set_parent` and the modal
+        /// flag are both requests, and there is no way to ask for them except as
+        /// the client.
         fn open_window(
             display: &mut Display<Solium>,
             state: &mut Solium,
             conn: &Connection,
             client: &Client,
             qh: &QueueHandle<Client>,
-        ) -> Window {
+        ) -> (Window, xdg_toplevel::XdgToplevel) {
             let compositor = client.compositor.clone().expect("wl_compositor bound");
             let wm_base = client.wm_base.clone().expect("xdg_wm_base bound");
             let shm = client.shm.clone().expect("wl_shm bound");
@@ -6902,7 +7236,7 @@ mod tests {
 
             let surface = compositor.create_surface(qh, ());
             let xdg_surface = wm_base.get_xdg_surface(&surface, qh, ());
-            let _toplevel = xdg_surface.get_toplevel(qh, ());
+            let toplevel = xdg_surface.get_toplevel(qh, ());
 
             const SIDE: i32 = 64;
             const STRIDE: i32 = SIDE * 4;
@@ -6918,16 +7252,29 @@ mod tests {
                 .dispatch_clients(state)
                 .expect("dispatching the window-open requests");
 
-            state
+            let window = state
                 .space
                 .elements()
                 .find(|window| !before.contains(window))
                 .cloned()
-                .expect("new_toplevel mapped a window")
+                .expect("new_toplevel mapped a window");
+            (window, toplevel)
         }
 
-        /// The scenario issue #99 describes: two monitors, a `super+shift+r`
-        /// rescale of one of them, and a window already open on each.
+        /// **Issue #99: a rescale left already-open windows blurry.**
+        ///
+        /// Two protocols tell a client what scale to draw at. `commit`'s call to
+        /// `send_surface_state` resends `wl_surface.preferred_buffer_scale` on
+        /// every commit, so an existing client picks up a new output scale the
+        /// moment it next draws. `new_fractional_scale` answers the other one,
+        /// `wp_fractional_scale_v1`, but only when a client asks -- once, ever,
+        /// per surface, and nothing called it again when `scale_outputs` changed
+        /// a monitor's scale later. A window opened before a `super+shift+r`
+        /// rescale kept the scale it was told at startup, and the compositor
+        /// upscaled its buffer to fill the larger area the new scale gave it.
+        ///
+        /// The scenario it describes: two monitors, a `super+shift+r` rescale of
+        /// one of them, and a window already open on each.
         #[test]
         fn changed_output_resends_fractional_scale_and_unchanged_output_does_not() {
             let mut display = Display::<Solium>::new().expect("creating a test wayland display");
@@ -7000,35 +7347,13 @@ mod tests {
             state.space.map_output(&output_b, (1920, 0));
 
             // A real client -- see the module doc comment for why.
-            let (server_side, client_side) = UnixStream::pair().expect("a socketpair");
-            display
-                .handle()
-                .insert_client(server_side, std::sync::Arc::new(ClientState::default()))
-                .expect("inserting the test client");
-            let conn = Connection::from_socket(client_side).expect("wrapping the client socket");
-            let mut event_queue = conn.new_event_queue::<Client>();
+            let (conn, event_queue, client) = connect(&mut display, &mut state);
             let qh = event_queue.handle();
-            let mut client = Client::default();
 
-            conn.display().get_registry(&qh, ());
-            conn.flush().expect("flushing get_registry");
-            display
-                .dispatch_clients(&mut state)
-                .expect("dispatching get_registry");
-            display
-                .flush_clients()
-                .expect("flushing the registry snapshot");
-            // The one blocking read in this fixture: it is safe because the
-            // server has, on the line above, already written the response --
-            // every global this compositor has -- onto the socket. Blocking
-            // here waits on bytes that are already in the kernel buffer, not
-            // on the server, which nothing is driving but this same thread.
-            event_queue
-                .blocking_dispatch(&mut client)
-                .expect("reading the registry snapshot");
-
-            let window_a = open_window(&mut display, &mut state, &conn, &client, &qh);
-            let window_b = open_window(&mut display, &mut state, &conn, &client, &qh);
+            let (window_a, _toplevel_a) =
+                open_window(&mut display, &mut state, &conn, &client, &qh);
+            let (window_b, _toplevel_b) =
+                open_window(&mut display, &mut state, &conn, &client, &qh);
 
             // Placed explicitly, one per monitor: `new_toplevel` maps every
             // window at `(0, 0)`, and where the pane system fits it from
@@ -7111,6 +7436,101 @@ mod tests {
                  never runs for it at all -- and separately, b's window was \
                  never on the monitor that changed, so it must be untouched \
                  even if it had been"
+            );
+        }
+
+        /// **A modal cannot be buried under the window it is waiting on.**
+        ///
+        /// The regression floating them introduced. Tiled, a dialog took a slot
+        /// of its own and overlapped nothing, so there was nowhere for it to be
+        /// lost; floated, it sits *on* its parent, and nothing in the stack said
+        /// which of the two belongs on top. `Space::map_element` takes an
+        /// element out of the stack and pushes it back at the top whatever
+        /// `activate` says, so every raise buried the prompt: one click on the
+        /// strip of document left showing, or one pointer crossing with
+        /// `focus_follows_mouse`, and "Discard changes?" was behind the window
+        /// refusing to accept keystrokes until it is answered.
+        ///
+        /// The third window is what stops this passing for the wrong reason. If
+        /// `focus_window` had quietly stopped restacking at all, the dialog
+        /// would still be above its parent and the test would be green over a
+        /// broken raise -- so the parent is also asserted to have come above the
+        /// window it was under.
+        #[test]
+        fn a_modal_stays_above_the_window_it_is_waiting_on() {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            // See the #99 test: a Qt scene in a process holding a libwayland
+            // connection of its own aborts the whole test binary.
+            state
+                .decorations
+                .set_style(&mut state.panes, Some("none".to_string()));
+
+            let (conn, event_queue, client) = connect(&mut display, &mut state);
+            let qh = event_queue.handle();
+
+            let (parent, parent_toplevel) =
+                open_window(&mut display, &mut state, &conn, &client, &qh);
+            let (dialog, dialog_toplevel) =
+                open_window(&mut display, &mut state, &conn, &client, &qh);
+            let (other, _other_toplevel) =
+                open_window(&mut display, &mut state, &conn, &client, &qh);
+
+            // The two requests that make this a modal dialog, in the order a
+            // toolkit sends them and from the only side that can send them.
+            let dialogs = client.dialogs.clone().expect("xdg_wm_dialog_v1 bound");
+            dialog_toplevel.set_parent(Some(&parent_toplevel));
+            let object = dialogs.get_xdg_dialog(&dialog_toplevel, &qh, ());
+            object.set_modal();
+            conn.flush().expect("flushing set_parent and set_modal");
+            display
+                .dispatch_clients(&mut state)
+                .expect("dispatching set_parent and set_modal");
+
+            // The fixture is doing what it claims before anything is asserted
+            // about stacking: the compositor agrees this is a modal, and agrees
+            // whose.
+            assert!(
+                state.is_modal(&dialog),
+                "the client called set_modal and the compositor did not read it \
+                 back, so nothing below is about a modal dialog at all"
+            );
+            let parent_pane = state.panes.id_of(&parent).expect("the parent has a pane");
+            assert_eq!(
+                state.parent_of(&dialog),
+                Parentage::Window(parent_pane.get()),
+                "the client called set_parent and the compositor did not read it \
+                 back"
+            );
+
+            // `elements` is back to front, so a higher index is nearer the top.
+            let depth = |state: &Solium, window: &Window| {
+                state
+                    .space
+                    .elements()
+                    .position(|element| element == window)
+                    .expect("a mapped window is in the space")
+            };
+            assert!(
+                depth(&state, &dialog) > depth(&state, &parent),
+                "the dialog opened after its parent, so it starts above it -- and \
+                 a test that starts in the state it is checking for proves nothing"
+            );
+
+            // One click on the parent. This is the whole of the bug.
+            state.focus_window(&parent, SERIAL_COUNTER.next_serial());
+
+            assert!(
+                depth(&state, &parent) > depth(&state, &other),
+                "focusing the parent did not raise it above the window that was \
+                 over it, so this run says nothing about what a raise does to its \
+                 dialog"
+            );
+            assert!(
+                depth(&state, &dialog) > depth(&state, &parent),
+                "the parent was raised over the dialog that is waiting on it: the \
+                 prompt is now behind the window it is blocking, where it cannot \
+                 be read or dismissed"
             );
         }
     }

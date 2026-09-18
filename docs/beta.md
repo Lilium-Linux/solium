@@ -31,7 +31,7 @@ which is the only test that counts for a compositor.
 Protocols: `xdg-shell`, `wlr-layer-shell`, `xdg-decoration`, `xdg-output`,
 `xdg-activation`, `wp-viewporter`, `wp-fractional-scale`, `wp-presentation`,
 `linux-dmabuf`, `relative-pointer`, `pointer-constraints`, `primary-selection`,
-`xwayland-shell`.
+`xdg-dialog`, `xwayland-shell`.
 
 ## Call it a preview, not a beta
 
