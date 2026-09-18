@@ -1083,13 +1083,28 @@ fn scroller_from(options: &Table) -> mlua::Result<solium_layout::scroller::Scrol
             }
         },
     };
-    if !widths.is_empty() && start >= widths.len() {
+    // Against the list that is actually in force, which is `PRESETS` when the
+    // configuration's own list turned out to hold nothing usable. Gated on
+    // `!widths.is_empty()` until #117's review, which meant a file whose every
+    // width was rejected got a line per width and nothing at all about the
+    // index -- so the clamp, the one step that decides what a new column opens
+    // at, was the only silent thing left in a read that says everything else
+    // out loud.
+    let in_force = if widths.is_empty() {
+        solium_layout::scroller::PRESETS.len()
+    } else {
+        widths.len()
+    };
+    if start >= in_force {
         tracing::warn!(
             target: "solium::script",
             default_width = start + 1,
-            widths = widths.len(),
-            "scrolling.default_width names a width that is not in scrolling.widths; \
-             a new column opens at the last one instead"
+            widths = in_force,
+            // Named, because "not in scrolling.widths" is confusing advice when
+            // the list being counted against is not the one in the file.
+            fallback = widths.is_empty(),
+            "scrolling.default_width names a width that is not in the list of widths \
+             in force; a new column opens at the last one instead"
         );
     }
     Ok(solium_layout::scroller::Scroller::with_widths(
@@ -3661,10 +3676,18 @@ mod tests {
                 -- A typo at the top level, and one inside a section.
                 tilling = { split = 0.6 },
                 open = { scal = 0.5 },
+                -- A near miss on the *deprecated* spelling of `pane`. Reported,
+                -- because it is not a key anything reads -- and reported with no
+                -- suggestion, because the only word within two edits of it is
+                -- `decoration`, and answering a typo with a deprecated spelling
+                -- walks somebody past the key that actually works (#117 review).
+                decoraton = "border",
                 -- Not typos, and must not be reported: `keyboard` is empty on
                 -- purpose, so its keys cannot be checked against the defaults,
-                -- and a binding combination is whatever you press.
-                keyboard = { layout = "us,ua" },
+                -- and a binding combination is whatever you press. `active`
+                -- belongs with a dual layout and is exactly the pair that used
+                -- to be called a typo.
+                keyboard = { layout = "us,ua", active = 2 },
                 bindings = { ["super+f6"] = "fixture-nothing" },
             }
             "#,
@@ -3680,11 +3703,13 @@ mod tests {
         assert_eq!(
             reported,
             vec![
+                ("decoraton", None),
                 ("open.scal", Some("open.scale")),
                 ("tilling", Some("tiling"))
             ],
             "the unrecognised keys are wrong: a near miss inside a section must be \
-             reported by its full path, and neither `keyboard.layout` nor a binding \
+             reported by its full path, a near miss on a deprecated name must not be \
+             answered with that name, and neither the `keyboard` section nor a binding \
              combination may be called a typo"
         );
 
@@ -4560,6 +4585,293 @@ mod tests {
             (dx - (-2.0 * 1600.0 * 1.06)).abs() < 0.5 && dy == 0.0,
             "desk 1 sits at {dx},{dy}, which is not two screens to the left of desk 3"
         );
+    }
+
+    /// **A reload that shortens the arrangement still leaves every window
+    /// somewhere you can reach.**
+    ///
+    /// The failure the fix for #116 introduced, which the bug it fixed did not
+    /// have. `workspaces.of` is now carried across the reload, and the
+    /// `restore` sweep forgot the abandoned *desks* without touching the
+    /// entries naming them -- so `columns = 4` edited to `columns = 2` left a
+    /// window remembering workspace 4, in no group at all:
+    ///
+    ///   * `regroup` loops `1..count`, so nothing ever names it -- it is drawn
+    ///     over whatever workspace is in view, on top of windows that belong
+    ///     there;
+    ///   * `visible()` filters it out, so no layout arranges it;
+    ///   * and `go()` clamps to `count()`, so no key switches to where it
+    ///     thinks it is.
+    ///
+    /// Before #116 `of` was wiped on every reload and the window came back on
+    /// the workspace in view. The same is true of `showing`, and worse: a
+    /// session looking at workspace 4 when the arrangement shrinks to two
+    /// carries *every* surviving desk off to the left of a workspace that no
+    /// longer exists, which is the off-stage desktop the issue was reported as,
+    /// reached by the other door.
+    ///
+    /// Same shape as the reload test above, with the configuration edited
+    /// between the two loads -- which is what a reload is for.
+    #[test]
+    fn a_reload_with_fewer_workspaces_leaves_no_window_on_a_desk_that_is_gone() {
+        if let Some(own) = Scripts::user_config_dir()
+            && (own.join("config.lua").exists()
+                || own.join("user.lua").exists()
+                || own.join("workspaces.lua").exists()
+                || own.join("modes.lua").exists())
+        {
+            return;
+        }
+
+        let directory = std::env::temp_dir().join("solium-script-test-reload-shorter");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            local workspaces = require("workspaces")
+
+            sol.bind("super+f1", function() workspaces.go(3) end)
+            sol.bind("super+f2", function() workspaces.go(4) end)
+            sol.bind("super+f3", function()
+                sol.status(string.format("%d/%d",
+                    workspaces.on("test-1"), workspaces.count()))
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let first = &[7_u64];
+        let all = &[7_u64, 9];
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        scripts.monitors_changed(one_screen(first));
+        // One window on workspace 1, then to workspace 3, a window opens there,
+        // and the session is left looking at workspace 4.
+        scripts.opened(7, one_screen(first));
+        scripts.key("super+f1", one_screen(first));
+        scripts.opened(9, one_screen(all));
+        scripts.key("super+f2", one_screen(all));
+
+        let before = scripts.key("super+f3", one_screen(all));
+        assert_eq!(
+            before.status.as_deref(),
+            Some("4/4"),
+            "the session was not set up: this is before any reload"
+        );
+
+        // The edit. `require` searches the configuration's own directory first,
+        // so the *second* load finds this and the first did not.
+        std::fs::write(
+            directory.join("user.lua"),
+            "return { workspaces = { columns = 2 } }\n",
+        )
+        .expect("writing the fixture user.lua");
+
+        let carried_over = scripts.kept();
+        let mut scripts =
+            Scripts::load_carrying(&config, carried_over).expect("reloading the test script");
+        let restored = scripts.restored(one_screen(all));
+        let monitors = scripts.monitors_changed(one_screen(all));
+        let layout = scripts.relayout(one_screen(all));
+
+        let after = scripts.key("super+f3", one_screen(all));
+        assert_eq!(
+            after.status.as_deref(),
+            Some("2/2"),
+            "after the reload the scripts are still looking at a workspace the \
+             arrangement no longer has, and `go` clamps to the count -- so no key \
+             switches away from it"
+        );
+
+        let mut commands = restored.commands;
+        commands.extend(monitors.commands);
+        commands.extend(layout.commands);
+
+        let who = membership(&commands);
+        assert_eq!(
+            who.get("desk-1@test-1").map(Vec::as_slice),
+            Some([7].as_slice()),
+            "the window on workspace 1 is not on desk 1 any more; memberships: {who:?}"
+        );
+        assert_eq!(
+            who.get("desk-2@test-1").map(Vec::as_slice),
+            Some([9].as_slice()),
+            "the window kept on workspace 3 is in no selection at all: nothing names \
+             it, so no layout arranges it and no key reaches it; memberships: {who:?}"
+        );
+
+        // And the desk in view is the one in view, rather than one cell to the
+        // left of a workspace that no longer exists.
+        let where_they_sit = carried(&commands);
+        assert_eq!(
+            where_they_sit.get("desk-2@test-1"),
+            Some(&(0.0, 0.0)),
+            "every surviving desk is carried off-stage, relative to a workspace the \
+             arrangement no longer has; offsets: {where_they_sit:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A keyboard section that says what layout to start on is not a typo.**
+    ///
+    /// `config.lua` restates `sol.keyboard`'s key set, because `keyboard = {}`
+    /// is empty on purpose and so cannot be the list. The restatement left
+    /// `active` out, and `sol.keyboard` reads it -- so a dual-layout
+    /// configuration, the only kind that has an `active` to name, was told its
+    /// working setting is read by nothing and `solium --check` exited 1 (#117
+    /// review).
+    ///
+    /// That is worse than the silence #117 replaced. `--check` answers "did my
+    /// configuration work", and a check that is wrong about a setting people
+    /// really write is a check they stop running. See
+    /// `every_key_a_section_accepts_is_one_the_compositor_reads`, which is what
+    /// stops the list drifting again.
+    #[test]
+    fn a_keyboard_section_naming_its_layouts_and_which_is_live_is_not_a_typo() {
+        let Some((directory, scripts)) = shipped_init_with_user(
+            "solium-script-test-keyboard-active",
+            r#"
+            return {
+                keyboard = { layout = "us,ru", active = 2 },
+            }
+            "#,
+        ) else {
+            return;
+        };
+
+        let reported: Vec<String> = scripts
+            .unknown_settings()
+            .into_iter()
+            .map(|setting| setting.key)
+            .collect();
+        assert!(
+            reported.is_empty(),
+            "a configuration naming two layouts and which of them is live is reported \
+             as read by nothing, and `--check` exits 1 over a setting that works: \
+             {reported:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Every key `config.lua`'s `open_sections` accepts for one section.
+    ///
+    /// Scraped from the shipped file rather than restated here: a third copy of
+    /// a list whose second copy is the defect under test would be the same
+    /// mistake with more steps.
+    fn accepted_keys(section: &str) -> Vec<String> {
+        let path = crate::assets::lua().join("config.lua");
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let Some(table) = text.split("local open_sections = {").nth(1) else {
+            return Vec::new();
+        };
+        let Some(rest) = table.split(&format!("{section} = {{")).nth(1) else {
+            return Vec::new();
+        };
+        // Comments stripped before anything else is looked for, because a line
+        // documenting `sol.keyboard{ active = 2 }` holds both a closing brace
+        // and an `=` -- so leaving them in ends the table early and drops the
+        // very key the comment is about. No string in this table holds a `--`.
+        let without_comments: String = rest
+            .lines()
+            .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let Some(body) = without_comments.split('}').next() else {
+            return Vec::new();
+        };
+        let mut found: Vec<String> = body
+            .split(',')
+            .filter_map(|entry| entry.split_once('='))
+            .filter(|(_, value)| value.trim() == "true")
+            .map(|(key, _)| key.trim().to_owned())
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The keys a compositor function reads out of the table it is handed.
+    ///
+    /// Asked of the function by handing it one that records what is looked up
+    /// in it, so this cannot be a restatement of the reads and cannot drift
+    /// from them however they are spelled -- `sol.keyboard` reads five of its
+    /// keys through a closure and three directly, and an `options.get(` scan
+    /// would see only three.
+    fn keys_read_by(name: &str) -> Vec<String> {
+        let directory = std::env::temp_dir().join(format!("solium-script-test-reads-{name}"));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+                sol.bind("Super+P", function()
+                    local seen = {{}}
+                    sol.{name}(setmetatable({{}}, {{
+                        __index = function(_, key) seen[#seen + 1] = tostring(key) end,
+                    }}))
+                    table.sort(seen)
+                    sol.status(table.concat(seen, " "))
+                end)
+                "#
+            ),
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+p", empty_snapshot());
+        let _ = std::fs::remove_dir_all(&directory);
+        let mut found: Vec<String> = outcome
+            .status
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect();
+        // Sorted on the Lua side already; a key read twice is one key.
+        found.dedup();
+        found
+    }
+
+    /// **The key sets `config.lua` restates are the ones the compositor reads.**
+    ///
+    /// `keyboard` and `cursor` default to `{}` -- empty *means* "whatever the
+    /// session already said" -- so the defaults cannot double as the list of
+    /// what exists, and `config.lua` writes the list out. #117 said in a comment
+    /// that a reader growing a key would make this report that key as a typo,
+    /// and called that loud. It was not loud: the list shipped already missing
+    /// `active`, and nothing failed.
+    ///
+    /// So the two halves are compared here instead, and in both directions. A
+    /// key the compositor reads and the list omits is a working setting called
+    /// a typo, which exits `--check` non-zero over nothing; a key the list
+    /// accepts and nothing reads is #117's original fault, read from the other
+    /// side -- a real typo waved through.
+    #[test]
+    fn every_key_a_section_accepts_is_one_the_compositor_reads() {
+        for (section, function) in [("keyboard", "keyboard"), ("cursor", "cursor_theme")] {
+            let read = keys_read_by(function);
+            let accepted = accepted_keys(section);
+            // Either scrape coming back empty would make this agree with
+            // anything, and both have a way of doing that quietly: a renamed
+            // `open_sections`, or a `sol.` function that stopped being reached.
+            assert!(
+                read.len() >= 2 && accepted.len() >= 2,
+                "sol.{function} was seen reading {read:?} and config.lua's \
+                 open_sections.{section} accepts {accepted:?}; one of the two walks \
+                 is broken, not the lists"
+            );
+            assert_eq!(
+                accepted, read,
+                "config.lua's open_sections.{section} and the keys sol.{function} \
+                 actually reads have drifted apart: a key only the compositor reads \
+                 is a working setting `--check` calls a typo, and a key only the \
+                 list has is a typo `--check` waves through"
+            );
+        }
     }
 }
 

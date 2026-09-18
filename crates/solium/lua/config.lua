@@ -534,11 +534,24 @@ end
 --   bindings           open by construction. A key combination is whatever you
 --                      press, so there is no list to check one against.
 --
--- A section listed here whose compositor-side reader grows a key, and which is
--- not updated to match, will report that key as a typo. That is the failure
--- this table can have, it is loud, and it is the right way round: the
--- alternative -- skipping these three -- is silence, which is the thing being
--- fixed.
+-- **This table is checked against the compositor, and was wrong when it
+-- shipped.** #117 wrote here that a reader growing a key and this list not
+-- being updated to match would report that key as a typo, and called that
+-- failure loud. It was not loud at all: `active` was missing from the day this
+-- was written, `sol.keyboard` has always read it, `init.lua` passes it straight
+-- through, and so `keyboard = { layout = "us,ru", active = 2 }` -- the only
+-- shape of configuration that has an `active` worth naming -- was told its
+-- working setting is read by nothing, and `solium --check` exited 1 over it.
+-- Which is worse than the silence #117 replaced: `--check` is sold as "did my
+-- configuration work", and one wrong answer there teaches people to stop
+-- reading it.
+--
+-- A hand-restated list drifts, so a comment asking the next person to remember
+-- is not the fix. `every_key_a_section_accepts_is_one_the_compositor_reads` in
+-- `script.rs` hands each of these functions a table that records what is looked
+-- up in it and compares the two sets, in both directions: a key only the
+-- compositor reads is a working setting called a typo, and a key only this list
+-- has is #117's own fault from the other side.
 local open_sections = {
     keyboard = {
         rules = true,
@@ -548,6 +561,9 @@ local open_sections = {
         options = true,
         repeat_rate = true,
         repeat_delay = true,
+        -- Which of several layouts is live. `sol.keyboard{ active = 2 }` is
+        -- also how the cycle binding in `init.lua` switches it.
+        active = true,
     },
     cursor = { theme = true, size = true },
     -- `true` rather than a set of names: everything is accepted.
@@ -556,6 +572,13 @@ local open_sections = {
 
 -- The one key a user may write that these defaults deliberately do not define.
 -- See the read-across at the bottom of this file.
+--
+-- Accepted, and deliberately never *suggested*: `nearest` is not shown this
+-- table. It used to be, and so `decoraton` was answered with "did you mean
+-- decoration", which sends somebody to correct a typo into a spelling that is
+-- deprecated -- past the key that actually configures this, which is `pane`. An
+-- alias exists so a file written before the rename keeps working, not so a new
+-- file can be steered into using it.
 local legacy = { decoration = true }
 
 -- Keys the user's file set that nothing here defines, as dotted paths.
@@ -619,12 +642,24 @@ end
 -- anything, a table of names for one whose names live elsewhere, `nil` for the
 -- ordinary case where `base` itself is the list of what exists.
 --
+-- `legacy` is read straight out of the upvalue rather than handed in as an
+-- `accepted` set, because the two are accepted for opposite reasons: an
+-- `open_sections` name is the current spelling and is worth suggesting, and a
+-- legacy name is the old one and is not.
+--
 -- Checking on the way *in*, before the assignment, because after it the key
 -- exists in `base` and the evidence is gone.
 local function merge(base, over, path, accepted)
     for key, value in pairs(over) do
         local where = path and (path .. "." .. tostring(key)) or tostring(key)
-        if accepted ~= true and base[key] == nil and not (accepted and accepted[key]) then
+        -- `legacy` is consulted here and not passed to `nearest`: an old
+        -- spelling still works, and is still not what to suggest. Only at the
+        -- top level, which is where the alias is.
+        local known = accepted == true
+            or base[key] ~= nil
+            or (accepted and accepted[key])
+            or (path == nil and legacy[key])
+        if not known then
             local meant = nearest(tostring(key), base, accepted)
             -- Qualified the same way the key is, so the suggestion is something
             -- you can paste: inside `tiling` the fix is `tiling.split`, not
@@ -655,7 +690,7 @@ end
 local found, user = pcall(require, "user")
 if found then
     if type(user) == "table" then
-        merge(defaults, user, nil, legacy)
+        merge(defaults, user)
     else
         error("user.lua must return a table, got " .. type(user), 0)
     end

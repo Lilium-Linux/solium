@@ -127,11 +127,15 @@ out of it. Captured frame by frame in `docs/morph.png` — 460x208 near the dock
 then 928x504, 1192x672, settled at full size about a third of a second later.
 
 `sol.present_from` is still there and still does that. What is missing is a
-dock to give it a rectangle, and `config.lua` still carries `dock.morph` for
-the day one exists. A layer-shell dock could hand over an icon rect through a
-protocol, and that is exactly the side-channel the one-engine argument says
-will go stale — so if the morph is wanted for real, this is the decision to
-reopen rather than route around.
+dock to give it a rectangle. `config.lua` carried a `dock.morph` duration for
+the day one exists, and #117 removed it — nothing had ever read it, and a
+setting configuring a component that does not exist cannot be told apart, from
+outside, from one that is broken. `--check` reports that spelling as an
+unrecognised key now, and a dock brings its settings back to that spot when it
+arrives. A layer-shell dock could hand over an icon rect through a protocol, and
+that is exactly the side-channel the one-engine argument says will go stale — so
+if the morph is wanted for real, this is the decision to reopen rather than
+route around.
 
 None of that is reachable from a separate process. A client dock can pass a
 rectangle over IPC, but by the time the window exists the two are separate
