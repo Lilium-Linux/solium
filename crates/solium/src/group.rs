@@ -1002,6 +1002,8 @@ mod desk {
             title: format!("window {id}"),
             focused,
             monitor: "DP-1".to_owned(),
+            modal: false,
+            parent: crate::script::Parentage::None,
         }
     }
 
