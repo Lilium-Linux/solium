@@ -336,6 +336,9 @@ pub(crate) enum Command {
     /// How a window behaves between being asked for and its application
     /// arriving. See `Loading`.
     Loading(Loading),
+    /// What fills a window between an edge drag asking for a size and the
+    /// client painting it. See `crate::resizing::Settings`.
+    Resize(crate::resizing::Settings),
     /// Which XCursor theme the pointer is drawn from, and how big it is.
     ///
     /// Carries what the *configuration* said and nothing else — `None` in a
@@ -2009,6 +2012,67 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Loading(loading.clone()));
+            })
+        })?,
+    )?;
+
+    // What fills a window while a resize drag is ahead of its client.
+    //
+    // `Option<Table>` and not `Table`, for the reason `sol.cursor_theme` below
+    // spells out at length: the documented way to override the configuration is
+    // one `~/.config/solium/config.lua`, and a copy written before this setting
+    // existed has no `resize` key at all. A `Table` parameter would fail the
+    // *whole configuration* over a setting nobody asked for -- no layouts, no
+    // bindings, no windows placed.
+    sol.set(
+        "resize",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let options = match options {
+                Some(table) => table,
+                None => lua.create_table()?,
+            };
+            let mut resize = crate::resizing::Settings::default();
+            // Read as a `Value` and matched rather than asked for as an
+            // `Option<String>`: mlua *errors* on anything that is not
+            // string-like instead of answering None, and the `?` would take the
+            // whole handler down with it. Same reasoning as `scene` above, and
+            // it is how bezier easings once silently stopped working.
+            //
+            // A name that is not one of the three is named in the log and the
+            // default kept, rather than guessed at. Someone who wrote `fill =
+            // "stretched"` wants to be told, and a compositor that silently
+            // picks for them is one they cannot debug.
+            if let Ok(Value::String(name)) = options.get::<Value>("fill")
+                && let Ok(name) = name.to_str()
+            {
+                match crate::resizing::Fill::named(&name) {
+                    Some(fill) => {
+                        // Said out loud rather than left to be discovered.
+                        // `scene` is a real setting and its render path is
+                        // real, but the only pane that has a scene to draw is
+                        // one whose application has not painted yet -- so on
+                        // an ordinary window it is `hold` today, and someone
+                        // who chose it and saw no difference deserves to be
+                        // told why rather than left doubting their config.
+                        // `crate::resizing::Fill::Scene` carries the whole of
+                        // it, including what arming one would cost.
+                        if fill == crate::resizing::Fill::Scene {
+                            tracing::warn!(
+                                "resize.fill = \"scene\" only draws a scene a window already \
+                                 has, which today means one resized before its application \
+                                 painted; anywhere else it behaves as \"hold\""
+                            );
+                        }
+                        resize.fill = fill;
+                    }
+                    None => tracing::warn!(
+                        fill = %name,
+                        "resize.fill is one of stretch, hold or scene; keeping the default"
+                    ),
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Resize(resize));
             })
         })?,
     )?;

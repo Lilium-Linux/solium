@@ -173,6 +173,29 @@ impl ResizeGrab {
     }
 }
 
+/// Whether a drag on these edges moves the window's left edge, and with it its
+/// origin.
+///
+/// Shared with [`crate::resizing`] rather than restated there. That module has
+/// to pin the edges a drag is *not* holding when a client refuses the size it
+/// was offered, which is the same question asked from the other side, and two
+/// spellings of "is this drag pulling the left edge" is how the end of a
+/// gesture comes to disagree with the middle of it.
+pub(crate) const fn pulls_left(edges: ResizeEdge) -> bool {
+    matches!(
+        edges,
+        ResizeEdge::Left | ResizeEdge::TopLeft | ResizeEdge::BottomLeft
+    )
+}
+
+/// The same for the top edge. See [`pulls_left`].
+pub(crate) const fn pulls_top(edges: ResizeEdge) -> bool {
+    matches!(
+        edges,
+        ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::TopRight
+    )
+}
+
 /// Where a drag from `from` to `now` puts a window that started at `began`.
 ///
 /// A free function so it can be tested without a compositor: this is the whole
@@ -194,17 +217,9 @@ fn resized(
     );
 
     let mut rect = began;
-    let pulls_left = matches!(
-        edges,
-        ResizeEdge::Left | ResizeEdge::TopLeft | ResizeEdge::BottomLeft
-    );
     let pulls_right = matches!(
         edges,
         ResizeEdge::Right | ResizeEdge::TopRight | ResizeEdge::BottomRight
-    );
-    let pulls_top = matches!(
-        edges,
-        ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::TopRight
     );
     let pulls_bottom = matches!(
         edges,
@@ -220,11 +235,11 @@ fn resized(
     // Dragging a left or top edge moves the window as well as resizing it, and
     // the opposite edge must stay put — so the size is clamped first and the
     // position derived from it, not the other way round.
-    if pulls_left {
+    if pulls_left(edges) {
         rect.size.w = (began.size.w - dx).max(MINIMUM);
         rect.loc.x = began.loc.x + began.size.w - rect.size.w;
     }
-    if pulls_top {
+    if pulls_top(edges) {
         rect.size.h = (began.size.h - dy).max(MINIMUM);
         rect.loc.y = began.loc.y + began.size.h - rect.size.h;
     }
@@ -248,6 +263,7 @@ impl PointerGrab<Solium> for ResizeGrab {
             window: self.window.clone(),
             wanted: self.resized(event.location),
             at: (event.location.x, event.location.y),
+            edges: self.edges,
             horizontal: matches!(
                 self.edges,
                 ResizeEdge::Left
@@ -381,7 +397,21 @@ impl PointerGrab<Solium> for ResizeGrab {
         &self.start_data
     }
 
-    fn unset(&mut self, _data: &mut Solium) {}
+    /// The gesture is over, however it ended.
+    ///
+    /// Smithay calls this when the grab is removed — the button coming up, and
+    /// also a grab being replaced or the seat being reset, which is why the
+    /// release is hooked here rather than in [`Self::button`]. Any of them ends
+    /// the drag, and a drag that ended without saying so leaves the pane's slot
+    /// holding a rectangle nothing will ever reconcile.
+    ///
+    /// Safe to call from inside a grab callback because it touches no seat: it
+    /// sets a deadline and sends one configure. Anything that asked the seat
+    /// where the pointer is would deadlock here — see `Solium::pending_drop`
+    /// for the version of that lesson that cost a frozen compositor.
+    fn unset(&mut self, data: &mut Solium) {
+        data.release_resize(&self.window);
+    }
 }
 
 #[cfg(test)]

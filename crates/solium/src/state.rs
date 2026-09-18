@@ -544,6 +544,19 @@ pub(crate) struct Solium {
     /// floating window is resized directly.
     pub(crate) pending_resize: Option<ResizeRequest>,
 
+    /// The window whose pane's slot is currently telling the truth about its
+    /// size, because an edge drag is still going on. See [`crate::resizing`].
+    ///
+    /// **Not a fourth place a window's position lives** — issue #84 counts
+    /// three already and adding one would be the wrong direction. No rectangle
+    /// is stored here: the rectangle is the pane's slot, and this only says
+    /// that the slot outranks the client for a while and when it stops doing
+    /// so.
+    pub(crate) resize_hold: Option<crate::resizing::Held>,
+
+    /// What `config.lua` said about resizing. See [`crate::resizing::Fill`].
+    pub(crate) resizing: crate::resizing::Settings,
+
     /// A drag that has finished and not yet been reported to scripts.
     ///
     /// Recorded inside the pointer grab and acted on after it, for exactly the
@@ -593,6 +606,15 @@ pub(crate) struct ResizeRequest {
     /// Where a floating window would be put, for when no layout claims it.
     pub(crate) wanted: Rectangle<i32, Logical>,
     pub(crate) at: (f64, f64),
+    /// Which edges the pointer has hold of.
+    ///
+    /// The two booleans below are what a *script* is handed and are an axis
+    /// pair, which is all a layout needs: a seam moves or it does not. This is
+    /// the side as well, because the compositor needs it — a client that
+    /// refuses the size it was offered has to give the pixels back on the edge
+    /// being dragged, and "horizontal" cannot say which of the two that is.
+    /// See `crate::resizing::Hold::anchored`.
+    pub(crate) edges: ResizeEdge,
     pub(crate) horizontal: bool,
     pub(crate) vertical: bool,
 }
@@ -1135,6 +1157,8 @@ impl Solium {
             closing: None,
             pending_drop: None,
             pending_resize: None,
+            resize_hold: None,
+            resizing: crate::resizing::Settings::default(),
             redraw: true,
             animating: false,
             dmabuf_state: DmabufState::new(),
@@ -1177,6 +1201,24 @@ impl Solium {
         let Some(window) = pane.client() else {
             return Some(pane.slot());
         };
+        // **While an edge is being dragged the slot outranks the client.**
+        //
+        // This is the inversion issue #113 needed. Everywhere else the space is
+        // the authority for a mapped window, and the space reports a window's
+        // size as whatever the *client* last committed -- so a drag that moved
+        // the origin now and asked for the size later drew a rectangle with a
+        // new origin and an old size, which moves the edge nobody is dragging
+        // and snaps it back when the client answers. Here the rectangle the
+        // user is dragging is the truth, immediately, and the client's last
+        // buffer is bridged into it by `resizing::factor` until it catches up.
+        //
+        // Bounded, and that matters more than the inversion: `resizing::Hold`
+        // ends this the moment the client answers -- with what it was asked for
+        // or with anything else -- and on a deadline if it answers nothing.
+        // See `crate::resizing`.
+        if self.holding_resize(pane.id()) {
+            return Some(pane.slot());
+        }
         // A client that has mapped and not yet answered the size it was asked
         // for has a window of no size at all. Taking the space's word for that
         // collapses the pane to nothing for as long as it lasts -- which is
@@ -2121,10 +2163,23 @@ impl Solium {
             }
         }
 
+        // The space's answer per window, except for one being dragged: while an
+        // edge drag is live the slot is the authority and the space's size is
+        // whatever the client last committed, so copying it back would undo the
+        // drag between one frame and the next. Its own slot is substituted
+        // rather than the pane being skipped, so `Panes::sync` still sees every
+        // window in the space and in the space's order — the ordering is the
+        // other half of what this call is for.
         let stack: Vec<(Window, Rectangle<i32, Logical>)> = self
             .space
             .elements()
-            .filter_map(|window| Some((window.clone(), self.real_geometry(window)?)))
+            .filter_map(|window| {
+                let rect = match self.held_slot(window) {
+                    Some(slot) => slot,
+                    None => self.real_geometry(window)?,
+                };
+                Some((window.clone(), rect))
+            })
             .collect();
         if !self.panes.sync(&stack, self.clock.now()) {
             return false;
@@ -2582,6 +2637,12 @@ impl Solium {
                     if self.loading != loading {
                         tracing::debug!(?loading, "loading behaviour set");
                         self.loading = loading;
+                    }
+                }
+                Command::Resize(resizing) => {
+                    if self.resizing != resizing {
+                        tracing::debug!(?resizing, "resize behaviour set");
+                        self.resizing = resizing;
                     }
                 }
                 Command::Cursor(configured) => {
@@ -3521,16 +3582,237 @@ impl Solium {
     /// pointer is wherever it is now, and the positions it passed through since
     /// the last frame are of no interest to anyone.
     ///
+    /// Coalescing is the *rate* the client is asked at, not the rate the
+    /// window moves at. Since #113 those are two different numbers:
+    /// `hold_resize` puts the pane where the drag says on every one of these
+    /// calls, and `crate::resizing::TELL_EVERY` decides which of them the
+    /// client hears about.
+    ///
     /// Returns whether anything was resized.
     pub(crate) fn settle_resize(&mut self) -> bool {
-        let Some(request) = self.pending_resize.take() else {
+        let now = self.clock.now();
+        let dragged = match self.pending_resize.take() {
+            Some(request) => {
+                if self.trigger_resize(&request) {
+                    // A layout took it: the window's rectangle is the layout's
+                    // arithmetic and goes through `move_pane`, which writes the
+                    // slot, the space and the client together. Nothing for a
+                    // hold to arbitrate, and a hold left over from a drag that
+                    // has since been claimed would fight it.
+                    self.drop_resize_hold();
+                } else {
+                    self.hold_resize(&request, now);
+                }
+                self.redraw = true;
+                true
+            }
+            None => false,
+        };
+        // Whether or not the pointer moved this frame: a hold outlives the
+        // gesture by however long the client takes to answer the last
+        // configure, and something has to be watching for that answer.
+        self.settle_resize_hold(now) || dragged
+    }
+
+    /// Whether this pane's slot is the authority on its window's size just now.
+    pub(crate) fn holding_resize(&self, pane: crate::pane::PaneId) -> bool {
+        self.resize_hold
+            .as_ref()
+            .is_some_and(|held| held.pane == pane)
+    }
+
+    /// What fills this pane while its client catches up, or `None` if it is not
+    /// being dragged. See [`crate::resizing::factor`].
+    pub(crate) fn resize_fill(&self, pane: crate::pane::PaneId) -> Option<crate::resizing::Fill> {
+        let held = self.resize_hold.as_ref()?;
+        (held.pane == pane).then(|| held.hold.fill(self.resizing.fill))
+    }
+
+    /// The slot a held window's pane is keeping, if this is that window.
+    ///
+    /// `sync_panes` asks: the space is normally the authority it copies into
+    /// every pane's slot, and copying it over a held slot would undo the drag
+    /// between one frame and the next — silently, which is exactly how the
+    /// first attempt at `rescue_offscreen` went wrong.
+    fn held_slot(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+        let held = self.resize_hold.as_ref()?;
+        if &held.window != window {
+            return None;
+        }
+        self.panes.get(held.pane).map(Pane::slot)
+    }
+
+    /// A fresh edge drag is starting on this window.
+    ///
+    /// The previous drag's hold may still be live: its deadline runs for a
+    /// quarter of a second after the button came up, and a second drag can
+    /// easily begin inside that — a border nudged twice, or a double-click that
+    /// turns into a drag. Inheriting it would let the *old* gesture's deadline
+    /// expire in the middle of the new one and adopt whatever size the client
+    /// happened to be at, which is the shake back again with a longer period.
+    ///
+    /// Holds on other windows are left alone: one of those expiring reconciles
+    /// its own window correctly and has nothing to do with this drag.
+    pub(crate) fn begin_resize(&mut self, window: &Window) {
+        if self
+            .resize_hold
+            .as_ref()
+            .is_some_and(|held| &held.window == window)
+        {
+            self.drop_resize_hold();
+        }
+    }
+
+    /// Let go of a hold without reconciling anything.
+    ///
+    /// For the cases where the rectangle has been decided by someone else — a
+    /// layout claiming the drag, the window going away — rather than by the
+    /// client answering. Nothing to adopt: whoever took over owns the
+    /// rectangle now.
+    fn drop_resize_hold(&mut self) {
+        self.resize_hold = None;
+    }
+
+    /// Put the pane where the drag says, now, and let the client catch up.
+    ///
+    /// **This is the fix for #113.** What it does *not* do is as important as
+    /// what it does: it does not wait for the client, and it does not derive
+    /// the window's rectangle from the client's size. The pane's slot takes the
+    /// dragged rectangle whole — origin and size in the same frame — so the
+    /// edge under the pointer is the edge that moves and the opposite edge does
+    /// not move at all.
+    ///
+    /// The space is told the new *position* in the same breath, deliberately.
+    /// Position never needed a client's consent; only size does. Holding the
+    /// position back too would put the space and the slot into exactly the
+    /// disagreement issue #84 is about, for no gain, and would break every
+    /// reader of `real_geometry` for the length of a drag.
+    fn hold_resize(&mut self, request: &ResizeRequest, now: Duration) {
+        let client = inner(request.wanted, self.frame_insets(&request.window));
+        let Some(pane) = self.panes.id_of(&request.window) else {
+            // A window with no pane has nowhere to hold a rectangle. That is
+            // not a case anyone should reach — `sync_panes` gives every client
+            // in the space a pane — but the old behaviour is a correct
+            // fallback rather than a guess, so take it and say nothing.
+            self.resize_to(&request.window, request.wanted);
+            return;
+        };
+        if let Some(held) = self.panes.get_mut(pane) {
+            held.set_slot(client);
+        }
+        self.map_stacked(request.window.clone(), client.loc, false);
+
+        let size = request.window.geometry().size;
+        match &mut self.resize_hold {
+            // The same drag, still going. The client hears about it on the
+            // throttle's schedule, not this frame's.
+            Some(held) if held.pane == pane => {
+                if let Some(tell) = held.hold.dragged(client.size, size, now) {
+                    size_window(&request.window, Rectangle::new(client.loc, tell));
+                }
+            }
+            // A new drag — or a drag that has moved to a different window,
+            // which a grab cannot do but a script rebinding one could. Either
+            // way the previous hold is over and its window keeps whatever
+            // rectangle it last had.
+            _ => {
+                size_window(&request.window, client);
+                self.resize_hold = Some(crate::resizing::Held {
+                    window: request.window.clone(),
+                    pane,
+                    hold: crate::resizing::Hold::new(request.edges, size, client.size, now),
+                });
+            }
+        }
+    }
+
+    /// The pointer has let go of an edge drag.
+    ///
+    /// Sends the final configure — the one the throttle must not get the last
+    /// word on — and starts the deadline. The pane keeps the rectangle the
+    /// gesture ended on until the client answers or the deadline runs out; see
+    /// `settle_resize_hold`.
+    ///
+    /// Called from inside the pointer grab, so it must not touch the seat. It
+    /// does not: a clock, a pane's slot, and one configure.
+    pub(crate) fn release_resize(&mut self, window: &Window) {
+        let now = self.clock.now();
+        let Some(held) = self.resize_hold.as_ref() else {
+            return;
+        };
+        if &held.window != window {
+            return;
+        }
+        let Some(slot) = self.panes.get(held.pane).map(Pane::slot) else {
+            self.drop_resize_hold();
+            return;
+        };
+        let size = window.geometry().size;
+        let Some(held) = self.resize_hold.as_mut() else {
+            return;
+        };
+        let tell = held.hold.release(slot.size, size, now);
+        size_window(window, Rectangle::new(slot.loc, tell));
+        self.redraw = true;
+    }
+
+    /// Watch a live hold for the client's answer, and end it when one comes.
+    ///
+    /// Returns whether the window's rectangle changed, which it only does in
+    /// the case that is the whole reason this is careful: the client answered
+    /// with a size that is not the one it was asked for, or answered nothing at
+    /// all. See `crate::resizing::Settle`.
+    fn settle_resize_hold(&mut self, now: Duration) -> bool {
+        let Some(held) = self.resize_hold.as_ref() else {
             return false;
         };
-        if !self.trigger_resize(&request) {
-            self.resize_to(&request.window, request.wanted);
+        let (window, pane) = (held.window.clone(), held.pane);
+        // The pane or its client has gone. A hold pointing at neither would
+        // keep `holding_resize` true for a pane id that has been reused by
+        // nothing, and there is no rectangle left to reconcile.
+        if self.panes.get(pane).and_then(Pane::client) != Some(&window) {
+            self.drop_resize_hold();
+            return false;
         }
-        self.redraw = true;
-        true
+        let size = window.geometry().size;
+        let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
+            self.drop_resize_hold();
+            return false;
+        };
+        let Some(held) = self.resize_hold.as_mut() else {
+            return false;
+        };
+        match held.hold.settle(size, now) {
+            crate::resizing::Settle::Waiting => false,
+            // The client is the size the pane is. Everything agrees again, so
+            // there is nothing to hold and nothing to move.
+            crate::resizing::Settle::Done => {
+                self.drop_resize_hold();
+                false
+            }
+            // **The client's answer wins.** It refused the size it was offered
+            // — a minimum width, a cell grid — or it never answered at all, and
+            // either way the alternative is a window drawn at a size its client
+            // will never reach, stretched, for as long as it is open. One snap
+            // at the end of a gesture is the cheaper of the two, and it is also
+            // issue #115 becoming visible rather than staying hidden behind a
+            // blur.
+            crate::resizing::Settle::Adopt(taken) => {
+                let landed = held.hold.anchored(slot, taken);
+                self.drop_resize_hold();
+                if let Some(pane) = self.panes.get_mut(pane) {
+                    pane.set_slot(landed);
+                }
+                self.map_stacked(window, landed.loc, false);
+                self.redraw = true;
+                tracing::debug!(
+                    asked = ?slot.size,
+                    given = ?taken,
+                    "a client settled at a size of its own"
+                );
+                true
+            }
+        }
     }
 
     /// An X11 client has copied something. Offer it to Wayland clients.
@@ -7816,6 +8098,137 @@ mod tests {
                 "the parent was raised over the dialog that is waiting on it: the \
                  prompt is now behind the window it is blocking, where it cannot \
                  be read or dismissed"
+            );
+        }
+
+        /// **This is issue #113, through the compositor rather than beside it.**
+        ///
+        /// A top-left drag, on the first frame, with a real client that has
+        /// committed one buffer and will not commit another. That last part is
+        /// the whole test: the client answers *nothing*, so what is asserted is
+        /// what the compositor draws while it is waiting — which is exactly the
+        /// window the shake lives in.
+        ///
+        /// **A test that checked the final rectangle would pass on `stage`.**
+        /// The client does commit eventually and the window does end up the
+        /// right size; the bug is entirely in the frames before that. So this
+        /// asserts the rectangle with no answer in hand, and it asserts the
+        /// *pinned* edge rather than the dragged one — `stage` gets the dragged
+        /// corner right, because it applies the origin immediately. What it
+        /// gets wrong is the opposite corner, which it moves by the whole of
+        /// the drag's delta and then snaps back.
+        ///
+        /// Confirmed failing against `stage`'s rule, not merely assumed to: the
+        /// rectangle `stage` would produce is computed here from the same
+        /// inputs and asserted to be wrong. `stage`'s `pane_geometry` answers
+        /// `real_geometry`, which is the space's location paired with the
+        /// *client's* size — `on_stage` below, spelled out.
+        #[test]
+        fn the_edge_being_dragged_is_the_edge_that_moves_before_any_client_answers() {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            // See the #99 test: a Qt scene in a process holding a libwayland
+            // connection of its own aborts the whole test binary.
+            state
+                .decorations
+                .set_style(&mut state.panes, Some("none".to_string()));
+
+            let (conn, event_queue, client) = connect(&mut display, &mut state);
+            let qh = event_queue.handle();
+            let (window, _toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+
+            // Away from the origin, so a drag that moved the window to where it
+            // already was could not pass by accident.
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            let before = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
+            let painted = window.geometry().size;
+            assert!(
+                painted.w > 20 && painted.h > 12,
+                "the drag below has to leave a window with a size"
+            );
+
+            // The drag: the top-left corner, 20 right and 12 down. Smaller by
+            // that much, moved by that much, with the bottom-right corner
+            // standing still — that is what dragging a top-left corner means.
+            let wanted = Rectangle::new(
+                (before.loc.x + 20, before.loc.y + 12).into(),
+                (before.size.w - 20, before.size.h - 12).into(),
+            );
+            state.pending_resize = Some(ResizeRequest {
+                window: window.clone(),
+                wanted,
+                at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                edges: ResizeEdge::TopLeft,
+                horizontal: true,
+                vertical: true,
+            });
+            state.settle_resize();
+
+            // The client has been asked and has said nothing. Asserted rather
+            // than assumed, because a client that *had* answered would make
+            // every assertion below true for the wrong reason.
+            assert_eq!(
+                window.geometry().size,
+                painted,
+                "the fixture's client never commits a second buffer; if it had, \
+                 this test would be checking the easy case"
+            );
+
+            let after = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
+            assert_eq!(
+                after, wanted,
+                "the pane takes the dragged rectangle whole — origin and size \
+                 in the same frame — or the two halves land at different times \
+                 and that gap is the shake"
+            );
+            assert_eq!(
+                (after.loc.x + after.size.w, after.loc.y + after.size.h),
+                (before.loc.x + before.size.w, before.loc.y + before.size.h),
+                "the bottom-right corner is not being dragged and must not move"
+            );
+
+            // And `stage`'s rule, computed from the same two inputs: the new
+            // origin paired with the client's size, which is what
+            // `real_geometry` answers and what `pane_geometry` used to return.
+            let on_stage = Rectangle::new(wanted.loc, painted);
+            assert_ne!(
+                (
+                    on_stage.loc.x + on_stage.size.w,
+                    on_stage.loc.y + on_stage.size.h
+                ),
+                (before.loc.x + before.size.w, before.loc.y + before.size.h),
+                "the control: pairing the new origin with the client's old size \
+                 walks the corner nobody is dragging across the desktop, and \
+                 snaps it back when the client finally commits. That is #113, \
+                 and it is what this test fails on against stage"
+            );
+            assert_eq!(
+                on_stage.loc.x + on_stage.size.w,
+                before.loc.x + before.size.w + 20,
+                "by the drag's whole delta, every frame"
+            );
+
+            // The space agrees about *position* throughout. Only the size is
+            // held back, because only the size needs the client's consent —
+            // holding the position back too would put the space and the pane
+            // into the standing disagreement #84 is about, for no gain.
+            assert_eq!(
+                state
+                    .space
+                    .element_location(&window)
+                    .expect("a mapped window has a location"),
+                wanted.loc,
+                "the slot is authoritative for the size, not for where the \
+                 window is; nothing here may add a fourth opinion about that"
             );
         }
     }

@@ -1130,10 +1130,21 @@ pub(crate) fn elements(
 
         // The surface tree is built as if at its real size and then scaled,
         // which keeps subsurface offsets correct for free.
+        //
+        // **The same arithmetic bridges a live resize**, and that is the point
+        // rather than a coincidence: this factor is 1 in ordinary use only
+        // because the drawn rectangle is derived from the client's own size.
+        // Give the pane a rectangle the client has not agreed to yet -- which
+        // is what `pane_geometry` does while an edge is being dragged -- and
+        // this stretches the buffer the client last painted to fill it, with no
+        // second scaling path and nothing new in the element list. When the
+        // client commits the size it was asked for the two sizes are equal
+        // again and the window is pixel-exact. See `crate::resizing`.
         let origin = client.loc.to_physical_precise_round(scale);
-        let factor = Scale::from((
-            ratio(client.size.w, real.size.w),
-            ratio(client.size.h, real.size.h),
+        let factor = Scale::from(crate::resizing::factor(
+            state.resize_fill(pane),
+            client.size,
+            real.size,
         ));
 
         // Popups go in ahead of the sandwich, which means above all of it.
