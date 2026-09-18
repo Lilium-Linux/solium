@@ -215,14 +215,34 @@ pub(crate) const fn pulls_top(edges: ResizeEdge) -> bool {
 /// `solium_layout::tree::Edge`'s parser in `script.rs`, which is the one place
 /// they are read back.
 pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'static str>) {
+    // Two questions per axis, and only the first is this function's own:
+    // whether the axis is in play at all, and then which of its two sides the
+    // hand is on. [`pulls_left`] and [`pulls_top`] already answer the second,
+    // and answering it again here is exactly the duplication their own docs
+    // warn about -- two spellings of "is this drag pulling the left edge" is
+    // how the end of a gesture comes to disagree with the middle of it.
+    //
+    // The arms below are the other question, which is a genuinely different
+    // one: the edges that touch this axis. The catch-all stays `None` rather
+    // than a side, so `ResizeEdge::None` -- and any variant the protocol grows
+    // later -- reads as "this axis is not being dragged" instead of falling
+    // into a direction nobody asked for.
     let horizontal = match edges {
-        ResizeEdge::Left | ResizeEdge::TopLeft | ResizeEdge::BottomLeft => Some("left"),
-        ResizeEdge::Right | ResizeEdge::TopRight | ResizeEdge::BottomRight => Some("right"),
+        ResizeEdge::Left
+        | ResizeEdge::TopLeft
+        | ResizeEdge::BottomLeft
+        | ResizeEdge::Right
+        | ResizeEdge::TopRight
+        | ResizeEdge::BottomRight => Some(if pulls_left(edges) { "left" } else { "right" }),
         _ => None,
     };
     let vertical = match edges {
-        ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::TopRight => Some("top"),
-        ResizeEdge::Bottom | ResizeEdge::BottomLeft | ResizeEdge::BottomRight => Some("bottom"),
+        ResizeEdge::Top
+        | ResizeEdge::TopLeft
+        | ResizeEdge::TopRight
+        | ResizeEdge::Bottom
+        | ResizeEdge::BottomLeft
+        | ResizeEdge::BottomRight => Some(if pulls_top(edges) { "top" } else { "bottom" }),
         _ => None,
     };
     (horizontal, vertical)

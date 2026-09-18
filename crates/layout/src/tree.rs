@@ -296,9 +296,37 @@ impl Tiling {
         let Some(rect) = self.node_box(seam, area, settings) else {
             return;
         };
+        // Inverted from [`cut`], which is the only thing that decides where an
+        // edge actually lands. Along the cut axis it lays out a first child of
+        // `(rect.w - gap) * ratio`, then a `gap`-wide band, then the second
+        // child — so a seam is not a line but a band, and the two windows
+        // beside it have their edges on its two sides:
+        //
+        //     first child's trailing edge: rect.x + (rect.w - gap) * ratio
+        //     second child's leading edge: rect.x + (rect.w - gap) * ratio + gap
+        //
+        // Solving each for `ratio` gives the two spellings below. The share is
+        // of `rect.w - gap` and not of `rect.w` because the band is not part
+        // of what the ratio divides, and the leading side subtracts a further
+        // `gap` because the second child begins on the far side of it.
+        //
+        // Dividing by `rect.w` and ignoring the band — what this did — leaves
+        // the grabbed edge near the pointer rather than under it. With the
+        // shipped `gap` of 12, dragging to x=1200 on a 1920 screen put a right
+        // edge at 1192.5 and a left edge at 1204.5: one seam, grabbed from its
+        // two sides, coming to rest a full gap apart. "The edge goes where the
+        // pointer is" is the whole of #120, so this arithmetic has to be right
+        // and not merely close.
+        //
+        // [`Edge::child`] already answers which of the two sides the hand is
+        // on — it is the index [`Self::seam_beside`] matched the window
+        // against — so reading it as a distance rather than as an index is
+        // what keeps the two in step.
+        let gap = settings.gap;
+        let leading = if edge.child() == 1 { gap } else { 0.0 };
         let ratio = match edge.axis() {
-            Axis::Vertical => (at.0 - rect.x) / rect.w.max(1.0),
-            Axis::Horizontal => (at.1 - rect.y) / rect.h.max(1.0),
+            Axis::Vertical => (at.0 - rect.x - leading) / (rect.w - gap).max(1.0),
+            Axis::Horizontal => (at.1 - rect.y - leading) / (rect.h - gap).max(1.0),
         };
         if let Some(Node::Split { ratio: current, .. }) = self.nodes[seam].as_mut() {
             *current = ratio.clamp(0.05, 0.95);
@@ -1170,6 +1198,147 @@ mod dragged_edge_tests {
         assert!(
             (two.x + two.w - 1000.0).abs() < 2.0,
             "from the left, because the right is the container's: {two:?}"
+        );
+    }
+
+    /// The gap the compositor actually ships with.
+    ///
+    /// Every test above this point runs at `gap: 0.0`, and zero is the single
+    /// value at which the seam band has no width — so "a share of the box" and
+    /// "a share of the box less the gap" give the same answer, and the two
+    /// sides of a seam are the same line. A suite written only at zero cannot
+    /// tell whether a grabbed edge lands under the pointer or several pixels
+    /// off it, which is the only thing #120 is about. Hence the cases below.
+    fn gapped() -> Settings {
+        Settings {
+            gap: 12.0,
+            split: 0.5,
+            ..Settings::default()
+        }
+    }
+
+    /// [`quad`] built at a given gap.
+    ///
+    /// The same arrangement, not a different one: `insert` picks each split's
+    /// axis from the target box's aspect ratio, and insetting a 1000x600
+    /// screen by 12 changes neither which side of the root box is longer nor
+    /// which side of a column's is. The tree is identical; only the pixels
+    /// move.
+    fn quad_at(settings: Settings) -> Tiling {
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area(), settings);
+        tiling.insert(2, Some(1), None, area(), settings);
+        tiling.insert(3, Some(1), None, area(), settings);
+        tiling.insert(4, Some(2), None, area(), settings);
+        tiling
+    }
+
+    fn rect_at(tiling: &Tiling, id: u64, settings: Settings) -> Rect {
+        tiling
+            .layout(area(), settings)
+            .into_iter()
+            .find(|(other, _)| *other == id)
+            .expect("in the tree")
+            .1
+    }
+
+    /// The whole of #120 as a coordinate: the edge the hand is on comes to
+    /// rest where the pointer is.
+    ///
+    /// Both halves drag the *same* seam — the root's vertical one — to the
+    /// same x, one of them by window 1's right edge and one by window 2's
+    /// left. Each has to put its own grabbed edge at exactly 700, and so the
+    /// two drags have to agree with each other about where 700 is.
+    ///
+    /// Against the formula this replaced — a share of `rect.w`, with no term
+    /// for the gap — the right edge came to rest at 691.5 and the left at
+    /// 703.5. Each wrong, wrong in opposite directions, and a full gap apart
+    /// from each other; all three assertions below fail on it. At `gap: 0.0`
+    /// not one of them does, which is how the defect passed a green suite.
+    #[test]
+    fn a_dragged_vertical_edge_lands_under_the_pointer_across_the_gap() {
+        let settings = gapped();
+
+        let mut trailing = quad_at(settings);
+        trailing.drag_seam(1, Edge::Right, (700.0, 150.0), area(), settings);
+        let one = rect_at(&trailing, 1, settings);
+        assert!(
+            (one.x + one.w - 700.0).abs() < 0.5,
+            "the grabbed right edge is at the pointer: {one:?}"
+        );
+
+        let mut leading = quad_at(settings);
+        leading.drag_seam(2, Edge::Left, (700.0, 150.0), area(), settings);
+        let two = rect_at(&leading, 2, settings);
+        assert!(
+            (two.x - 700.0).abs() < 0.5,
+            "the grabbed left edge is at the pointer: {two:?}"
+        );
+
+        // One seam, grabbed from either side, put in one place. This is the
+        // assertion the old arithmetic missed by exactly `gap`.
+        assert!(
+            ((one.x + one.w) - two.x).abs() < 0.5,
+            "the two sides of one seam disagree: {one:?} against {two:?}"
+        );
+    }
+
+    /// The same, on the other axis, because the gap term is spelled once per
+    /// axis and a fix to one of them is not a fix to the other. Window 1's
+    /// bottom edge and window 3's top edge are the two sides of the left
+    /// column's horizontal seam.
+    #[test]
+    fn a_dragged_horizontal_edge_lands_under_the_pointer_across_the_gap() {
+        let settings = gapped();
+
+        let mut trailing = quad_at(settings);
+        trailing.drag_seam(1, Edge::Bottom, (250.0, 400.0), area(), settings);
+        let one = rect_at(&trailing, 1, settings);
+        assert!(
+            (one.y + one.h - 400.0).abs() < 0.5,
+            "the grabbed bottom edge is at the pointer: {one:?}"
+        );
+
+        let mut leading = quad_at(settings);
+        leading.drag_seam(3, Edge::Top, (250.0, 400.0), area(), settings);
+        let three = rect_at(&leading, 3, settings);
+        assert!(
+            (three.y - 400.0).abs() < 0.5,
+            "the grabbed top edge is at the pointer: {three:?}"
+        );
+
+        assert!(
+            ((one.y + one.h) - three.y).abs() < 0.5,
+            "the two sides of one seam disagree: {one:?} against {three:?}"
+        );
+    }
+
+    /// Idempotence at a real gap.
+    ///
+    /// The doc on [`Tiling::drag_seam`] promises that dragging to the same
+    /// place twice gives the same layout, and that promise is what stops the
+    /// windows shaking while the button is held. It is worth pinning at a
+    /// non-zero gap specifically.
+    ///
+    /// Unlike the two above, this one passed against the old formula too —
+    /// being wrong by a constant offset is still being wrong in the same place
+    /// every time. It is a guard and not a witness: what it catches is a
+    /// future inversion that reads its own output back, the shape the
+    /// delta-accumulating version had, and only a non-zero gap would make that
+    /// term visible.
+    #[test]
+    fn dragging_to_the_same_place_twice_changes_nothing_at_a_real_gap() {
+        let settings = gapped();
+        let mut tiling = quad_at(settings);
+
+        tiling.drag_seam(1, Edge::Right, (700.0, 150.0), area(), settings);
+        let once = rect_at(&tiling, 1, settings);
+        tiling.drag_seam(1, Edge::Right, (700.0, 150.0), area(), settings);
+        let twice = rect_at(&tiling, 1, settings);
+
+        assert!(
+            (once.w - twice.w).abs() < 0.001,
+            "the second drag moved it: {once:?} then {twice:?}"
         );
     }
 }
