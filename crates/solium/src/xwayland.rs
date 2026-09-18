@@ -97,6 +97,63 @@ const fn places_itself(kind: Option<WmWindowType>) -> bool {
     )
 }
 
+/// Whether a window of this type is a dialog: laid out by us, but over its
+/// parent rather than in the arrangement.
+///
+/// This is the other half of the promise `places_itself` wrote down and did not
+/// keep. #104 left `Dialog` on the normal path on the grounds that what a
+/// "Save as..." box wants is floating-*and-decorated*, which the unmanaged path
+/// cannot give it, and said that was issue #72's shape. This is #72, and this
+/// is that branch: separate from the menu list rather than an addition to it,
+/// because the two answers differ in every way that matters. A menu is
+/// unmanaged -- bare, placed by its client, invisible to the layout. A dialog
+/// keeps its titlebar, is placed by us, and stays in the window list a script
+/// reads; the only thing it does not do is take a share of the screen.
+///
+/// **`Dialog` stands in for modality rather than stating it, and the
+/// substitution is forced.** A Wayland client says "modal" outright, through
+/// `xdg_dialog_v1.set_modal`. X11's equivalent is `_NET_WM_STATE_MODAL`, and
+/// smithay 0.7 will not tell us what the client put there.
+///
+/// It looks at first as though it would. `X11Surface::is_popup()` exists and is
+/// documented as that exact atom (`xwayland/xwm/surface.rs`). What it reads is
+/// `net_state`, and `net_state` is not the client's property: it starts empty at
+/// `CreateNotify` and the only thing that ever writes to it is
+/// `change_net_state`, which is *us* — `set_maximized`, `set_fullscreen`,
+/// `set_minimized`, `set_activated`. smithay never ingests the window's own
+/// `_NET_WM_STATE`, and says so where it would: `update_properties` reads title,
+/// class, protocols, hints, transient-for and window type, with a comment that
+/// `_NET_WM_STATE` is the window manager's to keep. The `_NET_WM_STATE` client
+/// *message* is handled, and only for maximise and fullscreen; an `_NET_WM_STATE_MODAL`
+/// in one is dropped on the floor. So `is_popup()` answers false for every modal
+/// dialog a client ever mapped, and can only ever echo something we set
+/// ourselves — a flag we never set.
+///
+/// Reading the property directly would mean our own X connection alongside the
+/// one the window manager already holds, for a distinction that barely exists in
+/// practice: an X11 client that types a window `Dialog` has a transient prompt,
+/// and floating a non-modal one over its parent is what every window manager
+/// before this one did with it.
+///
+/// **`Utility` is deliberately absent, which revises half of #104's sentence
+/// rather than forgetting it.** EWMH's `Utility` is "a small persistent utility
+/// window, such as a palette or toolbox", and *persistent* is the operative
+/// word: it is not waiting on an answer, it does not block the window that
+/// opened it, and it is exactly the sort of thing somebody tiles beside their
+/// document on purpose. #104's claim was that `Dialog` and `Utility` both want
+/// floating-and-*decorated*, and that half still holds for both -- neither is
+/// unmanaged, both keep their frames, and that is what keeping them off the
+/// `places_itself` list buys. What only `Dialog` gets is the second thing,
+/// being lifted out of the arrangement, because only `Dialog` is the shape that
+/// is meaningless inside one: a prompt given a third of the screen and a
+/// neighbour is a prompt you have to go looking for.
+///
+/// `None` is an ordinary window for the same reason as above: EWMH says a
+/// window with no `_NET_WM_WINDOW_TYPE` is to be treated as `Normal`.
+pub(crate) const fn floats_over_its_parent(kind: Option<WmWindowType>) -> bool {
+    matches!(kind, Some(WmWindowType::Dialog))
+}
+
 /// The event loop's data, whatever the backend made it, has a compositor in it.
 ///
 /// XWayland's sources are inserted into the loop the backend owns, and the two
@@ -261,7 +318,7 @@ impl XwmHandler for Solium {
             self.take_unmanaged_pane(element);
             return;
         }
-        self.space.map_element(element.clone(), (0, 0), true);
+        self.map_stacked(element.clone(), (0, 0), true);
         self.take_pane(element);
     }
 
@@ -672,7 +729,7 @@ impl XwmHandler for crate::tty::State {
 
 #[cfg(test)]
 mod tests {
-    use super::places_itself;
+    use super::{floats_over_its_parent, places_itself};
     use smithay::xwayland::xwm::WmWindowType;
 
     /// The kinds issue #104 is about. Opened under the pointer, positioned by
@@ -723,7 +780,9 @@ mod tests {
         // look like they belong in the list above -- they do float over their
         // parent. What they want is floating *and decorated*, which is issue
         // #72's job; this path would take the titlebar off a "Save as..." box
-        // and then never place it.
+        // and then never place it. #72 landed and they are still here: the
+        // floating half is `floats_over_its_parent` below, and it is a
+        // different question with a different answer.
         assert!(
             !places_itself(Some(WmWindowType::Dialog)),
             "a dialog wants floating-and-decorated (#72), not unmanaged"
@@ -739,6 +798,56 @@ mod tests {
             !places_itself(None),
             "no _NET_WM_WINDOW_TYPE means an ordinary window, per EWMH"
         );
+    }
+
+    /// The promise #104 made and deferred: a dialog floats over its parent.
+    ///
+    /// This is the X11 half of #72. There is no `_NET_WM_STATE_MODAL` to read
+    /// -- smithay 0.7's `X11Surface` does not expose it -- so the type is the
+    /// whole signal, and this is the line that says which types count.
+    #[test]
+    fn an_x11_dialog_floats_over_its_parent() {
+        assert!(
+            floats_over_its_parent(Some(WmWindowType::Dialog)),
+            "a Dialog is the X11 spelling of a modal dialog, and #104 promised \
+             it this treatment"
+        );
+    }
+
+    /// And the ones that keep their share of the screen.
+    ///
+    /// `Utility` is the interesting entry and the reason this is a test rather
+    /// than a comment: #104's note names `Dialog` and `Utility` in one breath,
+    /// so the obvious reading of "honour that" puts both here. A palette is
+    /// persistent and blocks nothing, so it stays in the arrangement; if that
+    /// is ever reconsidered, this assertion is where the decision is written
+    /// down rather than somewhere a reader has to infer it from.
+    #[test]
+    fn an_ordinary_x11_window_keeps_its_share_of_the_screen() {
+        for kind in [
+            WmWindowType::Normal,
+            WmWindowType::Toolbar,
+            WmWindowType::Utility,
+        ] {
+            assert!(
+                !floats_over_its_parent(Some(kind)),
+                "{kind:?} is a window that lives in the arrangement"
+            );
+        }
+        assert!(
+            !floats_over_its_parent(None),
+            "no _NET_WM_WINDOW_TYPE means an ordinary window, per EWMH"
+        );
+        // A menu never reaches this question -- it is unmanaged and placed by
+        // its client -- but answering "yes" here would mean a menu that
+        // somehow did reach it got a layout's idea of where it goes, which is
+        // #104 all over again.
+        for kind in PLACES_ITSELF {
+            assert!(
+                !floats_over_its_parent(Some(kind)),
+                "{kind:?} is placed by its client, not floated by us"
+            );
+        }
     }
 
     #[test]

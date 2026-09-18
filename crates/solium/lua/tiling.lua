@@ -18,8 +18,13 @@ local config = require("config")
 local workspaces = require("workspaces")
 local modes = require("modes")
 local monitors = require("monitors")
+local dialogs = require("dialogs")
 
-local tiling = { active = false, trees = {} }
+-- `exiled` is the ids this layout has taken out of its trees because they are
+-- modal dialogs, and it is what makes `unset_modal` reversible: only a window
+-- that was taken out is ever put back. See `dialogs.settle` for why it is not
+-- simply "re-admit whatever is missing".
+local tiling = { active = false, trees = {}, exiled = {} }
 
 -- One tree per workspace *per monitor*.
 --
@@ -50,21 +55,76 @@ local function options(monitor)
     return out
 end
 
+-- A modal dialog is in no tree, and one that stops being modal rejoins.
+--
+-- Run on every apply rather than only when a dialog appears, because that is
+-- the cheapest way to make the invariant true rather than hoped for: the
+-- compositor re-runs the layout on `set_modal`, `unset_modal` and
+-- `set_parent`, so this is on the path for every one of them, and a tree that
+-- somehow acquired a dialog loses it on the next pass instead of keeping it
+-- until the mode is toggled.
+local function settle_dialogs(windows)
+    dialogs.settle(
+        tiling.exiled,
+        windows,
+        function(id)
+            -- Every tree, not just this window's monitor's: a window that was
+            -- dragged to the other screen and then went modal is still in the
+            -- tree it left, and one window in two trees gets two slots.
+            for _, tree in pairs(tiling.trees) do
+                tree:remove(id)
+            end
+        end,
+        function(id)
+            local monitor = monitors.of(id)
+            local tree = tree_for(monitor)
+            if not tree:contains(id) then
+                -- No split target and no pointer position, unlike `open`: the
+                -- pointer is wherever it is now, which has nothing to do with
+                -- a dialog the user has just dismissed. `adopt` inserts the
+                -- same way and for the same reason.
+                tree:insert(id, nil, nil, nil, options(monitor))
+            end
+        end
+    )
+end
+
 function tiling.apply(animation)
     if not tiling.active then
         return
     end
 
+    local visible = workspaces.visible()
+    settle_dialogs(visible)
+
     sol.animate(animation or config.tiling.motion)
     -- Every monitor, each against its own area. One `sol.animate` for the lot,
     -- because two screens rearranging at once is one movement -- see
     -- docs/animation.md on why the feel is set per batch.
-    for _, each in ipairs(monitors.each(workspaces.visible())) do
+    local screens = monitors.each(visible)
+    -- What the trees decided, by window id. Collected because a dialog is
+    -- centred on its parent and its parent is very likely one of these: the
+    -- snapshot says where that window *was*, and this pass is in the middle of
+    -- moving it.
+    local placed = {}
+    for _, each in ipairs(screens) do
         local tree = tree_for(each.monitor.name)
         for _, slot in ipairs(tree:layout(options(each.monitor.name))) do
             sol.place(slot.id, slot)
+            placed[slot.id] = slot
         end
     end
+    -- A second pass rather than the tail of the first: a dialog on DP-1 may
+    -- belong to a window on DP-2, and centring it needs that window's new slot
+    -- rather than its old one. Dialogs are in no tree, so this is the only
+    -- thing that places them -- without it a Wayland toplevel stays in the
+    -- top-left corner it was mapped at.
+    --
+    -- One pass for every screen's dialogs, not one per screen, and `options`
+    -- itself rather than this screen's: a dialog goes onto its *parent's*
+    -- monitor, which the loop above has no way to name. Handing it one screen's
+    -- area is what pinned a cross-screen dialog to the wrong edge.
+    dialogs.place(visible, options, placed)
 end
 
 -- Bring the tree in line with what is actually on screen. Used when tiling is
@@ -78,9 +138,16 @@ function tiling.adopt()
     for _, each in ipairs(monitors.each(workspaces.visible())) do
         local tree = tree_for(each.monitor.name)
         for _, window in ipairs(each.windows) do
-            present[window.id] = each.monitor.name
-            if not tree:contains(window.id) then
-                tree:insert(window.id, nil, nil, nil, options(each.monitor.name))
+            -- A dialog is deliberately absent from every tree, so `adopt` --
+            -- whose whole job is to put back whatever is missing -- has to be
+            -- told that this one is missing on purpose. It is left out of
+            -- `present` too, so the sweep below does not go looking for it in
+            -- a tree it was never in.
+            if not dialogs.floats(window) then
+                present[window.id] = each.monitor.name
+                if not tree:contains(window.id) then
+                    tree:insert(window.id, nil, nil, nil, options(each.monitor.name))
+                end
             end
         end
     end
@@ -130,6 +197,12 @@ sol.on("layout", function()
 end)
 
 sol.on("open", function(id)
+    -- A dialog joins no tree. `apply` places it over its parent and records it
+    -- as exiled, so there is nothing to do here but let that happen.
+    if dialogs.floating(id) then
+        tiling.apply()
+        return
+    end
     local tree = tree_for(monitors.of(id))
     local cursor = sol.cursor()
     -- Skip the window being opened: it is already mapped and under the
@@ -150,6 +223,10 @@ sol.on("close", function(id)
     for _, tree in pairs(tiling.trees) do
         tree:remove(id)
     end
+    -- Ids are never reused, so a stale entry here would not put the wrong
+    -- window back -- it would simply accumulate for the life of the session.
+    tiling.exiled[id] = nil
+    dialogs.forget(id)
     tiling.apply()
 end)
 
@@ -157,6 +234,14 @@ end)
 -- anywhere else, the window slides back to its own slot.
 sol.on("drop", function(id, x, y)
     if not tiling.active then
+        return
+    end
+    -- A dialog stays where it was dropped, and joins no tree: it is in none,
+    -- and the insert below is the one way it could get into one. `dropped`
+    -- records the drag so the next pass does not undo it -- as an offset from
+    -- the parent, so the dialog still follows the window it belongs to.
+    if dialogs.dropped(id) then
+        tiling.apply(config.tiling.snap)
         return
     end
     -- Skip the window being dragged: it follows the cursor, so it is always
