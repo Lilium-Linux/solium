@@ -129,9 +129,11 @@ sol.on("resize", function(id, x, y, horizontal, vertical) end)
 sol.on("scroll", function(dx, dy) end)             -- a modified wheel turn
 sol.on("click",  function(x, y) end)               -- only while grabbing input
 sol.on("layout", function() end)                   -- the room windows get changed
+sol.on("monitors", function() end)                 -- the screens are not the screens you knew
+sol.on("restore",  function() end)                 -- you have replaced a running session
 ```
 
-Three of these are worth reading twice.
+Four of these are worth reading twice.
 
 **`open` fires when the window opens, which is before its application exists.**
 A window's life begins when the user asks for the program. Your mode is told
@@ -149,6 +151,46 @@ and the windows shake for as long as the button is held. `horizontal` and
 **`click` only arrives while you hold input.** `sol.grab_input(true)` takes keys
 and clicks away from clients, which is what a mode needs while it owns the
 screen. Release it when you leave, or nothing will ever reach a window again.
+
+**`restore` fires after a reload and never at startup.** That asymmetry is the
+event. See below.
+
+## What survives `super+shift+r`
+
+A reload throws the whole Lua state away and reads your files again. The
+session does not go with it: the windows, the monitors, the workspace in view
+and the layout in charge are all still exactly what they were. So your mode
+comes back as a stranger to a desktop it was running a moment ago, and it is
+entitled to exactly two things.
+
+**Whatever you handed to `sol.keep`.**
+
+```lua
+local state = sol.keep("my-mode", { showing = 1 })
+```
+
+You get the table the last load left under that name, or the defaults the first
+time. Mutate it in place; the host takes a copy when the reload happens. It
+holds plain data only — numbers, strings, booleans and tables of those. A
+function in there cannot cross and is named in the log rather than dropped in
+silence.
+
+Keep as little as you can. Anything you can work out again from `sol.windows()`
+and `sol.monitors()` should be worked out again, because a keep is a claim about
+the past that nothing checks.
+
+**And the world, re-announced:** `restore`, then `monitors`, then `layout`.
+
+`restore` is the moment every script has loaded, which is the earliest you can
+touch another module's registrations — `lua/modes.lua` uses it to make the
+remembered layout active again, which it cannot do at its own top level because
+`lua/tiling.lua` has not registered itself yet. `monitors` then says the screens
+are what they are, and `layout` asks you to arrange.
+
+Without this, a reload was a quiet way to lose the session: on workspace 3 it
+came back believing it was on workspace 1, put every window on desk 1, and drew
+the desk two screen-widths off-stage with no key that brought it back. That is
+issue #116, and both halves above are what it cost.
 
 ## What a mode can ask
 
