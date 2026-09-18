@@ -44,7 +44,15 @@ impl Column {
     }
 }
 
-/// The widths a column cycles through, as shares of the view.
+/// The widths a column cycles through when the caller names none, as shares of
+/// the view.
+///
+/// A fallback rather than the policy since #117. `lua/config.lua` has
+/// advertised a `scrolling.widths` list since it was written, and this constant
+/// is why that list did nothing: the configuration named three numbers and the
+/// strip used these three instead. A caller supplies its own through
+/// [`Scroller::with_widths`]; these are what a caller that says nothing gets,
+/// and what a caller whose list turns out to hold nothing usable falls back to.
 pub const PRESETS: [f64; 3] = [1.0 / 3.0, 0.5, 2.0 / 3.0];
 
 /// A scrolling workspace.
@@ -54,6 +62,17 @@ pub struct Scroller {
     active: usize,
     /// Where the view sits relative to the active column's left edge.
     view_offset: f64,
+    /// The widths this strip cycles through, as shares of the view.
+    ///
+    /// Held per strip rather than carried in [`crate::Settings`] because
+    /// `Settings` is `Copy` and is rebuilt from a Lua table on every call —
+    /// a list allocated per keystroke to describe something that cannot change
+    /// between them. It is also per strip in truth: the widths are read once,
+    /// where the strip is made.
+    ///
+    /// **Never empty.** Every read indexes it, and the two constructors below
+    /// are the only things that fill it.
+    widths: Vec<f64>,
     preset: usize,
 }
 
@@ -63,6 +82,7 @@ impl Default for Scroller {
             columns: Vec::new(),
             active: 0,
             view_offset: 0.0,
+            widths: PRESETS.to_vec(),
             // A third of the view, not a half. Half-width columns mean two on
             // screen and everything else off the edge, which for a terminal is
             // far wider than anyone reads at.
@@ -75,6 +95,50 @@ impl Scroller {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A strip cycling through widths of the caller's choosing.
+    ///
+    /// `start` is a zero-based index into `widths` — the width a new column
+    /// opens at, and the point the cycle begins from. `lua/config.lua` spells
+    /// it `default_width` and counts from one, the way Lua counts; the
+    /// subtraction happens at that boundary, not here.
+    ///
+    /// **What it does with a list it cannot use.** Anything not a share of a
+    /// view has already been dropped by the caller, which is where the log is;
+    /// this sees the survivors. If there are none it falls back to [`PRESETS`],
+    /// because every read of `widths` indexes it and a strip with no widths at
+    /// all has no width to open a column at. An out-of-range `start` is clamped
+    /// to the last width rather than refused, for the same reason: there is no
+    /// answer to "start at the fourth of three" that is not a choice, and
+    /// refusing would mean a session with no scrolling layout over one number.
+    #[must_use]
+    pub fn with_widths(widths: &[f64], start: usize) -> Self {
+        let widths: Vec<f64> = if widths.is_empty() {
+            PRESETS.to_vec()
+        } else {
+            widths.to_vec()
+        };
+        let preset = start.min(widths.len() - 1);
+        Self {
+            widths,
+            preset,
+            ..Self::default()
+        }
+    }
+
+    /// The width a column takes now, as a share of the view.
+    ///
+    /// `preset` is kept in range by both constructors and by `cycle_width`'s
+    /// modulo, so this cannot miss; the `unwrap_or` is what stands in for the
+    /// index that would panic if one of those three ever stopped being true,
+    /// and the crate denies panicking outright.
+    fn width_now(&self) -> f64 {
+        self.widths
+            .get(self.preset)
+            .or_else(|| self.widths.first())
+            .copied()
+            .unwrap_or(PRESETS[0])
     }
 
     #[must_use]
@@ -111,7 +175,7 @@ impl Scroller {
         if self.contains(id) {
             return;
         }
-        let width = PRESETS[self.preset.min(PRESETS.len() - 1)];
+        let width = self.width_now();
         let at = if self.columns.is_empty() {
             0
         } else {
@@ -334,8 +398,8 @@ impl Scroller {
 
     /// Cycle the active column through the preset widths.
     pub fn cycle_width(&mut self, area: Rect, settings: Settings) {
-        self.preset = (self.preset + 1) % PRESETS.len();
-        let width = PRESETS[self.preset];
+        self.preset = (self.preset + 1) % self.widths.len();
+        let width = self.width_now();
         if let Some(column) = self.columns.get_mut(self.active) {
             column.width = width;
         }
@@ -581,6 +645,65 @@ mod tests {
         assert!(
             (rect_of(&scroller, 1).w - second).abs() < 1.0,
             "and comes back around"
+        );
+    }
+
+    /// **The configured widths are the widths, and the configured index is
+    /// where the cycle starts.**
+    ///
+    /// `scrolling.widths` and `scrolling.default_width` were documented in
+    /// `lua/config.lua` and read by nothing: [`PRESETS`] decided both, so a
+    /// configuration naming quarters got thirds and could not tell whether it
+    /// had misunderstood the setting or been ignored (#117). Two numbers
+    /// nothing else in this file uses, so a regression here cannot hide behind
+    /// another test agreeing with it by coincidence.
+    #[test]
+    fn a_strip_cycles_through_the_widths_it_was_given() {
+        // Deliberately unlike PRESETS in both membership and length: a lap of
+        // two proves the cycle is over *this* list rather than over three of
+        // anything.
+        let mut scroller = Scroller::with_widths(&[0.25, 0.8], 1);
+        scroller.insert(1, area(), settings());
+        assert!(
+            (rect_of(&scroller, 1).w - 800.0).abs() < 1.0,
+            "a new column opens at `default_width`, which is the second of the \
+             two given: {:?}",
+            rect_of(&scroller, 1)
+        );
+
+        scroller.cycle_width(area(), settings());
+        assert!(
+            (rect_of(&scroller, 1).w - 250.0).abs() < 1.0,
+            "and cycling wraps to the first of them: {:?}",
+            rect_of(&scroller, 1)
+        );
+
+        scroller.cycle_width(area(), settings());
+        assert!(
+            (rect_of(&scroller, 1).w - 800.0).abs() < 1.0,
+            "a lap of a two-entry list is two steps, not three"
+        );
+    }
+
+    /// A list with nothing usable in it, and an index past the end of one.
+    ///
+    /// Both are reachable from a `user.lua`, and neither may cost the session
+    /// its scrolling layout — `with_widths` is called while the configuration
+    /// is being read, where an error would take every other setting with it.
+    #[test]
+    fn an_unusable_width_list_falls_back_rather_than_failing() {
+        let mut scroller = Scroller::with_widths(&[], 0);
+        scroller.insert(1, area(), settings());
+        assert!(
+            (rect_of(&scroller, 1).w - 1000.0 * PRESETS[0]).abs() < 1.0,
+            "an empty list is the shipped presets, not a column of no width"
+        );
+
+        let mut scroller = Scroller::with_widths(&[0.4, 0.6], 9);
+        scroller.insert(1, area(), settings());
+        assert!(
+            (rect_of(&scroller, 1).w - 600.0).abs() < 1.0,
+            "an index past the end is the last width, not a missing one"
         );
     }
 

@@ -412,6 +412,155 @@ struct Pending {
     status: Option<String>,
 }
 
+/// What a script handed the host to hold while the Lua state is replaced.
+///
+/// Plain data, because that is the only thing that can cross. A reload builds
+/// a whole new [`Lua`]; a table, a closure, an upvalue — every Lua value there
+/// is — dies with the old one. So what crosses is this, and it is rebuilt as a
+/// fresh table in the new state.
+///
+/// Tables are a list of pairs rather than a map for two reasons. Lua has one
+/// table type that is both a list and a dictionary, and both shipped keeps are
+/// dictionaries with keys of different types: `workspaces.of` is keyed by
+/// window id, which is an integer, and `workspaces.showing` by connector name,
+/// which is a string. And a `Vec` of pairs needs no `Hash` or `Eq` on the key,
+/// which a float key could not honestly have.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Kept {
+    Bool(bool),
+    /// Kept apart from `Number` so a window id survives as the integer it is.
+    /// Round-tripped through `f64` it would come back as `7.0`, which is a
+    /// *different table key* in Lua from `7` — so every entry in
+    /// `workspaces.of` would be unreachable by the id that wrote it.
+    Int(i64),
+    Number(f64),
+    Text(String),
+    Table(Vec<(Kept, Kept)>),
+}
+
+/// Everything kept, under the names the scripts gave it.
+pub(crate) type Keep = std::collections::HashMap<String, Kept>;
+
+/// How deep a kept table is followed.
+///
+/// A budget rather than a cycle check. A table holding itself — directly, or
+/// around through three others — would otherwise be copied until the stack ran
+/// out, and the compositor does not get to die because a configuration made a
+/// ring. Nothing that belongs in a keep is eight tables deep; what is cut is
+/// named in the log rather than dropped in silence, because half a table kept
+/// quietly is worse than a table that was not kept at all.
+const KEEP_DEPTH: usize = 8;
+
+impl Kept {
+    /// Read a Lua value, or say why it cannot be kept.
+    ///
+    /// `where_it_is` is the path from the keep's name down to this value, so a
+    /// warning names the key someone can go and look at rather than saying
+    /// "something in your table".
+    fn read(value: &Value, depth: usize, where_it_is: &str) -> Option<Self> {
+        match value {
+            Value::Boolean(flag) => Some(Self::Bool(*flag)),
+            Value::Integer(number) => Some(Self::Int(*number)),
+            Value::Number(number) => Some(Self::Number(*number)),
+            Value::String(text) => text.to_str().ok().map(|text| Self::Text(text.to_owned())),
+            Value::Table(table) => {
+                if depth >= KEEP_DEPTH {
+                    tracing::warn!(
+                        key = where_it_is,
+                        depth = KEEP_DEPTH,
+                        "a kept table is deeper than the host will follow; this branch of it \
+                         will not survive the next reload"
+                    );
+                    return None;
+                }
+                let mut pairs = Vec::new();
+                for (key, value) in table.pairs::<Value, Value>().flatten() {
+                    let named = format!("{where_it_is}.{}", describe(&key));
+                    let (Some(key), Some(value)) = (
+                        Self::read(&key, depth + 1, &named),
+                        Self::read(&value, depth + 1, &named),
+                    ) else {
+                        continue;
+                    };
+                    pairs.push((key, value));
+                }
+                Some(Self::Table(pairs))
+            }
+            // `nil` is not a failure: a key that has been cleared is a key that
+            // is not there, and Lua's own iteration never yields one.
+            Value::Nil => None,
+            other => {
+                tracing::warn!(
+                    key = where_it_is,
+                    kind = other.type_name(),
+                    "only plain data survives a reload, and this is not plain data; it will be \
+                     missing from the keep when the configuration is read again"
+                );
+                None
+            }
+        }
+    }
+
+    /// Build it again, in the Lua state that replaced the one it came from.
+    fn into_value(self, lua: &Lua) -> mlua::Result<Value> {
+        Ok(match self {
+            Self::Bool(flag) => Value::Boolean(flag),
+            Self::Int(number) => Value::Integer(number),
+            Self::Number(number) => Value::Number(number),
+            Self::Text(text) => Value::String(lua.create_string(&text)?),
+            Self::Table(pairs) => {
+                let table = lua.create_table()?;
+                for (key, value) in pairs {
+                    table.set(key.into_value(lua)?, value.into_value(lua)?)?;
+                }
+                Value::Table(table)
+            }
+        })
+    }
+}
+
+/// A Lua value as a log line should name it.
+fn describe(value: &Value) -> String {
+    match value {
+        Value::Integer(number) => number.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.to_string_lossy(),
+        other => format!("<{}>", other.type_name()),
+    }
+}
+
+/// What the configuration being replaced asked to keep, waiting in the new Lua
+/// state for `sol.keep` to claim it.
+///
+/// App data rather than a field on [`Scripts`], because `sol.keep` is called
+/// while the configuration is still being *read* — the whole point is that a
+/// script's top level has its state back before it does anything with it — and
+/// at that moment there is no `Scripts` yet, only a `Lua`.
+#[derive(Debug, Default)]
+struct Carried(Keep);
+
+/// A key binding as `solium --check` reports it.
+///
+/// The note is what the script said about where the binding came from, and is
+/// `None` for the shipped ones -- which is most of them, and is why `--check`
+/// stays a plain list of combinations until a configuration has something to
+/// add. See `sol.bind`'s third argument.
+#[derive(Debug)]
+pub(crate) struct Binding {
+    pub(crate) combo: String,
+    pub(crate) note: Option<String>,
+}
+
+/// A setting a configuration wrote that nothing reads.
+///
+/// `meant` is the nearest key that does exist, when `config.lua` found one
+/// close enough to be worth naming.
+#[derive(Debug)]
+pub(crate) struct UnknownSetting {
+    pub(crate) key: String,
+    pub(crate) meant: Option<String>,
+}
+
 /// The Lua runtime and the scripts loaded into it.
 #[derive(Debug)]
 pub(crate) struct Scripts {
@@ -440,23 +589,88 @@ impl Scripts {
             .map(|base| base.join("solium"))
     }
 
-    /// Every binding the configuration registered, as it spelled them.
+    /// Every binding the configuration registered, in its canonical spelling.
     ///
     /// Sorted, because this is read by a person comparing one run to the next.
-    pub(crate) fn binding_names(&self) -> Vec<String> {
+    pub(crate) fn bindings(&self) -> Vec<Binding> {
         let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
             return Vec::new();
         };
         let Ok(bindings) = sol.get::<Table>("_bindings") else {
             return Vec::new();
         };
-        let mut names: Vec<String> = bindings
+        let sources = sol.get::<Table>("_binding_sources").ok();
+        let mut names: Vec<Binding> = bindings
             .pairs::<String, Value>()
             .filter_map(Result::ok)
-            .map(|(combo, _)| combo)
+            .map(|(combo, _)| Binding {
+                note: sources
+                    .as_ref()
+                    .and_then(|sources| sources.get::<Option<String>>(combo.clone()).ok())
+                    .flatten(),
+                combo,
+            })
             .collect();
-        names.sort();
+        names.sort_by(|left, right| left.combo.cmp(&right.combo));
         names
+    }
+
+    /// Bindings a script deliberately took away.
+    ///
+    /// A combination somebody said something about and which is now bound to
+    /// nothing -- which is exactly `sol.unbind`. Reported separately from the
+    /// list above because it is the one thing that list cannot show: a key
+    /// that is missing on purpose looks, in a list of what survived, identical
+    /// to one that was never there.
+    pub(crate) fn unbound(&self) -> Vec<Binding> {
+        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
+            return Vec::new();
+        };
+        let (Ok(bindings), Ok(sources)) = (
+            sol.get::<Table>("_bindings"),
+            sol.get::<Table>("_binding_sources"),
+        ) else {
+            return Vec::new();
+        };
+        let mut gone: Vec<Binding> = sources
+            .pairs::<String, String>()
+            .filter_map(Result::ok)
+            .filter(|(combo, _)| {
+                !matches!(bindings.get::<Value>(combo.clone()), Ok(Value::Function(_)))
+            })
+            .map(|(combo, note)| Binding {
+                combo,
+                note: Some(note),
+            })
+            .collect();
+        gone.sort_by(|left, right| left.combo.cmp(&right.combo));
+        gone
+    }
+
+    /// Settings the configuration wrote that its defaults do not define.
+    ///
+    /// In the order `config.lua` found them, which is `pairs` order and so is
+    /// arbitrary -- sorted here, because the only reader is a person checking a
+    /// file. See `sol.unknown`.
+    pub(crate) fn unknown_settings(&self) -> Vec<UnknownSetting> {
+        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
+            return Vec::new();
+        };
+        let Ok(unknown) = sol.get::<Table>("_unknown_settings") else {
+            return Vec::new();
+        };
+        let mut found: Vec<UnknownSetting> = unknown
+            .sequence_values::<Table>()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                Some(UnknownSetting {
+                    key: entry.get::<String>("key").ok()?,
+                    meant: entry.get::<Option<String>>("meant").ok().flatten(),
+                })
+            })
+            .collect();
+        found.sort_by(|left, right| left.key.cmp(&right.key));
+        found
     }
 
     pub(crate) fn config_path() -> std::path::PathBuf {
@@ -480,11 +694,60 @@ impl Scripts {
         crate::assets::lua().join("init.lua")
     }
 
-    /// Load the configuration script and everything it pulls in.
+    /// Load the configuration script and everything it pulls in, cold.
+    ///
+    /// Nothing is carried, because at startup there is nothing to carry. A
+    /// reload goes through [`Self::load_carrying`].
     pub(crate) fn load(config: &Path) -> Result<Self> {
+        Self::load_carrying(config, Keep::new())
+    }
+
+    /// Everything the running scripts asked the host to keep.
+    ///
+    /// Read off the *old* `Scripts` before the new ones are built, which is
+    /// the only moment both exist. Reading rather than moving: a load that
+    /// fails leaves the running configuration alone — a typo costs a log line,
+    /// not the session — and that promise only holds if collecting the keep
+    /// cannot damage the scripts it was collected from.
+    pub(crate) fn kept(&self) -> Keep {
+        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
+            return Keep::new();
+        };
+        let Ok(keeps) = sol.get::<Table>("_keeps") else {
+            return Keep::new();
+        };
+        keeps
+            .pairs::<String, Value>()
+            .filter_map(Result::ok)
+            .filter_map(|(name, value)| Kept::read(&value, 0, &name).map(|kept| (name, kept)))
+            .collect()
+    }
+
+    /// Load the configuration again, handing back what the last one kept.
+    ///
+    /// ## What a script is entitled to know after a reload
+    ///
+    /// This is the contract, and it is deliberately short, because everything
+    /// in it is something the host has to keep true for ever:
+    ///
+    ///  1. **Whatever it handed to `sol.keep`, and nothing else.** A reload
+    ///     throws the whole Lua state away, so a script's own variables are
+    ///     gone by construction. `sol.keep` is the one exception, it is opt-in,
+    ///     and it holds plain data only — see [`Kept`].
+    ///  2. **The world as it now is, re-announced.** `restore`, then
+    ///     `monitors`, then `layout` — see [`crate::state::Solium::reload`].
+    ///     A script that can rebuild itself from `sol.windows()` and
+    ///     `sol.monitors()` needs no keep at all.
+    ///
+    /// Anything else a script believed is gone, and that is the point: the
+    /// alternative is every script inventing its own answer, which is what
+    /// `workspaces.lua` and `modes.lua` had each done — differently, and one
+    /// of them wrongly. See the comment at the top of `lua/modes.lua`.
+    pub(crate) fn load_carrying(config: &Path, carried: Keep) -> Result<Self> {
         let lua = Lua::new();
         lua.set_app_data(Pending::default());
         lua.set_app_data(Snapshot::default());
+        lua.set_app_data(Carried(carried));
 
         let sol = build_api(&lua).map_err(failed("building the script API"))?;
         lua.globals()
@@ -668,6 +931,22 @@ impl Scripts {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "monitors", ()))
     }
 
+    /// These scripts have replaced a running session's, rather than started one.
+    ///
+    /// The first half of the reload contract on [`Self::load_carrying`], and
+    /// the half a keep cannot cover. `sol.keep` gives a script its *data* back;
+    /// this is the moment it may act on it — after every script has loaded, so
+    /// a mode restored here can be sure the layout it names has registered
+    /// itself, which it cannot be at its own top level.
+    ///
+    /// It does not fire at startup, and that asymmetry is the whole meaning of
+    /// the event: a cold start has nothing to restore, and a script that
+    /// listens for this is saying "this is what I do differently when I am not
+    /// the first configuration this session has had".
+    pub(crate) fn restored(&mut self, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "restore", ()))
+    }
+
     /// A scripted surface was pressed and asked for something.
     pub(crate) fn surface_action(
         &mut self,
@@ -773,6 +1052,126 @@ fn tuning(options: &Table) -> mlua::Result<Settings> {
     })
 }
 
+/// A Lua number, whatever Lua happened to store it as.
+///
+/// `widths = { 1/3, 1/2, 1 }` puts two floats and an *integer* in one list, and
+/// asking mlua for an `f64` on the wrong one is a conversion error rather than
+/// a None -- which, with a `?` on it, would take the whole configuration down
+/// over a list that is perfectly well written. Same reasoning as `scene` and
+/// `cursor.size`, which are both read this way and say so.
+fn number(value: &Value) -> Option<f64> {
+    match value {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a share of a view, written as a whole number: 1, not 2^53"
+        )]
+        Value::Integer(whole) => Some(*whole as f64),
+        Value::Number(fraction) => Some(*fraction),
+        _ => None,
+    }
+}
+
+/// Build a scrolling strip from `config.scrolling`.
+///
+/// Both of these keys were documented in `lua/config.lua` and read by nothing
+/// until #117: the strip used the constant list in `solium_layout`, so a
+/// configuration naming quarters got thirds, and the person who wrote it could
+/// not tell whether they had misunderstood the setting or been ignored.
+///
+/// **A value that is not a share of a view is dropped with a line in the log,
+/// not clamped and not fatal.** The same policy as `cursor.size`, for the same
+/// reason: a column at 0.001 of the view is a column nobody can see and nobody
+/// asked for, so guessing what was meant is worse than saying so and carrying
+/// on. Fatal is wrong here too -- this runs while the configuration is being
+/// read, and a hard error over one number would cost every other setting in the
+/// file, the layouts and the bindings included.
+fn scroller_from(options: &Table) -> mlua::Result<solium_layout::scroller::Scroller> {
+    let mut widths = Vec::new();
+    if let Ok(Value::Table(list)) = options.get::<Value>("widths") {
+        for (index, value) in list.sequence_values::<Value>().flatten().enumerate() {
+            match number(&value) {
+                // Above 1.0 refused as well as below 0: a column wider than the
+                // view can never be brought fully into view, so the strip would
+                // scroll for ever trying to. `layout` clamps to 1.0 anyway,
+                // which is how this used to be silent.
+                Some(share) if share.is_finite() && share > 0.0 && share <= 1.0 => {
+                    widths.push(share);
+                }
+                _ => tracing::warn!(
+                    target: "solium::script",
+                    at = index + 1,
+                    "scrolling.widths holds something that is not a share of the view \
+                     (a number above 0 and at most 1); that entry is ignored"
+                ),
+            }
+        }
+    }
+    // 1-based, the way Lua counts and the way `config.lua` documents it. The
+    // subtraction belongs at this boundary and nowhere deeper.
+    //
+    // Filtered before the cast rather than clamped after it, and `f64::clamp`
+    // is deliberately not used -- clippy will offer it. `clamp` *returns* NaN
+    // for a NaN input, `NaN as usize` saturates to 0, and `0 - 1` on a `usize`
+    // is the underflow. Nobody writes `default_width = 0/0` on purpose, but a
+    // generated configuration can produce one, and "the compositor panicked"
+    // is not an acceptable answer to a number in a settings file.
+    let start = match options.get::<Value>("default_width") {
+        // Not written at all, which is the ordinary case and nothing to say
+        // about. `Nil` rather than an error: mlua answers a missing key with
+        // one, so this arm is "the setting is absent" and the next is "the
+        // setting is there and is not an index".
+        Ok(Value::Nil) | Err(_) => 0,
+        Ok(value) => match number(&value).filter(|index| index.is_finite() && *index >= 1.0) {
+            Some(index) => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "finite, at least 1, and capped at 1000 on the line \
+                                  itself; a fractional index is truncated on purpose"
+                )]
+                let index = index.min(1000.0) as usize;
+                index.saturating_sub(1)
+            }
+            None => {
+                tracing::warn!(
+                    target: "solium::script",
+                    "scrolling.default_width is not an index into scrolling.widths \
+                     (a whole number from 1 up); a new column opens at the first \
+                     width instead"
+                );
+                0
+            }
+        },
+    };
+    // Against the list that is actually in force, which is `PRESETS` when the
+    // configuration's own list turned out to hold nothing usable. Gated on
+    // `!widths.is_empty()` until #117's review, which meant a file whose every
+    // width was rejected got a line per width and nothing at all about the
+    // index -- so the clamp, the one step that decides what a new column opens
+    // at, was the only silent thing left in a read that says everything else
+    // out loud.
+    let in_force = if widths.is_empty() {
+        solium_layout::scroller::PRESETS.len()
+    } else {
+        widths.len()
+    };
+    if start >= in_force {
+        tracing::warn!(
+            target: "solium::script",
+            default_width = start + 1,
+            widths = in_force,
+            // Named, because "not in scrolling.widths" is confusing advice when
+            // the list being counted against is not the one in the file.
+            fallback = widths.is_empty(),
+            "scrolling.default_width names a width that is not in the list of widths \
+             in force; a new column opens at the last one instead"
+        );
+    }
+    Ok(solium_layout::scroller::Scroller::with_widths(
+        &widths, start,
+    ))
+}
+
 /// The `sol.layout` table.
 fn layouts(lua: &Lua) -> mlua::Result<Table> {
     fn to_lua(lua: &Lua, slots: &[Slot]) -> mlua::Result<Table> {
@@ -811,9 +1210,18 @@ fn layouts(lua: &Lua) -> mlua::Result<Table> {
     // A scrolling workspace, held by the script that made it. Stateful for the
     // same reason the tree is: which column is active and where the view sits
     // relative to it are not recoverable from a list of windows.
+    // Takes `config.scrolling` -- the whole section, not a rewrapping of it --
+    // and reads the two keys that describe the strip itself. Optional, because
+    // a script may want a plain one and because a `config.lua` written before
+    // #117 has nothing to hand over.
     layout.set(
         "scroller",
-        lua.create_function(|_, ()| Ok(Scrolling::default()))?,
+        lua.create_function(|_, options: Option<Table>| {
+            let Some(options) = options else {
+                return Ok(Scrolling::default());
+            };
+            Ok(Scrolling(scroller_from(&options)?))
+        })?,
     )?;
 
     layout.set(
@@ -923,6 +1331,69 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     let sol = lua.create_table()?;
     sol.set("_bindings", lua.create_table()?)?;
     sol.set("_handlers", lua.create_table()?)?;
+    sol.set("_keeps", lua.create_table()?)?;
+    // Where a binding came from, for the combinations a script chose to say.
+    // Keyed the same way `_bindings` is -- the canonical spelling -- so the two
+    // can be read together, and holding entries for combinations `_bindings`
+    // does *not* have, which is how `sol.unbind` reports a shipped binding
+    // somebody deliberately took away. See `Scripts::bindings`.
+    sol.set("_binding_sources", lua.create_table()?)?;
+    // Settings a configuration wrote that the defaults do not define. Filled by
+    // `lua/config.lua`, whose `merge` is the only thing that knows both halves
+    // of that comparison, and read by `solium --check`. See `sol.unknown`.
+    sol.set("_unknown_settings", lua.create_table()?)?;
+
+    // State that outlives `super+shift+r`.
+    //
+    //     local state = sol.keep("workspaces", { showing = {}, of = {} })
+    //
+    // Answers the table the last configuration had under this name, or the
+    // defaults on the first load. Mutate it in place and the next reload gets
+    // what you left in it; see [`Kept`] for what may be in one.
+    //
+    // **Why this is the host's job and not a script's.** Two shipped scripts
+    // had already invented an answer to surviving a reload, and neither could
+    // have got it right, because only the host knows when the Lua state dies.
+    // `workspaces.lua` reasoned about the *compositor's* lifetime instead —
+    // a selection outlives a reload, so it swept sixteen desk names once per
+    // session to clear ones a shorter arrangement had abandoned. `modes.lua`
+    // reasoned about nothing at all: it declared `current = "floating"` at its
+    // top level, which is true at startup and a lie after every reload, with
+    // every window still sitting in the tile a layout put it in.
+    //
+    // Those are the same defect. A script cannot see the seam it is being cut
+    // at, so the seam is where the mechanism belongs.
+    sol.set(
+        "keep",
+        lua.create_function(|lua, (name, defaults): (String, Table)| {
+            let sol: Table = lua.globals().get("sol")?;
+            let keeps: Table = sol.get("_keeps")?;
+            // Asked for twice under one name — two scripts sharing it, or one
+            // module required from two places — is the same table both times.
+            // Handing out a second would make whichever was harvested last the
+            // only one kept, which is a loss nothing would report.
+            if let Value::Table(already) = keeps.get::<Value>(name.as_str())? {
+                return Ok(already);
+            }
+            // Cloned out, and the borrow of the app data dropped, before any
+            // table is built: `into_value` calls back into Lua.
+            let carried = lua
+                .app_data_ref::<Carried>()
+                .and_then(|carried| carried.0.get(&name).cloned());
+            let table = match carried {
+                // Only a table is claimable. A keep that came back as a number
+                // would mean the script changed shape between reloads, and the
+                // defaults it just passed are the better answer.
+                Some(kept @ Kept::Table(_)) => match kept.into_value(lua)? {
+                    Value::Table(table) => table,
+                    _ => defaults,
+                },
+                _ => defaults,
+            };
+            keeps.set(name, &table)?;
+            Ok(table)
+        })?,
+    )?;
 
     // Every window a layout may arrange, topmost first.
     //
@@ -1820,12 +2291,120 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // The later call wins, and always has: two scripts binding one combination
+    // is how `init.lua` and `scrolling.lua` coexist, and the alternative --
+    // refusing the second -- would make the order files happen to be required
+    // in decide which of them works.
+    //
+    // The third argument is optional and is a *note*, not a name: a short
+    // phrase saying where this binding came from, which `solium --check` prints
+    // beside the combination. It exists because that "later call wins" rule is
+    // the whole mechanism behind `config.bindings` replacing a shipped binding
+    // (#117), and a replacement nobody can see is indistinguishable from a key
+    // that mysteriously stopped working. Shipped bindings pass nothing, so
+    // `--check` stays a plain list until a configuration has something to say.
     sol.set(
         "bind",
-        lua.create_function(|lua, (combo, handler): (String, mlua::Function)| {
+        lua.create_function(
+            |lua, (combo, handler, note): (String, mlua::Function, Option<String>)| {
+                let sol: Table = lua.globals().get("sol")?;
+                let bindings: Table = sol.get("_bindings")?;
+                let combo = normalise_combo(&combo);
+                bindings.set(combo.clone(), handler)?;
+                if let Some(note) = note {
+                    let sources: Table = sol.get("_binding_sources")?;
+                    sources.set(combo, note)?;
+                }
+                Ok(())
+            },
+        )?,
+    )?;
+
+    // Whether a combination is already bound, in its canonical spelling.
+    //
+    // Asking is the only way a script can tell that it is about to replace
+    // somebody's binding rather than add one, and normalising is why it cannot
+    // do this by reading `_bindings` itself: `Super+Q` and `shift+super+q` are
+    // spellings, not keys, and only this side knows which spelling won.
+    sol.set(
+        "bound",
+        lua.create_function(|lua, combo: String| {
             let sol: Table = lua.globals().get("sol")?;
             let bindings: Table = sol.get("_bindings")?;
-            bindings.set(normalise_combo(&combo), handler)?;
+            Ok(matches!(
+                bindings.get::<Value>(normalise_combo(&combo))?,
+                Value::Function(_)
+            ))
+        })?,
+    )?;
+
+    // Take a binding away.
+    //
+    // The counterpart to a configuration being able to replace one. Without it
+    // a shipped binding is unremovable short of replacing `init.lua` -- and
+    // binding it to a function that does nothing is not the same thing, because
+    // the compositor would still swallow the key and `--check` would still list
+    // it as bound.
+    //
+    // The note is kept even though the binding is gone, and that is the point
+    // of keeping it: `--check` reads the combinations in `_binding_sources`
+    // that are no longer in `_bindings` and reports them as deliberately
+    // removed, so an absence is stated rather than merely being an absence.
+    sol.set(
+        "unbind",
+        lua.create_function(|lua, (combo, note): (String, Option<String>)| {
+            let sol: Table = lua.globals().get("sol")?;
+            let bindings: Table = sol.get("_bindings")?;
+            let combo = normalise_combo(&combo);
+            bindings.set(combo.clone(), Value::Nil)?;
+            if let Some(note) = note {
+                let sources: Table = sol.get("_binding_sources")?;
+                sources.set(combo, note)?;
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // A setting a configuration wrote that the defaults do not define.
+    //
+    // `lua/config.lua` merges a `user.lua` over its own table key by key, and
+    // until #117 a key the defaults had never heard of was merged in exactly
+    // like one they had: `tilling = { split = 0.6 }` became a new section that
+    // nothing would ever read, and `--check` -- the one command whose job is
+    // answering "did what I wrote take effect" -- said the configuration loaded
+    // fine. It did. It just did not do anything.
+    //
+    // Reported from Lua rather than found from here because the comparison
+    // needs both halves, and only `config.lua` has them: the defaults are its
+    // table, and the user's file is something it alone reads. `meant` is a
+    // near-miss suggestion when there is one worth making, and is optional
+    // because most typos are not near misses of anything.
+    sol.set(
+        "unknown",
+        lua.create_function(|lua, (key, meant): (String, Option<String>)| {
+            let sol: Table = lua.globals().get("sol")?;
+            let unknown: Table = sol.get("_unknown_settings")?;
+            let entry = lua.create_table()?;
+            entry.set("key", key.clone())?;
+            if let Some(meant) = &meant {
+                entry.set("meant", meant.clone())?;
+            }
+            unknown.push(entry)?;
+            // Also in the log, because most of these are met in a running
+            // session rather than in front of `--check`, and a reload that
+            // quietly ignores half a file is the failure this is here to end.
+            match meant {
+                Some(meant) => tracing::warn!(
+                    target: "solium::script",
+                    setting = %key,
+                    "the configuration sets something nothing reads; did you mean {meant}?"
+                ),
+                None => tracing::warn!(
+                    target: "solium::script",
+                    setting = %key,
+                    "the configuration sets something nothing reads"
+                ),
+            }
             Ok(())
         })?,
     )?;
@@ -2848,6 +3427,370 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// A fixture `user.lua` in a directory of its own, and the *shipped*
+    /// `init.lua` loaded against it.
+    ///
+    /// The shipped entry point rather than a stand-in, because the thing under
+    /// test in every caller below is whether the file people actually run
+    /// honours the configuration -- a copy that requires the right modules in
+    /// the right order would pass while the real one did not, which is the
+    /// class of bug being fixed.
+    ///
+    /// `None` when this machine has any Lua of its own under
+    /// `~/.config/solium`: that directory comes *first* on `package.path`, so
+    /// one file there answers `require` ahead of the fixture or the shipped
+    /// script it shadows, and the assertions below would then be about
+    /// somebody's own configuration. Any `.lua` at all rather than a list of
+    /// names, because the list would have to grow every time a script is added
+    /// and would fail open when somebody forgot. The same guard, for the same
+    /// reason, as `a_user_file_using_the_old_key_still_chooses_a_style`.
+    fn shipped_init_with_user(name: &str, user: &str) -> Option<(std::path::PathBuf, Scripts)> {
+        let own = Scripts::user_config_dir()?;
+        if let Ok(entries) = std::fs::read_dir(&own)
+            && entries
+                .filter_map(Result::ok)
+                .any(|entry| entry.path().extension().is_some_and(|kind| kind == "lua"))
+        {
+            return None;
+        }
+
+        let directory = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).ok()?;
+        std::fs::write(directory.join("user.lua"), user).ok()?;
+        // Copied rather than required in place: `Scripts::load` puts the
+        // config's *own* directory on `package.path` ahead of the shipped one,
+        // and that is how the fixture `user.lua` beside it gets found at all.
+        let shipped = crate::assets::lua().join("init.lua");
+        let config = directory.join("init.lua");
+        std::fs::copy(&shipped, &config).ok()?;
+
+        let scripts = Scripts::load(&config).expect("loading the shipped init.lua");
+        Some((directory, scripts))
+    }
+
+    /// Every spawn a key produced, as `(program, args)`.
+    fn spawns(outcome: &Outcome) -> Vec<(String, Vec<String>)> {
+        outcome
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Spawn { program, args } => Some((program.clone(), args.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A `user.lua` can add, replace and remove a binding.**
+    ///
+    /// The fault this is pinned against: bindings were `sol.bind` calls in
+    /// `init.lua` and `user.lua` was a settings table, so the two could not
+    /// meet. Binding `super+b` to a browser meant either editing a file the
+    /// next update overwrites or writing your own `init.lua` -- two hundred
+    /// lines of layout wiring, mode setup and terminal detection adopted in
+    /// order to add one key (#117).
+    ///
+    /// Three assertions, because `config.bindings` makes three promises and
+    /// only the first is the obvious one:
+    ///
+    ///  1. A combination nothing else uses is bound, and runs what it says.
+    ///  2. A combination `init.lua` already bound is **replaced** -- the
+    ///     decision recorded in `config.lua`'s comment, and the one that makes
+    ///     the section worth having: refusing a clash would permit adding a
+    ///     binding and forbid changing one, and changing one is what people
+    ///     come here for.
+    ///  3. `false` removes a shipped binding outright, so the compositor stops
+    ///     swallowing the key rather than binding it to a handler that does
+    ///     nothing.
+    ///
+    /// It runs the shipped `init.lua`, which is what makes it a test of the
+    /// ordering as well as the mechanism: `require("bindings")` is the last
+    /// line of that file precisely so the user's call to `sol.bind` is the
+    /// later one, and moving it up would break assertion 2 alone.
+    #[test]
+    fn a_user_file_can_add_replace_and_remove_a_binding() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-user-bindings",
+            r#"
+            return {
+                bindings = {
+                    -- Added: nothing in the shipped configuration binds this.
+                    ["super+f5"] = "fixture-browser",
+                    -- Replaced: `init.lua` binds super+q to closing a window.
+                    ["Super+Q"] = { "fixture-editor", "a file.txt" },
+                    -- Removed: `init.lua` binds super+g to the tilt demo.
+                    ["super+g"] = false,
+                },
+            }
+            "#,
+        ) else {
+            return;
+        };
+
+        let added = scripts.key("super+f5", empty_snapshot());
+        assert!(
+            added.handled,
+            "a binding from user.lua did not reach sol.bind"
+        );
+        assert_eq!(
+            spawns(&added),
+            vec![("fixture-browser".to_owned(), Vec::new())],
+            "a string binding is a command line"
+        );
+
+        // Written `Super+Q` in the fixture and pressed as `super+q`: the
+        // compositor normalises, so a configuration is not obliged to guess the
+        // spelling `init.lua` happened to use.
+        let replaced = scripts.key("super+q", empty_snapshot());
+        assert!(replaced.handled);
+        assert_eq!(
+            spawns(&replaced),
+            vec![("fixture-editor".to_owned(), vec!["a file.txt".to_owned()])],
+            "the user's super+q did not win: a list keeps its spaces, and the shipped \
+             binding closes a window rather than spawning anything"
+        );
+        assert!(
+            !replaced
+                .commands
+                .iter()
+                .any(|command| matches!(command, Command::Close { .. })),
+            "the shipped super+q ran as well as the user's, which means both handlers \
+             are registered and only one of them can be reached"
+        );
+
+        assert!(
+            !scripts.has_binding("super+g"),
+            "`false` left the combination bound, so the compositor still swallows the key"
+        );
+
+        // And `--check` says so, which is the other half of the decision: a
+        // binding may replace a shipped one, but not quietly.
+        let reported = scripts.bindings();
+        let note = |combo: &str| {
+            reported
+                .iter()
+                .find(|binding| binding.combo == combo)
+                .unwrap_or_else(|| panic!("{combo} is not in what --check would print"))
+                .note
+                .clone()
+        };
+        assert_eq!(note("super+f5").as_deref(), Some("config.bindings"));
+        assert_eq!(
+            note("super+q").as_deref(),
+            Some("config.bindings, replacing a shipped binding"),
+            "--check must be able to tell a replacement from an addition"
+        );
+        let removed = scripts.unbound();
+        assert_eq!(
+            removed
+                .iter()
+                .map(|binding| binding.combo.as_str())
+                .collect::<Vec<_>>(),
+            vec!["super+g"],
+            "a binding removed on purpose looks, in a list of what survived, exactly \
+             like one that was never there -- so it is reported separately"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`open.motion` and `open.scale` decide the open animation.**
+    ///
+    /// Both were documented in `config.lua` and read by nothing: `open.lua`
+    /// held `220 / outBack` and `0.88` as local constants while the
+    /// configuration advertised `200 / outCubic` and `0.92`, so editing either
+    /// setting did nothing and there was no way to tell that apart from having
+    /// misunderstood what it meant (#117).
+    ///
+    /// The numbers in the fixture are deliberately unlike both pairs, so this
+    /// cannot pass by agreeing with whichever set of constants happens to be in
+    /// the file.
+    #[test]
+    fn the_open_animation_is_the_one_the_configuration_names() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-open-animation",
+            r#"
+            return {
+                open = {
+                    motion = { duration = 777, easing = "linear" },
+                    scale = 0.5,
+                },
+            }
+            "#,
+        ) else {
+            return;
+        };
+
+        // 800x600 at the origin, from `one_screen`. At a scale of 0.5 the
+        // window starts 400x300 about its own centre, so at 200,150.
+        let outcome = scripts.opened(7, one_screen(&[7]));
+        let from = outcome
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                Command::PresentFrom {
+                    id: 7,
+                    rect,
+                    animation,
+                    ..
+                } => Some((*rect, *animation)),
+                _ => None,
+            })
+            .expect("the open animation did not run");
+
+        assert_eq!(
+            from.1.duration,
+            Duration::from_millis(777),
+            "open.motion.duration is not what the window arrives with"
+        );
+        assert_eq!(
+            from.1.easing,
+            Curve::Linear,
+            "open.motion.easing is not what the window arrives with"
+        );
+        assert!(
+            (from.0.w - 400.0).abs() < 0.5 && (from.0.h - 300.0).abs() < 0.5,
+            "open.scale did not decide how small the window starts: {:?}",
+            from.0
+        );
+        assert!(
+            (from.0.x - 200.0).abs() < 0.5 && (from.0.y - 150.0).abs() < 0.5,
+            "and it is still shrunk about its own centre: {:?}",
+            from.0
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`scrolling.widths` and `scrolling.default_width` decide how wide a
+    /// column opens.**
+    ///
+    /// The other two settings that were documented and read by nothing: the
+    /// strip used the constant list in `crates/layout/src/scroller.rs`, so a
+    /// configuration asking for quarters got thirds (#117).
+    ///
+    /// Driven through the shipped `scrolling.lua` rather than by calling
+    /// `sol.layout.scroller` from a fixture, because the missing link was the
+    /// *call site* -- the constructor took no argument, and no test of the
+    /// layout crate could have seen that. 0.8 of a 1600-wide screen is
+    /// unmistakably neither of the shipped presets near it.
+    #[test]
+    fn the_configured_widths_are_what_a_column_opens_at() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-scrolling-widths",
+            r#"
+            return {
+                gap = 0,
+                scrolling = { widths = { 0.25, 0.8 }, default_width = 2 },
+            }
+            "#,
+        ) else {
+            return;
+        };
+
+        scripts.monitors_changed(one_screen(&[]));
+        // super+s is the shipped binding that puts the scrolling layout in
+        // charge; without it the strip is built but nothing places anything.
+        scripts.key("super+s", one_screen(&[]));
+        let outcome = scripts.opened(7, one_screen(&[7]));
+
+        let placed = outcome
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::Place { id: 7, rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .expect("the scrolling layout placed nothing");
+        assert!(
+            (placed.w - 1280.0).abs() < 1.0,
+            "a new column did not open at `default_width` of `widths` -- 0.8 of a \
+             1600-wide view is 1280, and the shipped presets would give 533, 800 or \
+             1066: {placed:?}"
+        );
+
+        // And the cycle is over the configured list, not the shipped one: one
+        // step from the second of two wraps to the first.
+        let cycled = scripts.key("super+r", one_screen(&[7]));
+        let after = cycled
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::Place { id: 7, rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .expect("super+r placed nothing");
+        assert!(
+            (after.w - 400.0).abs() < 1.0,
+            "super+r did not cycle through the configured widths: 0.25 of 1600 is 400, \
+             and a lap of a two-entry list is two steps: {after:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A key the defaults do not define is reported, not swallowed.**
+    ///
+    /// `config.lua`'s `merge` validated nothing, so `tilling = { ... }` was
+    /// merged in as a new section, read by nothing, for ever -- and `solium
+    /// --check`, the one command whose job is answering "did my configuration
+    /// work", said it had loaded fine (#117). It had. That was never the
+    /// question.
+    ///
+    /// Four fixtures, and the last two are the ones that make this worth
+    /// having: a check that reports real typos and also reports working
+    /// settings is a check nobody will keep running.
+    #[test]
+    fn an_unrecognised_setting_is_reported_rather_than_merged_in_silence() {
+        let Some((directory, scripts)) = shipped_init_with_user(
+            "solium-script-test-unknown-settings",
+            r#"
+            return {
+                -- A typo at the top level, and one inside a section.
+                tilling = { split = 0.6 },
+                open = { scal = 0.5 },
+                -- A near miss on the *deprecated* spelling of `pane`. Reported,
+                -- because it is not a key anything reads -- and reported with no
+                -- suggestion, because the only word within two edits of it is
+                -- `decoration`, and answering a typo with a deprecated spelling
+                -- walks somebody past the key that actually works (#117 review).
+                decoraton = "border",
+                -- Not typos, and must not be reported: `keyboard` is empty on
+                -- purpose, so its keys cannot be checked against the defaults,
+                -- and a binding combination is whatever you press. `active`
+                -- belongs with a dual layout and is exactly the pair that used
+                -- to be called a typo.
+                keyboard = { layout = "us,ua", active = 2 },
+                bindings = { ["super+f6"] = "fixture-nothing" },
+            }
+            "#,
+        ) else {
+            return;
+        };
+
+        let found = scripts.unknown_settings();
+        let reported: Vec<(&str, Option<&str>)> = found
+            .iter()
+            .map(|setting| (setting.key.as_str(), setting.meant.as_deref()))
+            .collect();
+        assert_eq!(
+            reported,
+            vec![
+                ("decoraton", None),
+                ("open.scal", Some("open.scale")),
+                ("tilling", Some("tiling"))
+            ],
+            "the unrecognised keys are wrong: a near miss inside a section must be \
+             reported by its full path, a near miss on a deprecated name must not be \
+             answered with that name, and neither the `keyboard` section nor a binding \
+             combination may be called a typo"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// A configured cursor theme and size reach the compositor as written.
     ///
     /// The wiring between `sol.cursor_theme` and `Command::Cursor`, which is the
@@ -3576,6 +4519,521 @@ mod tests {
         // disappearing into a broken script.
         assert!(!outcome.handled);
         assert!(outcome.commands.is_empty());
+    }
+
+    /// Who each named selection holds, after a batch of commands.
+    ///
+    /// Folded rather than indexed, because `regroup` re-declares every desk on
+    /// every event and a test that asserted on `commands[4]` would be pinning
+    /// the order of a loop over monitors.
+    fn membership(commands: &[Command]) -> std::collections::HashMap<String, Vec<u64>> {
+        let mut out = std::collections::HashMap::new();
+        for command in commands {
+            if let Command::Group {
+                name,
+                selection: Some(selection),
+                ..
+            } = command
+            {
+                out.insert(name.clone(), selection.windows.clone());
+            }
+        }
+        out
+    }
+
+    /// Where each named selection was last asked to sit, after a batch.
+    fn carried(commands: &[Command]) -> std::collections::HashMap<String, (f64, f64)> {
+        let mut out = std::collections::HashMap::new();
+        for command in commands {
+            match command {
+                Command::PresentGroup { name, to, .. } => {
+                    out.insert(name.clone(), to.offset());
+                }
+                Command::ClearGroup { name, .. } => {
+                    out.insert(name.clone(), (0.0, 0.0));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// One 1600x900 screen and three windows on it, for the reload test.
+    fn one_screen(windows: &[u64]) -> Snapshot {
+        Snapshot {
+            keyboard: crate::keymap::State::initial(),
+            windows: windows
+                .iter()
+                .map(|id| WindowInfo {
+                    id: *id,
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 800.0,
+                        h: 600.0,
+                    },
+                    drawn: Rect::default(),
+                    title: String::new(),
+                    focused: false,
+                    monitor: "test-1".to_owned(),
+                    // Ordinary windows: this fixture is about what a reload
+                    // keeps, and #72's modality plays no part in it. Spelled
+                    // out rather than defaulted so that a third field added to
+                    // `WindowInfo` fails here and is decided for this test
+                    // rather than silently inherited.
+                    modal: false,
+                    parent: Parentage::None,
+                })
+                .collect(),
+            monitors: vec![MonitorInfo {
+                name: "test-1".to_owned(),
+                area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1600.0,
+                    h: 900.0,
+                },
+                whole: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1600.0,
+                    h: 900.0,
+                },
+                scale: 1.0,
+                focused: true,
+                primary: true,
+                transform: "normal".to_owned(),
+            }],
+            work_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1600.0,
+                h: 900.0,
+            },
+            cursor: (0.0, 0.0),
+        }
+    }
+
+    /// **A reload does not lose the session, which is the whole of issue #116.**
+    ///
+    /// The bug as it was reported: `super+shift+r` on workspace 3, and the
+    /// desktop is drawn two screen-widths off-stage with no key that brings it
+    /// back. Underneath it are three separate losses, and this drives all
+    /// three through the same sequence `Solium::reload` runs -- `kept` and
+    /// `load_carrying`, then `restore`, `monitors`, `layout`:
+    ///
+    ///  * which workspace each monitor is showing, so the desks are carried
+    ///    relative to the one in view and not to desk 1;
+    ///  * which workspace each *window* is on, so three windows on two desks
+    ///    are still on two desks rather than swept onto one;
+    ///  * which layout is in charge, because a tiled session that comes back
+    ///    believing it is floating toggles the wrong way on the next key.
+    ///
+    /// It runs the **shipped** `workspaces.lua`, `modes.lua` and `tiling.lua`
+    /// rather than copies, which is what makes it a test of the files under
+    /// review. That also means a developer's own `~/.config/solium` would
+    /// answer `require` ahead of them -- it comes first on `package.path` --
+    /// so the run is skipped there rather than asserting about somebody's
+    /// configuration. The same guard, for the same reason, as
+    /// `a_user_file_using_the_old_key_still_chooses_a_style`.
+    #[test]
+    fn a_reload_keeps_the_workspace_the_windows_and_the_layout() {
+        if let Some(own) = Scripts::user_config_dir()
+            && (own.join("config.lua").exists()
+                || own.join("user.lua").exists()
+                || own.join("workspaces.lua").exists()
+                || own.join("modes.lua").exists())
+        {
+            return;
+        }
+
+        let directory = std::env::temp_dir().join("solium-script-test-reload");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            local workspaces = require("workspaces")
+            local modes = require("modes")
+            local tiling = require("tiling")
+
+            sol.bind("super+f1", function()
+                modes.use("tiling")
+                workspaces.go(3)
+            end)
+
+            -- What the session believes about itself, in one string, so the
+            -- assertions read the scripts' own answer rather than a
+            -- reconstruction of it.
+            sol.bind("super+f2", function()
+                sol.status(string.format(
+                    "%d %s", workspaces.on("test-1"), tostring(tiling.active)))
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let first = &[7_u64, 8];
+        let all = &[7_u64, 8, 9];
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        // The screens arrive, which is the moment the desks can be built at
+        // all -- a script's top level runs before any output is placed.
+        scripts.monitors_changed(one_screen(first));
+        // Two windows open on workspace 1, then the session moves to 3 with
+        // tiling on, and a third window opens there.
+        scripts.opened(7, one_screen(first));
+        scripts.opened(8, one_screen(first));
+        scripts.key("super+f1", one_screen(first));
+        scripts.opened(9, one_screen(all));
+
+        let before = scripts.key("super+f2", one_screen(all));
+        assert_eq!(
+            before.status.as_deref(),
+            Some("3 true"),
+            "the session was not set up: this is before any reload"
+        );
+
+        // Exactly what `Solium::reload` does, in the order it does it.
+        let carried_over = scripts.kept();
+        let mut scripts =
+            Scripts::load_carrying(&config, carried_over).expect("reloading the test script");
+        let restored = scripts.restored(one_screen(all));
+        let monitors = scripts.monitors_changed(one_screen(all));
+        let layout = scripts.relayout(one_screen(all));
+
+        let after = scripts.key("super+f2", one_screen(all));
+        assert_eq!(
+            after.status.as_deref(),
+            Some("3 true"),
+            "after the reload the scripts believe they are somewhere else: the workspace in \
+             view and the layout in charge are both part of the session, not of the file"
+        );
+
+        let mut commands = restored.commands;
+        commands.extend(monitors.commands);
+        commands.extend(layout.commands);
+
+        let who = membership(&commands);
+        assert_eq!(
+            who.get("desk-1@test-1").map(Vec::as_slice),
+            Some([7, 8].as_slice()),
+            "the windows that were on workspace 1 are not on desk 1 any more; \
+             memberships found: {who:?}"
+        );
+        assert_eq!(
+            who.get("desk-3@test-1").map(Vec::as_slice),
+            Some([9].as_slice()),
+            "the window that was on workspace 3 is not on desk 3 any more; \
+             memberships found: {who:?}"
+        );
+
+        // And the desks sit relative to the one in view. Desk 3 is what is
+        // being looked at, so it is carried nowhere; desk 1 is two cells to
+        // its left, at 1600 x 1.06 each. Off by this is the off-stage
+        // desktop the issue was reported as.
+        let where_they_sit = carried(&commands);
+        assert_eq!(
+            where_they_sit.get("desk-3@test-1"),
+            Some(&(0.0, 0.0)),
+            "the workspace in view is not at the origin; offsets: {where_they_sit:?}"
+        );
+        let (dx, dy) = where_they_sit
+            .get("desk-1@test-1")
+            .copied()
+            .unwrap_or_default();
+        assert!(
+            (dx - (-2.0 * 1600.0 * 1.06)).abs() < 0.5 && dy == 0.0,
+            "desk 1 sits at {dx},{dy}, which is not two screens to the left of desk 3"
+        );
+    }
+
+    /// **A reload that shortens the arrangement still leaves every window
+    /// somewhere you can reach.**
+    ///
+    /// The failure the fix for #116 introduced, which the bug it fixed did not
+    /// have. `workspaces.of` is now carried across the reload, and the
+    /// `restore` sweep forgot the abandoned *desks* without touching the
+    /// entries naming them -- so `columns = 4` edited to `columns = 2` left a
+    /// window remembering workspace 4, in no group at all:
+    ///
+    ///   * `regroup` loops `1..count`, so nothing ever names it -- it is drawn
+    ///     over whatever workspace is in view, on top of windows that belong
+    ///     there;
+    ///   * `visible()` filters it out, so no layout arranges it;
+    ///   * and `go()` clamps to `count()`, so no key switches to where it
+    ///     thinks it is.
+    ///
+    /// Before #116 `of` was wiped on every reload and the window came back on
+    /// the workspace in view. The same is true of `showing`, and worse: a
+    /// session looking at workspace 4 when the arrangement shrinks to two
+    /// carries *every* surviving desk off to the left of a workspace that no
+    /// longer exists, which is the off-stage desktop the issue was reported as,
+    /// reached by the other door.
+    ///
+    /// Same shape as the reload test above, with the configuration edited
+    /// between the two loads -- which is what a reload is for.
+    #[test]
+    fn a_reload_with_fewer_workspaces_leaves_no_window_on_a_desk_that_is_gone() {
+        if let Some(own) = Scripts::user_config_dir()
+            && (own.join("config.lua").exists()
+                || own.join("user.lua").exists()
+                || own.join("workspaces.lua").exists()
+                || own.join("modes.lua").exists())
+        {
+            return;
+        }
+
+        let directory = std::env::temp_dir().join("solium-script-test-reload-shorter");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            local workspaces = require("workspaces")
+
+            sol.bind("super+f1", function() workspaces.go(3) end)
+            sol.bind("super+f2", function() workspaces.go(4) end)
+            sol.bind("super+f3", function()
+                sol.status(string.format("%d/%d",
+                    workspaces.on("test-1"), workspaces.count()))
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let first = &[7_u64];
+        let all = &[7_u64, 9];
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        scripts.monitors_changed(one_screen(first));
+        // One window on workspace 1, then to workspace 3, a window opens there,
+        // and the session is left looking at workspace 4.
+        scripts.opened(7, one_screen(first));
+        scripts.key("super+f1", one_screen(first));
+        scripts.opened(9, one_screen(all));
+        scripts.key("super+f2", one_screen(all));
+
+        let before = scripts.key("super+f3", one_screen(all));
+        assert_eq!(
+            before.status.as_deref(),
+            Some("4/4"),
+            "the session was not set up: this is before any reload"
+        );
+
+        // The edit. `require` searches the configuration's own directory first,
+        // so the *second* load finds this and the first did not.
+        std::fs::write(
+            directory.join("user.lua"),
+            "return { workspaces = { columns = 2 } }\n",
+        )
+        .expect("writing the fixture user.lua");
+
+        let carried_over = scripts.kept();
+        let mut scripts =
+            Scripts::load_carrying(&config, carried_over).expect("reloading the test script");
+        let restored = scripts.restored(one_screen(all));
+        let monitors = scripts.monitors_changed(one_screen(all));
+        let layout = scripts.relayout(one_screen(all));
+
+        let after = scripts.key("super+f3", one_screen(all));
+        assert_eq!(
+            after.status.as_deref(),
+            Some("2/2"),
+            "after the reload the scripts are still looking at a workspace the \
+             arrangement no longer has, and `go` clamps to the count -- so no key \
+             switches away from it"
+        );
+
+        let mut commands = restored.commands;
+        commands.extend(monitors.commands);
+        commands.extend(layout.commands);
+
+        let who = membership(&commands);
+        assert_eq!(
+            who.get("desk-1@test-1").map(Vec::as_slice),
+            Some([7].as_slice()),
+            "the window on workspace 1 is not on desk 1 any more; memberships: {who:?}"
+        );
+        assert_eq!(
+            who.get("desk-2@test-1").map(Vec::as_slice),
+            Some([9].as_slice()),
+            "the window kept on workspace 3 is in no selection at all: nothing names \
+             it, so no layout arranges it and no key reaches it; memberships: {who:?}"
+        );
+
+        // And the desk in view is the one in view, rather than one cell to the
+        // left of a workspace that no longer exists.
+        let where_they_sit = carried(&commands);
+        assert_eq!(
+            where_they_sit.get("desk-2@test-1"),
+            Some(&(0.0, 0.0)),
+            "every surviving desk is carried off-stage, relative to a workspace the \
+             arrangement no longer has; offsets: {where_they_sit:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A keyboard section that says what layout to start on is not a typo.**
+    ///
+    /// `config.lua` restates `sol.keyboard`'s key set, because `keyboard = {}`
+    /// is empty on purpose and so cannot be the list. The restatement left
+    /// `active` out, and `sol.keyboard` reads it -- so a dual-layout
+    /// configuration, the only kind that has an `active` to name, was told its
+    /// working setting is read by nothing and `solium --check` exited 1 (#117
+    /// review).
+    ///
+    /// That is worse than the silence #117 replaced. `--check` answers "did my
+    /// configuration work", and a check that is wrong about a setting people
+    /// really write is a check they stop running. See
+    /// `every_key_a_section_accepts_is_one_the_compositor_reads`, which is what
+    /// stops the list drifting again.
+    #[test]
+    fn a_keyboard_section_naming_its_layouts_and_which_is_live_is_not_a_typo() {
+        let Some((directory, scripts)) = shipped_init_with_user(
+            "solium-script-test-keyboard-active",
+            r#"
+            return {
+                keyboard = { layout = "us,ru", active = 2 },
+            }
+            "#,
+        ) else {
+            return;
+        };
+
+        let reported: Vec<String> = scripts
+            .unknown_settings()
+            .into_iter()
+            .map(|setting| setting.key)
+            .collect();
+        assert!(
+            reported.is_empty(),
+            "a configuration naming two layouts and which of them is live is reported \
+             as read by nothing, and `--check` exits 1 over a setting that works: \
+             {reported:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Every key `config.lua`'s `open_sections` accepts for one section.
+    ///
+    /// Scraped from the shipped file rather than restated here: a third copy of
+    /// a list whose second copy is the defect under test would be the same
+    /// mistake with more steps.
+    fn accepted_keys(section: &str) -> Vec<String> {
+        let path = crate::assets::lua().join("config.lua");
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let Some(table) = text.split("local open_sections = {").nth(1) else {
+            return Vec::new();
+        };
+        let Some(rest) = table.split(&format!("{section} = {{")).nth(1) else {
+            return Vec::new();
+        };
+        // Comments stripped before anything else is looked for, because a line
+        // documenting `sol.keyboard{ active = 2 }` holds both a closing brace
+        // and an `=` -- so leaving them in ends the table early and drops the
+        // very key the comment is about. No string in this table holds a `--`.
+        let without_comments: String = rest
+            .lines()
+            .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let Some(body) = without_comments.split('}').next() else {
+            return Vec::new();
+        };
+        let mut found: Vec<String> = body
+            .split(',')
+            .filter_map(|entry| entry.split_once('='))
+            .filter(|(_, value)| value.trim() == "true")
+            .map(|(key, _)| key.trim().to_owned())
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The keys a compositor function reads out of the table it is handed.
+    ///
+    /// Asked of the function by handing it one that records what is looked up
+    /// in it, so this cannot be a restatement of the reads and cannot drift
+    /// from them however they are spelled -- `sol.keyboard` reads five of its
+    /// keys through a closure and three directly, and an `options.get(` scan
+    /// would see only three.
+    fn keys_read_by(name: &str) -> Vec<String> {
+        let directory = std::env::temp_dir().join(format!("solium-script-test-reads-{name}"));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+                sol.bind("Super+P", function()
+                    local seen = {{}}
+                    sol.{name}(setmetatable({{}}, {{
+                        __index = function(_, key) seen[#seen + 1] = tostring(key) end,
+                    }}))
+                    table.sort(seen)
+                    sol.status(table.concat(seen, " "))
+                end)
+                "#
+            ),
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+p", empty_snapshot());
+        let _ = std::fs::remove_dir_all(&directory);
+        let mut found: Vec<String> = outcome
+            .status
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect();
+        // Sorted on the Lua side already; a key read twice is one key.
+        found.dedup();
+        found
+    }
+
+    /// **The key sets `config.lua` restates are the ones the compositor reads.**
+    ///
+    /// `keyboard` and `cursor` default to `{}` -- empty *means* "whatever the
+    /// session already said" -- so the defaults cannot double as the list of
+    /// what exists, and `config.lua` writes the list out. #117 said in a comment
+    /// that a reader growing a key would make this report that key as a typo,
+    /// and called that loud. It was not loud: the list shipped already missing
+    /// `active`, and nothing failed.
+    ///
+    /// So the two halves are compared here instead, and in both directions. A
+    /// key the compositor reads and the list omits is a working setting called
+    /// a typo, which exits `--check` non-zero over nothing; a key the list
+    /// accepts and nothing reads is #117's original fault, read from the other
+    /// side -- a real typo waved through.
+    #[test]
+    fn every_key_a_section_accepts_is_one_the_compositor_reads() {
+        for (section, function) in [("keyboard", "keyboard"), ("cursor", "cursor_theme")] {
+            let read = keys_read_by(function);
+            let accepted = accepted_keys(section);
+            // Either scrape coming back empty would make this agree with
+            // anything, and both have a way of doing that quietly: a renamed
+            // `open_sections`, or a `sol.` function that stopped being reached.
+            assert!(
+                read.len() >= 2 && accepted.len() >= 2,
+                "sol.{function} was seen reading {read:?} and config.lua's \
+                 open_sections.{section} accepts {accepted:?}; one of the two walks \
+                 is broken, not the lists"
+            );
+            assert_eq!(
+                accepted, read,
+                "config.lua's open_sections.{section} and the keys sol.{function} \
+                 actually reads have drifted apart: a key only the compositor reads \
+                 is a working setting `--check` calls a typo, and a key only the \
+                 list has is a typo `--check` waves through"
+            );
+        }
     }
 }
 

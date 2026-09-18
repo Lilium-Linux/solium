@@ -101,10 +101,18 @@ scrolling = {
     snap = { duration = 200, easing = "outCubic" },
 },
 workspaces = { motion = { duration = 300, easing = "outCubic" } },
-dock      = { morph  = { duration = 340, easing = "outCubic" } },
-open      = { motion = { duration = 200, easing = "outCubic" }, scale = 0.92 },
+open      = { motion = { duration = 220, easing = "outBack" }, scale = 0.88 },
 loading   = { fade = 180 },
 ```
+
+These are the numbers `config.lua` really has. The block used to print `open` as
+200 / `outCubic` / 0.92 and to carry a `dock = { morph = ... }` line, and #117
+deleted both from `config.lua` for the same reason: nothing read either of them.
+`open.lua` held 220 / `outBack` / 0.88 as local constants, so the advertised
+numbers described an animation nobody had ever seen, and the script's won when
+the two were wired together — those are what the animation was tuned against.
+There is no dock, so `dock.morph` configured a component that does not exist,
+and `--check` now reports that spelling as an unrecognised key.
 
 So changing how tiling feels is one line in `~/.config/solium/user.lua`:
 
@@ -123,8 +131,9 @@ obvious:
 - **`snap` is shorter than `motion`.** A window returning after a drag is
   answering something you just did with your hand, and a long animation there
   reads as lag rather than polish.
-- **`dock.morph` is longer than everything.** The distance travelled is the
-  thing being shown, so it gets time to be seen.
+- **`open` overshoots, and is the only one that does.** `outBack` goes past the
+  window's real size and settles back, which is why it starts at 0.88 rather
+  than nearer 1 — a small overshoot needs somewhere to have come from.
 
 ## Animations you should not write
 

@@ -111,6 +111,44 @@ fn anywhere_on(
     screens.into_iter().any(|screen| screen.overlaps(rect))
 }
 
+/// How far past the present [`Solium::everything_is_off_stage`] looks.
+///
+/// A reload *starts* the workspace slide; it does not finish it. Asking where
+/// the windows are at that instant asks where they were before it, so the
+/// question has to be put to a moment when the transforms have landed.
+///
+/// Only has to be longer than the longest animation a configuration can name,
+/// and costs nothing for being longer than that: `Animation::progress` clamps
+/// the elapsed time to the duration, so every extra second is the same
+/// division. An hour is not a guess at how long an animation takes — it is far
+/// enough that it cannot be one.
+const SETTLED: Duration = Duration::from_secs(60 * 60);
+
+/// Whether none of these drawn rectangles reaches any screen.
+///
+/// `None` when there is nothing to ask about — no screens, or no windows. The
+/// free function over plain rectangles, for the same reason [`anywhere_on`] is
+/// one: `Solium` needs a `Display` and cannot be built in a unit test, so the
+/// half that decides is the half kept testable. The instant the rectangles were
+/// measured at is the caller's, and is the other half — see
+/// [`Solium::everything_is_off_stage`], which got it wrong.
+fn nothing_on_stage(
+    drawn: impl IntoIterator<Item = Rectangle<f64, Logical>>,
+    screens: &[Rectangle<i32, Logical>],
+) -> Option<bool> {
+    if screens.is_empty() {
+        return None;
+    }
+    let mut any = false;
+    for rect in drawn {
+        any = true;
+        if screens.iter().any(|screen| screen.to_f64().overlaps(rect)) {
+            return Some(false);
+        }
+    }
+    any.then_some(true)
+}
+
 /// A rectangle grown outward by the frame drawn around it.
 fn grown(real: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logical> {
     if !insets.any() {
@@ -2675,6 +2713,65 @@ impl Solium {
         }
     }
 
+    /// Whether a selection is carrying every window off every screen.
+    ///
+    /// **The recovery path is part of issue #116.** The session that found it
+    /// had every window drawn two screen-widths to the left, nothing on any
+    /// monitor but a wallpaper, and no key that brought it back — `super+1`
+    /// early-returned because the scripts believed workspace 1 was already in
+    /// view. What would have saved it was one line saying where everything had
+    /// gone. The compositor knew; nothing asked it.
+    ///
+    /// **The compositor cannot tell a lost desktop from an empty workspace,
+    /// and does not pretend to.** They are the same picture: in both, every
+    /// window is in a selection carried off screen and the desk in view has
+    /// none. The difference is intent, and intent lives in the scripts. So
+    /// this is asked at the one moment where the answer is worth having
+    /// either way — the end of [`Self::reload`], which is both the keypress
+    /// that lost the desktop and the keypress anyone reaches for when
+    /// something on screen has gone wrong. Asking it on every script event
+    /// instead would warn about every empty workspace anybody switched to,
+    /// and a warning that is usually wrong is one nobody reads.
+    ///
+    /// `None` when nothing is grouped, when there are no screens, or when
+    /// there are no windows — none of which is a question with an answer.
+    ///
+    /// Measured through [`Self::drawn_at`], which is the same function the
+    /// renderer uses to place a pane: asking `Groups` for the offset
+    /// separately would be a second answer to "where is this window", and two
+    /// answers drift.
+    ///
+    /// **Sampled [`SETTLED`] ahead, and the first version was not.** It asked
+    /// `self.clock.now()` the instant after the three dispatches, which is the
+    /// instant every group transform they started is at *progress zero* — so it
+    /// measured where the previous session had left the desks rather than what
+    /// this reload was doing with them. Wrong both ways round: a reload that
+    /// rescued an off-stage desktop printed the warning anyway, and one that
+    /// carried the desktop off went quiet. Only a displacement from a
+    /// membership change, which is instantaneous, came out right, and that is
+    /// the case the fault hid behind (#116 review).
+    fn everything_is_off_stage(&self) -> Option<bool> {
+        if self.groups.is_empty() {
+            return None;
+        }
+        let screens: Vec<Rectangle<i32, Logical>> = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output))
+            .collect();
+        // Having no screens is `nothing_on_stage`'s answer to give, and it does
+        // -- a second check here would be a second place that decides what an
+        // unanswerable question comes back as.
+        let landed = self.clock.now().saturating_add(SETTLED);
+        nothing_on_stage(
+            self.panes
+                .iter()
+                .filter(|pane| pane.managed())
+                .filter_map(|pane| Some(self.drawn_at(pane, self.pane_outer(pane)?, landed).rect)),
+            &screens,
+        )
+    }
+
     /// The compositor's own chrome under `location`, if any.
     ///
     /// **The single hit test behind both what a press does and what the pointer
@@ -4250,9 +4347,42 @@ impl Solium {
     /// decoration is the same one keystroke as editing a binding. A file that
     /// fails to load leaves the running configuration alone: a typo should
     /// cost a log line, not the session.
+    ///
+    /// ## A reload replaces the scripts, not the session
+    ///
+    /// The session is older than the scripts reading it. The windows, the
+    /// monitors, the workspace in view and the layout in charge all outlive
+    /// `super+shift+r`; the Lua state does not. So the second half of a reload
+    /// is putting the new scripts back in touch with the session they have
+    /// inherited, and it has two parts, both of which are the contract on
+    /// [`Scripts::load_carrying`]:
+    ///
+    ///  * `Scripts::kept` and `load_carrying` hand back what the old scripts
+    ///    asked to keep, *before* the new ones run, so a script's top level
+    ///    sees its own state rather than its defaults;
+    ///  * `restore`, `monitors` and `layout` re-announce the world, in that
+    ///    order, so nothing has to be kept that could be recomputed.
+    ///
+    /// **The order is the same one a hotplug uses** — see
+    /// [`Self::settle_monitors`] — with `restore` in front of it. That is not
+    /// a coincidence to be tidied away later: "the screens are not the screens
+    /// you knew" is exactly a new script set's position, and a layout that
+    /// handles a monitor arriving already handles this.
+    ///
+    /// **This is what issue #116 was.** Only `layout` reached the new scripts,
+    /// and only by accident: shipped `init.lua` calls `sol.monitors`, whose
+    /// command happens to trigger a relayout. `workspaces.lua` regrouped every
+    /// window onto desk 1 from that `layout` while desk 1 was still carried
+    /// two screen-widths off-stage by the *previous* session's view, and
+    /// nothing put it back — `super+1` did not, because the fresh Lua state
+    /// believed workspace 1 was already showing.
     pub(crate) fn reload(&mut self) {
         let path = Scripts::config_path();
-        match Scripts::load(&path) {
+        // Collected before the new configuration is even read, because reading
+        // it is what may fail, and the failure path has to leave the running
+        // scripts -- and therefore their keep -- untouched.
+        let carried = self.scripts.as_ref().map(Scripts::kept).unwrap_or_default();
+        match Scripts::load_carrying(&path, carried) {
             Ok(scripts) => {
                 crate::qml::clear_cache();
                 let style = self.decorations.style().map(ToOwned::to_owned);
@@ -4266,8 +4396,34 @@ impl Solium {
                 self.decorations.set_style(&mut self.panes, None);
                 self.decorations.set_style(&mut self.panes, style);
                 self.start_scripts(Some(scripts));
+                // The re-announcement, in the order the doc comment states.
+                // Three dispatches and not one, each with its own snapshot,
+                // because what `monitors` does changes what `layout` is
+                // looking at -- `workspaces.lua` moves every desk in the first
+                // and arranges the windows on the one in view in the second.
+                self.trigger_restored();
+                self.trigger_monitors_changed();
+                self.trigger_relayout();
                 self.redraw = true;
                 tracing::info!(config = %path.display(), "configuration reloaded");
+                // And then look at what that produced -- at where it *lands*,
+                // not at this frame, which is still the previous session's.
+                // See `everything_is_off_stage` for both halves: why the
+                // question is asked here and nowhere else -- a reload is both
+                // the keypress that lost the desktop and the keypress anybody
+                // reaches for when it is gone, so it is the one moment where
+                // the answer is worth having whichever way it comes out -- and
+                // why asking it of the current frame answered about the wrong
+                // session.
+                if self.everything_is_off_stage() == Some(true) {
+                    tracing::warn!(
+                        "when the movement this reload started has landed, every window will be \
+                         drawn outside every screen. If that is not simply a workspace with \
+                         nothing on it, a selection is carrying the desktop off-stage and only \
+                         something that names that selection can carry it back: switch workspace \
+                         away and back again, which re-states where every desk sits"
+                    );
+                }
             }
             Err(err) => {
                 tracing::error!(?err, config = %path.display(), "reload failed, keeping what was running");
@@ -4666,6 +4822,21 @@ impl Solium {
             return;
         };
         let outcome = scripts.monitors_changed(snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
+    /// Tell the scripts they have replaced a running session's, not started one.
+    ///
+    /// Called from [`Self::reload`] and from nowhere else: a cold start has
+    /// nothing to restore, and firing it there would make the event mean
+    /// "loaded", which is a thing a script's own top level already is.
+    fn trigger_restored(&mut self) {
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.restored(snapshot);
         self.scripts = Some(scripts);
         self.apply(outcome);
     }
@@ -6148,6 +6319,120 @@ mod tests {
         // Rules out a constant `true`, and covers the moment between a monitor
         // going away and the session noticing.
         assert!(!anywhere_on(at(100, 100, 800, 600), []));
+    }
+
+    /// **What the notice at the end of a reload is looking at.**
+    ///
+    /// The recovery half of #116 shipped with no test at all, which is how the
+    /// inversion below went out with it. This is the decision itself: three
+    /// answers, and the third is the one that matters — a *lost* desktop and an
+    /// *empty* workspace are the same picture, so `None` and `Some(true)` are
+    /// different claims and the empty cases must not come back as "everything
+    /// is off stage".
+    #[test]
+    fn a_desktop_is_off_stage_only_when_there_is_a_desktop_and_it_is_off() {
+        let screens = two_monitors().to_vec();
+        let on = at(100, 100, 800, 600).to_f64();
+        let off = at(-4000, 0, 1920, 1080).to_f64();
+
+        assert_eq!(
+            nothing_on_stage([off], &screens),
+            Some(true),
+            "a window carried clear of every screen is the picture this warns about"
+        );
+        // Rules out `all(..)` for `any(..)` twice over: one window still on a
+        // screen is a desktop that is there, whichever order they come in.
+        assert_eq!(
+            nothing_on_stage([off, on], &screens),
+            Some(false),
+            "one window still on a screen means the desktop is not lost"
+        );
+        assert_eq!(
+            nothing_on_stage([on, off], &screens),
+            Some(false),
+            "and the answer does not depend on which window is looked at first"
+        );
+
+        // Neither of these is a question with an answer, and neither may come
+        // back as `Some(true)`: the caller warns on exactly that, and a session
+        // with nothing open would then be told its desktop had been carried
+        // away.
+        assert_eq!(
+            nothing_on_stage([], &screens),
+            None,
+            "no windows is not an off-stage desktop"
+        );
+        assert_eq!(
+            nothing_on_stage([on], &[]),
+            None,
+            "and neither is no screens, which is every window off every one of \
+             them by arithmetic"
+        );
+    }
+
+    /// **And when it looks, which is the whole of the fault.**
+    ///
+    /// `everything_is_off_stage` ran at `self.clock.now()`, immediately after
+    /// the reload's three dispatches. A workspace slide is an animation, and at
+    /// its own start instant it has moved nothing — so the notice described the
+    /// session that had just been thrown away. A reload that *rescued* an
+    /// off-stage desktop warned about it, and one that carried the desktop off
+    /// said nothing at all.
+    ///
+    /// Asked of a real [`Groups`] carrying a real [`present::Transform`],
+    /// through the same `Shift::apply` that [`Solium::drawn_at`] ends in. Both
+    /// instants are asserted, because "sampled later" is only worth anything if
+    /// the earlier sample really does give the other answer — otherwise this
+    /// would pass against the code it is pinned against.
+    ///
+    /// **The honest limit.** This pins [`SETTLED`] and what it is for; it
+    /// cannot see `everything_is_off_stage` choosing to sample somewhere else,
+    /// because that method needs a `Display` and a mapped `Space` and so cannot
+    /// be called here at all. Setting `SETTLED` back to `ZERO` — which is what
+    /// the code did — fails the second assertion.
+    #[test]
+    fn a_slide_that_has_not_started_yet_is_not_where_the_desks_end_up() {
+        let start = Duration::from_secs(10);
+        let screens = two_monitors().to_vec();
+        let real = at(100, 100, 800, 600);
+
+        let mut groups = crate::group::Groups::default();
+        groups.declare(
+            "desk-2",
+            crate::group::Selection {
+                members: vec![crate::group::Member::Window(7)],
+                on: None,
+            },
+            start,
+        );
+        // A screen and a bit to the left, over 300ms: `workspaces.lua`'s own
+        // numbers, and what a reload onto another workspace asks for.
+        groups.present(
+            "desk-2",
+            crate::group::Shift {
+                dx: -1920.0 * 1.06,
+                ..crate::group::Shift::NONE
+            },
+            start,
+            Duration::from_millis(300),
+            present::Curve::OutCubic,
+        );
+
+        let where_it_is = |now| groups.on_window(7, None, now).apply(Frame::real(real)).rect;
+
+        assert_eq!(
+            nothing_on_stage([where_it_is(start)], &screens),
+            Some(false),
+            "at the instant the reload finishes, the slide it started has moved \
+             nothing -- so this is the session before the reload, and reporting it \
+             is reporting the wrong one"
+        );
+        assert_eq!(
+            nothing_on_stage([where_it_is(start + SETTLED)], &screens),
+            Some(true),
+            "SETTLED is not far enough ahead for the transforms this reload started \
+             to have landed, so the notice still describes the previous session"
+        );
     }
 
     #[test]

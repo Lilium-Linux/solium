@@ -100,6 +100,69 @@ local defaults = {
     -- returns the layout names, which one is active, and the repeat settings.
     keyboard = {},
 
+    -- The keys, and what they do.
+    --
+    -- The shipped bindings are `sol.bind` calls in `init.lua`, and `init.lua`
+    -- is the session's entry point -- so until #117 the only way to add one
+    -- key was to write your own copy of that file and adopt two hundred lines
+    -- of layout wiring, mode setup and terminal detection along with it, or to
+    -- edit a file the next update overwrites. Neither of those is a setting.
+    -- This table is: it is merged over these defaults exactly as `tiling` and
+    -- `scrolling` are, so a `user.lua` holding nothing but a binding is a
+    -- complete configuration.
+    --
+    --     bindings = {
+    --         ["super+b"]       = "firefox",
+    --         ["super+shift+s"] = { "sh", "-c", "grim -g \"$(slurp)\"" },
+    --         ["super+n"]       = function() sol.spawn("kitty", "-e", "nvim") end,
+    --         ["super+g"]       = false,
+    --     },
+    --
+    -- Four forms, each the shortest way to write what it means:
+    --
+    --   a string    a command line, split on spaces. The common case is a
+    --               program and no arguments, and that should read like one.
+    --   a list      the same, already split, for an argument with a space in
+    --               it -- the shell quoting above is one argument, not three.
+    --   a function  anything else. The whole `sol` API is in scope, so this is
+    --               a binding in exactly the sense `init.lua`'s are.
+    --   false       unbind. A shipped binding you do not want is otherwise
+    --               unremovable, and binding it to a function that does
+    --               nothing is not the same thing: the compositor would still
+    --               swallow the key.
+    --
+    -- The combination is written the way you would say it and normalised by
+    -- the compositor, so `super+shift+q` and `Shift+Super+Q` are one binding.
+    --
+    -- **A binding here replaces a shipped one on the same combination, rather
+    -- than being an error.** Two reasons, the second deciding. The first is
+    -- consistency: `sol.bind` has always let the later call win -- that is how
+    -- `init.lua` and `scrolling.lua` coexist -- so a clash refusing *here*
+    -- would make this table alone behave unlike the primitive underneath it.
+    -- The second is that refusing would permit adding a binding and forbid
+    -- changing one, and changing one is what people come here to do: `super+q`
+    -- closing a window is a choice, not a law, and "you may not rebind it"
+    -- leaves editing `init.lua` as the only way -- which is the fault this
+    -- section exists to remove.
+    --
+    -- Replacing is not the same as replacing quietly. `solium --check` prints
+    -- every binding this table produced, marks the ones that took a shipped
+    -- combination over, and lists the ones it removed, so a clash you did not
+    -- intend costs a line of output rather than an afternoon wondering why a
+    -- key stopped working.
+    --
+    -- Applied by `lua/bindings.lua`, from the last line of `init.lua`, because
+    -- that ordering *is* the replacement -- "the later call wins" only puts
+    -- these last if they are read last. In your own `init.lua`, keep
+    -- `require("bindings")` last for the same reason.
+    --
+    -- One thing this cannot check: a combination is whatever you press, so
+    -- there is no list of valid names to compare yours against. `super+whoops`
+    -- binds successfully and never fires. `--check` prints what was bound,
+    -- which is the only honest answer available -- read it and look for the
+    -- key you meant.
+    bindings = {},
+
     -- The pointer.
     --
     -- Empty means "whatever the session already said", exactly as `keyboard`
@@ -350,8 +413,23 @@ local defaults = {
 
     scrolling = {
         -- The widths a column cycles through with super+r, as shares of the
-        -- view. A new column starts at `default_width`, an index into these.
+        -- view.
+        --
+        -- Read by `sol.layout.scroller` since #117. Before that the strip used
+        -- the constant list in `crates/layout/src/scroller.rs` and these two
+        -- lines were a description of it -- so a configuration asking for
+        -- quarters got thirds, and nothing anywhere said which of the two had
+        -- been believed.
+        --
+        -- An entry that is not a share of a view -- zero, negative, above 1,
+        -- not a number at all -- is dropped with a line in the log, and a list
+        -- with nothing usable left falls back to this one. Refused rather than
+        -- clamped, for the reason `cursor.size` is: a column at 0.001 of the
+        -- screen is as unusable as no column, and nobody meant to ask for one.
         widths = { 1 / 3, 1 / 2, 2 / 3 },
+        -- Which of them a new column opens at, and where the cycle starts.
+        -- 1-based, the way Lua counts. Past the end of the list is the last
+        -- width, with a line in the log.
         default_width = 1,
         motion = { duration = 260, easing = "outCubic" },
         -- The shorter feel for bringing a column into view.
@@ -393,19 +471,45 @@ local defaults = {
         follow_new_windows = true,
     },
 
-    dock = {
-        -- What sits on the dock. Programs, by the name used to run them.
-        items = { "kitty", "firefox" },
-        -- How a window grows out of its icon. Slower than an ordinary open,
-        -- because the distance travelled is the thing being shown.
-        morph = { duration = 340, easing = "outCubic" },
-    },
+    -- There is no dock.
+    --
+    -- A `dock` section sat here offering `items` and `morph`, and nothing in
+    -- the compositor or in any script had ever read either of them --
+    -- `lua/init.lua` says as much in as many words, where the genie's target
+    -- rectangle is a hardcoded strip of screen "because there is no dock yet".
+    -- Removed by #117 rather than wired up, because there is nothing to wire it
+    -- to: a setting that configures a component which does not exist cannot be
+    -- told apart, from out here, from one that is broken. When a dock arrives
+    -- it brings its settings back to this spot. Until then `--check` reports
+    -- the old spelling as an unrecognised key, which is the truth.
 
     open = {
         -- The animation a window arrives with.
-        motion = { duration = 200, easing = "outCubic" },
-        scale = 0.92,
+        --
+        -- These read 200 / outCubic / 0.92 until #117, and `open.lua` had never
+        -- looked at them: it held 220 / outBack / 0.88 as local constants, so
+        -- what was written here described an animation nobody had ever seen.
+        -- Wiring the two together meant choosing which pair was the default,
+        -- and the script's won -- those are the numbers the animation was
+        -- actually tuned against and the ones every session so far has been
+        -- watching. Taking the advertised pair instead would have changed how
+        -- every window on every machine opens, as a side effect of correcting
+        -- a comment.
+        motion = { duration = 220, easing = "outBack" },
+        -- How small it starts, as a share of the size it ends up. `outBack`
+        -- overshoots, so it grows a little past that and settles back.
+        scale = 0.88,
     },
+
+    -- How much of a window trails behind it in the genie, for the Developer
+    -- Tweaks panel's version of that effect (`--debug-mode` only).
+    --
+    -- Declared here because `tweaks.lua` already reads `config.genie_spread`
+    -- and falls back to this number. An undeclared key that works is the same
+    -- fault as a declared one that does not, read from the other side: nothing
+    -- tells you it is there, and the unrecognised-key report below would call
+    -- a working setting a typo.
+    genie_spread = 1.4,
 }
 
 -- A list is a table with a [1]; anything else with keys is a section to
@@ -414,11 +518,160 @@ local function is_list(value)
     return type(value) == "table" and value[1] ~= nil
 end
 
-local function merge(base, over)
+-- Sections whose key set is not the one written above them.
+--
+-- `merge` reports every key a user's file sets that these defaults do not
+-- define -- which is what catches `tilling = { ... }`. Three sections would be
+-- reported wrongly by that rule, and each needs saying out loud rather than
+-- being quietly skipped:
+--
+--   keyboard, cursor   empty on purpose, because empty *means* "whatever the
+--                      session already said" -- see their comments. Their real
+--                      key sets belong to `sol.keyboard` and `sol.cursor_theme`
+--                      in the compositor, so they are written out here: the
+--                      defaults cannot carry them without changing what an
+--                      empty table means.
+--   bindings           open by construction. A key combination is whatever you
+--                      press, so there is no list to check one against.
+--
+-- **This table is checked against the compositor, and was wrong when it
+-- shipped.** #117 wrote here that a reader growing a key and this list not
+-- being updated to match would report that key as a typo, and called that
+-- failure loud. It was not loud at all: `active` was missing from the day this
+-- was written, `sol.keyboard` has always read it, `init.lua` passes it straight
+-- through, and so `keyboard = { layout = "us,ru", active = 2 }` -- the only
+-- shape of configuration that has an `active` worth naming -- was told its
+-- working setting is read by nothing, and `solium --check` exited 1 over it.
+-- Which is worse than the silence #117 replaced: `--check` is sold as "did my
+-- configuration work", and one wrong answer there teaches people to stop
+-- reading it.
+--
+-- A hand-restated list drifts, so a comment asking the next person to remember
+-- is not the fix. `every_key_a_section_accepts_is_one_the_compositor_reads` in
+-- `script.rs` hands each of these functions a table that records what is looked
+-- up in it and compares the two sets, in both directions: a key only the
+-- compositor reads is a working setting called a typo, and a key only this list
+-- has is #117's own fault from the other side.
+local open_sections = {
+    keyboard = {
+        rules = true,
+        model = true,
+        layout = true,
+        variant = true,
+        options = true,
+        repeat_rate = true,
+        repeat_delay = true,
+        -- Which of several layouts is live. `sol.keyboard{ active = 2 }` is
+        -- also how the cycle binding in `init.lua` switches it.
+        active = true,
+    },
+    cursor = { theme = true, size = true },
+    -- `true` rather than a set of names: everything is accepted.
+    bindings = true,
+}
+
+-- The one key a user may write that these defaults deliberately do not define.
+-- See the read-across at the bottom of this file.
+--
+-- Accepted, and deliberately never *suggested*: `nearest` is not shown this
+-- table. It used to be, and so `decoraton` was answered with "did you mean
+-- decoration", which sends somebody to correct a typo into a spelling that is
+-- deprecated -- past the key that actually configures this, which is `pane`. An
+-- alias exists so a file written before the rename keeps working, not so a new
+-- file can be steered into using it.
+local legacy = { decoration = true }
+
+-- Keys the user's file set that nothing here defines, as dotted paths.
+local unrecognised = {}
+
+-- How many single-character edits turn one word into the other.
+--
+-- Plain Levenshtein, two rows. Cheap enough not to think about: it runs only
+-- on a key that is already known to be wrong, against a handful of candidates
+-- of a dozen characters each, once per configuration load.
+local function distance(from, to)
+    local previous = {}
+    for column = 0, #to do
+        previous[column] = column
+    end
+    for row = 1, #from do
+        local current = { [0] = row }
+        for column = 1, #to do
+            local substitution = previous[column - 1]
+            if from:sub(row, row) ~= to:sub(column, column) then
+                substitution = substitution + 1
+            end
+            current[column] = math.min(previous[column] + 1, current[column - 1] + 1, substitution)
+        end
+        previous = current
+    end
+    return previous[#to]
+end
+
+-- The nearest key that does exist, when one is near enough to be worth naming.
+--
+-- Two edits, which is `tilling` to `tiling` and `scal` to `scale` but not
+-- `dock` to `pane`. A suggestion that is wrong is worse than none: it sends
+-- somebody to rewrite a line that was not the problem.
+local function nearest(key, base, accepted)
+    local best, best_distance = nil, 3
+    local function consider(candidate)
+        if type(candidate) ~= "string" then
+            return
+        end
+        local apart = distance(key:lower(), candidate:lower())
+        if apart < best_distance then
+            best, best_distance = candidate, apart
+        end
+    end
+    for candidate in pairs(base) do
+        consider(candidate)
+    end
+    if type(accepted) == "table" then
+        for candidate in pairs(accepted) do
+            consider(candidate)
+        end
+    end
+    return best
+end
+
+-- Merge `over` onto `base`, and say what could not have been meant.
+--
+-- `path` is where we are, for the report; `accepted` is the extra key set in
+-- force here, from `open_sections` -- `true` for a section that accepts
+-- anything, a table of names for one whose names live elsewhere, `nil` for the
+-- ordinary case where `base` itself is the list of what exists.
+--
+-- `legacy` is read straight out of the upvalue rather than handed in as an
+-- `accepted` set, because the two are accepted for opposite reasons: an
+-- `open_sections` name is the current spelling and is worth suggesting, and a
+-- legacy name is the old one and is not.
+--
+-- Checking on the way *in*, before the assignment, because after it the key
+-- exists in `base` and the evidence is gone.
+local function merge(base, over, path, accepted)
     for key, value in pairs(over) do
+        local where = path and (path .. "." .. tostring(key)) or tostring(key)
+        -- `legacy` is consulted here and not passed to `nearest`: an old
+        -- spelling still works, and is still not what to suggest. Only at the
+        -- top level, which is where the alias is.
+        local known = accepted == true
+            or base[key] ~= nil
+            or (accepted and accepted[key])
+            or (path == nil and legacy[key])
+        if not known then
+            local meant = nearest(tostring(key), base, accepted)
+            -- Qualified the same way the key is, so the suggestion is something
+            -- you can paste: inside `tiling` the fix is `tiling.split`, not
+            -- `split`.
+            if meant and path then
+                meant = path .. "." .. meant
+            end
+            unrecognised[#unrecognised + 1] = { key = where, meant = meant }
+        end
         if type(value) == "table" and type(base[key]) == "table"
             and not is_list(value) and not is_list(base[key]) then
-            merge(base[key], value)
+            merge(base[key], value, where, open_sections[where])
         else
             base[key] = value
         end
@@ -443,6 +696,36 @@ if found then
     end
 elseif not tostring(user):match("module 'user' not found") then
     error(tostring(user), 0)
+end
+
+-- Say what was merged and will never be read.
+--
+-- `merge` used to validate nothing at all, so a `user.lua` saying `tilling`
+-- gained a section by that name, read by nothing, for ever -- and `solium
+-- --check`, the one command whose job is answering "did my configuration
+-- work", said it loaded fine. It had loaded fine. It was not doing what the
+-- file said, and there was no way to tell those two apart from the outside
+-- (#117).
+--
+-- Reported rather than refused. A key nothing reads has no effect by
+-- definition, so raising here would trade a setting that does nothing for a
+-- session that does not start -- and on a reload, for a session that keeps the
+-- *old* configuration while you correct a spelling. `sol.unknown` puts each
+-- one in the log for a running session and in front of `solium --check`, which
+-- exits non-zero when there is one.
+--
+-- What this cannot see, stated rather than implied:
+--
+--   * Lists are replaced whole and never descended into, so the keys inside a
+--     `monitors` entry are not checked here. `mode` misspelled as `moed` is
+--     merged as written and the monitor keeps its default mode.
+--   * `keyboard`, `cursor` and `bindings` are the sections above; the first
+--     two are checked against a list this file restates, the third against
+--     nothing.
+--   * A value of the wrong *type* is not this check's business. `gap = "12"`
+--     is a recognised key and passes.
+for _, entry in ipairs(unrecognised) do
+    sol.unknown(entry.key, entry.meant)
 end
 
 -- `pane` was called `decoration` when a style was a single QML file rather
