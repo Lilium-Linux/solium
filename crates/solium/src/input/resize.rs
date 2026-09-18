@@ -196,6 +196,38 @@ pub(crate) const fn pulls_top(edges: ResizeEdge) -> bool {
     )
 }
 
+/// The sides a drag has hold of: the left-or-right one, and the top-or-bottom
+/// one.
+///
+/// What a script is handed, and what it hands back to `tree:drag_seam`. A pair
+/// because a corner drag is genuinely two drags — it moves one seam per axis —
+/// and `None` on an axis means that axis is not in play at all, so `if
+/// horizontal then` still reads the way it always did in Lua.
+///
+/// Named sides and not the two booleans this replaced. A layout cannot choose
+/// a seam from an axis: a window that is the second child of a vertical split
+/// has that split's seam on its left and no seam on its right, and "the
+/// horizontal axis is being dragged" is true in both cases. That conflation is
+/// #120. See `solium_layout::tree::Edge`.
+///
+/// `&'static str` rather than a layout type because these cross into Lua,
+/// where an edge is spelled — and the spellings have to match
+/// `solium_layout::tree::Edge`'s parser in `script.rs`, which is the one place
+/// they are read back.
+pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'static str>) {
+    let horizontal = match edges {
+        ResizeEdge::Left | ResizeEdge::TopLeft | ResizeEdge::BottomLeft => Some("left"),
+        ResizeEdge::Right | ResizeEdge::TopRight | ResizeEdge::BottomRight => Some("right"),
+        _ => None,
+    };
+    let vertical = match edges {
+        ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::TopRight => Some("top"),
+        ResizeEdge::Bottom | ResizeEdge::BottomLeft | ResizeEdge::BottomRight => Some("bottom"),
+        _ => None,
+    };
+    (horizontal, vertical)
+}
+
 /// Where a drag from `from` to `now` puts a window that started at `began`.
 ///
 /// A free function so it can be tested without a compositor: this is the whole
@@ -259,29 +291,16 @@ impl PointerGrab<Solium> for ResizeGrab {
         // than change one window's size, and asking it from in here would call
         // a script while the seat holds the pointer's lock — the deadlock the
         // move grab already taught us about.
+        //
+        // `edges` alone, because it already says everything the two derived
+        // booleans said and one thing they could not: which side. See
+        // [`sides`], which does the derivation once, where the script call is
+        // made, instead of here where it was thrown away.
         data.pending_resize = Some(crate::state::ResizeRequest {
             window: self.window.clone(),
             wanted: self.resized(event.location),
             at: (event.location.x, event.location.y),
             edges: self.edges,
-            horizontal: matches!(
-                self.edges,
-                ResizeEdge::Left
-                    | ResizeEdge::Right
-                    | ResizeEdge::TopLeft
-                    | ResizeEdge::TopRight
-                    | ResizeEdge::BottomLeft
-                    | ResizeEdge::BottomRight
-            ),
-            vertical: matches!(
-                self.edges,
-                ResizeEdge::Top
-                    | ResizeEdge::Bottom
-                    | ResizeEdge::TopLeft
-                    | ResizeEdge::TopRight
-                    | ResizeEdge::BottomLeft
-                    | ResizeEdge::BottomRight
-            ),
         });
     }
 

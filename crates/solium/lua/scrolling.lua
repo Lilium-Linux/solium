@@ -305,15 +305,28 @@ end)
 -- An edge drag changes the column's width rather than one window's size:
 -- every window in a column shares its width, so there is nothing else it
 -- could mean.
-sol.on("resize", function(id, dx, _)
-    if not scrolling.active or dx == 0 then
+--
+-- The second argument is where the pointer **is**, not how far it moved. It
+-- was named `dx` here and the compositor's own doc for the event called it
+-- "the delta" -- both wrong since the event was written, because
+-- `ResizeGrab::motion` records `event.location`. #120 corrected the doc; this
+-- handler is left doing the arithmetic it always did, because `view:widen`
+-- takes a delta and there is no way to feed it an absolute position without
+-- giving the scroller a set-the-width call, which is a change to a layout
+-- this issue is not about and cannot verify. Named honestly so the next
+-- reader sees the defect instead of inheriting the belief: dividing a screen
+-- coordinate by the monitor's width does not give a fraction of anything, and
+-- an edge drag in the scrolling layout jumps the column wide on the first
+-- motion. Tracked separately.
+sol.on("resize", function(id, x, _)
+    if not scrolling.active or x == 0 then
         return
     end
     local view, monitor = view_of(id)
     if view:contains(id) then
         -- A share of *this window's* monitor: the same drag means a different
         -- fraction on a 2560 than on a 1920 beside it.
-        view:widen(id, dx / math.max(options(monitor).w, 1), options(monitor))
+        view:widen(id, x / math.max(options(monitor).w, 1), options(monitor))
         scrolling.apply({ duration = 0 })
     end
 end)

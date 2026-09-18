@@ -625,15 +625,24 @@ pub(crate) struct ResizeRequest {
     pub(crate) at: (f64, f64),
     /// Which edges the pointer has hold of.
     ///
-    /// The two booleans below are what a *script* is handed and are an axis
-    /// pair, which is all a layout needs: a seam moves or it does not. This is
-    /// the side as well, because the compositor needs it — a client that
-    /// refuses the size it was offered has to give the pixels back on the edge
-    /// being dragged, and "horizontal" cannot say which of the two that is.
-    /// See `crate::resizing::Hold::anchored`.
+    /// The whole truth about the gesture, and since #120 the whole of it
+    /// reaches the layout too. This used to be accompanied by a `horizontal`
+    /// and a `vertical` boolean — what a *script* was handed — justified by
+    /// the claim that an axis pair "is all a layout needs: a seam moves or it
+    /// does not". That is false, and it was false in a way that was written
+    /// down as a reason. **Which seam moves depends on which side was
+    /// grabbed.** A window that is the right-hand child of a vertical split
+    /// has that split's seam on its left; told only "horizontal", the layout
+    /// moved that seam for a drag on the window's *right* edge, so the left
+    /// edge jumped and the edge under the pointer did not move at all.
+    ///
+    /// The compositor needed the side already, for its own reason — a client
+    /// that refuses the size it was offered has to give the pixels back on the
+    /// edge being dragged, and "horizontal" cannot say which of the two that
+    /// is; see `crate::resizing::Hold::anchored`. It simply threw the answer
+    /// away on the way to the script. [`crate::input::resize::sides`] is the
+    /// conversion that no longer does.
     pub(crate) edges: ResizeEdge,
-    pub(crate) horizontal: bool,
-    pub(crate) vertical: bool,
 }
 
 /// A request from the input layer that only the backend can honour.
@@ -3587,6 +3596,16 @@ impl Solium {
     /// directly, which is what keeps a tiled window from growing over its
     /// neighbour instead of moving the seam between them.
     ///
+    /// **This is the fork between the two resize paths, and they are fixed
+    /// independently.** The claimed branch is the *tiled* path: nothing here
+    /// sizes the window, the layout moves a seam and `move_pane` writes what
+    /// the layout decided. #120 lives entirely on that side, in
+    /// `Tiling::drag_seam` — which seam a dragged edge moves. The unclaimed
+    /// branch is the *floating* path: `hold_resize` makes the drag's own
+    /// rectangle authoritative until the client catches up, which is #113.
+    /// Neither fix touches the other's branch, and a change that appears to
+    /// help both is a change that has confused them.
+    ///
     /// Once a frame, not once per pointer event, and the difference is the
     /// whole reason this is here rather than in the motion handler. A mouse
     /// reports movement up to a thousand times a second; each report was
@@ -5102,9 +5121,24 @@ impl Solium {
 
     /// Offer a resize to scripts. Returns whether a layout took it.
     ///
-    /// The delta is what the dragged edge moved by, which is what a layout can
-    /// act on; the absolute rectangle would only be useful to something that
-    /// already agreed the window has its own size.
+    /// **`request.at` is where the pointer is, not how far it moved.** This
+    /// doc used to call it "the delta", and it was wrong when it was written:
+    /// `ResizeGrab::motion` records `event.location`. A layout that believes
+    /// the doc divides an absolute screen coordinate by the monitor's width
+    /// and calls the result a fraction. `scrolling.lua` does exactly that, in
+    /// a handler whose first parameter is named `dx`, which is how a comment
+    /// becomes a defect.
+    ///
+    /// An absolute position is also the right thing to send, for the reason
+    /// `ResizeRequest` gives: a seam set from where the pointer *is* is
+    /// idempotent, and one accumulated from deltas feeds the layout's own
+    /// response back in as its next input.
+    ///
+    /// The pair after it is the side of the window being dragged on each axis
+    /// — `"left"` or `"right"`, `"top"` or `"bottom"`, or nil for an axis that
+    /// is not in play. Sides and not an axis pair, because which seam a tiled
+    /// drag moves depends on which edge the hand is on; see
+    /// [`crate::input::resize::sides`].
     pub(crate) fn trigger_resize(&mut self, request: &ResizeRequest) -> bool {
         let id = self.window_id(&request.window);
         let snapshot = self.snapshot();
@@ -5114,7 +5148,7 @@ impl Solium {
         let outcome = scripts.resized(
             id,
             request.at,
-            (request.horizontal, request.vertical),
+            crate::input::resize::sides(request.edges),
             snapshot,
         );
         self.scripts = Some(scripts);
@@ -8318,8 +8352,6 @@ mod tests {
                 wanted,
                 at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
                 edges: ResizeEdge::TopLeft,
-                horizontal: true,
-                vertical: true,
             });
             state.settle_resize();
 
@@ -8495,8 +8527,6 @@ mod tests {
                     wanted,
                     at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
                     edges,
-                    horizontal: left || right,
-                    vertical: top || bottom,
                 });
                 state.settle_resize();
 
@@ -8586,8 +8616,6 @@ mod tests {
                 wanted,
                 at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
                 edges: ResizeEdge::TopLeft,
-                horizontal: true,
-                vertical: true,
             });
             // And the release, still with no frame in between: this is
             // `ResizeGrab::unset`, which is where the button coming up lands.
@@ -8677,8 +8705,6 @@ mod tests {
                     wanted,
                     at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
                     edges: ResizeEdge::TopLeft,
-                    horizontal: true,
-                    vertical: true,
                 });
             };
 

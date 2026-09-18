@@ -273,6 +273,16 @@ end)
 -- window does not have one: the space is divided, and dragging an edge moves
 -- where the division falls. Returning a command tells the compositor we took
 -- it, so it does not also resize the window directly.
+--
+-- `horizontal` and `vertical` are the *sides* the pointer has hold of --
+-- "left" or "right", "top" or "bottom", and nil for an axis that is not being
+-- dragged. They were plain booleans until #120, and a boolean is not enough to
+-- choose a seam with: a window that is the right-hand child of a vertical
+-- split has that split's seam on its *left*, so "the horizontal axis is in
+-- play" moved that seam for a drag on the window's right edge. The far side
+-- jumped 209 pixels and the side under the pointer did not move at all.
+-- Passed straight through, because the side is exactly what `drag_seam` wants
+-- and the compositor knew it all along.
 sol.on("resize", function(id, x, y, horizontal, vertical)
     if not tiling.active then
         return
@@ -282,11 +292,13 @@ sol.on("resize", function(id, x, y, horizontal, vertical)
     -- The seam goes where the pointer is. Not where it moved to: a delta would
     -- be measured against a layout this very drag just changed, and the windows
     -- would shake for as long as the button was held.
+    --
+    -- Both arms can run: a corner drag is two drags, one seam per axis.
     if horizontal then
-        tree:drag_seam(id, "width", x, y, options(monitor))
+        tree:drag_seam(id, horizontal, x, y, options(monitor))
     end
     if vertical then
-        tree:drag_seam(id, "height", x, y, options(monitor))
+        tree:drag_seam(id, vertical, x, y, options(monitor))
     end
     -- Placed immediately. An animation would be chasing the pointer, and the
     -- pointer wins.
@@ -297,26 +309,37 @@ sol.bind("super+t", tiling.toggle)
 
 -- Move the seam this window sits on. Everything on the far side stays put,
 -- which is the property a tree has and a recomputed arrangement does not.
-sol.bind("super+minus", function()
-    local focused = nil
+--
+-- The axis is named, where a drag names a side: a keypress says "wider", not
+-- which neighbour gives up the room, so `tree:resize` prefers the seam on the
+-- right or below and falls back to the other one. Before #120 it moved the
+-- window's immediate parent, and in an ordinary four-window dwindle every
+-- leaf's parent is a horizontal split -- so "wider" reached the centre
+-- vertical seam in no arrangement at all and quietly changed the height.
+local function focused_window()
     for _, window in ipairs(sol.windows()) do
-        if window.focused then focused = window.id end
+        if window.focused then return window.id end
     end
-    if focused then
-        tree_for(monitors.of(focused)):resize(focused, -0.05)
-        tiling.apply(config.tiling.snap)
-    end
-end)
+    return nil
+end
 
-sol.bind("super+equal", function()
-    local focused = nil
-    for _, window in ipairs(sol.windows()) do
-        if window.focused then focused = window.id end
+local function nudge(axis, by)
+    return function()
+        local focused = focused_window()
+        if focused then
+            tree_for(monitors.of(focused)):resize(focused, axis, by)
+            tiling.apply(config.tiling.snap)
+        end
     end
-    if focused then
-        tree_for(monitors.of(focused)):resize(focused, 0.05)
-        tiling.apply(config.tiling.snap)
-    end
-end)
+end
+
+sol.bind("super+minus", nudge("width", -0.05))
+sol.bind("super+equal", nudge("width", 0.05))
+-- Height on the same keys with shift, because the other axis was reachable
+-- before this change -- by accident, in the arrangements whose parent split
+-- happened to be horizontal -- and losing it to fix the width would trade one
+-- unreachable seam for another.
+sol.bind("super+shift+minus", nudge("height", -0.05))
+sol.bind("super+shift+equal", nudge("height", 0.05))
 
 return tiling
