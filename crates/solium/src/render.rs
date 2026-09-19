@@ -1149,18 +1149,37 @@ pub(crate) fn elements(
         // drawn. Together they answer the question a report of "it still
         // stutters" cannot — whether the frame drawn on a given frame came from
         // the slot or from the client's last commit. See `resizing::trace`.
+        //
+        // **This line and not the `layout` one is what every frame has.**
+        // `move_pane` is reached only from a frame that carried a motion, so a
+        // paused drag writes no `layout` line at all — which is precisely the
+        // stretch of a gesture the trailing flush is about, and precisely when
+        // a reader needs to know what the pane was drawn at and what its client
+        // had. So the slot is repeated here rather than left to be joined
+        // against a line that may not exist, and it is the *client* rectangle
+        // for the same reason `state.rs` logs that one: `frame` is the outer
+        // rectangle, a titlebar taller, and two rectangles that differ by a
+        // decoration are two rectangles a reader subtracts by hand and gets
+        // wrong.
         if crate::resizing::trace::on() {
+            let slot = state.panes.get(pane).map_or(real, Pane::slot);
             crate::resizing::trace::line(
                 "drawn",
                 format_args!(
-                    "pane={} frame={},{} {}x{} committed={}x{} factor={across:.4},{down:.4} fill={fill:?}",
+                    "pane={} frame={},{} {}x{} slot={},{} {}x{} committed={}x{} \
+                     factor={across:.4},{down:.4} fill={fill:?} held={}",
                     pane.get(),
                     frame.rect.loc.x,
                     frame.rect.loc.y,
                     frame.rect.size.w,
                     frame.rect.size.h,
+                    slot.loc.x,
+                    slot.loc.y,
+                    slot.size.w,
+                    slot.size.h,
                     real.size.w,
                     real.size.h,
+                    u8::from(state.holding_resize(pane)),
                 ),
             );
         }
