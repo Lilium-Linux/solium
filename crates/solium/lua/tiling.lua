@@ -274,6 +274,16 @@ end)
 -- where the division falls. Returning a command tells the compositor we took
 -- it, so it does not also resize the window directly.
 --
+-- `edge_x` and `edge_y` are where the dragged edge should come to rest, one
+-- per axis, in the same coordinates `tree:layout` hands back and `sol.place`
+-- takes. Not where the pointer is, which is what this used to be handed: a
+-- seam set from the cursor lands under the cursor, so a drag begun anywhere
+-- but exactly on the edge threw that edge across to the cursor on its first
+-- frame. `super` plus the right button begins a resize from the *middle* of a
+-- window, so there the throw was most of a window wide. That is #124, and the
+-- fix is entirely on the compositor's side of this call -- the arithmetic here
+-- and in `drag_seam` is unchanged, and is simply given a relative target now.
+--
 -- `horizontal_side` and `vertical_side` are the *sides* the pointer has hold
 -- of -- "left" or "right", "top" or "bottom", and nil for an axis that is not
 -- being dragged. Named for the side and not the axis because the value is a
@@ -286,22 +296,27 @@ end)
 -- jumped 209 pixels and the side under the pointer did not move at all.
 -- Passed straight through, because the side is exactly what `drag_seam` wants
 -- and the compositor knew it all along.
-sol.on("resize", function(id, x, y, horizontal_side, vertical_side)
+sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side)
     if not tiling.active then
         return
     end
     local monitor = monitors.of(id)
     local tree = tree_for(monitor)
-    -- The seam goes where the pointer is. Not where it moved to: a delta would
-    -- be measured against a layout this very drag just changed, and the windows
-    -- would shake for as long as the button was held.
+    -- The seam goes where the dragged edge goes. Still a position and not a
+    -- delta: a delta would be measured against a layout this very drag just
+    -- changed, and the windows would shake for as long as the button was held.
+    -- The position is relative to the grab all the same, because the
+    -- compositor derives it from the rectangle the drag has produced.
     --
-    -- Both arms can run: a corner drag is two drags, one seam per axis.
+    -- Both arms can run: a corner drag is two drags, one seam per axis. Each
+    -- gets its own edge -- `edge_x` for the vertical seam, `edge_y` for the
+    -- horizontal one -- and `drag_seam` reads only the one its side names, so
+    -- neither axis can borrow the other's.
     if horizontal_side then
-        tree:drag_seam(id, horizontal_side, x, y, options(monitor))
+        tree:drag_seam(id, horizontal_side, edge_x, edge_y, options(monitor))
     end
     if vertical_side then
-        tree:drag_seam(id, vertical_side, x, y, options(monitor))
+        tree:drag_seam(id, vertical_side, edge_x, edge_y, options(monitor))
     end
     -- Placed immediately. An animation would be chasing the pointer, and the
     -- pointer wins.
