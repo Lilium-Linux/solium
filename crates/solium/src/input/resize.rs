@@ -164,9 +164,22 @@ pub(crate) struct ResizeGrab {
     /// pointer delta to that is the accumulating-delta runaway by another
     /// spelling. It is not merely drift — the error is the whole of the
     /// previous frame's travel, every frame.
-    laid_out: Rectangle<i32, Logical>,
+    laid_out: LaidOut,
     from: Point<f64, Logical>,
 }
+
+/// The rectangle the *layout* put a pane at, as opposed to where the window is.
+///
+/// A newtype rather than a bare `Rectangle`, because [`ResizeGrab::new`] takes
+/// one of each and they were the same type. Swapping the two arguments compiled,
+/// left every test in the workspace green, and silently reinstated the #124
+/// review's second finding — a tiled drag starting from the client's rectangle
+/// instead of the layout's, which moves the seam by the client's rounding
+/// residue on the first frame and is invisible. Nothing anywhere constructs a
+/// `ResizeGrab`, so no test could have caught it; the type can, and does it at
+/// compile time for every call site that will ever exist.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct LaidOut(pub(crate) Rectangle<i32, Logical>);
 
 impl ResizeGrab {
     pub(crate) fn new(
@@ -174,7 +187,7 @@ impl ResizeGrab {
         window: Window,
         edges: ResizeEdge,
         began: Rectangle<i32, Logical>,
-        laid_out: Rectangle<i32, Logical>,
+        laid_out: LaidOut,
     ) -> Self {
         let from = start_data.location;
         Self {
@@ -273,9 +286,15 @@ pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'
 /// **The layout's own edge, moved by the pointer.** Each axis in play answers
 /// with that side of `laid_out` — `Solium::pane_laid_out`, the rectangle the
 /// layout put this pane at, frozen at the grab — plus the drag's *total*
-/// pointer movement. So the first frame of every gesture hands back exactly the
-/// number the layout itself produced, whatever the pointer is doing, and every
-/// frame after it is that number displaced by as far as the hand has gone.
+/// pointer movement. So the first frame of every gesture hands back the number
+/// the layout itself produced, whatever the pointer is doing, and every frame
+/// after it is that number displaced by as far as the hand has gone.
+///
+/// To the pixel and not beyond it: `Solium::place` rounds the layout's `f64`
+/// rectangle to whole pixels before `Pane::set_placed` stores it, so a seam the
+/// tree put at `x.5` comes back half a pixel out. Constant for the gesture
+/// rather than accumulating — the base is frozen — and a pixel is the unit a
+/// client is configured in anyway, but it is a rounding and not an identity.
 ///
 /// Nothing accumulates: the delta is measured from the grab and not from the
 /// previous frame, which is the property `ResizeGrab::began`'s own doc insists
@@ -360,7 +379,7 @@ pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'
 /// in that layout rather than in this gesture — so what it reads on an axis
 /// nobody is dragging is left exactly what it was.
 pub(crate) fn dragged_edge(
-    laid_out: Rectangle<i32, Logical>,
+    laid_out: LaidOut,
     edges: ResizeEdge,
     from: Point<f64, Logical>,
     now: Point<f64, Logical>,
@@ -371,6 +390,7 @@ pub(crate) fn dragged_edge(
     // body: two spellings of "is this drag pulling the left edge" is how the
     // end of a gesture comes to disagree with the middle of it.
     let (horizontal, vertical) = sides(edges);
+    let laid_out = laid_out.0;
     // Not rounded, unlike `resized`'s. A window's rectangle is whole pixels
     // because a client is configured in them; a seam's position is not -- every
     // number `drag_seam` works in is an `f64`, and it divides this one by a
@@ -844,7 +864,7 @@ mod tests {
             from: Point<f64, Logical>,
             now: Point<f64, Logical>,
         ) -> (f64, f64) {
-            dragged_edge(laid_out, edges, from, now)
+            dragged_edge(LaidOut(laid_out), edges, from, now)
         }
 
         /// A window whose four edges are at 100, 500, 100 and 400.
@@ -1053,6 +1073,40 @@ mod tests {
                  did -- clamping a seam is the layout's job and it has \
                  its own"
             );
+
+            // **All four, and not because the arithmetic looks symmetric.**
+            // The #124 review's second finding was asymmetric in exactly this
+            // way -- left and top were exact while right and bottom skewed,
+            // because `real.loc` is compositor-set and `real.size` is the
+            // client's -- so a suite that pins one side of one axis and trusts
+            // symmetry for the rest is the shape that let that through.
+            let short = rect(300, 100, 48, 32);
+            for (edges, at, moved) in [
+                (ResizeEdge::Left, 300.0, -800.0),
+                (ResizeEdge::Right, 348.0, 800.0),
+                (ResizeEdge::Top, 100.0, -800.0),
+                (ResizeEdge::Bottom, 132.0, 800.0),
+            ] {
+                let vertical = matches!(edges, ResizeEdge::Top | ResizeEdge::Bottom);
+                let read = |sent: (f64, f64)| if vertical { sent.1 } else { sent.0 };
+                assert_eq!(
+                    read(handed(short, edges, grab, grab)),
+                    at,
+                    "{edges:?}: a drag that has not moved hands back the tile's \
+                     own edge, on a tile under `MINIMUM` in both axes"
+                );
+                let to: Point<f64, Logical> = if vertical {
+                    (grab.x, grab.y + moved).into()
+                } else {
+                    (grab.x + moved, grab.y).into()
+                };
+                assert_eq!(
+                    read(handed(short, edges, grab, to)),
+                    at + moved,
+                    "{edges:?}: and it follows the pointer the whole way, in \
+                     both directions"
+                );
+            }
         }
 
         /// Sub-pixel pointer travel survives the trip to the layout.

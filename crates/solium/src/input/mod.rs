@@ -758,7 +758,9 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                     // client's size into the slot and `Pane::placed` is the
                     // field that does not hear about it. See
                     // `Solium::pane_laid_out`.
-                    let laid_out = state.pane_laid_out(&window).unwrap_or(began);
+                    let laid_out = state
+                        .pane_laid_out(&window)
+                        .unwrap_or(resize::LaidOut(began));
                     let start_data = GrabStartData {
                         focus: None,
                         button,
@@ -834,7 +836,9 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             // See the border drag above: `outer` is where this window is and
             // `laid_out` is where the layout put it, and only the second is a
             // number the layout will recognise when it comes back.
-            let laid_out = state.pane_laid_out(&window).unwrap_or(outer);
+            let laid_out = state
+                .pane_laid_out(&window)
+                .unwrap_or(resize::LaidOut(outer));
             let start_data = GrabStartData {
                 focus: None,
                 button,
