@@ -179,11 +179,19 @@ pub(crate) struct Pane {
     /// `Solium::settle_resize_hold` deliberately adopts such an answer into the
     /// slot rather than fighting it.
     ///
-    /// Written only by `Solium::move_pane`, from the rectangle a layout handed
-    /// `sol.place`, and by nothing that hears from a client. That makes it the
-    /// one place the compositor keeps the *layout's* opinion of where this pane
-    /// is, which is what an edge drag has to start from — see
-    /// `Solium::pane_laid_out` for why the client's opinion will not do.
+    /// Written only by `Solium::move_pane`, and by nothing that hears from a
+    /// client. That is what makes it the one place the compositor keeps the
+    /// *layout's* opinion of where this pane is, which is what an edge drag has
+    /// to start from — see `Solium::pane_laid_out` for why the client's opinion
+    /// will not do.
+    ///
+    /// **Usually from the rectangle a layout handed `sol.place`, but not
+    /// always**: `Solium::rescue_offscreen` reaches `move_pane` too, with a
+    /// rectangle it worked out itself to drag a window back onto a screen that
+    /// went away. So the invariant is the narrower one — no client ever writes
+    /// here — and not "this is what the layout last said". The next sweep puts
+    /// the layout's answer back, and a drag begun in between starts from a
+    /// rectangle the window really is at, which is the right answer anyway.
     ///
     /// `None` for a pane no layout has ever placed — a floating window, or one
     /// in the frames between mapping and the first sweep — where the pane's own

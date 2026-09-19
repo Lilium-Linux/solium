@@ -1428,9 +1428,11 @@ impl Solium {
     /// and the first sweep after tiling comes back makes it current again.
     /// Clearing it on the way out would mean teaching every mode that stops
     /// placing a window to say so, for a value nobody is reading.
-    pub(crate) fn pane_laid_out(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+    pub(crate) fn pane_laid_out(&self, window: &Window) -> Option<crate::input::resize::LaidOut> {
         let pane = self.panes.get(self.panes.id_of(window)?)?;
-        pane.placed().or_else(|| self.pane_outer(pane))
+        pane.placed()
+            .or_else(|| self.pane_outer(pane))
+            .map(crate::input::resize::LaidOut)
     }
 
     /// How a pane is being drawn right now. Real geometry unless something is
@@ -8795,7 +8797,12 @@ mod tests {
                 f64::from(wanted.loc.y) + f64::from(wanted.size.h) / 2.0,
             )
                 .into();
-            crate::input::resize::dragged_edge(wanted, edges, pointer, pointer)
+            crate::input::resize::dragged_edge(
+                crate::input::resize::LaidOut(wanted),
+                edges,
+                pointer,
+                pointer,
+            )
         }
 
         /// The client side of the fixture. Binds exactly the globals a window
@@ -10038,11 +10045,16 @@ mod tests {
             // eight pixels the client kept -- asserted, because if they were
             // ever equal the half below would be testing the same thing twice.
             assert_ne!(
-                began, laid_out,
+                began, laid_out.0,
                 "the client's rectangle and the layout's have to differ here, \
                  or the defect this test is about cannot arise"
             );
-            let shipped = crate::input::resize::dragged_edge(began, ResizeEdge::Right, grab, grab);
+            let shipped = crate::input::resize::dragged_edge(
+                crate::input::resize::LaidOut(began),
+                ResizeEdge::Right,
+                grab,
+                grab,
+            );
             let mut moved = tiling.clone();
             moved.drag_seam(left_id, Edge::Right, shipped, area, settings);
             let jumped = leaf_of(&moved, left_id);
@@ -10150,7 +10162,8 @@ mod tests {
             let frozen = state
                 .pane_laid_out(&left)
                 .expect("a pane a layout has placed");
-            let from: Point<f64, Logical> = (f64::from(frozen.loc.x + frozen.size.w), 300.0).into();
+            let from: Point<f64, Logical> =
+                (f64::from(frozen.0.loc.x + frozen.0.size.w), 300.0).into();
 
             // Three frames of one gesture. The numbers are the pointer's total
             // travel from the press, which is what a grab has -- never the step
