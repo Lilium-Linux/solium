@@ -29,10 +29,13 @@
 //!
 //! This is deliberately *one* of the three places issue #84 names — the
 //! `Space`, the pane's slot, the presentation frame — becoming the authority
-//! for a bounded while, rather than a fourth place being added. Nothing here
-//! stores a rectangle: the rectangle lives in the pane's slot, exactly where it
-//! lived before, and this holds only the bookkeeping that says the slot is in
-//! charge and when it stops being.
+//! for a bounded while, rather than a fourth place being added. A window's
+//! rectangle lives in the pane's slot, exactly where it lived before, and what
+//! is here is the bookkeeping that says the slot is in charge and when it stops
+//! being. [`Hold::asked`] is a rectangle and is not an exception to that: it is
+//! a copy of what was last put on the wire, which nothing reads as a window's
+//! geometry and which exists so that the next configure can be compared against
+//! the last one.
 //!
 //! **The `Space` and the slot never disagree about *position*.** Only the size
 //! is held back, because only the size needs a client's consent. `state.rs`
@@ -74,14 +77,21 @@
 //! # The trap
 //!
 //! A client may **refuse** the size it is offered — Firefox has a minimum width
-//! and will not go under it, a terminal rounds to its cell grid — and the
-//! compositor does not read `min_size` yet (issue #115). If the bridge only
-//! ended when the client reached the size it was *asked* for, a refused resize
-//! would stretch for ever and the window would be permanently blurry: a worse
-//! bug than the one being fixed. So the rule written into [`Hold::settle`] and
-//! [`Hold::note`] is that **any answer ends the bridge**, whatever the answer
-//! says, and an answer that is not the one asked for is a refusal that stops
-//! the stretch on the spot. See those two for the whole of it.
+//! and will not go under it — and the compositor does not read `min_size` yet
+//! (issue #115). If the bridge only ended when the client reached the size it
+//! was *asked* for, a refused resize would stretch for ever and the window
+//! would be permanently blurry: a worse bug than the one being fixed. So the
+//! rule written into [`Hold::settle`] and [`Hold::note`] is that **any answer
+//! ends the bridge**, whatever the answer says.
+//!
+//! **Ending the bridge and taking the stretch away are two different
+//! questions**, and reading them as one costs the user something on every
+//! drag. A terminal rounds to its cell grid, so it misses the size it was asked
+//! for by a few pixels every single time; that is an answer, so it ends the
+//! bridge, and it is emphatically not the client that has walked away from the
+//! ask — treating it as one means kitty loses the configured fill on the first
+//! answer of every seam drag and gets [`Fill::Hold`]'s uncovered strip instead.
+//! [`ROUNDING`] is where the line is drawn and why it is drawn there.
 
 use std::time::Duration;
 
@@ -256,9 +266,11 @@ pub(crate) enum Settle {
 
 /// The bookkeeping that says the pane's slot is in charge, and when it stops.
 ///
-/// Holds no rectangle. The rectangle is the pane's slot, which is where a
-/// pane's rectangle has always lived; what is here is only which edges the user
-/// has hold of, what the client was last told, and when.
+/// **Stores no rectangle of its own.** The one rectangle below is a copy of
+/// what was last put on the wire, not a place a window's geometry lives: the
+/// geometry is the pane's slot, exactly where it has always been. What is here
+/// is which edges the user has hold of, what the client was last told, and
+/// when.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Hold {
     /// Which edges the pointer is dragging, so an adoption can pin the others.
@@ -270,8 +282,22 @@ pub(crate) struct Hold {
     /// not an answer to a configure about size, and the surface state machine
     /// has more ways to produce one of those than are worth enumerating here.
     since: Size<i32, Logical>,
-    /// The client size that last configure asked for.
-    asked: Size<i32, Logical>,
+    /// The client **rectangle** the last configure asked for.
+    ///
+    /// **The whole rectangle and not the size, because a configure carries a
+    /// position too.** `state::size_window` is the only thing that ever tells
+    /// an X11 client where it is — `map_stacked` moves the window in the space
+    /// and says nothing to the client — and `Solium::offers_size` documents
+    /// that in its own case (2). Case (1) compared sizes, so a pane that a
+    /// layout *translated* without resizing answered "nothing to say" and the
+    /// configure was skipped for the rest of the gesture: `scrolling.lua`'s
+    /// `widen` shifts every column sideways at an unchanged width, so an X11
+    /// window in one of those columns kept stale geometry and misrouted every
+    /// pointer coordinate until the button came up.
+    ///
+    /// Only its size is ever compared against a client's answer, because a
+    /// client answers with a size and has no say in where it is put.
+    asked: Rectangle<i32, Logical>,
     /// When it was sent, for [`TELL_EVERY`].
     told: Duration,
     /// When the pointer let go, if it has. [`PATIENCE`] runs from here.
@@ -288,17 +314,75 @@ pub(crate) struct Hold {
     /// Two different questions read it, which is why it is a size and not a
     /// flag:
     ///
-    /// * [`Self::fill`] asks *whether* anything was declined. Sticky until the
-    ///   client takes something it was offered, because until then what is on
-    ///   screen is not tracking what is being asked for, and stretching a
-    ///   buffer towards a size its client has already walked away from is how
-    ///   a window ends up permanently soft.
     /// * [`Self::settle`] asks whether it is *this* size that was declined,
     ///   which is the one case where the answer is already in and the gesture
     ///   need not wait out [`PATIENCE`] to learn it again. Anything else waits,
     ///   because without a minimum to read there is no honest way to tell a
-    ///   size the client will refuse from one it is merely slow about.
+    ///   size the client will refuse from one it is merely slow about. **Any
+    ///   mismatch counts here**, however small: the end of a gesture is the
+    ///   moment the client's own size wins, and it wins by a pixel as readily
+    ///   as by two hundred.
+    /// * [`Self::refused`] asks whether the mismatch is big enough to take the
+    ///   user's configured fill away, and that is a different question with a
+    ///   different answer. See [`ROUNDING`].
     declined: Option<Size<i32, Logical>>,
+}
+
+/// How far a client's answer may miss the size it was offered and still count
+/// as *tracking* it rather than refusing it, as a denominator: a twentieth is
+/// five percent.
+///
+/// [`Hold::declined`] exists for the client that will not go where it is being
+/// asked at all — Firefox has a minimum width and stops there, which is issue
+/// #115 — and [`Hold::fill`] answers that by taking the stretch away, because a
+/// buffer smeared towards a size nothing will ever agree to only ever gets
+/// softer.
+///
+/// That is the right answer for a refusal and the wrong one for a **rounding**.
+/// A terminal answers a configure with the nearest whole number of character
+/// cells, so it is a few pixels off *every single time*; with no distinction
+/// drawn, kitty — the ordinary tiled client — is declined from its first answer
+/// onward and [`Fill::Hold`] is forced for the whole of every seam drag. The
+/// user's configured `stretch` would then never once apply to a terminal, and
+/// what they would see instead is `Fill::Hold`'s deliberately uncovered strip:
+/// a *different* wrong-looking frame rather than no wrong-looking frame, which
+/// is the symptom this whole issue is about.
+///
+/// **A proportion, because what it is bounding is the stretch left over.** If
+/// the client settles `asked / given` away from the rectangle the pane is
+/// drawing, the buffer is scaled by exactly that ratio for as long as the hold
+/// lasts, and five percent of an edge is not a blur anybody can see. Judging it
+/// in pixels instead would call the same ratio a refusal on a small pane and a
+/// rounding on a large one, which is backwards.
+///
+/// Mis-judging it is bounded on both sides, which is why a proportion is safe
+/// enough to pick. Calling a real refusal a rounding costs at most a five
+/// percent stretch, and only until the hold ends — `declined` is still recorded,
+/// so [`Hold::settle`] still adopts and the hold still ends, on the deadline at
+/// the latest. Calling a rounding a refusal costs the configured fill on every
+/// terminal drag there will ever be.
+const ROUNDING: i32 = 20;
+
+/// The floor under [`ROUNDING`], in pixels: the tallest character cell an
+/// ordinary font produces.
+///
+/// A proportion alone is wrong at the small end. Five percent of a two-hundred
+/// pixel pane is ten pixels and a cell is twice that at a comfortable size, so
+/// a terminal in a four-way split would round by more than the proportion
+/// allows and be called a refusal — which is precisely the case this is here to
+/// stop being called one. The number is a font metric and nothing cleverer:
+/// cell heights run about sixteen to twenty-four pixels at the sizes people
+/// read code at, and the floor has to clear the top of that range to be worth
+/// having.
+const CELL: i32 = 24;
+
+/// Whether `given` is near enough to `asked` to be a rounding. See [`ROUNDING`].
+fn rounds(asked: Size<i32, Logical>, given: Size<i32, Logical>) -> bool {
+    let near = |asked: i32, given: i32| {
+        let slack = (asked.abs() / ROUNDING).max(CELL);
+        given.abs_diff(asked) <= slack.unsigned_abs()
+    };
+    near(asked.w, given.w) && near(asked.h, given.h)
 }
 
 impl Hold {
@@ -323,7 +407,7 @@ impl Hold {
     pub(crate) const fn new(
         edges: ResizeEdge,
         client: Size<i32, Logical>,
-        asked: Size<i32, Logical>,
+        asked: Rectangle<i32, Logical>,
         now: Duration,
         released: Option<Duration>,
     ) -> Self {
@@ -347,6 +431,34 @@ impl Hold {
         (pulls_left(self.edges), pulls_top(self.edges))
     }
 
+    /// The rectangle this client was last told to be, for the trace.
+    ///
+    /// The one number a report of "it still looks wrong" cannot be settled
+    /// without: everything else in the log says what the compositor decided,
+    /// and this says what the client was actually asked for, which is the only
+    /// way to tell a stretch that is waiting for an answer from one that is
+    /// waiting for a question. See [`trace`].
+    pub(crate) const fn asked(&self) -> Rectangle<i32, Logical> {
+        self.asked
+    }
+
+    /// The same gesture, placed by the compositor's other authority now.
+    ///
+    /// `settle_resize` forks per frame and not per gesture, so one pane moves
+    /// between `Solium::resize_hold` and `Solium::resize_bridge` whenever a
+    /// layout changes its mind about claiming the drag — `scrolling.lua`'s
+    /// guard at screen x 0 is one frame of exactly that. Destroying the hold
+    /// and building a fresh one across that boundary threw away
+    /// [`Self::told`], so each flip bought an unthrottled configure in each
+    /// direction and a handler that alternated restored the sixty a second
+    /// [`TELL_EVERY`] exists to remove. It is the same client, the same
+    /// gesture and the same throttle; only the edges are the other authority's
+    /// to name, because a tiled pane's moved edge is its own and a floating
+    /// one's is the pointer's. See [`moved_edges`].
+    pub(crate) const fn retargeted(&mut self, edges: ResizeEdge) {
+        self.edges = edges;
+    }
+
     /// Notice whatever the client has said since it was last spoken to.
     ///
     /// **This is the half of the answer that stops a refused resize stretching
@@ -363,27 +475,30 @@ impl Hold {
             return;
         }
         self.since = client;
-        if client == self.asked {
+        if client == self.asked.size {
             // It took what it was offered, so whatever it declined earlier in
             // this gesture it is tracking now: a drag that went under Firefox's
             // minimum width and came back out of it stretches again.
             self.declined = None;
         } else {
-            self.declined = Some(self.asked);
+            self.declined = Some(self.asked.size);
         }
     }
 
-    /// The pointer moved. Returns the size to tell the client, if it is time.
+    /// Offer the client a rectangle. Returns it if it goes out now.
     ///
-    /// `wanted` is the client rectangle's size the drag is asking for this
-    /// frame — the pane has already taken it; this only decides whether the
-    /// client hears about it yet. See [`TELL_EVERY`] for why not every frame.
-    pub(crate) fn dragged(
+    /// The one place a configure is decided, with the throttle as a parameter
+    /// rather than as two copies of this arithmetic: [`Self::dragged`] and
+    /// [`Self::placed`] differ in exactly that and in nothing else, and a
+    /// second spelling of "have we already told it this" is how the middle of a
+    /// gesture comes to disagree with the end of it.
+    fn offered(
         &mut self,
-        wanted: Size<i32, Logical>,
+        wanted: Rectangle<i32, Logical>,
         client: Size<i32, Logical>,
         now: Duration,
-    ) -> Option<Size<i32, Logical>> {
+        throttled: bool,
+    ) -> Option<Rectangle<i32, Logical>> {
         self.note(client);
         if wanted == self.asked {
             return None;
@@ -398,7 +513,7 @@ impl Hold {
         // the throttle swallow it would leave `asked` naming a size the client
         // was never told, and `settle` would then wait out `PATIENCE` for an
         // answer that cannot come and end the gesture with a snap.
-        if self.released.is_none() && now.saturating_sub(self.told) < TELL_EVERY {
+        if throttled && self.released.is_none() && now.saturating_sub(self.told) < TELL_EVERY {
             return None;
         }
         self.asked = wanted;
@@ -411,18 +526,60 @@ impl Hold {
         Some(wanted)
     }
 
-    /// The pointer let go. Returns the size to tell the client, always.
+    /// The drag moved this pane. Returns the rectangle to tell the client, if
+    /// it is time.
     ///
-    /// Unconditional, whatever the throttle would have said. Wherever
-    /// [`TELL_EVERY`] happened to land, the last thing the client hears has to
-    /// be the size the gesture actually ended on, or the window settles at the
-    /// last throttled size and the final few pixels of the drag are lost.
-    pub(crate) fn release(
+    /// `wanted` is the client rectangle the drag is asking for this frame — the
+    /// pane has already taken it; this only decides whether the client hears
+    /// about it yet. See [`TELL_EVERY`] for why not every frame.
+    pub(crate) fn dragged(
         &mut self,
-        wanted: Size<i32, Logical>,
+        wanted: Rectangle<i32, Logical>,
         client: Size<i32, Logical>,
         now: Duration,
-    ) -> Size<i32, Logical> {
+    ) -> Option<Rectangle<i32, Logical>> {
+        self.offered(wanted, client, now, true)
+    }
+
+    /// Something that is **not** the drag moved this pane. Returns the
+    /// rectangle to tell the client, whatever the throttle would have said.
+    ///
+    /// [`TELL_EVERY`] is a live gesture's own rate limit and it has no business
+    /// swallowing anybody else's single configure. A config reload, a
+    /// `modes.use` from a keybinding, a workspace switch and `rescue_offscreen`
+    /// all reach `Solium::move_pane`, and one of them landing on a pane that
+    /// happens to be mid-bridge — or inside the quarter second a released
+    /// bridge is still waiting out — used to have its one and only configure
+    /// dropped on the floor while `move_pane` went on writing the slot. The
+    /// pane was then drawn, stretched, at a rectangle its client had never been
+    /// told about, for the rest of the gesture.
+    ///
+    /// Recorded in the hold rather than sent behind its back, because a hold
+    /// whose `asked` names a rectangle the client was not the last to be told
+    /// would wait out [`PATIENCE`] for an answer to a question nobody asked.
+    pub(crate) fn placed(
+        &mut self,
+        wanted: Rectangle<i32, Logical>,
+        client: Size<i32, Logical>,
+        now: Duration,
+    ) -> Option<Rectangle<i32, Logical>> {
+        self.offered(wanted, client, now, false)
+    }
+
+    /// The pointer let go. Returns the rectangle to tell the client, always.
+    ///
+    /// Unconditional, whatever the throttle would have said — and unconditional
+    /// even when it repeats [`Self::asked`], because a release is also where a
+    /// pane's *position* is reconciled for an X11 client. Wherever
+    /// [`TELL_EVERY`] happened to land, the last thing the client hears has to
+    /// be the rectangle the gesture actually ended on, or the window settles at
+    /// the last throttled size and the final few pixels of the drag are lost.
+    pub(crate) fn release(
+        &mut self,
+        wanted: Rectangle<i32, Logical>,
+        client: Size<i32, Logical>,
+        now: Duration,
+    ) -> Rectangle<i32, Logical> {
         self.note(client);
         self.asked = wanted;
         self.told = now;
@@ -441,7 +598,7 @@ impl Hold {
         // Asked *and* answered, or asked for the size it already had — which is
         // the same thing from here and is why this compares the size rather
         // than watching for a commit.
-        if client == self.asked {
+        if client == self.asked.size {
             return Settle::Done;
         }
         // It has already been offered exactly this and declined it — a minimum
@@ -451,7 +608,12 @@ impl Hold {
         // drag: people stop moving the pointer before they let go of the
         // button, so the size the release offers is the size the throttle last
         // offered, which is the size that came back refused.
-        if self.declined == Some(self.asked) {
+        // Any mismatch at all, including the cell-grid rounding [`ROUNDING`]
+        // refuses to call a refusal: the client's own size wins at the end of a
+        // gesture whether it missed by four pixels or by two hundred, and
+        // waiting a further quarter second to be told the same thing again is
+        // only latency.
+        if self.declined == Some(self.asked.size) {
             return Settle::Adopt(client);
         }
         // Nothing at all. Give up rather than hold the space and the slot apart
@@ -515,13 +677,37 @@ impl Hold {
         self.released = released;
     }
 
+    /// Whether the client has walked away from what it is being offered, as
+    /// opposed to merely landing near it.
+    ///
+    /// The distinction is [`ROUNDING`]'s and the whole of its reasoning is
+    /// there. In one line: a terminal's answer is a whole number of character
+    /// cells and so is a few pixels out every time, and calling that a refusal
+    /// takes the user's configured fill away from every terminal drag there
+    /// will ever be.
+    ///
+    /// Measured against [`Self::since`] — the size the client actually
+    /// committed — rather than against a flag set at the time, so that a hold
+    /// carried across a claimed/unclaimed flip carries its verdict with it
+    /// instead of re-deriving one from state it no longer has.
+    pub(crate) fn refused(&self) -> bool {
+        self.declined
+            .is_some_and(|asked| !rounds(asked, self.since))
+    }
+
     /// What actually fills the pane, given what the configuration asked for.
     ///
     /// A refusal overrides the setting. See [`Self::declined`]: the client is
     /// not tracking what it is being offered, so a stretch would never return
     /// to 1 and the window would stay soft until something else resized it.
-    pub(crate) const fn fill(&self, configured: Fill) -> Fill {
-        if self.declined.is_some() {
+    ///
+    /// **A rounding does not**, which is [`Self::refused`] and not
+    /// `declined.is_some()`. `Fill::Hold` deliberately leaves an uncovered
+    /// strip while a pane grows, so forcing it for a client that is four pixels
+    /// off its ask trades a stretch nobody can see for a band of background
+    /// nobody asked for.
+    pub(crate) fn fill(&self, configured: Fill) -> Fill {
+        if self.refused() {
             Fill::Hold
         } else {
             configured
@@ -616,6 +802,35 @@ pub(crate) fn moved_edges(
 
 /// A per-frame record of what a drag did to one pane, for when a report of
 /// "it still stutters" needs numbers rather than another theory.
+///
+/// # What a line says
+///
+/// Three sites, told apart by the first word so `grep` can separate them, and
+/// between them they carry every number the three faults #123's review found
+/// are distinguished by.
+///
+/// * `drawn`, from `render.rs`, **once per pane per frame and unconditionally**
+///   — the only one of the three that is on every frame, because the other two
+///   are reached only from a frame that placed something. `frame` is the outer
+///   rectangle drawn, `slot` the pane's client rectangle, `committed` what the
+///   client last agreed to, `factor` the stretch its buffer is drawn at, `fill`
+///   the mode actually chosen once [`Hold::fill`] has had its say, and `held`
+///   whether a hold is live.
+/// * `layout`, from `Solium::offers_size`, once per pane a placement reached.
+///   Adds `asked` — the rectangle the client was last *told*, which is the one
+///   number nothing else can supply — `told`, whether a configure went out on
+///   this frame, and `refused`, whether the client's answer was far enough off
+///   to take the stretch away. See [`ROUNDING`].
+/// * `flush`, from `Solium::flush_resize`, when the throttle's trailing edge
+///   sends what a paused drag was sitting on. The same fields as `layout`.
+///
+/// So each of the three faults reads as a shape rather than as a guess. A
+/// **tail** is `drawn` lines whose `slot` has moved away from `committed` with
+/// no `layout` or `flush` line between them and `asked` standing still. A
+/// **pane moved without being resized** is a `slot` whose origin walks at an
+/// unchanged size with `asked` not following. A **rounding mistaken for a
+/// refusal** is `refused=1` with `committed` a handful of pixels from `asked`,
+/// and `fill` reading `Hold` in a session configured for `Stretch`.
 ///
 /// **Off unless [`VARIABLE`] names a file**, and off is one relaxed atomic load
 /// on a path that runs once per pane per frame. Not `tracing`: the compositor's
@@ -742,6 +957,19 @@ mod tests {
         std::time::Duration::from_millis(millis)
     }
 
+    /// A client rectangle of this size at one fixed origin.
+    ///
+    /// A hold's `asked` is the whole rectangle, because a configure carries a
+    /// position for an X11 client and a pane that only *moves* has to be told
+    /// about it — see `Hold::asked`. Nearly every test in this module is about
+    /// what a client answers, which is a size and has no position in it, so
+    /// they name a size and this puts it somewhere. The origin is the same for
+    /// every call on purpose: a test that meant to change the size and changed
+    /// the position as well would be asking a different question.
+    fn want(w: i32, h: i32) -> Rectangle<i32, Logical> {
+        rect(100, 100, w, h)
+    }
+
     /// A hold born in the middle of its gesture, which is the ordinary case and
     /// the one nearly every test below is about.
     ///
@@ -750,7 +978,7 @@ mod tests {
     fn dragging(
         edges: ResizeEdge,
         client: Size<i32, Logical>,
-        asked: Size<i32, Logical>,
+        asked: Rectangle<i32, Logical>,
         now: std::time::Duration,
     ) -> Hold {
         Hold::new(edges, client, asked, now, None)
@@ -816,15 +1044,15 @@ mod tests {
         let mut hold = dragging(
             ResizeEdge::BottomRight,
             size(400, 300),
-            size(500, 380),
+            want(500, 380),
             ms(0),
         );
         // Mid-drag the client has said nothing, so the hold stands.
         assert_eq!(hold.settle(size(400, 300), ms(8)), Settle::Waiting);
         // The pointer lets go and the client is told the final size.
         assert_eq!(
-            hold.release(size(520, 400), size(400, 300), ms(200)),
-            size(520, 400)
+            hold.release(want(520, 400), size(400, 300), ms(200)),
+            want(520, 400)
         );
         assert_eq!(hold.settle(size(400, 300), ms(216)), Settle::Waiting);
         // It answers with exactly that.
@@ -843,7 +1071,7 @@ mod tests {
     /// something else resized it — a worse bug than the shake.
     #[test]
     fn a_refused_size_stops_the_stretch_instead_of_stretching_for_ever() {
-        let mut hold = dragging(ResizeEdge::Left, size(800, 600), size(300, 600), ms(0));
+        let mut hold = dragging(ResizeEdge::Left, size(800, 600), want(300, 600), ms(0));
         assert_eq!(
             hold.fill(Fill::Stretch),
             Fill::Stretch,
@@ -875,8 +1103,8 @@ mod tests {
         // not holding stays where it was.
         let slot = rect(200, 100, 300, 600);
         assert_eq!(
-            hold.release(size(300, 600), size(450, 600), ms(300)),
-            size(300, 600)
+            hold.release(want(300, 600), size(450, 600), ms(300)),
+            want(300, 600)
         );
         let Settle::Adopt(taken) = hold.settle(size(450, 600), ms(320)) else {
             panic!("a client that answered with a size of its own must be adopted");
@@ -901,13 +1129,13 @@ mod tests {
     /// was refused.
     #[test]
     fn a_refusal_lifts_on_an_answer_and_not_on_a_new_offer() {
-        let mut hold = dragging(ResizeEdge::Left, size(800, 600), size(300, 600), ms(0));
+        let mut hold = dragging(ResizeEdge::Left, size(800, 600), want(300, 600), ms(0));
         hold.settle(size(450, 600), ms(100));
         assert_eq!(hold.fill(Fill::Stretch), Fill::Hold);
         // Dragged back out, and told so.
         assert_eq!(
-            hold.dragged(size(700, 600), size(450, 600), ms(200)),
-            Some(size(700, 600))
+            hold.dragged(want(700, 600), size(450, 600), ms(200)),
+            Some(want(700, 600))
         );
         assert_eq!(
             hold.fill(Fill::Stretch),
@@ -920,7 +1148,7 @@ mod tests {
         assert_eq!(hold.fill(Fill::Stretch), Fill::Stretch);
         // So a release at a size it never declined waits for it rather than
         // pre-empting it with the size it happened to be at.
-        hold.release(size(760, 600), size(700, 600), ms(400));
+        hold.release(want(760, 600), size(700, 600), ms(400));
         assert_eq!(
             hold.settle(size(700, 600), ms(420)),
             Settle::Waiting,
@@ -934,8 +1162,8 @@ mod tests {
     /// nothing *because* it was asked for the size it already had.
     #[test]
     fn a_client_that_never_answers_is_given_up_on_at_the_deadline() {
-        let mut hold = dragging(ResizeEdge::Bottom, size(400, 300), size(400, 420), ms(0));
-        hold.release(size(400, 420), size(400, 300), ms(500));
+        let mut hold = dragging(ResizeEdge::Bottom, size(400, 300), want(400, 420), ms(0));
+        hold.release(want(400, 420), size(400, 300), ms(500));
         assert_eq!(hold.settle(size(400, 300), ms(600)), Settle::Waiting);
         assert_eq!(
             hold.settle(size(400, 300), ms(500) + PATIENCE),
@@ -945,8 +1173,8 @@ mod tests {
 
         // And the case that produces no commit at all: the drag came back to
         // where it started, so the configure asked for the size the client is.
-        let mut same = dragging(ResizeEdge::Bottom, size(400, 300), size(400, 420), ms(0));
-        same.release(size(400, 300), size(400, 300), ms(500));
+        let mut same = dragging(ResizeEdge::Bottom, size(400, 300), want(400, 420), ms(0));
+        same.release(want(400, 300), size(400, 300), ms(500));
         assert_eq!(
             same.settle(size(400, 300), ms(501)),
             Settle::Done,
@@ -957,30 +1185,152 @@ mod tests {
     /// The client is asked at [`TELL_EVERY`], not at the frame rate.
     #[test]
     fn the_client_is_not_asked_more_often_than_the_throttle_allows() {
-        let mut hold = dragging(ResizeEdge::Right, size(400, 300), size(410, 300), ms(0));
+        let mut hold = dragging(ResizeEdge::Right, size(400, 300), want(410, 300), ms(0));
         // Sixteen milliseconds is a frame. Nothing goes out.
-        assert_eq!(hold.dragged(size(420, 300), size(400, 300), ms(16)), None);
-        assert_eq!(hold.dragged(size(430, 300), size(400, 300), ms(32)), None);
-        assert_eq!(hold.dragged(size(460, 300), size(400, 300), ms(99)), None);
+        assert_eq!(hold.dragged(want(420, 300), size(400, 300), ms(16)), None);
+        assert_eq!(hold.dragged(want(430, 300), size(400, 300), ms(32)), None);
+        assert_eq!(hold.dragged(want(460, 300), size(400, 300), ms(99)), None);
         // Past the interval, one configure, carrying the latest size rather
         // than any of the ones that were skipped.
         assert_eq!(
-            hold.dragged(size(470, 300), size(400, 300), ms(0) + TELL_EVERY),
-            Some(size(470, 300))
+            hold.dragged(want(470, 300), size(400, 300), ms(0) + TELL_EVERY),
+            Some(want(470, 300))
         );
         // And the throttle restarts from there.
-        assert_eq!(hold.dragged(size(480, 300), size(400, 300), ms(120)), None);
+        assert_eq!(hold.dragged(want(480, 300), size(400, 300), ms(120)), None);
+    }
+
+    /// **A placement that is not the drag's own goes out whatever the interval
+    /// says.**
+    ///
+    /// [`TELL_EVERY`] is a live gesture's rate limit. A config reload, a
+    /// `modes.use` from a keybinding and `rescue_offscreen` all reach
+    /// `Solium::move_pane` and have no next frame to resend anything, so a
+    /// throttle that swallowed one of them would leave the pane drawn at a
+    /// rectangle its client was never told about for the rest of the gesture.
+    ///
+    /// Through the hold rather than around it, which is the second assertion:
+    /// an `asked` that does not name what the client last heard would wait out
+    /// [`PATIENCE`] for an answer to a question nobody asked.
+    #[test]
+    fn a_placement_that_is_not_the_drags_is_not_throttled_by_it() {
+        let mut hold = dragging(ResizeEdge::Right, size(400, 300), want(410, 300), ms(0));
+        assert_eq!(
+            hold.dragged(want(420, 300), size(400, 300), ms(16)),
+            None,
+            "the control: the same frame, asked for by the drag, is throttled"
+        );
+        assert_eq!(
+            hold.placed(want(260, 180), size(400, 300), ms(16)),
+            Some(want(260, 180))
+        );
+        assert_eq!(
+            hold.asked(),
+            want(260, 180),
+            "the hold has to know what the client was last told, or it waits \
+             for an answer to a size it never offered"
+        );
+        // And it is still a deduplicated offer rather than an unconditional
+        // send: the same rectangle twice is nothing to say.
+        assert_eq!(hold.placed(want(260, 180), size(400, 300), ms(32)), None);
+    }
+
+    /// **A pane that only *moved* is still something to tell the client.**
+    ///
+    /// `state::size_window` is the only thing that carries a position to an X11
+    /// client, and [`Hold::asked`] is the whole rectangle for exactly that
+    /// reason. Comparing sizes meant a bridged pane whose slot translated
+    /// answered "nothing to say" for the rest of the gesture; `scrolling.lua`'s
+    /// `widen` shifts every column sideways at an unchanged width, so that is
+    /// the whole of a drag in the scrolling layout.
+    #[test]
+    fn a_pane_that_only_moved_is_still_told_where_it_went() {
+        let mut hold = dragging(ResizeEdge::Right, size(400, 300), want(400, 300), ms(0));
+        let sideways = rect(140, 100, 400, 300);
+        assert_eq!(
+            hold.dragged(sideways, size(400, 300), TELL_EVERY),
+            Some(sideways),
+            "the same size at a different origin is a real change"
+        );
+        assert_eq!(
+            hold.dragged(sideways, size(400, 300), TELL_EVERY * 2),
+            None,
+            "and the same rectangle twice is not"
+        );
+    }
+
+    /// **A terminal rounds; it does not refuse.** See [`ROUNDING`].
+    ///
+    /// The two questions `declined` answers come apart here, which is the whole
+    /// of the change. A cell-grid answer is close enough that the stretch it
+    /// leaves behind is invisible, so the user's configured fill stands —
+    /// otherwise kitty, the ordinary tiled client, loses `stretch` on the first
+    /// answer of every seam drag and gets [`Fill::Hold`]'s uncovered strip
+    /// instead. It is still an answer, so the end of the gesture still adopts
+    /// it: a client's own size wins by six pixels as readily as by two hundred.
+    ///
+    /// The boundary is asserted from both sides rather than described, because
+    /// a tolerance nothing pins is a tolerance the next edit widens.
+    #[test]
+    fn a_cell_grid_answer_keeps_the_stretch_and_still_ends_the_gesture() {
+        let mut hold = dragging(ResizeEdge::Right, size(400, 300), want(300, 200), ms(0));
+        // Six across and ten down: a cell or two of an ordinary font.
+        assert_eq!(hold.settle(size(294, 190), ms(50)), Settle::Waiting);
+        assert!(!hold.refused());
+        assert_eq!(
+            hold.fill(Fill::Stretch),
+            Fill::Stretch,
+            "a rounding is not the refusal `declined` exists to catch"
+        );
+        // But it is still an answer, so the gesture ends on it rather than
+        // waiting out the deadline for one that will never differ.
+        hold.release(want(300, 200), size(294, 190), ms(200));
+        assert_eq!(
+            hold.settle(size(294, 190), ms(210)),
+            Settle::Adopt(size(294, 190)),
+            "the client's own size wins at the end whatever the fill did in \
+             the middle"
+        );
+
+        // The other side of the line, which is what stops this being a fix that
+        // simply never calls anything a refusal: Firefox's minimum width.
+        let mut firefox = dragging(ResizeEdge::Left, size(800, 600), want(300, 600), ms(0));
+        firefox.settle(size(450, 600), ms(50));
+        assert!(firefox.refused());
+        assert_eq!(firefox.fill(Fill::Stretch), Fill::Hold);
+
+        // The proportion, on a pane big enough for it to be the term that
+        // decides: a twentieth of a thousand is fifty.
+        let refused = |asked: (i32, i32), given: (i32, i32)| {
+            let mut hold = dragging(
+                ResizeEdge::Right,
+                size(asked.0, asked.1),
+                want(asked.0, asked.1),
+                ms(0),
+            );
+            hold.settle(size(given.0, given.1), ms(50));
+            hold.refused()
+        };
+        assert!(!refused((1000, 1000), (950, 1000)), "five percent");
+        assert!(refused((1000, 1000), (949, 1000)), "and past it");
+        // And the floor, which is what a short pane needs: a twentieth of two
+        // hundred is ten, and one row of text is more than that.
+        assert!(
+            !refused((300, 200), (300, 180)),
+            "a rule that calls one character cell a refusal is the rule this \
+             replaces"
+        );
     }
 
     /// Whatever the throttle did, the gesture always ends with a configure for
     /// the size it actually ended on.
     #[test]
     fn letting_go_always_tells_the_client_where_the_drag_ended() {
-        let mut hold = dragging(ResizeEdge::Right, size(400, 300), size(410, 300), ms(0));
-        assert_eq!(hold.dragged(size(470, 300), size(400, 300), ms(16)), None);
+        let mut hold = dragging(ResizeEdge::Right, size(400, 300), want(410, 300), ms(0));
+        assert_eq!(hold.dragged(want(470, 300), size(400, 300), ms(16)), None);
         assert_eq!(
-            hold.release(size(473, 300), size(400, 300), ms(20)),
-            size(473, 300),
+            hold.release(want(473, 300), size(400, 300), ms(20)),
+            want(473, 300),
             "the last few pixels of a drag are lost if the throttle gets the \
              final word"
         );
@@ -995,19 +1345,19 @@ mod tests {
     /// an answer that cannot come, and then snapping.
     #[test]
     fn a_motion_settled_after_the_release_still_reaches_the_client() {
-        let mut hold = dragging(ResizeEdge::Right, size(400, 300), size(400, 300), ms(0));
+        let mut hold = dragging(ResizeEdge::Right, size(400, 300), want(400, 300), ms(0));
         // The control: six milliseconds into a live drag is throttled.
-        assert_eq!(hold.dragged(size(460, 300), size(400, 300), ms(6)), None);
+        assert_eq!(hold.dragged(want(460, 300), size(400, 300), ms(6)), None);
         // The button comes up.
         assert_eq!(
-            hold.release(size(470, 300), size(400, 300), ms(50)),
-            size(470, 300)
+            hold.release(want(470, 300), size(400, 300), ms(50)),
+            want(470, 300)
         );
         // And the frame after it settles the motion that preceded it. The same
         // six milliseconds, and now it goes out.
         assert_eq!(
-            hold.dragged(size(474, 300), size(400, 300), ms(56)),
-            Some(size(474, 300))
+            hold.dragged(want(474, 300), size(400, 300), ms(56)),
+            Some(want(474, 300))
         );
         assert_eq!(
             hold.settle(size(474, 300), ms(120)),
@@ -1047,7 +1397,7 @@ mod tests {
         let mut hold = Hold::new(
             ResizeEdge::TopLeft,
             size(400, 300),
-            size(380, 288),
+            want(380, 288),
             ms(16),
             Some(ms(12)),
         );
@@ -1060,7 +1410,7 @@ mod tests {
         );
 
         // And the control: the same hold that never heard about its release.
-        let mut deaf = dragging(ResizeEdge::TopLeft, size(400, 300), size(380, 288), ms(16));
+        let mut deaf = dragging(ResizeEdge::TopLeft, size(400, 300), want(380, 288), ms(16));
         assert_eq!(
             deaf.settle(size(400, 300), ms(12) + PATIENCE + ms(1000)),
             Settle::Waiting,
@@ -1078,7 +1428,7 @@ mod tests {
     /// that cannot be grabbed to undo it.
     #[test]
     fn an_adopted_size_never_collapses_the_slot_to_nothing() {
-        let hold = dragging(ResizeEdge::TopLeft, size(400, 300), size(380, 288), ms(0));
+        let hold = dragging(ResizeEdge::TopLeft, size(400, 300), want(380, 288), ms(0));
         let slot = rect(200, 100, 380, 288);
         let landed = hold.anchored(slot, size(0, 0));
         assert!(
@@ -1095,7 +1445,7 @@ mod tests {
     /// Which edges are standing still, for a picture that is not stretched.
     #[test]
     fn a_hold_says_which_edges_the_picture_has_to_stay_against() {
-        let pins = |edges| dragging(edges, size(400, 300), size(400, 300), ms(0)).pins();
+        let pins = |edges| dragging(edges, size(400, 300), want(400, 300), ms(0)).pins();
         assert_eq!(pins(ResizeEdge::TopLeft), (true, true));
         assert_eq!(pins(ResizeEdge::BottomRight), (false, false));
         assert_eq!(pins(ResizeEdge::Left), (true, false));
@@ -1172,7 +1522,7 @@ mod tests {
         let hold = Hold::new(
             moved_edges(rect(700, 300, 200, 400), rect(760, 300, 200, 400)),
             size(200, 400),
-            size(200, 400),
+            want(200, 400),
             ms(0),
             None,
         );
@@ -1216,7 +1566,7 @@ mod tests {
         let mut hold = Hold::new(
             ResizeEdge::Right,
             size(300, 200),
-            size(320, 200),
+            want(320, 200),
             ms(0),
             Some(ms(0)),
         );
@@ -1230,7 +1580,7 @@ mod tests {
         let mut hold = Hold::new(
             ResizeEdge::Right,
             size(300, 200),
-            size(320, 200),
+            want(320, 200),
             ms(0),
             Some(ms(0)),
         );
@@ -1242,8 +1592,8 @@ mod tests {
              going ends nothing"
         );
         assert_eq!(
-            hold.dragged(size(340, 200), size(300, 200), TELL_EVERY),
-            Some(size(340, 200)),
+            hold.dragged(want(340, 200), size(300, 200), TELL_EVERY),
+            Some(want(340, 200)),
             "and the interval still runs from when the client was last spoken \
              to, not from the handover: resetting it would cost a tenth of a \
              second of silence at the one moment a drag has just started"

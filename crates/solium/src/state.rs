@@ -548,10 +548,12 @@ pub(crate) struct Solium {
     /// size, because an edge drag is still going on. See [`crate::resizing`].
     ///
     /// **Not a fourth place a window's position lives** — issue #84 counts
-    /// three already and adding one would be the wrong direction. No rectangle
-    /// is stored here: the rectangle is the pane's slot, and this only says
-    /// that the slot outranks the client for a while and when it stops doing
-    /// so.
+    /// three already and adding one would be the wrong direction. A window's
+    /// rectangle is the pane's slot, and this only says that the slot outranks
+    /// the client for a while and when it stops doing so. The rectangle inside
+    /// the hold is `resizing::Hold::asked`, which is a copy of the last
+    /// configure rather than a window's geometry: nothing reads it to find out
+    /// where a window is.
     pub(crate) resize_hold: Option<crate::resizing::Held>,
 
     /// The same, for the panes a *layout* moved because of an edge drag.
@@ -579,6 +581,20 @@ pub(crate) struct Solium {
     /// from the half-dozen other things that reach it — a keyboard nudge, a
     /// reload, a monitor change, a workspace switch, `rescue_offscreen`. None of
     /// those has a gesture to end a hold, so none of them may arm one.
+    ///
+    /// **It spans the whole of `trigger_resize`, including an `apply` whose
+    /// outcome turns out to be unclaimed, and that is right rather than merely
+    /// unavoidable.** It is unavoidable, because a layout's placements *are*
+    /// commands and `apply` is what runs them: there is no seam inside the call
+    /// at which "this handler's own layout" could be told from "a command this
+    /// handler ran", so narrowing the window would mean arming nothing at all.
+    /// It is also right, because a pane this dispatch moved is a pane this
+    /// gesture moved whatever the handler said about claiming the *dragged*
+    /// window: `handled` answers who decides that one window's rectangle, not
+    /// whether the others need bridging, and they do — they were moved by the
+    /// drag's own dispatch and `release_bridge` ends every one of them when the
+    /// button comes up. An unclaimed frame hands the dragged pane back to the
+    /// floating path and leaves the rest alone; see `settle_resize`.
     resize_gesture: Option<Gesture>,
 
     /// An edge drag whose button has come up, and when.
@@ -3218,6 +3234,25 @@ impl Solium {
     ///    deliberate: the first offer of a new size goes out on the frame it is
     ///    decided, and only the ones after it are throttled.
     ///
+    /// **Case (1) is only the drag's throttle when the drag is what is placing
+    /// this pane.** A bridge outlives its gesture by up to `PATIENCE`, and
+    /// `move_pane` is reached by a config reload, a `modes.use` from a
+    /// keybinding, a workspace switch and `rescue_offscreen` as well — none of
+    /// which has a next frame to resend anything. Routing one of those through
+    /// the throttle dropped its one configure while `move_pane` went on writing
+    /// the slot, which leaves the pane drawn, stretched, at a rectangle its
+    /// client was never told about for the rest of the gesture.
+    /// [`Self::resize_gesture`] is exactly "the layout sweep running right now
+    /// belongs to a live drag", so it is the question, and anything else offers
+    /// the same rectangle unthrottled through `Hold::placed` — through the hold
+    /// rather than around it, so `asked` still names what the client last heard.
+    ///
+    /// **A toplevel carrying a pending change is sent whatever the throttle
+    /// says**, for the same reason and one more: `size_window` is a pending size
+    /// *and* a `send_pending_configure`, so a throttled frame skips the flush
+    /// too, and a maximise or a decoration mode agreed by somebody else is then
+    /// blocked behind an interval for exactly the windows a drag is touching.
+    ///
     /// Note what is *not* here: nothing arms a hold without
     /// [`Self::resize_gesture`]. A keyboard nudge, a reload, a monitor change
     /// and a workspace switch all reach `move_pane`, and a hold armed by one of
@@ -3234,22 +3269,49 @@ impl Solium {
         now: Duration,
     ) -> bool {
         let committed = window.geometry().size;
+        // **And anything else the toplevel is carrying.** A maximise, a
+        // fullscreen or a decoration mode agreed before the initial configure
+        // went out is a pending change somebody else wrote and is waiting on.
+        // Every one of those sends its own configure today, so this is belt and
+        // braces rather than a known hole; it is here because the alternative
+        // failure is a window that never hears an answer it is blocked on, and
+        // there is no cheaper way to be sure than asking.
+        let pending = window
+            .toplevel()
+            .is_some_and(smithay::wayland::shell::xdg::ToplevelSurface::has_pending_changes);
+        // Whether the sweep reaching this pane is the live drag's own. Read
+        // before the borrow below, which needs `self` mutably.
+        let dragging = self.resize_gesture.is_some();
         // Case (1). The borrow ends on this line, so the arm below can reach
         // `self` again.
         let bridged = self
             .resize_bridge
             .as_mut()
             .and_then(|bridge| bridge.panes.iter_mut().find(|held| held.pane == pane))
-            .map(|held| held.hold.dragged(client.size, committed, now).is_some());
+            .map(|held| {
+                if dragging && !pending {
+                    held.hold.dragged(client, committed, now)
+                } else {
+                    held.hold.placed(client, committed, now)
+                }
+                .is_some()
+            });
         let (told, held) = match bridged {
             Some(told) => (told, true),
-            None => self.offers_first_size(pane, window, client, now),
+            None => self.offers_first_size(pane, window, client, committed, now),
         };
+        // A pending flush is worth a configure even when the rectangle is one
+        // the client has already been told: the size is not what it is waiting
+        // for.
+        let told = told || pending;
         if crate::resizing::trace::on() {
+            let hold = self.held_hold(pane);
+            let asked = hold.map_or(client, crate::resizing::Hold::asked);
             crate::resizing::trace::line(
                 "layout",
                 format_args!(
-                    "pane={} slot={},{} {}x{} committed={}x{} told={} held={}",
+                    "pane={} slot={},{} {}x{} committed={}x{} asked={},{} {}x{} told={} \
+                     held={} refused={}",
                     pane.get(),
                     client.loc.x,
                     client.loc.y,
@@ -3257,84 +3319,118 @@ impl Solium {
                     client.size.h,
                     committed.w,
                     committed.h,
+                    asked.loc.x,
+                    asked.loc.y,
+                    asked.size.w,
+                    asked.size.h,
                     u8::from(told),
                     u8::from(held),
+                    u8::from(hold.is_some_and(crate::resizing::Hold::refused)),
                 ),
             );
         }
         told
     }
 
-    /// Cases (2) and (3) of [`Self::offers_size`]: a pane with no hold yet.
+    /// Cases (2) and (3) of [`Self::offers_size`]: a pane with no bridge entry.
     ///
     /// Returns whether the client is told and whether a hold was armed, which
     /// are different questions. A pane is told without being bridged by every
-    /// caller that is not a drag, and — in the one case below where a toplevel
-    /// is carrying a pending change somebody else wrote — told without having
-    /// moved at all.
+    /// caller that is not a drag.
     fn offers_first_size(
         &mut self,
         pane: crate::pane::PaneId,
         window: &Window,
         client: Rectangle<i32, Logical>,
+        committed: Size<i32, Logical>,
         now: Duration,
     ) -> (bool, bool) {
         // The client's own rectangle: where the space has it, at the size it
         // last committed. Read before `map_stacked` moves it, which is why this
         // is answered here rather than after the move.
+        //
+        // **This is the right question for case (2) and the wrong one for the
+        // edges below**, and the two used to share it. "Has the client already
+        // been put here" is about where the *client* is, so it asks the space.
+        // "Which of this pane's edges did this placement move" is about the
+        // *pane*, and the pane's previous rectangle is its slot: during a drag
+        // the client's committed size is frames behind the slot, so deriving an
+        // edge from it mixes the client's latency into the answer and can name
+        // an edge the placement never touched — `moved_edges` would see both
+        // sides of an axis move where only one did, or a far edge move where
+        // only the near one did, and `Hold::pins` and `anchored` would then
+        // hang a held picture against the wrong side of a window.
         let before = self.real_geometry(window);
-        // **And anything else the toplevel is carrying.** `size_window` is a
-        // pending size *and* a `send_pending_configure`, so skipping it skips
-        // the flush as well — and a maximise, a fullscreen or a decoration mode
-        // agreed before the initial configure went out is a pending change
-        // somebody else wrote and is waiting on. Every one of those sends its
-        // own configure today, so this is belt and braces rather than a known
-        // hole; it is here because the alternative failure is a window that
-        // never hears an answer it is blocked on, and there is no cheaper way
-        // to be sure than asking.
-        let pending = window
-            .toplevel()
-            .is_some_and(smithay::wayland::shell::xdg::ToplevelSurface::has_pending_changes);
         let changed = before != Some(client);
-        let moved = changed || pending;
         // A hold is armed by a live gesture and by nothing else, and only for a
-        // pane whose rectangle actually changed — `changed` and not `moved`: a
-        // layout re-placing a leaf exactly where it already is has moved
-        // nothing, and a hold for it would pin a slot that needs no pinning
-        // until the gesture ended.
+        // pane whose rectangle actually changed: a layout re-placing a leaf
+        // exactly where it already is has moved nothing, and a hold for it
+        // would pin a slot that needs no pinning until the gesture ended.
         let released = self.resize_gesture.as_ref().map(|gesture| gesture.released);
-        let armed = match (changed, released, before) {
-            (true, Some(released), Some(before)) => {
-                // **The pane's own moved edge, not the pointer's.** See
-                // `crate::resizing::moved_edges`: the neighbour across a seam
-                // has the opposite edge pulled, and a pane shoved sideways by
-                // someone else's drag has neither.
-                let hold = crate::resizing::Hold::new(
-                    crate::resizing::moved_edges(before, client),
-                    before.size,
-                    client.size,
-                    now,
-                    released,
-                );
-                let held = crate::resizing::Held {
-                    window: window.clone(),
-                    pane,
-                    hold,
-                };
-                match self.resize_bridge.as_mut() {
-                    Some(bridge) => {
-                        bridge.panes.push(held);
-                        true
-                    }
-                    // `arm_resize_gesture` creates the bridge with the gesture,
-                    // so this is unreachable rather than a case: answered
-                    // instead of asserted because a compositor may not panic.
-                    None => false,
-                }
-            }
-            _ => false,
+        let Some(released) = released.filter(|_| changed) else {
+            return (changed, false);
         };
-        (moved, armed)
+        // **The pane's own moved edge, not the pointer's.** See
+        // `crate::resizing::moved_edges`: the neighbour across a seam has the
+        // opposite edge pulled, and a pane shoved sideways by someone else's
+        // drag has neither. Against the pane's previous slot for the reason
+        // `before` gives; a pane with no slot yet cannot have moved an edge, so
+        // `client` against itself answers `ResizeEdge::None`, which is the
+        // honest "nothing to anchor against".
+        let previous = self.panes.get(pane).map_or(client, Pane::slot);
+        let edges = crate::resizing::moved_edges(previous, client);
+        // **The same drag's hold if this pane already had one, rather than a
+        // fresh one.** `settle_resize` forks per frame, so a layout that claims
+        // a drag on one frame and not the next hands this pane back and forth
+        // between the floating path and the bridge. Building a new hold each
+        // way reset `Hold::told`, so every flip bought an unthrottled configure
+        // and an alternating handler restored the sixty a second this fix
+        // removes. Same client, same gesture, same throttle — only the edges
+        // are this path's to name. See `Hold::retargeted`.
+        //
+        // `released` is reasserted because `arm_resize_gesture` rearms the
+        // bridge's holds before the sweep and a floating hold arriving during it
+        // missed that: its deadline must stop for the same reason theirs did.
+        let carried = self
+            .resize_hold
+            .take_if(|held| held.pane == pane && &held.window == window)
+            .map(|held| held.hold);
+        let (hold, told) = match carried {
+            Some(mut hold) => {
+                hold.retargeted(edges);
+                hold.rearm(released);
+                let told = hold.dragged(client, committed, now).is_some();
+                (hold, told)
+            }
+            // A pane joining the bridge hears immediately, and only the offers
+            // after it are throttled: `Hold::new` records this frame as the one
+            // the client was spoken to on, and the caller sends.
+            //
+            // `committed` and not `before.size`, which is the same number —
+            // `real_geometry` builds its size from `window.geometry()` — read
+            // from the one source that answers for a window the space has let
+            // go of as well.
+            None => (
+                crate::resizing::Hold::new(edges, committed, client, now, released),
+                true,
+            ),
+        };
+        let held = crate::resizing::Held {
+            window: window.clone(),
+            pane,
+            hold,
+        };
+        match self.resize_bridge.as_mut() {
+            Some(bridge) => {
+                bridge.panes.push(held);
+                (told, true)
+            }
+            // `arm_resize_gesture` creates the bridge with the gesture, so this
+            // is unreachable rather than a case: answered instead of asserted
+            // because a compositor may not panic. The client is still told,
+            // because losing a hold is not a reason to lose a configure.
+            None => (true, false),
+        }
     }
 
     /// Start a program as a client of this compositor.
@@ -3891,24 +3987,16 @@ impl Solium {
                     self.drop_resize_hold_for(&request.window);
                 } else {
                     // **Nobody placed anything this frame, so the dragged pane
-                    // goes back to the floating path — and only that pane.**
-                    // `hold_resize` is about to take its slot and its authority
-                    // whole, so leaving a bridge hold on it would make two
-                    // things answer `holding_resize` for one pane with two
-                    // different opinions about which edges are pulled.
-                    //
-                    // Dropped rather than reconciled, because there is nothing
-                    // to reconcile: the very next statement writes that pane's
-                    // slot and creates a hold watching for the same client's
-                    // answer. Every *other* pane the gesture has moved keeps its
-                    // hold: those panes are not on the floating path, nothing
-                    // else is watching them, and a layout that unclaims one
-                    // frame and claims the next — which is `modes.lua` and
-                    // `scrolling.lua` today — would otherwise abandon them
-                    // mid-gesture with slots the client never agreed to.
-                    if let Some(pane) = self.panes.id_of(&request.window) {
-                        self.drop_bridged(pane);
-                    }
+                    // goes back to the floating path.** `hold_resize` takes its
+                    // slot, its authority and — since it is the same client in
+                    // the same gesture — its hold; see `Hold::retargeted` there
+                    // for why the hold is carried rather than rebuilt. Every
+                    // *other* pane the gesture has moved keeps its own: those
+                    // panes are not on the floating path, nothing else is
+                    // watching them, and a layout that unclaims one frame and
+                    // claims the next — which is `modes.lua` and `scrolling.lua`
+                    // today — would otherwise abandon them mid-gesture with
+                    // slots the client never agreed to.
                     self.hold_resize(&request, now);
                 }
                 self.redraw = true;
@@ -3916,6 +4004,12 @@ impl Solium {
             }
             None => false,
         };
+        // **Before settling, and on every frame rather than on the ones that
+        // carried a motion.** See [`Self::flush_resize`]: the throttle's own
+        // trailing edge is the last thing a paused drag is waiting for, and a
+        // paused drag is what every drag is for the moment before the button
+        // comes up.
+        self.flush_resize(now);
         // Whether or not the pointer moved this frame: a hold outlives the
         // gesture by however long the client takes to answer the last
         // configure, and something has to be watching for that answer.
@@ -3941,6 +4035,14 @@ impl Solium {
     ///   whichever panes the sweep actually moves, which may be none — a
     ///   `resize` listener that claims the drag by running a command about some
     ///   other window claims it just as hard as one that lays anything out.
+    ///   A purely floating drag therefore creates one here and
+    ///   `settle_resize_bridge` drops it again at the end of the same frame,
+    ///   every frame. That is not worth deferring: `Vec::new` does not
+    ///   allocate, so the whole of the per-frame cost is one `Arc` refcount
+    ///   either way, and the alternative — the gesture carrying the window so
+    ///   the bridge can be built lazily at the first arm — puts a second copy
+    ///   of "which window is being dragged" in the compositor for two atomic
+    ///   increments a frame.
     /// * **A bridge for this same window.** The previous gesture on it ended and
     ///   its holds are waiting out `PATIENCE`. They are handed to this gesture
     ///   rather than reconciled: reconciling means adopting, and adopting a
@@ -4003,6 +4105,27 @@ impl Solium {
         self.bridged(pane).map(|held| &held.hold)
     }
 
+    /// The same, to be written to. See [`Self::flush_resize`], which is the
+    /// only caller: a trailing flush has to update `asked` and `told` on
+    /// whichever of the two authorities is holding this pane, and it has no
+    /// business knowing which.
+    fn held_hold_mut(&mut self, pane: crate::pane::PaneId) -> Option<&mut crate::resizing::Hold> {
+        if let Some(held) = self
+            .resize_hold
+            .as_mut()
+            .filter(|held| held.pane == pane)
+            .map(|held| &mut held.hold)
+        {
+            return Some(held);
+        }
+        self.resize_bridge
+            .as_mut()?
+            .panes
+            .iter_mut()
+            .find(|held| held.pane == pane)
+            .map(|held| &mut held.hold)
+    }
+
     /// This pane's entry in the bridge, if a tiled gesture is moving it.
     fn bridged(&self, pane: crate::pane::PaneId) -> Option<&crate::resizing::Held> {
         self.resize_bridge
@@ -4017,9 +4140,18 @@ impl Solium {
     /// For the one case where something else has taken over its rectangle: the
     /// floating path claiming a pane the layout has stopped placing.
     fn drop_bridged(&mut self, pane: crate::pane::PaneId) {
-        if let Some(bridge) = self.resize_bridge.as_mut() {
-            bridge.panes.retain(|held| held.pane != pane);
-        }
+        drop(self.take_bridged(pane));
+    }
+
+    /// The same, handing back what was taken.
+    ///
+    /// The floating path wants the hold rather than merely wanting it gone:
+    /// it is the same client in the same gesture, so its throttle, its `asked`
+    /// and its refusal all still apply. See `hold_resize`.
+    fn take_bridged(&mut self, pane: crate::pane::PaneId) -> Option<crate::resizing::Held> {
+        let bridge = self.resize_bridge.as_mut()?;
+        let at = bridge.panes.iter().position(|held| held.pane == pane)?;
+        Some(bridge.panes.swap_remove(at))
     }
 
     /// What fills this pane while its client catches up, or `None` if it is not
@@ -4110,6 +4242,33 @@ impl Solium {
         {
             let taken = window.geometry().size;
             self.adopt_resize(taken);
+        }
+        // **And the tiled half of the same problem, which is not reconciled but
+        // stopped.** `arm_resize_gesture` already rearms this window's bridge,
+        // and that runs on the first *motion* — so a press, a pause and then a
+        // drag leaves the previous gesture's deadline running across the whole
+        // of the pause, and `settle_resize_bridge` runs every frame. A press
+        // held for longer than `PATIENCE` therefore adopts every pane the last
+        // drag moved, which is exactly the snap `resizing::Hold::rearm` exists
+        // to prevent, arriving between the press and the first pixel of motion.
+        //
+        // Stopped rather than adopted, for `rearm`'s reason: adopting a tiled
+        // pane takes it off its tile, so a border nudged twice inside a quarter
+        // second would snap every pane the first nudge moved. The new gesture
+        // owns these panes and will keep placing them.
+        //
+        // A bridge belonging to a *different* window is left alone. That
+        // gesture's deadline expiring reconciles its own panes correctly and
+        // has nothing to do with this drag — the same rule the floating hold
+        // above follows, and `arm_resize_gesture` ends it on the first motion.
+        if let Some(bridge) = self
+            .resize_bridge
+            .as_mut()
+            .filter(|bridge| &bridge.window == window)
+        {
+            for held in &mut bridge.panes {
+                held.hold.rearm(None);
+            }
         }
         // Whatever gesture that record belonged to, it is not this one.
         self.resize_ended = None;
@@ -4251,12 +4410,37 @@ impl Solium {
         self.map_stacked(request.window.clone(), client.loc, false);
 
         let size = request.window.geometry().size;
+        // **This pane's hold, wherever the last frame left it.** A bridge entry
+        // means the layout claimed the drag on an earlier frame and has stopped
+        // claiming it — `scrolling.lua`'s guard at screen x 0 is one frame of
+        // exactly that — and it is still the same client in the same gesture,
+        // so it keeps its throttle, its `asked`, and whether it has refused
+        // anything. Rebuilding instead reset `Hold::told`, which handed every
+        // flip a free configure in each direction; a handler that alternated
+        // therefore restored the sixty a second `crate::resizing::TELL_EVERY`
+        // exists to remove.
+        //
+        // Taken and not copied: leaving it in the bridge would make two things
+        // answer `holding_resize` for one pane with two different opinions
+        // about which edges are pulled.
+        let carried = self.take_bridged(pane).map(|mut held| {
+            // The pointer's edges now, because this pane is the one under the
+            // hand again. A tiled pane's edges are derived from what moved; a
+            // floating one's are the grab's. See `crate::resizing::moved_edges`.
+            held.hold.retargeted(request.edges);
+            held.hold
+        });
         match &mut self.resize_hold {
             // The same drag, still going. The client hears about it on the
             // throttle's schedule, not this frame's.
+            //
+            // A `carried` here would mean one pane held by both authorities at
+            // once, which `settle_resize` hands back and forth precisely to
+            // avoid; dropping it is how that is repaired rather than an
+            // oversight, and the floating hold is the newer of the two.
             Some(held) if held.pane == pane => {
-                if let Some(tell) = held.hold.dragged(client.size, size, now) {
-                    size_window(&request.window, Rectangle::new(client.loc, tell));
+                if let Some(tell) = held.hold.dragged(client, size, now) {
+                    size_window(&request.window, tell);
                 }
             }
             // A new drag — or a drag that has moved to a different window,
@@ -4272,22 +4456,28 @@ impl Solium {
             // already happened, which never comes again — see
             // [`Self::resize_ended`] and `resizing::Hold::new`.
             _ => {
-                size_window(&request.window, client);
                 let released = self
                     .resize_ended
                     .as_ref()
                     .filter(|(ended, _)| ended == &request.window)
                     .map(|&(_, at)| at);
+                let hold = match carried {
+                    Some(mut hold) => {
+                        hold.rearm(released);
+                        if let Some(tell) = hold.dragged(client, size, now) {
+                            size_window(&request.window, tell);
+                        }
+                        hold
+                    }
+                    None => {
+                        size_window(&request.window, client);
+                        crate::resizing::Hold::new(request.edges, size, client, now, released)
+                    }
+                };
                 self.resize_hold = Some(crate::resizing::Held {
                     window: request.window.clone(),
                     pane,
-                    hold: crate::resizing::Hold::new(
-                        request.edges,
-                        size,
-                        client.size,
-                        now,
-                        released,
-                    ),
+                    hold,
                 });
             }
         }
@@ -4348,22 +4538,22 @@ impl Solium {
         let Some(held) = self.resize_hold.as_mut() else {
             return;
         };
-        let tell = held.hold.release(client.size, size, now);
-        size_window(window, Rectangle::new(client.loc, tell));
+        let tell = held.hold.release(client, size, now);
+        size_window(window, tell);
         self.redraw = true;
     }
 
     /// The same for a tiled gesture: one final configure per pane it moved.
     ///
     /// **This is what stops the throttle losing the end of a drag.** A pane's
-    /// hold records the rectangle the layout last gave it in `asked` whether or
-    /// not the interval let the client hear about it, so a pane whose last two
-    /// changes fell inside one interval has an `asked` nothing was ever told.
-    /// Left there, its client would answer the size before that one, `settle`
-    /// would wait out `PATIENCE` for an answer that cannot come, and the gesture
-    /// would end by snapping the pane to a size from the middle of the drag.
-    /// `Hold::release` sends unconditionally for exactly this reason on the
-    /// floating path; the tiled path needs it once per moved pane.
+    /// hold keeps `asked` at the rectangle the client was last *told*, so a pane
+    /// whose last change fell inside an interval has an `asked` the drag has
+    /// already moved on from. Left there, its client would answer the size
+    /// before that one, `settle` would wait out `PATIENCE` for an answer that
+    /// cannot come, and the gesture would end by snapping the pane to a size
+    /// from the middle of the drag. `Hold::release` sends unconditionally for
+    /// exactly this reason on the floating path; the tiled path needs it once
+    /// per moved pane.
     ///
     /// The slot is the rectangle, and unlike the floating path there is no
     /// pending motion to reconcile against: the layout — not the pointer —
@@ -4384,6 +4574,15 @@ impl Solium {
             .map(|held| (held.window.clone(), held.pane))
             .collect();
         for (client, pane) in moved {
+            // The pane or its client has gone, or the pane has been given a
+            // different client since the gesture started. The same check
+            // `settle_resize_bridge` makes, and for the same reason: a
+            // `size_window` on the window this hold remembers would configure a
+            // client that no longer owns the rectangle being sent, and the slot
+            // read below is not that client's anyway.
+            if self.panes.get(pane).and_then(Pane::client) != Some(&client) {
+                continue;
+            }
             let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
                 continue;
             };
@@ -4395,10 +4594,88 @@ impl Solium {
             else {
                 continue;
             };
-            let tell = held.hold.release(slot.size, committed, now);
-            size_window(&client, Rectangle::new(slot.loc, tell));
+            let tell = held.hold.release(slot, committed, now);
+            size_window(&client, tell);
         }
         self.redraw = true;
+    }
+
+    /// Send the configure the throttle is still sitting on, once its interval
+    /// has passed.
+    ///
+    /// **`crate::resizing::TELL_EVERY` is a rate, and a rate needs a trailing
+    /// edge.** `Hold::dragged` is reached from `move_pane` and from
+    /// `hold_resize`, and `settle_resize` reaches either only on a frame whose
+    /// `pending_resize` carried a motion. So the offers a drag makes in the
+    /// last interval before it stops moving were recorded in the pane's slot,
+    /// drawn from the pane's slot, and never sent: the client sits at the size
+    /// it was told up to a tenth of a second earlier while the pane is drawn
+    /// where the pointer is, and the bridge between them is the whole of that
+    /// gap — drag speed times the interval, which on an ordinary seam drag is
+    /// tens of pixels of stretch or, under `Fill::Hold`, tens of pixels of
+    /// uncovered background.
+    ///
+    /// **Pausing before releasing is what people do**, so this is the ordinary
+    /// end of a drag rather than an edge case, and it is held until the pointer
+    /// moves again or the button comes up. Before #123 the tiled path
+    /// configured on every frame and so had no tail at all, which makes this
+    /// exactly the symptom that was reported.
+    ///
+    /// Both paths, because neither had it. `settle_resize_hold` looked like the
+    /// floating path's answer and is not: `Hold::settle` decides whether a hold
+    /// is over and never sends anything, so a paused floating drag sat on its
+    /// last offer in the same way. The only thing that ever sent unconditionally
+    /// was the release.
+    ///
+    /// The slot is the rectangle, for the same reason `release_bridge` uses it:
+    /// it is what `move_pane` and `hold_resize` wrote, so it is the offer the
+    /// throttle swallowed. A hold whose slot it has already sent answers `None`
+    /// and costs a comparison.
+    fn flush_resize(&mut self, now: Duration) {
+        let held: Vec<(Window, crate::pane::PaneId)> = self
+            .resize_hold
+            .iter()
+            .chain(self.resize_bridge.iter().flat_map(|bridge| &bridge.panes))
+            .map(|held| (held.window.clone(), held.pane))
+            .collect();
+        for (window, pane) in held {
+            let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
+                continue;
+            };
+            let committed = window.geometry().size;
+            let Some(hold) = self.held_hold_mut(pane) else {
+                continue;
+            };
+            let Some(tell) = hold.dragged(slot, committed, now) else {
+                continue;
+            };
+            size_window(&window, tell);
+            self.redraw = true;
+            if crate::resizing::trace::on() {
+                crate::resizing::trace::line(
+                    "flush",
+                    format_args!(
+                        "pane={} slot={},{} {}x{} committed={}x{} asked={},{} {}x{} told=1 \
+                         held=1 refused={}",
+                        pane.get(),
+                        slot.loc.x,
+                        slot.loc.y,
+                        slot.size.w,
+                        slot.size.h,
+                        committed.w,
+                        committed.h,
+                        tell.loc.x,
+                        tell.loc.y,
+                        tell.size.w,
+                        tell.size.h,
+                        u8::from(
+                            self.held_hold(pane)
+                                .is_some_and(crate::resizing::Hold::refused)
+                        ),
+                    ),
+                );
+            }
+        }
     }
 
     /// Watch a live hold for the client's answer, and end it when one comes.
@@ -9413,9 +9690,27 @@ mod tests {
                 now,
             );
             state.resize_gesture = None;
+            // The claimed branch's own line: the bridge is watching every pane
+            // the sweep moved, so a floating hold on this window would be a
+            // second authority over one of them.
+            state.drop_resize_hold_for(&request.window);
             // What `settle_resize` does after the layout has run. No-op while
             // the pointer is down, and included so the loop under test is the
             // loop that ships rather than a shorter one.
+            paused_frame(state, now);
+        }
+
+        /// A frame of a live drag that carried **no** motion.
+        ///
+        /// The whole of what `settle_resize` does when `pending_resize` is
+        /// empty, which is every frame the pointer is not moving on — including
+        /// the ones at the end of a gesture, because people stop moving before
+        /// they let go. The flush is the half `move_pane` cannot do: it is only
+        /// reached from a frame that carried a motion, so the offers made in
+        /// the last `TELL_EVERY` of travel have nowhere else to come from.
+        fn paused_frame(state: &mut Solium, now: Duration) {
+            state.flush_resize(now);
+            state.settle_resize_hold(now);
             state.settle_resize_bridge(now);
         }
 
@@ -9970,6 +10265,858 @@ mod tests {
             assert!(
                 state.offers_size(pane, &window, at(500, 300, 64, 64), Duration::ZERO),
                 "a move with no resize still has to reach the client"
+            );
+        }
+
+        /// **The throttle had no trailing edge, so the end of every drag was
+        /// never sent.**
+        ///
+        /// `Hold::dragged` is reached from `move_pane` and from `hold_resize`,
+        /// and `settle_resize` reaches either only on a frame whose
+        /// `pending_resize` carried a motion. So the offers a drag makes inside
+        /// its last `TELL_EVERY` are written into the pane's slot, drawn from
+        /// the pane's slot, and never put on the wire: the client sits at a size
+        /// up to a tenth of a second stale while the pane is drawn where the
+        /// pointer is, and the bridge between the two is the visible gap.
+        ///
+        /// **A paused pointer is the ordinary end of a drag**, not an edge
+        /// case — people stop moving before they let go — and the gap is held
+        /// for as long as the pause lasts. Before #123 the tiled path
+        /// configured on every frame and had no tail at all, which makes this
+        /// the regression of exactly the symptom that was reported.
+        ///
+        /// The pause is driven with `paused_frame`, which is the whole of what
+        /// `settle_resize` runs on a frame with no motion. Against the code
+        /// before this fix that call is `settle_resize_bridge` alone, and
+        /// nothing in it sends anything.
+        #[test]
+        fn a_drag_that_pauses_still_tells_its_client_where_it_stopped() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            client.configures.clear();
+
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: at(400, 300, 300, 200),
+                at: (700.0, 500.0),
+                edges: ResizeEdge::Right,
+            };
+            state.begin_resize(&window);
+
+            // Three frames of a drag well inside one interval. The first is the
+            // pane joining the bridge, which goes out at once; the other two are
+            // throttled, and the third is where the pointer stops.
+            for (millis, width) in [(0, 300), (16, 340), (32, 380)] {
+                tiled_frame(
+                    &mut state,
+                    &request,
+                    pane,
+                    at(400, 300, width, 200),
+                    Duration::from_millis(millis),
+                );
+            }
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.configures.last().map(|&(_, w, _)| w),
+                Some(300),
+                "the control: while the interval is running the client is still \
+                 at the first offer, and the 80 pixels since are the gap"
+            );
+
+            // The pointer has stopped. No motion reaches `settle_resize`, so
+            // nothing calls `move_pane` again — these are the frames a paused
+            // drag is made of.
+            for millis in [48, 64, 80, 96, 112, 128] {
+                paused_frame(&mut state, Duration::from_millis(millis));
+            }
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.configures.last().map(|&(_, w, h)| (w, h)),
+                Some((380, 200)),
+                "once the interval passes the pane's rectangle has to reach its \
+                 client whether or not the pointer moved again. Without a \
+                 trailing flush the client stays 80 pixels behind a pane that is \
+                 drawn where the pointer stopped, for as long as the pause \
+                 lasts. Got {:?}",
+                client.configures
+            );
+            assert_eq!(
+                client.configures.len(),
+                2,
+                "and once, not once a frame: the flush is the throttle's \
+                 trailing edge and not a way around it. Got {:?}",
+                client.configures
+            );
+        }
+
+        /// **The same tail on the floating path**, which `settle_resize_hold`
+        /// looks like it covers and does not.
+        ///
+        /// `Hold::settle` decides whether a hold is over; it has never sent a
+        /// configure and does not know how. So a paused floating drag sat on
+        /// its last offer exactly as a tiled one did — the only thing that ever
+        /// sent unconditionally was the release. Older than #123 rather than a
+        /// regression of it, and fixed by the same flush, so it is asserted
+        /// here rather than left to be rediscovered.
+        #[test]
+        fn a_floating_drag_that_pauses_also_tells_its_client() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            client.configures.clear();
+            state.begin_resize(&window);
+
+            let dragged = |state: &mut Solium, width: i32, millis: u64| {
+                let request = ResizeRequest {
+                    window: window.clone(),
+                    wanted: at(400, 300, width, 200),
+                    at: (f64::from(400 + width), 500.0),
+                    edges: ResizeEdge::Right,
+                };
+                state.hold_resize(&request, Duration::from_millis(millis));
+            };
+            dragged(&mut state, 300, 0);
+            dragged(&mut state, 340, 16);
+            dragged(&mut state, 380, 32);
+            for millis in [48, 64, 80, 96, 112, 128] {
+                paused_frame(&mut state, Duration::from_millis(millis));
+            }
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert!(
+                state.holding_resize(pane),
+                "the gesture is still live, which is what makes the pause a \
+                 pause rather than an ending"
+            );
+            assert_eq!(
+                client.configures.last().map(|&(_, w, h)| (w, h)),
+                Some((380, 200)),
+                "a floating drag's tail is the same tail. Got {:?}",
+                client.configures
+            );
+        }
+
+        /// **A pane the layout only *moved* was never told, for the whole of
+        /// the gesture.**
+        ///
+        /// `offers_size`'s case (2) documents why the whole rectangle is
+        /// compared and not just the size: `size_window` is the only thing that
+        /// carries a position to an X11 client, because `map_stacked` moves the
+        /// window in the space and says nothing to anybody. Case (1) compared
+        /// sizes — `Hold::dragged` took one — so a bridged pane whose slot
+        /// translates answered "nothing to say" and went on answering it until
+        /// the button came up. `scrolling.lua`'s `widen` shifts every column
+        /// sideways at an unchanged width, so that is the whole of an X11
+        /// window's drag in the scrolling layout: stale geometry, and pointer
+        /// coordinates routed to where the window used to be.
+        ///
+        /// **Asserted against `offers_size` rather than against the wire**, and
+        /// forced rather than chosen, for the reason
+        /// `a_layout_replacing_a_pane_where_it_already_is_tells_its_client_nothing`
+        /// gives at length: the fixture speaks xdg, and smithay deduplicates a
+        /// configure that repeats the last size it sent — which is every
+        /// configure this test is about. Counting them would prove nothing.
+        ///
+        /// The existing neighbour test cannot see this: it moves the pane it is
+        /// about *and* resizes it, and it moves it for the first time, so it
+        /// never reaches case (1) at all.
+        #[test]
+        fn a_bridged_pane_that_only_moves_is_still_told_where_it_went() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: at(400, 300, 300, 200),
+                at: (700.0, 500.0),
+                edges: ResizeEdge::Right,
+            };
+            state.begin_resize(&window);
+            // The pane joins the bridge here, so what follows exercises case (1).
+            tiled_frame(
+                &mut state,
+                &request,
+                pane,
+                at(400, 300, 300, 200),
+                Duration::ZERO,
+            );
+            assert!(
+                state.holding_resize(pane),
+                "the pane has to be bridged, or this is testing case (2)"
+            );
+
+            // A whole interval later, so the throttle is not what is being
+            // measured: the column slides 40 pixels sideways at exactly the
+            // width it already had.
+            assert!(
+                state.offers_size(
+                    pane,
+                    &window,
+                    at(440, 300, 300, 200),
+                    crate::resizing::PATIENCE,
+                ),
+                "a bridged pane that translates has moved, and for an X11 client \
+                 `size_window` is the only thing that will ever say so"
+            );
+            // And the dedup it must not have cost: the same rectangle twice is
+            // still nothing to say.
+            assert!(
+                !state.offers_size(
+                    pane,
+                    &window,
+                    at(440, 300, 300, 200),
+                    crate::resizing::PATIENCE * 2,
+                ),
+                "comparing the whole rectangle must not turn into telling the \
+                 client on every frame"
+            );
+        }
+
+        /// **A terminal rounds; it does not refuse. `declined` could not tell
+        /// the difference, so kitty never got the fill the user configured.**
+        ///
+        /// `Hold::note` records a decline for any answer that is not exactly
+        /// the ask, and `fill` forced `Fill::Hold` for the rest of the gesture
+        /// on the strength of it. A terminal answers with a whole number of
+        /// character cells and so is a few pixels out on its very first answer
+        /// and every one after it — which makes kitty, the ordinary tiled
+        /// client, `declined` from the first frame of every seam drag.
+        /// `Fill::Hold` deliberately leaves an uncovered strip while a pane
+        /// grows, so what the user saw in place of their `stretch` was a band
+        /// of background: a different wrong-looking frame rather than none, on
+        /// the drag whose symptom is "frames with the wrong size".
+        ///
+        /// Both directions, because a fix that stops calling anything a refusal
+        /// would ship the permanent blur this module was built to prevent.
+        #[test]
+        fn a_cell_grid_rounding_is_not_the_refusal_that_takes_the_stretch_away() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: at(400, 300, 300, 200),
+                at: (700.0, 500.0),
+                edges: ResizeEdge::Right,
+            };
+            state.begin_resize(&window);
+            let outer = at(400, 300, 300, 200);
+            tiled_frame(&mut state, &request, pane, outer, Duration::ZERO);
+
+            // What kitty answers 300x200 with: the nearest whole number of
+            // cells, which at an ordinary font is a handful of pixels short on
+            // each axis.
+            commit_buffer(&client, &qh, &surface, 294, 190);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                window.geometry().size,
+                Size::from((294, 190)),
+                "the client answered with a size of its own, which is what a \
+                 cell grid always does"
+            );
+            tiled_frame(&mut state, &request, pane, outer, Duration::from_millis(16));
+            assert_eq!(
+                state.resize_fill(pane),
+                Some(crate::resizing::Fill::Stretch),
+                "six pixels on a three-hundred pixel pane is a rounding, and \
+                 the user's configured fill stands. Calling it a refusal costs \
+                 the stretch on every terminal drag there will ever be"
+            );
+
+            // And the same client, refusing for real: a minimum width, which is
+            // nothing like six pixels out.
+            commit_buffer(&client, &qh, &surface, 120, 90);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            tiled_frame(&mut state, &request, pane, outer, Duration::from_millis(32));
+            assert_eq!(
+                state.resize_fill(pane),
+                Some(crate::resizing::Fill::Hold),
+                "a client that has walked away from the ask still loses the \
+                 stretch: it will never bring the factor back to 1, and a \
+                 window that never un-stretches is the trap this module is \
+                 built around"
+            );
+        }
+
+        /// **The drag's throttle was applied to every caller of `move_pane`.**
+        ///
+        /// A bridge outlives its gesture by up to `PATIENCE`, and `move_pane`
+        /// is reached by a config reload, a `modes.use` from a keybinding, a
+        /// workspace switch and `rescue_offscreen` as well as by a layout
+        /// sweep. Case (1) looked the pane up in the bridge without asking
+        /// whose sweep this was, so one of those landing inside a live bridge
+        /// had its one and only configure swallowed by an interval somebody
+        /// else opened — and nothing would resend it, because a keypress has no
+        /// next frame. `move_pane` went on writing the slot regardless, so the
+        /// pane was then drawn, stretched, at a rectangle its client had never
+        /// been told about for the rest of the gesture.
+        ///
+        /// `resize_gesture` is set for the length of `trigger_resize` and by
+        /// nothing else, which is exactly the question "is the sweep reaching
+        /// this pane the live drag's own".
+        #[test]
+        fn a_reload_inside_a_live_bridge_is_not_throttled_by_the_drag() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            client.configures.clear();
+
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: at(400, 300, 300, 200),
+                at: (700.0, 500.0),
+                edges: ResizeEdge::Right,
+            };
+            state.begin_resize(&window);
+            tiled_frame(
+                &mut state,
+                &request,
+                pane,
+                at(400, 300, 300, 200),
+                Duration::ZERO,
+            );
+
+            // Sixteen milliseconds later — deep inside the interval the drag
+            // just opened — something that is not the drag places this pane.
+            // No `arm_resize_gesture`, because a reload does not run one: this
+            // is the whole of what a `move_pane` from a key dispatch is.
+            let was = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
+            state.move_pane(
+                pane,
+                at(400, 300, 260, 180),
+                was,
+                AnimationSpec::default(),
+                Duration::from_millis(16),
+            );
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.configures.last().map(|&(_, w, h)| (w, h)),
+                Some((260, 180)),
+                "a reload's one configure must not be swallowed by a drag's \
+                 interval: there is no second frame to resend it, and the pane \
+                 has already taken the rectangle. Got {:?}",
+                client.configures
+            );
+            assert!(
+                state.holding_resize(pane),
+                "and the bridge is still the bridge -- the reload was sent \
+                 through the hold, not around it, so `asked` still names what \
+                 the client last heard"
+            );
+        }
+
+        /// **A pending change must not wait out the drag's interval.**
+        ///
+        /// `size_window` is a pending size *and* a `send_pending_configure`, so
+        /// a throttled frame skips the flush as well. A maximise, a fullscreen
+        /// or a decoration mode agreed by somebody else is then blocked behind
+        /// an interval for exactly the windows a drag is touching — which is
+        /// the one place case (1) short-circuited before the check that exists
+        /// to catch it.
+        #[test]
+        fn a_pending_change_is_flushed_even_while_the_drag_is_throttled() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            client.configures.clear();
+
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: at(400, 300, 300, 200),
+                at: (700.0, 500.0),
+                edges: ResizeEdge::Right,
+            };
+            state.begin_resize(&window);
+            tiled_frame(
+                &mut state,
+                &request,
+                pane,
+                at(400, 300, 300, 200),
+                Duration::ZERO,
+            );
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            let before = client.configures.len();
+
+            // Somebody else agrees a state change and is waiting on the
+            // configure that carries it.
+            window
+                .toplevel()
+                .expect("the fixture's window is an xdg toplevel")
+                .with_pending_state(|state| {
+                    state.states.set(
+                        smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
+                    );
+                });
+            // And a throttled frame of the drag arrives before the interval is
+            // up. This is the frame that used to swallow it.
+            tiled_frame(
+                &mut state,
+                &request,
+                pane,
+                at(400, 300, 310, 200),
+                Duration::from_millis(16),
+            );
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert!(
+                client.configures.len() > before,
+                "the throttle governs how often a drag asks for a size, not \
+                 whether a window blocked on somebody else's change ever hears \
+                 about it. Got {:?}",
+                client.configures
+            );
+        }
+
+        /// **A press that pauses let the previous gesture's deadline expire.**
+        ///
+        /// `begin_resize` reconciles the floating hold and clears
+        /// `resize_ended`, and `arm_resize_gesture` rearms the bridge — but
+        /// that runs on the first *motion*, and `settle_resize_bridge` runs on
+        /// every frame. So pressing on a border, holding still for a quarter of
+        /// a second and then dragging let the previous drag's `PATIENCE` run
+        /// out with the button already down: every pane that drag had moved was
+        /// adopted off its tile, which is precisely the snap `Hold::rearm`
+        /// exists to prevent, arriving between the press and the first pixel of
+        /// motion.
+        #[test]
+        fn a_press_stops_the_previous_drags_deadline_before_it_can_expire() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: at(400, 300, 300, 200),
+                at: (700.0, 500.0),
+                edges: ResizeEdge::Right,
+            };
+            state.begin_resize(&window);
+            let outer = at(400, 300, 300, 200);
+            tiled_frame(&mut state, &request, pane, outer, Duration::ZERO);
+            // The first gesture ends. Its holds are now waiting out `PATIENCE`
+            // for an answer the fixture's client never gives.
+            let ended = Duration::from_millis(100);
+            state.release_bridge(&window, ended);
+
+            // The second gesture presses, and the hand stays still. Every frame
+            // of that pause runs `settle_resize_bridge`.
+            state.begin_resize(&window);
+            paused_frame(&mut state, ended + crate::resizing::PATIENCE);
+            paused_frame(
+                &mut state,
+                ended + crate::resizing::PATIENCE + Duration::from_millis(50),
+            );
+
+            assert!(
+                state.holding_resize(pane),
+                "the new gesture owns this pane and will keep placing it, so \
+                 the old gesture's deadline must stop at the press rather than \
+                 at the first motion"
+            );
+            assert_eq!(
+                state
+                    .panes
+                    .get(pane)
+                    .expect("the pane is still here")
+                    .slot(),
+                outer,
+                "and the pane is still on the tile the last drag left it on \
+                 rather than snapped back to its client's own size"
+            );
+        }
+
+        /// **A claimed/unclaimed flip cost two unthrottled configures and reset
+        /// the interval.**
+        ///
+        /// `settle_resize` forks per frame, so a handler whose answer changes
+        /// between frames hands one pane back and forth between the bridge and
+        /// the floating hold. Each direction built a fresh `Hold` with a fresh
+        /// `told`, and a fresh hold is told immediately by design — so an
+        /// alternating handler restored the sixty configures a second
+        /// `TELL_EVERY` exists to remove. Carrying the hold across the boundary
+        /// is what stops that: it is the same client in the same gesture.
+        ///
+        /// The fixture has no scripts, so `trigger_resize` returns false and
+        /// `settle_resize`'s own unclaimed branch is what `hold_resize` is
+        /// reached through here; `tiled_frame` is the claimed one.
+        #[test]
+        fn a_layout_changing_its_mind_does_not_buy_a_configure_each_way() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            client.configures.clear();
+
+            let asking = |width: i32| ResizeRequest {
+                window: window.clone(),
+                wanted: at(400, 300, width, 200),
+                at: (f64::from(400 + width), 500.0),
+                edges: ResizeEdge::Right,
+            };
+            state.begin_resize(&window);
+
+            // Claimed: the pane joins the bridge and is told at once.
+            tiled_frame(
+                &mut state,
+                &asking(300),
+                pane,
+                at(400, 300, 300, 200),
+                Duration::ZERO,
+            );
+            // Unclaimed, sixteen milliseconds later. Every frame asks for a
+            // different width, because smithay drops a configure that repeats
+            // the last size it sent and a test that dragged to the same place
+            // twice would be green against a compositor with no throttle at all.
+            state.hold_resize(&asking(310), Duration::from_millis(16));
+            // Claimed again.
+            tiled_frame(
+                &mut state,
+                &asking(320),
+                pane,
+                at(400, 300, 320, 200),
+                Duration::from_millis(32),
+            );
+            // And unclaimed again.
+            state.hold_resize(&asking(330), Duration::from_millis(48));
+
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.configures.len(),
+                1,
+                "four frames inside one interval are one configure however many \
+                 times the layout changed its mind: the pane's throttle belongs \
+                 to the gesture, not to whichever authority happens to be \
+                 placing it. Got {:?}",
+                client.configures
+            );
+            assert!(
+                state.holding_resize(pane),
+                "and exactly one authority is holding it at the end"
+            );
+        }
+
+        /// **A pane's moved edge was derived from where its *client* is, not
+        /// from where the pane was.**
+        ///
+        /// `moved_edges` asks which of this pane's edges a placement moved, and
+        /// a pane's previous rectangle is its slot. `real_geometry` is the
+        /// client's — the space's position at the size the client last
+        /// committed — which during a drag is frames behind the slot, so the
+        /// client's latency leaked into the answer: an edge that did not move
+        /// looks moved because the client has not caught up to where it already
+        /// is. `Hold::pins` then hangs a held picture against the wrong side of
+        /// the window, and `anchored` gives a refusal's pixels back on an edge
+        /// the user never touched.
+        ///
+        /// The arrangement below is the ordinary one: a client that has
+        /// answered nothing, a pane a seam has already widened once, and a
+        /// second placement that pulls the pane's *left* edge. Measured from
+        /// the slot that is a left pull and nothing else. Measured from the
+        /// client's 64x64 buffer both horizontal edges look moved — which names
+        /// neither — and the vertical bottom looks moved as well.
+        #[test]
+        fn a_panes_moved_edge_is_measured_from_its_own_slot_not_from_its_client() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                window.geometry().size,
+                Size::from((64, 64)),
+                "the client has answered nothing, which is what makes its \
+                 rectangle the wrong thing to measure against"
+            );
+
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: at(400, 300, 300, 200),
+                at: (700.0, 500.0),
+                edges: ResizeEdge::Left,
+            };
+            state.begin_resize(&window);
+            tiled_frame(
+                &mut state,
+                &request,
+                pane,
+                at(400, 300, 300, 200),
+                Duration::ZERO,
+            );
+
+            // The layout stops placing this pane for a frame and then places it
+            // again, which is what makes the edges be derived a second time.
+            // Driven directly for the reason `tiled_frame` gives: a Lua handler
+            // that changed its mind between frames would be testing mlua.
+            state.drop_bridged(pane);
+            // A left pull from the slot: the left edge moves in by 40 and the
+            // right edge — at 700 — does not move at all.
+            tiled_frame(
+                &mut state,
+                &request,
+                pane,
+                at(440, 300, 260, 200),
+                Duration::from_millis(16),
+            );
+
+            assert_eq!(
+                state.resize_pins(pane),
+                Some((true, false)),
+                "the left edge is the one that moved and the right one is \
+                 standing still, so a held picture has to stay against the \
+                 right. Measured from the client's committed 64x64 instead, \
+                 both horizontal edges look moved and the pane is told it has \
+                 no stationary edge at all"
+            );
+        }
+
+        /// **A window the space does not have still needs the throttle.**
+        ///
+        /// Arming required `real_geometry` to answer, and it answers `None` for
+        /// a window that is not in the space. The rectangle still counted as
+        /// changed — `None != Some(client)` — so the client was told on every
+        /// frame and no hold was ever armed to say when to stop: the one path
+        /// left running at the pre-#123 configure rate, for the length of every
+        /// gesture that touched such a window.
+        ///
+        /// A pane's own slot is the previous rectangle the edges want anyway,
+        /// so nothing needs the space's answer to arm; only case (2)'s "is the
+        /// client already here" does, and `None` there means "no idea", which
+        /// is a reason to send rather than a reason not to hold.
+        #[test]
+        fn a_pane_whose_window_left_the_space_is_still_bridged() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            state.space.unmap_elem(&window);
+            assert_eq!(
+                state.real_geometry(&window),
+                None,
+                "the space no longer has it, which is the whole precondition"
+            );
+
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: at(400, 300, 300, 200),
+                at: (700.0, 500.0),
+                edges: ResizeEdge::Right,
+            };
+            state.begin_resize(&window);
+            tiled_frame(
+                &mut state,
+                &request,
+                pane,
+                at(400, 300, 300, 200),
+                Duration::ZERO,
+            );
+            assert!(
+                state.holding_resize(pane),
+                "a pane a live gesture moved is bridged whether or not the \
+                 space can say where its client was: without a hold nothing \
+                 throttles it and nothing ever ends it"
             );
         }
     }
