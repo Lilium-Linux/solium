@@ -3311,7 +3311,7 @@ impl Solium {
                 "layout",
                 format_args!(
                     "pane={} slot={},{} {}x{} committed={}x{} asked={},{} {}x{} told={} \
-                     held={} refused={}",
+                     held={} refused={} unanswered={}",
                     pane.get(),
                     client.loc.x,
                     client.loc.y,
@@ -3326,6 +3326,10 @@ impl Solium {
                     u8::from(told),
                     u8::from(held),
                     u8::from(hold.is_some_and(crate::resizing::Hold::refused)),
+                    // Which side of `SILENCE` the verdict beside it was taken
+                    // on. The two answers fail in opposite directions, so a log
+                    // without this cannot say which one it caught.
+                    hold.map_or(0, crate::resizing::Hold::unanswered),
                 ),
             );
         }
@@ -4675,7 +4679,7 @@ impl Solium {
                     "flush",
                     format_args!(
                         "pane={} slot={},{} {}x{} committed={}x{} asked={},{} {}x{} told=1 \
-                         held=1 refused={}",
+                         held=1 refused={} unanswered={}",
                         pane.get(),
                         slot.loc.x,
                         slot.loc.y,
@@ -4691,6 +4695,8 @@ impl Solium {
                             self.held_hold(pane)
                                 .is_some_and(crate::resizing::Hold::refused)
                         ),
+                        self.held_hold(pane)
+                            .map_or(0, crate::resizing::Hold::unanswered),
                     ),
                 );
             }

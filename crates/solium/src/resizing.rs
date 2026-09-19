@@ -473,13 +473,20 @@ impl Hold {
             told: now,
             released,
             declined: None,
-            // **One, not none.** Both callers send the configure this hold is
-            // being built around — `offers_first_size` returns `told` true
-            // beside it and `hold_resize` calls `size_window` on the line
-            // above — so a configure is already out and unanswered before the
-            // first frame this hold sees. Starting at zero would make the
-            // hold's own configure free and put the [`SILENCE`] verdict an
-            // interval late.
+            // **One, not none**, because both callers send the configure this
+            // hold is built around — `offers_first_size` returns `told` true
+            // beside it and `hold_resize` calls `size_window` on the line above
+            // — so a configure really is out and unanswered before the first
+            // frame this hold sees.
+            //
+            // It cannot reach a verdict, and saying so is the point. The only
+            // reader is [`Self::refused`], which short-circuits while
+            // [`Self::declined`] is `None`, and the only thing that sets
+            // `declined` is [`Self::note`], which zeroes this counter first —
+            // so every value before the client's first answer is discarded
+            // unread. Counted honestly anyway, because a field that is right
+            // only where nobody looks is one refactor away from being wrong
+            // where somebody does.
             unanswered: 1,
         }
     }
@@ -503,6 +510,18 @@ impl Hold {
     /// waiting for a question. See [`trace`].
     pub(crate) const fn asked(&self) -> Rectangle<i32, Logical> {
         self.asked
+    }
+
+    /// How many configures this client owes an answer to. See [`SILENCE`].
+    ///
+    /// For the trace and nothing else. [`Self::refused`] weighs two different
+    /// pairs either side of [`SILENCE`], and they fail in opposite directions:
+    /// a stale-`declined` verdict is the runaway stretch, a silence verdict is
+    /// the uncovered strip. A log that records only which answer came out
+    /// cannot tell them apart — so the one column saying *why* would be
+    /// missing from exactly the runs recorded to find out why.
+    pub(crate) const fn unanswered(&self) -> u32 {
+        self.unanswered
     }
 
     /// The same gesture, placed by the compositor's other authority now.
@@ -589,6 +608,15 @@ impl Hold {
         // thing a count this large could do is wrap back under [`SILENCE`] and
         // hand a silent client its stretch back, and a hold that has sent four
         // billion configures has been alive for thirteen years.
+        //
+        // **Configures, not intervals**, and those are the same number only on
+        // the throttled path. [`Self::placed`] arrives here with `throttled`
+        // false — a reload, a workspace switch, a pane shoved aside by someone
+        // else's drag — so a burst of them can reach [`SILENCE`] without a
+        // whole [`TELL_EVERY`] having passed. That is the safe direction: it
+        // weighs a quiet client against the live ask sooner, which is the
+        // verdict that stops a runaway stretch rather than the one that opens
+        // an uncovered strip. Worth knowing before anyone reads this as a clock.
         self.unanswered = self.unanswered.saturating_add(1);
         // `declined` is deliberately *not* cleared here. A new offer is not an
         // answer: what is on screen is still whatever the client last chose for
@@ -917,8 +945,10 @@ pub(crate) fn moved_edges(
 /// * `layout`, from `Solium::offers_size`, once per pane a placement reached.
 ///   Adds `asked` — the rectangle the client was last *told*, which is the one
 ///   number nothing else can supply — `told`, whether a configure went out on
-///   this frame, and `refused`, whether the client's answer was far enough off
-///   to take the stretch away. See [`ROUNDING`].
+///   this frame, `refused`, whether the client's answer was far enough off to
+///   take the stretch away (see [`ROUNDING`]), and `unanswered`, how many
+///   configures the client still owes — which says *which* of
+///   [`Hold::refused`]'s two rules produced that verdict.
 /// * `flush`, from `Solium::flush_resize`, when the throttle's trailing edge
 ///   sends what a paused drag was sitting on. The same fields as `layout`.
 ///
@@ -929,6 +959,15 @@ pub(crate) fn moved_edges(
 /// unchanged size with `asked` not following. A **rounding mistaken for a
 /// refusal** is `refused=1` with `committed` a handful of pixels from `asked`,
 /// and `fill` reading `Hold` in a session configured for `Stretch`.
+///
+/// **`unanswered` is what tells the last of those from its opposite**, because
+/// [`Hold::refused`] weighs a different pair either side of [`SILENCE`] and the
+/// two go wrong in opposite directions. Below it the verdict is against the ask
+/// the client answered, and its failure is a stretch that runs away unchecked;
+/// at or above it the verdict is against the live ask, and its failure is an
+/// uncovered strip on a client that was merely a frame behind. Both print
+/// `refused=` and nothing else distinguishes them, so a log recorded to settle
+/// which one is happening has to carry the count that decided it.
 ///
 /// **Off unless [`VARIABLE`] names a file**, and off is one relaxed atomic load
 /// on a path that runs once per pane per frame. Not `tracing`: the compositor's
