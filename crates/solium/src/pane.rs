@@ -476,13 +476,34 @@ impl Pane {
     ///    it is *more* in need of the guard than (1), not less: there is
     ///    nothing on screen for a second press to have been aimed at.
     /// 3. [`Content::Leaving`] — the client has gone and the pane is still
-    ///    being drawn. Nothing constructs this today; it is issue #126's state,
-    ///    and it is named here rather than left for #126 to remember, because
-    ///    the failure it would cause is fault 1 exactly: `tiling.lua`'s
-    ///    `sol.on("close")` calls `tiling.apply()`, `trigger_close` fires from
-    ///    `toplevel_destroyed`, and the instant a `Leaving` pane survives that
-    ///    the sweep lands on a pane that is still on screen and still
-    ///    animating.
+    ///    being drawn. Nothing constructs this today; it is issue #126's state.
+    ///
+    /// **What the third arm is and is not.** It is here so that this predicate
+    /// is total over `Content` and cannot answer "not leaving" for a variant
+    /// whose name is `Leaving` — nothing more than that. It is *not* the
+    /// #126-shaped case being handled in advance, and the first draft of this
+    /// comment said it was: "the relayout #126 will put on a still-drawn pane
+    /// is already covered". That was the same promise-in-a-comment that kept
+    /// #126 itself unfiled behind a note about an animation nothing could play,
+    /// and it is worth less than nothing, because the next reader trusts it.
+    ///
+    /// What is actually true is that **the first `Content::Leaving` pane anyone
+    /// constructs will never go away.** Three separate places keep it alive, and
+    /// #126 has to answer all three:
+    ///
+    /// * `Panes::sync` retains exactly the panes whose `client()` is `None`,
+    ///   which is how a still-loading pane survives a sweep — and a `Leaving`
+    ///   pane's `client()` is `None` too, so it is retained by the same line
+    ///   with nothing to ever drop it.
+    /// * [`Self::expired`] only answers for [`Self::is_loading`], so the
+    ///   patience timeout that retires an application that never arrived does
+    ///   not look at this state at all.
+    /// * `Solium::close_pane` declines any pane that is `leaving()` — this
+    ///   function — so it cannot be closed by hand either.
+    ///
+    /// So #126 owes this state a retirement: something that ends the animation
+    /// and drops the pane. Until then the arm is correct and unreachable, which
+    /// is the only combination worth writing down.
     pub(crate) const fn leaving(&self) -> bool {
         self.closing_at.is_some()
             || self.asked_at.is_some()

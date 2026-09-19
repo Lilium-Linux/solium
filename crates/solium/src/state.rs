@@ -967,8 +967,15 @@ pub(crate) fn pane_hit_of(chrome: Option<Chrome>, covers: bool) -> PaneHit<Chrom
 /// Which of its chrome a pane is allowed to offer at all, before any point is
 /// considered.
 ///
-/// Two gates, and both are about what a press there could actually *do*:
+/// Three gates, and all of them are about what a press there could actually
+/// *do*:
 ///
+/// - **`shows`.** A pane drawn at opacity zero has no titlebar to press and no
+///   edge to drag, because it has nothing on screen at all. Unlike the two
+///   below, this one is *also* a statement about covering — see
+///   [`Solium::pane_chrome`], which asks it in both places — because an
+///   invisible pane is the one kind that offers nothing and occludes nothing
+///   either. Issue #127's review finding 1.
 /// - **`managed`.** An unmanaged pane is one its client placed and owns: an
 ///   X11 menu, a tooltip, a dropdown. Nothing here ever sizes it or moves it —
 ///   `show_if_new` and `snapshot` both ask [`crate::pane::Pane::managed`] and
@@ -983,12 +990,13 @@ pub(crate) fn pane_hit_of(chrome: Option<Chrome>, covers: bool) -> PaneHit<Chrom
 ///   frame around a window whose application has not arrived still has working
 ///   buttons, which is the point of giving it one.
 pub(crate) fn chrome_offered(
+    shows: bool,
     managed: bool,
     window: bool,
     framed: bool,
     edges: ResizeEdge,
 ) -> Option<Chrome> {
-    if !managed {
+    if !shows || !managed {
         return None;
     }
     chrome_of(framed, edges).filter(|chrome| window || !matches!(chrome, Chrome::Resize(_)))
@@ -2816,7 +2824,12 @@ impl Solium {
                         continue;
                     };
                     let outer = self.pane_outer(pane);
-                    present::clear(pane, outer, now, animation.duration, animation.easing);
+                    // Deliberately discarded, unlike `give_back`'s. A script
+                    // clearing a transform is restated by the next call through
+                    // this queue, and nothing here retires a piece of state that
+                    // the clear is the only way out of -- which is the whole of
+                    // why `clear` reports at all.
+                    let _ = present::clear(pane, outer, now, animation.duration, animation.easing);
                 }
                 Command::Focus { id } => {
                     if let Some(window) = self.window_by_id(id) {
@@ -3151,7 +3164,7 @@ impl Solium {
         // click to land on, and there never was: this is the `decoration()?`
         // that gated `frame_under`.
         let framed = pane.decoration().is_some()
-            && drawn.rect.contains(location)
+            && drawn.covers(location)
             && on_frame(outer.size, self.insets_of(pane.id()), in_outer);
 
         #[expect(
@@ -3170,22 +3183,33 @@ impl Solium {
             )
                 .into(),
         );
-        // What this pane is allowed to offer -- the `managed` and `window`
-        // gates -- is `chrome_offered`'s, and both of them decline by answering
-        // `None` here rather than by returning out of the function. That is the
-        // #111-shaped difference: a loading window, and a client-placed menu,
-        // both still cover what is behind them, and a press on either is its
-        // own and nobody else's. Occluding is a fact about pixels; offering
-        // chrome is a claim about what a press would do.
+        // What this pane is allowed to offer -- the `shows`, `managed` and
+        // `window` gates -- is `chrome_offered`'s, and all of them decline by
+        // answering `None` here rather than by returning out of the function.
+        // That is the #111-shaped difference: a loading window, and a
+        // client-placed menu, both still cover what is behind them, and a press
+        // on either is its own and nobody else's. Occluding is a fact about
+        // pixels; offering chrome is a claim about what a press would do.
+        //
+        // **An invisible pane is the one case that fails both questions**, and
+        // it has to fail them together. Gating only `covers` below would turn
+        // its `Some(chrome)` into a `PaneHit::Halo` -- a claim that survives
+        // the walk and wins wherever nothing lower paints -- so a closed
+        // window's resize border would go on being draggable, invisibly, over
+        // bare desktop for the whole grace period. `shows` is therefore asked
+        // here as well, and the pair answers `pane_hit_of(None, false)`:
+        // `PaneHit::Miss`, the walk descends, and the pane is gone from the hit
+        // test exactly as it is gone from the screen.
         let window = pane.client().cloned();
         let chrome = chrome_offered(
+            drawn.shows(),
             pane.managed(),
             window.is_some(),
             framed,
             resize::border_edges(drawn_rect, location),
         );
 
-        pane_hit_of(chrome, drawn.rect.contains(location)).map(|chrome| Under {
+        pane_hit_of(chrome, drawn.covers(location)).map(|chrome| Under {
             chrome,
             pane: pane.id(),
             window,
@@ -3270,9 +3294,45 @@ impl Solium {
         // left is the client's.
         let client = inner(outer, self.insets_of(pane));
 
+        // **Asked once, and it gates everything a client can observe.**
+        //
+        // The guard that shipped with #127 covered the transform at the bottom
+        // of this function and nothing else, which left the three writes below
+        // running on a dying window -- issue #127's review finding 2. What that
+        // costs is one visible defect and one pointless one.
+        //
+        // `size_window` and `map_stacked` move and resize `real_geometry` while
+        // `present::close` holds `frame.rect` pinned at the rectangle the window
+        // was closed at. Those two rectangles are exactly the pair
+        // `resizing::factor` divides -- the client's committed buffer against
+        // the size the pane is drawn at -- so the moment the layout hands the
+        // dying client a different size and the client answers it, the leaving
+        // animation stretches the last buffer to fill a rectangle it was never
+        // painted for. The window squashes as it fades, which reads as the
+        // close going wrong rather than as a reflow happening behind it.
+        //
+        // And the configure itself is waste at best: it asks a client that is
+        // in the middle of tearing itself down to re-lay-out at a size that
+        // will never be drawn, on the one code path where the answer cannot
+        // arrive in time to matter. Electron and the JVM are the clients slow
+        // enough to still be running their quit handlers when it lands.
+        //
+        // **Only what a client can see is suppressed.** The slot and
+        // `Pane::placed` below are written for a leaving pane exactly as for a
+        // staying one, because the layout is still right about where this pane
+        // lives, `sync_panes` still has to agree with the space, and #124 reads
+        // `placed`.
+        let leaving = self.panes.get(pane).is_some_and(Pane::leaving);
+
         // A client is moved and resized for real, and the space is told,
         // because the space is the authority for a mapped window.
-        if let Some(window) = self.panes.get(pane).and_then(Pane::client).cloned() {
+        if let Some(window) = self
+            .panes
+            .get(pane)
+            .filter(|_| !leaving)
+            .and_then(Pane::client)
+            .cloned()
+        {
             if self.offers_size(pane, &window, client, now) {
                 size_window(&window, client);
             }
@@ -3341,19 +3401,19 @@ impl Solium {
         // underneath — against a full-opacity snap followed by nothing, which
         // is what shipped.
         //
-        // **Only the transform is suppressed.** The slot, `Pane::placed` and
-        // the client's own configure above all still happen: the layout is
-        // still right about where this pane lives, `sync_panes` still has to
-        // agree with the space, and #124 reads `placed`.
+        // **The bookkeeping is what survives, not the presentation.** The slot
+        // and `Pane::placed` above still happen for a leaving pane; the
+        // transform here and the client-facing writes at the top of the
+        // function do not. The first draft of this guard covered only this
+        // line and said so, which left the configure and the restack running —
+        // see the note above them for what that cost.
         //
         // Note what needs no guard. `present::rebase` — the group path — is
         // safe for a leaving pane by construction: it preserves both the
         // destination and the release flag, so a closing transform rebased by a
         // workspace slide is still a closing transform. It is this function's
         // unconditional `from` that was the exception.
-        if let Some(held) = self.panes.get(pane)
-            && !held.leaving()
-        {
+        if let Some(held) = self.panes.get(pane).filter(|_| !leaving) {
             present::from(
                 held,
                 outer,
@@ -3720,7 +3780,13 @@ impl Solium {
         let now = self.clock.now();
         for pane in self.panes.iter().rev() {
             let outer = self.pane_outer(pane);
-            if !self.drawn_at(pane, outer, now).rect.contains(location) {
+            // `covers`, not `rect.contains`: a pane drawn at opacity zero is
+            // not on screen and owns no pixel, however solid the rectangle it
+            // would be drawn at. See [`present::Frame::covers`], and #127's
+            // review finding 1 -- this walk ends in `focus_window` through
+            // click-to-focus, so an invisible pane winning it took the
+            // keyboard as well as the click.
+            if !self.drawn_at(pane, outer, now).covers(location) {
                 continue;
             }
             // Covered. A pane whose application has not arrived has no window
@@ -3781,7 +3847,12 @@ impl Solium {
         for pane in self.panes.iter().rev() {
             let outer = self.pane_outer(pane);
             let frame = self.drawn_at(pane, outer, now);
-            if !frame.rect.contains(location) {
+            // Invisible is not covered. Same rule and same reason as
+            // [`Self::window_under`]: this walk is what delivers motion,
+            // buttons and — through the focus a press sets — keystrokes, so a
+            // pane held at opacity zero across a close winning it is where the
+            // typing went. [`present::Frame::covers`] argues the predicate.
+            if !frame.covers(location) {
                 continue;
             }
             // A window whose application has not arrived has no surface to
@@ -3872,6 +3943,21 @@ impl Solium {
         // and only the predicate closes it. Ordering is now irrelevant here
         // either way, which is worth more than picking one: `leaving` is true
         // across the whole transition however those two writes are arranged.
+        //
+        // **What this leaves the user with for a wedged client, written down
+        // because it is a gap and not a decision.** There is no force-kill
+        // anywhere in this compositor -- no `xkill`, no "application is not
+        // responding", no binding that destroys a client rather than asking
+        // it. Against a client that has hung, `super+q` therefore does one
+        // thing per close cycle: animate out, ask, wait `GRACE`, come back.
+        // Roughly 1.34s from press to the window standing there again, and
+        // then it can be asked once more, for ever. Before the guard was
+        // widened a user could at least hammer the binding -- which achieved
+        // nothing either, since `send_close` is a request a wedged client is
+        // not reading, but it did not *look* like the compositor ignoring the
+        // keyboard. That is a real regression in what the session feels like,
+        // and the honest fix is a kill path rather than a narrower guard here.
+        // It wants a confirmation of its own and is not part of #127.
         if pane.leaving() {
             return;
         }
@@ -5111,21 +5197,50 @@ impl Solium {
         /// for longer -- but it *does* still come back, so the cost is a wait
         /// rather than a loss. The recoverable failure is the one to take.
         ///
-        /// **The upper bound is human, not arithmetic.** A window returning
-        /// within about a second still reads as the answer to the key that was
-        /// pressed; past that it reads as the session doing something by
-        /// itself, which is the confusion the original comment here named and
-        /// was right to name. A second is therefore the largest value that
-        /// serves the purpose, so it is the value.
+        /// **The upper bound is human, not arithmetic** — and it is measured
+        /// from the *press*, which is the only clock the user has. This
+        /// constant is not that bound; it is the largest part of it. The whole
+        /// span from `super+q` to a refused window standing at full opacity
+        /// again is
         ///
-        /// What is *not* done, deliberately: closing early on the evidence that
-        /// a client is honouring the request -- `Self::has_content` goes false
-        /// as a client tears its surface down, which distinguishes "closing" from
-        /// "refusing" far better than any timeout can. It would be a real
-        /// improvement and it is not this change: getting it wrong in the
-        /// direction of "this client is closing" means never bringing the
-        /// window back at all, and this deadline is the only thing standing
-        /// between a refused close and a lost window.
+        /// ```text
+        ///   present::CLOSING  190 ms   the leaving animation, before the ask
+        /// + GRACE           1000 ms   this constant: waiting for an answer
+        /// + the recovery     150 ms   `give_back`'s fade back in
+        /// = 1340 ms
+        /// ```
+        ///
+        /// A window returning inside about a second and a half still reads as
+        /// the answer to the key that was pressed; past that it reads as the
+        /// session doing something by itself, which is the confusion the
+        /// original comment here named and was right to name. One second is
+        /// the largest value of *this* term that keeps the total inside that,
+        /// so it is the value.
+        ///
+        /// The test that pins this measures from the request rather than from
+        /// the press — it has the pane and not the keystroke — so its bound is
+        /// this constant plus the recovery, and the two numbers are the same
+        /// claim in two frames of reference. See
+        /// `a_client_that_takes_six_hundred_milliseconds_to_close_is_never_shown_again`.
+        ///
+        /// **This is a deadline, and a deadline is the weakest evidence there
+        /// is.** It fires on a client that said nothing, because saying nothing
+        /// is all the protocol requires of a refusal. Evidence that arrives
+        /// *before* it is better than the clock in every case, and
+        /// [`Self::refused_with_a_dialog`] is the one piece of it acted on
+        /// today: a client that answers a close by putting a new window on
+        /// screen has told us what it is doing in as many words.
+        ///
+        /// What is still *not* done, deliberately: ending the wait early on the
+        /// evidence that a client is honouring the request -- `Self::has_content`
+        /// goes false as a client tears its surface down, which distinguishes
+        /// "closing" from "refusing" far better than any timeout can. The
+        /// asymmetry is the whole reason the dialog case could be taken and this
+        /// one could not. Reading the dialog wrong ends the grace early and
+        /// gives a window *back* that might have been about to go, which the
+        /// next frame's `Panes::sync` corrects for free. Reading a teardown
+        /// wrong means never bringing the window back at all, and this deadline
+        /// is the only thing standing between a refused close and a lost window.
         const GRACE: std::time::Duration = std::time::Duration::from_millis(1000);
 
         // Over the panes, for the reason `settle_closing` is: a window that
@@ -5141,30 +5256,127 @@ impl Solium {
             .map(Pane::id)
             .collect();
         for id in due {
-            // Stopped waiting first, then acted on -- the same order the map
-            // did it in, so a pane that goes while this runs is not waited on
-            // for ever.
-            if let Some(pane) = self.panes.get_mut(id) {
-                pane.forget_asked();
-            }
-            let Some(pane) = self.panes.get(id) else {
-                continue;
-            };
-            let outer = self.pane_outer(pane);
             tracing::debug!(
                 pane = id.get(),
                 "a window refused to close; bringing it back"
             );
-            present::clear(
-                pane,
-                outer,
-                now,
-                std::time::Duration::from_millis(150),
-                solium_animation::Curve::OutCubic,
-            );
-            self.redraw = true;
+            self.give_back(id, now);
         }
         self.panes.iter().any(|pane| pane.asked_at().is_some())
+    }
+
+    /// Put a window that was asked to close back on screen, and stop waiting on
+    /// it.
+    ///
+    /// The two halves of undoing a close, in the order that cannot strand a
+    /// window: **the transform is restored first, and the wait is retired only
+    /// if that worked.**
+    ///
+    /// The other order is issue #127's review finding 5. `present::clear` is
+    /// not guaranteed to do anything -- `with_slot` declines rather than panics
+    /// when the transform slot is already borrowed, which is the right trade
+    /// for a compositor and the reason the call reports now. Retiring
+    /// `asked_at` first meant that on such a frame the pane stopped being
+    /// `Pane::leaving` while still holding `present::close`'s non-releasing,
+    /// opacity-zero transform. Nothing else clears it: `settle_refused` will
+    /// never look at the pane again, `close_pane` would decline a second
+    /// `super+q` -- no, worse, it would *accept* one and animate an already
+    /// invisible window out -- and the only remaining rescue is `move_pane`'s
+    /// `present::from`, which needs a layout sweep that never comes in floating
+    /// mode with no layout script. The result is a live window holding its
+    /// place in the layout that nobody can see or reach.
+    ///
+    /// Answering `false` leaves `asked_at` set, so the pane is still due next
+    /// frame and `settle_refused` returns `true` and keeps the backend drawing.
+    /// A busy slot costs a frame, which is what it costs everywhere else.
+    fn give_back(&mut self, id: crate::pane::PaneId, now: std::time::Duration) -> bool {
+        let Some(pane) = self.panes.get(id) else {
+            // No pane, nothing to give back and nothing left waiting: a window
+            // that went while this ran answered the close after all.
+            return true;
+        };
+        let outer = self.pane_outer(pane);
+        if !present::clear(
+            pane,
+            outer,
+            now,
+            std::time::Duration::from_millis(150),
+            solium_animation::Curve::OutCubic,
+        ) {
+            return false;
+        }
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.forget_asked();
+        }
+        self.redraw = true;
+        true
+    }
+
+    /// A window that was asked to close has answered by opening another one.
+    ///
+    /// **The case that inverts `GRACE`'s argument**, and issue #127's review
+    /// finding 3. `settle_refused` reasons that too long a grace period only
+    /// makes a genuinely refused window wait, which is true for the client the
+    /// grace period was lengthened for -- the honest-but-slow one -- and
+    /// backwards for the client that refuses on purpose. "Save your changes
+    /// before closing?" is a refusal delivered as a question, and under a flat
+    /// deadline it left the parent window a hole for the whole second: the
+    /// dialog floating over the space where its document used to be, with
+    /// nothing to read and nothing to decide against. A second `super+q` could
+    /// not clear it either, because the widened `Pane::leaving` guard correctly
+    /// declines to start a second close on a pane that is still in one.
+    ///
+    /// **A new window from a client we just asked to close is evidence, and it
+    /// is the safe kind.** The direction of the risk is what makes this
+    /// actionable where reading a teardown is not: acting on it *returns* a
+    /// window, so being wrong costs a window coming back that was going to
+    /// leave anyway -- which the next `Panes::sync` undoes by itself when the
+    /// client does finish closing. See `GRACE`'s note.
+    ///
+    /// Parentage rather than the client connection, deliberately. A file
+    /// chooser is `set_parent`'d to the document that raised it, which says
+    /// *this* window is what the dialog is about; a client that happens to open
+    /// an unrelated window elsewhere in the same process while a close is
+    /// pending has said nothing about the window being closed. `Self::parent_of`
+    /// already walks both protocols' spellings of it, so an X11
+    /// `WM_TRANSIENT_FOR` dialog is covered by the same line.
+    fn refused_with_a_dialog(&mut self, child: &Window) {
+        let Parentage::Window(parent) = self.parent_of(child) else {
+            return;
+        };
+        let Some(id) = self
+            .panes
+            .iter()
+            .map(Pane::id)
+            .find(|id| id.get() == parent)
+        else {
+            return;
+        };
+        if !self.panes.get(id).is_some_and(|pane| pane.leaving()) {
+            return;
+        }
+        let now = self.clock.now();
+        tracing::debug!(
+            pane = id.get(),
+            "a window answered a close with a dialog; bringing it back"
+        );
+        // **The transform first, and nothing is retired unless it took.** Same
+        // rule as `give_back`'s own, for the same reason: a frame that cleared
+        // `closing_at` without restoring the presentation would leave a pane
+        // that is not `leaving()`, not due at any deadline, and still holding
+        // an opacity-zero transform -- finding 5 reintroduced by the fix for
+        // finding 3. Declining changes nothing at all, which leaves the close
+        // proceeding exactly as it did before this function existed.
+        if !self.give_back(id, now) {
+            return;
+        }
+        // `stop_closing` matters for the window where the dialog beat the
+        // 190 ms `CLOSING` deadline -- a GTK file chooser is up well inside it
+        // -- because otherwise `settle_closing` would still send the request
+        // afterwards and close the parent out from under its own dialog.
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.stop_closing();
+        }
     }
 
     /// Act on a frame button.
@@ -5350,7 +5562,12 @@ impl Solium {
             pane.decoration()?;
             let outer = self.pane_outer(pane);
             let drawn = self.drawn_at(pane, outer, now);
-            if !drawn.rect.contains(location) {
+            // An invisible frame has nothing to glow. This walk only forwards
+            // the pointer to a decoration's scene, so the cost of getting it
+            // wrong is a hover state on a window that is not there rather than
+            // a lost click -- but it is the same question as the other three
+            // walks and it gets the same answer. See `present::Frame::covers`.
+            if !drawn.covers(location) {
                 return None;
             }
             let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
@@ -6665,7 +6882,16 @@ impl XdgShellHandler for Solium {
     ///
     /// Cheap enough not to need a guard: the layout runs off a snapshot, and a
     /// window whose place has not changed is placed where it already is.
-    fn parent_changed(&mut self, _surface: ToplevelSurface) {
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        // **The moment a client says which window its new one is about**, which
+        // is the evidence `Solium::refused_with_a_dialog` acts on. Hooked here
+        // rather than at the child's first commit because this fires whichever
+        // order the client chooses: a toolkit that calls `set_parent` during
+        // window setup and one that calls it after mapping both arrive here,
+        // and only one of them has committed a buffer by now.
+        if let Some(window) = self.window_for(surface.wl_surface()) {
+            self.refused_with_a_dialog(&window);
+        }
         self.trigger_relayout();
     }
 
@@ -8323,6 +8549,11 @@ mod tests {
         /// Whether the layout owns this pane. `false` is an X11 menu, tooltip
         /// or dropdown the client placed itself.
         managed: bool,
+        /// Whether this pane paints anything. `false` is a pane held at opacity
+        /// zero — which on this desktop means one between its close animation
+        /// landing and its client acting on the request. It has a rectangle and
+        /// it covers nothing.
+        shows: bool,
     }
 
     impl Stacked {
@@ -8337,6 +8568,7 @@ mod tests {
                 },
                 window: true,
                 managed: true,
+                shows: true,
             }
         }
 
@@ -8353,6 +8585,14 @@ mod tests {
             self
         }
 
+        /// The same pane held at opacity zero: asked to close and waiting on a
+        /// client that has not answered. It is still in the stack, still the
+        /// topmost thing at this rectangle, and on screen it is not there.
+        const fn invisible(mut self) -> Self {
+            self.shows = false;
+            self
+        }
+
         /// What [`Solium::pane_chrome`] makes of a point, out of the same two
         /// functions in the same order it uses them.
         ///
@@ -8366,7 +8606,10 @@ mod tests {
         /// green.
         fn hit(self, point: (f64, f64)) -> PaneHit<Chrome> {
             let location = Point::<f64, Logical>::from(point);
-            let covers = self.outer.to_f64().contains(location);
+            // Both halves of `Frame::covers`, in the same order and for the
+            // same reason `pane_chrome` asks them: the rectangle says where the
+            // pane would be drawn, and `shows` says whether it is drawn at all.
+            let covers = self.shows && self.outer.to_f64().contains(location);
             let framed = covers
                 && on_frame(
                     self.outer.size,
@@ -8375,6 +8618,7 @@ mod tests {
                 );
             pane_hit_of(
                 chrome_offered(
+                    self.shows,
                     self.managed,
                     self.window,
                     framed,
@@ -8727,6 +8971,87 @@ mod tests {
             "a managed window of the same shape would offer this"
         );
         assert_eq!(menu.hit(edge), PaneHit::Client);
+    }
+
+    /// **An invisible pane offers nothing and covers nothing** — the one kind
+    /// that fails both of [`pane_hit_of`]'s questions at once.
+    ///
+    /// Issue #127's review finding 1 at the level of the rule rather than of
+    /// the compositor. A pane between its close animation landing and its
+    /// client acting on the request is held at opacity zero by a transform
+    /// written `release: false`, for `CLOSING` plus the whole grace period. It
+    /// is still in the stack and its rectangle still contains the point; it is
+    /// simply not on screen.
+    ///
+    /// **The `Halo` is what makes this two gates and not one.** Suppressing
+    /// only `covers` would turn the chrome this pane claims into
+    /// [`PaneHit::Halo`] — the weakest claim, but a claim that survives the
+    /// walk and wins wherever nothing lower paints. A closed window's titlebar
+    /// and resize border would go on being pressable over bare desktop, which
+    /// is a worse bug than the one being fixed because there is nothing on
+    /// screen to explain it. Both questions are therefore asked, and every
+    /// point is a `Miss`.
+    ///
+    /// Contrast [`an_unmanaged_pane_occludes_but_offers_no_chrome`]: a menu
+    /// offers no chrome *and still covers*, because it is drawn. That is the
+    /// distinction — offering is about what a press would mean, covering is
+    /// about pixels, and this pane has no pixels.
+    #[test]
+    fn an_invisible_pane_offers_no_chrome_and_covers_nothing() {
+        let lower = Stacked::window((100, 100), (400, 300));
+        // Directly over the lower window, which is the situation a close
+        // leaves behind once the layout has reflowed into the space.
+        let closed = Stacked::window((100, 100), (400, 300)).invisible();
+        let stack = [closed, lower];
+
+        // On the lower window's titlebar, which the invisible pane's own
+        // titlebar sits exactly on top of.
+        let titlebar = (300.0, 110.0);
+        assert_eq!(
+            Stacked::window((100, 100), (400, 300)).hit(titlebar),
+            PaneHit::Chrome(Chrome::Frame),
+            "a visible pane of the same shape owns this point -- without which \
+             the assertions below pass for want of a titlebar rather than for \
+             want of a pane"
+        );
+        assert_eq!(
+            closed.hit(titlebar),
+            PaneHit::Miss,
+            "an invisible pane's titlebar is not pressable"
+        );
+        assert_eq!(
+            topmost_chrome(stack.iter().map(|pane| pane.hit(titlebar))),
+            Some(Chrome::Frame),
+            "so the press reaches the titlebar that is actually drawn there"
+        );
+
+        // The body, which is the click-to-focus case and the one that took the
+        // keyboard with it.
+        let body = (300.0, 250.0);
+        assert_eq!(
+            closed.hit(body),
+            PaneHit::Miss,
+            "and it occludes nothing, so the walk descends rather than \
+             stopping at `PaneHit::Client`"
+        );
+
+        // The resize border, inside and out. Outside is the `Halo` this gate
+        // exists to prevent.
+        let inside = (300.0, 396.0);
+        let outside = (300.0, 404.0);
+        assert_eq!(
+            Stacked::window((100, 100), (400, 300)).hit(outside),
+            PaneHit::Halo(Chrome::Resize(ResizeEdge::Bottom)),
+            "a visible pane of the same shape claims this as a halo, which is \
+             the claim that must not survive being invisible"
+        );
+        assert_eq!(closed.hit(inside), PaneHit::Miss);
+        assert_eq!(
+            closed.hit(outside),
+            PaneHit::Miss,
+            "an edge nobody can see is an edge nobody can drag, and a halo \
+             would have been honoured over bare desktop"
+        );
     }
 
     /// A pane whose application has not arrived offers its frame and not its
@@ -11983,6 +12308,37 @@ mod tests {
                  still written, because the layout is still right about where \
                  this pane lives and #124 reads it"
             );
+
+            // **And the close still completes.** The assertions above are all
+            // about the frame at T+400, which a suppression that also swallowed
+            // the request would satisfy perfectly: the window would sit at
+            // opacity 0 for ever and no client would ever be told. Driving
+            // `settle_closing` past the deadline is what separates "still
+            // animating out" from "stuck invisible", and it is the claim the
+            // sentence "a swept close still sends its one request and stays
+            // gone" was making with nothing behind it.
+            state.settle_closing(pressed + Duration::from_millis(400));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.closes.len(),
+                1,
+                "a close the layout swept still sends its one request"
+            );
+            assert!(
+                drawn_now(&state, pane, pressed + Duration::from_millis(500))
+                    .opacity
+                    .abs()
+                    < f32::EPSILON,
+                "and the window stays gone afterwards rather than being handed \
+                 back by the sweep"
+            );
         }
 
         /// **Issue #127, fault 2: a second close restarted an invisible
@@ -12163,6 +12519,326 @@ mod tests {
                 "a window that never answers is still brought back, and within \
                  a second and a half of being asked: it was drawn at opacity \
                  {back}"
+            );
+        }
+
+        /// **#127 review, finding 1: an invisible closing pane went on winning
+        /// every hit test at the rectangle it used to occupy.**
+        ///
+        /// `window_under`, `surface_under`, `pane_chrome` and `decorated_under`
+        /// all asked `drawn_at(..).rect.contains(location)` and nothing else.
+        /// `present::close` ends at opacity 0 and is written with
+        /// `release: false` on purpose, so the transform *holds* there — for
+        /// `CLOSING` plus the whole grace period, which #127 took from about
+        /// 590 ms to about 1190 ms. For all of it the dead window was the
+        /// topmost thing at a rectangle the layout had already given to
+        /// somebody else.
+        ///
+        /// **The trade #127 made without noticing.** It removed a cosmetic
+        /// flicker — the window fading back in and popping — and what that
+        /// flicker had been doing was *telling the user the window was still
+        /// there*. Silencing it while leaving the hit test alone turns a
+        /// visible glitch into an invisible one: the sibling has reflowed into
+        /// the space and is what is on screen, a click there lands in the dead
+        /// window, and every keystroke after it follows the focus that click
+        /// set. For exactly the slow-but-honest clients the grace bump was
+        /// written for.
+        ///
+        /// **Both halves of a press, because they are two walks and either
+        /// alone would leave the other broken.** `window_under` is what
+        /// click-to-focus raises and focuses — the keystroke half, since focus
+        /// is what the typing follows — and `surface_under` is what the pointer
+        /// event is actually delivered to. `chrome_under` is asserted beside
+        /// them because an invisible titlebar is still a titlebar to a walk
+        /// that only measures rectangles.
+        ///
+        /// The pane being closed is opened *second* so that it is above the
+        /// survivor in the stack: a test where the right answer is also the
+        /// topmost one is not testing the walk.
+        #[test]
+        fn a_press_where_a_closed_window_used_to_be_reaches_what_is_drawn_there() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (kept, survivor) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (1000, 300));
+            let (doomed, closing) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (400, 300));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            // Past both windows' opening animations, and *settled*, which is
+            // what the render loop does once a frame. Two reasons, and the test
+            // needs both. `present::open` starts at opacity 0 and eases up, so
+            // a window in its first frame is genuinely not on screen yet and
+            // these walks correctly decline it. And `open`'s target was
+            // captured before `opened_at` moved the window, so until the
+            // released transform is retired the pane is still drawn at the
+            // rectangle it mapped at rather than the one it now lives at.
+            state.clock.advance(Duration::from_millis(300));
+            state.settle(state.clock.now());
+
+            let vacated = state
+                .pane_outer_of(closing)
+                .expect("a mapped pane has a rectangle");
+            let was = state
+                .pane_outer_of(survivor)
+                .expect("a mapped pane has a rectangle");
+            // The middle of the window the user is about to close, which is
+            // where the window that replaces it will be too.
+            let point = Point::<f64, Logical>::from((
+                f64::from(vacated.loc.x) + f64::from(vacated.size.w) / 2.0,
+                f64::from(vacated.loc.y) + f64::from(vacated.size.h) / 2.0,
+            ));
+
+            // The premise. If the closing window did not own this point to
+            // begin with, nothing below is about anything.
+            assert_eq!(
+                state.window_under(point).map(|(window, _)| window),
+                Some(doomed.clone()),
+                "before the close, the point belongs to the window that is \
+                 about to be closed"
+            );
+
+            state.close_pane(closing);
+            // Past `CLOSING`: the animation has landed, the request has gone
+            // out, and the fixture's client never destroys anything -- which is
+            // what a client still running its quit handlers looks like from
+            // here.
+            state
+                .clock
+                .advance(present::CLOSING + Duration::from_millis(10));
+            let asked = state.clock.now();
+            state.settle_closing(asked);
+            assert_eq!(client.closes.len(), 0, "the client has not answered yet");
+
+            // The layout reflows into the space, which is the ordinary
+            // consequence of a close and the reason the stale rectangle matters
+            // at all.
+            state.move_pane(survivor, vacated, was, AnimationSpec::default(), asked);
+            // Past the survivor's own move, so what is drawn at the point is
+            // the survivor itself rather than a frame of it in transit.
+            state.clock.advance(Duration::from_millis(400));
+
+            // The premise for the second half: the closing pane is invisible
+            // and its rectangle still covers the point. Without this the walk
+            // could be answering correctly for the wrong reason.
+            let dead = drawn_now(&state, closing, state.clock.now());
+            assert!(
+                dead.opacity.abs() < f32::EPSILON && dead.rect.contains(point),
+                "the closing pane is held at opacity 0 over the point -- \
+                 opacity {}, rect {:?}. That is the situation under test",
+                dead.opacity,
+                dead.rect
+            );
+
+            assert_eq!(
+                state.window_under(point).map(|(window, _)| window),
+                Some(kept.clone()),
+                "a click where a closed window used to be belongs to the \
+                 window that is drawn there now. `window_under` is what \
+                 click-to-focus focuses, so answering the dead window sends \
+                 every keystroke after the click into a window that is not on \
+                 screen"
+            );
+
+            let surface = state
+                .surface_under(point)
+                .map(|(surface, _)| surface)
+                .expect("the survivor is drawn at this point and has a surface");
+            assert_eq!(
+                Some(&surface),
+                kept.wl_surface().as_deref(),
+                "and the pointer event is delivered to that window's surface, \
+                 not to the dead one's"
+            );
+
+            // The compositor's own chrome, by the same rule: an invisible
+            // titlebar has no buttons and an invisible edge cannot be dragged.
+            // A `Halo` would be wrong here too, which is why `chrome_offered`
+            // is gated and not only `covers`.
+            assert!(
+                state
+                    .chrome_under(point)
+                    .is_none_or(|under| under.pane != closing),
+                "no chrome of the closed window is under the point either"
+            );
+        }
+
+        /// **#127 review, finding 2: the guard covered the transform and left
+        /// the client-facing half of a placement running.**
+        ///
+        /// `move_pane` suppressed `present::from` for a leaving pane and went on
+        /// calling `offers_size`, `size_window` and `map_stacked`. The configure
+        /// is the visible one: it asks a client that is tearing itself down to
+        /// re-lay-out at a size nobody will ever see, and if the client answers,
+        /// `real_geometry` moves under a `frame.rect` that `present::close` has
+        /// pinned — which is exactly the pair `resizing::factor` divides, so the
+        /// dying buffer is stretched to fill a rectangle it was never painted
+        /// for, mid-fade.
+        ///
+        /// Counted at the client, for the reason `Client::configures` gives:
+        /// from the server's own side a compositor that sends a configure looks
+        /// identical to one that does not.
+        #[test]
+        fn a_layout_sweep_does_not_configure_a_window_that_is_closing() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (_window, pane) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (400, 300));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            let was = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
+            let pressed = state.clock.now();
+            state.close_pane(pane);
+
+            let before = client.configures.len();
+            // A different size, not just a different place: `offers_size`
+            // deduplicates on the whole rectangle, so a sweep that only moved
+            // the pane would send nothing even without the guard and the test
+            // would pass against the bug.
+            state.move_pane(
+                pane,
+                at(1000, 300, 250, 180),
+                was,
+                AnimationSpec::default(),
+                pressed + Duration::from_millis(95),
+            );
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            assert_eq!(
+                client.configures.len(),
+                before,
+                "a client that has been asked to close is not asked to \
+                 re-lay-out at a size that will never be drawn"
+            );
+
+            // And the half that must keep working, for the same reason the
+            // sweep test asserts it: only what a client can observe is
+            // suppressed, and #124 reads `placed`.
+            let placed = state
+                .panes
+                .get(pane)
+                .and_then(Pane::placed)
+                .expect("the sweep placed this pane");
+            assert_eq!(
+                placed,
+                at(1000, 300, 250, 180),
+                "the layout's own answer is still written for a leaving pane"
+            );
+        }
+
+        /// **#127 review, finding 3: `GRACE` inverts for the client that
+        /// refuses on purpose.**
+        ///
+        /// The grace period was lengthened on the argument that too long only
+        /// makes a genuinely refused window wait. That holds for the
+        /// honest-but-slow client and reverses for this one: "save your changes
+        /// before closing?" is a refusal delivered as a question, and under a
+        /// flat deadline the parent was a hole for the whole second with the
+        /// dialog floating over nothing to read. A second `super+q` could not
+        /// clear it either — correctly, since `Pane::leaving` declines to start
+        /// a second close on a pane already in one.
+        ///
+        /// A new window parented to the one being closed is an answer, and it
+        /// is the safe kind to act on: being wrong gives a window back that was
+        /// going to leave anyway. See `Solium::refused_with_a_dialog`.
+        ///
+        /// **Asserted well inside `GRACE`**, which is the whole claim. Sampling
+        /// after it would pass against the plain deadline and test nothing.
+        #[test]
+        fn a_window_that_answers_a_close_with_a_dialog_comes_straight_back() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            // `opened_at`'s body, inlined for the one thing it discards: the
+            // client-side toplevel proxy, which is the only end `set_parent`
+            // can be sent from.
+            let (parent, parent_toplevel) =
+                open_window(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(parent.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&parent)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            state.close_pane(pane);
+            state
+                .clock
+                .advance(present::CLOSING + Duration::from_millis(10));
+            let asked = state.clock.now();
+            state.settle_closing(asked);
+            assert!(
+                state
+                    .panes
+                    .get(pane)
+                    .is_some_and(|pane| pane.asked_at().is_some()),
+                "the request has gone out and the client has not answered"
+            );
+            assert!(
+                drawn_now(&state, pane, asked).opacity.abs() < f32::EPSILON,
+                "and the window is invisible, which is the hole the dialog \
+                 would otherwise float over"
+            );
+
+            // The client's answer: not a destroy, a dialog. `set_parent` is
+            // what says the dialog is about *this* window, and it is the
+            // request `parent_changed` fires on.
+            let (dialog, dialog_toplevel) =
+                open_window(&mut display, &mut state, &conn, &client, &qh);
+            dialog_toplevel.set_parent(Some(&parent_toplevel));
+            conn.flush().expect("flushing set_parent");
+            display
+                .dispatch_clients(&mut state)
+                .expect("dispatching set_parent");
+
+            // The fixture is doing what it claims: the compositor read the
+            // parent back, so this is a dialog about the window being closed
+            // and not merely another window.
+            assert_eq!(
+                state.parent_of(&dialog),
+                Parentage::Window(pane.get()),
+                "the client called set_parent and the compositor did not read \
+                 it back, so nothing below is about a dialog for this window"
+            );
+
+            let back = drawn_now(&state, pane, state.clock.now() + Duration::from_millis(200));
+            assert!(
+                (back.opacity - 1.0).abs() < f32::EPSILON,
+                "a window whose client answered with a dialog is back on \
+                 screen without waiting out the grace period: it was drawn at \
+                 opacity {}",
+                back.opacity
+            );
+            assert!(
+                state.panes.get(pane).is_some_and(|pane| !pane.leaving()),
+                "and it is no longer leaving, so a second super+q can close it"
             );
         }
     }

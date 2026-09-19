@@ -68,6 +68,28 @@ impl Clock {
     pub(crate) fn now(&self) -> Duration {
         self.start.elapsed()
     }
+
+    /// Pretend `by` more time has passed than really has.
+    ///
+    /// **Test-only, and the only way to test the hit test.** Most of this
+    /// compositor takes `now` as an argument, which is what lets a test assert
+    /// about a frame in the future without waiting for it. The four walks that
+    /// decide who owns a press — `Solium::window_under`, `surface_under`,
+    /// `pane_chrome` and `decorated_under` — cannot: they are called from input
+    /// handlers that have no time to hand them, so they sample this clock
+    /// themselves. Moving the origin back is the only lever a test has over
+    /// them, short of really sleeping for the length of a close.
+    ///
+    /// `checked_sub` because `Instant` subtraction panics on underflow, and a
+    /// panic in a compositor's own clock is a poor trade for a test fixture.
+    /// Declining leaves the clock where it was, which fails the assertion that
+    /// asked for the time rather than taking the process down.
+    #[cfg(test)]
+    pub(crate) fn advance(&mut self, by: Duration) {
+        if let Some(start) = self.start.checked_sub(by) {
+            self.start = start;
+        }
+    }
 }
 
 impl Default for Clock {
@@ -236,6 +258,16 @@ pub(crate) struct Frame {
     pub(crate) pivot: (f32, f32),
 }
 
+/// Below this, a frame puts nothing on screen.
+///
+/// One step of an eight-bit channel, which is the smallest difference the
+/// output can carry: at or under it the compositor is compositing a window
+/// that no display can show. A threshold rather than `== 0.0` because an
+/// easing's last sample is a float — `InOutQuad` at a progress of 0.9999
+/// leaves an opacity of about 2e-8, which is exactly as invisible as zero and
+/// is not zero.
+const INVISIBLE: f32 = 1.0 / 255.0;
+
 impl Frame {
     /// The identity frame: drawn at real geometry, fully opaque.
     pub(crate) fn real(geometry: Rectangle<i32, Logical>) -> Self {
@@ -247,6 +279,55 @@ impl Frame {
             z: 0.0,
             pivot: (0.5, 0.5),
         }
+    }
+
+    /// Whether this frame paints anything at all.
+    pub(crate) fn shows(&self) -> bool {
+        self.opacity > INVISIBLE
+    }
+
+    /// Whether this frame covers `point` with something the user can see.
+    ///
+    /// **The hit test, and the reason it is one function rather than a
+    /// `contains` at each of four call sites.** `rect.contains` alone is the
+    /// question "is the point inside the rectangle this pane would be drawn
+    /// at", which is not the question any caller is asking: `window_under`,
+    /// `surface_under`, `pane_chrome` and `decorated_under` all want "does
+    /// this pane own that pixel", and a pane at opacity zero owns no pixel
+    /// anywhere. That is issue #127's review finding 1. `present::close`
+    /// deliberately holds a pane at opacity 0 with `release: false` for the
+    /// whole of `CLOSING` plus the grace period after the request — over a
+    /// second — and for all of it the pane stayed the topmost hit at the
+    /// rectangle it was closed at, while the sibling that had reflowed into
+    /// that space was what the user could see. A click there went to the dead
+    /// window, and so did everything typed after it.
+    ///
+    /// **The gate is "shows nothing", not "is leaving", and the two differ for
+    /// a pane mid-fade.** Three reasons for the pixel question over the
+    /// lifecycle one.
+    ///
+    /// * It is the rule the rest of this hit test already runs on.
+    ///   `chrome_offered` states it outright — *covering is a fact about
+    ///   pixels, offering chrome is a claim about what a press means* — and
+    ///   that is what makes an unmanaged menu occlude while offering no resize
+    ///   border. A pane painting nothing is not in the contest for a pixel at
+    ///   all, whatever it is painting nothing *because of*.
+    /// * `leaving()` would make a visibly fading window click-through for the
+    ///   190 ms it is still on screen, which is the same defect with the sign
+    ///   reversed: what you can see, you cannot click. Under this predicate a
+    ///   closing pane keeps its clicks for exactly as long as it is visible
+    ///   and loses them at the instant it stops being — which is also the
+    ///   instant the layout has moved somebody else into that space.
+    /// * `leaving()` would fix the close path only. Opacity reaches zero by
+    ///   several other routes — a script's `sol.present`, a group's alpha, a
+    ///   mode that fades a pane out — and every one of them had the same black
+    ///   hole. One predicate closes all of them.
+    ///
+    /// Note what this is *not* about: a client's own transparency. `opacity`
+    /// is the compositor's presentation alpha, not the buffer's, so a terminal
+    /// with a see-through background is `1.0` here and still takes its clicks.
+    pub(crate) fn covers(&self, point: Point<f64, Logical>) -> bool {
+        self.shows() && self.rect.contains(point)
     }
 
     /// Scaled about its own centre — what "smaller, in place" means, and the
@@ -480,13 +561,27 @@ pub(crate) fn present(
 }
 
 /// Animate back to real geometry, then stop transforming this pane.
+///
+/// **Returns whether it happened**, which every other writer here can afford
+/// to ignore and this one cannot. `with_slot` declines rather than panics when
+/// the slot is already borrowed — the right trade for a compositor, and for
+/// `present` or `from` it costs one frame of an animation that the next frame
+/// restates. This call is not restated by anything: it is the only route out
+/// of the non-releasing, opacity-zero transform `close` leaves behind, and its
+/// caller retires the `asked_at` that would bring it back. Dropping the answer
+/// meant a pane that stopped being `leaving()` while still holding that
+/// transform — a live window, holding its place in the layout, permanently
+/// invisible, with only a later `move_pane` sweep to rescue it and no sweep
+/// coming at all in floating mode with no layout script. Issue #127's review
+/// finding 5. See `Solium::give_back`.
+#[must_use]
 pub(crate) fn clear(
     pane: &Pane,
     real: Rectangle<i32, Logical>,
     now: Duration,
     duration: Duration,
     easing: Curve,
-) {
+) -> bool {
     let from = frame(pane, real, now);
     with_slot(pane, |slot| {
         *slot = Some(Transform::new(
@@ -497,7 +592,8 @@ pub(crate) fn clear(
             easing,
             true,
         ));
-    });
+    })
+    .is_some()
 }
 
 /// Keep a pane looking where it is while the transform *around* it changes.
