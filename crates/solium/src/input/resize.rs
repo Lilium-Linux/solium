@@ -147,6 +147,24 @@ pub(crate) struct ResizeGrab {
     /// from the previous frame. Accumulating per-frame deltas drifts, and the
     /// drift is worst exactly when the pointer moves fastest.
     began: Rectangle<i32, Logical>,
+    /// The rectangle the *layout* had this pane at when the drag began.
+    ///
+    /// A second frozen rectangle rather than a second reading of the first, and
+    /// the two are genuinely different questions. [`Self::began`] is
+    /// `Solium::pane_outer` — where the window *is*, which is what a floating
+    /// drag resizes and is rightly the client's own rectangle. This is
+    /// `Solium::pane_laid_out` — where the layout *put* it, which is what a
+    /// tiled drag has to move a seam from. They differ by however far the
+    /// client has drifted from what it was asked for, which for a terminal is
+    /// about a cell and for every client is silent. See [`dragged_edge`].
+    ///
+    /// Frozen at the grab for the same reason `began` is: the layout moves this
+    /// pane on every frame of the drag, so a rectangle re-read each frame would
+    /// have the previous frame's motion already in it and adding the total
+    /// pointer delta to that is the accumulating-delta runaway by another
+    /// spelling. It is not merely drift — the error is the whole of the
+    /// previous frame's travel, every frame.
+    laid_out: Rectangle<i32, Logical>,
     from: Point<f64, Logical>,
 }
 
@@ -156,6 +174,7 @@ impl ResizeGrab {
         window: Window,
         edges: ResizeEdge,
         began: Rectangle<i32, Logical>,
+        laid_out: Rectangle<i32, Logical>,
     ) -> Self {
         let from = start_data.location;
         Self {
@@ -163,6 +182,7 @@ impl ResizeGrab {
             window,
             edges,
             began,
+            laid_out,
             from,
         }
     }
@@ -250,15 +270,20 @@ pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'
 
 /// Where the dragged edge should come to rest, on each axis.
 ///
-/// **This is the relative half of a tiled drag, and it is relative by
-/// construction rather than by arithmetic of its own.** `wanted` is the whole
-/// gesture already: [`resized`] builds it from the rectangle the drag began on
-/// and the *total* pointer movement since, so an edge read off it starts
-/// exactly where that edge was and has travelled exactly as far as the pointer
-/// has. Nothing here accumulates anything, which is the property `ResizeGrab`'s
-/// own field doc insists on — per-frame deltas drift, worst when the pointer
-/// moves fastest — and reusing `wanted` is how this gesture inherits it rather
-/// than restating it.
+/// **The layout's own edge, moved by the pointer.** Each axis in play answers
+/// with that side of `laid_out` — `Solium::pane_laid_out`, the rectangle the
+/// layout put this pane at, frozen at the grab — plus the drag's *total*
+/// pointer movement. So the first frame of every gesture hands back exactly the
+/// number the layout itself produced, whatever the pointer is doing, and every
+/// frame after it is that number displaced by as far as the hand has gone.
+///
+/// Nothing accumulates: the delta is measured from the grab and not from the
+/// previous frame, which is the property `ResizeGrab::began`'s own doc insists
+/// on — per-frame deltas drift, worst when the pointer moves fastest. The
+/// *base* is frozen for the same reason and it is the sharper of the two: the
+/// layout moves this pane on every frame of the drag, so re-reading its
+/// rectangle each frame and adding the total delta would count the previous
+/// frame's travel twice, and then three times, and the window would fly.
 ///
 /// What this replaces is the pointer's own position, which `ResizeRequest`
 /// carried to the layout until #124. A seam set from an absolute screen
@@ -272,33 +297,61 @@ pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'
 /// relatively-derived target instead of an absolute one, and stays the tested
 /// thing it was.
 ///
-/// **One edge per axis, each read from its own pair of `wanted`'s numbers.** A
+/// **`laid_out` and not the rectangle [`resized`] produces, which is the #124
+/// review's finding and the reason this takes two arguments where it took
+/// one.** Reading the edge off `wanted` was wrong twice over, and both faults
+/// are first-frame jumps — the very thing #124 exists to remove:
+///
+/// * `wanted` is in the *client's* space. It is built from `Solium::pane_outer`
+///   at grab start, and `pane_outer` goes through `pane_geometry`, which for a
+///   mapped client with no hold live answers `real_geometry` — the space's
+///   location paired with the size the client last *committed*. A client that
+///   quantises, which every terminal does, therefore moved the seam by its own
+///   rounding residue on frame one. Only the far edges: `real.loc` is
+///   compositor-set, so left and top were exact and right and bottom carried
+///   the whole of it. `crate::resizing` puts the threshold for calling such an
+///   answer a rounding at `max(asked / 20, CELL)`, which is at or above the
+///   half-gap #120 was about, and silent.
+/// * `wanted` has already been floored at [`MINIMUM`]. A tile narrower than 120
+///   outer pixels on the dragged axis — reachable through `tree:resize`, deep
+///   dwindle nesting, or a `split` setting — therefore reported its edge at
+///   `began ± 120` from frame one, so grabbing a 48px tile's right edge threw
+///   it 72px before the pointer moved, and left it dead in one direction and
+///   72px behind in the other for the rest of the gesture. The pointer is never
+///   floored, so nothing about that jump was the user's.
+///
+/// `wanted` is not wrong; it is answering the other question. It is the
+/// *client's* rectangle, it is rightly clamped, and it goes on serving the
+/// floating path (#113) exactly as before. This function simply stopped asking
+/// it about the layout.
+///
+/// **One edge per axis, each read from its own pair of `laid_out`'s numbers.** A
 /// corner drag is genuinely two drags — one seam per axis, which is what
-/// [`sides`] says — so the vertical seam is set from `wanted`'s left-or-right
+/// [`sides`] says — so the vertical seam is set from `laid_out`'s left-or-right
 /// edge and the horizontal one from its top-or-bottom. Neither axis may borrow
 /// the other's edge: a `TopRight` drag moving the pointer right and up has to
 /// send the right edge right and the top edge up, and a single number cannot
 /// be both.
 ///
-/// **The value is in the layout's outer coordinate space.** `began` is
-/// `Solium::pane_outer` at grab start — see `Solium::begin_resize`, which both
-/// grab sites in `crate::input` read it from — and [`resized`] only adds pointer
-/// movement to it, so an edge off `wanted` is an outer edge. That is the space
-/// `sol.place` writes (`Solium::place` takes a script's rect as the pane's
-/// outer rectangle and subtracts the insets itself), therefore the space
-/// `tree:layout` handed back, therefore the space
-/// `solium_layout::tree::Tiling::node_box` measures a seam in. Verified rather
-/// than assumed: `tree::dragged_edge_tests::a_window_handed_its_own_edge_does_not_move`
-/// gives a leaf its own laid-out edge at the shipped `gap: 12` and pins that
-/// nothing moves, which is exactly where a half-gap of skew — #120's symptom
-/// reached by another route — would show.
+/// **The value is in the layout's outer coordinate space, by construction
+/// rather than by argument.** `laid_out` is the rectangle `sol.place` was
+/// handed — `Solium::place` takes a script's rect as the pane's outer rectangle
+/// and subtracts the insets itself — so this is the space `tree:layout` returns
+/// and therefore the space `solium_layout::tree::Tiling::node_box` measures a
+/// seam in. It is the layout's own number going back to the layout. Verified
+/// across that boundary rather than assumed:
+/// `crate::state::tests::real_client::a_client_that_rounds_its_size_does_not_move_the_seam`
+/// lays a real `Tiling` out through `Solium::place`, lets its client commit a
+/// cell less than it was asked for, and pins that the edge this hands over
+/// still leaves the tree's own seam where it was.
 ///
-/// The edge handed over is **already floored**: [`resized`] clamps the size to
-/// [`MINIMUM`], so a drag shoved past the far edge sends the floored edge and
-/// not a crossed-over one. `drag_seam`'s `0.05..0.95` clamp (#115) is a second
-/// and unrelated floor — it bounds a *ratio* of the seam's box and knows
-/// nothing of pixels or of this one — so whichever bites first wins, and
-/// neither can be derived from the other or dropped because the other exists.
+/// **Nothing is floored here, and that is the point.** The layout clamps what
+/// the layout owns: `drag_seam` bounds a *ratio* of the seam's box to
+/// 0.05..0.95, which is measured against a rectangle that is not this window
+/// and knows nothing of its pixels. [`MINIMUM`] is a floor on a *window's*
+/// size and belongs to `resized` and the floating path, where a window is what
+/// is being sized. Applying it here put a window's floor on a seam's position,
+/// which is the sub-`MINIMUM` jump above.
 ///
 /// An axis the drag has no hold of has no dragged edge, and there the
 /// pointer's own coordinate is passed through unchanged. The only shipped
@@ -306,10 +359,11 @@ pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'
 /// coordinate as a delta whatever the drag is doing — that is #122, a defect
 /// in that layout rather than in this gesture — so what it reads on an axis
 /// nobody is dragging is left exactly what it was.
-fn dragged_edge(
-    wanted: Rectangle<i32, Logical>,
+pub(crate) fn dragged_edge(
+    laid_out: Rectangle<i32, Logical>,
     edges: ResizeEdge,
-    pointer: Point<f64, Logical>,
+    from: Point<f64, Logical>,
+    now: Point<f64, Logical>,
 ) -> (f64, f64) {
     // [`sides`] answers only the first of the two questions -- whether this
     // axis is in play at all. Which of its two sides the hand is on comes from
@@ -317,19 +371,26 @@ fn dragged_edge(
     // body: two spellings of "is this drag pulling the left edge" is how the
     // end of a gesture comes to disagree with the middle of it.
     let (horizontal, vertical) = sides(edges);
+    // Not rounded, unlike `resized`'s. A window's rectangle is whole pixels
+    // because a client is configured in them; a seam's position is not -- every
+    // number `drag_seam` works in is an `f64`, and it divides this one by a
+    // box's width to get a ratio. Rounding here would quantise a gesture that
+    // has no reason to be quantised, and on a scaled output a logical half-pixel
+    // is a real one.
+    let (dx, dy) = (now.x - from.x, now.y - from.y);
     let x = if horizontal.is_none() {
-        pointer.x
+        now.x
     } else if pulls_left(edges) {
-        f64::from(wanted.loc.x)
+        f64::from(laid_out.loc.x) + dx
     } else {
-        f64::from(wanted.loc.x + wanted.size.w)
+        f64::from(laid_out.loc.x + laid_out.size.w) + dx
     };
     let y = if vertical.is_none() {
-        pointer.y
+        now.y
     } else if pulls_top(edges) {
-        f64::from(wanted.loc.y)
+        f64::from(laid_out.loc.y) + dy
     } else {
-        f64::from(wanted.loc.y + wanted.size.h)
+        f64::from(laid_out.loc.y + laid_out.size.h) + dy
     };
     (x, y)
 }
@@ -403,15 +464,18 @@ impl PointerGrab<Solium> for ResizeGrab {
         // [`sides`], which does the derivation once, where the script call is
         // made, instead of here where it was thrown away.
         //
-        // Both fields now come off the one rectangle, which is the whole of
-        // #124: the layout used to be handed `event.location` while `wanted`
-        // -- the relative answer, computed a line above it -- went to the
-        // floating path alone. See [`dragged_edge`].
+        // Two rectangles and two answers, because there are two questions.
+        // `wanted` is where this *window* would go and is the floating path's
+        // (#113); `edge_at` is where the layout's *seam* should go, and it is
+        // built from the layout's own rectangle rather than from `wanted`,
+        // which is in the client's space and already floored. The layout used
+        // to be handed `event.location` here, which is the whole of #124. See
+        // [`dragged_edge`].
         let wanted = self.resized(event.location);
         data.pending_resize = Some(crate::state::ResizeRequest {
             window: self.window.clone(),
             wanted,
-            edge_at: dragged_edge(wanted, self.edges, event.location),
+            edge_at: dragged_edge(self.laid_out, self.edges, self.from, event.location),
             edges: self.edges,
         });
     }
@@ -730,19 +794,18 @@ mod tests {
     /// #124: a drag moves the edge it has hold of, from where that edge is.
     ///
     /// Every test here goes through [`handed`], which is `ResizeGrab::motion`'s
-    /// payload written out: the rectangle the gesture has produced, and the
-    /// edge read off it that the layout is given. That is the whole of what
-    /// changed — `drag_seam` is untouched — so it is the whole of what has to
-    /// be pinned on this side.
+    /// payload written out: the pane's laid-out rectangle, and the edge the
+    /// layout is handed off it for a given pointer travel. That is the whole of
+    /// what changed — `drag_seam` is untouched — so it is the whole of what has
+    /// to be pinned on this side.
     ///
-    /// **All six tests below fail against `bf80265`**, where the payload was
+    /// **Every test below fails against `bf80265`**, where the payload was
     /// `(event.location.x, event.location.y)`. Confirmed rather than assumed,
     /// by replacing [`dragged_edge`]'s body with exactly that expression and
-    /// running them: six failures, and six passes again on the restore. The
-    /// margins are 3px where a border was grabbed three pixels inside its band,
-    /// 50px on each axis for a modifier drag begun a quarter of the way into a
-    /// window, 5px for the pass-through case, and 520px where the
-    /// minimum-size floor is what the pointer ran past.
+    /// running them. The margins are 3px where a border was grabbed three
+    /// pixels inside its band, 50px on each axis for a modifier drag begun a
+    /// quarter of the way into a window, 5px for the pass-through case, and
+    /// 800px where the pointer was shoved clear across the screen.
     ///
     /// Even [`an_axis_the_drag_does_not_move_passes_the_pointer_through`] fails
     /// there, and that is worth writing down because it is the one test whose
@@ -751,23 +814,37 @@ mod tests {
     /// test is not a witness for whichever assertion was in mind while writing
     /// it.
     ///
-    /// The numbers are integers widened to `f64` — [`dragged_edge`] reads
-    /// `i32` corners off `wanted` — or the pointer passed through untouched, so
-    /// these compare exactly rather than within a tolerance. A tolerance here
-    /// would be a place for a rounding to hide.
+    /// [`a_tile_under_the_minimum_keeps_its_own_edge`] additionally fails
+    /// against `ec1da24`, where [`dragged_edge`] read its edge off `resized`'s
+    /// output and inherited that function's [`MINIMUM`] floor. It is the one
+    /// test here that is about the first fix rather than about the defect.
+    ///
+    /// The numbers are integers widened to `f64` plus an exact pointer travel,
+    /// or the pointer passed through untouched, so these compare exactly rather
+    /// than within a tolerance. A tolerance here would be a place for a
+    /// rounding to hide.
     mod dragged_edge_tests {
         use super::*;
 
-        /// One frame of a drag, as `ResizeGrab::motion` assembles it: the
-        /// rectangle for this pointer position, and the edge handed to the
-        /// layout off that rectangle.
+        /// One frame of a drag, as `ResizeGrab::motion` assembles it: the edge
+        /// the layout is handed for a pane laid out at `laid_out`, grabbed at
+        /// `from`, with the pointer now at `now`.
+        ///
+        /// `laid_out` and not the rectangle [`resized`] returns. The two are the
+        /// same number for a client sitting at exactly the size it was asked
+        /// for, which every case in this module is; what they do *not* share is
+        /// a floor, and [`a_tile_under_the_minimum_keeps_its_own_edge`] is
+        /// where that separation is pinned. The case where they differ by a
+        /// client's own rounding cannot be reached from here at all — it needs
+        /// a real client to commit a real buffer — and lives in
+        /// `crate::state::tests::real_client`.
         fn handed(
-            began: Rectangle<i32, Logical>,
+            laid_out: Rectangle<i32, Logical>,
             edges: ResizeEdge,
             from: Point<f64, Logical>,
             now: Point<f64, Logical>,
         ) -> (f64, f64) {
-            dragged_edge(resized(began, edges, from, now), edges, now)
+            dragged_edge(laid_out, edges, from, now)
         }
 
         /// A window whose four edges are at 100, 500, 100 and 400.
@@ -926,25 +1003,79 @@ mod tests {
             );
         }
 
-        /// The edge handed over is already floored, and that floor is not
-        /// `drag_seam`'s.
+        /// The edge handed over is **not** floored, and the floor it used to
+        /// carry was a first-frame jump of its own.
         ///
-        /// [`resized`] clamps the *size* to [`MINIMUM`] pixels, so a left edge
-        /// shoved past the right one comes back at 380 — the right edge at 500
-        /// less the minimum — rather than at the pointer's 900. `drag_seam`
-        /// then clamps a *ratio* to 0.05..0.95 (#115), which is a different
-        /// quantity measured against a different rectangle: the seam's box is
-        /// not the window, so neither floor can be computed from the other and
-        /// whichever is tighter for a given arrangement wins. Both exist; this
-        /// pins the one on this side of the call.
+        /// **This is the #124 review's first finding.** [`dragged_edge`] read
+        /// its edge off [`resized`]'s output, and `resized` clamps a window's
+        /// *size* to [`MINIMUM`] — so for any tile already narrower than 120
+        /// outer pixels on the dragged axis, the reported edge was
+        /// `opposite ± MINIMUM` from the very first frame, with the pointer
+        /// still on the pixel it pressed. The 48px tile below would have handed
+        /// over 72px of travel nobody asked for, and then been dead in one
+        /// direction and 72px behind in the other for the rest of the gesture.
+        ///
+        /// Sub-`MINIMUM` tiles are not hypothetical: `tree:resize` will make
+        /// one from the keyboard, deep dwindle nesting produces them on its own,
+        /// and a small `split` setting does it at the first window. Nothing
+        /// bounds a *tile* at 120px, because `MINIMUM` is a floor on a
+        /// floating window's size and a tiled window does not have one.
+        ///
+        /// The two floors were never the same quantity: `drag_seam` bounds a
+        /// *ratio* of the seam's own box, which is a different number in
+        /// different units against a rectangle that is not this window. That
+        /// clamp is now the only one on a tiled drag, which is where a clamp on
+        /// the layout's arrangement belongs. `resized` keeps its floor for the
+        /// floating path, which is what it was always for.
+        ///
+        /// Both halves are asserted: an untouched pointer leaves a tiny tile's
+        /// edge exactly where it is, and a pointer that runs clear off the far
+        /// side is still followed rather than stopping at a window's minimum.
+        /// Against `ec1da24` the first assertion is out by 72px and the second
+        /// by 748.
         #[test]
-        fn the_edge_handed_over_is_already_floored_at_the_minimum() {
-            let grab: Point<f64, Logical> = (104.0, 250.0).into();
-            let sent = handed(window(), ResizeEdge::Left, grab, (900.0, 250.0).into());
+        fn a_tile_under_the_minimum_keeps_its_own_edge() {
+            // 48 outer pixels wide: well under `MINIMUM`, and a perfectly
+            // ordinary tile.
+            let tile = rect(300, 100, 48, 300);
+            let grab: Point<f64, Logical> = (346.0, 250.0).into();
+
             assert_eq!(
-                sent.0,
-                f64::from(100 + 400 - MINIMUM),
-                "the floored left edge, not the pointer"
+                handed(tile, ResizeEdge::Right, grab, grab).0,
+                348.0,
+                "a drag that has not moved hands back the tile's own right \
+                 edge, whatever `MINIMUM` says a window may be"
+            );
+            assert_eq!(
+                handed(tile, ResizeEdge::Right, grab, (1146.0, 250.0).into()).0,
+                1148.0,
+                "and once it moves, the edge goes the whole 800 the pointer \
+                 did -- clamping a seam is the layout's job and it has \
+                 its own"
+            );
+        }
+
+        /// Sub-pixel pointer travel survives the trip to the layout.
+        ///
+        /// [`resized`] rounds its delta to whole pixels because it is building
+        /// a rectangle a client will be configured with, and configures are in
+        /// whole pixels. `drag_seam` is under no such constraint — it divides
+        /// this number by a box's width to get a ratio, and every term in that
+        /// arithmetic is an `f64` — so the rounding is dropped here rather than
+        /// inherited.
+        ///
+        /// Worth a test rather than a comment because it is the one behaviour
+        /// this change takes *away* from a value that had it: reading the edge
+        /// off `wanted` quantised the layout's target to whole logical pixels,
+        /// which on a fractionally-scaled output is more than one device pixel.
+        #[test]
+        fn the_layout_is_handed_the_pointer_travel_unrounded() {
+            let grab: Point<f64, Logical> = (497.0, 137.0).into();
+            let sent = handed(window(), ResizeEdge::Right, grab, (497.5, 137.0).into());
+            assert_eq!(
+                sent.0, 500.5,
+                "half a pixel of travel is half a pixel at the seam, not none \
+                 of one and not a whole one"
             );
         }
     }

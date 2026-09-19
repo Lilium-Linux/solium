@@ -700,11 +700,18 @@ struct Gesture {
 /// the next input.
 ///
 /// The positions are relative to the grab all the same, and since #124 both of
-/// them are: [`crate::input::resize::resized`] adds the drag's *total* pointer
-/// movement to the rectangle the drag began on, and [`Self::edge_at`] is read
-/// off that rectangle. "Absolute or relative" and "a position or a delta" are
-/// two different questions, and conflating them is how the tiled path came to
-/// send the pointer's own coordinate for a year.
+/// them are: each is a rectangle frozen at the grab plus the drag's *total*
+/// pointer movement. "Absolute or relative" and "a position or a delta" are two
+/// different questions, and conflating them is how the tiled path came to send
+/// the pointer's own coordinate for a year.
+///
+/// **The two are built from two different rectangles, and that is deliberate.**
+/// [`Self::wanted`] starts from `Solium::pane_outer` — where the window is,
+/// which is the client's own rectangle and the right one to resize a floating
+/// window by. [`Self::edge_at`] starts from `Solium::pane_laid_out` — where the
+/// layout put the pane, which is the only rectangle a layout will recognise
+/// when it comes back. Deriving the second from the first is the #124 review's
+/// finding; see [`crate::input::resize::dragged_edge`].
 #[derive(Clone, Debug)]
 pub(crate) struct ResizeRequest {
     pub(crate) window: Window,
@@ -713,8 +720,11 @@ pub(crate) struct ResizeRequest {
     /// Where the dragged edge should come to rest, per axis, in the layout's
     /// **outer** coordinate space.
     ///
-    /// Read off [`Self::wanted`], so it starts at the window's own edge and
-    /// moves with the pointer rather than jumping to it. See
+    /// The layout's own edge for this pane, frozen at the grab, plus the total
+    /// pointer movement — so it starts on a number the layout produced and
+    /// moves with the pointer rather than jumping to it. Deliberately *not*
+    /// read off [`Self::wanted`], which is in the client's space and already
+    /// floored at a window's minimum size. See
     /// [`crate::input::resize::dragged_edge`] for the whole of the reasoning,
     /// including which space this is in and why that has to be the space
     /// `solium_layout::tree::Tiling::node_box` measures in.
@@ -1376,6 +1386,51 @@ impl Solium {
     /// The same, for a caller that holds only the pane's id.
     pub(crate) fn pane_outer_of(&self, id: crate::pane::PaneId) -> Option<Rectangle<i32, Logical>> {
         self.pane_outer(self.panes.get(id)?)
+    }
+
+    /// Where the *layout* has this pane, in the layout's outer space.
+    ///
+    /// **Not [`Self::pane_outer`], and the two differ by exactly the amount a
+    /// client has disagreed with what it was asked for.** `pane_outer` goes
+    /// through [`Self::pane_geometry`], which answers `real_geometry` for a
+    /// mapped client with no hold live — the space's location paired with the
+    /// size the *client* committed. `Pane::placed` is the rectangle the layout
+    /// asked for, written by [`Self::move_pane`] and by nothing that hears from
+    /// a client.
+    ///
+    /// The difference is small, silent and constant: a terminal quantises to
+    /// its cell grid, so it answers a few pixels short on every configure it is
+    /// ever sent, and `settle_resize_hold` then *adopts* that answer into the
+    /// slot rather than fighting it — see `crate::resizing`, which puts the
+    /// tolerance for calling such an answer a rounding at `max(asked / 20,
+    /// CELL)`. Measured on this compositor's own fixture: a pane placed 500
+    /// wide whose client committed 492 has a `slot` and a `pane_outer` of 492
+    /// from the next frame onward, and a `placed` of 500.
+    ///
+    /// **Which is why an edge drag starts here.** A tiled drag hands the layout
+    /// a position and `tree:drag_seam` puts the seam exactly there, so a first
+    /// frame that has not moved must hand back a number the layout itself
+    /// produced or the seam shifts by the client's residue before the pointer
+    /// has travelled a pixel. `pane_outer` cannot do that for a right or bottom
+    /// edge: `real.loc` is compositor-set so the left and top edges are exact,
+    /// and the far edges carry the whole of the client's disagreement. See
+    /// `crate::input::resize::dragged_edge`.
+    ///
+    /// Falls back to `pane_outer` for a pane no layout has ever placed. That is
+    /// a floating window — where nothing reads this, because no layout claims
+    /// the drag — or the frames between a window mapping and the first sweep,
+    /// where the pane's own rectangle is the only answer there is.
+    ///
+    /// A pane that *was* laid out and is not any more — tiling switched off
+    /// under it — answers with where the last layout left it, which is stale.
+    /// That is deliberate rather than overlooked: the only reader is the edge a
+    /// tiled drag sends, no layout is offered a drag it has stopped claiming,
+    /// and the first sweep after tiling comes back makes it current again.
+    /// Clearing it on the way out would mean teaching every mode that stops
+    /// placing a window to say so, for a value nobody is reading.
+    pub(crate) fn pane_laid_out(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+        let pane = self.panes.get(self.panes.id_of(window)?)?;
+        pane.placed().or_else(|| self.pane_outer(pane))
     }
 
     /// How a pane is being drawn right now. Real geometry unless something is
@@ -3212,6 +3267,17 @@ impl Solium {
         // there is nothing else holding its geometry.
         if let Some(held) = self.panes.get_mut(pane) {
             held.set_slot(client);
+            // **And the layout's own answer, kept where no client can reach
+            // it.** The line above is exactly the one `sync_panes` overwrites:
+            // it writes the space's rectangle into the slot on every frame this
+            // pane is not held, and the space reports a mapped window's size as
+            // whatever the client last committed. So `slot` is the rectangle
+            // asked for only until the client answers, and a client answering
+            // with a size of its own is the ordinary case rather than the
+            // exception. `Pane::placed` records the rectangle that was *asked
+            // for*, which is the only copy of the layout's opinion the
+            // compositor keeps; see `Self::pane_laid_out`.
+            held.set_placed(outer);
         }
 
         if let Some(held) = self.panes.get(pane) {
@@ -5980,12 +6046,14 @@ impl Solium {
     /// `ResizeRequest` gives: a seam set from a position is idempotent, and one
     /// accumulated from deltas feeds the layout's own response back in as its
     /// next input. It is nonetheless relative to the grab, because
-    /// `crate::input::resize::dragged_edge` reads it off the rectangle the drag
-    /// has produced rather than off the seat.
+    /// `crate::input::resize::dragged_edge` builds it from the pane's own
+    /// laid-out edge and the drag's total movement rather than from the seat.
     ///
     /// It is in the layout's **outer** space — the space `sol.place` writes and
-    /// `tree:layout` returns — because it comes from a rectangle that began as
-    /// `Solium::pane_outer`.
+    /// `tree:layout` returns — because it comes from `Solium::pane_laid_out`,
+    /// which is the rectangle `sol.place` was last handed for this pane. Not
+    /// from `Solium::pane_outer`, which is that rectangle only until the client
+    /// commits a size of its own.
     ///
     /// The pair after it is the side of the window being dragged on each axis
     /// — `"left"` or `"right"`, `"top"` or `"bottom"`, or nil for an axis that
@@ -8702,6 +8770,34 @@ mod tests {
         use wayland_protocols::xdg::dialog::v1::client::{xdg_dialog_v1, xdg_wm_dialog_v1};
         use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
+        /// The `edge_at` a `ResizeGrab` would record on the frame it produced
+        /// `wanted`, for a pane the layout has at that same rectangle.
+        ///
+        /// These fixtures build a `ResizeRequest` by hand, because what is under
+        /// test is what `settle_resize` does with one rather than how a grab
+        /// assembles one. It still has to be a payload a grab could *have*
+        /// assembled. Spelled `(wanted.loc.x, wanted.loc.y)` it was not: that is
+        /// the top-left corner whatever the edges say, so every `Right`,
+        /// `Bottom` and `BottomRight` case carried a pair
+        /// `crate::input::resize::dragged_edge` cannot produce. Nothing read it
+        /// -- every one of these takes the floating path, where no layout is
+        /// offered the drag at all -- which is exactly why it would have sat
+        /// there until a tiled test was written against it and believed.
+        ///
+        /// Built by the real function for that reason, rather than by a second
+        /// copy of its rules here.
+        fn payload_edge(wanted: Rectangle<i32, Logical>, edges: ResizeEdge) -> (f64, f64) {
+            // The pointer, for an axis this drag has no hold of. Its centre is
+            // as good as anywhere: the value is passed straight through and
+            // these fixtures never look at it.
+            let pointer: Point<f64, Logical> = (
+                f64::from(wanted.loc.x) + f64::from(wanted.size.w) / 2.0,
+                f64::from(wanted.loc.y) + f64::from(wanted.size.h) / 2.0,
+            )
+                .into();
+            crate::input::resize::dragged_edge(wanted, edges, pointer, pointer)
+        }
+
         /// The client side of the fixture. Binds exactly the globals a window
         /// needs and nothing else -- there is no renderer on this end to answer
         /// anything more, and none of what follows needs one.
@@ -9310,7 +9406,7 @@ mod tests {
             state.pending_resize = Some(ResizeRequest {
                 window: window.clone(),
                 wanted,
-                edge_at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                edge_at: payload_edge(wanted, ResizeEdge::TopLeft),
                 edges: ResizeEdge::TopLeft,
             });
             state.settle_resize();
@@ -9485,7 +9581,7 @@ mod tests {
                 state.pending_resize = Some(ResizeRequest {
                     window: window.clone(),
                     wanted,
-                    edge_at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                    edge_at: payload_edge(wanted, edges),
                     edges,
                 });
                 state.settle_resize();
@@ -9574,7 +9670,7 @@ mod tests {
             state.pending_resize = Some(ResizeRequest {
                 window: window.clone(),
                 wanted,
-                edge_at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                edge_at: payload_edge(wanted, ResizeEdge::TopLeft),
                 edges: ResizeEdge::TopLeft,
             });
             // And the release, still with no frame in between: this is
@@ -9663,7 +9759,7 @@ mod tests {
                 state.pending_resize = Some(ResizeRequest {
                     window: window.clone(),
                     wanted,
-                    edge_at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                    edge_at: payload_edge(wanted, ResizeEdge::TopLeft),
                     edges: ResizeEdge::TopLeft,
                 });
             };
@@ -9780,6 +9876,341 @@ mod tests {
                 let ($conn, mut $queue, mut $client) = connect(&mut $display, &mut $state);
                 let $qh = $queue.handle();
             };
+        }
+
+        /// **#124 review, finding 2: a client that rounds must not move the
+        /// seam on the first frame.**
+        ///
+        /// **The cross-boundary test, and the only one there is.** Every other
+        /// test of this gesture lives on one side of the call or the other:
+        /// `input::resize::dragged_edge_tests` is arithmetic on rectangles the
+        /// test itself made up, and `solium_layout::tree::dragged_edge_tests`
+        /// feeds the tree a number the same tree produced. Neither can see the
+        /// link that actually broke — `Solium`'s rectangle for a pane against
+        /// the tree's — because neither crosses it. This one does: a real
+        /// `Tiling` is laid out, placed through `Solium::place` exactly as
+        /// `tiling.apply` places it, disagreed with by a real client over the
+        /// real protocol, and then the number the compositor would hand a
+        /// layout on the first frame of a drag is fed back into that same tree.
+        ///
+        /// What #124 shipped read the edge off `Solium::pane_outer`, which goes
+        /// through `pane_geometry` and answers `real_geometry` for a mapped
+        /// client with no hold live: the space's location paired with the size
+        /// the *client* committed. So the first frame handed the layout the
+        /// client's edge and `drag_seam` obediently moved the seam there,
+        /// shifting the whole column by the client's rounding residue with the
+        /// pointer still on the pixel it pressed.
+        ///
+        /// **Eight pixels, which is what makes it the nasty kind.** The client
+        /// below answers a cell short, which is what every terminal does to
+        /// every configure it is ever sent; `crate::resizing` puts the threshold
+        /// for calling such an answer a refusal rather than a rounding at
+        /// `max(asked / 20, CELL)`, so this is deliberately *under* it — the
+        /// compositor is meant to accept it and does. It is at or above the
+        /// half-gap that was the whole of #120, and it is silent.
+        ///
+        /// **A right edge, because a left edge cannot show it.** `real.loc` is
+        /// compositor-set and `real.size` is the client's, so `pane_outer`'s
+        /// left and top edges are exact and its right and bottom carry the whole
+        /// of the disagreement. A version of this test on `Edge::Left` passes
+        /// against the defect.
+        ///
+        /// **Off-centre first**, for the reason
+        /// `solium_layout::tree::dragged_edge_tests::a_window_handed_its_own_edge_does_not_move`
+        /// gives at length: a fixture at `split: 0.5` is where a skew is least
+        /// visible, and a test that cannot fail is not evidence. The seam is
+        /// dragged somewhere lopsided and re-placed before the client is ever
+        /// asked to disagree.
+        ///
+        /// Confirmed failing against `ec1da24` rather than assumed: the value
+        /// that commit would have sent is computed here from the same live
+        /// compositor state and fed into a clone of the same tree, and the
+        /// second half of this test pins that it moves the window. Both halves
+        /// are needed — the first alone would pass on a tree that ignored
+        /// `drag_seam` entirely.
+        #[test]
+        fn a_client_that_rounds_its_size_does_not_move_the_seam() {
+            use solium_layout::tree::{Edge, Tiling};
+
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (left, _left_toplevel, left_surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            let (right, _right_toplevel, _right_surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&left)
+                .expect("a client in the space has a pane");
+            let (left_id, right_id) = (state.window_id(&left), state.window_id(&right));
+
+            let (area, settings) = (tiled_area(), tiled_settings());
+            let mut tiling = Tiling::new();
+            tiling.insert(left_id, None, None, area, settings);
+            tiling.insert(right_id, Some(left_id), None, area, settings);
+            sweep(&mut state, &tiling);
+
+            // Lopsided, so a skew that is self-cancelling at the midpoint of
+            // the seam's box cannot hide in this fixture.
+            tiling.drag_seam(left_id, Edge::Right, (340.0, 300.0), area, settings);
+            sweep(&mut state, &tiling);
+
+            let slot = leaf_of(&tiling, left_id);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a rect from a layout is screen-sized, and `Solium::place` \
+                          rounds these same numbers the same way"
+            )]
+            let asked = at(slot.x as i32, slot.y as i32, slot.w as i32, slot.h as i32);
+
+            // First the obedient client, which is the round trip this whole
+            // test rests on: what `tree:layout` returned, through `sol.place`,
+            // is what the pane's rectangle becomes -- so `pane_outer` and the
+            // layout's own answer agree whenever a client does as it is told.
+            // The defect below is entirely about the case where one does not.
+            commit_buffer(&client, &qh, &left_surface, asked.size.w, asked.size.h);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            state.sync_panes();
+            assert_eq!(
+                state.pane_outer_of(pane),
+                Some(asked),
+                "a client at the size it was asked for puts `pane_outer` on \
+                 the layout's own rectangle"
+            );
+
+            // And now the same client answering a cell short. This is the one
+            // thing no rectangle arithmetic can fake, and the whole reason this
+            // test needs a real client.
+            let short = asked.size.w - 8;
+            commit_buffer(&client, &qh, &left_surface, short, asked.size.h);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            state.sync_panes();
+            assert_eq!(
+                state.pane_outer_of(pane).map(|outer| outer.size.w),
+                Some(short),
+                "the client committed a size of its own and the compositor \
+                 took it -- if it had not, this test would be checking nothing"
+            );
+
+            // The drag begins. `begin_resize` is what both grab sites call
+            // first, and its answer is `began` -- the client's rectangle.
+            let began = state.begin_resize(&left).expect("a mapped pane");
+            let laid_out = state
+                .pane_laid_out(&left)
+                .expect("a pane a layout has placed");
+
+            // The first frame: the pointer has not moved.
+            let grab: Point<f64, Logical> =
+                (f64::from(began.loc.x + began.size.w) - 3.0, 300.0).into();
+            let sent = crate::input::resize::dragged_edge(laid_out, ResizeEdge::Right, grab, grab);
+
+            let mut unmoved = tiling.clone();
+            unmoved.drag_seam(left_id, Edge::Right, sent, area, settings);
+            let after = leaf_of(&unmoved, left_id);
+            assert!(
+                (after.x - slot.x).abs() < 0.5
+                    && (after.y - slot.y).abs() < 0.5
+                    && (after.w - slot.w).abs() < 0.5
+                    && (after.h - slot.h).abs() < 0.5,
+                "a drag that has not moved must not move the seam. The layout \
+                 is handed {sent:?}; its own edge is at {:?}. {slot:?} became \
+                 {after:?}",
+                (slot.x + slot.w, slot.y + slot.h)
+            );
+
+            // And what `ec1da24` sent, from the same state, into the same
+            // tree. `began` is the rectangle that commit derived its edge from,
+            // and it is a different rectangle from `laid_out` by exactly the
+            // eight pixels the client kept -- asserted, because if they were
+            // ever equal the half below would be testing the same thing twice.
+            assert_ne!(
+                began, laid_out,
+                "the client's rectangle and the layout's have to differ here, \
+                 or the defect this test is about cannot arise"
+            );
+            let shipped = crate::input::resize::dragged_edge(began, ResizeEdge::Right, grab, grab);
+            let mut moved = tiling.clone();
+            moved.drag_seam(left_id, Edge::Right, shipped, area, settings);
+            let jumped = leaf_of(&moved, left_id);
+            assert!(
+                (jumped.w - slot.w).abs() > 4.0,
+                "reading the edge off the client's rectangle moved the seam by \
+                 the client's rounding on frame one, which is the defect: \
+                 {slot:?} became {jumped:?}"
+            );
+        }
+
+        /// The work area every tiled-tree fixture in this module lays out over.
+        fn tiled_area() -> solium_layout::Rect {
+            solium_layout::Rect::new(0.0, 0.0, 1000.0, 600.0)
+        }
+
+        /// The shipped gap, because at `gap: 0` the two sides of a seam are one
+        /// line and half the arithmetic under test disappears.
+        fn tiled_settings() -> solium_layout::Settings {
+            solium_layout::Settings {
+                gap: 12.0,
+                split: 0.5,
+                ..solium_layout::Settings::default()
+            }
+        }
+
+        /// Where a tree has put one window. `rect_at` in the layout crate's own
+        /// suite, which is not public.
+        fn leaf_of(tiling: &solium_layout::tree::Tiling, id: u64) -> solium_layout::Rect {
+            tiling
+                .layout(tiled_area(), tiled_settings())
+                .into_iter()
+                .find(|(other, _)| *other == id)
+                .expect("the window is in the tree")
+                .1
+        }
+
+        /// One layout sweep, which is what `tiling.apply` is in Lua: every leaf
+        /// placed, every frame, whether it moved or not.
+        ///
+        /// `sol.place` is `Solium::place`, and a script's rect is the pane's
+        /// *outer* rectangle — `place` subtracts the insets itself.
+        fn sweep(state: &mut Solium, tiling: &solium_layout::tree::Tiling) {
+            for (id, rect) in tiling.layout(tiled_area(), tiled_settings()) {
+                state.place(
+                    id,
+                    Rect {
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                    },
+                    AnimationSpec {
+                        duration: Duration::ZERO,
+                        ..AnimationSpec::default()
+                    },
+                    Duration::ZERO,
+                );
+            }
+        }
+
+        /// **A tiled drag measures from the grab, not from the last frame.**
+        ///
+        /// `ResizeGrab` freezes two rectangles at the press and this pins why
+        /// the second of them has to be one of them. `laid_out` is where the
+        /// layout had this pane when the button went down, and the layout moves
+        /// the pane on *every frame of the drag* — that is what a seam moving
+        /// means. So a version that asked `Solium::pane_laid_out` afresh each
+        /// frame and added the gesture's total travel to whatever came back
+        /// would add the previous frame's travel a second time, and the frame
+        /// before that a third. Not drift: the whole of the motion, compounding,
+        /// for as long as the button is held.
+        ///
+        /// It is an easy thing to write, because "ask the layout where the pane
+        /// is now" reads like the honest version. The first half below is the
+        /// fixture earning its keep — the compositor really is moving this pane
+        /// under the drag — and the second is the runaway, computed by doing
+        /// exactly that to a second copy of the same tree.
+        ///
+        /// A *position* built from a frozen base and a total delta, which is
+        /// what `ResizeRequest` promises and what keeps `drag_seam` idempotent.
+        /// Both halves of that matter and neither implies the other: the base
+        /// is frozen so the drag does not read its own output back, and the
+        /// delta is total rather than per-frame so it does not accumulate
+        /// rounding. See `crate::input::resize::dragged_edge`.
+        #[test]
+        fn a_tiled_drag_measures_from_where_the_grab_began_and_not_from_the_last_frame() {
+            use solium_layout::tree::{Edge, Tiling};
+
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (left, _left_toplevel, _left_surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            let (right, _right_toplevel, _right_surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.sync_panes();
+            let (left_id, right_id) = (state.window_id(&left), state.window_id(&right));
+
+            let (area, settings) = (tiled_area(), tiled_settings());
+            let mut tiling = Tiling::new();
+            tiling.insert(left_id, None, None, area, settings);
+            tiling.insert(right_id, Some(left_id), None, area, settings);
+            sweep(&mut state, &tiling);
+
+            let began = leaf_of(&tiling, left_id);
+            let frozen = state
+                .pane_laid_out(&left)
+                .expect("a pane a layout has placed");
+            let from: Point<f64, Logical> = (f64::from(frozen.loc.x + frozen.size.w), 300.0).into();
+
+            // Three frames of one gesture. The numbers are the pointer's total
+            // travel from the press, which is what a grab has -- never the step
+            // since the last frame.
+            let mut the_layout_moved_it = false;
+            for total in [10.0, 40.0, 90.0] {
+                let now: Point<f64, Logical> = (from.x + total, from.y).into();
+                let sent = crate::input::resize::dragged_edge(frozen, ResizeEdge::Right, from, now);
+                tiling.drag_seam(left_id, Edge::Right, sent, area, settings);
+                sweep(&mut state, &tiling);
+                // A whole frame, configures and all. The client is never made
+                // to answer here -- what this test is about happens whether it
+                // does or not -- but a sweep that never reached the wire would
+                // be a different code path from the one a drag takes.
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                state.sync_panes();
+                the_layout_moved_it |= state.pane_laid_out(&left) != Some(frozen);
+            }
+            assert!(
+                the_layout_moved_it,
+                "the layout has to actually move this pane under the drag, or \
+                 freezing its rectangle costs nothing and this test pins nothing"
+            );
+
+            let ended = leaf_of(&tiling, left_id);
+            assert!(
+                (ended.w - (began.w + 90.0)).abs() < 0.5,
+                "the pointer travelled 90 from the press, so the edge is 90 \
+                 from where it was: {began:?} became {ended:?}"
+            );
+
+            // And the same three frames against a base re-read each time, which
+            // is the mistake this is here to keep out.
+            let mut runaway = Tiling::new();
+            runaway.insert(left_id, None, None, area, settings);
+            runaway.insert(right_id, Some(left_id), None, area, settings);
+            for total in [10.0, 40.0, 90.0] {
+                let live = leaf_of(&runaway, left_id);
+                runaway.drag_seam(
+                    left_id,
+                    Edge::Right,
+                    (live.x + live.w + total, 300.0),
+                    area,
+                    settings,
+                );
+            }
+            let flew = leaf_of(&runaway, left_id);
+            assert!(
+                flew.w - began.w > 130.0,
+                "re-reading the layout's rectangle each frame adds every \
+                 earlier frame's travel again -- 140 rather than 90 here, and \
+                 unbounded on a real gesture: {began:?} became {flew:?}"
+            );
         }
 
         /// **Issue #123, the rate half: a tiled drag configured its client once

@@ -307,14 +307,13 @@ end)
 -- could mean.
 --
 -- The second argument is a **screen x coordinate**, and has never once been the
--- delta this handler divides as though it were. It has been three different
--- coordinates now and not one of them a delta: it was named `dx` here while the
--- compositor's doc called it "the delta" and the code sent `event.location`;
--- #120 corrected the doc to "where the pointer is"; and #124 changed the value
--- to where the *dragged edge* should come to rest, which is what it is today.
--- On a drag that moves no horizontal edge at all -- a top or bottom border --
--- there is no such edge and the pointer's own x comes through instead, exactly
--- as before.
+-- delta this handler divides as though it were. It has been two different
+-- coordinates and not one of them a delta: it was `event.location.x` -- the
+-- pointer -- for the whole life of the event, which #120 corrected the
+-- compositor's doc about without changing the value; and since #124 it is
+-- where the *dragged edge* should come to rest. On a drag that moves no
+-- horizontal edge at all -- a top or bottom border -- there is no such edge and
+-- the pointer's own x comes through instead, exactly as before.
 --
 -- The arithmetic below is untouched by all three, and still wrong. `view:widen`
 -- takes a delta, and there is no way to feed it an absolute position without
@@ -327,13 +326,22 @@ end)
 -- motion. Tracked as #122.
 sol.on("resize", function(id, edge_x, _)
     -- `edge_x == 0` is doing duty as "no drag", and it does not mean that: it
-    -- means the dragged edge belongs at screen x 0, which is a real place a
-    -- real drag can reach -- the leftmost column of the leftmost monitor. The
-    -- guard is left as it is because changing it is part of giving this handler
-    -- arithmetic that matches its input, which is #122 and not this branch.
+    -- means the dragged edge belongs at screen x 0.
+    --
+    -- **That is a likelier accident since #124, not a less likely one.** While
+    -- this was the pointer, hitting it needed the cursor on the exact column of
+    -- pixels at x=0 -- rare, and it took a moving hand to get there. `edge_x` is
+    -- a fixed edge now: the left edge of a column laid out at x=0 *is* zero, so
+    -- a left-edge drag on the leftmost column of the leftmost monitor trips this
+    -- deterministically, on the first frame and every frame after, and the
+    -- handler does nothing for the whole gesture.
+    --
+    -- Left as it is all the same, because the fix is to give this handler
+    -- arithmetic that matches its input and that is #122, not this branch.
     -- Written down rather than quietly tidied, so the next reader does not have
     -- to rediscover that the condition is a sentinel wearing a coordinate's
-    -- clothes.
+    -- clothes -- and does not inherit an assessment of how often it fires that
+    -- was true of a value this no longer receives.
     if not scrolling.active or edge_x == 0 then
         return
     end
