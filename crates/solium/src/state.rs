@@ -4639,6 +4639,25 @@ impl Solium {
             .map(|held| (held.window.clone(), held.pane))
             .collect();
         for (window, pane) in held {
+            // The pane has been given a different client since the gesture
+            // started, or has lost the one it had. The same check
+            // `release_bridge`, `settle_resize_bridge` and `settle_resize_hold`
+            // all make, and this is the site that needs it most: it runs first
+            // of the four on every frame, so without it the *new* client's slot
+            // is configured onto the window this hold remembers — and
+            // `committed` below is read off that stale window too, so the
+            // throttle's bookkeeping is answered about one client with the
+            // other one's size.
+            //
+            // Skipped rather than dropped, which is `release_bridge`'s choice
+            // and right for the same reason: the two settle passes run
+            // immediately after this one on the same frame and each drops what
+            // it owns. A flush that dropped holds would be deciding a lifetime
+            // question from the function whose whole job is the throttle's
+            // trailing edge.
+            if self.panes.get(pane).and_then(Pane::client) != Some(&window) {
+                continue;
+            }
             let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
                 continue;
             };
@@ -10375,6 +10394,119 @@ mod tests {
                 "and once, not once a frame: the flush is the throttle's \
                  trailing edge and not a way around it. Got {:?}",
                 client.configures
+            );
+        }
+
+        /// **A pane given a different client mid-gesture was configured through
+        /// the old one.**
+        ///
+        /// `settle_resize_hold`, `settle_resize_bridge` and `release_bridge`
+        /// all check `panes.get(pane).and_then(Pane::client)` against the window
+        /// their hold remembers before touching anything. `flush_resize` did
+        /// not, and it is the one that runs *first* on every frame — so a pane
+        /// whose content was replaced while its hold was still alive sent the
+        /// new client's slot to the old client, and read the old client's
+        /// committed size back into the throttle's bookkeeping while it was
+        /// there. `Pane::adopt` is how a pane's content is replaced without the
+        /// pane changing: same id, same slot, different window, which is
+        /// exactly the state the guard is about.
+        ///
+        /// **The control is
+        /// [`a_drag_that_pauses_still_tells_its_client_where_it_stopped`],
+        /// which is this test without the adoption**: the same fixture, the
+        /// same two frames inside one interval, the same paused frame past it,
+        /// and there the configure does arrive. A test that only asserts
+        /// silence passes against a flush that was never going to fire, so the
+        /// slot is asserted here as well — the pane is still holding the offer
+        /// the throttle swallowed, which is the thing that would have been sent
+        /// to the wrong client.
+        #[test]
+        fn a_pane_given_a_different_client_is_not_flushed_through_the_old_one() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: at(400, 300, 300, 200),
+                at: (700.0, 500.0),
+                edges: ResizeEdge::Right,
+            };
+            state.begin_resize(&window);
+            // Two frames inside one interval: the first joins the bridge and
+            // goes out at once, the second is throttled and is what a trailing
+            // flush exists to send.
+            for (millis, width) in [(0, 300), (16, 340)] {
+                tiled_frame(
+                    &mut state,
+                    &request,
+                    pane,
+                    at(400, 300, width, 200),
+                    Duration::from_millis(millis),
+                );
+            }
+
+            // The pane's content is replaced. Its id and its slot are the same
+            // ones the hold is holding; the window inside it is not.
+            let (other, _other_toplevel, _other_surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state
+                .panes
+                .get_mut(pane)
+                .expect("the pane is still here")
+                .adopt(other);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            client.configures.clear();
+
+            // Past the interval, which is the frame the flush would fire on.
+            paused_frame(&mut state, Duration::from_millis(120));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            let id = wayland_client::Proxy::id(&toplevel);
+            assert!(
+                !client.configures.iter().any(|(sent_to, ..)| sent_to == &id),
+                "the window this hold remembers no longer owns the pane, so the \
+                 slot being flushed is not its rectangle to be told about. Got \
+                 {:?}",
+                client.configures
+            );
+            assert_eq!(
+                state
+                    .panes
+                    .get(pane)
+                    .expect("the pane is still here")
+                    .slot()
+                    .size,
+                Size::from((340, 200)),
+                "the control: the slot still carries the offer the throttle \
+                 swallowed, so there was something for the flush to send"
             );
         }
 

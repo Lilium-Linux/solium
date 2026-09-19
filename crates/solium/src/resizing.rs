@@ -92,6 +92,15 @@
 //! ask — treating it as one means kitty loses the configured fill on the first
 //! answer of every seam drag and gets [`Fill::Hold`]'s uncovered strip instead.
 //! [`ROUNDING`] is where the line is drawn and why it is drawn there.
+//!
+//! **And it is a line drawn afresh every frame, not once.** A client answers at
+//! the moment it answers and the drag goes on moving afterwards, so a verdict
+//! reached about the ask it replied to is out of date as soon as the pointer
+//! moves again: the pair the renderer stretches by has one end still
+//! travelling. [`SILENCE`] is how much benefit of the doubt that end is given,
+//! and it is the same trap from the other side — judged too early it takes the
+//! terminal's fill away, judged never it stretches a client that has walked off
+//! for the whole of a gesture.
 
 use std::time::Duration;
 
@@ -324,8 +333,24 @@ pub(crate) struct Hold {
     ///   as by two hundred.
     /// * [`Self::refused`] asks whether the mismatch is big enough to take the
     ///   user's configured fill away, and that is a different question with a
-    ///   different answer. See [`ROUNDING`].
+    ///   different answer, and it is asked of the ask the drag has reached
+    ///   rather than of this one once the client has stopped answering at all.
+    ///   See [`ROUNDING`] and [`SILENCE`].
     declined: Option<Size<i32, Logical>>,
+    /// How many configures have gone out since the client last said anything.
+    ///
+    /// Zero means it has answered everything it has been told, one is the
+    /// ordinary in-flight state of a client that is keeping up, and anything
+    /// more is silence across a whole [`TELL_EVERY`]. [`SILENCE`] is what reads
+    /// it and the whole of why.
+    ///
+    /// **Counted rather than timed**, and the count is the more direct of the
+    /// two: the throttle already spaces configures an interval apart, so
+    /// counting them counts intervals, and a duration would have to be threaded
+    /// through `Solium::resize_fill` into the renderer to be read at the one
+    /// place that asks. A release is deliberately not counted — see
+    /// [`Self::release`].
+    unanswered: u32,
 }
 
 /// How far a client's answer may miss the size it was offered and still count
@@ -376,6 +401,36 @@ const ROUNDING: i32 = 20;
 /// having.
 const CELL: i32 = 24;
 
+/// How many configures a client may leave unanswered before it is judged
+/// against the ask the drag has reached rather than the one it last replied to.
+///
+/// [`Hold::refused`] has to weigh the pair `render.rs` is actually stretching
+/// by — the rectangle the pane is drawing against the size the client last
+/// committed — and the first of those keeps moving for as long as the gesture
+/// does. Weighing the ask the client *answered* instead freezes the verdict at
+/// that answer, because [`Hold::note`] returns early when the client has
+/// committed nothing new: Firefox stops at its minimum width, answers one ask
+/// ten pixels off it, [`ROUNDING`] rightly calls that a rounding, and the
+/// verdict is then reasserted unchanged while the drag runs on another four
+/// hundred pixels. The stretch that bought is bounded only by the release and
+/// [`PATIENCE`], which is the permanent blur this module's documentation says
+/// shipped once already.
+///
+/// **Judging the live ask the moment it moves is the other wrong answer**, and
+/// it is the expensive one. The throttle sends a whole [`TELL_EVERY`] of travel
+/// in one step and the answer comes a frame or two later, so a client that is
+/// keeping up is an interval behind for those frames — every interval, on every
+/// drag. That would read as a refusal once per interval and put one frame of
+/// [`Fill::Hold`]'s deliberately uncovered strip on screen each time: the band
+/// of background [`ROUNDING`] exists to keep off a terminal's drags, back at
+/// ten hertz instead of for the whole gesture.
+///
+/// So the unit is the throttle's own. **One** unanswered configure is the
+/// ordinary state of a client that is keeping up, and **two** means a whole
+/// interval went by with nothing said at all — which is not a client that is a
+/// frame behind, and the ask it is not answering is the live one.
+const SILENCE: u32 = 2;
+
 /// Whether `given` is near enough to `asked` to be a rounding. See [`ROUNDING`].
 fn rounds(asked: Size<i32, Logical>, given: Size<i32, Logical>) -> bool {
     let near = |asked: i32, given: i32| {
@@ -418,6 +473,14 @@ impl Hold {
             told: now,
             released,
             declined: None,
+            // **One, not none.** Both callers send the configure this hold is
+            // being built around — `offers_first_size` returns `told` true
+            // beside it and `hold_resize` calls `size_window` on the line
+            // above — so a configure is already out and unanswered before the
+            // first frame this hold sees. Starting at zero would make the
+            // hold's own configure free and put the [`SILENCE`] verdict an
+            // interval late.
+            unanswered: 1,
         }
     }
 
@@ -475,6 +538,10 @@ impl Hold {
             return;
         }
         self.since = client;
+        // It has spoken, so whatever it was told before this is answered for
+        // and the count of intervals it has been silent for starts again. See
+        // [`SILENCE`].
+        self.unanswered = 0;
         if client == self.asked.size {
             // It took what it was offered, so whatever it declined earlier in
             // this gesture it is tracking now: a drag that went under Firefox's
@@ -518,6 +585,11 @@ impl Hold {
         }
         self.asked = wanted;
         self.told = now;
+        // One more the client owes an answer to. Saturating because the only
+        // thing a count this large could do is wrap back under [`SILENCE`] and
+        // hand a silent client its stretch back, and a hold that has sent four
+        // billion configures has been alive for thirteen years.
+        self.unanswered = self.unanswered.saturating_add(1);
         // `declined` is deliberately *not* cleared here. A new offer is not an
         // answer: what is on screen is still whatever the client last chose for
         // itself, and resuming the stretch on the strength of having asked
@@ -574,6 +646,14 @@ impl Hold {
     /// [`TELL_EVERY`] happened to land, the last thing the client hears has to
     /// be the rectangle the gesture actually ended on, or the window settles at
     /// the last throttled size and the final few pixels of the drag are lost.
+    ///
+    /// **Not counted against [`SILENCE`]**, though it is a configure like any
+    /// other. What that count is for is an ask running away from a client that
+    /// has stopped answering, and the ask stops running away here: from this
+    /// point [`Self::settle`] bounds the stretch at [`PATIENCE`] whatever the
+    /// client does. Counting it would only let a drag that ended in the few
+    /// milliseconds between a configure and its answer flash [`Fill::Hold`]'s
+    /// uncovered strip at the one moment the user is looking at the result.
     pub(crate) fn release(
         &mut self,
         wanted: Rectangle<i32, Logical>,
@@ -690,9 +770,27 @@ impl Hold {
     /// committed — rather than against a flag set at the time, so that a hold
     /// carried across a claimed/unclaimed flip carries its verdict with it
     /// instead of re-deriving one from state it no longer has.
+    ///
+    /// **And against the newest ask the client has had its say on, which is not
+    /// always the one it answered.** `since` and [`Self::declined`] are both
+    /// frozen by [`Self::note`]'s early return, so a client that answers once
+    /// and then says nothing again pins this verdict at the moment of that
+    /// answer while the drag — and the rectangle `render.rs` is stretching the
+    /// client's buffer into — walks away from it. Once the client has been
+    /// silent through a whole [`TELL_EVERY`] the live ask is what it is not
+    /// answering, and that is the pair to weigh. [`SILENCE`] is the whole of
+    /// why it is not weighed sooner: for a frame or two after every configure,
+    /// a client that is keeping up perfectly well looks exactly like one that
+    /// has stopped.
     pub(crate) fn refused(&self) -> bool {
-        self.declined
-            .is_some_and(|asked| !rounds(asked, self.since))
+        self.declined.is_some_and(|answered| {
+            let judged = if self.unanswered >= SILENCE {
+                self.asked.size
+            } else {
+                answered
+            };
+            !rounds(judged, self.since)
+        })
     }
 
     /// What actually fills the pane, given what the configuration asked for.
@@ -1320,6 +1418,127 @@ mod tests {
             "a rule that calls one character cell a refusal is the rule this \
              replaces"
         );
+    }
+
+    /// **A verdict about a pair that has stopped moving says nothing about the
+    /// pair the renderer is stretching by.**
+    ///
+    /// `refused` used to ask `rounds(declined, since)`, and `Hold::note`'s
+    /// `client == self.since` early return freezes *both* of those the moment
+    /// the client last spoke. Firefox has a minimum width, answers an ask of
+    /// 790 with 800, and [`ROUNDING`] quite rightly calls ten pixels a
+    /// rounding — a verdict that was correct about the ask it was made on and
+    /// is reasserted, unchanged, for every frame after it. The drag then runs
+    /// on to 400 with no second commit to notice, so the verdict never moves
+    /// and the pane goes on drawing a rectangle the client walked away from two
+    /// hundred pixels ago.
+    ///
+    /// **Both halves are asserted because they fail at different depths.**
+    /// `fill` is the verdict — what the trace's `refused=` column reports and
+    /// what #115's guard is — and it is wrong from the first frame of the
+    /// runaway. `factor` is the picture, and it is only wrong where
+    /// [`Fill::Hold`] has teeth: the element path cannot clip, so a *shrinking*
+    /// pane scales down under either fill and the two draw the same thing. The
+    /// growing half below is the one a user sees, and it is the same fault.
+    #[test]
+    fn a_client_that_answers_once_and_then_says_nothing_stops_stretching() {
+        // 850 wide, a left edge pulled in to 790, and 800 is as narrow as this
+        // client goes.
+        let mut hold = dragging(ResizeEdge::Left, size(850, 600), want(790, 600), ms(0));
+        assert_eq!(hold.settle(size(800, 600), ms(20)), Settle::Waiting);
+        assert!(
+            !hold.refused(),
+            "ten pixels off 790 is inside `ROUNDING`, and about the ask it was \
+             answering that is the right answer"
+        );
+
+        // The drag runs on. The client is at its minimum and commits nothing
+        // further, so `note` is never called with anything new again.
+        let mut at = ms(20);
+        for width in [700, 600, 500, 400] {
+            at += TELL_EVERY;
+            assert_eq!(
+                hold.dragged(want(width, 600), size(800, 600), at),
+                Some(want(width, 600)),
+                "the ask keeps moving even though the answer does not"
+            );
+            assert_eq!(hold.settle(size(800, 600), at + ms(16)), Settle::Waiting);
+        }
+        assert!(
+            hold.refused(),
+            "the pane is drawing 400 against a client stuck at 800, and a \
+             client that has been told four times and said nothing is not \
+             tracking the ask by four hundred pixels"
+        );
+        assert_eq!(
+            hold.fill(Fill::Stretch),
+            Fill::Hold,
+            "#115's guard is that a refusing client must not be stretched, and \
+             a guard that lasts one frame of a drag is not one"
+        );
+
+        // The same shape in the direction where the fill decides the picture: a
+        // terminal answers one ask a cell short — a rounding, correctly — and
+        // then stops answering while the drag grows the pane past it.
+        let mut hung = dragging(ResizeEdge::Right, size(400, 300), want(420, 300), ms(0));
+        assert_eq!(hung.settle(size(412, 292), ms(10)), Settle::Waiting);
+        assert!(!hung.refused(), "eight pixels is a cell, not a refusal");
+        for (width, at) in [(620, TELL_EVERY), (820, TELL_EVERY * 2)] {
+            assert_eq!(
+                hung.dragged(want(width, 300), size(412, 292), at),
+                Some(want(width, 300))
+            );
+        }
+        let (across, _) = factor(
+            Some(hung.fill(Fill::Stretch)),
+            size(820, 300).to_f64(),
+            size(412, 292),
+        );
+        assert!(
+            (across - 1.0).abs() < f64::EPSILON,
+            "a buffer drawn at twice its own size for the rest of a gesture is \
+             the blur this module was written to prevent; got {across}"
+        );
+    }
+
+    /// **The other side of [`SILENCE`]: a client that is still answering keeps
+    /// the stretch while it does.**
+    ///
+    /// The ask moves a whole [`TELL_EVERY`] of travel in one step and the
+    /// answer arrives a frame or two later, so a client that is keeping up
+    /// perfectly well is *always* an interval behind for those frames. Judging
+    /// the live ask the moment it moves would call that a refusal once per
+    /// interval, and one frame of [`Fill::Hold`] is one frame of its
+    /// deliberately uncovered strip — which is the band of background
+    /// [`ROUNDING`] exists to keep off a terminal's drags, back again at ten
+    /// hertz instead of for the whole gesture.
+    #[test]
+    fn a_terminal_that_is_still_answering_keeps_the_stretch_across_a_configure() {
+        // A 400-wide tile grown by a hundred pixels an interval, which is an
+        // ordinary flick of a seam at about a thousand pixels a second.
+        let mut hold = dragging(ResizeEdge::Right, size(400, 300), want(420, 300), ms(0));
+        assert_eq!(hold.settle(size(412, 292), ms(10)), Settle::Waiting);
+        assert!(!hold.refused());
+
+        assert_eq!(
+            hold.dragged(want(520, 300), size(412, 292), TELL_EVERY),
+            Some(want(520, 300))
+        );
+        assert!(
+            !hold.refused(),
+            "one configure in flight is what a client that is keeping up looks \
+             like on the frame it is sent: the hundred pixels between the ask \
+             and the answer are the throttle's, not the client's"
+        );
+        assert_eq!(hold.fill(Fill::Stretch), Fill::Stretch);
+
+        // And it answers, a cell short again, which is where it was all along.
+        assert_eq!(
+            hold.settle(size(512, 292), TELL_EVERY + ms(10)),
+            Settle::Waiting
+        );
+        assert!(!hold.refused());
+        assert_eq!(hold.fill(Fill::Stretch), Fill::Stretch);
     }
 
     /// Whatever the throttle did, the gesture always ends with a configure for
