@@ -319,13 +319,35 @@ impl XwmHandler for Solium {
             return;
         }
         self.map_stacked(element.clone(), (0, 0), true);
-        self.take_pane(element);
+        self.take_pane(element.clone());
+        // **X11's half of `refused_with_a_dialog`, and the place nearly every
+        // one of them arrives.** An application answering `WM_DELETE_WINDOW`
+        // with "save your changes?" creates the dialog with `WM_TRANSIENT_FOR`
+        // already set and then maps it, so the parent is readable here -- by
+        // the same guarantee this function's own note makes for the window
+        // type, and for the same reason: smithay reads every property at
+        // `CreateNotify`, which a `MapRequest` for the same window cannot
+        // precede. Without this an XWayland application's unsaved-changes
+        // prompt floated over a 1.19 s hole where its own document had been.
+        //
+        // The managed branch only. A window that places itself is a menu, a
+        // tooltip or a splash, and one of those appearing over a window that is
+        // closing says nothing about whether the close was refused -- it is not
+        // the answer to anything. `Dialog` is deliberately not in
+        // `places_itself` (see #72), so the windows this is about come here.
+        self.refused_with_a_dialog(&element);
     }
 
     /// A property changed on a window we already know about.
     ///
-    /// The window type is the only one anything here cares about, and only to
-    /// say so in the log. **A late type change does not re-classify.**
+    /// Two are read. `TransientFor` is a client saying whose dialog this is,
+    /// which is the evidence `Solium::refused_with_a_dialog` acts on; it is
+    /// taken here for the client that maps a window first and names its parent
+    /// afterwards, `map_window_request` having already covered the ordinary
+    /// order. The rest of this note is about the other one.
+    ///
+    /// The window type changes nothing, and is read only to say so in the log.
+    /// **A late type change does not re-classify.**
     ///
     /// That is a decision rather than an omission, because the type is an X11
     /// property and a client may write it whenever it likes. Three things
@@ -354,6 +376,21 @@ impl XwmHandler for Solium {
     /// last time a window type went unread, the only symptom was a menu in the
     /// wrong place and nothing in the log at all.
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
+        if property == WmWindowProperty::TransientFor {
+            // Cloned out of the space before the call, which needs `self`
+            // mutably. Not in the space means not mapped, and a window that has
+            // not appeared cannot be an answer to anything yet;
+            // `map_window_request` will read the property it is carrying.
+            let child = self
+                .space
+                .elements()
+                .find(|element| element.x11_surface() == Some(&window))
+                .cloned();
+            if let Some(child) = child {
+                self.refused_with_a_dialog(&child);
+            }
+            return;
+        }
         if property != WmWindowProperty::WindowType {
             return;
         }
