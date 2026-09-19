@@ -1332,9 +1332,19 @@ impl Solium {
     /// A pane with a client asks the space, which is the authority for a
     /// mapped window. A pane without one answers from its own slot — the
     /// layout's answer for it, and the only one there is.
-    pub(crate) fn pane_geometry(&self, pane: &Pane) -> Option<Rectangle<i32, Logical>> {
+    ///
+    /// **Total, and it always was.** Every arm below already ended in `Some`,
+    /// because every pane has a slot and a slot is always an answer. It
+    /// returned `Option` anyway, and twenty-odd callers wrote a bail for a
+    /// `None` that cannot happen — one of which, in `close_pane`, read as a
+    /// policy: a window the compositor cannot locate and therefore declines to
+    /// close. Dead code that describes a real-sounding case is worse than no
+    /// code, so the type says what the function does. `pane_outer_of` still
+    /// answers `Option`, because *that* question — is there a pane with this id
+    /// — really can be no.
+    pub(crate) fn pane_geometry(&self, pane: &Pane) -> Rectangle<i32, Logical> {
         let Some(window) = pane.client() else {
-            return Some(pane.slot());
+            return pane.slot();
         };
         // **While an edge is being dragged the slot outranks the client.**
         //
@@ -1352,7 +1362,7 @@ impl Solium {
         // or with anything else -- and on a deadline if it answers nothing.
         // See `crate::resizing`.
         if self.holding_resize(pane.id()) {
-            return Some(pane.slot());
+            return pane.slot();
         }
         // A client that has mapped and not yet answered the size it was asked
         // for has a window of no size at all. Taking the space's word for that
@@ -1361,8 +1371,8 @@ impl Solium {
         // blank gap between the scene and the client. The slot is what the
         // layout said, and it is still the truth. Same rule as `Panes::sync`.
         match self.real_geometry(window) {
-            Some(real) if real.size.w > 0 && real.size.h > 0 => Some(real),
-            _ => Some(pane.slot()),
+            Some(real) if real.size.w > 0 && real.size.h > 0 => real,
+            _ => pane.slot(),
         }
     }
 
@@ -1377,15 +1387,32 @@ impl Solium {
         size.w > 0 && size.h > 0 && self.has_content(window)
     }
 
-    /// A pane as drawn, frame included. Every presentation transform is
+    /// Where a pane *lives*, frame included. Every presentation transform is
     /// expressed against this.
-    pub(crate) fn pane_outer(&self, pane: &Pane) -> Option<Rectangle<i32, Logical>> {
-        Some(grown(self.pane_geometry(pane)?, self.insets_of(pane.id())))
+    ///
+    /// **Not "as drawn", which is what this used to say and has not been true
+    /// since #113.** Two things are wrong with that reading. Where a pane is
+    /// drawn is [`Self::drawn_at`] — this rectangle put through whatever
+    /// transform the pane is carrying — and the two differ by the whole of
+    /// every animation, every mode and every group shift; a closing window is
+    /// drawn shrunk and transparent at a rectangle this function knows nothing
+    /// about. And even as a statement about geometry it is wrong in the one
+    /// case it was written for: [`Self::pane_geometry`] returns the *dragged
+    /// slot* while a resize hold is live, which is deliberately a rectangle the
+    /// client has not agreed to and is not yet painting.
+    ///
+    /// What it is, is the rectangle transforms are expressed against and hit
+    /// tests are resolved in — the pane's real geometry grown by its frame.
+    pub(crate) fn pane_outer(&self, pane: &Pane) -> Rectangle<i32, Logical> {
+        grown(self.pane_geometry(pane), self.insets_of(pane.id()))
     }
 
     /// The same, for a caller that holds only the pane's id.
+    ///
+    /// `Option` here is the *lookup* failing, not the geometry: an id whose
+    /// pane has been retired has no rectangle because it has no pane.
     pub(crate) fn pane_outer_of(&self, id: crate::pane::PaneId) -> Option<Rectangle<i32, Logical>> {
-        self.pane_outer(self.panes.get(id)?)
+        Some(self.pane_outer(self.panes.get(id)?))
     }
 
     /// Where the *layout* has this pane, in the layout's outer space.
@@ -1430,9 +1457,9 @@ impl Solium {
     /// placing a window to say so, for a value nobody is reading.
     pub(crate) fn pane_laid_out(&self, window: &Window) -> Option<crate::input::resize::LaidOut> {
         let pane = self.panes.get(self.panes.id_of(window)?)?;
-        pane.placed()
-            .or_else(|| self.pane_outer(pane))
-            .map(crate::input::resize::LaidOut)
+        Some(crate::input::resize::LaidOut(
+            pane.placed().unwrap_or_else(|| self.pane_outer(pane)),
+        ))
     }
 
     /// How a pane is being drawn right now. Real geometry unless something is
@@ -1607,9 +1634,7 @@ impl Solium {
             let Some(pane) = self.panes.by_script_id(*id) else {
                 continue;
             };
-            let Some(outer) = self.pane_outer(pane) else {
-                continue;
-            };
+            let outer = self.pane_outer(pane);
             present::rebase(pane, outer, *by, now, animation.duration, animation.easing);
         }
         self.redraw = true;
@@ -1639,7 +1664,7 @@ impl Solium {
             present::Anchor::Rect(rect) => rect,
             present::Anchor::Pane(id) => {
                 let pane = self.panes.by_script_id(id)?;
-                self.drawn(pane.id(), self.pane_outer(pane)?).rect
+                self.drawn(pane.id(), self.pane_outer(pane)).rect
             }
             // The monitor in front of the user, and the primary one when there
             // is no pointer yet. Not "the first output that answers": that is
@@ -1714,7 +1739,7 @@ impl Solium {
 
     /// Whether the pointer is over a pane, frame included.
     pub(crate) fn pointer_over(&self, id: crate::pane::PaneId) -> bool {
-        let Some(outer) = self.panes.get(id).and_then(|pane| self.pane_outer(pane)) else {
+        let Some(outer) = self.pane_outer_of(id) else {
             return false;
         };
         let Some(pointer) = self.seat.get_pointer() else {
@@ -2423,7 +2448,7 @@ impl Solium {
                 if !pane.managed() {
                     return None;
                 }
-                let outer = self.pane_outer(pane)?;
+                let outer = self.pane_outer(pane);
                 let drawn = self.drawn_at(pane, outer, now);
                 Some(WindowInfo {
                     id: pane.id().get(),
@@ -2722,9 +2747,7 @@ impl Solium {
                     let Some(pane) = self.panes.by_script_id(id) else {
                         continue;
                     };
-                    let Some(outer) = self.pane_outer(pane) else {
-                        continue;
-                    };
+                    let outer = self.pane_outer(pane);
                     let target = Frame {
                         matrix: matrix.unwrap_or(crate::mat4::Mat4::IDENTITY),
                         rect: rect.map_or_else(
@@ -2761,9 +2784,7 @@ impl Solium {
                     let Some(pane) = self.panes.by_script_id(id) else {
                         continue;
                     };
-                    let Some(outer) = self.pane_outer(pane) else {
-                        continue;
-                    };
+                    let outer = self.pane_outer(pane);
                     let start = Frame {
                         matrix: crate::mat4::Mat4::IDENTITY,
                         rect: present::logical((rect.x, rect.y), (rect.w, rect.h)),
@@ -2794,9 +2815,7 @@ impl Solium {
                     let Some(pane) = self.panes.by_script_id(id) else {
                         continue;
                     };
-                    let Some(outer) = self.pane_outer(pane) else {
-                        continue;
-                    };
+                    let outer = self.pane_outer(pane);
                     present::clear(pane, outer, now, animation.duration, animation.easing);
                 }
                 Command::Focus { id } => {
@@ -3010,7 +3029,7 @@ impl Solium {
             self.panes
                 .iter()
                 .filter(|pane| pane.managed())
-                .filter_map(|pane| Some(self.drawn_at(pane, self.pane_outer(pane)?, landed).rect)),
+                .map(|pane| self.drawn_at(pane, self.pane_outer(pane), landed).rect),
             &screens,
         )
     }
@@ -3121,9 +3140,7 @@ impl Solium {
         location: Point<f64, Logical>,
         now: std::time::Duration,
     ) -> PaneHit<Under> {
-        let Some(outer) = self.pane_outer(pane) else {
-            return PaneHit::Miss;
-        };
+        let outer = self.pane_outer(pane);
         let drawn = self.drawn_at(pane, outer, now);
         let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
 
@@ -3201,7 +3218,7 @@ impl Solium {
             return;
         };
         // Captured before anything moves: this is where the animation starts.
-        let Some(was) = self.panes.get(pane).and_then(|held| self.pane_outer(held)) else {
+        let Some(was) = self.pane_outer_of(pane) else {
             return;
         };
 
@@ -3282,7 +3299,61 @@ impl Solium {
             held.set_placed(outer);
         }
 
-        if let Some(held) = self.panes.get(pane) {
+        // **And the transform, unless this pane is leaving.**
+        //
+        // `present::from` is released on arrival and aimed at `Frame::real` —
+        // full size, full opacity — which is right for every pane that is
+        // staying and is the whole of issue #127's first fault for one that is
+        // not. `Pane::closing_at` had three readers and this was not one of
+        // them, so any layout sweep inside the 190ms `CLOSING` window put the
+        // dying window back at full opacity, released the transform, and left
+        // it to vanish with no animation at all. A sweep inside that window is
+        // not exotic: another window opening, a layer surface's first
+        // configure, a GTK4 `set_parent` or `set_modal` each cause one.
+        //
+        // **What a closing pane does when the layout moves it: it animates out
+        // from where it was.** The slot moves under it and the transform does
+        // not follow, so the window shrinks and fades at the rectangle it was
+        // closed at while its neighbours reflow around the space it is about to
+        // give up. The alternative — sliding to the new slot while fading —
+        // was rejected on three counts.
+        //
+        // * It animates towards a place the window will never occupy. The pane
+        //   is retired within `CLOSING` plus whatever the client takes, so the
+        //   destination is a fiction, and it pulls the eye away from the window
+        //   the user just acted on.
+        // * `present::close` computes its target *once*, from the frame at the
+        //   instant of the press. Following the layout means recomputing that
+        //   target on every sweep, and a sweep can run once a frame —
+        //   `tiling.lua` runs `tiling.apply` per frame for the whole of a seam
+        //   drag. Restarting a 190ms easing at 60Hz is an animation that never
+        //   finishes, which is the shape of the defect being fixed here.
+        // * The close transform already owns this pane's presentation for the
+        //   rest of its life, deliberately: `present::close` is the one
+        //   transform written with `release: false`, so that the window stays
+        //   invisible between the animation landing and the client acting. The
+        //   layout is not the authority over where a leaving pane is *drawn*,
+        //   and this line was the only place that said otherwise.
+        //
+        // The cost is that a closing window can overlap the one moving into its
+        // space for up to 190ms. It is shrinking and fading throughout, so what
+        // that reads as is the window dissolving with its replacement arriving
+        // underneath — against a full-opacity snap followed by nothing, which
+        // is what shipped.
+        //
+        // **Only the transform is suppressed.** The slot, `Pane::placed` and
+        // the client's own configure above all still happen: the layout is
+        // still right about where this pane lives, `sync_panes` still has to
+        // agree with the space, and #124 reads `placed`.
+        //
+        // Note what needs no guard. `present::rebase` — the group path — is
+        // safe for a leaving pane by construction: it preserves both the
+        // destination and the release flag, so a closing transform rebased by a
+        // workspace slide is still a closing transform. It is this function's
+        // unconditional `from` that was the exception.
+        if let Some(held) = self.panes.get(pane)
+            && !held.leaving()
+        {
             present::from(
                 held,
                 outer,
@@ -3648,9 +3719,7 @@ impl Solium {
         }
         let now = self.clock.now();
         for pane in self.panes.iter().rev() {
-            let Some(outer) = self.pane_outer(pane) else {
-                continue;
-            };
+            let outer = self.pane_outer(pane);
             if !self.drawn_at(pane, outer, now).rect.contains(location) {
                 continue;
             }
@@ -3710,9 +3779,7 @@ impl Solium {
         let now = self.clock.now();
 
         for pane in self.panes.iter().rev() {
-            let Some(outer) = self.pane_outer(pane) else {
-                continue;
-            };
+            let outer = self.pane_outer(pane);
             let frame = self.drawn_at(pane, outer, now);
             if !frame.rect.contains(location) {
                 continue;
@@ -3781,7 +3848,11 @@ impl Solium {
     /// binding, a script. A client that exits on its own still vanishes
     /// instantly: by the time we hear about it its surface is gone, and
     /// animating it would mean holding a snapshot of every window on the
-    /// chance that it might be the next to leave.
+    /// chance that it might be the next to leave. That is issue #126.
+    ///
+    /// **Asked at most once per window.** See [`Pane::leaving`] for the three
+    /// states that answer it, and why the narrower question this used to ask
+    /// was wrong for most of the time a window spends leaving.
     pub(crate) fn close_pane(&mut self, id: crate::pane::PaneId) {
         // The pane is looked up before the "already leaving" guard rather than
         // after it, which the `closing` map could not do. Same answer either
@@ -3791,12 +3862,24 @@ impl Solium {
         let Some(pane) = self.panes.get(id) else {
             return;
         };
-        if pane.closing_at().is_some() {
+        // **The guard was widened rather than the write order changed**, and
+        // the two are not alternatives to each other. `settle_closing` clears
+        // `closing_at` before it stamps `asked_at`, so swapping those two lines
+        // closes a gap of a few statements that nothing can press a key inside
+        // -- while leaving the whole of the grace period after them, which is
+        // *hundreds of milliseconds of an invisible window*, answering "not
+        // closing". That is the window a second `super+q` actually lands in,
+        // and only the predicate closes it. Ordering is now irrelevant here
+        // either way, which is worth more than picking one: `leaving` is true
+        // across the whole transition however those two writes are arranged.
+        if pane.leaving() {
             return;
         }
-        let Some(outer) = self.pane_outer(pane) else {
-            return;
-        };
+        // No `let else`. `pane_outer` answers for every pane there is -- see
+        // its own documentation -- and the bail that used to be here was dead
+        // code that read as a real case: a window the compositor cannot
+        // *locate* and therefore declines to close.
+        let outer = self.pane_outer(pane);
         let now = self.clock.now();
         present::close(pane, outer, now);
         if let Some(pane) = self.panes.get_mut(id) {
@@ -3834,11 +3917,6 @@ impl Solium {
                 }
                 continue;
             };
-            // A request, not a kill: the client decides whether it can close,
-            // and the window goes away when it does. Either protocol -- an X11
-            // window was previously animated away and then asked *nothing*, so
-            // it never closed and never came back. From the other side of the
-            // screen that is a window that vanished.
             // A request, not a kill: the client decides whether it can close,
             // and the window goes away when it does. Either protocol -- an X11
             // window used to be animated away and then asked *nothing*, so it
@@ -5003,14 +5081,52 @@ impl Solium {
     /// session that lost it.
     ///
     /// There is no refusal in the protocol, so the only evidence is the window
-    /// still being here a moment later. It comes back.
+    /// still being here a moment later. It comes back, fading up out of the
+    /// frame it was left at rather than snapping -- `present::clear` starts
+    /// from what is on screen, which here is the held, shrunk, transparent end
+    /// of the leaving animation, so the recovery is that animation run
+    /// backwards.
     ///
     /// Returns whether anything is still being waited on.
     pub(crate) fn settle_refused(&mut self, now: std::time::Duration) -> bool {
-        /// Long enough that a client which is closing is not interrupted part
-        /// way; short enough that coming back reads as an answer to the press
-        /// rather than as a window reappearing by itself.
-        const GRACE: std::time::Duration = std::time::Duration::from_millis(400);
+        /// How long a client has to act on the request before the compositor
+        /// decides it is not going to and gives the window back.
+        ///
+        /// **A deadline on refusal, and it was set as though it were a deadline
+        /// on slowness.** At 400ms this fired on clients that were doing
+        /// exactly what they had been asked: Electron runs `before-quit`
+        /// handlers on the main JS thread, the JVM runs window listeners behind
+        /// class loading, Firefox flushes its session store, and all three
+        /// routinely take longer than that between receiving
+        /// `xdg_toplevel.close` and destroying the toplevel. What the user saw
+        /// on an ordinary, successful close was the window fade away, fade back
+        /// in, and then vanish with no animation at all when the client finally
+        /// went. That is issue #127's third fault, and the fix is not a bigger
+        /// number for its own sake -- it is that the number was measuring the
+        /// wrong thing.
+        ///
+        /// **The two costs are not symmetric.** Too short, and every slow-but-
+        /// honest close flickers; that is the common case and the user sees it
+        /// daily. Too long, and a window that really did refuse stays invisible
+        /// for longer -- but it *does* still come back, so the cost is a wait
+        /// rather than a loss. The recoverable failure is the one to take.
+        ///
+        /// **The upper bound is human, not arithmetic.** A window returning
+        /// within about a second still reads as the answer to the key that was
+        /// pressed; past that it reads as the session doing something by
+        /// itself, which is the confusion the original comment here named and
+        /// was right to name. A second is therefore the largest value that
+        /// serves the purpose, so it is the value.
+        ///
+        /// What is *not* done, deliberately: closing early on the evidence that
+        /// a client is honouring the request -- `Self::has_content` goes false
+        /// as a client tears its surface down, which distinguishes "closing" from
+        /// "refusing" far better than any timeout can. It would be a real
+        /// improvement and it is not this change: getting it wrong in the
+        /// direction of "this client is closing" means never bringing the
+        /// window back at all, and this deadline is the only thing standing
+        /// between a refused close and a lost window.
+        const GRACE: std::time::Duration = std::time::Duration::from_millis(1000);
 
         // Over the panes, for the reason `settle_closing` is: a window that
         // has gone is a window that answered, and there is nothing left of it
@@ -5034,9 +5150,7 @@ impl Solium {
             let Some(pane) = self.panes.get(id) else {
                 continue;
             };
-            let Some(outer) = self.pane_outer(pane) else {
-                continue;
-            };
+            let outer = self.pane_outer(pane);
             tracing::debug!(
                 pane = id.get(),
                 "a window refused to close; bringing it back"
@@ -5234,7 +5348,7 @@ impl Solium {
             // Only a built frame is listening. There is no scene to tell about
             // the pointer until there is one.
             pane.decoration()?;
-            let outer = self.pane_outer(pane)?;
+            let outer = self.pane_outer(pane);
             let drawn = self.drawn_at(pane, outer, now);
             if !drawn.rect.contains(location) {
                 return None;
@@ -5509,14 +5623,14 @@ impl Solium {
                 window
                     .wl_surface()
                     .is_some_and(|owned| owned.as_ref() == surface)
-                    && self.pane_outer(pane).is_some_and(|outer| {
-                        let drawn = self.drawn_at(pane, outer, now).rect;
+                    && {
+                        let drawn = self.drawn_at(pane, self.pane_outer(pane), now).rect;
                         self.space.outputs().any(|output| {
                             self.space
                                 .output_geometry(output)
                                 .is_some_and(|geometry| geometry.to_f64().overlaps(drawn))
                         })
-                    })
+                    }
             })
         })
     }
@@ -6154,7 +6268,7 @@ impl Solium {
             .panes
             .iter()
             .filter_map(|pane| {
-                let outer = self.pane_outer(pane)?;
+                let outer = self.pane_outer(pane);
                 screens
                     .iter()
                     .all(|screen| !screen.overlaps(outer))
@@ -8829,6 +8943,16 @@ mod tests {
             /// compositor that sends the same size sixty times a second looks
             /// identical from its own side and costs nothing on the wire.
             configures: Vec<(wayland_client::backend::ObjectId, i32, i32)>,
+            /// Every `xdg_toplevel.close` this client has been sent, with the
+            /// toplevel it was sent to.
+            ///
+            /// Counted here for the same reason `configures` is: `send_close`
+            /// is a call the server makes into Smithay, and from the server's
+            /// own side a compositor that asks twice looks exactly like one
+            /// that asks once. Issue #127's second fault is precisely a second
+            /// request going out, so the only honest place to count is the end
+            /// that receives them.
+            closes: Vec<wayland_client::backend::ObjectId>,
         }
 
         impl Dispatch<wl_registry::WlRegistry, ()> for Client {
@@ -8867,12 +8991,22 @@ mod tests {
         wayland_client::delegate_noop!(Client: ignore xdg_surface::XdgSurface);
         wayland_client::delegate_noop!(Client: ignore wl_callback::WlCallback);
 
-        /// The one event this fixture does not ignore. See [`Client::configures`].
+        /// The two events this fixture does not ignore. See
+        /// [`Client::configures`] and [`Client::closes`].
         ///
-        /// Deliberately not acked: `ToplevelSurface::send_pending_configure`
-        /// compares against the last configure it *sent*, not the last one a
-        /// client acknowledged, so a fixture that never acks still sees exactly
-        /// the deduplication a real client would.
+        /// Configures are deliberately not acked:
+        /// `ToplevelSurface::send_pending_configure` compares against the last
+        /// configure it *sent*, not the last one a client acknowledged, so a
+        /// fixture that never acks still sees exactly the deduplication a real
+        /// client would.
+        ///
+        /// A close is deliberately not acted on either, and that is the whole
+        /// of what makes this client a stand-in for a slow one. `close` is a
+        /// request with no reply in the protocol; a client honours it by
+        /// destroying its toplevel, and one that has not done so *yet* is
+        /// indistinguishable from one that has decided not to. This fixture
+        /// never destroys anything, so it is both — which is what issue #127's
+        /// third fault is about.
         impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Client {
             fn event(
                 state: &mut Self,
@@ -8882,10 +9016,14 @@ mod tests {
                 _conn: &Connection,
                 _qh: &QueueHandle<Self>,
             ) {
-                if let xdg_toplevel::Event::Configure { width, height, .. } = event {
-                    state
+                match event {
+                    xdg_toplevel::Event::Configure { width, height, .. } => state
                         .configures
-                        .push((wayland_client::Proxy::id(toplevel), width, height));
+                        .push((wayland_client::Proxy::id(toplevel), width, height)),
+                    xdg_toplevel::Event::Close => {
+                        state.closes.push(wayland_client::Proxy::id(toplevel));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -9709,9 +9847,7 @@ mod tests {
                  is true and the client's own size is stretched into it for ever"
             );
             assert_eq!(
-                state
-                    .pane_geometry(state.panes.get(pane).expect("the pane is still here"))
-                    .expect("a mapped pane has a rectangle"),
+                state.pane_geometry(state.panes.get(pane).expect("the pane is still here")),
                 state
                     .real_geometry(&window)
                     .expect("a mapped window has a rectangle"),
@@ -10392,9 +10528,7 @@ mod tests {
                  answered there would be no disagreement to test"
             );
             let geometry = |state: &Solium| {
-                state
-                    .pane_geometry(state.panes.get(pane).expect("the pane is still here"))
-                    .expect("a mapped pane has a rectangle")
+                state.pane_geometry(state.panes.get(pane).expect("the pane is still here"))
             };
             assert_eq!(
                 geometry(&state),
@@ -11721,6 +11855,314 @@ mod tests {
                 "a pane a live gesture moved is bridged whether or not the \
                  space can say where its client was: without a hold nothing \
                  throttles it and nothing ever ends it"
+            );
+        }
+
+        /// A window opened, mapped at a known place, and known to the panes.
+        ///
+        /// The three closing tests below all start here, and all three need a
+        /// *real* client rather than a loading pane: `settle_closing` removes a
+        /// pane with no client outright — "the one case where closing is
+        /// entirely ours to decide" — so a fixture without one never reaches
+        /// `send_close`, never stamps `asked_at`, and so cannot see either of
+        /// the two faults that live after the request goes out.
+        fn opened_at(
+            display: &mut Display<Solium>,
+            state: &mut Solium,
+            conn: &Connection,
+            client: &Client,
+            qh: &QueueHandle<Client>,
+            place: (i32, i32),
+        ) -> (Window, crate::pane::PaneId) {
+            let (window, _toplevel) = open_window(display, state, conn, client, qh);
+            state.map_stacked(window.clone(), place, false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            (window, pane)
+        }
+
+        /// How this pane is drawn at `now`, through the same call the renderer
+        /// makes.
+        fn drawn_now(state: &Solium, pane: crate::pane::PaneId, now: Duration) -> Frame {
+            let outer = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
+            state.drawn_id_at(pane, outer, now)
+        }
+
+        /// **Issue #127, fault 1: a layout sweep during a close put the dying
+        /// window back at full opacity, and it then vanished with no
+        /// animation.**
+        ///
+        /// `Pane::closing_at` had three production readers and `move_pane` was
+        /// not one of them, so the unconditional `present::from` at the end of
+        /// every placement overwrote the closing transform with a *released*
+        /// one aimed at `Frame::real` — full size, full opacity. Any sweep
+        /// inside the 190 ms `CLOSING` window did it, and a sweep inside that
+        /// window is ordinary: another window opening, a layer surface's first
+        /// configure, a GTK4 `set_parent`. That is the "sometimes close
+        /// animations does not even play" the issue was filed for.
+        ///
+        /// **Three assertions, and they are three different claims.** The
+        /// opacity is the fault itself. The position is the *decision* — a
+        /// closing pane animates out from where it was, and does not slide to
+        /// the slot the layout has just given it; see `move_pane`, which argues
+        /// it. And `placed` is the half that must keep working: only the
+        /// transform is suppressed, the layout's bookkeeping is untouched, and
+        /// #124 reads `placed`.
+        #[test]
+        fn a_layout_sweep_does_not_cancel_a_close_that_is_already_playing() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (_window, pane) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (400, 300));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            let was = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
+            // Sampled before the call, which samples it again for itself: the
+            // gap is microseconds and every instant below is offset by enough
+            // milliseconds that it cannot matter.
+            let pressed = state.clock.now();
+            state.close_pane(pane);
+            assert!(
+                drawn_now(&state, pane, pressed + Duration::from_millis(95)).opacity < 0.9,
+                "the close animation is under way; if it were not, nothing \
+                 below is testing anything"
+            );
+
+            // The sweep. A window opening on the other half of the screen is
+            // the commonest way to get one, and `tiling.apply` re-places every
+            // leaf on every visible monitor — including this one, which is
+            // still in the tree because its client has not gone yet.
+            let elsewhere = at(1000, 300, 64, 64);
+            state.move_pane(
+                pane,
+                elsewhere,
+                was,
+                AnimationSpec::default(),
+                pressed + Duration::from_millis(95),
+            );
+
+            let landed = drawn_now(&state, pane, pressed + Duration::from_millis(400));
+            assert!(
+                landed.opacity.abs() < f32::EPSILON,
+                "a pane the layout moved mid-close must still finish its \
+                 close: it was drawn at opacity {} instead",
+                landed.opacity
+            );
+            // 400 + 64 * (1 - 0.86) / 2: `Frame::scaled` is about the centre,
+            // so the shrunk rectangle sits inside the one the window was
+            // closed at. The claim is which of the two places it is near, and
+            // 600 logical pixels separate them.
+            assert!(
+                landed.rect.loc.x < 500.0,
+                "a closing pane animates out from where it was, not from the \
+                 slot it will never occupy: it was drawn at x={}",
+                landed.rect.loc.x
+            );
+
+            let placed = state
+                .panes
+                .get(pane)
+                .and_then(Pane::placed)
+                .expect("the sweep placed this pane");
+            assert_eq!(
+                placed, elsewhere,
+                "only the transform is suppressed. The layout's own answer is \
+                 still written, because the layout is still right about where \
+                 this pane lives and #124 reads it"
+            );
+        }
+
+        /// **Issue #127, fault 2: a second close restarted an invisible
+        /// animation and sent a second `send_close`.**
+        ///
+        /// `close_pane`'s guard was `closing_at().is_some()`, and
+        /// `settle_closing` clears `closing_at` before it stamps `asked_at` —
+        /// so from the moment the request goes out until `settle_refused` gives
+        /// up on it, a pane already on its way out answered "not closing" to
+        /// the one question that was asked about it. A second `super+q` in that
+        /// window restarted `present::close` from the held opacity-0 frame
+        /// (invisible to invisible, so nothing to see) and asked the client
+        /// again.
+        ///
+        /// Asking twice is not harmless. A client showing "save your work?" is
+        /// a client that received the first request and is acting on it; a
+        /// second one is a second dialog.
+        #[test]
+        fn a_second_close_inside_the_grace_neither_restarts_nor_asks_again() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (_window, pane) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (400, 300));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert!(
+                client.closes.is_empty(),
+                "opening a window asks nothing to close"
+            );
+
+            let pressed = state.clock.now();
+            state.close_pane(pane);
+            let asked = pressed + present::CLOSING + Duration::from_millis(10);
+            state.settle_closing(asked);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(client.closes.len(), 1, "the press asked, once");
+            assert!(
+                drawn_now(&state, pane, asked).opacity.abs() < f32::EPSILON,
+                "and the window is held invisible while the client decides, \
+                 which is what makes a second press invisible too"
+            );
+
+            // The second `super+q`, well inside the grace period. There is
+            // nothing on screen for the user to have aimed it at, which is
+            // exactly why it happens: the window went and the client has not.
+            state.close_pane(pane);
+            assert!(
+                state.panes.get(pane).and_then(Pane::closing_at).is_none(),
+                "a pane already on its way out must not have its animation \
+                 restarted -- and restarting it from an invisible frame to an \
+                 invisible frame is 190ms of nothing"
+            );
+
+            // Far enough past a second `CLOSING` that a restarted timer would
+            // have come due and sent its request.
+            state.settle_closing(asked + present::CLOSING + Duration::from_millis(10));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.closes.len(),
+                1,
+                "and the client is asked once per window, not once per press"
+            );
+        }
+
+        /// **Issue #127, fault 3: a slow client faded out, faded back in, then
+        /// popped.**
+        ///
+        /// `settle_refused` measures its grace from the instant the request
+        /// went out and brings the window back when it expires. At 400 ms that
+        /// is not a deadline on *refusal* — it is a deadline on slowness, and
+        /// Electron's `before-quit`, the JVM's window listeners and Firefox's
+        /// session flush all run past it. What the user saw was the window fade
+        /// away, come back, and then vanish with no animation at all when the
+        /// client finally did close.
+        ///
+        /// **Written against a client latency, not against the constant.** 600
+        /// ms is the claim: a client that takes that long to honour a close is
+        /// never shown again. A test that restated `GRACE` would pass at any
+        /// value including the one that caused the bug — this fails for every
+        /// grace period shorter than 600 ms, whatever it is called.
+        ///
+        /// **And the other direction, in the same test**, because the recovery
+        /// is right and deleting it would otherwise turn this green: a window
+        /// that never answers is still brought back, and soon enough that it
+        /// reads as an answer to the press. Together the two halves pin the
+        /// grace period into a range rather than onto a number.
+        #[test]
+        fn a_client_that_takes_six_hundred_milliseconds_to_close_is_never_shown_again() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (_window, pane) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (400, 300));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            let pressed = state.clock.now();
+            state.close_pane(pane);
+            let asked = pressed + present::CLOSING + Duration::from_millis(10);
+            state.settle_closing(asked);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(client.closes.len(), 1, "the request went out");
+
+            /// What a heavy client costs between receiving `xdg_toplevel.close`
+            /// and destroying its toplevel. The fixture's client never destroys
+            /// anything, so this is simply how long the test waits before
+            /// declaring the window safely gone.
+            const SLOW: Duration = Duration::from_millis(600);
+            /// A frame at 60Hz. The fault is a frame the user can see, so the
+            /// assertion is made at the rate frames are drawn.
+            const FRAME: Duration = Duration::from_millis(16);
+
+            /// By when a window that never answers must be back on screen and
+            /// fully opaque. Not arithmetic: it is the span in which a window
+            /// reappearing still reads as caused by the press rather than as
+            /// the session doing something by itself, and it has to cover the
+            /// recovery's own fade as well as the wait before it.
+            const LOST: Duration = Duration::from_millis(1500);
+
+            let mut waited = Duration::ZERO;
+            // The loop that ships: `Solium::settle` calls this once a frame.
+            // Sampling the frame at the same instant is what makes the
+            // assertion about what is on screen rather than about a timer.
+            while waited <= LOST {
+                let now = asked + waited;
+                state.settle_refused(now);
+                let opacity = drawn_now(&state, pane, now).opacity;
+                if waited <= SLOW {
+                    assert!(
+                        opacity.abs() < f32::EPSILON,
+                        "{}ms after the request the window was drawn at opacity \
+                         {opacity}; a client this slow is closing, not \
+                         refusing, and bringing it back means fade out, fade \
+                         in, pop",
+                        waited.as_millis()
+                    );
+                }
+                waited += FRAME;
+            }
+
+            // And the other direction. The recovery is right and must survive:
+            // a window animated away that then refuses to close would
+            // otherwise be invisible and alive, holding its place in the
+            // layout, with nothing to bring it back.
+            let back = drawn_now(&state, pane, asked + LOST).opacity;
+            assert!(
+                (back - 1.0).abs() < f32::EPSILON,
+                "a window that never answers is still brought back, and within \
+                 a second and a half of being asked: it was drawn at opacity \
+                 {back}"
             );
         }
     }
