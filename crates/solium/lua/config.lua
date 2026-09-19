@@ -383,8 +383,13 @@ local defaults = {
         -- overrides this, because that is set per run.
         scene = "window",
         -- How long to keep a window open for an application that never
-        -- arrives, in milliseconds. After that it closes, exactly as if you
-        -- had closed it, and the layout is told.
+        -- arrives, in milliseconds. After that the window is taken away and
+        -- the layout is told.
+        --
+        -- Not the same as closing it yourself, which this used to claim. A
+        -- close you ask for plays the leaving animation first and asks the
+        -- application afterwards; there is no application here to ask, so the
+        -- window is simply removed and goes without one.
         patience = 8000,
         -- Whether it takes its place in the layout straight away. With this
         -- off, the other windows only move aside once the application is
