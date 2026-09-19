@@ -10,6 +10,10 @@ local config = require("config")
 -- everything else. All of them take effect immediately when reloaded.
 sol.pane(config.pane)
 sol.loading(config.loading)
+-- What fills a window while a resize drag is ahead of its client. An absent
+-- table is not an error: a `config.lua` copied before this setting existed
+-- keeps the default rather than failing the whole configuration.
+sol.resize(config.resize)
 -- Where the monitors go. Applied on reload too, so moving a screen in the
 -- configuration is `super+shift+r` rather than logging out.
 sol.keyboard(config.keyboard)

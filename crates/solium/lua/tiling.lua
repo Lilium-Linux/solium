@@ -273,20 +273,50 @@ end)
 -- window does not have one: the space is divided, and dragging an edge moves
 -- where the division falls. Returning a command tells the compositor we took
 -- it, so it does not also resize the window directly.
-sol.on("resize", function(id, x, y, horizontal, vertical)
+--
+-- `edge_x` and `edge_y` are where the dragged edge should come to rest, one
+-- per axis, in the same coordinates `tree:layout` hands back and `sol.place`
+-- takes. Not where the pointer is, which is what this used to be handed: a
+-- seam set from the cursor lands under the cursor, so a drag begun anywhere
+-- but exactly on the edge threw that edge across to the cursor on its first
+-- frame. `super` plus the right button begins a resize from the *middle* of a
+-- window, so there the throw was most of a window wide. That is #124, and the
+-- fix is entirely on the compositor's side of this call -- the arithmetic here
+-- and in `drag_seam` is unchanged, and is simply given a relative target now.
+--
+-- `horizontal_side` and `vertical_side` are the *sides* the pointer has hold
+-- of -- "left" or "right", "top" or "bottom", and nil for an axis that is not
+-- being dragged. Named for the side and not the axis because the value is a
+-- side: `horizontal` holding "left" invites the reader to test it as a
+-- boolean, which is the very mistake below.
+-- They were plain booleans until #120, and a boolean is not enough to
+-- choose a seam with: a window that is the right-hand child of a vertical
+-- split has that split's seam on its *left*, so "the horizontal axis is in
+-- play" moved that seam for a drag on the window's right edge. The far side
+-- jumped 209 pixels and the side under the pointer did not move at all.
+-- Passed straight through, because the side is exactly what `drag_seam` wants
+-- and the compositor knew it all along.
+sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side)
     if not tiling.active then
         return
     end
     local monitor = monitors.of(id)
     local tree = tree_for(monitor)
-    -- The seam goes where the pointer is. Not where it moved to: a delta would
-    -- be measured against a layout this very drag just changed, and the windows
-    -- would shake for as long as the button was held.
-    if horizontal then
-        tree:drag_seam(id, "width", x, y, options(monitor))
+    -- The seam goes where the dragged edge goes. Still a position and not a
+    -- delta: a delta would be measured against a layout this very drag just
+    -- changed, and the windows would shake for as long as the button was held.
+    -- The position is relative to the grab all the same, because the
+    -- compositor derives it from the rectangle the drag has produced.
+    --
+    -- Both arms can run: a corner drag is two drags, one seam per axis. Each
+    -- gets its own edge -- `edge_x` for the vertical seam, `edge_y` for the
+    -- horizontal one -- and `drag_seam` reads only the one its side names, so
+    -- neither axis can borrow the other's.
+    if horizontal_side then
+        tree:drag_seam(id, horizontal_side, edge_x, edge_y, options(monitor))
     end
-    if vertical then
-        tree:drag_seam(id, "height", x, y, options(monitor))
+    if vertical_side then
+        tree:drag_seam(id, vertical_side, edge_x, edge_y, options(monitor))
     end
     -- Placed immediately. An animation would be chasing the pointer, and the
     -- pointer wins.
@@ -297,26 +327,56 @@ sol.bind("super+t", tiling.toggle)
 
 -- Move the seam this window sits on. Everything on the far side stays put,
 -- which is the property a tree has and a recomputed arrangement does not.
-sol.bind("super+minus", function()
-    local focused = nil
+--
+-- The axis is named, where a drag names a side: a keypress says "wider", not
+-- which neighbour gives up the room, so `tree:resize` prefers the seam on the
+-- right or below and falls back to the other one. Before #120 it moved the
+-- window's immediate parent, and in an ordinary four-window dwindle every
+-- leaf's parent is a horizontal split -- so "wider" reached the centre
+-- vertical seam in no arrangement at all and quietly changed the height.
+local function focused_window()
     for _, window in ipairs(sol.windows()) do
-        if window.focused then focused = window.id end
+        if window.focused then return window.id end
     end
-    if focused then
-        tree_for(monitors.of(focused)):resize(focused, -0.05)
-        tiling.apply(config.tiling.snap)
-    end
-end)
+    return nil
+end
 
-sol.bind("super+equal", function()
-    local focused = nil
-    for _, window in ipairs(sol.windows()) do
-        if window.focused then focused = window.id end
+local function nudge(axis, by)
+    return function()
+        local focused = focused_window()
+        if focused then
+            tree_for(monitors.of(focused)):resize(focused, axis, by)
+            tiling.apply(config.tiling.snap)
+        end
     end
-    if focused then
-        tree_for(monitors.of(focused)):resize(focused, 0.05)
-        tiling.apply(config.tiling.snap)
-    end
-end)
+end
+
+sol.bind("super+minus", nudge("width", -0.05))
+sol.bind("super+equal", nudge("width", 0.05))
+-- Height on the same two keys, because the other axis was reachable before
+-- this change -- by accident, in the arrangements whose parent split happened
+-- to be horizontal -- and losing it to fix the width would trade one
+-- unreachable seam for another.
+--
+-- Ctrl and not shift, which is what these were first written as. A binding is
+-- a table lookup on the string `input::combo_for` builds, and that string
+-- names the key from `modified_sym` -- the keysym with the modifiers already
+-- applied. Shift changes it: on a `us` layout shift+`-` arrives as
+-- `underscore` and shift+`=` as `plus`, so `super+shift+minus` is a spelling
+-- nothing will ever produce, and a binding nothing produces fails silently --
+-- no warning at load, and at the press only a `no script has bound this` at
+-- info. Ctrl selects no shift level, so ctrl+`-` still arrives as `minus`;
+-- `super+ctrl+left` and its three siblings in `workspaces.lua` have been live
+-- on exactly that basis. Verified against a real `us` keymap rather than
+-- assumed -- see `every_height_bind_is_a_key_that_arrives` in `script.rs`.
+--
+-- That `modified_sym` is what bindings match on at all is #121, which is not
+-- fixed here: it changes how every binding in the compositor is matched and
+-- wants a live keyboard. Ctrl is the spelling that is correct either way --
+-- when #121 lands and matching moves to the unmodified keysym, ctrl+`-` is
+-- still `minus`, whereas `super+shift+underscore` would work today and die on
+-- that commit.
+sol.bind("super+ctrl+minus", nudge("height", -0.05))
+sol.bind("super+ctrl+equal", nudge("height", 0.05))
 
 return tiling

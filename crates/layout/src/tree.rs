@@ -28,6 +28,58 @@ pub enum Axis {
     Horizontal,
 }
 
+/// Which side of a window was grabbed.
+///
+/// Not an axis, and the difference is the whole of #120. A window that is the
+/// right-hand child of a vertical split has that split's seam on its **left**.
+/// Dragging its left edge moves that seam; dragging its right edge must find a
+/// different seam, or none at all. An axis cannot tell those two apart, so a
+/// layout handed only "horizontal" moves whichever seam the walk to the root
+/// meets first — which for a right-edge drag is the seam on the far side, and
+/// the window's left edge then jumps while the edge under the pointer sits
+/// still. Measured: the slot's x moved 209px in one frame while its width did
+/// not change at all.
+///
+/// The compositor has known the side all along — `ResizeEdge` in `state.rs`,
+/// which the floating path already uses — and reduced it to a pair of booleans
+/// on the way to the layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// The low-x side, which a vertical split's seam bounds from the left.
+    Left,
+    /// The high-x side.
+    Right,
+    /// The low-y side, which a horizontal split's seam bounds from above.
+    Top,
+    /// The high-y side.
+    Bottom,
+}
+
+impl Edge {
+    /// The axis a seam along this side is cut on.
+    #[must_use]
+    pub const fn axis(self) -> Axis {
+        match self {
+            Self::Left | Self::Right => Axis::Vertical,
+            Self::Top | Self::Bottom => Axis::Horizontal,
+        }
+    }
+
+    /// Which child of a split has that split's seam on this side.
+    ///
+    /// A split's seam lies *between* its two children, so the child that has
+    /// the seam on its left — or above it — is the second one, and the child
+    /// that has it on its right or below is the first. This single index is
+    /// what turns "a branch cut the right way" into "the branch whose seam is
+    /// actually under the pointer".
+    const fn child(self) -> usize {
+        match self {
+            Self::Left | Self::Top => 1,
+            Self::Right | Self::Bottom => 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Node {
     Window {
@@ -195,56 +247,172 @@ impl Tiling {
         self.nodes[parent] = None;
     }
 
-    /// Drag the seam a window sits against, to where the pointer is.
+    /// Put the seam beside a window's `edge` where `edge_at` says that edge
+    /// belongs.
     ///
-    /// Two things this does that adding a delta to the nearest parent cannot.
+    /// `edge_at` is a position on each axis and only the one `edge` names is
+    /// read — `.0` for a left or right side, `.1` for a top or bottom — which
+    /// is what lets a corner drag call this twice with one pair and have each
+    /// axis take its own edge. The coordinates are the ones [`Self::layout`]
+    /// hands back, so "where this window's right edge should be" is directly
+    /// comparable with the `x + w` of the slot this same tree produced for it.
     ///
-    /// It finds the right seam. A window's immediate parent may have been cut
-    /// the other way — in a two-by-two, dragging a side edge has to move a
-    /// seam two levels up — so this walks towards the root until it finds a
-    /// branch cut along the axis being dragged. Adjusting only the parent is
-    /// why width could be dragged in some arrangements and not others.
+    /// It is **not** where the pointer is, and calling it that was #124. The
+    /// two coincide only for a drag that began exactly on the edge, and no
+    /// gesture does: a border grab is a band sixteen pixels wide, and the
+    /// modifier drag starts from wherever in the window the button went down.
+    /// The compositor derives this from the rectangle the drag has produced —
+    /// `solium::input::resize::dragged_edge` — so what arrives here has already
+    /// moved exactly as far as the pointer has, from exactly where the edge
+    /// already was. The arithmetic below did not change for #124 and did not
+    /// need to.
     ///
-    /// And it is idempotent. The ratio comes from where the pointer *is*, not
-    /// from how far it moved, so dragging to the same place twice gives the
-    /// same layout. Accumulating deltas fed the layout's own response back in
-    /// as the next input, and the windows shook themselves apart for as long
-    /// as the button was held.
+    /// This is the **tiled** resize path: a tiled window has no size of its
+    /// own, so an edge drag moves the division it shares with its neighbour
+    /// and the compositor never resizes the window directly. The floating path
+    /// is the other one — see `Solium::settle_resize`, which only reaches
+    /// `hold_resize` when no layout claimed the drag — and the two are
+    /// deliberately independent.
+    ///
+    /// Three things this does that adding a delta to the nearest parent
+    /// cannot.
+    ///
+    /// It finds the seam on the side that was grabbed. [`Self::seam_beside`]
+    /// carries the argument; the short version is that "the nearest ancestor
+    /// cut on this axis" is not the same branch as "the branch whose seam is
+    /// under the pointer", and taking the first for the second is #120.
+    ///
+    /// It reaches past the immediate parent. A window's parent may have been
+    /// cut the other way — in a two-by-two, the seam beside a side edge is two
+    /// levels up — which is why width could be dragged in some arrangements
+    /// and not others.
+    ///
+    /// And it is idempotent. The ratio comes from a *position*, not from how
+    /// far anything moved, so handling the same drag twice gives the same
+    /// layout. Accumulating deltas fed the layout's own response back in as the
+    /// next input, and the windows shook themselves apart for as long as the
+    /// button was held. A relative gesture and a delta are not the same thing:
+    /// #124 made the gesture relative by choosing a better position to send,
+    /// and left this idempotence exactly where it was.
     pub fn drag_seam(
         &mut self,
         id: u64,
-        axis: Axis,
-        at: (f64, f64),
+        edge: Edge,
+        edge_at: (f64, f64),
         area: Rect,
         settings: Settings,
     ) {
         let Some(leaf) = self.leaf(id) else {
             return;
         };
-
-        let mut node = leaf;
-        let mut seam = None;
-        while let Some(parent) = self.parent(node) {
-            if matches!(self.nodes[parent], Some(Node::Split { axis: cut, .. }) if cut == axis) {
-                seam = Some(parent);
-                break;
-            }
-            node = parent;
-        }
-        let Some(seam) = seam else {
+        // No seam on that side: the window is flush against its container
+        // there, and the thing beyond its edge is the screen, which does not
+        // move. Doing nothing is the answer — moving some other seam instead
+        // is the whole of the bug this replaced.
+        let Some(seam) = self.seam_beside(leaf, edge) else {
             return;
         };
 
         let Some(rect) = self.node_box(seam, area, settings) else {
             return;
         };
-        let ratio = match axis {
-            Axis::Vertical => (at.0 - rect.x) / rect.w.max(1.0),
-            Axis::Horizontal => (at.1 - rect.y) / rect.h.max(1.0),
+        // Inverted from [`cut`], which is the only thing that decides where an
+        // edge actually lands. Along the cut axis it lays out a first child of
+        // `(rect.w - gap) * ratio`, then a `gap`-wide band, then the second
+        // child — so a seam is not a line but a band, and the two windows
+        // beside it have their edges on its two sides:
+        //
+        //     first child's trailing edge: rect.x + (rect.w - gap) * ratio
+        //     second child's leading edge: rect.x + (rect.w - gap) * ratio + gap
+        //
+        // Solving each for `ratio` gives the two spellings below. The share is
+        // of `rect.w - gap` and not of `rect.w` because the band is not part
+        // of what the ratio divides, and the leading side subtracts a further
+        // `gap` because the second child begins on the far side of it.
+        //
+        // Dividing by `rect.w` and ignoring the band — what this did — leaves
+        // the grabbed edge near the asked-for place rather than on it. With the
+        // shipped `gap` of 12, asking for x=1200 on a 1920 screen put a right
+        // edge at 1192.5 and a left edge at 1204.5: one seam, grabbed from its
+        // two sides, coming to rest a full gap apart. "The edge goes where it
+        // was asked to" is the whole of #120, so this arithmetic has to be
+        // right and not merely close. It is also why `edge_at` and `rect` have
+        // to be measured in the same space, which they are: `node_box` and
+        // [`Self::layout`] both start from `area.inset(gap)` and both descend
+        // through [`cut`], so a slot's edge and a seam's box are two readings
+        // off one arrangement. `dragged_edge_tests` pins that at a real gap,
+        // where half a gap of skew would be the whole of #120 again.
+        //
+        // [`Edge::child`] already answers which of the two sides the hand is
+        // on — it is the index [`Self::seam_beside`] matched the window
+        // against — so reading it as a distance rather than as an index is
+        // what keeps the two in step.
+        let gap = settings.gap;
+        let leading = if edge.child() == 1 { gap } else { 0.0 };
+        let ratio = match edge.axis() {
+            Axis::Vertical => (edge_at.0 - rect.x - leading) / (rect.w - gap).max(1.0),
+            Axis::Horizontal => (edge_at.1 - rect.y - leading) / (rect.h - gap).max(1.0),
         };
+        // **The only clamp on a tiled drag, which is why it has to be here.**
+        // `edge_at` arrives unbounded: the compositor sends this pane's own
+        // laid-out edge displaced by the pointer, and it deliberately does not
+        // floor it. It cannot usefully. `resize::MINIMUM` is a floor on a
+        // *window's* size, and applying it to a seam's position put a 120-pixel
+        // window's floor on a tile that was narrower than that to begin with --
+        // which reported an edge 120px from where it was on the first frame of
+        // the drag, before the pointer had moved at all. A ratio of the seam's
+        // own box is the quantity this layout actually owns, and the box is not
+        // the window.
+        //
+        // The bounds are 0.05..0.95 because a seam driven to either end of its
+        // box leaves a child of no width, and a window of no width cannot be
+        // grabbed again to undo it. Not attributable to an issue: #115 is
+        // "minimum size is never read", about a client's own `min_size`, which
+        // is still unimplemented and is a different quantity in different units
+        // against a different rectangle.
+        //
+        // This is also the tighter of two clamps on a *floating* drag, where
+        // `resize::MINIMUM` does apply -- to the window, in `resized`, for the
+        // floating path's own rectangle. The two never meet on one number.
         if let Some(Node::Split { ratio: current, .. }) = self.nodes[seam].as_mut() {
             *current = ratio.clamp(0.05, 0.95);
         }
+    }
+
+    /// The branch whose seam runs along `edge` of the window at `leaf`.
+    ///
+    /// Two conditions, and the old walk checked only the first. The branch has
+    /// to be cut along the dragged axis, *and* this subtree has to be on the
+    /// side of it that puts the seam under the grabbed edge — which is
+    /// [`Edge::child`]. A window that is the second child of a vertical split
+    /// has that seam on its left and nowhere else; matching it for a
+    /// right-edge drag moves the window's far side while the pointer's side
+    /// stands still.
+    ///
+    /// The walk continues towards the root rather than stopping at the first
+    /// branch on the axis, because a branch on the wrong side is not a
+    /// near-miss: the seam beside a right edge may be any number of levels up,
+    /// past ancestors cut the other way and past ancestors cut the same way
+    /// that this subtree happens to sit on the far side of.
+    ///
+    /// `None` when the walk reaches the root having found no such branch,
+    /// which means exactly one thing: the window is flush against its
+    /// container on that side, and there is no seam there to move.
+    fn seam_beside(&self, leaf: usize, edge: Edge) -> Option<usize> {
+        let axis = edge.axis();
+        let side = edge.child();
+        let mut node = leaf;
+        while let Some(parent) = self.parent(node) {
+            if matches!(
+                self.nodes[parent],
+                Some(Node::Split { axis: cut, children, .. })
+                    if cut == axis && children[side] == node
+            ) {
+                return Some(parent);
+            }
+            node = parent;
+        }
+        None
     }
 
     /// The rectangle a node occupies, branches included.
@@ -276,19 +444,45 @@ impl Tiling {
         find(self, root, area.inset(settings.gap), wanted, settings)
     }
 
-    /// Move one seam by a fraction. Everything on the far side stays put.
-    pub fn resize(&mut self, id: u64, by: f64) {
+    /// Grow a window along `axis` by a fraction, moving one seam. Everything
+    /// on the far side stays put.
+    ///
+    /// The keyboard path. It takes an axis and not an [`Edge`] because a
+    /// keypress names neither side: `super+equal` means "make this wider", and
+    /// which of the two seams beside it gives up the space is not something
+    /// the user expressed. A drag is the opposite — the hand is on one
+    /// specific edge — which is why the two take different arguments.
+    ///
+    /// So it prefers the trailing seam (right, or below) and falls back to the
+    /// leading one, with the sign flipped so that positive `by` still grows
+    /// the window either way. Only a window with no seam on either side —
+    /// which on that axis means the only window on the screen — does nothing.
+    ///
+    /// This used to adjust the immediate parent and nothing else, which is the
+    /// same shortcut [`Self::drag_seam`] made: in an ordinary four-window
+    /// dwindle every leaf's parent is a horizontal split, so the centre
+    /// vertical seam could not be reached from the keyboard at all and
+    /// `super+equal` silently changed the height instead.
+    pub fn resize(&mut self, id: u64, axis: Axis, by: f64) {
         let Some(leaf) = self.leaf(id) else {
             return;
         };
-        let Some(parent) = self.parent(leaf) else {
-            return;
+        let (trailing, leading) = match axis {
+            Axis::Vertical => (Edge::Right, Edge::Left),
+            Axis::Horizontal => (Edge::Bottom, Edge::Top),
         };
-        if let Some(Node::Split {
-            ratio, children, ..
-        }) = self.nodes[parent].as_mut()
-        {
-            let towards = if children[0] == leaf { by } else { -by };
+        // A seam on the trailing side is the first child's, so raising its
+        // ratio grows this window; a seam on the leading side is the second
+        // child's, where the same move shrinks it. Hence the negation, which
+        // is the one thing about this that reads backwards.
+        let (seam, towards) = match self.seam_beside(leaf, trailing) {
+            Some(seam) => (seam, by),
+            None => match self.seam_beside(leaf, leading) {
+                Some(seam) => (seam, -by),
+                None => return,
+            },
+        };
+        if let Some(Node::Split { ratio, .. }) = self.nodes[seam].as_mut() {
             *ratio = (*ratio + towards).clamp(0.05, 0.95);
         }
     }
@@ -568,7 +762,7 @@ mod tests {
         tiling.insert(3, Some(2), None, area(), settings());
         let untouched = rect_of(&tiling, 1);
 
-        tiling.resize(2, 0.2);
+        tiling.resize(2, Axis::Horizontal, 0.2);
         assert!(rect_of(&tiling, 2).h > 300.0, "the seam moved");
         assert!(
             (rect_of(&tiling, 1).w - untouched.w).abs() < 1.0,
@@ -710,7 +904,7 @@ mod self_target {
 
 #[cfg(test)]
 mod seam_tests {
-    use super::{Axis, Tiling};
+    use super::{Edge, Tiling};
     use crate::{Rect, Settings};
 
     fn area() -> Rect {
@@ -751,11 +945,11 @@ mod seam_tests {
         let before = rect_of(&tiling, 1).w;
         assert!((before - 500.0).abs() < 1.0, "starts halved: {before}");
 
-        tiling.drag_seam(1, Axis::Vertical, (700.0, 300.0), area(), settings());
+        tiling.drag_seam(1, Edge::Right, (700.0, 300.0), area(), settings());
         let after = rect_of(&tiling, 1).w;
         assert!(
             (after - 700.0).abs() < 2.0,
-            "seam followed the pointer: {after}"
+            "the seam went where it was asked: {after}"
         );
     }
 
@@ -764,10 +958,10 @@ mod seam_tests {
     #[test]
     fn dragging_to_the_same_place_twice_is_the_same_layout() {
         let mut tiling = quad();
-        tiling.drag_seam(1, Axis::Vertical, (650.0, 300.0), area(), settings());
+        tiling.drag_seam(1, Edge::Right, (650.0, 300.0), area(), settings());
         let once = rect_of(&tiling, 1).w;
         for _ in 0..20 {
-            tiling.drag_seam(1, Axis::Vertical, (650.0, 300.0), area(), settings());
+            tiling.drag_seam(1, Edge::Right, (650.0, 300.0), area(), settings());
         }
         let many = rect_of(&tiling, 1).w;
         assert!((once - many).abs() < f64::EPSILON, "{once} then {many}");
@@ -776,16 +970,527 @@ mod seam_tests {
     #[test]
     fn height_drags_find_the_horizontal_seam() {
         let mut tiling = quad();
-        tiling.drag_seam(1, Axis::Horizontal, (250.0, 400.0), area(), settings());
+        tiling.drag_seam(1, Edge::Bottom, (250.0, 400.0), area(), settings());
         let one = rect_of(&tiling, 1);
-        assert!((one.h - 400.0).abs() < 2.0, "followed the pointer: {one:?}");
+        assert!(
+            (one.h - 400.0).abs() < 2.0,
+            "went where it was asked: {one:?}"
+        );
     }
 
     #[test]
     fn a_lone_window_has_no_seam_to_drag() {
         let mut tiling = Tiling::new();
         tiling.insert(1, None, None, area(), settings());
-        tiling.drag_seam(1, Axis::Vertical, (700.0, 300.0), area(), settings());
+        tiling.drag_seam(1, Edge::Right, (700.0, 300.0), area(), settings());
         assert!((rect_of(&tiling, 1).w - 1000.0).abs() < 1.0, "unchanged");
+    }
+}
+
+/// #120: the seam that moves is the one beside the edge that was grabbed.
+///
+/// The measurement this pins came off a real drag. Dragging one edge of a
+/// tiled window slowly, the drag's own rectangle moved smoothly — 808, 809,
+/// 817, 835 — while the slot the layout produced went 806, 1015, 1016, 1024:
+/// a 209px jump in one frame, three frames of unchanged width, then another
+/// leap. That is the signature of moving the seam on the *far* side, because
+/// the far side moving is the near side standing still.
+///
+/// Every test below is written against [`quad`], where each window's immediate
+/// parent is cut the opposite way to the split its side edges touch, so
+/// "nearest ancestor on the axis" and "seam beside the edge" are different
+/// branches and the difference is visible in the rectangles.
+#[cfg(test)]
+mod dragged_edge_tests {
+    use super::{Axis, Edge, Tiling};
+    use crate::{Rect, Settings};
+
+    fn area() -> Rect {
+        Rect::new(0.0, 0.0, 1000.0, 600.0)
+    }
+    fn settings() -> Settings {
+        Settings {
+            gap: 0.0,
+            split: 0.5,
+            ..Settings::default()
+        }
+    }
+    fn rect_of(tiling: &Tiling, id: u64) -> Rect {
+        tiling
+            .layout(area(), settings())
+            .into_iter()
+            .find(|(other, _)| *other == id)
+            .expect("in the tree")
+            .1
+    }
+    fn every_rect(tiling: &Tiling) -> Vec<(u64, Rect)> {
+        let mut out = tiling.layout(area(), settings());
+        out.sort_by_key(|(id, _)| *id);
+        out
+    }
+
+    /// Two columns of two. Window 1 is top-left, 2 top-right, 3 bottom-left,
+    /// 4 bottom-right; the columns are divided by one vertical seam at the
+    /// root, and each column by a horizontal seam of its own.
+    ///
+    /// The same shape as `seam_tests::quad`, restated here so this module
+    /// reads on its own — the arrangement *is* the argument, and a fixture
+    /// imported from elsewhere is one the reader has to go and look up.
+    fn quad() -> Tiling {
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area(), settings());
+        tiling.insert(2, Some(1), None, area(), settings());
+        tiling.insert(3, Some(1), None, area(), settings());
+        tiling.insert(4, Some(2), None, area(), settings());
+        tiling
+    }
+
+    /// Window 1 is the first child of the root's vertical split, so that seam
+    /// is on its right. Dragging the right edge to 700 has to leave the left
+    /// edge at 0 — the failure being pinned is precisely a left edge that
+    /// moves instead — and has to carry window 3 with it, because they share
+    /// the column the root seam bounds.
+    #[test]
+    fn a_right_edge_drag_moves_the_seam_on_the_right() {
+        let mut tiling = quad();
+        tiling.drag_seam(1, Edge::Right, (700.0, 150.0), area(), settings());
+
+        let one = rect_of(&tiling, 1);
+        assert!(
+            (one.x - 0.0).abs() < 1.0,
+            "the left edge stood still: {one:?}"
+        );
+        assert!(
+            (one.w - 700.0).abs() < 2.0,
+            "the right edge followed: {one:?}"
+        );
+        assert!(
+            (rect_of(&tiling, 3).w - 700.0).abs() < 2.0,
+            "the root seam moved, so the whole column did"
+        );
+        assert!((one.h - 300.0).abs() < 1.0, "nothing horizontal moved");
+    }
+
+    /// The mirror. Window 2 is the *second* child of the root's vertical
+    /// split, so that same seam is on its left, and a left-edge drag is what
+    /// moves it. Its right edge must stay against the container at 1000.
+    #[test]
+    fn a_left_edge_drag_moves_the_seam_on_the_left() {
+        let mut tiling = quad();
+        tiling.drag_seam(2, Edge::Left, (700.0, 150.0), area(), settings());
+
+        let two = rect_of(&tiling, 2);
+        assert!(
+            (two.x - 700.0).abs() < 2.0,
+            "the left edge followed: {two:?}"
+        );
+        assert!(
+            (two.x + two.w - 1000.0).abs() < 2.0,
+            "the right edge stood still: {two:?}"
+        );
+    }
+
+    /// Window 1 is the first child of its column's horizontal split, so that
+    /// seam is below it. Its top edge is the container's, and its width is
+    /// bounded by a seam that a vertical drag must not touch.
+    #[test]
+    fn a_bottom_edge_drag_moves_the_seam_below() {
+        let mut tiling = quad();
+        tiling.drag_seam(1, Edge::Bottom, (250.0, 400.0), area(), settings());
+
+        let one = rect_of(&tiling, 1);
+        assert!(
+            (one.y - 0.0).abs() < 1.0,
+            "the top edge stood still: {one:?}"
+        );
+        assert!(
+            (one.h - 400.0).abs() < 2.0,
+            "the bottom edge followed: {one:?}"
+        );
+        assert!((one.w - 500.0).abs() < 1.0, "nothing vertical moved");
+        assert!(
+            (rect_of(&tiling, 2).h - 300.0).abs() < 1.0,
+            "the other column's seam is a different seam and did not move"
+        );
+    }
+
+    /// And the mirror of that: window 3 is the second child of the left
+    /// column's split, so the seam is above it and its bottom edge is the
+    /// container's.
+    #[test]
+    fn a_top_edge_drag_moves_the_seam_above() {
+        let mut tiling = quad();
+        tiling.drag_seam(3, Edge::Top, (250.0, 200.0), area(), settings());
+
+        let three = rect_of(&tiling, 3);
+        assert!(
+            (three.y - 200.0).abs() < 2.0,
+            "the top edge followed: {three:?}"
+        );
+        assert!(
+            (three.y + three.h - 600.0).abs() < 2.0,
+            "the bottom edge stood still: {three:?}"
+        );
+        assert!(
+            (rect_of(&tiling, 1).h - 200.0).abs() < 2.0,
+            "the neighbour above gave up the space"
+        );
+    }
+
+    /// The four cases where the grabbed edge is the container's own, which is
+    /// where the old walk did its damage: it found the nearest ancestor cut on
+    /// the axis regardless of which side of it the window sat, so every one of
+    /// these dragged the seam on the *opposite* side and the window jumped.
+    ///
+    /// Nothing at all is the right answer. The thing beyond that edge is the
+    /// screen, and the screen does not move.
+    #[test]
+    fn a_window_against_the_container_has_no_seam_on_that_side() {
+        // Window 1 is top-left: its left edge and its top edge are the
+        // container's. Window 2 is top-right, so its right edge is; window 3
+        // is bottom-left, so its bottom edge is.
+        let cases = [
+            (1_u64, Edge::Left, (200.0, 150.0)),
+            (1, Edge::Top, (250.0, 200.0)),
+            (2, Edge::Right, (800.0, 150.0)),
+            (3, Edge::Bottom, (250.0, 450.0)),
+        ];
+        for (id, edge, at) in cases {
+            let mut tiling = quad();
+            let before = every_rect(&tiling);
+            tiling.drag_seam(id, edge, at, area(), settings());
+            assert_eq!(
+                every_rect(&tiling),
+                before,
+                "dragging window {id}'s {edge:?} edge moved something"
+            );
+        }
+    }
+
+    /// A three-level tree, where the seam beside an edge is provably *not* the
+    /// nearest ancestor cut on that axis — the case the two-by-two cannot show
+    /// because there the nearest ancestor is the only one.
+    ///
+    /// Splitting window 4 again gives the bottom-right corner its own vertical
+    /// seam. Window 4's right edge touches that inner seam; its *left* edge
+    /// touches the root's, two branches further up, past a horizontal split
+    /// and past a vertical one it is on the wrong side of. Walking to the
+    /// nearest vertical ancestor finds the inner seam for both.
+    fn nested() -> Tiling {
+        let mut tiling = quad();
+        tiling.insert(5, Some(4), None, area(), settings());
+        tiling
+    }
+
+    #[test]
+    fn the_seam_beside_an_edge_is_not_always_the_nearest_ancestor() {
+        let mut tiling = nested();
+        assert!(
+            (rect_of(&tiling, 4).w - 250.0).abs() < 1.0,
+            "the corner was split again: {:?}",
+            rect_of(&tiling, 4)
+        );
+
+        // The left edge of window 4 is the root's seam. Moving it to 700 has
+        // to widen the left column to 700 and leave window 5 — on the far side
+        // of the inner seam — with its right edge still against the container.
+        tiling.drag_seam(4, Edge::Left, (700.0, 450.0), area(), settings());
+        assert!(
+            (rect_of(&tiling, 1).w - 700.0).abs() < 2.0,
+            "the root seam moved: {:?}",
+            rect_of(&tiling, 1)
+        );
+        let five = rect_of(&tiling, 5);
+        assert!(
+            (five.x + five.w - 1000.0).abs() < 2.0,
+            "the far side of the inner seam is still against the edge: {five:?}"
+        );
+    }
+
+    /// Window 5 sits in the bottom-right corner, so its right edge is the
+    /// container's even though it has a vertical seam on its other side. The
+    /// nearest-ancestor walk finds that inner seam and drags it, which moves
+    /// the window's left edge for a drag on its right.
+    #[test]
+    fn a_nested_window_at_the_far_edge_still_moves_nothing() {
+        let mut tiling = nested();
+        let before = every_rect(&tiling);
+        tiling.drag_seam(5, Edge::Right, (900.0, 450.0), area(), settings());
+        assert_eq!(every_rect(&tiling), before, "the inner seam was dragged");
+    }
+
+    /// The keyboard path, which took the same shortcut from the other end: it
+    /// adjusted the immediate parent, and in this arrangement every leaf's
+    /// parent is a horizontal split. `super+equal` meaning "wider" could not
+    /// reach the centre vertical seam at all — it changed the height instead.
+    #[test]
+    fn the_keyboard_can_reach_the_centre_vertical_seam() {
+        let mut tiling = quad();
+        tiling.resize(1, Axis::Vertical, 0.1);
+
+        let one = rect_of(&tiling, 1);
+        assert!((one.w - 600.0).abs() < 2.0, "it got wider: {one:?}");
+        assert!((one.h - 300.0).abs() < 1.0, "and not taller: {one:?}");
+    }
+
+    /// Growing is growing from either side. Window 2 has no seam on its right
+    /// — it is against the container — so the seam on its left gives up the
+    /// space, and the sign has to flip for the window to get bigger rather
+    /// than smaller.
+    #[test]
+    fn a_window_against_the_container_grows_from_the_other_side() {
+        let mut tiling = quad();
+        tiling.resize(2, Axis::Vertical, 0.1);
+
+        let two = rect_of(&tiling, 2);
+        assert!((two.w - 600.0).abs() < 2.0, "it got wider: {two:?}");
+        assert!(
+            (two.x + two.w - 1000.0).abs() < 2.0,
+            "from the left, because the right is the container's: {two:?}"
+        );
+    }
+
+    /// The gap the compositor actually ships with.
+    ///
+    /// Every test above this point runs at `gap: 0.0`, and zero is the single
+    /// value at which the seam band has no width — so "a share of the box" and
+    /// "a share of the box less the gap" give the same answer, and the two
+    /// sides of a seam are the same line. A suite written only at zero cannot
+    /// tell whether a grabbed edge lands under the pointer or several pixels
+    /// off it, which is the only thing #120 is about. Hence the cases below.
+    fn gapped() -> Settings {
+        Settings {
+            gap: 12.0,
+            split: 0.5,
+            ..Settings::default()
+        }
+    }
+
+    /// [`quad`] built at a given gap.
+    ///
+    /// The same arrangement, not a different one: `insert` picks each split's
+    /// axis from the target box's aspect ratio, and insetting a 1000x600
+    /// screen by 12 changes neither which side of the root box is longer nor
+    /// which side of a column's is. The tree is identical; only the pixels
+    /// move.
+    fn quad_at(settings: Settings) -> Tiling {
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area(), settings);
+        tiling.insert(2, Some(1), None, area(), settings);
+        tiling.insert(3, Some(1), None, area(), settings);
+        tiling.insert(4, Some(2), None, area(), settings);
+        tiling
+    }
+
+    fn rect_at(tiling: &Tiling, id: u64, settings: Settings) -> Rect {
+        tiling
+            .layout(area(), settings)
+            .into_iter()
+            .find(|(other, _)| *other == id)
+            .expect("in the tree")
+            .1
+    }
+
+    /// The whole of #120 as a coordinate: the edge the hand is on comes to rest
+    /// exactly where it was asked to.
+    ///
+    /// Named for the ask and not for the pointer, because since #124 they are
+    /// not the same place -- the compositor sends where the *edge* belongs.
+    /// What #120 was about is unaffected: whatever the caller asks for, the
+    /// grabbed edge has to land on it and not a gap away from it.
+    ///
+    /// Both halves drag the *same* seam — the root's vertical one — to the
+    /// same x, one of them by window 1's right edge and one by window 2's
+    /// left. Each has to put its own grabbed edge at exactly 700, and so the
+    /// two drags have to agree with each other about where 700 is.
+    ///
+    /// Against the formula this replaced — a share of `rect.w`, with no term
+    /// for the gap — the right edge came to rest at 691.5 and the left at
+    /// 703.5. Each wrong, wrong in opposite directions, and a full gap apart
+    /// from each other; all three assertions below fail on it. At `gap: 0.0`
+    /// not one of them does, which is how the defect passed a green suite.
+    #[test]
+    fn a_dragged_vertical_edge_lands_where_it_was_asked_across_the_gap() {
+        let settings = gapped();
+
+        let mut trailing = quad_at(settings);
+        trailing.drag_seam(1, Edge::Right, (700.0, 150.0), area(), settings);
+        let one = rect_at(&trailing, 1, settings);
+        assert!(
+            (one.x + one.w - 700.0).abs() < 0.5,
+            "the grabbed right edge is where it was asked: {one:?}"
+        );
+
+        let mut leading = quad_at(settings);
+        leading.drag_seam(2, Edge::Left, (700.0, 150.0), area(), settings);
+        let two = rect_at(&leading, 2, settings);
+        assert!(
+            (two.x - 700.0).abs() < 0.5,
+            "the grabbed left edge is where it was asked: {two:?}"
+        );
+
+        // One seam, grabbed from either side, put in one place. This is the
+        // assertion the old arithmetic missed by exactly `gap`.
+        assert!(
+            ((one.x + one.w) - two.x).abs() < 0.5,
+            "the two sides of one seam disagree: {one:?} against {two:?}"
+        );
+    }
+
+    /// The same, on the other axis, because the gap term is spelled once per
+    /// axis and a fix to one of them is not a fix to the other. Window 1's
+    /// bottom edge and window 3's top edge are the two sides of the left
+    /// column's horizontal seam.
+    #[test]
+    fn a_dragged_horizontal_edge_lands_where_it_was_asked_across_the_gap() {
+        let settings = gapped();
+
+        let mut trailing = quad_at(settings);
+        trailing.drag_seam(1, Edge::Bottom, (250.0, 400.0), area(), settings);
+        let one = rect_at(&trailing, 1, settings);
+        assert!(
+            (one.y + one.h - 400.0).abs() < 0.5,
+            "the grabbed bottom edge is where it was asked: {one:?}"
+        );
+
+        let mut leading = quad_at(settings);
+        leading.drag_seam(3, Edge::Top, (250.0, 400.0), area(), settings);
+        let three = rect_at(&leading, 3, settings);
+        assert!(
+            (three.y - 400.0).abs() < 0.5,
+            "the grabbed top edge is where it was asked: {three:?}"
+        );
+
+        assert!(
+            ((one.y + one.h) - three.y).abs() < 0.5,
+            "the two sides of one seam disagree: {one:?} against {three:?}"
+        );
+    }
+
+    /// #124: a window handed its own edge does not move.
+    ///
+    /// **Internal to this tree, and the #124 review is why that is now written
+    /// down.** This was billed as the space check — the thing that pins the
+    /// compositor's rectangle for a pane against the one [`Tiling::node_box`]
+    /// measures a seam in. It is not, and structurally cannot be: the edge it
+    /// hands `drag_seam` comes from `rect_at`, which is [`Tiling::layout`], so
+    /// both ends of the round trip are this same tree. A skew introduced
+    /// anywhere on the compositor's side of the call leaves it green, which is
+    /// exactly what it did.
+    ///
+    /// What it *does* pin is worth keeping and is a narrower claim: within one
+    /// arrangement, `node_box` and `layout` agree. Both begin at
+    /// `area.inset(gap)` and both descend through [`cut`], so a slot's edge and
+    /// a seam's box are two readings off one thing, and the inversion in
+    /// [`Tiling::drag_seam`] undoes `cut` exactly rather than approximately. A
+    /// half-gap error in either — #120's symptom by another route — shows here.
+    ///
+    /// The check this one was mistaken for lives in the compositor, because
+    /// only the compositor has both rectangles:
+    /// `solium::state::tests::real_client::a_client_that_rounds_its_size_does_not_move_the_seam`
+    /// lays a real tree out through `Solium::place`, lets a real client commit a
+    /// cell less than it was asked for, and feeds the edge the compositor would
+    /// send on the first frame back into the tree. That is the boundary, and it
+    /// cannot be crossed from this crate at all.
+    ///
+    /// At [`gapped`] rather than at zero, which is the first reason this can
+    /// say anything: at `gap: 0` the two sides of a seam are one line and every
+    /// skew it could catch is zero pixels wide.
+    ///
+    /// **And off-centre, which is the second, discovered by checking that the
+    /// test can fail.** Skewing [`Tiling::node_box`]'s own inset by half a gap
+    /// and re-running it — the exact defect it is here to catch — left it
+    /// green. At ratio 0.5 that skew is self-cancelling: moving the box's
+    /// origin out by 6 and its width out by 12 leaves its midpoint exactly
+    /// where it was, so a seam sitting at the midpoint does not move and a
+    /// fixture built at `split: 0.5` cannot tell. Each case therefore drags its
+    /// seam somewhere deliberately lopsided first, and asserts that it went. On
+    /// the same skew the strengthened version fails on its first case, by
+    /// 1.87px — which is why the tolerance is 0.5px and not "a few pixels". A
+    /// skew does not have to be as wide as the gap to be a skew.
+    ///
+    /// Unlike the compositor-side tests in
+    /// `solium::input::resize::dragged_edge_tests`, this one passes against
+    /// `bf80265` and against `ec1da24` too: `drag_seam` did not change for #124
+    /// and has not changed since. It is a guard on this tree's own internal
+    /// consistency, not a regression test for the value the compositor sends.
+    #[test]
+    fn a_window_handed_its_own_edge_does_not_move() {
+        let settings = gapped();
+        // One case per side, each on a window that actually has a seam there:
+        // 1 has the root's vertical seam on its right and its column's
+        // horizontal seam below, 2 has the root's on its left, 3 has its
+        // column's above. A window flush against the container on the side
+        // tested would pass this vacuously, `drag_seam` having returned early.
+        //
+        // The third number is where that seam goes first. Every one of them is
+        // well inside the 0.05..0.95 clamp -- the extremes of these two seams
+        // are 60..928 and 40..548 -- because a clamped ratio would hold still
+        // for the second drag whatever space it was measured in, which is the
+        // other way this test could pass without meaning anything.
+        for (id, edge, lopsided) in [
+            (1_u64, Edge::Right, (340.0, 150.0)),
+            (2, Edge::Left, (640.0, 150.0)),
+            (1, Edge::Bottom, (250.0, 200.0)),
+            (3, Edge::Top, (250.0, 420.0)),
+        ] {
+            let mut tiling = quad_at(settings);
+            let centred = rect_at(&tiling, id, settings);
+            tiling.drag_seam(id, edge, lopsided, area(), settings);
+            let before = rect_at(&tiling, id, settings);
+            assert!(
+                (before.w - centred.w).abs() > 50.0 || (before.h - centred.h).abs() > 50.0,
+                "the fixture has to be off-centre before it proves anything: \
+                 window {id} is still {before:?}"
+            );
+
+            let own_edge = match edge {
+                Edge::Left => (before.x, before.y + before.h / 2.0),
+                Edge::Right => (before.x + before.w, before.y + before.h / 2.0),
+                Edge::Top => (before.x + before.w / 2.0, before.y),
+                Edge::Bottom => (before.x + before.w / 2.0, before.y + before.h),
+            };
+
+            tiling.drag_seam(id, edge, own_edge, area(), settings);
+            let after = rect_at(&tiling, id, settings);
+
+            assert!(
+                (after.x - before.x).abs() < 0.5
+                    && (after.y - before.y).abs() < 0.5
+                    && (after.w - before.w).abs() < 0.5
+                    && (after.h - before.h).abs() < 0.5,
+                "window {id} handed its own {edge:?} edge at {own_edge:?} moved: \
+                 {before:?} became {after:?}"
+            );
+        }
+    }
+
+    /// Idempotence at a real gap.
+    ///
+    /// The doc on [`Tiling::drag_seam`] promises that dragging to the same
+    /// place twice gives the same layout, and that promise is what stops the
+    /// windows shaking while the button is held. It is worth pinning at a
+    /// non-zero gap specifically.
+    ///
+    /// Unlike the two above, this one passed against the old formula too —
+    /// being wrong by a constant offset is still being wrong in the same place
+    /// every time. It is a guard and not a witness: what it catches is a
+    /// future inversion that reads its own output back, the shape the
+    /// delta-accumulating version had, and only a non-zero gap would make that
+    /// term visible.
+    #[test]
+    fn dragging_to_the_same_place_twice_changes_nothing_at_a_real_gap() {
+        let settings = gapped();
+        let mut tiling = quad_at(settings);
+
+        tiling.drag_seam(1, Edge::Right, (700.0, 150.0), area(), settings);
+        let once = rect_at(&tiling, 1, settings);
+        tiling.drag_seam(1, Edge::Right, (700.0, 150.0), area(), settings);
+        let twice = rect_at(&tiling, 1, settings);
+
+        assert!(
+            (once.w - twice.w).abs() < 0.001,
+            "the second drag moved it: {once:?} then {twice:?}"
+        );
     }
 }
