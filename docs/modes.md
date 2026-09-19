@@ -125,7 +125,7 @@ sol.on("open",   function(id) end)                 -- a window's life began
 sol.on("close",  function(id) end)                 -- it is going
 sol.on("focus",  function(id) end)                 -- the keyboard moved
 sol.on("drop",   function(id, x, y) end)           -- a drag finished
-sol.on("resize", function(id, x, y, horizontal, vertical) end)
+sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side) end)
 sol.on("scroll", function(dx, dy) end)             -- a modified wheel turn
 sol.on("click",  function(x, y) end)               -- only while grabbing input
 sol.on("layout", function() end)                   -- the room windows get changed
@@ -133,7 +133,7 @@ sol.on("monitors", function() end)                 -- the screens are not the sc
 sol.on("restore",  function() end)                 -- you have replaced a running session
 ```
 
-Four of these are worth reading twice.
+Five of these are worth reading twice.
 
 **`open` fires when the window opens, which is before its application exists.**
 A window's life begins when the user asks for the program. Your mode is told
@@ -143,10 +143,41 @@ later. Nothing special is required of you for that to work — but it is why
 not. A layout keeps its own structure and adds to it on `open`; `layout` only
 means "re-run what you already hold".
 
-**`resize` gives you the pointer's position, not a delta.** Deliberately: a
-delta would be measured against a layout your own last response just changed,
-and the windows shake for as long as the button is held. `horizontal` and
-`vertical` say which axes the dragged edge can move.
+**`resize` gives you where the dragged edge should go, not where the pointer
+is and not a delta.** `edge_x` and `edge_y` are in the same coordinates
+`tree:layout` returns and `sol.place` takes — one per axis, so a corner drag's
+two seams each get their own.
+
+A position rather than a delta, deliberately: a delta would be measured against
+a layout your own last response just changed, and the windows shake for as long
+as the button is held. But a position *of the edge* rather than of the pointer,
+also deliberately, and that is #124. A seam set from the cursor lands under the
+cursor, so a drag begun anywhere except exactly on the edge threw that edge
+across to the cursor on its first frame — half a border's width for a border
+drag, and most of a window for `super`+right-button, which starts a resize from
+wherever inside the window you happened to press. Handed the edge instead, the
+same arithmetic makes the gesture relative: the edge starts where it already is
+and moves as far as the pointer moves.
+
+"Where it already is" means *where you put it* — the rect your last
+`sol.place` for that window carried — and not where the client drew itself. The
+two differ whenever a client commits a size other than the one it was asked
+for, which a terminal on a cell grid does every time. Hand that back on a first
+frame and your seam moves by the client's rounding before the pointer has
+travelled a pixel, so the compositor sends your own number back to you.
+
+On an axis this drag does not move there is no dragged edge, and the pointer's
+own coordinate comes through there instead. Check the side before using the
+coordinate — which is what the side is for — and you will never see it.
+
+**`horizontal_side` and `vertical_side` are the *sides* being dragged**, not the axes:
+`"left"` or `"right"`, `"top"` or `"bottom"`, and `nil` for an axis this drag
+does not move. A corner drag fills both, because a corner drag moves one seam
+per axis. They were booleans until #120, and a boolean cannot choose a seam: a
+window sitting on the right of a vertical split has that split's seam on its
+*left*, so "the horizontal axis is in play" was true whichever edge the hand
+was on, and dragging the right edge moved the left one instead. Hand the side
+straight to `tree:drag_seam`.
 
 **`click` only arrives while you hold input.** `sol.grab_input(true)` takes keys
 and clicks away from clients, which is what a mode needs while it owns the
@@ -384,9 +415,28 @@ tree:remove(id)
 tree:contains(id)
 tree:windows()
 tree:layout(options)      -- the slots, to hand to sol.place
-tree:resize(id, share)
-tree:drag_seam(id, "width", x, y, options)
+tree:resize(id, "width", share)                        -- keyboard: an axis
+tree:drag_seam(id, "right", edge_x, edge_y, options)   -- pointer: a side
 ```
+
+The two resize calls take different things on purpose. A drag names a side —
+the hand is on one specific edge, and which seam moves follows from that. A
+keypress names only an axis: `super+equal` means "wider" and says nothing about
+which neighbour gives up the room, so `resize` prefers the seam on the right or
+below and falls back to the other, with positive `share` always growing the
+window. Either way, a window flush against its container on that side has no
+seam there and nothing happens — the screen edge is not a seam.
+
+`drag_seam` puts the named side of that window at `edge_x` (for `"left"` and
+`"right"`) or `edge_y` (for `"top"` and `"bottom"`), reading only the one its
+side names — which is what lets a corner drag call it twice with one pair and
+have each axis take its own. Hand it the `edge_x`, `edge_y` a `resize` gave you
+and the gesture is relative; hand it the pointer and you have rebuilt #124.
+The ratio it computes is separately clamped to `0.05..0.95`, so a window shoved
+hard against a seam stops there rather than vanishing. That clamp is the only
+bound on a tiled drag: the compositor sends an unfloored edge, deliberately,
+because a floor measured in a window's pixels cannot bound a seam's position —
+see `Tiling::drag_seam`.
 
 `options` is a monitor's work area with `gap` and `split` added. Passing the
 monitor in rather than the tree asking for it is what lets one tree per

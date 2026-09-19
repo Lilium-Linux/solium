@@ -26,7 +26,7 @@ use smithay::{
     desktop::{PopupManager, Window, layer_map_for_output},
     input::pointer::{CursorImageAttributes, CursorImageStatus},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::Scale,
+    utils::{Logical, Point, Scale},
     wayland::compositor::with_states,
 };
 
@@ -1130,11 +1130,94 @@ pub(crate) fn elements(
 
         // The surface tree is built as if at its real size and then scaled,
         // which keeps subsurface offsets correct for free.
-        let origin = client.loc.to_physical_precise_round(scale);
-        let factor = Scale::from((
-            ratio(client.size.w, real.size.w),
-            ratio(client.size.h, real.size.h),
-        ));
+        //
+        // **The same arithmetic bridges a live resize**, and that is the point
+        // rather than a coincidence: this factor is 1 in ordinary use only
+        // because the drawn rectangle is derived from the client's own size.
+        // Give the pane a rectangle the client has not agreed to yet -- which
+        // is what `pane_geometry` does while an edge is being dragged -- and
+        // this stretches the buffer the client last painted to fill it, with no
+        // second scaling path and nothing new in the element list. When the
+        // client commits the size it was asked for the two sizes are equal
+        // again and the window is pixel-exact. See `crate::resizing`.
+        let fill = state.resize_fill(pane);
+        let (across, down) = crate::resizing::factor(fill, client.size, real.size);
+        let factor = Scale::from((across, down));
+
+        // The other half of the resize trace: `state.rs` records what the layout
+        // wrote and what the client was told, and this records what was actually
+        // drawn. Together they answer the question a report of "it still
+        // stutters" cannot — whether the frame drawn on a given frame came from
+        // the slot or from the client's last commit. See `resizing::trace`.
+        //
+        // **This line and not the `layout` one is what every frame has.**
+        // `move_pane` is reached only from a frame that carried a motion, so a
+        // paused drag writes no `layout` line at all — which is precisely the
+        // stretch of a gesture the trailing flush is about, and precisely when
+        // a reader needs to know what the pane was drawn at and what its client
+        // had. So the slot is repeated here rather than left to be joined
+        // against a line that may not exist, and it is the *client* rectangle
+        // for the same reason `state.rs` logs that one: `frame` is the outer
+        // rectangle, a titlebar taller, and two rectangles that differ by a
+        // decoration are two rectangles a reader subtracts by hand and gets
+        // wrong.
+        if crate::resizing::trace::on() {
+            let slot = state.panes.get(pane).map_or(real, Pane::slot);
+            crate::resizing::trace::line(
+                "drawn",
+                format_args!(
+                    "pane={} frame={},{} {}x{} slot={},{} {}x{} committed={}x{} \
+                     factor={across:.4},{down:.4} fill={fill:?} held={}",
+                    pane.get(),
+                    frame.rect.loc.x,
+                    frame.rect.loc.y,
+                    frame.rect.size.w,
+                    frame.rect.size.h,
+                    slot.loc.x,
+                    slot.loc.y,
+                    slot.size.w,
+                    slot.size.h,
+                    real.size.w,
+                    real.size.h,
+                    u8::from(state.holding_resize(pane)),
+                ),
+            );
+        }
+
+        let corner = client.loc.to_physical_precise_round(scale);
+
+        // **A picture that is not stretched stays against the edges the drag is
+        // not moving.**
+        //
+        // `Fill::Hold` keeps the buffer at its own size where the pane has grown
+        // past it, which leaves a strip the buffer does not cover. Anchoring at
+        // the drawn rectangle's top-left puts that strip on the bottom and the
+        // right, which is correct for a bottom or right drag -- those are
+        // exactly the drags whose top-left corner is standing still -- and
+        // wrong for every drag that pulls a left or top edge, where the picture
+        // would travel with the pointer and the gap would open against the
+        // stationary edge. The whole of the window's contents would slide while
+        // the user dragged one of four corners.
+        //
+        // **Zero for a stretch, by the arithmetic rather than by a branch.** A
+        // stretched buffer covers its rectangle exactly, so the slack below is
+        // `client.size.w - real.size.w * (client.size.w / real.size.w)`, which
+        // is nothing -- the default path and every window that is not being
+        // dragged at all get `corner` back, to the bit.
+        let (pulls_left, pulls_top) = state.resize_pins(pane).unwrap_or((false, false));
+        let slack = |pulled: bool, drawn: f64, real: i32, factor: f64| {
+            if pulled {
+                (drawn - f64::from(real) * factor).max(0.0)
+            } else {
+                0.0
+            }
+        };
+        let origin = (client.loc
+            + Point::<f64, Logical>::from((
+                slack(pulls_left, client.size.w, real.size.w, across),
+                slack(pulls_top, client.size.h, real.size.h, down),
+            )))
+        .to_physical_precise_round(scale);
 
         // Popups go in ahead of the sandwich, which means above all of it.
         //
@@ -1240,8 +1323,16 @@ pub(crate) fn elements(
                     // opaque region for good on exactly the outputs a
                     // fractional scale is ordinary on. `client_pixels` carries
                     // the rest of it.
+                    //
+                    // **`corner`, not `origin`.** This path does not scale by
+                    // `factor` at all -- the capture is drawn into the whole of
+                    // the client's drawn rectangle, which is a stretch whatever
+                    // the configured fill says -- so there is no slack for a
+                    // held picture to be anchored against, and offsetting a
+                    // rectangle that is already the full width would hang it
+                    // over the edge it was meant to be pinned to.
                     let dst = smithay::utils::Rectangle::new(
-                        origin,
+                        corner,
                         client.size.to_physical_precise_round(scale),
                     );
                     elements.push(Element::Rounded(pass.at(dst, frame.opacity)));

@@ -336,6 +336,9 @@ pub(crate) enum Command {
     /// How a window behaves between being asked for and its application
     /// arriving. See `Loading`.
     Loading(Loading),
+    /// What fills a window between an edge drag asking for a size and the
+    /// client painting it. See `crate::resizing::Settings`.
+    Resize(crate::resizing::Settings),
     /// Which XCursor theme the pointer is drawn from, and how big it is.
     ///
     /// Carries what the *configuration* said and nothing else — `None` in a
@@ -886,15 +889,46 @@ impl Scripts {
     ///
     /// Offered to layouts before the compositor resizes anything, so a tiled
     /// window can move its seam instead of growing over its neighbour.
+    ///
+    /// `(id, edge_x, edge_y, horizontal_side, vertical_side)`.
+    ///
+    /// This signature line has been wrong twice, so it is written out rather
+    /// than summarised. It said `(id, x, y, horizontal, vertical)` until now —
+    /// the names of the *pre-#120* booleans, which that issue replaced with
+    /// sides in the code and forgot to replace here — and the prose under it
+    /// called the first pair "the delta" for the whole life of the event and
+    /// then "where the pointer is", neither of which it is any more.
+    ///
+    /// `edge_x, edge_y` is **where the dragged edge should come to rest** on
+    /// each axis, in the coordinates `sol.place` and `tree:layout` already
+    /// speak. A position and not a delta, so handling the same drag twice gives
+    /// the same layout; derived from the drag's own rectangle rather than from
+    /// the seat, so the edge moves *with* the pointer instead of jumping to it.
+    /// That is #124, and the difference is most of a window's width on a
+    /// `super`+right-button drag, which begins in the middle of one. See
+    /// [`crate::input::resize::dragged_edge`].
+    ///
+    /// On an axis this drag does not move there is no such edge, and the
+    /// pointer's own coordinate is passed through there instead. A handler that
+    /// checks its side before using the coordinate — which is what the side is
+    /// for — never sees it.
+    ///
+    /// `horizontal_side, vertical_side` are the *side* of the window being
+    /// dragged on each axis: `"left"`/`"right"`, `"top"`/`"bottom"`, or nil
+    /// where that axis is not in play. They were a pair of booleans until #120;
+    /// a script that only tested them for truthiness still reads the same,
+    /// because a side is truthy and nil is not, but one that passes them on now
+    /// passes on something a layout can choose a seam from. See
+    /// [`crate::input::resize::sides`].
     pub(crate) fn resized(
         &mut self,
         id: u64,
-        at: (f64, f64),
-        edges: (bool, bool),
+        edge_at: (f64, f64),
+        sides: (Option<&'static str>, Option<&'static str>),
         snapshot: Snapshot,
     ) -> Outcome {
         self.dispatch(snapshot, move |sol| {
-            call_listeners(sol, "resize", (id, at.0, at.1, edges.0, edges.1))
+            call_listeners(sol, "resize", (id, edge_at.0, edge_at.1, sides.0, sides.1))
         })
     }
 
@@ -1050,6 +1084,43 @@ fn tuning(options: &Table) -> mlua::Result<Settings> {
             .get::<Option<f64>>("split")?
             .unwrap_or(defaults.split),
     })
+}
+
+/// Which way a script means a seam to run.
+///
+/// "width" is the seam that bounds a window's width, and that seam is cut
+/// *vertically*. The two names disagree, which is exactly why this is a named
+/// function: `axis == "width"` producing `Vertical` reads like a bug at the
+/// call site, and has been reported as one.
+///
+/// Anything else is "height", because the caller is a keyboard binding
+/// choosing between two axes and there is no third answer to fall back to.
+/// [`edge_named`] is stricter for the opposite reason: it has four answers and
+/// a wrong guess moves a seam the user did not touch.
+fn axis_named(name: &str) -> solium_layout::tree::Axis {
+    if name == "width" {
+        solium_layout::tree::Axis::Vertical
+    } else {
+        solium_layout::tree::Axis::Horizontal
+    }
+}
+
+/// Which side of a window a script means.
+///
+/// The spellings are the ones the `resize` event emits — see
+/// [`crate::input::resize::sides`] — so the ordinary script is passing back a
+/// value the compositor just handed it and cannot misspell. `None` for
+/// anything else, so a hand-written one is told rather than silently given a
+/// side it did not ask for.
+fn edge_named(name: &str) -> Option<solium_layout::tree::Edge> {
+    use solium_layout::tree::Edge;
+    match name {
+        "left" => Some(Edge::Left),
+        "right" => Some(Edge::Right),
+        "top" => Some(Edge::Top),
+        "bottom" => Some(Edge::Bottom),
+        _ => None,
+    }
 }
 
 /// A Lua number, whatever Lua happened to store it as.
@@ -2013,6 +2084,67 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // What fills a window while a resize drag is ahead of its client.
+    //
+    // `Option<Table>` and not `Table`, for the reason `sol.cursor_theme` below
+    // spells out at length: the documented way to override the configuration is
+    // one `~/.config/solium/config.lua`, and a copy written before this setting
+    // existed has no `resize` key at all. A `Table` parameter would fail the
+    // *whole configuration* over a setting nobody asked for -- no layouts, no
+    // bindings, no windows placed.
+    sol.set(
+        "resize",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let options = match options {
+                Some(table) => table,
+                None => lua.create_table()?,
+            };
+            let mut resize = crate::resizing::Settings::default();
+            // Read as a `Value` and matched rather than asked for as an
+            // `Option<String>`: mlua *errors* on anything that is not
+            // string-like instead of answering None, and the `?` would take the
+            // whole handler down with it. Same reasoning as `scene` above, and
+            // it is how bezier easings once silently stopped working.
+            //
+            // A name that is not one of the three is named in the log and the
+            // default kept, rather than guessed at. Someone who wrote `fill =
+            // "stretched"` wants to be told, and a compositor that silently
+            // picks for them is one they cannot debug.
+            if let Ok(Value::String(name)) = options.get::<Value>("fill")
+                && let Ok(name) = name.to_str()
+            {
+                match crate::resizing::Fill::named(&name) {
+                    Some(fill) => {
+                        // Said out loud rather than left to be discovered.
+                        // `scene` is a real setting and its render path is
+                        // real, but the only pane that has a scene to draw is
+                        // one whose application has not painted yet -- so on
+                        // an ordinary window it is `hold` today, and someone
+                        // who chose it and saw no difference deserves to be
+                        // told why rather than left doubting their config.
+                        // `crate::resizing::Fill::Scene` carries the whole of
+                        // it, including what arming one would cost.
+                        if fill == crate::resizing::Fill::Scene {
+                            tracing::warn!(
+                                "resize.fill = \"scene\" only draws a scene a window already \
+                                 has, which today means one resized before its application \
+                                 painted; anywhere else it behaves as \"hold\""
+                            );
+                        }
+                        resize.fill = fill;
+                    }
+                    None => tracing::warn!(
+                        fill = %name,
+                        "resize.fill is one of stretch, hold or scene; keeping the default"
+                    ),
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Resize(resize));
+            })
+        })?,
+    )?;
+
     // The pointer's XCursor theme and its size, in logical pixels.
     //
     // An optional table, the same shape as `sol.loading` above and for the
@@ -2725,22 +2857,55 @@ impl mlua::UserData for TilingTree {
             Ok(())
         });
 
-        methods.add_method_mut("resize", |_, this, (id, by): (u64, f64)| {
-            this.0.resize(id, by);
+        // The keyboard path: `axis` is "width" or "height" and `by` is a signed
+        // fraction that always *grows* the window when positive, from whichever
+        // of the two seams beside it exists. An axis and not an edge because a
+        // keypress names no side — `super+equal` means "wider" and nothing
+        // about which neighbour pays for it. See `Tiling::resize`.
+        //
+        // Existence and not room, which this said before and `Tiling::resize`'s
+        // own doc has always had right. The trailing seam is preferred and the
+        // leading one is a fallback only when there is no trailing seam at all
+        // — the window is against its container on that side. A trailing seam
+        // that exists but is already at the 0.95 clamp does nothing, and does
+        // not hand the press to the seam on the other side. That is the
+        // behaviour; whether it is the behaviour a user expects is a separate
+        // question from whether the comment describes it.
+        methods.add_method_mut("resize", |_, this, (id, axis, by): (u64, String, f64)| {
+            this.0.resize(id, axis_named(&axis), by);
             Ok(())
         });
 
-        // `axis` is "width" or "height": which way the seam being dragged runs.
+        // The drag path: `edge` is the side the pointer has hold of, which is
+        // what the `resize` event hands the script. Not an axis — see
+        // `Tiling::drag_seam` for why an axis picks the wrong seam for two of
+        // the four sides.
+        //
+        // `edge_x`/`edge_y` are where that side should come to rest, not where
+        // the pointer is, and the two stopped being the same thing in #124.
+        // Named for what they are so a script passing the pointer here reads as
+        // the mistake it is; `drag_seam` reads only the one `edge` names.
         methods.add_method_mut(
             "drag_seam",
-            |_, this, (id, axis, x, y, options): (u64, String, f64, f64, Table)| {
-                let axis = if axis == "width" {
-                    solium_layout::tree::Axis::Vertical
-                } else {
-                    solium_layout::tree::Axis::Horizontal
+            |_, this, (id, edge, edge_x, edge_y, options): (u64, String, f64, f64, Table)| {
+                let Some(edge) = edge_named(&edge) else {
+                    // Named rather than guessed at. Falling back to a side
+                    // would move a seam the user did not grab, which is the
+                    // failure #120 was, and a script with a typo would see it
+                    // as the compositor being wrong.
+                    tracing::warn!(
+                        edge,
+                        "not a side a window has; expected left, right, top or bottom"
+                    );
+                    return Ok(());
                 };
-                this.0
-                    .drag_seam(id, axis, (x, y), area(&options)?, tuning(&options)?);
+                this.0.drag_seam(
+                    id,
+                    edge,
+                    (edge_x, edge_y),
+                    area(&options)?,
+                    tuning(&options)?,
+                );
                 Ok(())
             },
         );
@@ -5523,6 +5688,95 @@ mod shipped {
                 canonical, key,
                 "{file}:{line} binds {combo:?}, but that key arrives called {canonical:?} -- \
                  the binding would never fire"
+            );
+        }
+    }
+
+    /// **The two height binds in `tiling.lua` are combinations a `us` keyboard
+    /// can actually produce.**
+    ///
+    /// Reachability, which the test above deliberately does not check: it asks
+    /// whether a key is *spelled* the way xkb names it, and `underscore` passes
+    /// that while being a combination no one can press with the modifiers the
+    /// binding also names.
+    ///
+    /// So this goes the other way round. It starts from the physical keys --
+    /// `AE11` and `AE12`, the `-` and `=` of the top row, which are evdev 12
+    /// and 13 and so xkb keycodes 20 and 21 -- presses them under the modifiers
+    /// the bindings name, and builds the string `input::combo_for` would build.
+    /// A real keymap compiled from the real `us` rules, because the question is
+    /// what xkb does and not what anyone believes it does.
+    ///
+    /// The shift case is asserted too, and asserted as *not* arriving. That is
+    /// the reason these are bound on ctrl, and without it here the next reader
+    /// tidies them back to the shift spelling this branch started with -- it
+    /// looks more natural, it passes the spelling test, and it is dead. #121 is
+    /// the underlying defect: bindings match on `modified_sym`, so every
+    /// shifted non-letter in the compositor is unreachable, nine
+    /// `super+shift+<digit>` in `workspaces.lua` among them. Fixing that is not
+    /// this branch's work. Choosing a spelling that is correct before *and*
+    /// after it is.
+    #[test]
+    fn every_height_bind_is_a_key_that_arrives() {
+        use smithay::input::keyboard::xkb;
+
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let Some(keymap) = xkb::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            "us",
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        ) else {
+            // No xkb rules on this machine means no keymap to ask, and a test
+            // that invented an answer here would be worse than one that says
+            // it could not look.
+            panic!("no `us` keymap; xkb data is missing, so this proves nothing");
+        };
+        let shift = keymap.mod_get_index(xkb::MOD_NAME_SHIFT);
+        let ctrl = keymap.mod_get_index(xkb::MOD_NAME_CTRL);
+        let logo = keymap.mod_get_index(xkb::MOD_NAME_LOGO);
+
+        // What `combo_for` produces for a press of `code` while `mask` is held.
+        // The modifier order is that function's fixed one, and `normalise_combo`
+        // is the very function it finishes with, so this is the whole of the
+        // string a binding is looked up by.
+        let arrives = |code: u32, mask: u32, names: &str| -> String {
+            let mut state = xkb::State::new(&keymap);
+            state.update_mask(mask, 0, 0, 0, 0, 0);
+            let sym = state.key_get_one_sym(code.into());
+            normalise_combo(&format!("{names}{}", xkb::keysym_get_name(sym)))
+        };
+
+        let minus = 20;
+        let equal = 21;
+        let with_ctrl = (1 << ctrl) | (1 << logo);
+        let with_shift = (1 << shift) | (1 << logo);
+
+        // What `tiling.lua` binds, and what the keyboard sends. These have to
+        // be the same string or the binding is an entry in a table nothing
+        // looks up.
+        for (code, bound) in [(minus, "super+ctrl+minus"), (equal, "super+ctrl+equal")] {
+            let sent = arrives(code, with_ctrl, "ctrl+super+");
+            assert_eq!(
+                sent,
+                normalise_combo(bound),
+                "`tiling.lua` binds {bound:?}, and that keypress arrives as {sent:?}"
+            );
+        }
+
+        // And the spelling not to go back to. `underscore` and `plus` are what
+        // shift makes of these keys, so `super+shift+minus` names a press that
+        // does not exist.
+        for (code, tempting) in [(minus, "super+shift+minus"), (equal, "super+shift+equal")] {
+            let sent = arrives(code, with_shift, "shift+super+");
+            assert_ne!(
+                sent,
+                normalise_combo(tempting),
+                "{tempting:?} looks reachable now; if shift has stopped changing \
+                 the keysym then #121 has landed and this test wants rewriting"
             );
         }
     }

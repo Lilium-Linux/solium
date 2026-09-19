@@ -742,6 +742,25 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                 // than a case that happens.
                 if let Some(window) = under.window {
                     state.focus_window(&window, serial);
+                    // Before the grab, so the new drag cannot inherit the
+                    // previous one's unsettled hold. Its answer is the
+                    // rectangle to drag from rather than `under.outer`, which
+                    // was read before that hold was reconciled: see
+                    // `begin_resize`.
+                    let began = state.begin_resize(&window).unwrap_or(under.outer);
+                    // And the layout's own rectangle beside it, which is a
+                    // different rectangle for any client that has not committed
+                    // exactly what it was asked for. `began` is what this
+                    // *window* is; `laid_out` is where the layout put it, and a
+                    // tiled drag moves a seam from the second. Read after
+                    // `begin_resize` like `began` is, though for this one it
+                    // makes no difference: reconciling a hold writes the
+                    // client's size into the slot and `Pane::placed` is the
+                    // field that does not hear about it. See
+                    // `Solium::pane_laid_out`.
+                    let laid_out = state
+                        .pane_laid_out(&window)
+                        .unwrap_or(resize::LaidOut(began));
                     let start_data = GrabStartData {
                         focus: None,
                         button,
@@ -749,7 +768,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                     };
                     pointer.set_grab(
                         state,
-                        resize::ResizeGrab::new(start_data, window, edges, under.outer),
+                        resize::ResizeGrab::new(start_data, window, edges, began, laid_out),
                         serial,
                         Focus::Clear,
                     );
@@ -775,10 +794,28 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         // is, rather than from an eight-pixel border. Which corner is being
         // pulled comes from which quarter of the window the pointer is in, so
         // there is no edge to find and no direction that cannot be reached.
+        // `begin_resize` before anything reads a rectangle, and its answer is
+        // the rectangle. Two things are going on and both are its
+        // documentation's: the previous drag's hold outlives its grab by up to
+        // `resizing::PATIENCE`, so this one must not inherit it, and
+        // reconciling it *changes* the pane's rectangle — so a rectangle read
+        // before that ran is a rectangle this drag would jump away from on its
+        // first motion.
+        //
+        // **`pane_outer`, not `outer_geometry`**, which is what this reached
+        // for. `chrome_under`'s own note records that the border drag was moved
+        // off `outer_geometry` for exactly this reason: `outer_geometry` is the
+        // space's location paired with the *client's* size, and a live hold is
+        // a second way for that to differ from the pane's slot — for as long as
+        // a client takes to answer. A quadrant drag begun from the stale
+        // rectangle jumps the edge nobody is dragging by the unanswered delta,
+        // which is issue #113 arriving by the other gesture.
         if dragging
             && button == BTN_RIGHT
             && let Some((window, _)) = state.window_under(location)
-            && let Some(outer) = state.outer_geometry(&window)
+            && let Some(outer) = state
+                .begin_resize(&window)
+                .or_else(|| state.outer_geometry(&window))
         {
             state.focus_window(&window, serial);
             let edges = resize::quadrant(outer, location);
@@ -796,6 +833,12 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             if state.pointer.assert(Some(resize::cursor(edges))) {
                 state.redraw = true;
             }
+            // See the border drag above: `outer` is where this window is and
+            // `laid_out` is where the layout put it, and only the second is a
+            // number the layout will recognise when it comes back.
+            let laid_out = state
+                .pane_laid_out(&window)
+                .unwrap_or(resize::LaidOut(outer));
             let start_data = GrabStartData {
                 focus: None,
                 button,
@@ -803,7 +846,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             };
             pointer.set_grab(
                 state,
-                resize::ResizeGrab::new(start_data, window, edges, outer),
+                resize::ResizeGrab::new(start_data, window, edges, outer, laid_out),
                 serial,
                 Focus::Clear,
             );

@@ -305,15 +305,51 @@ end)
 -- An edge drag changes the column's width rather than one window's size:
 -- every window in a column shares its width, so there is nothing else it
 -- could mean.
-sol.on("resize", function(id, dx, _)
-    if not scrolling.active or dx == 0 then
+--
+-- The second argument is a **screen x coordinate**, and has never once been the
+-- delta this handler divides as though it were. It has been two different
+-- coordinates and not one of them a delta: it was `event.location.x` -- the
+-- pointer -- for the whole life of the event, which #120 corrected the
+-- compositor's doc about without changing the value; and since #124 it is
+-- where the *dragged edge* should come to rest. On a drag that moves no
+-- horizontal edge at all -- a top or bottom border -- there is no such edge and
+-- the pointer's own x comes through instead, exactly as before.
+--
+-- The arithmetic below is untouched by all three, and still wrong. `view:widen`
+-- takes a delta, and there is no way to feed it an absolute position without
+-- giving the scroller a set-the-width call; that is a change to this layout
+-- rather than to the resize gesture, so it belongs to #122 and not to the
+-- branch that happens to be passing through. Named honestly so the next reader
+-- sees the defect instead of inheriting the belief: dividing a screen
+-- coordinate by the monitor's width does not give a fraction of anything, and
+-- an edge drag in the scrolling layout still jumps the column wide on the first
+-- motion. Tracked as #122.
+sol.on("resize", function(id, edge_x, _)
+    -- `edge_x == 0` is doing duty as "no drag", and it does not mean that: it
+    -- means the dragged edge belongs at screen x 0.
+    --
+    -- **That is a likelier accident since #124, not a less likely one.** While
+    -- this was the pointer, hitting it needed the cursor on the exact column of
+    -- pixels at x=0 -- rare, and it took a moving hand to get there. `edge_x` is
+    -- a fixed edge now: the left edge of a column laid out at x=0 *is* zero, so
+    -- a left-edge drag on the leftmost column of the leftmost monitor trips this
+    -- deterministically, on the first frame and every frame after, and the
+    -- handler does nothing for the whole gesture.
+    --
+    -- Left as it is all the same, because the fix is to give this handler
+    -- arithmetic that matches its input and that is #122, not this branch.
+    -- Written down rather than quietly tidied, so the next reader does not have
+    -- to rediscover that the condition is a sentinel wearing a coordinate's
+    -- clothes -- and does not inherit an assessment of how often it fires that
+    -- was true of a value this no longer receives.
+    if not scrolling.active or edge_x == 0 then
         return
     end
     local view, monitor = view_of(id)
     if view:contains(id) then
         -- A share of *this window's* monitor: the same drag means a different
         -- fraction on a 2560 than on a 1920 beside it.
-        view:widen(id, dx / math.max(options(monitor).w, 1), options(monitor))
+        view:widen(id, edge_x / math.max(options(monitor).w, 1), options(monitor))
         scrolling.apply({ duration = 0 })
     end
 end)
