@@ -125,7 +125,7 @@ sol.on("open",   function(id) end)                 -- a window's life began
 sol.on("close",  function(id) end)                 -- it is going
 sol.on("focus",  function(id) end)                 -- the keyboard moved
 sol.on("drop",   function(id, x, y) end)           -- a drag finished
-sol.on("resize", function(id, x, y, horizontal_side, vertical_side) end)
+sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side) end)
 sol.on("scroll", function(dx, dy) end)             -- a modified wheel turn
 sol.on("click",  function(x, y) end)               -- only while grabbing input
 sol.on("layout", function() end)                   -- the room windows get changed
@@ -143,9 +143,25 @@ later. Nothing special is required of you for that to work — but it is why
 not. A layout keeps its own structure and adds to it on `open`; `layout` only
 means "re-run what you already hold".
 
-**`resize` gives you the pointer's position, not a delta.** Deliberately: a
-delta would be measured against a layout your own last response just changed,
-and the windows shake for as long as the button is held.
+**`resize` gives you where the dragged edge should go, not where the pointer
+is and not a delta.** `edge_x` and `edge_y` are in the same coordinates
+`tree:layout` returns and `sol.place` takes — one per axis, so a corner drag's
+two seams each get their own.
+
+A position rather than a delta, deliberately: a delta would be measured against
+a layout your own last response just changed, and the windows shake for as long
+as the button is held. But a position *of the edge* rather than of the pointer,
+also deliberately, and that is #124. A seam set from the cursor lands under the
+cursor, so a drag begun anywhere except exactly on the edge threw that edge
+across to the cursor on its first frame — half a border's width for a border
+drag, and most of a window for `super`+right-button, which starts a resize from
+wherever inside the window you happened to press. Handed the edge instead, the
+same arithmetic makes the gesture relative: the edge starts where it already is
+and moves as far as the pointer moves.
+
+On an axis this drag does not move there is no dragged edge, and the pointer's
+own coordinate comes through there instead. Check the side before using the
+coordinate — which is what the side is for — and you will never see it.
 
 **`horizontal_side` and `vertical_side` are the *sides* being dragged**, not the axes:
 `"left"` or `"right"`, `"top"` or `"bottom"`, and `nil` for an axis this drag
@@ -392,8 +408,8 @@ tree:remove(id)
 tree:contains(id)
 tree:windows()
 tree:layout(options)      -- the slots, to hand to sol.place
-tree:resize(id, "width", share)            -- keyboard: an axis
-tree:drag_seam(id, "right", x, y, options) -- pointer: a side
+tree:resize(id, "width", share)                        -- keyboard: an axis
+tree:drag_seam(id, "right", edge_x, edge_y, options)   -- pointer: a side
 ```
 
 The two resize calls take different things on purpose. A drag names a side —
@@ -403,6 +419,14 @@ which neighbour gives up the room, so `resize` prefers the seam on the right or
 below and falls back to the other, with positive `share` always growing the
 window. Either way, a window flush against its container on that side has no
 seam there and nothing happens — the screen edge is not a seam.
+
+`drag_seam` puts the named side of that window at `edge_x` (for `"left"` and
+`"right"`) or `edge_y` (for `"top"` and `"bottom"`), reading only the one its
+side names — which is what lets a corner drag call it twice with one pair and
+have each axis take its own. Hand it the `edge_x`, `edge_y` a `resize` gave you
+and the gesture is relative; hand it the pointer and you have rebuilt #124.
+The ratio it computes is separately clamped to `0.05..0.95` (#115), so a window
+shoved hard against a seam stops there rather than vanishing.
 
 `options` is a monitor's work area with `gap` and `split` added. Passing the
 monitor in rather than the tree asking for it is what lets one tree per

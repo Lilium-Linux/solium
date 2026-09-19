@@ -890,23 +890,45 @@ impl Scripts {
     /// Offered to layouts before the compositor resizes anything, so a tiled
     /// window can move its seam instead of growing over its neighbour.
     ///
-    /// `(id, x, y, horizontal, vertical)`, where `x, y` is where the pointer
-    /// **is** — not how far it moved — and the last two are the *side* of the
-    /// window being dragged on each axis: `"left"`/`"right"`,
-    /// `"top"`/`"bottom"`, or nil where that axis is not in play. They were a
-    /// pair of booleans until #120; a script that only tested them for
-    /// truthiness still reads the same, because a side is truthy and nil is
-    /// not, but one that passes them on now passes on something a layout can
-    /// choose a seam from. See [`crate::input::resize::sides`].
+    /// `(id, edge_x, edge_y, horizontal_side, vertical_side)`.
+    ///
+    /// This signature line has been wrong twice, so it is written out rather
+    /// than summarised. It said `(id, x, y, horizontal, vertical)` until now —
+    /// the names of the *pre-#120* booleans, which that issue replaced with
+    /// sides in the code and forgot to replace here — and the prose under it
+    /// called the first pair "the delta" for the whole life of the event and
+    /// then "where the pointer is", neither of which it is any more.
+    ///
+    /// `edge_x, edge_y` is **where the dragged edge should come to rest** on
+    /// each axis, in the coordinates `sol.place` and `tree:layout` already
+    /// speak. A position and not a delta, so handling the same drag twice gives
+    /// the same layout; derived from the drag's own rectangle rather than from
+    /// the seat, so the edge moves *with* the pointer instead of jumping to it.
+    /// That is #124, and the difference is most of a window's width on a
+    /// `super`+right-button drag, which begins in the middle of one. See
+    /// [`crate::input::resize::dragged_edge`].
+    ///
+    /// On an axis this drag does not move there is no such edge, and the
+    /// pointer's own coordinate is passed through there instead. A handler that
+    /// checks its side before using the coordinate — which is what the side is
+    /// for — never sees it.
+    ///
+    /// `horizontal_side, vertical_side` are the *side* of the window being
+    /// dragged on each axis: `"left"`/`"right"`, `"top"`/`"bottom"`, or nil
+    /// where that axis is not in play. They were a pair of booleans until #120;
+    /// a script that only tested them for truthiness still reads the same,
+    /// because a side is truthy and nil is not, but one that passes them on now
+    /// passes on something a layout can choose a seam from. See
+    /// [`crate::input::resize::sides`].
     pub(crate) fn resized(
         &mut self,
         id: u64,
-        at: (f64, f64),
+        edge_at: (f64, f64),
         sides: (Option<&'static str>, Option<&'static str>),
         snapshot: Snapshot,
     ) -> Outcome {
         self.dispatch(snapshot, move |sol| {
-            call_listeners(sol, "resize", (id, at.0, at.1, sides.0, sides.1))
+            call_listeners(sol, "resize", (id, edge_at.0, edge_at.1, sides.0, sides.1))
         })
     }
 
@@ -2858,9 +2880,14 @@ impl mlua::UserData for TilingTree {
         // what the `resize` event hands the script. Not an axis — see
         // `Tiling::drag_seam` for why an axis picks the wrong seam for two of
         // the four sides.
+        //
+        // `edge_x`/`edge_y` are where that side should come to rest, not where
+        // the pointer is, and the two stopped being the same thing in #124.
+        // Named for what they are so a script passing the pointer here reads as
+        // the mistake it is; `drag_seam` reads only the one `edge` names.
         methods.add_method_mut(
             "drag_seam",
-            |_, this, (id, edge, x, y, options): (u64, String, f64, f64, Table)| {
+            |_, this, (id, edge, edge_x, edge_y, options): (u64, String, f64, f64, Table)| {
                 let Some(edge) = edge_named(&edge) else {
                     // Named rather than guessed at. Falling back to a side
                     // would move a seam the user did not grab, which is the
@@ -2872,8 +2899,13 @@ impl mlua::UserData for TilingTree {
                     );
                     return Ok(());
                 };
-                this.0
-                    .drag_seam(id, edge, (x, y), area(&options)?, tuning(&options)?);
+                this.0.drag_seam(
+                    id,
+                    edge,
+                    (edge_x, edge_y),
+                    area(&options)?,
+                    tuning(&options)?,
+                );
                 Ok(())
             },
         );

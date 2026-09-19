@@ -306,35 +306,42 @@ end)
 -- every window in a column shares its width, so there is nothing else it
 -- could mean.
 --
--- The second argument is where the pointer **is**, not how far it moved. It
--- was named `dx` here and the compositor's own doc for the event called it
--- "the delta" -- both wrong since the event was written, because
--- `ResizeGrab::motion` records `event.location`. #120 corrected the doc; this
--- handler is left doing the arithmetic it always did, because `view:widen`
--- takes a delta and there is no way to feed it an absolute position without
--- giving the scroller a set-the-width call, which is a change to a layout
--- this issue is not about and cannot verify. Named honestly so the next
--- reader sees the defect instead of inheriting the belief: dividing a screen
+-- The second argument is a **screen x coordinate**, and has never once been the
+-- delta this handler divides as though it were. It has been three different
+-- coordinates now and not one of them a delta: it was named `dx` here while the
+-- compositor's doc called it "the delta" and the code sent `event.location`;
+-- #120 corrected the doc to "where the pointer is"; and #124 changed the value
+-- to where the *dragged edge* should come to rest, which is what it is today.
+-- On a drag that moves no horizontal edge at all -- a top or bottom border --
+-- there is no such edge and the pointer's own x comes through instead, exactly
+-- as before.
+--
+-- The arithmetic below is untouched by all three, and still wrong. `view:widen`
+-- takes a delta, and there is no way to feed it an absolute position without
+-- giving the scroller a set-the-width call; that is a change to this layout
+-- rather than to the resize gesture, so it belongs to #122 and not to the
+-- branch that happens to be passing through. Named honestly so the next reader
+-- sees the defect instead of inheriting the belief: dividing a screen
 -- coordinate by the monitor's width does not give a fraction of anything, and
--- an edge drag in the scrolling layout jumps the column wide on the first
+-- an edge drag in the scrolling layout still jumps the column wide on the first
 -- motion. Tracked as #122.
-sol.on("resize", function(id, x, _)
-    -- `x == 0` is doing duty as "no drag", and it does not mean that: it means
-    -- the pointer is at screen x 0, which is a real place a real drag can
-    -- reach -- the leftmost column of the leftmost monitor. The guard is left
-    -- as it is because changing it is part of giving this handler an absolute
-    -- position to work from, which is #122 and not this branch. Written down
-    -- rather than quietly tidied, so the next reader does not have to
-    -- rediscover that the condition is a sentinel wearing a coordinate's
+sol.on("resize", function(id, edge_x, _)
+    -- `edge_x == 0` is doing duty as "no drag", and it does not mean that: it
+    -- means the dragged edge belongs at screen x 0, which is a real place a
+    -- real drag can reach -- the leftmost column of the leftmost monitor. The
+    -- guard is left as it is because changing it is part of giving this handler
+    -- arithmetic that matches its input, which is #122 and not this branch.
+    -- Written down rather than quietly tidied, so the next reader does not have
+    -- to rediscover that the condition is a sentinel wearing a coordinate's
     -- clothes.
-    if not scrolling.active or x == 0 then
+    if not scrolling.active or edge_x == 0 then
         return
     end
     local view, monitor = view_of(id)
     if view:contains(id) then
         -- A share of *this window's* monitor: the same drag means a different
         -- fraction on a 2560 than on a 1920 beside it.
-        view:widen(id, x / math.max(options(monitor).w, 1), options(monitor))
+        view:widen(id, edge_x / math.max(options(monitor).w, 1), options(monitor))
         scrolling.apply({ duration = 0 })
     end
 end)

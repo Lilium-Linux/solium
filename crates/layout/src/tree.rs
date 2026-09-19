@@ -247,7 +247,25 @@ impl Tiling {
         self.nodes[parent] = None;
     }
 
-    /// Drag the seam beside a window's `edge` to where the pointer is.
+    /// Put the seam beside a window's `edge` where `edge_at` says that edge
+    /// belongs.
+    ///
+    /// `edge_at` is a position on each axis and only the one `edge` names is
+    /// read — `.0` for a left or right side, `.1` for a top or bottom — which
+    /// is what lets a corner drag call this twice with one pair and have each
+    /// axis take its own edge. The coordinates are the ones [`Self::layout`]
+    /// hands back, so "where this window's right edge should be" is directly
+    /// comparable with the `x + w` of the slot this same tree produced for it.
+    ///
+    /// It is **not** where the pointer is, and calling it that was #124. The
+    /// two coincide only for a drag that began exactly on the edge, and no
+    /// gesture does: a border grab is a band sixteen pixels wide, and the
+    /// modifier drag starts from wherever in the window the button went down.
+    /// The compositor derives this from the rectangle the drag has produced —
+    /// `solium::input::resize::dragged_edge` — so what arrives here has already
+    /// moved exactly as far as the pointer has, from exactly where the edge
+    /// already was. The arithmetic below did not change for #124 and did not
+    /// need to.
     ///
     /// This is the **tiled** resize path: a tiled window has no size of its
     /// own, so an edge drag moves the division it shares with its neighbour
@@ -269,16 +287,18 @@ impl Tiling {
     /// levels up — which is why width could be dragged in some arrangements
     /// and not others.
     ///
-    /// And it is idempotent. The ratio comes from where the pointer *is*, not
-    /// from how far it moved, so dragging to the same place twice gives the
-    /// same layout. Accumulating deltas fed the layout's own response back in
-    /// as the next input, and the windows shook themselves apart for as long
-    /// as the button was held.
+    /// And it is idempotent. The ratio comes from a *position*, not from how
+    /// far anything moved, so handling the same drag twice gives the same
+    /// layout. Accumulating deltas fed the layout's own response back in as the
+    /// next input, and the windows shook themselves apart for as long as the
+    /// button was held. A relative gesture and a delta are not the same thing:
+    /// #124 made the gesture relative by choosing a better position to send,
+    /// and left this idempotence exactly where it was.
     pub fn drag_seam(
         &mut self,
         id: u64,
         edge: Edge,
-        at: (f64, f64),
+        edge_at: (f64, f64),
         area: Rect,
         settings: Settings,
     ) {
@@ -311,12 +331,17 @@ impl Tiling {
         // `gap` because the second child begins on the far side of it.
         //
         // Dividing by `rect.w` and ignoring the band — what this did — leaves
-        // the grabbed edge near the pointer rather than under it. With the
-        // shipped `gap` of 12, dragging to x=1200 on a 1920 screen put a right
+        // the grabbed edge near the asked-for place rather than on it. With the
+        // shipped `gap` of 12, asking for x=1200 on a 1920 screen put a right
         // edge at 1192.5 and a left edge at 1204.5: one seam, grabbed from its
-        // two sides, coming to rest a full gap apart. "The edge goes where the
-        // pointer is" is the whole of #120, so this arithmetic has to be right
-        // and not merely close.
+        // two sides, coming to rest a full gap apart. "The edge goes where it
+        // was asked to" is the whole of #120, so this arithmetic has to be
+        // right and not merely close. It is also why `edge_at` and `rect` have
+        // to be measured in the same space, which they are: `node_box` and
+        // [`Self::layout`] both start from `area.inset(gap)` and both descend
+        // through [`cut`], so a slot's edge and a seam's box are two readings
+        // off one arrangement. `dragged_edge_tests` pins that at a real gap,
+        // where half a gap of skew would be the whole of #120 again.
         //
         // [`Edge::child`] already answers which of the two sides the hand is
         // on — it is the index [`Self::seam_beside`] matched the window
@@ -325,9 +350,18 @@ impl Tiling {
         let gap = settings.gap;
         let leading = if edge.child() == 1 { gap } else { 0.0 };
         let ratio = match edge.axis() {
-            Axis::Vertical => (at.0 - rect.x - leading) / (rect.w - gap).max(1.0),
-            Axis::Horizontal => (at.1 - rect.y - leading) / (rect.h - gap).max(1.0),
+            Axis::Vertical => (edge_at.0 - rect.x - leading) / (rect.w - gap).max(1.0),
+            Axis::Horizontal => (edge_at.1 - rect.y - leading) / (rect.h - gap).max(1.0),
         };
+        // Two floors bite on one drag and they are unrelated, which is worth
+        // saying because either one alone looks sufficient. The compositor has
+        // already clamped the window to `resize::MINIMUM` pixels before
+        // deriving `edge_at`, so what arrives here is a floored edge; this
+        // clamps a *ratio* of the seam's own box (#115), knows nothing of
+        // pixels or of that floor, and bounds a seam that has nothing to do
+        // with the dragged window's size when the box is a different size from
+        // the window. Whichever is tighter wins, and neither may be dropped on
+        // the grounds that the other exists.
         if let Some(Node::Split { ratio: current, .. }) = self.nodes[seam].as_mut() {
             *current = ratio.clamp(0.05, 0.95);
         }
@@ -903,7 +937,7 @@ mod seam_tests {
         let after = rect_of(&tiling, 1).w;
         assert!(
             (after - 700.0).abs() < 2.0,
-            "seam followed the pointer: {after}"
+            "the seam went where it was asked: {after}"
         );
     }
 
@@ -926,7 +960,10 @@ mod seam_tests {
         let mut tiling = quad();
         tiling.drag_seam(1, Edge::Bottom, (250.0, 400.0), area(), settings());
         let one = rect_of(&tiling, 1);
-        assert!((one.h - 400.0).abs() < 2.0, "followed the pointer: {one:?}");
+        assert!(
+            (one.h - 400.0).abs() < 2.0,
+            "went where it was asked: {one:?}"
+        );
     }
 
     #[test]
@@ -1242,8 +1279,13 @@ mod dragged_edge_tests {
             .1
     }
 
-    /// The whole of #120 as a coordinate: the edge the hand is on comes to
-    /// rest where the pointer is.
+    /// The whole of #120 as a coordinate: the edge the hand is on comes to rest
+    /// exactly where it was asked to.
+    ///
+    /// Named for the ask and not for the pointer, because since #124 they are
+    /// not the same place -- the compositor sends where the *edge* belongs.
+    /// What #120 was about is unaffected: whatever the caller asks for, the
+    /// grabbed edge has to land on it and not a gap away from it.
     ///
     /// Both halves drag the *same* seam — the root's vertical one — to the
     /// same x, one of them by window 1's right edge and one by window 2's
@@ -1256,7 +1298,7 @@ mod dragged_edge_tests {
     /// from each other; all three assertions below fail on it. At `gap: 0.0`
     /// not one of them does, which is how the defect passed a green suite.
     #[test]
-    fn a_dragged_vertical_edge_lands_under_the_pointer_across_the_gap() {
+    fn a_dragged_vertical_edge_lands_where_it_was_asked_across_the_gap() {
         let settings = gapped();
 
         let mut trailing = quad_at(settings);
@@ -1264,7 +1306,7 @@ mod dragged_edge_tests {
         let one = rect_at(&trailing, 1, settings);
         assert!(
             (one.x + one.w - 700.0).abs() < 0.5,
-            "the grabbed right edge is at the pointer: {one:?}"
+            "the grabbed right edge is where it was asked: {one:?}"
         );
 
         let mut leading = quad_at(settings);
@@ -1272,7 +1314,7 @@ mod dragged_edge_tests {
         let two = rect_at(&leading, 2, settings);
         assert!(
             (two.x - 700.0).abs() < 0.5,
-            "the grabbed left edge is at the pointer: {two:?}"
+            "the grabbed left edge is where it was asked: {two:?}"
         );
 
         // One seam, grabbed from either side, put in one place. This is the
@@ -1288,7 +1330,7 @@ mod dragged_edge_tests {
     /// bottom edge and window 3's top edge are the two sides of the left
     /// column's horizontal seam.
     #[test]
-    fn a_dragged_horizontal_edge_lands_under_the_pointer_across_the_gap() {
+    fn a_dragged_horizontal_edge_lands_where_it_was_asked_across_the_gap() {
         let settings = gapped();
 
         let mut trailing = quad_at(settings);
@@ -1296,7 +1338,7 @@ mod dragged_edge_tests {
         let one = rect_at(&trailing, 1, settings);
         assert!(
             (one.y + one.h - 400.0).abs() < 0.5,
-            "the grabbed bottom edge is at the pointer: {one:?}"
+            "the grabbed bottom edge is where it was asked: {one:?}"
         );
 
         let mut leading = quad_at(settings);
@@ -1304,13 +1346,104 @@ mod dragged_edge_tests {
         let three = rect_at(&leading, 3, settings);
         assert!(
             (three.y - 400.0).abs() < 0.5,
-            "the grabbed top edge is at the pointer: {three:?}"
+            "the grabbed top edge is where it was asked: {three:?}"
         );
 
         assert!(
             ((one.y + one.h) - three.y).abs() < 0.5,
             "the two sides of one seam disagree: {one:?} against {three:?}"
         );
+    }
+
+    /// #124: a window handed its own edge does not move.
+    ///
+    /// **This is the space check, and it is the trap #124 had to clear.** The
+    /// compositor derives what it sends from `Solium::pane_outer` at grab start
+    /// — the pane's *outer* rectangle, insets and all — so a first frame that
+    /// has not moved sends the window's own outer edge back. That has to be the
+    /// same space [`Tiling::node_box`] measures a seam's box in, or the first
+    /// frame of every drag shifts the layout by the difference. Half a gap of
+    /// skew is exactly #120's symptom reached by another route, and #120 took
+    /// two rounds to get right, so this is verified rather than assumed.
+    ///
+    /// It holds because there is only one arrangement here: `node_box` and
+    /// [`Tiling::layout`] both begin at `area.inset(gap)` and both descend
+    /// through [`cut`], so a slot's edge and a seam's box are two readings off
+    /// it. On the compositor's side `sol.place` takes a script's rect as the
+    /// pane's outer rectangle and subtracts the insets itself — see
+    /// `Solium::place` — so the slots this returns are outer rectangles too,
+    /// and the chain closes.
+    ///
+    /// At [`gapped`] rather than at zero, which is the first reason this can
+    /// say anything: at `gap: 0` the two sides of a seam are one line and every
+    /// skew it could catch is zero pixels wide.
+    ///
+    /// **And off-centre, which is the second, discovered by checking that the
+    /// test can fail.** Skewing [`Tiling::node_box`]'s own inset by half a gap
+    /// and re-running it — the exact defect it is here to catch — left it
+    /// green. At ratio 0.5 that skew is self-cancelling: moving the box's
+    /// origin out by 6 and its width out by 12 leaves its midpoint exactly
+    /// where it was, so a seam sitting at the midpoint does not move and a
+    /// fixture built at `split: 0.5` cannot tell. Each case therefore drags its
+    /// seam somewhere deliberately lopsided first, and asserts that it went. On
+    /// the same skew the strengthened version fails on its first case, by
+    /// 1.87px — which is why the tolerance is 0.5px and not "a few pixels". A
+    /// skew does not have to be as wide as the gap to be a skew.
+    ///
+    /// Unlike the compositor-side tests in
+    /// `solium::input::resize::dragged_edge_tests`, this one passes against
+    /// `bf80265` too: `drag_seam` did not change for #124. It is a witness that
+    /// the value now being sent is measured in the right units, not a
+    /// regression test for the value itself.
+    #[test]
+    fn a_window_handed_its_own_edge_does_not_move() {
+        let settings = gapped();
+        // One case per side, each on a window that actually has a seam there:
+        // 1 has the root's vertical seam on its right and its column's
+        // horizontal seam below, 2 has the root's on its left, 3 has its
+        // column's above. A window flush against the container on the side
+        // tested would pass this vacuously, `drag_seam` having returned early.
+        //
+        // The third number is where that seam goes first. Every one of them is
+        // well inside the 0.05..0.95 clamp -- the extremes of these two seams
+        // are 60..928 and 40..548 -- because a clamped ratio would hold still
+        // for the second drag whatever space it was measured in, which is the
+        // other way this test could pass without meaning anything.
+        for (id, edge, lopsided) in [
+            (1_u64, Edge::Right, (340.0, 150.0)),
+            (2, Edge::Left, (640.0, 150.0)),
+            (1, Edge::Bottom, (250.0, 200.0)),
+            (3, Edge::Top, (250.0, 420.0)),
+        ] {
+            let mut tiling = quad_at(settings);
+            let centred = rect_at(&tiling, id, settings);
+            tiling.drag_seam(id, edge, lopsided, area(), settings);
+            let before = rect_at(&tiling, id, settings);
+            assert!(
+                (before.w - centred.w).abs() > 50.0 || (before.h - centred.h).abs() > 50.0,
+                "the fixture has to be off-centre before it proves anything: \
+                 window {id} is still {before:?}"
+            );
+
+            let own_edge = match edge {
+                Edge::Left => (before.x, before.y + before.h / 2.0),
+                Edge::Right => (before.x + before.w, before.y + before.h / 2.0),
+                Edge::Top => (before.x + before.w / 2.0, before.y),
+                Edge::Bottom => (before.x + before.w / 2.0, before.y + before.h),
+            };
+
+            tiling.drag_seam(id, edge, own_edge, area(), settings);
+            let after = rect_at(&tiling, id, settings);
+
+            assert!(
+                (after.x - before.x).abs() < 0.5
+                    && (after.y - before.y).abs() < 0.5
+                    && (after.w - before.w).abs() < 0.5
+                    && (after.h - before.h).abs() < 0.5,
+                "window {id} handed its own {edge:?} edge at {own_edge:?} moved: \
+                 {before:?} became {after:?}"
+            );
+        }
     }
 
     /// Idempotence at a real gap.

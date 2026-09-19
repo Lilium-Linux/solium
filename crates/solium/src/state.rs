@@ -694,16 +694,31 @@ struct Gesture {
 
 /// An edge drag in progress.
 ///
-/// Carries where the pointer *is* rather than how far it moved. A layout sets
-/// its seam from the position directly, so dragging to the same place twice
-/// gives the same result; feeding it deltas fed the layout's own response back
-/// in as the next input.
+/// Carries *positions* rather than deltas, on both of its paths. A layout sets
+/// its seam from a position directly, so dragging to the same place twice gives
+/// the same result; feeding it deltas fed the layout's own response back in as
+/// the next input.
+///
+/// The positions are relative to the grab all the same, and since #124 both of
+/// them are: [`crate::input::resize::resized`] adds the drag's *total* pointer
+/// movement to the rectangle the drag began on, and [`Self::edge_at`] is read
+/// off that rectangle. "Absolute or relative" and "a position or a delta" are
+/// two different questions, and conflating them is how the tiled path came to
+/// send the pointer's own coordinate for a year.
 #[derive(Clone, Debug)]
 pub(crate) struct ResizeRequest {
     pub(crate) window: Window,
     /// Where a floating window would be put, for when no layout claims it.
     pub(crate) wanted: Rectangle<i32, Logical>,
-    pub(crate) at: (f64, f64),
+    /// Where the dragged edge should come to rest, per axis, in the layout's
+    /// **outer** coordinate space.
+    ///
+    /// Read off [`Self::wanted`], so it starts at the window's own edge and
+    /// moves with the pointer rather than jumping to it. See
+    /// [`crate::input::resize::dragged_edge`] for the whole of the reasoning,
+    /// including which space this is in and why that has to be the space
+    /// `solium_layout::tree::Tiling::node_box` measures in.
+    pub(crate) edge_at: (f64, f64),
     /// Which edges the pointer has hold of.
     ///
     /// The whole truth about the gesture, and since #120 the whole of it
@@ -5952,18 +5967,25 @@ impl Solium {
 
     /// Offer a resize to scripts. Returns whether a layout took it.
     ///
-    /// **`request.at` is where the pointer is, not how far it moved.** This
-    /// doc used to call it "the delta", and it was wrong when it was written:
-    /// `ResizeGrab::motion` records `event.location`. A layout that believes
-    /// the doc divides an absolute screen coordinate by the monitor's width
-    /// and calls the result a fraction. `scrolling.lua` does exactly that, in
-    /// a handler whose first parameter is named `dx`, which is how a comment
-    /// becomes a defect.
+    /// **`request.edge_at` is where the dragged edge should go, per axis.** Not
+    /// a delta, and since #124 not the pointer either. This doc has been wrong
+    /// about it twice: it called it "the delta" for the whole life of the event
+    /// while `ResizeGrab::motion` recorded `event.location`, and #120 corrected
+    /// that to "where the pointer is" — accurate about the code, and the code
+    /// was the defect. A seam set from the pointer lands *under the cursor*, so
+    /// a drag begun anywhere but exactly on the edge threw that edge to the
+    /// cursor on its first frame.
     ///
-    /// An absolute position is also the right thing to send, for the reason
-    /// `ResizeRequest` gives: a seam set from where the pointer *is* is
-    /// idempotent, and one accumulated from deltas feeds the layout's own
-    /// response back in as its next input.
+    /// It is still a position rather than a delta, for the reason
+    /// `ResizeRequest` gives: a seam set from a position is idempotent, and one
+    /// accumulated from deltas feeds the layout's own response back in as its
+    /// next input. It is nonetheless relative to the grab, because
+    /// `crate::input::resize::dragged_edge` reads it off the rectangle the drag
+    /// has produced rather than off the seat.
+    ///
+    /// It is in the layout's **outer** space — the space `sol.place` writes and
+    /// `tree:layout` returns — because it comes from a rectangle that began as
+    /// `Solium::pane_outer`.
     ///
     /// The pair after it is the side of the window being dragged on each axis
     /// — `"left"` or `"right"`, `"top"` or `"bottom"`, or nil for an axis that
@@ -5978,7 +6000,7 @@ impl Solium {
         };
         let outcome = scripts.resized(
             id,
-            request.at,
+            request.edge_at,
             crate::input::resize::sides(request.edges),
             snapshot,
         );
@@ -9288,7 +9310,7 @@ mod tests {
             state.pending_resize = Some(ResizeRequest {
                 window: window.clone(),
                 wanted,
-                at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                edge_at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
                 edges: ResizeEdge::TopLeft,
             });
             state.settle_resize();
@@ -9463,7 +9485,7 @@ mod tests {
                 state.pending_resize = Some(ResizeRequest {
                     window: window.clone(),
                     wanted,
-                    at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                    edge_at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
                     edges,
                 });
                 state.settle_resize();
@@ -9552,7 +9574,7 @@ mod tests {
             state.pending_resize = Some(ResizeRequest {
                 window: window.clone(),
                 wanted,
-                at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                edge_at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
                 edges: ResizeEdge::TopLeft,
             });
             // And the release, still with no frame in between: this is
@@ -9641,7 +9663,7 @@ mod tests {
                 state.pending_resize = Some(ResizeRequest {
                     window: window.clone(),
                     wanted,
-                    at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
+                    edge_at: (f64::from(wanted.loc.x), f64::from(wanted.loc.y)),
                     edges: ResizeEdge::TopLeft,
                 });
             };
@@ -9801,7 +9823,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -9911,7 +9933,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -9989,7 +10011,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -10096,7 +10118,7 @@ mod tests {
             let request = ResizeRequest {
                 window: dragged.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&dragged);
@@ -10338,7 +10360,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -10449,7 +10471,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -10551,7 +10573,7 @@ mod tests {
                 let request = ResizeRequest {
                     window: window.clone(),
                     wanted: at(400, 300, width, 200),
-                    at: (f64::from(400 + width), 500.0),
+                    edge_at: (f64::from(400 + width), 500.0),
                     edges: ResizeEdge::Right,
                 };
                 state.hold_resize(&request, Duration::from_millis(millis));
@@ -10630,7 +10652,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -10713,7 +10735,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -10809,7 +10831,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -10891,7 +10913,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -10982,7 +11004,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -11058,7 +11080,7 @@ mod tests {
             let asking = |width: i32| ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, width, 200),
-                at: (f64::from(400 + width), 500.0),
+                edge_at: (f64::from(400 + width), 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
@@ -11158,7 +11180,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Left,
             };
             state.begin_resize(&window);
@@ -11239,7 +11261,7 @@ mod tests {
             let request = ResizeRequest {
                 window: window.clone(),
                 wanted: at(400, 300, 300, 200),
-                at: (700.0, 500.0),
+                edge_at: (700.0, 500.0),
                 edges: ResizeEdge::Right,
             };
             state.begin_resize(&window);
