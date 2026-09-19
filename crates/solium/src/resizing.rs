@@ -40,6 +40,37 @@
 //! everything that reads `real_geometry` sees the same position the pane does,
 //! and the one deliberate disagreement is the one the bridge is measuring.
 //!
+//! # Both paths, and why there are several holds
+//!
+//! `state::Solium::settle_resize` forks on whether a layout claimed the drag,
+//! and for two releases everything in this module hung off the *unclaimed*
+//! branch. The claimed — tiled — branch dropped the hold and went through
+//! `move_pane`, which sizes the window unconditionally, once per pane per
+//! frame. So a tiled drag had no throttle (sixty configures a second, which is
+//! the stutter issue #123 is about), no inversion (`pane_geometry` fell through
+//! to the client's last committed size on every frame that carried no motion,
+//! which is the flicker), and no refusal bookkeeping at all. The comment at the
+//! fork said "nothing here sizes the window"; the code sized it.
+//!
+//! The client-facing half of a resize is the same problem whichever branch
+//! decided the rectangle, so it is now the same code. What differs is *how many
+//! windows one gesture moves*:
+//!
+//! * Floating: one. `Solium::resize_hold` is one slot and that is right.
+//! * Tiled: a seam is two panes, a corner drag is two seams and up to four, and
+//!   a layout is free to move every pane on the monitor. Each has its own
+//!   client, its own committed size, its own throttle deadline, its own
+//!   refusal — and its own moved edge, which is *not* the pointer's: see
+//!   [`moved_edges`]. One hold cannot carry that, so `Solium::resize_bridge`
+//!   holds one per pane.
+//!
+//! A hold is still only ever created by a live pointer gesture. `move_pane` is
+//! reached by a keyboard nudge, a reload, a monitor change and a workspace
+//! switch as well, and a hold created there could never be released —
+//! `release_resize` has exactly one caller, the pointer grab — so it would wait
+//! for ever and hold the slot and the space apart for ever, which is precisely
+//! the disagreement [`PATIENCE`] exists to prevent.
+//!
 //! # The trap
 //!
 //! A client may **refuse** the size it is offered — Firefox has a minimum width
@@ -467,6 +498,23 @@ impl Hold {
         Rectangle::new((x, y).into(), size)
     }
 
+    /// Hand this hold to a gesture that has just started on the same window.
+    ///
+    /// **Only [`Self::released`] changes, and deliberately not [`Self::told`].**
+    /// A hold that outlives its own gesture is a hold whose deadline is
+    /// running, and letting that deadline expire in the middle of the *next*
+    /// gesture adopts whatever size the client happened to be at — the shake
+    /// back again with a longer period, which is why `Solium::begin_resize`
+    /// reconciles the floating hold rather than inheriting it. A tiled pane
+    /// cannot be reconciled the same way without snapping every pane the
+    /// previous drag moved off its tile, so the deadline is stopped instead:
+    /// the new gesture owns these panes and will keep placing them. Leaving
+    /// `told` alone is what stops the handover costing a throttle interval of
+    /// silence at the one moment a drag has just started.
+    pub(crate) const fn rearm(&mut self, released: Option<Duration>) {
+        self.released = released;
+    }
+
     /// What actually fills the pane, given what the configuration asked for.
     ///
     /// A refusal overrides the setting. See [`Self::declined`]: the client is
@@ -490,6 +538,15 @@ impl Hold {
 /// overview thumbnail comes through here and it is free to grow. Only a pane
 /// under a live [`Hold`] is clamped, and only when the configuration asked for
 /// a fill that does not stretch.
+///
+/// **"Mid-drag" means holding, not being dragged**, and until issue #123 those
+/// were different things. A *tiled* pane was being dragged and had no hold, so
+/// it took the `None` arm — the free-to-grow thumbnail arm — and a client
+/// sitting at its minimum width was stretched without limit for the whole of a
+/// gesture, with no `declined` bookkeeping anywhere to notice. The sentence
+/// above was describing the floating path and reading as though it described
+/// the function. Every pane a live gesture moves now carries a hold, so it
+/// describes the function again.
 pub(crate) fn factor(
     fill: Option<Fill>,
     drawn: Size<f64, Logical>,
@@ -505,9 +562,169 @@ pub(crate) fn factor(
     }
 }
 
+/// Which of a pane's *own* edges a rectangle change moved.
+///
+/// **Not the pointer's edges, and that is the whole reason this exists.** A
+/// tiled drag moves a seam, and a seam is at least two panes: the one under the
+/// pointer and its neighbour across the seam. The neighbour's moved edge is the
+/// opposite one — the user pulls their window's right edge and the pane to the
+/// right of it has its *left* edge pulled — and a corner drag moves two seams,
+/// so up to four panes each have their own answer. Handing a neighbour's hold
+/// the pointer's `edges` would pin [`Hold::anchored`] and [`Fill::Hold`]'s
+/// slack against the wrong side of it: the picture would travel with the
+/// pointer inside a window the user is not touching, and a refusal would give
+/// the pixels back on the edge that never moved.
+///
+/// An edge is "moved" when its coordinate changed. **Both edges of one axis
+/// moving names neither**, which is not a fallback but the honest answer: there
+/// is no stationary edge on that axis to hang a held picture against, so
+/// [`Hold::pins`] says false and `render.rs` draws at the rectangle's own
+/// corner. A pane merely pushed sideways by someone else's drag is exactly that
+/// case on one axis and exactly nothing on the other, and it wants no anchoring
+/// at all.
+pub(crate) fn moved_edges(
+    before: Rectangle<i32, Logical>,
+    after: Rectangle<i32, Logical>,
+) -> ResizeEdge {
+    let moved = |before: (i32, i32), after: (i32, i32)| {
+        // `.1` is the far edge: the near coordinate plus the extent, which is
+        // the coordinate that moves when a window grows without moving.
+        (
+            before.0 != after.0,
+            before.0 + before.1 != after.0 + after.1,
+        )
+    };
+    let (left, right) = moved((before.loc.x, before.size.w), (after.loc.x, after.size.w));
+    let (top, bottom) = moved((before.loc.y, before.size.h), (after.loc.y, after.size.h));
+    match (
+        left && !right,
+        right && !left,
+        top && !bottom,
+        bottom && !top,
+    ) {
+        (true, _, true, _) => ResizeEdge::TopLeft,
+        (true, _, _, true) => ResizeEdge::BottomLeft,
+        (true, ..) => ResizeEdge::Left,
+        (_, true, true, _) => ResizeEdge::TopRight,
+        (_, true, _, true) => ResizeEdge::BottomRight,
+        (_, true, ..) => ResizeEdge::Right,
+        (_, _, true, _) => ResizeEdge::Top,
+        (_, _, _, true) => ResizeEdge::Bottom,
+        _ => ResizeEdge::None,
+    }
+}
+
+/// A per-frame record of what a drag did to one pane, for when a report of
+/// "it still stutters" needs numbers rather than another theory.
+///
+/// **Off unless [`VARIABLE`] names a file**, and off is one relaxed atomic load
+/// on a path that runs once per pane per frame. Not `tracing`: the compositor's
+/// subscriber is wired for a session's diagnostics and this is a stream of tens
+/// of lines a frame that wants to land somewhere a person can `awk` at. Not
+/// `/tmp` either — the user's Xwayland clears it — so the variable takes a path
+/// and the caller chooses one under `$XDG_RUNTIME_DIR` or the worktree.
+///
+/// Appends and never truncates, so two runs of a compositor that was restarted
+/// mid-investigation are both still there, and writes unbuffered so a session
+/// that ends in a hang has its last frame on disk.
+pub(crate) mod trace {
+    use std::{
+        fs::OpenOptions,
+        io::Write,
+        sync::{Mutex, OnceLock},
+    };
+
+    /// The environment variable naming the file to append to.
+    pub(crate) const VARIABLE: &str = "SOLIUM_RESIZE_TRACE";
+
+    static SINK: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+
+    fn sink() -> Option<&'static Mutex<std::fs::File>> {
+        SINK.get_or_init(|| open(std::env::var_os(VARIABLE)?))
+            .as_ref()
+    }
+
+    /// Open one trace file, warning rather than failing if it cannot be opened.
+    ///
+    /// Split from [`sink`] so it can be tested. A `OnceLock` latches for the
+    /// life of the process and `cargo test` is one process, so a test that set
+    /// the variable would be racing every other test for who initialises it
+    /// first — and the half worth testing is this one, where a mistyped
+    /// directory or a read-only path decides whether the user gets numbers or
+    /// silence.
+    fn open(path: std::ffi::OsString) -> Option<Mutex<std::fs::File>> {
+        match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => Some(Mutex::new(file)),
+            Err(err) => {
+                tracing::warn!(?err, ?path, "could not open the resize trace");
+                None
+            }
+        }
+    }
+
+    /// Whether anything is listening, for a caller that would have to compute
+    /// something to say.
+    pub(crate) fn on() -> bool {
+        sink().is_some()
+    }
+
+    /// One line. `what` names the site so two sites can be told apart by
+    /// `grep`; the rest is `key=value` pairs.
+    pub(crate) fn line(what: &str, fields: std::fmt::Arguments<'_>) {
+        let Some(sink) = sink() else {
+            return;
+        };
+        // A poisoned lock means some other thread panicked mid-line. Losing a
+        // diagnostic is not worth taking a compositor down for, and the lints
+        // that forbid `unwrap` here are the same rule said once.
+        let Ok(mut file) = sink.lock() else {
+            return;
+        };
+        let _ = writeln!(file, "{what} {fields}");
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io::Write as _;
+
+        /// The trace appends rather than truncating, and a path it cannot open
+        /// costs a warning rather than a session.
+        ///
+        /// Both halves are the difference between the user running a drag and
+        /// sending back numbers, and the user running a drag and sending back
+        /// nothing — which is where this issue started.
+        #[test]
+        fn a_trace_appends_to_its_file_and_survives_one_it_cannot_open() {
+            let path = std::env::temp_dir().join(format!(
+                "solium-resize-trace-test-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, "earlier\n").expect("seeding the trace file");
+
+            let sink = super::open(path.clone().into_os_string()).expect("opening the trace");
+            writeln!(sink.lock().expect("locking the trace").by_ref(), "later")
+                .expect("writing the trace");
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("reading the trace back"),
+                "earlier\nlater\n",
+                "a second run of a restarted compositor must not erase the \
+                 first one's frames"
+            );
+            std::fs::remove_file(&path).expect("removing the trace file");
+
+            assert!(
+                super::open(path.join("not-a-directory").into_os_string()).is_none(),
+                "a path that cannot be opened turns the trace off, and takes \
+                 nothing else with it"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Fill, Hold, PATIENCE, Settle, TELL_EVERY, factor};
+    use super::{Fill, Hold, PATIENCE, Settle, TELL_EVERY, factor, moved_edges};
     use smithay::{
         reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
         utils::{Logical, Rectangle, Size},
@@ -917,5 +1134,119 @@ mod tests {
         assert_eq!(Fill::named("Stretch"), None);
         assert_eq!(Fill::named(""), None);
         assert_eq!(Fill::default(), Fill::Stretch);
+    }
+
+    /// **The two panes a seam moves are pulled by opposite edges.**
+    ///
+    /// The scenario is the ordinary one: a vertical seam at x 700 between a
+    /// pane occupying 400..700 and its neighbour occupying 700..900, and the
+    /// user drags the left pane's *right* edge out to 760. The left pane's
+    /// right edge moved and the right pane's *left* edge moved, and handing the
+    /// second one the pointer's `Right` would anchor its held picture and any
+    /// refusal against the side that did not move — the window's contents would
+    /// slide inside their own frame for the length of the drag.
+    #[test]
+    fn a_seams_two_panes_are_pulled_by_opposite_edges() {
+        assert_eq!(
+            moved_edges(rect(400, 300, 300, 400), rect(400, 300, 360, 400)),
+            ResizeEdge::Right,
+            "the pane under the pointer keeps the edge the pointer has"
+        );
+        assert_eq!(
+            moved_edges(rect(700, 300, 200, 400), rect(760, 300, 140, 400)),
+            ResizeEdge::Left,
+            "and its neighbour across the seam has the opposite one: its right \
+             edge is the far wall and has not moved at all"
+        );
+    }
+
+    /// **A pane merely pushed aside has no pulled edge, and must not be given
+    /// one.**
+    ///
+    /// Both of its edges travelled by the same amount, so nothing on that axis
+    /// is standing still and there is nothing for a held picture to be anchored
+    /// against. Naming an edge anyway would offset the buffer by the slack
+    /// `render.rs` computes, inside a window the user is not touching.
+    #[test]
+    fn a_pane_that_only_moved_has_no_edge_to_anchor_against() {
+        let hold = Hold::new(
+            moved_edges(rect(700, 300, 200, 400), rect(760, 300, 200, 400)),
+            size(200, 400),
+            size(200, 400),
+            ms(0),
+            None,
+        );
+        assert_eq!(hold.pins(), (false, false));
+        assert_eq!(
+            moved_edges(rect(400, 300, 300, 400), rect(400, 300, 300, 400)),
+            ResizeEdge::None,
+            "and a rectangle that did not change moved no edge either"
+        );
+    }
+
+    /// A corner drag moves two seams, and each of the up-to-four panes it
+    /// touches has its own pair.
+    #[test]
+    fn a_corner_names_both_of_its_axes() {
+        assert_eq!(
+            moved_edges(rect(400, 300, 300, 400), rect(400, 300, 360, 460)),
+            ResizeEdge::BottomRight
+        );
+        assert_eq!(
+            moved_edges(rect(700, 700, 200, 300), rect(760, 760, 140, 240)),
+            ResizeEdge::TopLeft,
+            "the pane diagonally opposite has both of its near edges pulled"
+        );
+        assert_eq!(
+            moved_edges(rect(700, 300, 200, 400), rect(760, 300, 140, 460)),
+            ResizeEdge::BottomLeft
+        );
+    }
+
+    /// **A hold handed to a new gesture stops counting down, and does not lose
+    /// its place in the throttle.**
+    ///
+    /// `rearm` exists for a border nudged twice inside a quarter of a second:
+    /// the first gesture's holds are waiting out `PATIENCE` when the second
+    /// starts. Letting that deadline expire mid-gesture would adopt whatever
+    /// size each client happened to be at — every pane the first nudge moved
+    /// snapping off its tile in the middle of the second.
+    #[test]
+    fn a_rearmed_hold_stops_its_deadline_without_resetting_its_throttle() {
+        let mut hold = Hold::new(
+            ResizeEdge::Right,
+            size(300, 200),
+            size(320, 200),
+            ms(0),
+            Some(ms(0)),
+        );
+        // Well past the deadline: this hold would adopt on the next look.
+        assert_eq!(
+            hold.settle(size(300, 200), PATIENCE + ms(10)),
+            Settle::Adopt(size(300, 200)),
+            "which is what the second gesture must not be handed"
+        );
+
+        let mut hold = Hold::new(
+            ResizeEdge::Right,
+            size(300, 200),
+            size(320, 200),
+            ms(0),
+            Some(ms(0)),
+        );
+        hold.rearm(None);
+        assert_eq!(
+            hold.settle(size(300, 200), PATIENCE + ms(10)),
+            Settle::Waiting,
+            "the new gesture owns this pane now, and a gesture that is still \
+             going ends nothing"
+        );
+        assert_eq!(
+            hold.dragged(size(340, 200), size(300, 200), TELL_EVERY),
+            Some(size(340, 200)),
+            "and the interval still runs from when the client was last spoken \
+             to, not from the handover: resetting it would cost a tenth of a \
+             second of silence at the one moment a drag has just started"
+        );
     }
 }

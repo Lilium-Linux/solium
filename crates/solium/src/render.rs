@@ -1140,9 +1140,30 @@ pub(crate) fn elements(
         // second scaling path and nothing new in the element list. When the
         // client commits the size it was asked for the two sizes are equal
         // again and the window is pixel-exact. See `crate::resizing`.
-        let (across, down) =
-            crate::resizing::factor(state.resize_fill(pane), client.size, real.size);
+        let fill = state.resize_fill(pane);
+        let (across, down) = crate::resizing::factor(fill, client.size, real.size);
         let factor = Scale::from((across, down));
+
+        // The other half of the resize trace: `state.rs` records what the layout
+        // wrote and what the client was told, and this records what was actually
+        // drawn. Together they answer the question a report of "it still
+        // stutters" cannot — whether the frame drawn on a given frame came from
+        // the slot or from the client's last commit. See `resizing::trace`.
+        if crate::resizing::trace::on() {
+            crate::resizing::trace::line(
+                "drawn",
+                format_args!(
+                    "pane={} frame={},{} {}x{} committed={}x{} factor={across:.4},{down:.4} fill={fill:?}",
+                    pane.get(),
+                    frame.rect.loc.x,
+                    frame.rect.loc.y,
+                    frame.rect.size.w,
+                    frame.rect.size.h,
+                    real.size.w,
+                    real.size.h,
+                ),
+            );
+        }
 
         let corner = client.loc.to_physical_precise_round(scale);
 
