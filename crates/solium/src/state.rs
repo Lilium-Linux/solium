@@ -1746,6 +1746,24 @@ impl Solium {
     }
 
     /// Whether the pointer is over a pane, frame included.
+    ///
+    /// **A question about a rectangle, and deliberately not a hit test.** It is
+    /// asked once per frame by `render::chrome`, for
+    /// `decoration::Look::pointer_inside` — the flag a titlebar reads to light
+    /// a close button up as the cursor crosses it. Nothing routes an event by
+    /// it: presses go through `chrome_under` and `window_under`, motion and
+    /// buttons through `surface_under`, and all three walk `drawn_at` and
+    /// `Frame::covers`.
+    ///
+    /// That is why it takes `pane_outer_of` rather than the drawn frame, and
+    /// why it is right that it does. The alternative was raised by #127's
+    /// review and is worth answering once so it is not raised again: were this
+    /// gated on `covers` like the walks are, it would still decide nothing
+    /// about where input goes, and a pane it answers `true` for while invisible
+    /// draws no decoration to light up — `render::chrome` is reached through
+    /// the same transform, and a frame at opacity zero paints nothing. Asking a
+    /// cheaper question here and the exact one there is the split, not an
+    /// oversight in this line.
     pub(crate) fn pointer_over(&self, id: crate::pane::PaneId) -> bool {
         let Some(outer) = self.pane_outer_of(id) else {
             return false;
@@ -3294,46 +3312,65 @@ impl Solium {
         // left is the client's.
         let client = inner(outer, self.insets_of(pane));
 
-        // **Asked once, and it gates everything a client can observe.**
+        // **The configure, and only the configure.**
         //
         // The guard that shipped with #127 covered the transform at the bottom
-        // of this function and nothing else, which left the three writes below
-        // running on a dying window -- issue #127's review finding 2. What that
-        // costs is one visible defect and one pointless one.
+        // of this function and nothing else, which left the *client-facing*
+        // write running on a dying window -- issue #127's review finding 2.
+        // `size_window` resizes `real_geometry` while `present::close` holds
+        // `frame.rect` pinned at the rectangle the window was closed at. Those
+        // two rectangles are exactly the pair `resizing::factor` divides -- the
+        // client's committed buffer against the size the pane is drawn at -- so
+        // the moment the layout hands the dying client a different size and the
+        // client answers it, the leaving animation stretches the last buffer to
+        // fill a rectangle it was never painted for. The window squashes as it
+        // fades, which reads as the close going wrong rather than as a reflow
+        // happening behind it.
         //
-        // `size_window` and `map_stacked` move and resize `real_geometry` while
-        // `present::close` holds `frame.rect` pinned at the rectangle the window
-        // was closed at. Those two rectangles are exactly the pair
-        // `resizing::factor` divides -- the client's committed buffer against
-        // the size the pane is drawn at -- so the moment the layout hands the
-        // dying client a different size and the client answers it, the leaving
-        // animation stretches the last buffer to fill a rectangle it was never
-        // painted for. The window squashes as it fades, which reads as the
-        // close going wrong rather than as a reflow happening behind it.
+        // The configure is waste even when the client never answers: it asks
+        // something in the middle of tearing itself down to re-lay-out at a
+        // size that will never be drawn, on the one code path where the answer
+        // cannot arrive in time to matter. Electron and the JVM are the clients
+        // slow enough to still be running their quit handlers when it lands.
         //
-        // And the configure itself is waste at best: it asks a client that is
-        // in the middle of tearing itself down to re-lay-out at a size that
-        // will never be drawn, on the one code path where the answer cannot
-        // arrive in time to matter. Electron and the JVM are the clients slow
-        // enough to still be running their quit handlers when it lands.
+        // **`map_stacked` is none of that, and suppressing it too was the
+        // second review's finding 2.** It carries a *location* and no size, so
+        // it is not half of any pair `resizing::factor` divides and cannot
+        // stretch anything; and it tells no client anything -- it writes into
+        // `self.space`, a window's position is not on the xdg wire at all, and
+        // for X11 it is `size_window` that sends the `ConfigureWindow`. What it
+        // is, is the third copy of the fact this function exists to keep in
+        // agreement, and this function's own opening paragraph already says
+        // what dropping it costs: *setting the slot without telling the space
+        // is undone before the next frame is drawn, silently*. `pane_geometry`
+        // answers `real_geometry` for a mapped client, so `sync_panes` copies
+        // the space's stale rectangle back over the `set_slot` below on the
+        // very next frame -- which made the slot, `Pane::placed` and the space
+        // three different answers instead of one.
         //
-        // **Only what a client can see is suppressed.** The slot and
-        // `Pane::placed` below are written for a leaving pane exactly as for a
-        // staying one, because the layout is still right about where this pane
-        // lives, `sync_panes` still has to agree with the space, and #124 reads
-        // `placed`.
+        // The consequence was not cosmetic. A sweep that moved a pane *during*
+        // a close -- a workspace switch, `rescue_offscreen`, a config reload --
+        // followed by a refusal handed the window back at its **pre-close**
+        // rectangle while `Pane::placed` said the layout had moved it. Those
+        // two are exactly what `pane_laid_out` pairs, so #124's edge drag began
+        // from a rectangle the window was not at. That path rests on `real.loc`
+        // being compositor-set and therefore exact; this line is what keeps it
+        // so.
+        //
+        // **What is still suppressed, said plainly rather than left to be
+        // inferred.** The client's *size* stays one configure behind for as
+        // long as the pane is leaving, because that configure was never sent.
+        // It corrects itself on the first sweep after the window comes back --
+        // the configure was suppressed before `offers_size` could record it as
+        // told, so re-placing at the same rectangle is a change and goes out --
+        // and `a_window_the_layout_moved_mid_close_comes_back_where_it_was_put`
+        // asserts that rather than this paragraph asserting it.
         let leaving = self.panes.get(pane).is_some_and(Pane::leaving);
 
         // A client is moved and resized for real, and the space is told,
         // because the space is the authority for a mapped window.
-        if let Some(window) = self
-            .panes
-            .get(pane)
-            .filter(|_| !leaving)
-            .and_then(Pane::client)
-            .cloned()
-        {
-            if self.offers_size(pane, &window, client, now) {
+        if let Some(window) = self.panes.get(pane).and_then(Pane::client).cloned() {
+            if !leaving && self.offers_size(pane, &window, client, now) {
                 size_window(&window, client);
             }
             // `false`: laying out must not restack. A tiling arrangement that
@@ -3401,12 +3438,15 @@ impl Solium {
         // underneath — against a full-opacity snap followed by nothing, which
         // is what shipped.
         //
-        // **The bookkeeping is what survives, not the presentation.** The slot
-        // and `Pane::placed` above still happen for a leaving pane; the
-        // transform here and the client-facing writes at the top of the
-        // function do not. The first draft of this guard covered only this
-        // line and said so, which left the configure and the restack running —
-        // see the note above them for what that cost.
+        // **The bookkeeping is what survives, not the presentation.** All three
+        // copies of where this pane lives — the space, the slot and
+        // `Pane::placed` — are written for a leaving pane exactly as for a
+        // staying one. Exactly two things are suppressed, and they are the two
+        // a *client* can observe: the configure at the top of the function, and
+        // this transform. The first draft of this guard covered only this line,
+        // which left the configure running; the second suppressed the space as
+        // well, which left the three copies disagreeing. See the note above
+        // them for both.
         //
         // Note what needs no guard. `present::rebase` — the group path — is
         // safe for a leaving pane by construction: it preserves both the
@@ -4022,6 +4062,11 @@ impl Solium {
             if let Some(pane) = self.panes.get_mut(id) {
                 pane.mark_asked(now);
             }
+            // **And the keyboard leaves with the pixels.** After `mark_asked`,
+            // not before: `stop_closing` above has already cleared the other
+            // half of `Pane::leaving`, so until this line the pane would still
+            // be a candidate for the keyboard it is about to give up.
+            self.hand_off_keyboard(&window);
         }
         // Asked after the loop, not before it: `trigger_close` runs a script,
         // and a script that closes another window during it starts a timer
@@ -5132,6 +5177,13 @@ impl Solium {
     /// that is where focus would land the moment you moved; the topmost
     /// otherwise. Called where a window went, and only when nothing has focus,
     /// so it cannot argue with a script that has just chosen one.
+    ///
+    /// **Neither candidate may be a window on its way out.** The pointer arm
+    /// gets that from `window_under`, which declines a pane nothing can see.
+    /// The topmost arm had to be told: it reads the pane list directly, and the
+    /// pane a close is playing on is usually the topmost one there is, so
+    /// without the filter [`Self::hand_off_keyboard`] would take the keyboard
+    /// off a closing window and give it straight back.
     pub(crate) fn settle_focus(&mut self) {
         if self.focused_window().is_some() {
             return;
@@ -5147,12 +5199,68 @@ impl Solium {
                 self.panes
                     .iter()
                     .rev()
+                    .filter(|pane| !pane.leaving())
                     .find_map(|pane| pane.client().cloned())
             });
         if let Some(window) = next {
             tracing::debug!("a window went and the keyboard had nowhere to be");
             self.focus_window(&window, SERIAL_COUNTER.next_serial());
         }
+    }
+
+    /// Take the keyboard off a window that is no longer on screen, and give it
+    /// to whatever is.
+    ///
+    /// **The half of issue #127's hit-test fix that a mouse cannot reach.** The
+    /// review before this one stopped an invisible closing pane from winning
+    /// `window_under`, which fixed the keystrokes that follow a *click*: the
+    /// press lands in the window that is drawn and focus goes there with it.
+    /// It fixed nothing for the user who never touches the mouse. `close_pane`
+    /// does not move focus, and `settle_focus` runs only from `sync_panes`,
+    /// which calls it when the *pane set* changes -- and a close that has been
+    /// asked and not yet answered changes nothing. So `super+q` followed by
+    /// carrying on typing put every keystroke into an invisible window for the
+    /// whole 190 ms animation plus the 1000 ms grace period, with the window
+    /// that reflowed into its place on screen taking the blame. Close, keep
+    /// typing is the ordinary way to meet this; clicking first is the rare one.
+    ///
+    /// **Here, at the request, and not at the press.** The boundary is the same
+    /// one `Frame::covers` draws for the pointer, deliberately: while the
+    /// leaving animation is playing the window is still *there* -- shrinking
+    /// and fading, but drawn, and still alive -- and a half-faded window that
+    /// keeps its clicks must keep its keystrokes too, or the two halves of a
+    /// press disagree about which window the user is looking at. The animation
+    /// landing is the instant the window stops covering anything, and it is the
+    /// same instant `settle_closing` sends the request. So the exposure is the
+    /// 190 ms in which the window is visible, rather than the 1190 ms in which
+    /// it is not.
+    ///
+    /// **What it is not: a decision about where focus should end up.** That is
+    /// [`Self::settle_focus`]'s, unchanged and already the answer everywhere
+    /// else a window goes -- the window under the pointer, else the topmost.
+    /// This only clears the seat first, because `settle_focus` declines to
+    /// argue with a focus that is already set, and the focus that is set is the
+    /// one being taken away.
+    ///
+    /// Nothing is focused when there is nothing else open. That is the right
+    /// answer rather than a gap: typing into a window that is not on screen is
+    /// the fault, and typing into nothing at least loses no keystrokes to the
+    /// wrong application. [`Self::give_back`] calls `settle_focus` again for
+    /// the window that comes back to a session with an idle keyboard.
+    fn hand_off_keyboard(&mut self, leaving: &Window) {
+        if !self.is_focused(leaving) {
+            return;
+        }
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+        }
+        // Both of the things `focus_window` sets beside the keyboard. A client
+        // that keeps the data-device focus it was given can still read the
+        // selection, and an X11 window that is never deactivated goes on
+        // drawing itself focused.
+        self.focus_selection(None);
+        crate::xwayland::activate(self, None);
+        self.settle_focus();
     }
 
     /// Bring back a window that was asked to close and did not.
@@ -5289,6 +5397,22 @@ impl Solium {
     /// Answering `false` leaves `asked_at` set, so the pane is still due next
     /// frame and `settle_refused` returns `true` and keeps the backend drawing.
     /// A busy slot costs a frame, which is what it costs everywhere else.
+    ///
+    /// **Both timers, not just the one each caller happens to be holding.**
+    /// `stop_closing` is a no-op on `settle_refused`'s path, where the request
+    /// has long gone out and `closing_at` was cleared with it, and it is the
+    /// whole of the point on [`Self::refused_with_a_dialog`]'s: a GTK file
+    /// chooser is up well inside the 190 ms `CLOSING` window, and without this
+    /// `settle_closing` would go on to send the request and close the parent
+    /// out from under its own dialog. Undoing a close is one operation, so it
+    /// is written once.
+    ///
+    /// **And the keyboard, because this is the other side of
+    /// [`Self::hand_off_keyboard`].** The handoff leaves the seat holding
+    /// nothing when the closing window was the only one open; a window coming
+    /// back to a session whose keyboard is idle is exactly the case
+    /// `settle_focus` exists for. It declines when something else has focus,
+    /// so a window the user has moved on from does not steal it back.
     fn give_back(&mut self, id: crate::pane::PaneId, now: std::time::Duration) -> bool {
         let Some(pane) = self.panes.get(id) else {
             // No pane, nothing to give back and nothing left waiting: a window
@@ -5307,8 +5431,10 @@ impl Solium {
         }
         if let Some(pane) = self.panes.get_mut(id) {
             pane.forget_asked();
+            pane.stop_closing();
         }
         self.redraw = true;
+        self.settle_focus();
         true
     }
 
@@ -5337,10 +5463,35 @@ impl Solium {
     /// chooser is `set_parent`'d to the document that raised it, which says
     /// *this* window is what the dialog is about; a client that happens to open
     /// an unrelated window elsewhere in the same process while a close is
-    /// pending has said nothing about the window being closed. `Self::parent_of`
-    /// already walks both protocols' spellings of it, so an X11
-    /// `WM_TRANSIENT_FOR` dialog is covered by the same line.
-    fn refused_with_a_dialog(&mut self, child: &Window) {
+    /// pending has said nothing about the window being closed.
+    ///
+    /// **Three call sites, named because a claim about coverage is worth
+    /// exactly what can be checked against it.** [`Self::parent_of`] reading
+    /// both protocols' spellings of a parent is necessary and is not
+    /// sufficient: what decides whether an X11 dialog is covered is whether any
+    /// X11 *event* reaches this function, and the first draft of this comment
+    /// asserted that it did on the strength of `parent_of` alone, while the
+    /// only caller was `XdgShellHandler::parent_changed`. An XWayland
+    /// application's unsaved-changes dialog left its parent a 1.19 s hole for
+    /// the whole of #127's review. The callers are:
+    ///
+    /// * `XdgShellHandler::parent_changed` — `xdg_toplevel.set_parent`.
+    /// * `XwmHandler::map_window_request` — an X11 window appearing with
+    ///   `WM_TRANSIENT_FOR` already set, which is where nearly every one of
+    ///   them arrives: smithay reads the property at `CreateNotify`, strictly
+    ///   before the `MapRequest`.
+    /// * `XwmHandler::property_notify` for `WmWindowProperty::TransientFor` —
+    ///   the client that maps first and says whose dialog it is afterwards.
+    ///
+    /// **And the honest limit, which is the part the last comment here left
+    /// out.** Only the first of the three is pinned by a test: an `X11Surface`
+    /// cannot be built without a live XWayland and nothing in this suite has
+    /// one. So the two X11 hooks are verified by reading them, and what they
+    /// share with the tested path is the body below — which is every line of
+    /// the decision. That is a weaker claim than "covered" and it is the one
+    /// that is true; the previous version of this note made the stronger claim
+    /// with nothing behind it at all.
+    pub(crate) fn refused_with_a_dialog(&mut self, child: &Window) {
         let Parentage::Window(parent) = self.parent_of(child) else {
             return;
         };
@@ -5367,16 +5518,12 @@ impl Solium {
         // an opacity-zero transform -- finding 5 reintroduced by the fix for
         // finding 3. Declining changes nothing at all, which leaves the close
         // proceeding exactly as it did before this function existed.
-        if !self.give_back(id, now) {
-            return;
-        }
-        // `stop_closing` matters for the window where the dialog beat the
-        // 190 ms `CLOSING` deadline -- a GTK file chooser is up well inside it
-        // -- because otherwise `settle_closing` would still send the request
-        // afterwards and close the parent out from under its own dialog.
-        if let Some(pane) = self.panes.get_mut(id) {
-            pane.stop_closing();
-        }
+        //
+        // `give_back` retires both timers, which is what matters for the dialog
+        // that beat the 190 ms `CLOSING` deadline: without `stop_closing` the
+        // request would still go out afterwards and close the parent out from
+        // under its own dialog. See it for why that lives there and not here.
+        self.give_back(id, now);
     }
 
     /// Act on a frame button.
@@ -9205,7 +9352,8 @@ mod tests {
         use std::os::unix::io::{AsFd, OwnedFd};
         use std::os::unix::net::UnixStream;
         use wayland_client::protocol::{
-            wl_buffer, wl_callback, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+            wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_shm,
+            wl_shm_pool, wl_surface,
         };
         use wayland_client::{Connection, Dispatch, QueueHandle};
         use wayland_protocols::xdg::dialog::v1::client::{xdg_dialog_v1, xdg_wm_dialog_v1};
@@ -9278,6 +9426,35 @@ mod tests {
             /// request going out, so the only honest place to count is the end
             /// that receives them.
             closes: Vec<wayland_client::backend::ObjectId>,
+            /// The seat and its keyboard, bound so that a test can ask where
+            /// typing *went* rather than where focus was set.
+            ///
+            /// The distinction is the whole of #127's second review, finding 1:
+            /// a compositor that leaves focus on a window nobody can see is
+            /// indistinguishable, from its own side, from one that moved it —
+            /// `keyboard.set_focus` returns nothing and the seat is perfectly
+            /// happy to hold a surface that is drawn at opacity zero. The end
+            /// that receives the keystrokes is the only one that can say.
+            seat: Option<wl_seat::WlSeat>,
+            keyboard: Option<wl_keyboard::WlKeyboard>,
+            /// The surface this client currently has keyboard focus on, as
+            /// `wl_keyboard.enter` and `.leave` report it.
+            ///
+            /// Kept as the protocol id rather than the proxy, because that is
+            /// the one number both ends of this fixture agree on: a
+            /// `wl_surface` is created by the client and carries the same id in
+            /// the server's object map, so a test holding only the server's
+            /// `Window` can still say which surface this was.
+            entered: Option<u32>,
+            /// Every key this client was sent, paired with the surface it was
+            /// focused on when it arrived.
+            ///
+            /// The pairing is the point. `wl_keyboard.key` carries no surface —
+            /// it goes wherever the last `enter` put the focus — so "which
+            /// window did this character reach" is a question only a client
+            /// tracking both events can answer, and it is exactly the question
+            /// the user asks when they close a window and keep typing.
+            typed: Vec<(Option<u32>, u32)>,
         }
 
         impl Dispatch<wl_registry::WlRegistry, ()> for Client {
@@ -9300,6 +9477,63 @@ mod tests {
                     "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
                     "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                     "xdg_wm_dialog_v1" => state.dialogs = Some(registry.bind(name, 1, qh, ())),
+                    // Version 5 rather than the newest: everything below needs
+                    // `enter`, `leave` and `key`, which are version 1, and the
+                    // lower the bind the fewer ways this fixture can stop
+                    // matching the compositor's advertised version.
+                    "wl_seat" => state.seat = Some(registry.bind(name, 5, qh, ())),
+                    _ => {}
+                }
+            }
+        }
+
+        /// The keyboard is taken as soon as the seat says it has one.
+        ///
+        /// Here rather than at a call site, because capabilities arrive
+        /// asynchronously: a test that asked for the keyboard at the moment it
+        /// wanted to type would be asking before the registry round trip that
+        /// `connect` ends with had delivered this event.
+        impl Dispatch<wl_seat::WlSeat, ()> for Client {
+            fn event(
+                state: &mut Self,
+                seat: &wl_seat::WlSeat,
+                event: wl_seat::Event,
+                (): &(),
+                _conn: &Connection,
+                qh: &QueueHandle<Self>,
+            ) {
+                let wl_seat::Event::Capabilities { capabilities } = event else {
+                    return;
+                };
+                let has_keyboard = capabilities
+                    .into_result()
+                    .is_ok_and(|capabilities| capabilities.contains(wl_seat::Capability::Keyboard));
+                if has_keyboard && state.keyboard.is_none() {
+                    state.keyboard = Some(seat.get_keyboard(qh, ()));
+                }
+            }
+        }
+
+        /// Where the typing went. See [`Client::typed`].
+        ///
+        /// The keymap fd is dropped rather than read: nothing here interprets
+        /// keysyms, and the assertion is about which surface received a key
+        /// rather than which character it was.
+        impl Dispatch<wl_keyboard::WlKeyboard, ()> for Client {
+            fn event(
+                state: &mut Self,
+                _keyboard: &wl_keyboard::WlKeyboard,
+                event: wl_keyboard::Event,
+                (): &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+                match event {
+                    wl_keyboard::Event::Enter { surface, .. } => {
+                        state.entered = Some(wayland_client::Proxy::id(&surface).protocol_id());
+                    }
+                    wl_keyboard::Event::Leave { .. } => state.entered = None,
+                    wl_keyboard::Event::Key { key, .. } => state.typed.push((state.entered, key)),
                     _ => {}
                 }
             }
@@ -12839,6 +13073,354 @@ mod tests {
             assert!(
                 state.panes.get(pane).is_some_and(|pane| !pane.leaving()),
                 "and it is no longer leaving, so a second super+q can close it"
+            );
+        }
+
+        /// The protocol id of a window's surface.
+        ///
+        /// The one number the two ends of this fixture share. A `wl_surface` is
+        /// created by the client, so the id it picked is the id the server
+        /// knows it by, and a test holding the server's `Window` can say which
+        /// surface a `wl_keyboard.enter` named without threading the client's
+        /// proxy through every helper.
+        fn surface_id(window: &Window) -> u32 {
+            window
+                .wl_surface()
+                .expect("a mapped client has a surface")
+                .id()
+                .protocol_id()
+        }
+
+        /// One keystroke, through the same `KeyboardHandle::input` that
+        /// `crate::input::keyboard` ends in.
+        ///
+        /// `Forward` unconditionally: whether a combination is a binding is
+        /// `input::keyboard`'s question and not this one's.
+        ///
+        /// `key` is the evdev code, which is what an input backend reports and
+        /// what the client is sent. The `+ 8` in the middle is the X11 offset
+        /// libxkbcommon works in and smithay unwinds again on the wire, so the
+        /// number that goes in here is the number that comes out at the other
+        /// end — and a test asserting on a different one would be asserting on
+        /// this fixture's arithmetic rather than on the compositor's.
+        fn types(state: &mut Solium, key: u32) {
+            let keyboard = state.seat.get_keyboard().expect(
+                "the fixture's seat has a keyboard; without one there is no \
+                 typing to be wrong about",
+            );
+            keyboard.input::<(), _>(
+                state,
+                smithay::input::keyboard::Keycode::new(key + 8),
+                smithay::backend::input::KeyState::Pressed,
+                SERIAL_COUNTER.next_serial(),
+                0,
+                |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+            );
+        }
+
+        /// `KEY_A`, as evdev and the client both spell it. See [`types`].
+        const KEY_A: u32 = 30;
+
+        /// **#127 second review, finding 1: the keystroke fix only worked via a
+        /// click.**
+        ///
+        /// The review before this one stopped an invisible closing pane from
+        /// winning `window_under`, and `window_under` is what click-to-focus
+        /// focuses — so a press where the dead window used to be goes to the
+        /// window that is drawn there, and the typing after it follows. That is
+        /// the whole of the fix, and it requires the user to touch the mouse.
+        ///
+        /// **Nothing moved focus otherwise.** `close_pane` does not, and
+        /// `settle_focus` runs from `sync_panes` only when the pane set
+        /// changes, which a close that has been asked and not yet answered does
+        /// not do. So `super+q` and carry on typing — the ordinary way anyone
+        /// meets this — put every character into a window at opacity zero for
+        /// the 190 ms animation *and* the 1000 ms grace after it, while the
+        /// sibling that reflowed into the space sat on screen looking like the
+        /// thing being typed into.
+        ///
+        /// **Asserted at the client, which is the only end that can tell.**
+        /// From the compositor's own side a seat holding an invisible surface
+        /// looks exactly like one holding a visible one; `set_focus` returns
+        /// nothing and complains about nothing. So this binds a `wl_keyboard`
+        /// and asks where the key came out. See [`Client::typed`].
+        ///
+        /// The premise is typed first, before the close: a test whose second
+        /// half passes because the keyboard was never wired at all would be
+        /// worth nothing, and this makes that failure loud instead.
+        #[test]
+        fn typing_after_a_close_reaches_the_window_that_is_drawn() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (kept, _survivor) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (1000, 300));
+            let (doomed, closing) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (400, 300));
+            // Twice: the first round trip carries the seat's capabilities to
+            // the client, and `get_keyboard` is a request it makes in answer to
+            // them, so the keyboard does not exist on the server until the
+            // second.
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert!(
+                client.keyboard.is_some(),
+                "the client bound a keyboard; without one this test cannot \
+                 observe anything"
+            );
+
+            // Past both opening animations, and *settled*, which is what the
+            // render loop does once a frame.
+            //
+            // Not housekeeping: `present::open`'s target was captured before
+            // `opened_at` moved each window, so until that released transform
+            // is retired a pane is still drawn near the origin — where the
+            // pointer is sitting, having never been moved. `settle_focus` asks
+            // `window_under` first, so without this it answers from the pointer
+            // and the topmost-pane arm that this test is about is never
+            // reached. It passed that way, for a reason that had nothing to do
+            // with the fix.
+            state.clock.advance(Duration::from_millis(300));
+            state.settle(state.clock.now());
+            assert!(
+                state.window_under((0.0, 0.0).into()).is_none(),
+                "the pointer has not been moved and there is nothing under it, \
+                 which is what makes this the keyboard's question and not the \
+                 mouse's"
+            );
+
+            // The window the user is working in, which is the one they are
+            // about to close.
+            state.focus_window(&doomed, SERIAL_COUNTER.next_serial());
+            types(&mut state, KEY_A);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.typed,
+                vec![(Some(surface_id(&doomed)), KEY_A)],
+                "the premise: typing reaches the focused window, and this \
+                 fixture can see it happen"
+            );
+
+            state.close_pane(closing);
+            // Past `CLOSING`: the animation has landed, the request has gone
+            // out, and the fixture's client never destroys anything — a client
+            // still running its quit handlers, which is what the longer grace
+            // period exists for.
+            state
+                .clock
+                .advance(present::CLOSING + Duration::from_millis(10));
+            let asked = state.clock.now();
+            state.settle_closing(asked);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            // The situation under test, stated rather than assumed: the window
+            // that was closed is drawn at nothing, and the user has not touched
+            // the mouse — there has been no press for `window_under` to answer.
+            assert!(
+                drawn_now(&state, closing, asked).opacity.abs() < f32::EPSILON,
+                "the closed window is invisible, which is what makes typing \
+                 into it silent"
+            );
+
+            // And the user keeps typing, which is the whole of the case.
+            types(&mut state, KEY_A);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.typed.last(),
+                Some(&(Some(surface_id(&kept)), KEY_A)),
+                "a keystroke after a close belongs to the window that is drawn, \
+                 not to the one that was closed: it went to surface {:?}, and \
+                 the closed window's is {}",
+                client.typed.last().and_then(|(surface, _)| *surface),
+                surface_id(&doomed)
+            );
+        }
+
+        /// **#127 second review, finding 2: suppressing `map_stacked` left the
+        /// three copies of a pane's position disagreeing.**
+        ///
+        /// The guard `move_pane` needs is over the *configure*: a client that
+        /// answers a new size while `present::close` holds `frame.rect` pinned
+        /// gets its last buffer stretched mid-fade, because those two
+        /// rectangles are the pair `resizing::factor` divides. `map_stacked`
+        /// carries a location and no size, so it is no part of that — and
+        /// suppressing it anyway cost what `move_pane`'s own opening paragraph
+        /// warns about: *setting the slot without telling the space is undone
+        /// before the next frame is drawn, silently*. `pane_geometry` reads
+        /// `real_geometry` for a mapped client, so `sync_panes` copied the
+        /// stale rectangle straight back over `set_slot`.
+        ///
+        /// **`sync_panes` is the line that made it a defect**, and a test that
+        /// only looked at the frame `move_pane` returns on would pass against
+        /// the bug. The sweep is a workspace switch, a `rescue_offscreen` or a
+        /// config reload; the refusal is a client that goes on living. Between
+        /// them the window came back where it had been *closed*, while
+        /// `Pane::placed` said the layout had moved it — which is the pair
+        /// `pane_laid_out` hands #124's edge drag.
+        ///
+        /// **And the last assertion is the one this replaces a comment with.**
+        /// The client's *size* really is one configure behind while the pane is
+        /// leaving, because that configure is deliberately never sent. The
+        /// claim made for that is that the next sweep after the window comes
+        /// back sends it — the suppression happened before `offers_size` could
+        /// record the size as told, so re-placing at the same rectangle is
+        /// still a change. That is asserted here rather than promised there.
+        #[test]
+        fn a_window_the_layout_moved_mid_close_comes_back_where_it_was_put() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, pane) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (400, 300));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            let was = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
+            state.close_pane(pane);
+            state
+                .clock
+                .advance(present::CLOSING + Duration::from_millis(10));
+            let asked = state.clock.now();
+            state.settle_closing(asked);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(client.closes.len(), 1, "the request went out");
+
+            // The sweep, mid-close. A different size as well as a different
+            // place, so that the configure guard is still being exercised and
+            // this is not quietly testing a move nobody suppressed.
+            let elsewhere = at(1000, 500, 250, 180);
+            let configures = client.configures.len();
+            state.move_pane(pane, elsewhere, was, AnimationSpec::default(), asked);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.configures.len(),
+                configures,
+                "the leaving client is still told nothing, which is the guard \
+                 that belongs here"
+            );
+
+            // The next frame. This is where the defect lived: the space was
+            // never told, so the space's stale rectangle came back over the
+            // slot the sweep had just written.
+            state.sync_panes();
+
+            let outer = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
+            assert_eq!(
+                outer.loc, elsewhere.loc,
+                "a pane the layout moved during a close lives where the layout \
+                 put it, one frame later as well as on the frame it was moved"
+            );
+            let laid_out = state
+                .pane_laid_out(&window)
+                .expect("a pane the layout has placed answers this");
+            assert_eq!(
+                laid_out.0.loc, outer.loc,
+                "and the rectangle #124's edge drag starts from is one the \
+                 window is actually at: `pane_laid_out` says {:?} and the pane \
+                 is at {:?}",
+                laid_out.0.loc, outer.loc
+            );
+
+            // The refusal. The client never destroyed anything, so the deadline
+            // is what brings the window back.
+            let refused = asked + Duration::from_millis(1500);
+            state.settle_refused(refused);
+            let back = drawn_now(&state, pane, refused + Duration::from_millis(200));
+            assert!(
+                (back.opacity - 1.0).abs() < f32::EPSILON,
+                "the premise for the rest: the window is back on screen, at \
+                 opacity {}",
+                back.opacity
+            );
+            assert_eq!(
+                state
+                    .pane_outer_of(pane)
+                    .expect("a mapped pane has a rectangle")
+                    .loc,
+                elsewhere.loc,
+                "and it comes back where the layout left it rather than where \
+                 it was closed"
+            );
+
+            // The residue, and the claim made about it. The size is still the
+            // one the client last committed, because the configure that would
+            // have changed it was suppressed — and the next sweep sends it.
+            let configures = client.configures.len();
+            state.move_pane(
+                pane,
+                elsewhere,
+                elsewhere,
+                AnimationSpec::default(),
+                refused + Duration::from_millis(200),
+            );
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert!(
+                client.configures.len() > configures,
+                "the configure the close swallowed is sent by the first sweep \
+                 after the window comes back, which is what makes the \
+                 suppression a delay rather than a loss"
             );
         }
     }
