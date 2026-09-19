@@ -748,6 +748,17 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                     // was read before that hold was reconciled: see
                     // `begin_resize`.
                     let began = state.begin_resize(&window).unwrap_or(under.outer);
+                    // And the layout's own rectangle beside it, which is a
+                    // different rectangle for any client that has not committed
+                    // exactly what it was asked for. `began` is what this
+                    // *window* is; `laid_out` is where the layout put it, and a
+                    // tiled drag moves a seam from the second. Read after
+                    // `begin_resize` like `began` is, though for this one it
+                    // makes no difference: reconciling a hold writes the
+                    // client's size into the slot and `Pane::placed` is the
+                    // field that does not hear about it. See
+                    // `Solium::pane_laid_out`.
+                    let laid_out = state.pane_laid_out(&window).unwrap_or(began);
                     let start_data = GrabStartData {
                         focus: None,
                         button,
@@ -755,7 +766,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                     };
                     pointer.set_grab(
                         state,
-                        resize::ResizeGrab::new(start_data, window, edges, began),
+                        resize::ResizeGrab::new(start_data, window, edges, began, laid_out),
                         serial,
                         Focus::Clear,
                     );
@@ -820,6 +831,10 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             if state.pointer.assert(Some(resize::cursor(edges))) {
                 state.redraw = true;
             }
+            // See the border drag above: `outer` is where this window is and
+            // `laid_out` is where the layout put it, and only the second is a
+            // number the layout will recognise when it comes back.
+            let laid_out = state.pane_laid_out(&window).unwrap_or(outer);
             let start_data = GrabStartData {
                 focus: None,
                 button,
@@ -827,7 +842,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             };
             pointer.set_grab(
                 state,
-                resize::ResizeGrab::new(start_data, window, edges, outer),
+                resize::ResizeGrab::new(start_data, window, edges, outer, laid_out),
                 serial,
                 Focus::Clear,
             );

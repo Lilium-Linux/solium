@@ -353,15 +353,27 @@ impl Tiling {
             Axis::Vertical => (edge_at.0 - rect.x - leading) / (rect.w - gap).max(1.0),
             Axis::Horizontal => (edge_at.1 - rect.y - leading) / (rect.h - gap).max(1.0),
         };
-        // Two floors bite on one drag and they are unrelated, which is worth
-        // saying because either one alone looks sufficient. The compositor has
-        // already clamped the window to `resize::MINIMUM` pixels before
-        // deriving `edge_at`, so what arrives here is a floored edge; this
-        // clamps a *ratio* of the seam's own box (#115), knows nothing of
-        // pixels or of that floor, and bounds a seam that has nothing to do
-        // with the dragged window's size when the box is a different size from
-        // the window. Whichever is tighter wins, and neither may be dropped on
-        // the grounds that the other exists.
+        // **The only clamp on a tiled drag, which is why it has to be here.**
+        // `edge_at` arrives unbounded: the compositor sends this pane's own
+        // laid-out edge displaced by the pointer, and it deliberately does not
+        // floor it. It cannot usefully. `resize::MINIMUM` is a floor on a
+        // *window's* size, and applying it to a seam's position put a 120-pixel
+        // window's floor on a tile that was narrower than that to begin with --
+        // which reported an edge 120px from where it was on the first frame of
+        // the drag, before the pointer had moved at all. A ratio of the seam's
+        // own box is the quantity this layout actually owns, and the box is not
+        // the window.
+        //
+        // The bounds are 0.05..0.95 because a seam driven to either end of its
+        // box leaves a child of no width, and a window of no width cannot be
+        // grabbed again to undo it. Not attributable to an issue: #115 is
+        // "minimum size is never read", about a client's own `min_size`, which
+        // is still unimplemented and is a different quantity in different units
+        // against a different rectangle.
+        //
+        // This is also the tighter of two clamps on a *floating* drag, where
+        // `resize::MINIMUM` does apply -- to the window, in `resized`, for the
+        // floating path's own rectangle. The two never meet on one number.
         if let Some(Node::Split { ratio: current, .. }) = self.nodes[seam].as_mut() {
             *current = ratio.clamp(0.05, 0.95);
         }
@@ -1357,22 +1369,29 @@ mod dragged_edge_tests {
 
     /// #124: a window handed its own edge does not move.
     ///
-    /// **This is the space check, and it is the trap #124 had to clear.** The
-    /// compositor derives what it sends from `Solium::pane_outer` at grab start
-    /// — the pane's *outer* rectangle, insets and all — so a first frame that
-    /// has not moved sends the window's own outer edge back. That has to be the
-    /// same space [`Tiling::node_box`] measures a seam's box in, or the first
-    /// frame of every drag shifts the layout by the difference. Half a gap of
-    /// skew is exactly #120's symptom reached by another route, and #120 took
-    /// two rounds to get right, so this is verified rather than assumed.
+    /// **Internal to this tree, and the #124 review is why that is now written
+    /// down.** This was billed as the space check — the thing that pins the
+    /// compositor's rectangle for a pane against the one [`Tiling::node_box`]
+    /// measures a seam in. It is not, and structurally cannot be: the edge it
+    /// hands `drag_seam` comes from `rect_at`, which is [`Tiling::layout`], so
+    /// both ends of the round trip are this same tree. A skew introduced
+    /// anywhere on the compositor's side of the call leaves it green, which is
+    /// exactly what it did.
     ///
-    /// It holds because there is only one arrangement here: `node_box` and
-    /// [`Tiling::layout`] both begin at `area.inset(gap)` and both descend
-    /// through [`cut`], so a slot's edge and a seam's box are two readings off
-    /// it. On the compositor's side `sol.place` takes a script's rect as the
-    /// pane's outer rectangle and subtracts the insets itself — see
-    /// `Solium::place` — so the slots this returns are outer rectangles too,
-    /// and the chain closes.
+    /// What it *does* pin is worth keeping and is a narrower claim: within one
+    /// arrangement, `node_box` and `layout` agree. Both begin at
+    /// `area.inset(gap)` and both descend through [`cut`], so a slot's edge and
+    /// a seam's box are two readings off one thing, and the inversion in
+    /// [`Tiling::drag_seam`] undoes `cut` exactly rather than approximately. A
+    /// half-gap error in either — #120's symptom by another route — shows here.
+    ///
+    /// The check this one was mistaken for lives in the compositor, because
+    /// only the compositor has both rectangles:
+    /// `solium::state::tests::real_client::a_client_that_rounds_its_size_does_not_move_the_seam`
+    /// lays a real tree out through `Solium::place`, lets a real client commit a
+    /// cell less than it was asked for, and feeds the edge the compositor would
+    /// send on the first frame back into the tree. That is the boundary, and it
+    /// cannot be crossed from this crate at all.
     ///
     /// At [`gapped`] rather than at zero, which is the first reason this can
     /// say anything: at `gap: 0` the two sides of a seam are one line and every
@@ -1392,9 +1411,9 @@ mod dragged_edge_tests {
     ///
     /// Unlike the compositor-side tests in
     /// `solium::input::resize::dragged_edge_tests`, this one passes against
-    /// `bf80265` too: `drag_seam` did not change for #124. It is a witness that
-    /// the value now being sent is measured in the right units, not a
-    /// regression test for the value itself.
+    /// `bf80265` and against `ec1da24` too: `drag_seam` did not change for #124
+    /// and has not changed since. It is a guard on this tree's own internal
+    /// consistency, not a regression test for the value the compositor sends.
     #[test]
     fn a_window_handed_its_own_edge_does_not_move() {
         let settings = gapped();

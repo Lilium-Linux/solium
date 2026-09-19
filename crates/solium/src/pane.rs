@@ -165,6 +165,30 @@ pub(crate) enum Frame {
 pub(crate) struct Pane {
     id: PaneId,
     slot: Rectangle<i32, Logical>,
+    /// The **outer** rectangle a layout last asked for this pane, if one ever
+    /// has.
+    ///
+    /// **Not a cache of [`Self::slot`], and the difference is the whole reason
+    /// this field exists.** `Panes::sync` writes the space's answer over `slot`
+    /// on every frame a pane is not under a resize hold, and the space reports
+    /// a mapped window's size as whatever the *client* last committed — so the
+    /// moment a client answers a configure with a size of its own, `slot` stops
+    /// being the rectangle the layout asked for and becomes the layout's origin
+    /// paired with the client's size. That is not a rare case: a terminal on a
+    /// cell grid does it on every resize it is ever given, and
+    /// `Solium::settle_resize_hold` deliberately adopts such an answer into the
+    /// slot rather than fighting it.
+    ///
+    /// Written only by `Solium::move_pane`, from the rectangle a layout handed
+    /// `sol.place`, and by nothing that hears from a client. That makes it the
+    /// one place the compositor keeps the *layout's* opinion of where this pane
+    /// is, which is what an edge drag has to start from — see
+    /// `Solium::pane_laid_out` for why the client's opinion will not do.
+    ///
+    /// `None` for a pane no layout has ever placed — a floating window, or one
+    /// in the frames between mapping and the first sweep — where the pane's own
+    /// rectangle is the only answer there is.
+    placed: Option<Rectangle<i32, Logical>>,
     content: Content,
     /// What is drawn around this pane's client. See [`Frame`].
     ///
@@ -255,6 +279,7 @@ impl Pane {
         Self {
             id: PaneId::next(),
             slot,
+            placed: None,
             content: Content::Loading {
                 program: program.to_owned(),
                 pid,
@@ -278,6 +303,7 @@ impl Pane {
         Self {
             id: PaneId::next(),
             slot,
+            placed: None,
             content: Content::Client {
                 window,
                 scene: None,
@@ -319,6 +345,20 @@ impl Pane {
 
     pub(crate) const fn set_slot(&mut self, slot: Rectangle<i32, Logical>) {
         self.slot = slot;
+    }
+
+    /// The outer rectangle a layout last asked for this pane. See the field.
+    pub(crate) const fn placed(&self) -> Option<Rectangle<i32, Logical>> {
+        self.placed
+    }
+
+    /// Record the outer rectangle a layout has just asked for this pane.
+    ///
+    /// Separate from [`Self::set_slot`] rather than folded into it, because the
+    /// two have different writers on purpose: every path that hears from a
+    /// client sets the slot, and only a layout's sweep sets this.
+    pub(crate) const fn set_placed(&mut self, placed: Rectangle<i32, Logical>) {
+        self.placed = Some(placed);
     }
 
     pub(crate) const fn content(&self) -> &Content {

@@ -159,6 +159,13 @@ wherever inside the window you happened to press. Handed the edge instead, the
 same arithmetic makes the gesture relative: the edge starts where it already is
 and moves as far as the pointer moves.
 
+"Where it already is" means *where you put it* — the rect your last
+`sol.place` for that window carried — and not where the client drew itself. The
+two differ whenever a client commits a size other than the one it was asked
+for, which a terminal on a cell grid does every time. Hand that back on a first
+frame and your seam moves by the client's rounding before the pointer has
+travelled a pixel, so the compositor sends your own number back to you.
+
 On an axis this drag does not move there is no dragged edge, and the pointer's
 own coordinate comes through there instead. Check the side before using the
 coordinate — which is what the side is for — and you will never see it.
@@ -425,8 +432,11 @@ seam there and nothing happens — the screen edge is not a seam.
 side names — which is what lets a corner drag call it twice with one pair and
 have each axis take its own. Hand it the `edge_x`, `edge_y` a `resize` gave you
 and the gesture is relative; hand it the pointer and you have rebuilt #124.
-The ratio it computes is separately clamped to `0.05..0.95` (#115), so a window
-shoved hard against a seam stops there rather than vanishing.
+The ratio it computes is separately clamped to `0.05..0.95`, so a window shoved
+hard against a seam stops there rather than vanishing. That clamp is the only
+bound on a tiled drag: the compositor sends an unfloored edge, deliberately,
+because a floor measured in a window's pixels cannot bound a seam's position —
+see `Tiling::drag_seam`.
 
 `options` is a monitor's work area with `gap` and `split` added. Passing the
 monitor in rather than the tree asking for it is what lets one tree per
