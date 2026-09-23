@@ -78,3 +78,9 @@ pkg-config = "0.3"
 # depends on them too; this only adds an edge to a graph that does not change.
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client"] }
+# A bar, for the #92 tests of a maximised window leaving fullscreen. Maximise
+# fills the work area and fullscreen the whole monitor, and with no layer
+# surface on it the two are the same rectangle -- so a test without a bar
+# cannot tell a window put back at its work area from one left where
+# fullscreen put it. The same version and feature `wl-probe` already resolves.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }

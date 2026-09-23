@@ -203,6 +203,12 @@ pub(crate) struct Pane {
     /// before they move the window, and taken -- used once -- by whichever of
     /// `toggle_maximize` and `Solium::unfullscreen_request` puts it back.
     ///
+    /// **One slot for both**, so a window maximised and then sent fullscreen
+    /// has the rect from before the maximise here. Leaving fullscreen leaves it
+    /// alone for such a window and puts it back to maximised, and ignores a
+    /// client asking to leave a fullscreen it is not in; either way round, the
+    /// rect would be spent on a window that is still maximised.
+    ///
     /// **A property of the window, not of its frame**, and it lived on the
     /// frame until #92. `Solium::fullscreen_request` wrote it into the pane's
     /// `Decoration` and then, two lines later, dropped that decoration so a
@@ -210,7 +216,10 @@ pub(crate) struct Pane {
     /// with this empty, so there was never a rect to put the window back at.
     /// A window with no server-side frame at all -- one that draws its own, or
     /// any window under `pane = "none"` -- had nowhere to keep it in the first
-    /// place, so its maximise never toggled back either.
+    /// place. For fullscreen that was reachable: a client drawing its own
+    /// frame that went fullscreen had no rect kept at all. For maximise it was
+    /// latent, because the only way to maximise is a button on a frame, so a
+    /// window with no frame had no button to press.
     ///
     /// Here, it survives every [`Self::set_frame`], which is what
     /// `a_windows_way_back_outlives_its_frame` pins.
@@ -1238,15 +1247,18 @@ mod tests {
 
     /// **Issue #92: a window's way back is not its frame's to lose.**
     ///
-    /// Going fullscreen drops a window's frame and marks it bare; leaving
-    /// builds it again, going through `Pending` on the way. The rect a window
-    /// goes back to used to live on the `Decoration`, so the first of those
-    /// dropped it. This walks the same frame changes past a kept rect.
+    /// The rect a window goes back to used to live on the `Decoration`, so
+    /// the `remove` that drops a window's frame as it goes fullscreen dropped
+    /// the rect too. This sets a rect and then changes the frame under it
+    /// three times -- `None`, `Pending`, `None`, starting from a loading pane
+    /// -- to show that no `set_frame` touches it.
     ///
-    /// `Styled` is not among them because building one needs Qt, which this
-    /// module does not start: `decoration.rs`'s
-    /// `a_rebuilt_frame_does_not_take_the_way_back_with_it` walks the real
-    /// fullscreen sequence on a pane with a real `Decoration` on it.
+    /// Not the fullscreen sequence itself, which starts and ends on `Styled`:
+    /// `Styled`, `Pending` (`remove`), `None` (`set_bare`), `Pending`
+    /// (`unset_bare`), `Styled` (`insert`). Building a `Styled` frame needs Qt,
+    /// which this module does not start, so `decoration.rs`'s
+    /// `a_rebuilt_frame_does_not_take_the_way_back_with_it` walks that order
+    /// on a pane with a real `Decoration` on it.
     #[test]
     fn a_windows_way_back_outlives_its_frame() {
         let mut pane = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
