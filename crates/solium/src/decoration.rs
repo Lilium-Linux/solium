@@ -1377,6 +1377,9 @@ impl Decorations {
     /// negotiates its decoration mode, once -- so dropping them would leave
     /// every open window bare until it was reopened. Rebuilding is what makes
     /// this a live setting a script can change and watch happen.
+    ///
+    /// The exception is `none`, which is asking for exactly that: every frame
+    /// is dropped and its pane left bare, reserving no room.
     pub(crate) fn set_style(&mut self, panes: &mut Panes, style: Option<String>) -> bool {
         if self.style == style {
             return false;
@@ -1387,14 +1390,25 @@ impl Decorations {
             // now have -- which the caller does, because it is the one holding
             // the windows.
             //
-            // **`Pending` and not `None`**, which is not what it should be and
-            // is what it was: this was `self.frames.clear()`, and a pane that
-            // is in neither table reserves a titlebar's worth of room for a
-            // frame that is not coming. So `pane = "none"` only takes
-            // effect for windows opened *after* it -- those go through
-            // `insert`, which marks them properly. That is half of #90, it is
-            // reproduced here deliberately, and the one-word fix belongs in
-            // the commit that fixes it rather than in the one that moved it.
+            // **To `None`, because no frame is coming.** This was `Pending`,
+            // carried over from the `self.frames.clear()` it replaced, and
+            // `Pending` reserves a titlebar's worth of room for a frame that is
+            // on its way. So `pane = "none"` dropped every open window's scene
+            // and left an empty strip where it had been, and only reached
+            // windows opened afterwards (#91). Pinned by
+            // `switching_to_none_unframes_windows_already_open`.
+            //
+            // Only `Styled` panes are walked. One still `Pending` has not been
+            // decided yet, and is marked when it is: `insert` reads this style
+            // and writes `None` itself, which is what
+            // `a_window_opened_while_the_style_is_none_is_bare_from_the_start`
+            // pins.
+            //
+            // Not the way back. A later switch to a style rebuilds only
+            // `Styled` panes, so the windows this unframes stay unframed until
+            // their client negotiates its decoration mode again or they are
+            // reopened. That was already so while this wrote `Pending`; what
+            // changes is that they no longer sit under an empty strip meanwhile.
             let framed: Vec<PaneId> = panes
                 .iter()
                 .filter(|pane| pane.decoration().is_some())
@@ -1402,7 +1416,7 @@ impl Decorations {
                 .collect();
             for id in framed {
                 if let Some(pane) = panes.get_mut(id) {
-                    pane.set_frame(Frame::Pending);
+                    pane.set_frame(Frame::None);
                 }
             }
             return true;
@@ -1423,9 +1437,15 @@ impl Decorations {
                     }
                 }
                 Err(err) => {
+                    // Bare, as the log line says, and not `Pending`: nothing
+                    // rebuilds it on its own -- this walk, and so the next
+                    // `set_style` and the next reload, visits only `Styled`
+                    // panes -- so `Pending` here reserved a titlebar above the
+                    // window with nothing ever drawn in it (#90). Pinned by
+                    // `a_frame_that_will_not_rebuild_reserves_nothing`.
                     tracing::error!(?err, "could not load the new decoration, leaving it bare");
                     if let Some(pane) = panes.get_mut(id) {
-                        pane.set_frame(Frame::Pending);
+                        pane.set_frame(Frame::None);
                     }
                 }
             }
@@ -1449,18 +1469,26 @@ impl Decorations {
             pane.set_frame(Frame::None);
             return;
         }
-        // Cleared *before* the build, which is where `self.bare.remove(&id)`
-        // stood. It matters only in the failure arm below, and there it is the
-        // other half of #90: a pane that was bare and whose new frame will not
-        // load ends up `Pending` -- reserving room for a frame that is not
-        // coming -- rather than back where it started. Kept, so that this
-        // commit changes nothing; #90 changes it on purpose.
-        pane.set_frame(Frame::Pending);
+        // Both arms below write the frame, so whatever the pane held before --
+        // `Pending`, or `None` when a client that drew its own decorations asks
+        // for server-side ones -- survives neither. A `Pending` used to be
+        // written here first, where `self.bare.remove(&id)` had stood, and the
+        // failure arm wrote nothing, so that `Pending` was where a pane whose
+        // frame would not build was left.
         match build(self.style.as_deref(), width, height) {
             Ok(decoration) => pane.set_frame(Frame::Styled(decoration)),
             Err(err) => {
                 // An undecorated window is worse than a decorated one and much
                 // better than no window.
+                //
+                // **And bare, not `Pending`.** `Pending` reserves a titlebar
+                // for a frame that is on its way, and this one is not: no later
+                // `set_style` or reload builds it, because both rebuild only
+                // `Styled` panes. So a window whose frame failed to load kept an
+                // empty 32-pixel strip above it while this line said it had
+                // been left bare (#90). Pinned by
+                // `a_frame_that_will_not_build_reserves_nothing`.
+                pane.set_frame(Frame::None);
                 tracing::error!(?err, "could not load a window frame, leaving it bare");
             }
         }
@@ -3481,11 +3509,11 @@ mod tests {
 
     #[test]
     fn a_window_opened_while_the_style_is_none_is_bare_from_the_start() {
-        // The half of #90 that works, pinned because the half that does not is
-        // one line away in the same function: a window opened *after*
-        // `pane = "none"` goes through `insert`, which marks it, while
-        // one already framed when the style changed falls to `Pending` and
-        // keeps reserving room. See `set_style`'s bare arm.
+        // A window opened *after* `pane = "none"` goes through `insert`, which
+        // reads the style and marks the pane `None` itself. Its counterpart for
+        // a window that was already framed when the style changed is
+        // `switching_to_none_unframes_windows_already_open`: that one goes
+        // through `set_style`'s bare arm instead, and was #91.
         if environment_names_a_style() {
             // `bare()` reads the environment before the style, so a session
             // that set it decides this rather than the test does.
@@ -3496,6 +3524,95 @@ mod tests {
         assert!(decorations.set_style(&mut panes, Some("none".to_owned())));
         decorations.insert(&mut panes, id, 300, 200);
         assert!(matches!(panes.get(id).map(Pane::frame), Some(Frame::None)));
+    }
+
+    #[test]
+    fn a_frame_that_will_not_build_reserves_nothing() {
+        // #90. `Pending` means "a frame is coming", and `insets_for` reserves a
+        // titlebar's worth of room for it so the window does not change shape
+        // when it arrives. A frame whose build failed is not coming, and no
+        // later style change or reload takes a pane out of `Pending` --
+        // `set_style` rebuilds only `Styled` panes -- so a pane left there by
+        // this failure kept an empty 32-pixel strip above its window. The log
+        // line said it had been left bare.
+        //
+        // Headless, and not on the Qt thread, because an unknown name fails in
+        // `build` before Qt is involved: `bundle` finds no folder and
+        // `qml_path` no file, and the refusal is raised from those two path
+        // lookups. `a_name_that_is_nowhere_is_refused_by_name` pins that
+        // refusal itself.
+        if the_environment_has_already_chosen() {
+            // `build` reads `SOLIUM_PANE` before the style it is handed.
+            return;
+        }
+        let (mut panes, id) = one_pane();
+        let mut decorations = Decorations::default();
+        assert!(decorations.set_style(&mut panes, Some("no-such-style-ships-here".to_owned())));
+        decorations.insert(&mut panes, id, 300, 200);
+        assert!(
+            matches!(panes.get(id).map(Pane::frame), Some(Frame::None)),
+            "a frame that could not be built is bare, not still on its way"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_will_not_rebuild_reserves_nothing() {
+        // The same failure reached the other way: a pane that *was* framed,
+        // and whose frame will not build from the style it is switched to.
+        // `set_style` rebuilds only `Styled` panes, so a pane this leaves
+        // `Pending` is not visited by the next switch either -- the same
+        // permanent strip as `a_frame_that_will_not_build_reserves_nothing`.
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let (mut panes, id) = one_pane();
+            let mut decorations = Decorations::default();
+            decorations.insert(&mut panes, id, 300, 200);
+            assert!(
+                panes.get(id).and_then(Pane::decoration).is_some(),
+                "the claim is about a pane that really is framed, so building \
+                 the default has to have worked -- if this is what failed, Qt \
+                 did not come up, not the thing under test"
+            );
+
+            assert!(decorations.set_style(&mut panes, Some("no-such-style-ships-here".to_owned())));
+
+            assert!(
+                matches!(panes.get(id).map(Pane::frame), Some(Frame::None)),
+                "a frame that could not be rebuilt is bare, not still on its way"
+            );
+        });
+    }
+
+    #[test]
+    fn switching_to_none_unframes_windows_already_open() {
+        // #91. `pane = "none"` used to reach only windows opened after it: the
+        // bare arm of `set_style` took every open frame to `Pending`, which
+        // dropped the scene but kept a titlebar's worth of room reserved above
+        // the window with nothing drawn in it.
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let (mut panes, id) = one_pane();
+            let mut decorations = Decorations::default();
+            decorations.insert(&mut panes, id, 300, 200);
+            assert!(
+                panes.get(id).and_then(Pane::decoration).is_some(),
+                "the claim is about a pane that really is framed, so building \
+                 the default has to have worked -- if this is what failed, Qt \
+                 did not come up, not the thing under test"
+            );
+
+            assert!(decorations.set_style(&mut panes, Some("none".to_owned())));
+
+            assert!(
+                matches!(panes.get(id).map(Pane::frame), Some(Frame::None)),
+                "a window that was framed when the style became `none` is bare \
+                 now, not reserving room for a frame that is not coming"
+            );
+        });
     }
 
     #[test]
