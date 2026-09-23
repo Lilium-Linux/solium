@@ -169,18 +169,26 @@ should run again.
 
 While a window is between `closing` and whichever comes next, its row in
 `sol.windows()` says `leaving = true` (and so does its row in `close`'s own
-snapshot). It is fading where it stood whatever you do: the compositor pins
-the rectangle it is drawn at, so placing it moves nothing you can see.
+snapshot). After `close` it is in no snapshot but that one. It is fading where
+it stood whatever you do: the compositor pins the rectangle it is drawn at, so
+placing it moves nothing you can see, and it stays in front of any window you
+move into its space -- as does a refused window while it fades back in.
 
-The shipped layouts close up at `closing` and put the window back at
-`refused`; `reflow_on_close = "when_gone"` in their section of `config.lua`
-makes both events do nothing and leaves the reflow to `close`, which is how
-every close worked before #128. A layout that listens for neither event hears
-exactly what it always heard -- `close`, once the window is gone -- so a mode
-written before these two existed keeps working unchanged, and keeps its slot
-for a closing window until the application has gone. To close up at once,
-handle `closing`, leave `leaving` windows out of any arrangement you build from
-`sol.windows()`, and put the window back on `refused`.
+The shipped layouts close up at `closing`, while they are the layout in
+charge, and put the window back at `refused`; `reflow_on_close = "when_gone"`
+in their section of `config.lua` makes both events do nothing and leaves the
+reflow to `close`, which is how every close worked before #128. Closing up at
+once has one cost worth knowing: the compositor waits a second for an
+application to go before it takes the silence for a refusal, so one slower
+than that to quit is refused and then closes, and the layout moves three times
+-- at the press, at `refused`, and at `close`.
+
+A layout that listens for neither event hears exactly what it always heard --
+`close`, once the window is gone -- so a mode written before these two existed
+keeps working unchanged, and keeps its slot for a closing window until the
+application has gone. To close up at once, handle `closing`, leave `leaving`
+windows out of any arrangement you build from `sol.windows()`, and put the
+window back on `refused`.
 
 **`resize` gives you where the dragged edge should go, not where the pointer
 is and not a delta.** `edge_x` and `edge_y` are in the same coordinates

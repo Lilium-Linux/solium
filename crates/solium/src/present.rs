@@ -667,36 +667,6 @@ pub(crate) fn rebase(
     });
 }
 
-/// Start whatever this pane is animating towards again, from `start`.
-///
-/// For a window whose animation was replaced from under it by one that begins
-/// somewhere it is not. `Solium::give_back` is the caller: a refused window is
-/// faded back in from the held end of its leaving animation, and a layout that
-/// puts it back in the same pass replaces that fade with `move_pane`'s slide,
-/// which begins at full opacity. This keeps the slide's destination and whether
-/// it releases, and puts the start back to what was on screen. With nothing in
-/// the slot the destination is `real`, released.
-///
-/// Returns whether it happened, as `clear` does, because it goes through the
-/// same `with_slot`.
-pub(crate) fn restart_from(
-    pane: &Pane,
-    real: Rectangle<i32, Logical>,
-    start: Frame,
-    now: Duration,
-    duration: Duration,
-    easing: Curve,
-) -> bool {
-    with_slot(pane, |slot| {
-        let (to, release) = slot.map_or_else(
-            || (Frame::real(real), true),
-            |transform| (transform.target(), transform.releases()),
-        );
-        *slot = Some(Transform::new(start, to, now, duration, easing, release));
-    })
-    .is_some()
-}
-
 /// The frame to draw this window in. Real geometry when nothing is animating.
 pub(crate) fn frame(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) -> Frame {
     with_slot(pane, |slot| {
@@ -1094,86 +1064,6 @@ mod tests {
             frame(&pane, real, Duration::from_millis(300)).rect,
             slot.rect,
             "and it still arrives at the slot the mode chose"
-        );
-    }
-
-    /// **A restart keeps where the window was going and whether it lets go,
-    /// and changes only where it starts.** The shape `Solium::give_back` needs:
-    /// a layout has just replaced the return fade with a slide that begins at
-    /// full opacity, and the window has to begin from the invisible frame it
-    /// vanished at instead, still heading for the layout's slot.
-    ///
-    /// Both halves of the slot's answer are asserted, because each is a way to
-    /// get this wrong that looks right on the first frame: a restart aimed at
-    /// `real` rather than the slide's target lands the window where it was and
-    /// not where the layout put it, and one that always released would let go
-    /// of a close transform that exists to hold.
-    #[test]
-    fn a_restart_keeps_the_destination_and_changes_only_the_start() {
-        let real = rect(0, 0, 400, 300);
-        let pane = crate::pane::Pane::loading(
-            "kitty",
-            None,
-            real,
-            std::path::PathBuf::new(),
-            None,
-            Duration::ZERO,
-        );
-        let slot = rect(1000, 40, 200, 150);
-        // The layout's slide: from where the pane was, at full opacity.
-        from(
-            &pane,
-            slot,
-            Frame::real(real),
-            Duration::ZERO,
-            Duration::from_millis(240),
-            Curve::Linear,
-        );
-        let vanished = Frame::real(real).scaled(0.86).with_opacity(0.0);
-
-        assert!(restart_from(
-            &pane,
-            slot,
-            vanished,
-            Duration::ZERO,
-            Duration::from_millis(150),
-            Curve::Linear,
-        ));
-        assert_eq!(
-            frame(&pane, slot, Duration::ZERO),
-            vanished,
-            "it starts from what was on screen, not from the slide's full-opacity start"
-        );
-        assert_eq!(
-            frame(&pane, slot, Duration::from_millis(150)),
-            Frame::real(slot),
-            "and still lands on the slot the layout chose"
-        );
-        assert!(
-            !settle(&pane, Duration::from_millis(150)),
-            "and lets go on arrival, as the slide it replaced would have"
-        );
-
-        // A transform that holds keeps holding.
-        close(&pane, real, Duration::from_secs(1));
-        let held = frame(&pane, real, Duration::from_secs(2));
-        assert!(restart_from(
-            &pane,
-            real,
-            Frame::real(real),
-            Duration::from_secs(2),
-            Duration::from_millis(150),
-            Curve::Linear,
-        ));
-        assert_eq!(
-            frame(&pane, real, Duration::from_secs(3)),
-            held,
-            "a restarted close still ends where the close did"
-        );
-        assert!(
-            !settle(&pane, Duration::from_secs(3))
-                && frame(&pane, real, Duration::from_secs(4)) == held,
-            "and is still held there once it lands, rather than let go to real geometry"
         );
     }
 
