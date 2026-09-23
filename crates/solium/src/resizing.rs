@@ -194,10 +194,16 @@ pub(crate) enum Fill {
     /// **Asymmetric on purpose.** Growing the pane holds the buffer at 1.0 and
     /// leaves a strip uncovered, which is the whole idea. Shrinking it cannot
     /// do the same without clipping the buffer to the pane, and there is no
-    /// clip in the element path — an unclipped oversized buffer would spill
-    /// over the frame and over the neighbouring window. So shrinking falls back
-    /// to scaling down, which is the direction where resampling is close to
-    /// free of artefacts anyway. See [`factor`].
+    /// clip in the element path while a hold is live — an unclipped oversized
+    /// buffer would spill over the frame and over the neighbouring window. So
+    /// shrinking falls back to scaling down, which is the direction where
+    /// resampling is close to free of artefacts anyway. See [`factor`].
+    ///
+    /// **Since #133 there is a clip, and this does not use it yet.**
+    /// `render::fit` cuts a *settled* tiled client to its tile, and
+    /// `Solium::tile_of` answers `None` under a hold, so a held pane is drawn
+    /// exactly as this describes. Holding a shrinking buffer at 1.0 inside that
+    /// cut is #125's change and not #133's.
     Hold,
     /// Draw the pane's QML scene over the client until it arrives.
     ///

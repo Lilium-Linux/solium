@@ -57,6 +57,17 @@ function modes.use(name)
             end
         end
     end
+    -- Every window out of its tile, before the next layout puts it in one.
+    --
+    -- The compositor holds a tiled window inside the rect `sol.place` gave it
+    -- (#133), and only this file knows that the layout which gave it has
+    -- stopped. Left alone, a window switched to floating would go on being cut
+    -- to its old tile whenever it grew. Every window rather than the ones the
+    -- old layout placed, because nothing here knows which those were -- and a
+    -- layout starting below places its own windows again at once.
+    for _, window in ipairs(sol.windows()) do
+        sol.unplace(window.id)
+    end
     kept.current = name
     local layout = modes.registered[name]
     if layout then

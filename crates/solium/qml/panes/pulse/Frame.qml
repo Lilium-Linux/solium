@@ -25,6 +25,13 @@ Item {
     property string action: ""
     property string hovered: ""
 
+    // What a narrow tile leaves room for, by `top/Frame.qml`'s arithmetic and
+    // for its reasons (#133): the title below 174px, maximise below 59px,
+    // close below 37px, and a bare bar under that.
+    readonly property bool roomForTitle: frame.width - 150 >= 24
+    readonly property bool roomForClose: frame.width >= 37
+    readonly property bool roomForMaximize: frame.width >= 59
+
     Rectangle {
         id: bar
 
@@ -58,6 +65,7 @@ Item {
 
         Text {
             anchors.centerIn: parent
+            visible: frame.roomForTitle
             width: Math.min(implicitWidth, Math.max(frame.width - 150, 0))
             text: frame.title
             elide: Text.ElideRight
@@ -76,6 +84,8 @@ Item {
                 Rectangle {
                     required property var modelData
 
+                    visible: modelData.name === "close" ? frame.roomForClose
+                                                        : frame.roomForMaximize
                     width: 13
                     height: 13
                     radius: width / 2

@@ -218,7 +218,11 @@ local function place_one(window, windows, area_for, placed, busy)
     local area = area_for(screen and screen.name or window.monitor)
 
     local rect = dialogs.within(wanted, area)
-    sol.place(window.id, rect)
+    -- Not a tile: a dialog is a floating window whichever layout is running,
+    -- and the compositor holds a tile's client inside it (#133). A modal that
+    -- grows after it is centred -- a file chooser settling on its size -- must
+    -- be drawn at the size it grew to, not cut to the one it was centred at.
+    sol.place(window.id, { x = rect.x, y = rect.y, w = rect.w, h = rect.h, tile = false })
     -- **Recorded, like any other placement.** `placed` is what this pass
     -- decided, and a dialog is a window something else may be centred on; left
     -- out of it, the prompt above falls through to the snapshot and is centred
