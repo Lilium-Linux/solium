@@ -64,9 +64,10 @@ right. Every layout runs per screen, and the pointer crosses between them.
 Protocols: `xdg-shell`, `wlr-layer-shell`, `wlr-screencopy`, `ext-session-lock`,
 `ext-idle-notify`, `idle-inhibit`, `xdg-decoration`, `xdg-output`,
 `xdg-activation`, `wp-viewporter`, `wp-fractional-scale`, `wp-presentation`,
-`linux-dmabuf`, `relative-pointer`, `pointer-constraints`, `primary-selection`,
-`xwayland-shell`. `_NET_WM_WINDOW_TYPE` is read on the X11 side, so menus and
-tooltips are not managed as windows.
+`wp-single-pixel-buffer`, `linux-dmabuf`, `relative-pointer`,
+`pointer-constraints`, `primary-selection`, `xwayland-shell`.
+`_NET_WM_WINDOW_TYPE` is read on the X11 side, so menus and tooltips are not
+managed as windows.
 
 The desktop has a wallpaper before anything else is running, because a session
 whose first frame is flat grey looks the same as a broken one. It is
