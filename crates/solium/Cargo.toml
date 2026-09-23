@@ -91,3 +91,9 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 # its work area from one left where fullscreen put it. Already in the lockfile,
 # at this version with this feature, through `wl-probe`.
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# smithay's `DummyRenderer`, for `a_toplevel_is_drawn_without_its_popups` in `state.rs`:
+# the one renderer that builds a surface's render elements without a GPU, which
+# is what it takes to read back the element list a window is drawn from. Tests
+# only, and a feature with no dependencies of its own, so the lockfile does not
+# change.
+smithay = { version = "0.7", default-features = false, features = ["renderer_test"] }

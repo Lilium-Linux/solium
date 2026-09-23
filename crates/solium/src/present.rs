@@ -256,6 +256,25 @@ pub(crate) struct Frame {
     /// silently wrong otherwise. It is resolved in `warp.rs`, at the two lines
     /// that compute the centre.
     pub(crate) pivot: (f32, f32),
+    /// How much `rect` is a *picture* of the pane rather than the pane: the
+    /// drawn size over the size of the pane rectangle it shows, per axis.
+    ///
+    /// **1.0 for a pane drawn at a rectangle it really has**, which is a pane
+    /// at rest and also every frame of a layout's glide: `Solium::move_pane`
+    /// animates from `Frame::real` of the old tile to `Frame::real` of the new
+    /// one, so the rectangle in between is the window part of the way there,
+    /// not the new tile drawn larger. Below 1.0 at the start of an open, and
+    /// whatever `sol.present` makes it for a thumbnail.
+    ///
+    /// Carried rather than worked out from `rect` and the pane's own rectangle
+    /// (#133). The renderer used to divide the one by the other, which reads a
+    /// glide from a 1900-wide tile to a 950-wide one as the new tile drawn at
+    /// up to 2x: a sweep that halved a window zoomed its contents from the
+    /// first frame, where the frame before had drawn them 1:1. It measures, so a
+    /// blend sweeps it -- from the open's scale up to `1.0`, and `1.0` all the
+    /// way through a glide. `a_glide_is_drawn_as_the_window_on_its_way` and
+    /// `an_open_pictures_the_window_it_opens_at_every_frame` pin the two.
+    pub(crate) zoom: (f64, f64),
 }
 
 /// Below this, a frame puts nothing on screen.
@@ -278,7 +297,21 @@ impl Frame {
             deform: None,
             z: 0.0,
             pivot: (0.5, 0.5),
+            zoom: (1.0, 1.0),
         }
+    }
+
+    /// The [`Self::zoom`] that draws a pane whose own rectangle is `real` at
+    /// `rect`: a script's rectangle, read as a picture of the window it puts
+    /// there.
+    pub(crate) fn zoom_of(
+        rect: Rectangle<f64, Logical>,
+        real: Rectangle<i32, Logical>,
+    ) -> (f64, f64) {
+        (
+            crate::render::ratio(rect.size.w, real.size.w),
+            crate::render::ratio(rect.size.h, real.size.h),
+        )
     }
 
     /// Whether this frame paints anything at all.
@@ -345,6 +378,8 @@ impl Frame {
             deform: self.deform,
             z: self.z,
             pivot: self.pivot,
+            // A smaller picture of the same pane.
+            zoom: (self.zoom.0 * factor, self.zoom.1 * factor),
         }
     }
 
@@ -427,6 +462,14 @@ impl Blend for Frame {
             // matrix would have to be re-conjugated about the new pivot anyway.
             z: other.z,
             pivot: other.pivot,
+            // Measures, so it sweeps, in the same progress as `rect`. That is
+            // what keeps the rectangle being pictured exact through an open:
+            // `rect` runs from `s * real` to `real` and this from `s` to `1`,
+            // so their quotient is `real` at every frame.
+            zoom: (
+                mix(self.zoom.0, other.zoom.0),
+                mix(self.zoom.1, other.zoom.1),
+            ),
         }
     }
 }
@@ -955,11 +998,137 @@ mod tests {
             deform: None,
             z: 0.0,
             pivot: (0.5, 0.5),
+            zoom: (0.5, 0.5),
         };
         // The centre of the thumbnail is the centre of the window.
         let mapped = to_window_space(drawn, real, Point::from((600.0, 175.0)));
         assert!((mapped.x - 200.0).abs() < 1e-6, "got {}", mapped.x);
         assert!((mapped.y - 150.0).abs() < 1e-6, "got {}", mapped.y);
+    }
+
+    /// The rectangle a frame is a picture of: its drawn size undone by its
+    /// zoom. See [`Frame::zoom`].
+    fn pictured(frame: Frame) -> (f64, f64) {
+        (
+            frame.rect.size.w / frame.zoom.0,
+            frame.rect.size.h / frame.zoom.1,
+        )
+    }
+
+    /// **#133: a glide is drawn as the window on its way, not as its new tile
+    /// zoomed.**
+    ///
+    /// `Solium::move_pane` starts every placement with `from`, from
+    /// `Frame::real` of the rectangle the pane had to `Frame::real` of the one
+    /// it has now. Every rectangle in between is a rectangle the window is
+    /// passing through at its own size, so the zoom stays 1.0 on both axes
+    /// the whole way -- including along an axis the glide does not change,
+    /// and on a glide that changes the two axes by different amounts, which is
+    /// the sibling a new window squeezes sideways. Reading such a frame as a
+    /// scale of the destination is what drew the first frame of a sweep that
+    /// halved a window at 2x.
+    #[test]
+    fn a_glide_is_drawn_as_the_window_on_its_way() {
+        let was = rect(0, 0, 1900, 1000);
+        let tile = rect(0, 0, 950, 1000);
+        let pane = crate::pane::Pane::loading(
+            "kitty",
+            None,
+            tile,
+            std::path::PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
+        let start = Duration::from_millis(100);
+        from(
+            &pane,
+            tile,
+            Frame::real(was),
+            start,
+            Duration::from_millis(240),
+            Curve::OutCubic,
+        );
+
+        for at in [0, 30, 120, 240] {
+            let drawn = frame(&pane, tile, start + Duration::from_millis(at));
+            assert_eq!(
+                drawn.zoom,
+                (1.0, 1.0),
+                "at {at}ms the glide is drawn at {:?}, which is a rectangle the \
+                 window has on its way, at its own size",
+                drawn.rect
+            );
+        }
+        assert!(
+            frame(&pane, tile, start + Duration::from_millis(30))
+                .rect
+                .size
+                .w
+                > 1000.0,
+            "and the frame this test reads is really part of the way between \
+             the two, or a zoom of 1.0 proves nothing"
+        );
+    }
+
+    /// **And an open is a picture of the window it opens, at every frame.**
+    ///
+    /// The other side of the same field. `open` starts the window at 0.88 of
+    /// its size and grows it to 1.0; `from` with a rectangle a script shrank
+    /// is `sol.present_from`, which `open.lua` uses. Either way what is drawn
+    /// is the whole window made smaller, so the rectangle it pictures is the
+    /// window's own at every sample -- and the zoom is what the drawn size is
+    /// over it, 0.88 on the first frame.
+    #[test]
+    fn an_open_pictures_the_window_it_opens_at_every_frame() {
+        let real = rect(100, 50, 800, 400);
+        let pane = crate::pane::Pane::loading(
+            "kitty",
+            None,
+            real,
+            std::path::PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
+        let start = Duration::from_millis(100);
+        open(&pane, real, start);
+
+        let first = frame(&pane, real, start);
+        assert!(
+            (first.zoom.0 - 0.88).abs() < 1e-9 && (first.zoom.1 - 0.88).abs() < 1e-9,
+            "the first frame of an open is the window at 0.88: {:?}",
+            first.zoom
+        );
+        for at in [0, 40, 110, 220] {
+            let drawn = frame(&pane, real, start + Duration::from_millis(at));
+            let (w, h) = pictured(drawn);
+            assert!(
+                (w - 800.0).abs() < 1e-6 && (h - 400.0).abs() < 1e-6,
+                "at {at}ms the open pictures {w}x{h}, which is not the window"
+            );
+        }
+
+        // `sol.present_from`'s start, as `Solium::apply` builds it.
+        let shrunk = logical((200.0, 100.0), (600.0, 300.0));
+        let start_frame = Frame {
+            rect: shrunk,
+            zoom: Frame::zoom_of(shrunk, real),
+            ..Frame::real(real)
+        };
+        from(
+            &pane,
+            real,
+            start_frame,
+            start,
+            Duration::from_millis(200),
+            Curve::OutCubic,
+        );
+        for at in [0, 50, 200] {
+            let (w, h) = pictured(frame(&pane, real, start + Duration::from_millis(at)));
+            assert!(
+                (w - 800.0).abs() < 1e-6 && (h - 400.0).abs() < 1e-6,
+                "at {at}ms a script's open pictures {w}x{h}, which is not the window"
+            );
+        }
     }
 
     /// **A window whose group changed is drawn where it was, and animates.**

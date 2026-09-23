@@ -1476,8 +1476,10 @@ impl Solium {
         // to the client's share of the tile -- the tile is the answer, and the
         // client catches up inside it. Cut and not replaced: a client *smaller*
         // than its tile keeps its own size, which is the cell-grid residue
-        // `pane_laid_out` describes and must go on seeing. `render::elements`
-        // cuts the surfaces to the same rectangle. See `Self::shown_size`.
+        // `pane_laid_out` describes and must go on seeing. At rest,
+        // `render::elements` cuts the surfaces to the same rectangle, because
+        // `render::fit` cuts a tiled client to whatever its frame pictures and
+        // a frame at rest pictures this. See `Self::shown_size`.
         match self.real_geometry(window) {
             Some(real) if real.size.w > 0 && real.size.h > 0 => {
                 Rectangle::new(real.loc, self.shown_size(pane, real.size))
@@ -1506,14 +1508,18 @@ impl Solium {
         Some(inner(pane.placed()?, self.insets_of(pane.id())).size)
     }
 
-    /// A committed size, as this pane shows it: cut per axis to its tile.
+    /// A committed size, as this pane shows it at rest: cut per axis to its
+    /// tile.
     ///
     /// The committed size itself for a pane in no tile, and on any axis the
-    /// client is already inside. Shared by `pane_geometry`, which is what the
-    /// frame, the hit test and every transform read, and by the two places
-    /// that draw a client's pixels -- `render::elements` cuts the surfaces to
-    /// it, and `offscreen::capture_client` captures a masked client at it --
-    /// so none of the three can hold the client to a different rectangle.
+    /// client is already inside. What `pane_geometry` answers, which is what
+    /// the frame, the hit test and every transform read. The two places that
+    /// draw a client's pixels do not ask this: they ask `render::place_client`
+    /// of the frame being drawn, which on a frame at rest cuts to exactly this
+    /// (`a_titled_tiled_client_is_held_inside_its_tile_frame_and_all`) and on
+    /// a frame of a glide cuts to the rectangle the glide has reached instead,
+    /// which this cannot know
+    /// (`a_glide_that_narrows_a_tiled_window_is_drawn_1_to_1_on_its_first_frame`).
     pub(crate) fn shown_size(
         &self,
         pane: &Pane,
@@ -1591,11 +1597,22 @@ impl Solium {
     /// and the far edges carry the whole of the client's disagreement. See
     /// `crate::input::resize::dragged_edge`.
     ///
-    /// Falls back to `pane_outer` for a pane no layout holds in a tile. That is
-    /// a floating window — where nothing reads this, because no layout claims
-    /// the drag — a dialog a layout centred without tiling it, a maximised or
-    /// fullscreen window, or the frames between a window mapping and the first
-    /// sweep, where the pane's own rectangle is the only answer there is.
+    /// **A maximised or fullscreen window answers the tile it left**, from
+    /// `Pane::left_tile`. It is out of its tile for the cap's sake -- a
+    /// maximised window is not cut to the corner it was tiled in -- but it is
+    /// still a leaf of its layout's tree, and nothing on the drag path asks
+    /// about maximised: `settle_resize` hands a drag on it to
+    /// `trigger_resize`, and `tiling.lua`'s `resize` handler asks only whether
+    /// tiling is on. Answered with the work area instead, `tree:drag_seam` was handed
+    /// the screen's edge plus the pointer's travel and threw the seam to its
+    /// clamp on the first frame.
+    /// `a_drag_on_a_maximised_tiled_window_starts_from_its_tile` pins it.
+    ///
+    /// Falls back to `pane_outer` for a pane in no tile and waiting for none:
+    /// a floating window -- where nothing reads this, because no layout claims
+    /// the drag -- a dialog a layout centred without tiling it, or the frames
+    /// between a window mapping and the first sweep, where the pane's own
+    /// rectangle is the only answer there is.
     ///
     /// **A pane that was laid out and is not any more answers `pane_outer`
     /// too, and until #133 it did not.** It answered where the last layout
@@ -1611,7 +1628,9 @@ impl Solium {
     pub(crate) fn pane_laid_out(&self, window: &Window) -> Option<crate::input::resize::LaidOut> {
         let pane = self.panes.get(self.panes.id_of(window)?)?;
         Some(crate::input::resize::LaidOut(
-            pane.placed().unwrap_or_else(|| self.pane_outer(pane)),
+            pane.placed()
+                .or_else(|| pane.left_tile())
+                .unwrap_or_else(|| self.pane_outer(pane)),
         ))
     }
 
@@ -2973,12 +2992,18 @@ impl Solium {
                         continue;
                     };
                     let outer = self.pane_outer(pane);
+                    let rect = rect.map_or_else(
+                        || outer.to_f64(),
+                        |rect| present::logical((rect.x, rect.y), (rect.w, rect.h)),
+                    );
                     let target = Frame {
                         matrix: matrix.unwrap_or(crate::mat4::Mat4::IDENTITY),
-                        rect: rect.map_or_else(
-                            || outer.to_f64(),
-                            |rect| present::logical((rect.x, rect.y), (rect.w, rect.h)),
-                        ),
+                        rect,
+                        // A script's rectangle is a picture of the window it
+                        // moves there -- a thumbnail is the window made small
+                        // -- so it is zoomed by what it is over the window's
+                        // own rectangle. See `Frame::zoom`.
+                        zoom: Frame::zoom_of(rect, outer),
                         opacity: opacity.unwrap_or(1.0),
                         deform: deform.and_then(|deform| self.aimed(&deform)),
                         // Both arrive resolved: `script::depth_from` and
@@ -3010,9 +3035,13 @@ impl Solium {
                         continue;
                     };
                     let outer = self.pane_outer(pane);
+                    let rect = present::logical((rect.x, rect.y), (rect.w, rect.h));
                     let start = Frame {
                         matrix: crate::mat4::Mat4::IDENTITY,
-                        rect: present::logical((rect.x, rect.y), (rect.w, rect.h)),
+                        rect,
+                        // The window it grows into, drawn smaller: `open.lua`
+                        // shrinks the window's own rectangle. See `Frame::zoom`.
+                        zoom: Frame::zoom_of(rect, outer),
                         opacity: opacity.unwrap_or(1.0),
                         deform: None,
                         // Explicit so the next field added breaks this line
@@ -4163,23 +4192,77 @@ impl Solium {
             // buttons and — through the focus a press sets — keystrokes, so a
             // pane held at opacity zero across a close winning it is where the
             // typing went. [`present::Frame::covers`] argues the predicate.
-            if !frame.covers(location) {
-                continue;
-            }
-            // A window whose application has not arrived has no surface to
-            // give the pointer -- but it is on screen and it is under the
-            // cursor, so nothing behind it may have the click either. Falling
-            // through would type into whatever the window is covering.
-            let window = pane.client()?;
+            //
+            // **Except that a window's popups are not inside its rectangle.**
+            // `render::elements` draws them uncut, reaching past the parent's
+            // tile, so a point outside the parent's frame can still be on one
+            // of its menus -- and since #133 that includes the whole strip
+            // between a tiled window's tile and the edge its client committed,
+            // where a menu opened from an oversized Firefox lands. The point
+            // went to the neighbour instead, and a press on it -- when the
+            // neighbour is another application -- had smithay's popup grab
+            // dismiss the menu rather than choose the item under it
+            // (`PopupPointerGrab::button`). So a visible pane that does not
+            // cover the point is still asked about its popups, and only about
+            // those. `a_menu_past_its_parents_tile_takes_the_press` pins it.
+            let covered = frame.covers(location);
+            let (window, kind) = match pane.client() {
+                Some(window) if covered => (window, WindowSurfaceType::ALL),
+                // A popup and its own subsurfaces, and not the toplevel's tree.
+                Some(window) if frame.shows() => (
+                    window,
+                    WindowSurfaceType::POPUP | WindowSurfaceType::SUBSURFACE,
+                ),
+                // A window whose application has not arrived has no surface to
+                // give the pointer -- but it is on screen and it is under the
+                // cursor, so nothing behind it may have the click either.
+                // Falling through would type into whatever the window is
+                // covering.
+                None if covered => return None,
+                _ => continue,
+            };
 
-            // Mapped through the *outer* rect, then offset into the client's
-            // own space. A point in the titlebar lands above the client and
-            // finds no surface, which is what should happen: the frame is the
-            // compositor's, not the client's.
-            let insets = self.frame_insets(window);
-            let inset: Point<f64, Logical> = (f64::from(insets.left), f64::from(insets.top)).into();
-            let in_outer = present::to_window_space(frame, outer, location);
-            let in_window = in_outer - outer.loc.to_f64() - inset;
+            // Into the client's own space through the very fit its picture is
+            // drawn with (#133): off the buffer's drawn corner, and divided by
+            // what the buffer was scaled by. A point in the titlebar lands
+            // above the client and finds no surface, which is what should
+            // happen: the frame is the compositor's, not the client's.
+            //
+            // It used to go through `to_window_space`, which reads the drawn
+            // rectangle as a scale of the pane's own, and take its inset from
+            // `frame_insets`. That is the picture's arithmetic for a decorated
+            // window at rest or in a thumbnail and for nothing else:
+            //
+            // * a tiled window on a frame of a glide is drawn 1:1 and cut, and
+            //   a press there landed as far from the pixel under it as the
+            //   glide was from its destination --
+            //   `a_press_on_a_gliding_window_lands_on_the_pixel_under_it`;
+            // * a window under a resize hold has its last buffer stretched
+            //   into the dragged rectangle, and a press was mapped 1:1 against
+            //   the rectangle instead --
+            //   `a_press_on_a_held_window_lands_on_the_pixel_its_picture_has`;
+            // * a pane still reserving a titlebar is drawn below it, and
+            //   `frame_insets` answers nothing for a pane that is not yet
+            //   decorated --
+            //   `a_press_on_a_window_reserving_a_titlebar_lands_on_the_pixel_under_it`.
+            //
+            // It is still the picture's arithmetic for the *frame*, which is
+            // stretched from the pane's outer size to the drawn rect, so
+            // `pane_chrome` keeps it.
+            let placed =
+                crate::render::place_client(self, pane, &frame, outer.size, window.geometry().size);
+            let undo = |drawn: f64, factor: f64| {
+                if factor.abs() > f64::EPSILON {
+                    drawn / factor
+                } else {
+                    drawn
+                }
+            };
+            let in_window: Point<f64, Logical> = (
+                undo(location.x - placed.origin.x, placed.fit.factor.x),
+                undo(location.y - placed.origin.y, placed.fit.factor.y),
+            )
+                .into();
 
             // Into the *buffer's* coordinates, which is what `surface_under`
             // wants and is not the same point.
@@ -4206,9 +4289,7 @@ impl Solium {
             // never noticed.
             let in_buffer = in_window + window.geometry().loc.to_f64();
 
-            if let Some((surface, surface_offset)) =
-                window.surface_under(in_buffer, WindowSurfaceType::ALL)
-            {
+            if let Some((surface, surface_offset)) = window.surface_under(in_buffer, kind) {
                 let in_surface = in_buffer - surface_offset.to_f64();
                 return Some((surface, location - in_surface));
             }
@@ -7179,6 +7260,24 @@ impl Solium {
                 "a window was left on no screen and has been brought back"
             );
         }
+
+        // **And the tile a maximised or fullscreen window is waiting to go
+        // back into, by the same rule.** It was on the monitor that went as
+        // well, and `pane_laid_out` answers it for a drag on that window, so
+        // left there the drag would start from a rectangle on no screen. Every
+        // pane rather than the stranded ones above, because the tile and the
+        // window are two rectangles and it is the tile being asked about. The
+        // next sweep replaces it with the layout's own answer either way.
+        let tiles: Vec<_> = self
+            .panes
+            .iter()
+            .filter_map(|pane| Some((pane.id(), self.rescued(pane.left_tile()?)?)))
+            .collect();
+        for (pane, back) in tiles {
+            if let Some(held) = self.panes.get_mut(pane) {
+                held.move_left_tile(back);
+            }
+        }
     }
 
     pub(crate) fn trigger_monitors_changed(&mut self) {
@@ -10092,6 +10191,12 @@ mod tests {
             selections: usize,
             /// How many `xdg_popup.popup_done` events have arrived.
             popups_done: usize,
+            /// Every `xdg_surface.configure` serial, with the `xdg_surface` it
+            /// was sent to. Recorded and not acked, for the reason
+            /// [`Self::configures`] gives -- and so a test that needs a popup
+            /// to draw can ack one itself, which xdg-shell requires before a
+            /// popup may commit anything.
+            surface_configures: Vec<(wayland_client::backend::ObjectId, u32)>,
             /// Every `xdg_toplevel.close` this client has been sent, with the
             /// toplevel it was sent to.
             ///
@@ -10283,7 +10388,24 @@ mod tests {
         wayland_client::delegate_noop!(Client: ignore wl_shm_pool::WlShmPool);
         wayland_client::delegate_noop!(Client: ignore wl_buffer::WlBuffer);
         wayland_client::delegate_noop!(Client: ignore xdg_wm_base::XdgWmBase);
-        wayland_client::delegate_noop!(Client: ignore xdg_surface::XdgSurface);
+
+        /// See [`Client::surface_configures`].
+        impl Dispatch<xdg_surface::XdgSurface, ()> for Client {
+            fn event(
+                state: &mut Self,
+                surface: &xdg_surface::XdgSurface,
+                event: xdg_surface::Event,
+                _data: &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+                if let xdg_surface::Event::Configure { serial } = event {
+                    state
+                        .surface_configures
+                        .push((wayland_client::Proxy::id(surface), serial));
+                }
+            }
+        }
         wayland_client::delegate_noop!(Client: ignore wl_callback::WlCallback);
         wayland_client::delegate_noop!(Client: ignore wl_output::WlOutput);
         wayland_client::delegate_noop!(Client: ignore wl_data_device_manager::WlDataDeviceManager);
@@ -13033,6 +13155,945 @@ mod tests {
                 state.pane_outer_of(pane).map(|outer| outer.size),
                 Some(Size::from((700, 500))),
                 "and it is the size its client committed"
+            );
+        }
+
+        /// `window` placed again, through `Solium::place` as `tiling.apply`
+        /// places it, at `rect` and gliding there for `duration`.
+        fn glide(
+            state: &mut Solium,
+            window: &Window,
+            rect: Rectangle<i32, Logical>,
+            duration: Duration,
+            easing: present::Curve,
+            start: Duration,
+        ) {
+            let id = state.window_id(window);
+            state.place(
+                id,
+                to_rect(rect),
+                AnimationSpec { duration, easing },
+                start,
+                Standing::Tile,
+            );
+        }
+
+        /// A window alone in a tile whose client filled it, which is every
+        /// tiled window a moment before its neighbour opens.
+        fn filled_tile(
+            display: &mut Display<Solium>,
+            state: &mut Solium,
+            conn: &Connection,
+            qh: &QueueHandle<Client>,
+            queue: &mut wayland_client::EventQueue<Client>,
+            client: &mut Client,
+        ) -> (
+            Window,
+            wl_surface::WlSurface,
+            crate::pane::PaneId,
+            Rectangle<i32, Logical>,
+        ) {
+            let (window, _toplevel, surface) = open_surface(display, state, conn, client, qh);
+            let (pane, tile) = tiled_alone(state, &window);
+            commit_buffer(client, qh, &surface, tile.size.w, tile.size.h);
+            pump(display, state, conn, qh, queue, client);
+            a_frame(state);
+            assert_eq!(
+                window.geometry().size,
+                tile.size,
+                "the client filled its tile, so the frame before the sweep is \
+                 the whole buffer at 1:1"
+            );
+            (window, surface, pane, tile)
+        }
+
+        /// **#133 review, finding 1: a glide that narrows a tiled window is
+        /// drawn 1:1, cut to the rectangle it has reached, from its first
+        /// frame.**
+        ///
+        /// The case that made the finding: a window alone in its tile, a
+        /// second one opening, and the layout halving the first with a 240ms
+        /// glide while its client still has the whole width committed. The
+        /// cap takes the pane to its new tile at once, so the glide's first
+        /// frame is drawn at the old tile while `pane_outer` is the new one --
+        /// and what was shipped read the pair as the new tile zoomed 2x, so
+        /// the left half of the buffer was stretched over the whole of the old
+        /// tile on the frame after one that had drawn all of it 1:1.
+        ///
+        /// Driven through the real placement and the real transform, and read
+        /// through `render::place_client`, which is what `elements` draws the
+        /// surfaces with and what `offscreen::capture_client` sizes a masked
+        /// client from. Three frames: the first, one a little way in, and one
+        /// most of the way.
+        #[test]
+        fn a_glide_that_narrows_a_tiled_window_is_drawn_1_to_1_on_its_first_frame() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _surface, pane, tile) = filled_tile(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            let half = Rectangle::new(tile.loc, (tile.size.w / 2, tile.size.h).into());
+            let start = state.clock.now();
+            glide(
+                &mut state,
+                &window,
+                half,
+                Duration::from_millis(240),
+                present::Curve::OutCubic,
+                start,
+            );
+            let outer = state.pane_outer_of(pane).expect("the pane is here");
+            assert_eq!(
+                outer, half,
+                "the pane is held in its new tile at once, which is what the \
+                 glide's frames are measured against"
+            );
+            let committed = window.geometry().size;
+            assert_eq!(committed, tile.size, "and the client has not answered");
+
+            let placed_at = |state: &Solium, at: Duration| {
+                let held = state.panes.get(pane).expect("the pane is here");
+                let frame = state.drawn_at(held, outer, start + at);
+                (
+                    frame,
+                    crate::render::place_client(state, held, &frame, outer.size, committed),
+                )
+            };
+
+            let (first, drawn) = placed_at(&state, Duration::ZERO);
+            assert_eq!(
+                first.rect,
+                tile.to_f64(),
+                "the glide starts at the old tile"
+            );
+            assert_eq!(
+                drawn.fit.factor,
+                smithay::utils::Scale::from((1.0, 1.0)),
+                "its first frame is the whole buffer at its own size, as the frame \
+                 before the sweep was -- not the new tile zoomed"
+            );
+            assert_eq!(drawn.fit.crop, None, "and nothing of it is cut yet");
+
+            for at in [Duration::from_millis(30), Duration::from_millis(200)] {
+                let (frame, drawn) = placed_at(&state, at);
+                assert!(
+                    frame.rect.size.w < f64::from(tile.size.w) - 1.0
+                        && frame.rect.size.w > f64::from(half.size.w) + 1.0,
+                    "at {at:?} the frame is part of the way, or it proves nothing: {frame:?}"
+                );
+                assert_eq!(
+                    drawn.fit.factor,
+                    smithay::utils::Scale::from((1.0, 1.0)),
+                    "at {at:?} the buffer is still drawn at its own size"
+                );
+                assert_eq!(
+                    drawn.fit.crop,
+                    Some(drawn.client),
+                    "at {at:?} it is cut to the rectangle the glide has reached"
+                );
+                #[expect(clippy::cast_possible_truncation, reason = "a screen-sized rect")]
+                let reached = drawn.client.size.w.round() as i32;
+                assert_eq!(
+                    drawn.fit.shown,
+                    Size::from((reached, committed.h)),
+                    "at {at:?} a masked client is captured at the same cut, not at \
+                     the new tile's share"
+                );
+            }
+        }
+
+        /// **And a press on a gliding window lands on the pixel under it.**
+        ///
+        /// `surface_under` used to map a point through `to_window_space`,
+        /// which reads the drawn rectangle as a scale of the pane's own. For
+        /// the glide above that is the new tile zoomed, so a press 600 pixels
+        /// into the drawn window reached the client 600 * 488 / 732 = 400
+        /// pixels in -- the zoom's picture, which is no longer what is drawn.
+        /// It goes through `render::place_client` now, and the glide here is
+        /// ten seconds long and linear so that the few milliseconds this test
+        /// takes to run cannot move it anywhere that matters.
+        #[test]
+        fn a_press_on_a_gliding_window_lands_on_the_pixel_under_it() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _surface, pane, tile) = filled_tile(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+
+            let half = Rectangle::new(tile.loc, (tile.size.w / 2, tile.size.h).into());
+            let start = state.clock.now();
+            glide(
+                &mut state,
+                &window,
+                half,
+                Duration::from_secs(10),
+                present::Curve::Linear,
+                start,
+            );
+            state.clock.advance(Duration::from_secs(5));
+
+            let into = 600;
+            let point: Point<f64, Logical> =
+                (f64::from(tile.loc.x + into), f64::from(tile.loc.y + 100)).into();
+            let outer = state.pane_outer_of(pane).expect("the pane is here");
+            let frame = state.drawn(pane, outer);
+            assert!(
+                frame.covers(point) && point.x > f64::from(half.loc.x + half.size.w),
+                "the point is on the gliding window and past its new tile: \
+                 {frame:?}, {point:?}"
+            );
+
+            let (surface, origin) = state
+                .surface_under(point)
+                .expect("the gliding window is under the point");
+            assert_eq!(
+                Some(surface),
+                window
+                    .toplevel()
+                    .map(|toplevel| toplevel.wl_surface().clone())
+            );
+            let within = point - origin;
+            assert!(
+                (within.x - f64::from(into)).abs() < 0.5 && (within.y - 100.0).abs() < 0.5,
+                "the client is told the pixel the picture has under the pointer, \
+                 {into},100 at 1:1, and was told {within:?}"
+            );
+        }
+
+        /// **#133 review, finding 5: a drag on a maximised tiled window starts
+        /// from its tile.**
+        ///
+        /// A maximise takes the window out of `Pane::placed`, so that the
+        /// work area is not cut to the corner it was tiled in -- but it stays
+        /// a leaf of its tree, and nothing on the drag path asks about
+        /// maximised. `pane_laid_out` fell back to `pane_outer`, the whole
+        /// monitor, and the seam was handed the screen's far edge on the first
+        /// frame of a drag that had not moved. On stage `placed` still held
+        /// the tile. This is `a_client_that_rounds_its_size_does_not_move_the_seam`'s
+        /// drag, begun on a maximised window.
+        #[test]
+        fn a_drag_on_a_maximised_tiled_window_starts_from_its_tile() {
+            use solium_layout::tree::{Edge, Tiling};
+
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let output = one_screen(&mut state);
+            let screen = state
+                .space
+                .output_geometry(&output)
+                .expect("the monitor is mapped");
+            let (left, _left_toplevel, left_surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            let (right, _right_toplevel, _right_surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.sync_panes();
+            let (left_id, right_id) = (state.window_id(&left), state.window_id(&right));
+            let (area, settings) = (tiled_area(), tiled_settings());
+            let mut tiling = Tiling::new();
+            tiling.insert(left_id, None, None, area, settings);
+            tiling.insert(right_id, Some(left_id), None, area, settings);
+            sweep(&mut state, &tiling);
+            let slot = leaf_of(&tiling, left_id);
+
+            state.toggle_maximize(&left);
+            commit_buffer(&client, &qh, &left_surface, screen.size.w, screen.size.h);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+            let pane = state.panes.id_of(&left).expect("the pane is here");
+            assert_eq!(
+                state.pane_outer_of(pane),
+                Some(screen),
+                "the window is maximised, and not held in its tile"
+            );
+
+            let began = state.begin_resize(&left).expect("a mapped pane");
+            let laid_out = state.pane_laid_out(&left).expect("a mapped pane");
+            let grab: Point<f64, Logical> =
+                (f64::from(began.loc.x + began.size.w) - 3.0, 300.0).into();
+            let sent = crate::input::resize::dragged_edge(laid_out, ResizeEdge::Right, grab, grab);
+            let mut unmoved = tiling.clone();
+            unmoved.drag_seam(left_id, Edge::Right, sent, area, settings);
+            let after = leaf_of(&unmoved, left_id);
+            assert!(
+                (after.x - slot.x).abs() < 0.5 && (after.w - slot.w).abs() < 0.5,
+                "a drag that has not moved left the seam where it was: {slot:?} \
+                 became {after:?}, from an edge of {sent:?}"
+            );
+        }
+
+        /// **#133 review, finding 9: a tiled window brought back onto a screen
+        /// is still tiled**, at the rectangle it was brought back to -- the
+        /// half of `Standing::Kept` that `a_floating_window_brought_back_onto_a_screen_is_not_given_a_tile`
+        /// cannot see. A client that then commits more than that rectangle is
+        /// held inside it.
+        #[test]
+        fn a_tiled_window_brought_back_onto_a_screen_is_still_tiled() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let _output = one_screen(&mut state);
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            let (pane, tile) = tiled_alone(&mut state, &window);
+            state.map_stacked(window.clone(), (-5000, 300), false);
+            state.sync_panes();
+
+            state.rescue_offscreen();
+            let rescued = state.pane_outer_of(pane).expect("the pane is here");
+            assert!(
+                state.on_any_output(rescued),
+                "the rescue brought the window back, or it proves nothing"
+            );
+            assert_eq!(
+                state.panes.get(pane).and_then(Pane::placed),
+                Some(rescued),
+                "still in a tile, at the rectangle it was brought back to"
+            );
+
+            commit_buffer(&client, &qh, &surface, tile.size.w + 200, tile.size.h + 50);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+            assert_eq!(
+                state.pane_outer_of(pane),
+                Some(rescued),
+                "and a client that grows is held inside it"
+            );
+        }
+
+        /// **And a maximised one brings the tile it left along with it.**
+        ///
+        /// A window maximised on a monitor that goes away is rescued onto the
+        /// one that is left; the tile it is waiting to go back into was on the
+        /// departed monitor too, and `pane_laid_out` answers it for a drag on
+        /// the maximised window (see
+        /// `a_drag_on_a_maximised_tiled_window_starts_from_its_tile`). Left
+        /// behind, that drag would start from a rectangle on no screen.
+        #[test]
+        fn a_maximised_window_brought_back_onto_a_screen_brings_its_tile() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let _left = a_screen(&mut state, "rescue-left", (0, 0));
+            let right = a_screen(&mut state, "rescue-right", (1920, 0));
+            let (window, _toplevel, _surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.sync_panes();
+            let pane = state.panes.id_of(&window).expect("the pane is here");
+            let tile = at(2000, 100, 800, 600);
+            let now = state.clock.now();
+            glide(
+                &mut state,
+                &window,
+                tile,
+                Duration::ZERO,
+                present::Curve::Linear,
+                now,
+            );
+            state.toggle_maximize(&window);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+            assert_eq!(
+                state.panes.get(pane).and_then(Pane::left_tile),
+                Some(tile),
+                "maximised out of the tile on the right-hand monitor"
+            );
+
+            state.space.unmap_output(&right);
+            state.settle_monitors();
+            let rescued = state.pane_outer_of(pane).expect("the pane is here");
+            assert!(
+                state.on_any_output(rescued),
+                "the maximised window was brought back: {rescued:?}"
+            );
+
+            let laid_out = state.pane_laid_out(&window).map(|laid_out| laid_out.0);
+            assert_eq!(
+                laid_out,
+                Some(at(1920 - 800, 100, 800, 600)),
+                "the tile it will go back into was brought back the way a window \
+                 is: onto the screen that is left, its size kept, clamped at the \
+                 edge it was beyond"
+            );
+        }
+
+        /// **#133 review, finding 10: a tiled client is held inside its tile
+        /// with its frame taken off.**
+        ///
+        /// Every other #133 test runs undecorated, where the client's share of
+        /// a tile *is* the tile, so `Solium::tile_of` forgetting the insets
+        /// passed all of them. A pane reserving a titlebar -- `Frame::Pending`,
+        /// which needs no Qt scene -- has a share `TITLEBAR_HEIGHT` shorter
+        /// than its tile, and a client committing the tile's full height has to
+        /// be held to that share: taken as the tile, it reaches a titlebar's
+        /// height into the tile below. Asserted of the pane, of the part of
+        /// the buffer a masked client is captured at, and of the hit test.
+        #[test]
+        fn a_titled_tiled_client_is_held_inside_its_tile_frame_and_all() {
+            use solium_layout::tree::Tiling;
+
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.sync_panes();
+            let pane = state.panes.id_of(&window).expect("the pane is here");
+            state
+                .panes
+                .get_mut(pane)
+                .expect("the pane is here")
+                .set_frame(crate::pane::Frame::Pending);
+            assert_eq!(
+                state.insets_of(pane).top,
+                TITLEBAR_HEIGHT,
+                "a titlebar's worth reserved, or this is the undecorated case again"
+            );
+            let mut tiling = Tiling::new();
+            tiling.insert(
+                state.window_id(&window),
+                None,
+                None,
+                tiled_area(),
+                tiled_settings(),
+            );
+            sweep(&mut state, &tiling);
+            let tile = state
+                .panes
+                .get(pane)
+                .and_then(Pane::placed)
+                .expect("the pane is in a tile");
+            a_frame(&mut state);
+
+            commit_buffer(&client, &qh, &surface, tile.size.w + 120, tile.size.h);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+
+            assert_eq!(
+                state.pane_outer_of(pane),
+                Some(tile),
+                "the frame and the client together are exactly the tile"
+            );
+            let held = state.panes.get(pane).expect("the pane is here");
+            let frame = state.drawn(pane, tile);
+            let drawn = crate::render::place_client(
+                &state,
+                held,
+                &frame,
+                tile.size,
+                window.geometry().size,
+            );
+            assert_eq!(
+                drawn.fit.shown,
+                Size::from((tile.size.w, tile.size.h - TITLEBAR_HEIGHT)),
+                "a masked client is captured at the tile's share, under its titlebar"
+            );
+            let below: Point<f64, Logical> = (
+                f64::from(tile.loc.x + 40),
+                f64::from(tile.loc.y + tile.size.h + 4),
+            )
+                .into();
+            assert_eq!(
+                state.surface_under(below).map(|(surface, _)| surface),
+                None,
+                "and a point just past the tile's bottom edge is not the window's"
+            );
+        }
+
+        /// **#133 review, findings 3 and 6: a warped window is captured at the
+        /// rectangle its warp is drawn over.**
+        ///
+        /// `warp::mesh` spreads the whole of the capture over the frame's
+        /// rect, and that rect comes from `pane_outer_of`, which the cap holds
+        /// to the tile. The capture was sized from `outer_geometry` -- the
+        /// committed size -- so an oversized tiled client was squashed into
+        /// its tile for the length of a genie or a tilt, and its frame was told
+        /// the uncapped width while warped and the tile's once it landed.
+        /// `render::flat` is what both `offscreen::capture` and
+        /// `flat_window_elements` read, the texture size and the frame's
+        /// `Drawing.outer` alike.
+        #[test]
+        fn a_warped_window_is_captured_at_the_rect_its_warp_is_drawn_over() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            let (pane, tile) = tiled_alone(&mut state, &window);
+            commit_buffer(&client, &qh, &surface, tile.size.w * 2, tile.size.h);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+            assert_eq!(
+                window.geometry().size.w,
+                tile.size.w * 2,
+                "the client really is twice as wide as its tile"
+            );
+
+            let flat = crate::render::flat(&state, &window).expect("the window is mapped");
+            assert_eq!(
+                Some(flat.outer),
+                state.pane_outer_of(pane).map(|outer| outer.size),
+                "captured at the rect the mesh is built over, so nothing is squashed"
+            );
+            assert_eq!(flat.outer, tile.size, "which is the tile");
+            assert_eq!(flat.insets, state.insets_of(pane));
+        }
+
+        /// Open a popup on `parent` at `anchor` in its window's coordinates,
+        /// `size` big, and give it a buffer -- which means acking its first
+        /// configure, as xdg-shell requires before a popup commits anything.
+        #[expect(clippy::too_many_arguments, reason = "a fixture's plumbing")]
+        fn drawn_popup(
+            display: &mut Display<Solium>,
+            state: &mut Solium,
+            conn: &Connection,
+            qh: &QueueHandle<Client>,
+            queue: &mut wayland_client::EventQueue<Client>,
+            client: &mut Client,
+            parent: &xdg_surface::XdgSurface,
+            anchor: (i32, i32),
+            size: (i32, i32),
+        ) -> wl_surface::WlSurface {
+            let compositor = client.compositor.clone().expect("wl_compositor bound");
+            let wm_base = client.wm_base.clone().expect("xdg_wm_base bound");
+            let surface = compositor.create_surface(qh, ());
+            let xdg = wm_base.get_xdg_surface(&surface, qh, ());
+            let positioner = wm_base.create_positioner(qh, ());
+            positioner.set_size(size.0, size.1);
+            positioner.set_anchor_rect(anchor.0, anchor.1, 1, 1);
+            positioner.set_anchor(xdg_positioner::Anchor::TopLeft);
+            positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+            let _popup = xdg.get_popup(Some(parent), &positioner, qh, ());
+            surface.commit();
+            pump(display, state, conn, qh, queue, client);
+
+            let id = wayland_client::Proxy::id(&xdg);
+            let serial = client
+                .surface_configures
+                .iter()
+                .rev()
+                .find(|(to, _)| *to == id)
+                .map(|&(_, serial)| serial)
+                .expect("the popup was configured");
+            xdg.ack_configure(serial);
+            commit_buffer(client, qh, &surface, size.0, size.1);
+            pump(display, state, conn, qh, queue, client);
+            surface
+        }
+
+        /// **#133 review, findings 2 and 8: a toplevel is drawn without its
+        /// popups.**
+        ///
+        /// Every path that draws a client draws its popups itself --
+        /// `elements` uncut above the sandwich, `flat_window_elements` into the
+        /// warp's capture -- and smithay's `Window::render_elements` draws them
+        /// *again*, ahead of the toplevel's own tree. On the ordinary path that
+        /// second copy went through the toplevel's fit and was cut to the
+        /// tile, one layer under the uncut one, so a translucent pixel of a
+        /// menu crossing the tile's edge was blended twice on one side of it
+        /// and once on the other. `render::toplevel_elements` is what all
+        /// three paths build the toplevel from, and it is generic over the
+        /// renderer so it runs here on smithay's `DummyRenderer`.
+        ///
+        /// The first assertion is the control: smithay's own call does have
+        /// the popup in it, so the fixture has a popup that draws.
+        #[test]
+        fn a_toplevel_is_drawn_without_its_popups() {
+            use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+            use smithay::backend::renderer::element::{Element as _, Id};
+            use smithay::backend::renderer::test::DummyRenderer;
+
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, _surface, xdg_surface) =
+                open_xdg(&mut display, &mut state, &conn, &client, &qh);
+            let _popup = drawn_popup(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+                &xdg_surface,
+                (10, 10),
+                (40, 30),
+            );
+            let toplevel = window
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface().clone())
+                .expect("an xdg toplevel");
+            let popup = smithay::desktop::PopupManager::popups_for_surface(&toplevel)
+                .next()
+                .map(|(popup, _)| popup.wl_surface().clone())
+                .expect("the popup is tracked on its parent");
+            let (own_id, popup_id) = (
+                Id::from_wayland_resource(&toplevel),
+                Id::from_wayland_resource(&popup),
+            );
+
+            let mut renderer = DummyRenderer;
+            let scale = smithay::utils::Scale::from(1.0);
+            let whole: Vec<WaylandSurfaceRenderElement<DummyRenderer>> =
+                smithay::backend::renderer::element::AsRenderElements::render_elements(
+                    &window,
+                    &mut renderer,
+                    (0, 0).into(),
+                    scale,
+                    1.0,
+                );
+            assert!(
+                whole.iter().any(|element| element.id() == &popup_id),
+                "smithay's whole-window call draws the popup, so there is a popup \
+                 here to leave out"
+            );
+
+            let own =
+                crate::render::toplevel_elements(&mut renderer, &window, (0, 0).into(), scale, 1.0);
+            assert!(
+                own.iter().any(|element| element.id() == &own_id),
+                "the toplevel itself is drawn"
+            );
+            assert!(
+                own.iter().all(|element| element.id() != &popup_id),
+                "and its popup is not, because every caller draws that itself"
+            );
+        }
+
+        /// **#133 review, finding 8: a menu past its parent's tile takes the
+        /// press.**
+        ///
+        /// A popup is drawn uncut, reaching past its parent's tile, and since
+        /// #133 the parent's hit-test rectangle stops at the tile. So a menu
+        /// opened near the right edge of an oversized client drew items over
+        /// the neighbouring tile that could not be pointed at: `surface_under`
+        /// gated every pane on its own frame, the point fell through to the
+        /// neighbour, and a press there dismisses the menu's grab instead of
+        /// choosing the item. The window with the menu is raised, as a click
+        /// that opened one leaves it.
+        #[test]
+        fn a_menu_past_its_parents_tile_takes_the_press() {
+            use solium_layout::tree::Tiling;
+
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (left, _left_toplevel, left_surface, left_xdg) =
+                open_xdg(&mut display, &mut state, &conn, &client, &qh);
+            let (right, _right_toplevel, right_surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.sync_panes();
+            let (left_id, right_id) = (state.window_id(&left), state.window_id(&right));
+            let (area, settings) = (tiled_area(), tiled_settings());
+            let mut tiling = Tiling::new();
+            tiling.insert(left_id, None, None, area, settings);
+            tiling.insert(right_id, Some(left_id), None, area, settings);
+            sweep(&mut state, &tiling);
+            let pane = state.panes.id_of(&left).expect("the pane is here");
+            let tile = state
+                .panes
+                .get(pane)
+                .and_then(Pane::placed)
+                .expect("the pane is in a tile");
+            let beside = state
+                .panes
+                .id_of(&right)
+                .and_then(|pane| state.panes.get(pane))
+                .and_then(Pane::placed)
+                .expect("the neighbour is in a tile");
+            commit_buffer(&client, &qh, &right_surface, beside.size.w, beside.size.h);
+            commit_buffer(&client, &qh, &left_surface, tile.size.w + 200, tile.size.h);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            let _popup = drawn_popup(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+                &left_xdg,
+                (tile.size.w - 20, 50),
+                (120, 80),
+            );
+            state.space.raise_element(&left, false);
+            a_frame(&mut state);
+
+            let point: Point<f64, Logical> = (
+                f64::from(tile.loc.x + tile.size.w + 40),
+                f64::from(tile.loc.y + 90),
+            )
+                .into();
+            assert!(
+                beside.to_f64().contains(point),
+                "the point is over the neighbour's tile, where the menu reaches"
+            );
+            let menu = left.toplevel().and_then(|toplevel| {
+                smithay::desktop::PopupManager::popups_for_surface(toplevel.wl_surface())
+                    .next()
+                    .map(|(popup, _)| popup.wl_surface().clone())
+            });
+            assert!(menu.is_some(), "the menu is tracked on its parent");
+            assert_eq!(
+                state.surface_under(point).map(|(surface, _)| surface),
+                menu,
+                "the menu has the pixel it drew, not the window under it"
+            );
+        }
+
+        /// **A script's thumbnail and a script's open are pictures of the
+        /// whole window**, for a tiled one as for any other.
+        ///
+        /// `Solium::apply` gives the frames `sol.present` and
+        /// `sol.present_from` build a zoom of their rectangle over the
+        /// window's own. That zoom is what tells `render::fit` the rectangle is
+        /// the window made smaller, so a tiled window that fits its tile is
+        /// scaled into an overview slot or an open's first frame whole, as it
+        /// was before #133 -- where a frame at zoom 1.0 that small would read
+        /// as a tile that narrow, and the window would be cut to its top-left
+        /// corner instead.
+        #[test]
+        fn a_scripts_thumbnail_and_open_are_pictures_of_the_whole_window() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _surface, pane, tile) = filled_tile(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            let id = state.window_id(&window);
+            let instant = AnimationSpec {
+                duration: Duration::ZERO,
+                ..AnimationSpec::default()
+            };
+            let committed = window.geometry().size;
+            let thumbnail = Rect {
+                x: f64::from(tile.loc.x) + 40.0,
+                y: f64::from(tile.loc.y) + 30.0,
+                w: f64::from(tile.size.w) / 4.0,
+                h: f64::from(tile.size.h) / 4.0,
+            };
+            let placed_now = |state: &Solium| {
+                let held = state.panes.get(pane).expect("the pane is here");
+                let outer = state.pane_outer(held);
+                let frame = state.drawn(pane, outer);
+                (
+                    frame,
+                    crate::render::place_client(state, held, &frame, outer.size, committed),
+                )
+            };
+
+            state.apply(Outcome {
+                commands: vec![Command::Present {
+                    id,
+                    rect: Some(thumbnail),
+                    opacity: None,
+                    matrix: None,
+                    deform: None,
+                    z: 0.0,
+                    pivot: (0.5, 0.5),
+                    animation: instant,
+                }],
+                ..Outcome::default()
+            });
+            let (frame, drawn) = placed_now(&state);
+            assert_eq!(frame.zoom, (0.25, 0.25), "a quarter of the window");
+            assert_eq!(
+                (drawn.fit.factor, drawn.fit.crop),
+                (smithay::utils::Scale::from((0.25, 0.25)), None),
+                "the whole window at a quarter, with nothing cut off it"
+            );
+
+            state.apply(Outcome {
+                commands: vec![Command::Clear {
+                    id,
+                    animation: instant,
+                }],
+                ..Outcome::default()
+            });
+            a_frame(&mut state);
+            let shrunk = Rect {
+                x: f64::from(tile.loc.x) + f64::from(tile.size.w) * 0.06,
+                y: f64::from(tile.loc.y) + f64::from(tile.size.h) * 0.06,
+                w: f64::from(tile.size.w) * 0.88,
+                h: f64::from(tile.size.h) * 0.88,
+            };
+            let start = state.clock.now();
+            state.apply(Outcome {
+                commands: vec![Command::PresentFrom {
+                    id,
+                    rect: shrunk,
+                    opacity: Some(0.0),
+                    animation: AnimationSpec {
+                        duration: Duration::from_secs(10),
+                        easing: present::Curve::Linear,
+                    },
+                }],
+                ..Outcome::default()
+            });
+            let held = state.panes.get(pane).expect("the pane is here");
+            let outer = state.pane_outer(held);
+            let first = state.drawn_at(held, outer, start);
+            let opened = crate::render::place_client(&state, held, &first, outer.size, committed);
+            assert!(
+                (first.zoom.0 - 0.88).abs() < 1e-9 && (first.zoom.1 - 0.88).abs() < 1e-9,
+                "an open's first frame is the window at 0.88: {:?}",
+                first.zoom
+            );
+            assert!(
+                (opened.fit.factor.x - 0.88).abs() < 1e-9 && opened.fit.crop.is_none(),
+                "the whole window at 0.88, with nothing cut off it: {:?}",
+                opened.fit
+            );
+        }
+
+        /// **A press on a window lands where its client is drawn, frame and
+        /// all.**
+        ///
+        /// `elements` places the client under the frame's share from
+        /// `insets_of`, which answers for a `Frame::Pending` pane -- one still
+        /// reserving the titlebar a frame is on its way to fill. The hit test
+        /// took its inset from `frame_insets`, which answers nothing for that
+        /// pane because it is not decorated yet, so a press there reached the
+        /// client a titlebar's height above the pixel under it. Both read the
+        /// one `render::place_client` now.
+        #[test]
+        fn a_press_on_a_window_reserving_a_titlebar_lands_on_the_pixel_under_it() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state.panes.id_of(&window).expect("the pane is here");
+            state
+                .panes
+                .get_mut(pane)
+                .expect("the pane is here")
+                .set_frame(crate::pane::Frame::Pending);
+            commit_buffer(&client, &qh, &surface, 400, 300);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            // Past the open animation its first commit started, which begins
+            // at opacity zero -- and a pane nobody can see takes no press.
+            state.clock.advance(Duration::from_secs(1));
+            a_frame(&mut state);
+            let outer = state.pane_outer_of(pane).expect("the pane is here");
+            assert_eq!(
+                outer,
+                at(400, 300 - TITLEBAR_HEIGHT, 400, 300 + TITLEBAR_HEIGHT),
+                "the client at 400,300 with a titlebar's worth reserved above it"
+            );
+
+            let point: Point<f64, Logical> = (450.0, 310.0).into();
+            let (_, origin) = state
+                .surface_under(point)
+                .expect("the client is under the point");
+            let within = point - origin;
+            assert!(
+                (within.x - 50.0).abs() < 0.5 && (within.y - 10.0).abs() < 0.5,
+                "ten pixels into the client, as drawn, and was told {within:?}"
+            );
+        }
+
+        /// **A press on a window whose drag is still being answered lands on
+        /// the pixel its picture has there.**
+        ///
+        /// Under a resize hold the client's last buffer is stretched into the
+        /// rectangle the drag has reached, and the hold outlives the gesture
+        /// by up to `resizing::PATIENCE`. The hit test mapped the point 1:1
+        /// against the dragged rectangle, so a press on the stretched picture
+        /// reached the client somewhere else -- here, a buffer 400 wide drawn
+        /// 200 wide, and a press 150 pixels in, which is pixel 300 of the
+        /// picture and was delivered as pixel 150. It inverts the same fit the
+        /// picture is drawn with now.
+        #[test]
+        fn a_press_on_a_held_window_lands_on_the_pixel_its_picture_has() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state.panes.id_of(&window).expect("the pane is here");
+            commit_buffer(&client, &qh, &surface, 400, 300);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            state.sync_panes();
+
+            let outer = at(400, 300, 200, 150);
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: outer,
+                edge_at: (600.0, 450.0),
+                edges: ResizeEdge::BottomRight,
+            };
+            state.begin_resize(&window);
+            tiled_frame(&mut state, &request, pane, outer, Duration::ZERO);
+            assert!(state.holding_resize(pane), "the drag is holding the pane");
+            assert_eq!(
+                state.resize_fill(pane),
+                Some(crate::resizing::Fill::Stretch),
+                "and stretching the last buffer into the dragged rectangle"
+            );
+
+            let point: Point<f64, Logical> = (550.0, 400.0).into();
+            let (_, origin) = state
+                .surface_under(point)
+                .expect("the window is under the point");
+            let within = point - origin;
+            assert!(
+                (within.x - 300.0).abs() < 0.5 && (within.y - 200.0).abs() < 0.5,
+                "the picture has buffer pixel 300,200 there, and the client was \
+                 told {within:?}"
             );
         }
 
