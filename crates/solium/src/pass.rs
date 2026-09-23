@@ -639,9 +639,10 @@ impl Pass {
 /// is and this element holds one. The exception is `opaque_regions`, which is
 /// the one answer here whose cost of being wrong is a corrupt screen rather
 /// than a wrong picture: all of it lives in [`opaque_of`], which takes numbers
-/// and is tested against the shader's own distance field. The rest -- `src`,
-/// `geometry`, `alpha`, `draw` -- is seen for the first time by Task 6, on a
-/// screen.
+/// and is tested against the shader's own distance field. The other is the
+/// order `draw` packs the four radii in, which lives in [`packed_radii`] for
+/// the same reason. The rest -- `src`, `geometry`, `alpha`, and the rest of
+/// `draw` -- is seen for the first time by Task 6, on a screen.
 #[derive(Clone, Debug)]
 pub(crate) struct Rounded {
     id: Id,
@@ -716,11 +717,45 @@ impl Element for Rounded {
     }
 }
 
+/// The `corner_radius` uniform's value: **`(tl, tr, bl, br)`, which is
+/// `Corners`' own field order and is the order the shader indexes.**
+///
+/// `corner_radius.x` is read where `v_coords` is in the top-left quadrant,
+/// `.y` top-right, `.z` bottom-left, `.w` bottom-right -- so this tuple and
+/// `Corners`' declaration have to stay in step, and a transposed pair is
+/// invisible almost everywhere: it draws a correct-looking window with its
+/// corners swapped, and on the overwhelmingly common window where all four
+/// agree it draws nothing wrong at all. `dev/wirecheck` draws four distinct
+/// radii on a real GPU, but through its own `Uniform::new` and not this one,
+/// so it cannot see a transposition here.
+///
+/// **A free function so that a test can see the order**, which is the whole
+/// reason it is not inline in [`Rounded::draw`] any more: a test cannot build
+/// a `Rounded` to call `draw` on, for the reason [`Rounded`] gives.
+/// `the_radius_uniform_is_packed_in_the_order_the_shader_picks` holds what
+/// this returns against the component letters in `ROUNDED_CORNERS`' three
+/// `picked` lines, which it requires to be in the shader verbatim. It checks
+/// the shader's text, not a draw, and it does not check the `UniformType` the
+/// uniform is registered as, which is #95.
+///
+/// A 4-tuple and not a bare `f32`, which would register as `_1f` against a
+/// `vec4` location and mismatch the `UniformType::_4f` this program was
+/// compiled with in `Programs::rounded`, leaving every fragment unset -- not a
+/// theoretical risk, `dev/wirecheck` hit exactly this.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a corner radius is tens of pixels; f32 is what the uniform takes"
+)]
+fn packed_radii(radii: Corners) -> (f32, f32, f32, f32) {
+    (
+        radii.top_left as f32,
+        radii.top_right as f32,
+        radii.bottom_left as f32,
+        radii.bottom_right as f32,
+    )
+}
+
 impl RenderElement<GlesRenderer> for Rounded {
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "a corner radius is tens of pixels; f32 is what the uniform takes"
-    )]
     fn draw(
         &self,
         frame: &mut GlesFrame<'_, '_>,
@@ -742,30 +777,10 @@ impl RenderElement<GlesRenderer> for Rounded {
             self.alpha,
             Some(&self.program),
             &[
-                // **`(tl, tr, bl, br)`, which is `Corners`' own field order and
-                // is the order the shader indexes.** `corner_radius.x` is read
-                // where `v_coords` is in the top-left quadrant, `.y` top-right,
-                // `.z` bottom-left, `.w` bottom-right -- so this tuple and
-                // `Corners`' declaration have to stay in step, and nothing but
-                // a screen would notice if they stopped: a transposed pair
-                // draws a correct-looking window with its corners swapped, and
-                // on the overwhelmingly common window where all four agree it
-                // draws nothing wrong at all.
-                //
-                // A 4-tuple and not a bare `f32`, which would register as
-                // `_1f` against a `vec4` location and mismatch the
-                // `UniformType::_4f` this program was compiled with in
-                // `Programs::rounded`, leaving every fragment unset -- not a
-                // theoretical risk, `dev/wirecheck` hit exactly this.
-                Uniform::new(
-                    RADIUS_UNIFORM,
-                    (
-                        self.radii.top_left as f32,
-                        self.radii.top_right as f32,
-                        self.radii.bottom_left as f32,
-                        self.radii.bottom_right as f32,
-                    ),
-                ),
+                // The packing is `packed_radii`'s, which is where the order
+                // is written down and where a test holds it against the
+                // shader's own quadrant pick.
+                Uniform::new(RADIUS_UNIFORM, packed_radii(self.radii)),
                 // Both physical, which is the pair the shader's `v_coords *
                 // tex_size` arithmetic is written against. If this never
                 // arrives the uniform stays 0, the shader's clamp makes `r` 0
@@ -1551,12 +1566,14 @@ mod tests {
     /// **The three `picked` lines are also the only written-down statement of
     /// which `vec4` component is which corner**, and two things in this file
     /// depend on that answer: [`away`]'s `match`, and the tuple
-    /// `Rounded::draw` hands to `Uniform::new`. Read off the lines below,
-    /// `x < 0.5 && y < 0.5` -- the top-left quadrant -- takes `corner_radius.x`,
-    /// so the packing is `(top_left, top_right, bottom_left, bottom_right)`,
-    /// which is `Corners`' own field order. That is why `draw` names each field
-    /// rather than spreading a struct: the two orders agreeing is a fact about
-    /// these lines, not about the type.
+    /// [`packed_radii`] hands `Rounded::draw` for `Uniform::new`. Read off the
+    /// lines below, `x < 0.5 && y < 0.5` -- the top-left quadrant -- takes
+    /// `corner_radius.x`, so the packing is `(top_left, top_right, bottom_left,
+    /// bottom_right)`, which is `Corners`' own field order. That is why
+    /// `packed_radii` names each field rather than spreading a struct: the two
+    /// orders agreeing is a fact about these lines, not about the type, and
+    /// `the_radius_uniform_is_packed_in_the_order_the_shader_picks` is what
+    /// holds the tuple to them.
     const FIELD: [&str; 8] = [
         "vec2 half_size = tex_size * 0.5;",
         "float picked = (v_coords.x < 0.5)",
@@ -1729,6 +1746,81 @@ mod tests {
              corner alone is satisfied by a field that ignores the quadrant \
              pick and always reads `corner_radius.x`"
         );
+    }
+
+    /// **[`packed_radii`] puts each corner's radius in the component the shader
+    /// reads in that corner's quadrant**, checked against the shader's own
+    /// `picked` lines rather than against `Corners`' declaration order.
+    ///
+    /// Nothing else in the workspace checks this packing. [`away`] picks by
+    /// `Corners` field and never by `vec4` component, so it holds under any
+    /// packing at all; `dev/wirecheck` does see components, on a real GPU,
+    /// but through a `Uniform::new` of its own. With the tuple's second and
+    /// third entries swapped, this is the only test in `cargo test -p solium`
+    /// that fails.
+    ///
+    /// **The four component letters are this test's only input, and the
+    /// shader has to agree with them twice.** They are spliced into `FIELD`'s
+    /// three `picked` lines, which have to be in `ROUNDED_CORNERS` verbatim,
+    /// and they then name the component of the packed tuple each corner's
+    /// radius has to be in. So an edit to the shader's pick fails here until
+    /// the letters are changed to match, and changing the letters asks the
+    /// packing question again against the new pick -- where a pick transcribed
+    /// into a closure would go on passing against a shader that no longer
+    /// picks that way. What this cannot see is the rest of those lines' shape:
+    /// that `v_coords.x < 0.5` is the left half and `v_coords.y < 0.5` the top
+    /// is this file's reading, the same one [`away`] makes, and only a draw
+    /// checks it.
+    ///
+    /// **Four distinct radii**, the four `dev/wirecheck` draws. Under
+    /// `Corners::all` every order of the tuple packs the same four numbers and
+    /// this passes against all of them; with no two equal, any order but the
+    /// right one moves some corner's radius into another corner's component,
+    /// and that corner's assertion fails.
+    #[test]
+    fn the_radius_uniform_is_packed_in_the_order_the_shader_picks() {
+        let (tl, tr, bl, br) = ('x', 'y', 'z', 'w');
+        for line in [
+            "float picked = (v_coords.x < 0.5)".to_owned(),
+            format!("? ((v_coords.y < 0.5) ? corner_radius.{tl} : corner_radius.{bl})"),
+            format!(": ((v_coords.y < 0.5) ? corner_radius.{tr} : corner_radius.{br});"),
+        ] {
+            assert!(
+                ROUNDED_CORNERS.lines().any(|source| source.trim() == line),
+                "`{line}` is not in the shader, so the components this test \
+                 checks the packing against are not the ones the shader reads"
+            );
+        }
+
+        let radii = Corners {
+            top_left: 6.0,
+            top_right: 12.0,
+            bottom_left: 20.0,
+            bottom_right: 28.0,
+        };
+        let packed = packed_radii(radii);
+        let component = |letter: char| match letter {
+            'x' => Some(packed.0),
+            'y' => Some(packed.1),
+            'z' => Some(packed.2),
+            'w' => Some(packed.3),
+            _ => None,
+        };
+        for (corner, letter, want) in [
+            ("top-left", tl, radii.top_left),
+            ("top-right", tr, radii.top_right),
+            ("bottom-left", bl, radii.bottom_left),
+            ("bottom-right", br, radii.bottom_right),
+        ] {
+            assert_eq!(
+                component(letter).map(f64::from),
+                Some(want),
+                "the shader reads the {corner} radius from \
+                 `corner_radius.{letter}`, and `packed_radii` put something \
+                 else there, as {packed:?}. A window drawn with this packing \
+                 has its corners swapped"
+            );
+        }
     }
 
     /// Whether the client covered its capture, which is the question

@@ -412,13 +412,16 @@ fn draw_through_program(
                 &[
                     // `(tl, tr, bl, br)` -- `Corners`' field order, which is
                     // the order `fragment.rs` indexes `corner_radius` by, and
-                    // the order `pass::Rounded::draw` sends. Four values the
-                    // CALLER chooses rather than one repeated: this harness is
-                    // the only place in the tree that can see the packing at
-                    // all, because a transposition type-checks, compiles, and
-                    // draws a perfectly ordinary window with its corners
-                    // swapped. `rounded_corners_cut` sends four distinct ones
-                    // for exactly that reason.
+                    // the order `pass::packed_radii` packs for
+                    // `pass::Rounded::draw`. Four values the CALLER chooses
+                    // rather than one repeated, because a transposition
+                    // type-checks, compiles, and draws a perfectly ordinary
+                    // window with its corners swapped. `rounded_corners_cut`
+                    // sends four distinct ones for exactly that reason, and it
+                    // is the only draw in the tree that can see the packing: a
+                    // unit test in `pass.rs` holds the compositor's tuple to
+                    // the shader's `picked` lines, but as text, and nothing
+                    // but this checks the tuple in this file.
                     //
                     // A 4-tuple and not a bare `f32`, which `UniformValue`
                     // would turn into `_1f` against a `vec4` location and
@@ -628,16 +631,19 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
         }
     }
 
-    // 4. FOUR DISTINCT radii, which is the only thing in this tree that can
+    // 4. FOUR DISTINCT radii, which is the only draw in this tree that can
     //    see the `vec4` packing at all.
     //
     // Everything above sends one radius four times, and under that every
     // permutation of `corner_radius` draws the identical picture. So a
     // transposition between `Corners`' field order and the shader's component
-    // order -- `pass::Rounded::draw`'s tuple, this file's, or `fragment.rs`'s
-    // three `picked` lines -- type-checks, compiles, links, passes every unit
-    // test in the workspace, and swaps a window's corners on screen. Nothing
-    // but a real draw with four different values can tell.
+    // order type-checks, compiles, links, and swaps a window's corners on
+    // screen. The compositor's side of it is a unit test too --
+    // `the_radius_uniform_is_packed_in_the_order_the_shader_picks`, in
+    // `pass.rs`, holds `packed_radii` to the component letters in the
+    // shader's `picked` lines -- but that reads the shader as text. This
+    // file's own tuple, and what a GPU does with either, nothing but a real
+    // draw with four different values can tell.
     //
     // `style.rs` had this exact blindness and closed it the same way: four
     // distinct values instead of one repeated.
