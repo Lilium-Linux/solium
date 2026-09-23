@@ -78,3 +78,7 @@ pkg-config = "0.3"
 # depends on them too; this only adds an edge to a graph that does not change.
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client"] }
+# The client half of `zwlr_screencopy_v1`, for the test that a capture is
+# refused while the session is locked. Also already in the lockfile, at this
+# version with this feature, through `wl-probe`.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }

@@ -231,6 +231,8 @@ impl SessionLockHandler for Solium {
             tracing::warn!("a new lock client took over from one that went without unlocking");
         }
         self.lock = Some(Lock::new(asking));
+        // An unlock still waiting for its key to come up is moot now.
+        self.refocus_on_release = false;
         // Input is pointed at whatever the user was doing a moment ago, and it
         // stays pointed there until something moves. Between the lock and the
         // client's first surface -- which is a client starting up, so tens of
@@ -260,7 +262,22 @@ impl SessionLockHandler for Solium {
         // the user was using, because a session that unlocks and ignores
         // typing until you move the mouse reads as one that did not unlock.
         blind(self);
-        self.settle_focus();
+        // Unless a key is still down, which at this moment it nearly always
+        // is: the Enter that submitted the password, still under the user's
+        // finger while the lock client checked it. Handed the keyboard now, the
+        // window would be told in `wl_keyboard.enter` that Enter is held -- a
+        // key it never saw pressed, typed at the lock screen. So the keyboard
+        // stays on nothing until every key is up, a tenth of a second, and
+        // `input::key` settles it then. The release itself goes to nobody.
+        let held = self
+            .seat
+            .get_keyboard()
+            .is_some_and(|keyboard| !keyboard.pressed_keys().is_empty());
+        if held {
+            self.refocus_on_release = true;
+        } else {
+            self.settle_focus();
+        }
         tracing::info!("session unlocked");
     }
 

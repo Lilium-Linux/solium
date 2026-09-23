@@ -160,6 +160,16 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Solium {
         };
 
         let frame = data_init.init(frame, FrameData::default());
+        // Nothing is captured while the session is locked. What is on screen
+        // then is the lock screen, and a recording of it is a recording of the
+        // password being typed: its length, and the rhythm of it. Any client
+        // can ask -- this global has no filter -- and every client but the
+        // lock client is behind the lock. `failed`, the protocol's only way
+        // to say no, and what a screenshot tool reports as "could not capture".
+        if state.lock.is_some() {
+            frame.failed();
+            return;
+        }
         let Some(output) = Output::from_resource(&wl_output) else {
             // The output is gone. `failed` and not a protocol error: a monitor
             // being unplugged between the request and its arrival is a race
@@ -243,6 +253,12 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Solium {
             _ => return,
         };
 
+        // A frame asked for before the session locked and copied after:
+        // refused for the same reason as a new one.
+        if state.lock.is_some() {
+            frame.failed();
+            return;
+        }
         let Ok(mut held) = data.inner.lock() else {
             frame.failed();
             return;
@@ -306,6 +322,14 @@ pub(crate) fn settle(
     // Taken, so a capture that fails cannot be retried forever and a scene
     // that damages during the copy queues for the *next* frame.
     let captures = std::mem::take(&mut state.pending_captures);
+    // Queued before the session locked, and about to be filled from a frame
+    // of the lock screen. See `Dispatch<ZwlrScreencopyManagerV1>`.
+    if state.lock.is_some() {
+        for capture in captures {
+            capture.frame.failed();
+        }
+        return;
+    }
     for capture in captures {
         match fill(state, renderer, prepared, &capture) {
             Ok(()) => {
