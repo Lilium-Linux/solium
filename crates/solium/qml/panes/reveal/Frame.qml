@@ -24,6 +24,15 @@ Item {
     // here.
     readonly property int barHeight: 34
 
+    // What a narrow tile leaves room for, by `top/Frame.qml`'s arithmetic and
+    // for its reasons (#133): the title below 164px -- this file holds back
+    // 140 for the buttons rather than 150 -- maximise below 59px, close below
+    // 37px, and a bare bar under that. The centred title ends at `width - 70`
+    // and the buttons start at `width - 47`, so the two never meet.
+    readonly property bool roomForTitle: frame.width - 140 >= 24
+    readonly property bool roomForClose: frame.width >= 37
+    readonly property bool roomForMaximize: frame.width >= 59
+
     Rectangle {
         id: bar
 
@@ -44,6 +53,7 @@ Item {
 
         Text {
             anchors.centerIn: parent
+            visible: frame.roomForTitle
             width: Math.min(implicitWidth, Math.max(frame.width - 140, 0))
             text: frame.title
             elide: Text.ElideRight
@@ -62,6 +72,8 @@ Item {
                 Rectangle {
                     required property var modelData
 
+                    visible: modelData.name === "close" ? frame.roomForClose
+                                                        : frame.roomForMaximize
                     width: 13
                     height: 13
                     radius: width / 2

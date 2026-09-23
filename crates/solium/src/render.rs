@@ -13,12 +13,13 @@ use std::sync::Mutex;
 
 use smithay::{
     backend::renderer::{
+        ImportAll, Renderer,
         element::{
             AsRenderElements, Id, Kind,
             memory::MemoryRenderBufferRenderElement,
             render_elements,
             surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
-            utils::RescaleRenderElement,
+            utils::{CropRenderElement, RescaleRenderElement},
         },
         gles::{GlesRenderer, GlesTexture},
         utils::CommitCounter,
@@ -26,7 +27,7 @@ use smithay::{
     desktop::{PopupManager, Window, layer_map_for_output},
     input::pointer::{CursorImageAttributes, CursorImageStatus},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Logical, Point, Scale},
+    utils::{Logical, Physical, Point, Rectangle, Scale, Size},
     wayland::compositor::with_states,
 };
 
@@ -45,6 +46,10 @@ render_elements! {
     /// Vulkan backend needs its own element set, not just its own warp.
     pub(crate) Element<=GlesRenderer>;
     Window = RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
+    /// A tiled client's surface, cut to its tile because it committed more
+    /// than the tile has. See [`fit`] — every other client surface, and every
+    /// popup, is a `Window`.
+    Tiled = CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
     Chrome = MemoryRenderBufferRenderElement<GlesRenderer>,
     Warped = crate::warp::Warp,
     /// A surface drawn straight, with no rescale wrapper: the offscreen pass
@@ -1041,19 +1046,6 @@ pub(crate) fn elements(
             alpha: frame.opacity,
             scale,
         };
-        // The frame's share, in drawn pixels: a transform that scaled the
-        // window scaled its frame with it.
-        let insets = state.insets_of(pane);
-        let across = ratio(frame.rect.size.w, outer.size.w);
-        let down = ratio(frame.rect.size.h, outer.size.h);
-        let (left, top) = (
-            f64::from(insets.left) * across,
-            f64::from(insets.top) * down,
-        );
-        let (taken_x, taken_y) = (
-            f64::from(insets.horizontal()) * across,
-            f64::from(insets.vertical()) * down,
-        );
 
         // Nothing of the application to draw yet, so this window is entirely
         // ours and the scene has all of it, bar included. The frame is built
@@ -1118,16 +1110,6 @@ pub(crate) fn elements(
             continue;
         }
 
-        // What is left of the drawn rect once the frame has taken its share is
-        // the client's.
-        let client = present::logical(
-            (frame.rect.loc.x + left, frame.rect.loc.y + top),
-            (
-                (frame.rect.size.w - taken_x).max(1.0),
-                (frame.rect.size.h - taken_y).max(1.0),
-            ),
-        );
-
         // The surface tree is built as if at its real size and then scaled,
         // which keeps subsurface offsets correct for free.
         //
@@ -1140,9 +1122,26 @@ pub(crate) fn elements(
         // second scaling path and nothing new in the element list. When the
         // client commits the size it was asked for the two sizes are equal
         // again and the window is pixel-exact. See `crate::resizing`.
+        //
+        // **And a tiled client that committed more than its tile is cut to
+        // it, not squashed into it (#133).** `pane_geometry` caps the pane at
+        // the tile, so the client rectangle is the tile's share; dividing that
+        // by the committed size would shrink the whole buffer into the tile,
+        // which turns the spill over the neighbour into a squash. So the
+        // buffer is drawn at its own size -- times the frame's zoom, for an
+        // open, a close or a thumbnail -- and cut to the client rectangle.
+        // [`place_client`] is all of it, and it is shared with the hit test so
+        // a press lands on the pixel the picture put there.
         let fill = state.resize_fill(pane);
-        let (across, down) = crate::resizing::factor(fill, client.size, real.size);
-        let factor = Scale::from((across, down));
+        let Some(placed) = state
+            .panes
+            .get(pane)
+            .map(|held| place_client(state, held, &frame, outer.size, real.size))
+        else {
+            continue;
+        };
+        let (client, fitting) = (placed.client, placed.fit);
+        let (across, down) = (fitting.factor.x, fitting.factor.y);
 
         // The other half of the resize trace: `state.rs` records what the layout
         // wrote and what the client was told, and this records what was actually
@@ -1185,39 +1184,9 @@ pub(crate) fn elements(
         }
 
         let corner = client.loc.to_physical_precise_round(scale);
-
-        // **A picture that is not stretched stays against the edges the drag is
-        // not moving.**
-        //
-        // `Fill::Hold` keeps the buffer at its own size where the pane has grown
-        // past it, which leaves a strip the buffer does not cover. Anchoring at
-        // the drawn rectangle's top-left puts that strip on the bottom and the
-        // right, which is correct for a bottom or right drag -- those are
-        // exactly the drags whose top-left corner is standing still -- and
-        // wrong for every drag that pulls a left or top edge, where the picture
-        // would travel with the pointer and the gap would open against the
-        // stationary edge. The whole of the window's contents would slide while
-        // the user dragged one of four corners.
-        //
-        // **Zero for a stretch, by the arithmetic rather than by a branch.** A
-        // stretched buffer covers its rectangle exactly, so the slack below is
-        // `client.size.w - real.size.w * (client.size.w / real.size.w)`, which
-        // is nothing -- the default path and every window that is not being
-        // dragged at all get `corner` back, to the bit.
-        let (pulls_left, pulls_top) = state.resize_pins(pane).unwrap_or((false, false));
-        let slack = |pulled: bool, drawn: f64, real: i32, factor: f64| {
-            if pulled {
-                (drawn - f64::from(real) * factor).max(0.0)
-            } else {
-                0.0
-            }
-        };
-        let origin = (client.loc
-            + Point::<f64, Logical>::from((
-                slack(pulls_left, client.size.w, real.size.w, across),
-                slack(pulls_top, client.size.h, real.size.h, down),
-            )))
-        .to_physical_precise_round(scale);
+        // Where the buffer's corner goes, which a held picture's slack can move
+        // off the client's. See [`place_client`].
+        let origin = placed.origin.to_physical_precise_round(scale);
 
         // Popups go in ahead of the sandwich, which means above all of it.
         //
@@ -1248,8 +1217,16 @@ pub(crate) fn elements(
                         frame.opacity,
                         Kind::Unspecified,
                     );
-                elements.extend(popup_elements.into_iter().map(|element| {
-                    Element::Window(RescaleRenderElement::from_element(element, origin, factor))
+                // Scaled with the window and not cut to its tile: a menu has
+                // to reach past its parent's tile, and a menu cut to it would
+                // lose every item past the tile's edge. The window's own fit
+                // with the cut taken off, which is
+                // `a_popup_reaches_past_its_parents_tile`. This loop is the
+                // only place a toplevel's popups are drawn on this path -- the
+                // toplevel itself is drawn from its own surface tree, which
+                // holds no popups; see [`toplevel_elements`].
+                elements.extend(popup_elements.into_iter().filter_map(|element| {
+                    fitted(element, origin, fitting.uncut(), output_scale).map(Fitted::into_element)
                 }));
             }
         }
@@ -1350,9 +1327,19 @@ pub(crate) fn elements(
                 let surface_origin =
                     origin - window.geometry().loc.to_physical_precise_round(scale);
                 let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                    window.render_elements(renderer, surface_origin, output_scale, frame.opacity);
-                elements.extend(window_elements.into_iter().map(|element| {
-                    Element::Window(RescaleRenderElement::from_element(element, origin, factor))
+                    toplevel_elements(
+                        renderer,
+                        &window,
+                        surface_origin,
+                        output_scale,
+                        frame.opacity,
+                    );
+                // Cut to the tile when there is anything to cut, and a surface
+                // the cut leaves nothing of -- a subsurface wholly past the
+                // tile's edge -- is dropped: `CropRenderElement` has no empty
+                // element to hand back, and says so with `None`.
+                elements.extend(window_elements.into_iter().filter_map(|element| {
+                    fitted(element, origin, fitting, output_scale).map(Fitted::into_element)
                 }));
             }
         });
@@ -1666,11 +1653,21 @@ fn cursor(
     }
 }
 
-/// One window's elements, flat, at the origin and its real size.
+/// One window's elements, flat, at the origin and the size its pane has.
 ///
 /// The offscreen pass draws these into a texture so a deformed window is
 /// deformed as one thing. Built at the origin because the texture *is* the
 /// window's own space; where it lands on screen is the warp's business.
+///
+/// **At the pane's size, from [`flat`], which for a tiled client that
+/// committed more than its tile is the tile (#133).** `warp::mesh` spreads the
+/// whole texture over the frame's rect, and that rect is the pane's; a capture
+/// at the committed size pressed the whole buffer into the tile for the
+/// length of a genie or a tilt, and told the frame the uncapped width as well,
+/// so its titlebar was laid out at one width while warped and another once
+/// landed. The client's surfaces are drawn at their own size, so what reaches
+/// past the tile is simply off the texture's edge -- the cut `elements` makes
+/// with a crop, made here by the framebuffer.
 ///
 /// **A deformed window loses its bleed, and that is a known limit rather than
 /// an oversight.** `offscreen::capture` sizes its texture from the window's
@@ -1691,11 +1688,9 @@ pub(crate) fn flat_window_elements(
     scale: f64,
 ) -> Vec<Element> {
     let mut elements = Vec::new();
-    let (Some(real), Some(outer)) = (state.real_geometry(window), state.outer_geometry(window))
-    else {
+    let Some(Flat { outer, insets }) = flat(state, window) else {
         return elements;
     };
-    let insets = state.frame_insets(window);
     let output_scale = Scale::from(scale);
     // `None` only for a window smithay put in the space behind our back, which
     // `offscreen::capture` cannot produce -- it is holding the pane. Its layers
@@ -1709,22 +1704,15 @@ pub(crate) fn flat_window_elements(
     // whole texture afterwards, so applying it here as well would fade the
     // frame squared.
     let drawing = crate::decoration::Drawing {
-        rect: present::logical(
-            (0.0, 0.0),
-            (f64::from(outer.size.w), f64::from(outer.size.h)),
-        ),
-        outer: outer.size,
+        rect: present::logical((0.0, 0.0), (f64::from(outer.w), f64::from(outer.h))),
+        outer,
         alpha: 1.0,
         scale,
     };
 
     // The client within it.
-    let origin = present::logical(
-        (f64::from(insets.left), f64::from(insets.top)),
-        (f64::from(real.size.w), f64::from(real.size.h)),
-    )
-    .loc
-    .to_physical_precise_round(scale);
+    let origin =
+        Point::<i32, Logical>::from((insets.left, insets.top)).to_physical_precise_round(scale);
 
     // The same `PANE_ORDER` a flat window goes through, so a tilted window
     // carries its layers in the order it would have had standing still. A
@@ -1772,8 +1760,9 @@ pub(crate) fn flat_window_elements(
                 }
             }
 
+            // The toplevel's own tree: its popups are the loop above's.
             let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                window.render_elements(renderer, origin, output_scale, 1.0);
+                toplevel_elements(renderer, window, origin, output_scale, 1.0);
             elements.extend(window_elements.into_iter().map(Element::Window2));
         }
     });
@@ -1815,9 +1804,349 @@ pub(crate) fn client_elements(
     // Fully opaque, like the warp's capture and for the same reason: the
     // element drawn from this texture applies the pane's opacity to the whole
     // of it afterwards, so fading here as well would fade it squared.
+    // The toplevel's own tree and not smithay's whole window, which would
+    // draw every popup into the capture as well -- clipped to the client and
+    // masked with it, under the unmasked copy `elements` draws.
     let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-        window.render_elements(renderer, origin, Scale::from(scale), 1.0);
+        toplevel_elements(renderer, window, origin, Scale::from(scale), 1.0);
     surfaces.into_iter().map(Element::Window2).collect()
+}
+
+/// The rectangle a warped window is captured at, and where its client sits in
+/// it. See [`flat`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Flat {
+    /// The texture's size, in logical pixels: the pane's outer size.
+    pub(crate) outer: Size<i32, Logical>,
+    /// The frame's share of it, which puts the client's corner.
+    pub(crate) insets: crate::decoration::Insets,
+}
+
+/// What `offscreen::capture` and [`flat_window_elements`] draw a warped window
+/// at: **the pane's own outer rectangle**, which is the rectangle `elements`
+/// builds the warp's mesh over, so the texture and the mesh are one size.
+///
+/// That is the tile for a tiled client that committed more than it (#133),
+/// where the window's `outer_geometry` is the committed size:
+/// `a_warped_window_is_captured_at_the_rect_its_warp_is_drawn_over` pins it.
+/// It also counts the room a `Frame::Pending` pane reserves for a frame still
+/// to be built, because `insets_of` does and `frame_insets` does not; that
+/// half is read from the two functions and is not tested. A window with no
+/// pane, which only smithay can put in the space, keeps `outer_geometry`.
+pub(crate) fn flat(state: &Solium, window: &Window) -> Option<Flat> {
+    match state.panes.of(window) {
+        Some(pane) => Some(Flat {
+            outer: state.pane_outer(pane).size,
+            insets: state.insets_of(pane.id()),
+        }),
+        None => Some(Flat {
+            outer: state.outer_geometry(window)?.size,
+            insets: state.frame_insets(window),
+        }),
+    }
+}
+
+/// Where a pane's client is drawn inside a frame, and how its buffer is put
+/// there. What [`place_client`] answers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Placed {
+    /// The drawn client rectangle: the frame's rect with the frame's share
+    /// taken off, scaled as the frame canvas is scaled so the client sits in
+    /// the hole the canvas leaves for it.
+    pub(crate) client: Rectangle<f64, Logical>,
+    /// Where the buffer's top-left corner is drawn. `client`'s corner, moved
+    /// by a held picture's slack during a resize.
+    pub(crate) origin: Point<f64, Logical>,
+    /// How the buffer is scaled and cut.
+    pub(crate) fit: Fit,
+}
+
+/// Where `pane`'s client is drawn inside `frame`, and how its buffer is fitted
+/// to it.
+///
+/// `outer` is the pane's own outer size -- what its frame canvas is
+/// rasterised at -- and `committed` the size its client committed. The one
+/// answer every reader of a client's picture shares: `elements` draws the
+/// surfaces through it, `offscreen::capture_client` sizes a masked client's
+/// texture from its [`Fit::shown`], and `Solium::surface_under` inverts it, so
+/// a press lands on the pixel the picture put there.
+pub(crate) fn place_client(
+    state: &Solium,
+    pane: &Pane,
+    frame: &present::Frame,
+    outer: Size<i32, Logical>,
+    committed: Size<i32, Logical>,
+) -> Placed {
+    // The frame's share, in drawn pixels. Scaled as the frame canvas is --
+    // `decoration::spread` stretches the canvas from `outer` to the drawn rect
+    // -- so the client fills the hole the canvas leaves for it.
+    let insets = state.insets_of(pane.id());
+    let across = ratio(frame.rect.size.w, outer.w);
+    let down = ratio(frame.rect.size.h, outer.h);
+    let client = present::logical(
+        (
+            frame.rect.loc.x + f64::from(insets.left) * across,
+            frame.rect.loc.y + f64::from(insets.top) * down,
+        ),
+        (
+            (frame.rect.size.w - f64::from(insets.horizontal()) * across).max(1.0),
+            (frame.rect.size.h - f64::from(insets.vertical()) * down).max(1.0),
+        ),
+    );
+    let fitting = fit(
+        client,
+        frame.zoom,
+        committed,
+        state.tile_of(pane).is_some(),
+        state.resize_fill(pane.id()),
+    );
+
+    // **A picture that is not stretched stays against the edges the drag is
+    // not moving.**
+    //
+    // `Fill::Hold` keeps the buffer at its own size where the pane has grown
+    // past it, which leaves a strip the buffer does not cover. Anchoring at
+    // the drawn rectangle's top-left puts that strip on the bottom and the
+    // right, which is correct for a bottom or right drag -- those are exactly
+    // the drags whose top-left corner is standing still -- and wrong for every
+    // drag that pulls a left or top edge, where the picture would travel with
+    // the pointer and the gap would open against the stationary edge. The
+    // whole of the window's contents would slide while the user dragged one of
+    // four corners.
+    //
+    // **Zero for a stretch, by the arithmetic rather than by a branch.** A
+    // stretched buffer covers its rectangle exactly, so the slack below is
+    // `client.size.w - real.size.w * (client.size.w / real.size.w)`, which is
+    // nothing -- the default path and every window that is not being dragged
+    // at all get the client's corner back, to the bit.
+    let (pulls_left, pulls_top) = state.resize_pins(pane.id()).unwrap_or((false, false));
+    let slack = |pulled: bool, drawn: f64, real: i32, factor: f64| {
+        if pulled {
+            (drawn - f64::from(real) * factor).max(0.0)
+        } else {
+            0.0
+        }
+    };
+    let origin = client.loc
+        + Point::<f64, Logical>::from((
+            slack(pulls_left, client.size.w, committed.w, fitting.factor.x),
+            slack(pulls_top, client.size.h, committed.h, fitting.factor.y),
+        ));
+    Placed {
+        client,
+        origin,
+        fit: fitting,
+    }
+}
+
+/// How a client's surfaces go into the rectangle they are drawn in: the
+/// factor every surface is scaled by, about the client's corner, and the
+/// rectangle they are cut to when there is one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fit {
+    /// What the whole committed buffer is scaled by. Also what the popups are
+    /// scaled by, which is why it is separate from the cut: they take this and
+    /// never the other.
+    pub(crate) factor: Scale<f64>,
+    /// The drawn client rectangle, for a tiled client whose tile cuts some of
+    /// what it committed. `None` for every other client -- every client that
+    /// is not tiled, and every one its tile does not cut -- which is drawn
+    /// through no crop at all, so a rounding in this rectangle cannot shave a
+    /// pixel off a window that had nothing to cut. `fitted` rounds it to the
+    /// output's pixels.
+    pub(crate) crop: Option<Rectangle<f64, Logical>>,
+    /// How much of the committed buffer, from its top-left corner, is in the
+    /// picture: all of it, except along an axis the tile cuts. What a masked
+    /// client is captured at, so its corners are the picture's corners.
+    pub(crate) shown: Size<i32, Logical>,
+}
+
+impl Fit {
+    /// The same fit with nothing cut: what a popup is drawn through. A menu
+    /// scales with the window it belongs to and reaches past its tile.
+    pub(crate) const fn uncut(self) -> Self {
+        Self { crop: None, ..self }
+    }
+}
+
+/// Less than this short of the committed size is not a cut. Half a logical
+/// pixel, because the pictured size is float arithmetic -- a blended rect over
+/// a blended zoom, less insets scaled by another quotient -- and a window that
+/// fits can come back a rounding short of what it committed; a cut that small
+/// would put a crop, and its physical rounding, on a window with nothing to
+/// cut. A real cut is a whole pixel or more: a tile and a commit are both whole
+/// logical pixels. The margin is argued here and not pinned by a test.
+const CUT: f64 = 0.5;
+
+/// A client's [`Fit`], from the rectangle it is drawn in and what it committed.
+///
+/// `client` is the drawn client rectangle and `zoom` the frame's
+/// [`present::Frame::zoom`], so `client / zoom` is the client rectangle the
+/// frame is a picture of, at the pane's own scale: the tile's share for a
+/// settled tiled pane, a rectangle part of the way between two tiles on a
+/// frame of a layout's glide, and the window's own size in a thumbnail.
+/// `tiled` is whether a layout holds the pane in a tile, and `fill` is the
+/// resize hold's, `None` when there is no hold.
+///
+/// **Per axis, the buffer is drawn at its own size where the pictured
+/// rectangle is narrower than it and the pane is tiled** -- the tile cuts it --
+/// and is scaled to fill the pictured rectangle everywhere else, which is the
+/// arithmetic `render::elements` always had. Then the whole of it is scaled by
+/// `zoom`, and the cut, when there is one, is `client` itself. So:
+///
+/// * A settled client that committed more than its tile is shown 1:1, cut to
+///   the tile, and not squashed into it:
+///   `a_tiled_client_is_cut_to_its_tile_and_not_squashed_into_it`.
+/// * An open, a close or a thumbnail scales that cut picture as one:
+///   `an_animated_tiled_client_is_scaled_with_its_cut_and_not_cut_by_it`.
+/// * A glide that narrows a tiled window whose client has not answered yet is
+///   the buffer 1:1 with the cut following the drawn rectangle, which is the
+///   frame before it on the first frame and the settled window on the last:
+///   `a_glide_that_narrows_a_tiled_window_cuts_it_and_does_not_zoom_it`. The
+///   factor used to be `client / shown`, the old tile drawn as a zoom of the
+///   new one: 2x on the first frame of a sweep that halved a window, which is
+///   what `a_glide_that_narrows_a_tiled_window_is_drawn_1_to_1_on_its_first_frame`
+///   measured against that arithmetic.
+/// * A glide that grows a window past what its client committed stretches the
+///   buffer into it, as every glide did before #133, and one that changes the
+///   two axes by different amounts does each axis on its own:
+///   `a_glide_between_tiles_of_different_shapes_is_fitted_per_axis`.
+pub(crate) fn fit(
+    client: Rectangle<f64, Logical>,
+    zoom: (f64, f64),
+    committed: Size<i32, Logical>,
+    tiled: bool,
+    fill: Option<crate::resizing::Fill>,
+) -> Fit {
+    // A frame drawn at no size pictures nothing in particular; the committed
+    // size keeps the arithmetic finite, and the zoom draws it at nothing.
+    let pictured = |drawn: f64, zoom: f64, committed: i32| {
+        if zoom > f64::EPSILON {
+            drawn / zoom
+        } else {
+            f64::from(committed)
+        }
+    };
+    let pictured: Size<f64, Logical> = (
+        pictured(client.size.w, zoom.0, committed.w),
+        pictured(client.size.h, zoom.1, committed.h),
+    )
+        .into();
+    let cuts = |pictured: f64, committed: i32| tiled && pictured < f64::from(committed) - CUT;
+    let (cut_x, cut_y) = (cuts(pictured.w, committed.w), cuts(pictured.h, committed.h));
+    let (across, down) = crate::resizing::factor(fill, pictured, committed);
+    let factor = Scale::from((
+        zoom.0 * if cut_x { 1.0 } else { across },
+        zoom.1 * if cut_y { 1.0 } else { down },
+    ));
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a cut is narrower than the committed size, which is an i32"
+    )]
+    let kept = |cut: bool, pictured: f64, committed: i32| {
+        if cut {
+            (pictured.round() as i32).clamp(1, committed.max(1))
+        } else {
+            committed
+        }
+    };
+    Fit {
+        factor,
+        crop: (cut_x || cut_y).then_some(client),
+        shown: (
+            kept(cut_x, pictured.w, committed.w),
+            kept(cut_y, pictured.h, committed.h),
+        )
+            .into(),
+    }
+}
+
+/// One client surface through its [`Fit`].
+///
+/// Generic over the element so that the two wrappers smithay puts round a
+/// surface can be driven by a test with an element that needs no renderer --
+/// what comes out is what `elements` hands the damage tracker.
+#[derive(Debug)]
+pub(crate) enum Fitted<E> {
+    /// Nothing to cut: the client is not tiled, or fits its tile.
+    Whole(RescaleRenderElement<E>),
+    /// Cut to the client's tile.
+    Cut(CropRenderElement<RescaleRenderElement<E>>),
+}
+
+impl Fitted<WaylandSurfaceRenderElement<GlesRenderer>> {
+    /// Into the frame's element list.
+    fn into_element(self) -> Element {
+        match self {
+            Self::Whole(whole) => Element::Window(whole),
+            Self::Cut(cut) => Element::Tiled(cut),
+        }
+    }
+}
+
+/// Put one surface through a fit. `None` when the cut leaves nothing of it,
+/// which `CropRenderElement::from_element` answers for a surface lying wholly
+/// outside the rectangle; the caller drops it.
+pub(crate) fn fitted<E: smithay::backend::renderer::element::Element>(
+    element: E,
+    origin: Point<i32, Physical>,
+    fit: Fit,
+    output_scale: Scale<f64>,
+) -> Option<Fitted<E>> {
+    let scaled = RescaleRenderElement::from_element(element, origin, fit.factor);
+    match fit.crop {
+        None => Some(Fitted::Whole(scaled)),
+        Some(crop) => {
+            let crop = Rectangle::new(
+                crop.loc.to_physical_precise_round(output_scale),
+                crop.size.to_physical_precise_round(output_scale),
+            );
+            CropRenderElement::from_element(scaled, output_scale, crop).map(Fitted::Cut)
+        }
+    }
+}
+
+/// A toplevel's own surfaces, **without its popups**.
+///
+/// `Window::render_elements` is smithay's `AsRenderElements for Window`, and
+/// for a Wayland toplevel it emits every popup from `popups_for_surface` ahead
+/// of the toplevel's own tree (`desktop/space/wayland/window.rs:106-121` in
+/// smithay 0.7). Every path that draws a client here draws its popups itself,
+/// so going through it drew each popup twice: once where the path put it, and
+/// once as part of the toplevel -- cut to the tile with the toplevel, and
+/// under a masked client's corners. An opaque popup hides its double; a
+/// translucent pixel -- a menu's shadow, a rounded corner, any popup in a
+/// fading window -- blends twice inside the tile and once past it, which is a
+/// seam at the tile's edge. So a Wayland toplevel is drawn from its own
+/// surface tree, which holds its subsurfaces and nothing else. An X11 window
+/// has no popups here -- its menus are windows of their own -- and keeps
+/// smithay's call. `a_toplevel_is_drawn_without_its_popups` pins it.
+///
+/// Generic over the renderer so that test can run it on smithay's
+/// `DummyRenderer`: it needs no GPU, and what it returns is the element list
+/// every caller builds on.
+pub(crate) fn toplevel_elements<R>(
+    renderer: &mut R,
+    window: &Window,
+    location: Point<i32, Physical>,
+    scale: Scale<f64>,
+    alpha: f32,
+) -> Vec<WaylandSurfaceRenderElement<R>>
+where
+    R: Renderer + ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    match window.toplevel() {
+        Some(toplevel) => render_elements_from_surface_tree(
+            renderer,
+            toplevel.wl_surface(),
+            location,
+            scale,
+            alpha,
+            Kind::Unspecified,
+        ),
+        None => window.render_elements(renderer, location, scale, alpha),
+    }
 }
 
 /// Drawn size over real size, guarding the degenerate case.
@@ -1840,8 +2169,497 @@ pub(crate) fn ratio(drawn: f64, real: i32) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Drawn, Painted, by_depth, origin_at, ratio};
+    use super::{Drawn, Fit, Fitted, Painted, by_depth, fit, fitted, origin_at, ratio};
     use crate::qml::qt_test::on_the_qt_thread;
+
+    /// **#133: what a tiled client's surfaces become on their way to the
+    /// damage tracker**, with smithay's own wrappers and a stand-in surface.
+    ///
+    /// `elements` cannot be driven here -- it needs a `GlesRenderer`, which
+    /// needs a GPU the build container does not have; see
+    /// `the_drag_icon_is_emitted_below_the_lock_screens_early_return`. What it
+    /// hands on for a client surface is `fitted(surface, origin, fit(..), ..)`,
+    /// and `fitted` is generic over the surface, so these tests hand it one
+    /// that needs no renderer and read back the `geometry` and `src` smithay's
+    /// `RescaleRenderElement` and `CropRenderElement` report for it: the
+    /// numbers the damage tracker draws with.
+    mod fitting {
+        use super::{Fit, Fitted, fit, fitted};
+        use smithay::backend::renderer::element::{Element, Id};
+        use smithay::backend::renderer::utils::CommitCounter;
+        use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size};
+
+        /// A surface with an untransformed buffer of `size` physical pixels,
+        /// drawn at `at`: for such a buffer, the geometry and the source
+        /// rectangle are what the two wrappers read from the element inside
+        /// them (`element/utils/elements.rs` in smithay 0.7).
+        struct Surface {
+            id: Id,
+            at: Point<i32, Physical>,
+            size: Size<i32, Physical>,
+        }
+
+        impl Surface {
+            fn new(at: (i32, i32), size: (i32, i32)) -> Self {
+                Self {
+                    id: Id::new(),
+                    at: at.into(),
+                    size: size.into(),
+                }
+            }
+        }
+
+        impl Element for Surface {
+            fn id(&self) -> &Id {
+                &self.id
+            }
+
+            fn current_commit(&self) -> CommitCounter {
+                CommitCounter::default()
+            }
+
+            fn src(&self) -> Rectangle<f64, Buffer> {
+                Rectangle::from_size((f64::from(self.size.w), f64::from(self.size.h)).into())
+            }
+
+            fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+                Rectangle::new(self.at, self.size)
+            }
+        }
+
+        /// What one surface is drawn as: whether it was cut, where on the
+        /// output, and which part of its buffer.
+        #[derive(Debug, PartialEq)]
+        struct Shown {
+            cut: bool,
+            geometry: Rectangle<i32, Physical>,
+            src: Rectangle<f64, Buffer>,
+        }
+
+        const fn cut(geometry: Rectangle<i32, Physical>, src: Rectangle<f64, Buffer>) -> Shown {
+            Shown {
+                cut: true,
+                geometry,
+                src,
+            }
+        }
+
+        const fn whole(geometry: Rectangle<i32, Physical>, src: Rectangle<f64, Buffer>) -> Shown {
+            Shown {
+                cut: false,
+                geometry,
+                src,
+            }
+        }
+
+        /// One surface through `fitted`, read back. `None` for a surface the
+        /// fit dropped.
+        fn drawn(surface: Surface, origin: (i32, i32), fitting: Fit, scale: f64) -> Option<Shown> {
+            let scale = Scale::from(scale);
+            Some(match fitted(surface, origin.into(), fitting, scale)? {
+                Fitted::Whole(scaled) => whole(scaled.geometry(scale), scaled.src()),
+                Fitted::Cut(scaled) => cut(scaled.geometry(scale), scaled.src()),
+            })
+        }
+
+        fn logical(x: f64, y: f64, w: f64, h: f64) -> Rectangle<f64, Logical> {
+            Rectangle::new((x, y).into(), (w, h).into())
+        }
+
+        fn physical(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
+            Rectangle::new((x, y).into(), (w, h).into())
+        }
+
+        fn buffer(w: f64, h: f64) -> Rectangle<f64, Buffer> {
+            Rectangle::from_size((w, h).into())
+        }
+
+        /// The zoom of a frame drawn at the rectangle it has: at rest, and on
+        /// every frame of a layout's glide. See `present::Frame::zoom`.
+        const AT_REST: (f64, f64) = (1.0, 1.0);
+
+        /// **A client that committed more than its tile is cut to the tile, at
+        /// its own scale.**
+        ///
+        /// A kitty that stayed 1000 wide in a tile with room for 500. On stage
+        /// `render::elements` scaled the surfaces by the drawn rect over the
+        /// committed size and cut nothing, which after `pane_geometry` caps the
+        /// pane is the squash: all 1000 pixels of buffer pressed into 500 of
+        /// screen. Before the cap it was the spill -- the same buffer at 1:1,
+        /// 500 pixels of it over the neighbour. The answer is neither: 1:1,
+        /// and only the tile's 500 of it shown.
+        ///
+        /// Asserted at two output scales, because the cut is physical pixels
+        /// and the tile is logical ones.
+        #[test]
+        fn a_tiled_client_is_cut_to_its_tile_and_not_squashed_into_it() {
+            let committed = Size::from((1000, 600));
+            let client = logical(100.0, 50.0, 500.0, 600.0);
+
+            let settled = fit(client, AT_REST, committed, true, None);
+            assert_eq!(
+                settled.factor,
+                Scale::from((1.0, 1.0)),
+                "the buffer is drawn at its own size; anything else is a squash"
+            );
+            assert_eq!(
+                settled.shown,
+                Size::from((500, 600)),
+                "a masked client is captured at the tile's share"
+            );
+            assert_eq!(
+                drawn(
+                    Surface::new((100, 50), (1000, 600)),
+                    (100, 50),
+                    settled,
+                    1.0
+                ),
+                Some(cut(physical(100, 50, 500, 600), buffer(500.0, 600.0))),
+                "the surface is cut to the tile: 500 pixels of screen, showing the \
+                 first 500 pixels of the buffer"
+            );
+            assert_eq!(
+                drawn(
+                    Surface::new((200, 100), (2000, 1200)),
+                    (200, 100),
+                    settled,
+                    2.0
+                ),
+                Some(cut(physical(200, 100, 1000, 1200), buffer(1000.0, 1200.0))),
+                "and at 2x the cut is the same tile in twice the pixels"
+            );
+        }
+
+        /// **A client that fits is drawn exactly as it was before #133**:
+        /// through no crop at all, at the factor `resizing::factor` gives.
+        ///
+        /// Which covers every pane that is not tiled -- a maximised, fullscreen
+        /// or floating window arrives here with `tiled` false -- and a pane
+        /// under a resize hold, which `Solium::tile_of` also answers `None`
+        /// for. The hold's bridge is asserted here by its numbers: a 64-pixel
+        /// buffer stretched into the 300x200 the drag has reached, with
+        /// nothing cut.
+        #[test]
+        fn a_client_with_nothing_to_cut_is_not_cut() {
+            let committed = Size::from((500, 600));
+            for tiled in [true, false] {
+                let settled = fit(
+                    logical(100.0, 50.0, 500.0, 600.0),
+                    AT_REST,
+                    committed,
+                    tiled,
+                    None,
+                );
+                assert_eq!(
+                    settled,
+                    Fit {
+                        factor: Scale::from((1.0, 1.0)),
+                        crop: None,
+                        shown: committed,
+                    },
+                    "tiled: {tiled}"
+                );
+                assert_eq!(
+                    drawn(Surface::new((100, 50), (500, 600)), (100, 50), settled, 1.0),
+                    Some(whole(physical(100, 50, 500, 600), buffer(500.0, 600.0)))
+                );
+            }
+
+            let small = Size::from((64, 64));
+            let held = fit(
+                logical(400.0, 300.0, 300.0, 200.0),
+                AT_REST,
+                small,
+                false,
+                Some(crate::resizing::Fill::Stretch),
+            );
+            assert_eq!(
+                held,
+                Fit {
+                    factor: Scale::from((300.0 / 64.0, 200.0 / 64.0)),
+                    crop: None,
+                    shown: small,
+                },
+                "a held pane is bridged into the dragged rectangle, not cut to it"
+            );
+
+            // And a window no layout tiles is squashed by a rectangle smaller
+            // than its buffer, as every window was before #133: a dialog
+            // gliding to a smaller rect, or one a script presents narrower.
+            let free = fit(
+                logical(0.0, 0.0, 250.0, 600.0),
+                AT_REST,
+                committed,
+                false,
+                None,
+            );
+            assert_eq!(free.factor, Scale::from((0.5, 1.0)));
+            assert_eq!(free.crop, None, "nothing cuts a window that is in no tile");
+        }
+
+        /// **An animation scales the cut with the window; it does not cut the
+        /// window.**
+        ///
+        /// Open, close and the overview reach here as a drawn rectangle that
+        /// is a *picture* of the pane: smaller or larger than it by the
+        /// frame's zoom. The cut is that drawn rectangle and the buffer is
+        /// scaled by the same zoom, so what is inside the cut is the same part
+        /// of the buffer at every size -- the first 500 of 1000 pixels, as
+        /// settled. A cut left at the settled rectangle while the window shrank
+        /// would cut the window; a factor taken from the committed size would
+        /// squash it. Half size for an open or a thumbnail, and one and a half
+        /// for a mode that enlarges.
+        #[test]
+        fn an_animated_tiled_client_is_scaled_with_its_cut_and_not_cut_by_it() {
+            let committed = Size::from((1000, 600));
+
+            let half = fit(
+                logical(100.0, 50.0, 250.0, 300.0),
+                (0.5, 0.5),
+                committed,
+                true,
+                None,
+            );
+            assert_eq!(half.factor, Scale::from((0.5, 0.5)));
+            assert_eq!(
+                half.shown,
+                Size::from((500, 600)),
+                "the same share of the buffer as settled"
+            );
+            assert_eq!(
+                drawn(Surface::new((100, 50), (1000, 600)), (100, 50), half, 1.0),
+                Some(cut(physical(100, 50, 250, 300), buffer(500.0, 600.0))),
+                "at half size the cut is half the tile and shows the same half of \
+                 the buffer it shows settled"
+            );
+
+            let larger = fit(
+                logical(100.0, 50.0, 750.0, 900.0),
+                (1.5, 1.5),
+                committed,
+                true,
+                None,
+            );
+            assert_eq!(larger.factor, Scale::from((1.5, 1.5)));
+            assert_eq!(
+                drawn(Surface::new((100, 50), (1000, 600)), (100, 50), larger, 1.0),
+                Some(cut(physical(100, 50, 750, 900), buffer(500.0, 600.0))),
+                "and enlarged it is the tile enlarged, not more of the buffer"
+            );
+        }
+
+        /// **#133 review, finding 1: a glide that narrows a tiled window cuts
+        /// it and does not zoom it.**
+        ///
+        /// One full-width window, 1900 wide, and a second one opening: the
+        /// layout halves the first to 950 and it glides there while its
+        /// client still has 1900 committed. A frame of that glide is drawn at
+        /// a rectangle the window is passing through -- 1720 wide, say, at
+        /// zoom 1.0 -- and it is **not** a scale of the new tile. What was
+        /// shipped read it as one: the factor was the drawn size over the
+        /// tile's share, 1720 / 950 = 1.81, so the left 950 pixels of buffer
+        /// were stretched over 1720 of screen on the first frame after the
+        /// sweep, where the frame before had drawn all 1900 of them 1:1.
+        ///
+        /// Here the buffer stays 1:1 and the cut follows the glide: 1720 of
+        /// screen showing the first 1720 pixels of buffer. The first frame of
+        /// the glide is the rectangle the window had, which cuts nothing and
+        /// is the frame before it exactly; the last is the settled window.
+        ///
+        /// And the other way: a client 600 wide held in a 500 tile, whose
+        /// tile grows to 700. On the first frame the drawn rect is the old
+        /// tile, and the picture is the same 500-pixel cut it was a frame ago
+        /// -- not the whole 600 pressed into 500 (0.83), which is what reading
+        /// that rect as a scale of the new tile made of it.
+        #[test]
+        fn a_glide_that_narrows_a_tiled_window_cuts_it_and_does_not_zoom_it() {
+            let committed = Size::from((1900, 1000));
+
+            let first = fit(
+                logical(0.0, 0.0, 1900.0, 1000.0),
+                AT_REST,
+                committed,
+                true,
+                None,
+            );
+            assert_eq!(
+                first,
+                Fit {
+                    factor: Scale::from((1.0, 1.0)),
+                    crop: None,
+                    shown: committed,
+                },
+                "the first frame is the frame before the sweep"
+            );
+
+            let early = fit(
+                logical(0.0, 0.0, 1720.0, 1000.0),
+                AT_REST,
+                committed,
+                true,
+                None,
+            );
+            assert_eq!(
+                early.factor,
+                Scale::from((1.0, 1.0)),
+                "not zoomed: this is the window on its way, at its own size"
+            );
+            assert_eq!(early.shown, Size::from((1720, 1000)));
+            assert_eq!(
+                drawn(Surface::new((0, 0), (1900, 1000)), (0, 0), early, 1.0),
+                Some(cut(physical(0, 0, 1720, 1000), buffer(1720.0, 1000.0))),
+                "1720 pixels of screen, showing the first 1720 pixels of buffer"
+            );
+
+            let landed = fit(
+                logical(0.0, 0.0, 950.0, 1000.0),
+                AT_REST,
+                committed,
+                true,
+                None,
+            );
+            assert_eq!(
+                drawn(Surface::new((0, 0), (1900, 1000)), (0, 0), landed, 1.0),
+                Some(cut(physical(0, 0, 950, 1000), buffer(950.0, 1000.0))),
+                "and it lands on the settled window, cut to its tile"
+            );
+
+            let grown = fit(
+                logical(0.0, 0.0, 500.0, 400.0),
+                AT_REST,
+                Size::from((600, 400)),
+                true,
+                None,
+            );
+            assert_eq!(
+                grown.factor,
+                Scale::from((1.0, 1.0)),
+                "the first frame of a tile growing under an oversized client is \
+                 the cut it already had"
+            );
+            assert_eq!(
+                drawn(Surface::new((0, 0), (600, 400)), (0, 0), grown, 1.0),
+                Some(cut(physical(0, 0, 500, 400), buffer(500.0, 400.0)))
+            );
+        }
+
+        /// **#133 review, finding 11: a glide between tiles of different
+        /// shapes is fitted one axis at a time.**
+        ///
+        /// The most common glide there is: a sibling squeezed sideways when a
+        /// window opens, its height unchanged. Each axis gets its own answer:
+        ///
+        /// * Before the client answers, the width the glide has reached is
+        ///   narrower than the 1900 still committed -- cut, 1:1 -- and the
+        ///   height is the height it had: nothing is stretched.
+        /// * Once the client has answered with the new tile's 950, the glide is
+        ///   wider than the buffer and stretches it into the rectangle, on that
+        ///   axis alone, which is what every glide did before #133 once its
+        ///   client had committed. Nothing is cut.
+        /// * And a client that is short on one axis and oversized on the other
+        ///   is cut on the one and stretched on the other.
+        #[test]
+        fn a_glide_between_tiles_of_different_shapes_is_fitted_per_axis() {
+            let client = logical(0.0, 0.0, 1400.0, 1000.0);
+
+            let unanswered = fit(client, AT_REST, Size::from((1900, 1000)), true, None);
+            assert_eq!(unanswered.factor, Scale::from((1.0, 1.0)));
+            assert_eq!(unanswered.crop, Some(client));
+            assert_eq!(unanswered.shown, Size::from((1400, 1000)));
+
+            let answered = fit(client, AT_REST, Size::from((950, 1000)), true, None);
+            assert_eq!(
+                answered.factor,
+                Scale::from((1400.0 / 950.0, 1.0)),
+                "stretched across and not down"
+            );
+            assert_eq!(answered.crop, None, "and nothing to cut");
+
+            let mixed = fit(client, AT_REST, Size::from((1900, 800)), true, None);
+            assert_eq!(mixed.factor, Scale::from((1.0, 1000.0 / 800.0)));
+            assert_eq!(mixed.crop, Some(client));
+            assert_eq!(
+                mixed.shown,
+                Size::from((1400, 800)),
+                "cut across, the whole of it down"
+            );
+        }
+
+        /// **A surface the cut leaves nothing of is dropped**, rather than
+        /// handed on as an element of no size: `CropRenderElement` answers
+        /// `None` for it, and `fitted` passes that through for the caller to
+        /// skip. A subsurface lying wholly past the tile's right edge is one.
+        #[test]
+        fn a_surface_wholly_past_the_tile_is_dropped() {
+            let settled = fit(
+                logical(100.0, 50.0, 500.0, 600.0),
+                AT_REST,
+                Size::from((1000, 600)),
+                true,
+                None,
+            );
+            assert_eq!(
+                drawn(Surface::new((700, 50), (200, 100)), (100, 50), settled, 1.0),
+                None
+            );
+            assert!(
+                drawn(Surface::new((550, 50), (200, 100)), (100, 50), settled, 1.0)
+                    .is_some_and(|shown| shown.cut && shown.geometry == physical(550, 50, 50, 100)),
+                "one that straddles the edge keeps the part inside it"
+            );
+        }
+
+        /// **A popup reaches past its parent's tile.**
+        ///
+        /// A menu is its own window: cut to its parent's tile it would lose
+        /// every item past the tile's edge, and one opened from the right of a
+        /// narrow tile is mostly past it. So `elements` puts a popup through
+        /// the parent's fit with the cut taken off -- scaled with its window,
+        /// never cut. The first half shows the same popup *would* be cut by the
+        /// parent's own fit, so the second half cannot pass by accident.
+        ///
+        /// The second assertion is about the source text, for the reason the
+        /// drag-icon test gives: `elements` cannot be run here. It pins only
+        /// that the popup loop asks for `uncut`. That no *other* copy of the
+        /// popup reaches the element list -- smithay's whole-window call drew
+        /// one, cut with the toplevel -- is
+        /// `state::tests::real_client::a_toplevel_is_drawn_without_its_popups`.
+        #[test]
+        fn a_popup_reaches_past_its_parents_tile() {
+            let parent = fit(
+                logical(100.0, 50.0, 500.0, 600.0),
+                AT_REST,
+                Size::from((1000, 600)),
+                true,
+                None,
+            );
+            let menu = || Surface::new((550, 80), (200, 300));
+
+            assert_eq!(
+                drawn(menu(), (100, 50), parent, 1.0).map(|shown| shown.geometry),
+                Some(physical(550, 80, 50, 300)),
+                "through the parent's own fit the menu would keep 50 of its 200 pixels"
+            );
+            assert_eq!(
+                drawn(menu(), (100, 50), parent.uncut(), 1.0),
+                Some(whole(physical(550, 80, 200, 300), buffer(200.0, 300.0))),
+                "and through the fit popups are given, all of it is drawn"
+            );
+
+            let source = include_str!("render.rs");
+            let popups = source
+                .find("for (popup, offset) in PopupManager::popups_for_surface(&surface) {")
+                .expect("`elements` still walks the popups");
+            let sandwich = source[popups..]
+                .find("// **This is the sandwich.**")
+                .map(|at| popups + at)
+                .expect("and the sandwich still follows them");
+            assert!(
+                source[popups..sandwich].contains("fitting.uncut()"),
+                "the popup loop in `elements` no longer draws through the uncut fit"
+            );
+        }
+    }
 
     /// **The hotspot comes off the pointer's position, it is not added to it.**
     ///

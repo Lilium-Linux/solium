@@ -165,8 +165,8 @@ pub(crate) enum Frame {
 pub(crate) struct Pane {
     id: PaneId,
     slot: Rectangle<i32, Logical>,
-    /// The **outer** rectangle a layout last asked for this pane, if one ever
-    /// has.
+    /// The **outer** rectangle of the tile a layout holds this pane in, while
+    /// one does.
     ///
     /// **Not a cache of [`Self::slot`], and the difference is the whole reason
     /// this field exists.** `Panes::sync` writes the space's answer over `slot`
@@ -179,11 +179,28 @@ pub(crate) struct Pane {
     /// `Solium::settle_resize_hold` deliberately adopts such an answer into the
     /// slot rather than fighting it.
     ///
-    /// Written only by `Solium::move_pane`, and by nothing that hears from a
+    /// Written by `Solium::move_pane`, and by nothing that hears from a
     /// client. That is what makes it the one place the compositor keeps the
     /// *layout's* opinion of where this pane is, which is what an edge drag has
     /// to start from — see `Solium::pane_laid_out` for why the client's opinion
     /// will not do.
+    ///
+    /// **And it is the tile the client is held inside (#133).**
+    /// `Solium::pane_geometry` caps a settled client's committed size at this
+    /// rectangle's client share, and `render::elements` cuts the client's
+    /// surfaces to it, so a client that will not shrink as far as its tile —
+    /// a terminal on its cell grid, a browser at its minimum width — is drawn
+    /// inside the tile rather than over its neighbours. That is why this means
+    /// "tiled now" and not "tiled once": a stale rectangle here would cut a
+    /// maximised, fullscreen or floating window down to the tile it used to
+    /// have. So it is cleared on every way out of a tile — a maximise and a
+    /// fullscreen (which keep it in [`Self::left_tile`] for the way back), a
+    /// `sol.place` with `tile = false`, and `sol.unplace`, which is what
+    /// `modes.use` sends for every window when the layout changes.
+    /// `a_maximised_window_is_not_held_in_its_old_tile`,
+    /// `a_fullscreen_window_is_not_held_in_its_old_tile` and
+    /// `a_window_let_go_by_its_layout_is_not_held_in_its_old_tile` are the
+    /// three.
     ///
     /// **Usually from the rectangle a layout handed `sol.place`, but not
     /// always**: `Solium::rescue_offscreen` reaches `move_pane` too, with a
@@ -191,12 +208,38 @@ pub(crate) struct Pane {
     /// went away. So the invariant is the narrower one — no client ever writes
     /// here — and not "this is what the layout last said". The next sweep puts
     /// the layout's answer back, and a drag begun in between starts from a
-    /// rectangle the window really is at, which is the right answer anyway.
+    /// rectangle the window really is at, which is the right answer anyway. A
+    /// rescue keeps a pane's standing as it found it: a tiled pane is still
+    /// tiled at the rectangle it was rescued to
+    /// (`a_tiled_window_brought_back_onto_a_screen_is_still_tiled`), and a
+    /// floating one is still floating
+    /// (`a_floating_window_brought_back_onto_a_screen_is_not_given_a_tile`).
     ///
-    /// `None` for a pane no layout has ever placed — a floating window, or one
-    /// in the frames between mapping and the first sweep — where the pane's own
-    /// rectangle is the only answer there is.
+    /// `None` for a pane no layout holds in a tile — a floating window, a
+    /// dialog a layout centres over its parent, or one in the frames between
+    /// mapping and the first sweep — where the pane's own rectangle is the
+    /// only answer there is. **And for a maximised or fullscreen window only
+    /// until the next sweep:** `tiling.apply` places every leaf of its trees,
+    /// a script cannot see that a window is maximised, and a maximise takes no
+    /// window out of its tree -- so a relayout while one is maximised, which
+    /// `unfullscreen_request` and a layer surface arriving each cause, puts it
+    /// back here and `move_pane` configures it into the tile. That configure
+    /// is what stage did as well; it is read from `tiling.lua` and `move_pane`,
+    /// and no test pins it.
     placed: Option<Rectangle<i32, Logical>>,
+    /// The tile this pane left when it was maximised or sent fullscreen, kept
+    /// for the way back to put it in again.
+    ///
+    /// Beside [`Self::restore`] and spent with it: written when
+    /// `Solium::toggle_maximize` or `Solium::fullscreen_request` takes the
+    /// pane out of [`Self::placed`], and taken by whichever of
+    /// `toggle_maximize` and `Solium::unfullscreen_request` puts the window
+    /// back at its restore rectangle. Without it a window restored into its
+    /// tile would be a floating window inside a tiled layout until the next
+    /// sweep, and an edge drag begun in between would start from the client's
+    /// rectangle rather than the layout's — #124 again, by another door.
+    /// `a_restored_window_goes_back_into_its_tile` pins it.
+    left_tile: Option<Rectangle<i32, Logical>>,
     /// Where this window goes back to when it leaves maximised or fullscreen.
     ///
     /// Written by `Solium::toggle_maximize` and `Solium::fullscreen_request`
@@ -340,6 +383,7 @@ impl Pane {
             id: PaneId::next(),
             slot,
             placed: None,
+            left_tile: None,
             restore: None,
             content: Content::Loading {
                 program: program.to_owned(),
@@ -367,6 +411,7 @@ impl Pane {
             id: PaneId::next(),
             slot,
             placed: None,
+            left_tile: None,
             restore: None,
             content: Content::Client {
                 window,
@@ -425,6 +470,66 @@ impl Pane {
     /// client sets the slot, and only a layout's sweep sets this.
     pub(crate) const fn set_placed(&mut self, placed: Rectangle<i32, Logical>) {
         self.placed = Some(placed);
+    }
+
+    /// Take this pane out of its tile for a maximise or a fullscreen, keeping
+    /// the tile for the way back. See [`Self::left_tile`].
+    ///
+    /// A pane that is in no tile keeps whatever tile it was already waiting to
+    /// go back to: a window maximised and then sent fullscreen left its tile
+    /// at the maximise, and the fullscreen must not forget it. This and the
+    /// two below are `a_tile_left_for_a_maximise_is_kept_for_the_way_back_and_no_longer`.
+    pub(crate) const fn leave_tile(&mut self) {
+        if let Some(placed) = self.placed.take() {
+            self.left_tile = Some(placed);
+        }
+    }
+
+    /// Put this pane back into the tile it left, now that it is back at its
+    /// restore rectangle. See [`Self::left_tile`].
+    ///
+    /// A tile a layout has placed it in since wins over the kept one: that is
+    /// the layout's newer answer. It happens — `tiling.apply` places every
+    /// leaf of its trees on every sweep, and a maximise takes no window out of
+    /// its tree.
+    pub(crate) const fn return_to_tile(&mut self) {
+        let left = self.left_tile.take();
+        if self.placed.is_none() {
+            self.placed = left;
+        }
+    }
+
+    /// No layout holds this pane in a tile any more, and none is keeping one
+    /// for it to go back to.
+    ///
+    /// Both fields, because a window maximised in tiling and then let go by the
+    /// layout — `modes.use` switching to floating — must not be put back in its
+    /// old tile by the un-maximise that follows, when there is no layout left
+    /// to hold it there.
+    pub(crate) const fn untile(&mut self) {
+        self.placed = None;
+        self.left_tile = None;
+    }
+
+    /// The tile this pane is waiting to go back into, while it is maximised or
+    /// fullscreen. See [`Self::left_tile`]; read by `Solium::pane_laid_out`,
+    /// for a drag on the maximised window, and by `Solium::rescue_offscreen`.
+    pub(crate) const fn left_tile(&self) -> Option<Rectangle<i32, Logical>> {
+        self.left_tile
+    }
+
+    /// Move the tile this pane is waiting to go back into, if it is waiting
+    /// for one.
+    ///
+    /// For `Solium::rescue_offscreen`, which drags a maximised window off a
+    /// monitor that went away: the tile it left was on that monitor too, and
+    /// a restore before the next sweep would put it back there -- where
+    /// `Solium::pane_laid_out` would start a drag from, on no screen at all.
+    /// `a_maximised_window_brought_back_onto_a_screen_brings_its_tile` pins it.
+    pub(crate) const fn move_left_tile(&mut self, to: Rectangle<i32, Logical>) {
+        if self.left_tile.is_some() {
+            self.left_tile = Some(to);
+        }
     }
 
     /// Where this window goes back to, if a maximise or a fullscreen kept
@@ -1378,6 +1483,56 @@ mod tests {
              a pane now pays for the tag as well as for the decoration -- and \
              the case for boxing, which was rejected on these two numbers being \
              equal, is worth making again"
+        );
+    }
+
+    /// **#133: the tile a window left, kept for its way back and no longer.**
+    ///
+    /// Four promises the three methods make between them, each asserted on the
+    /// one pane in the order a session would reach them:
+    ///
+    ///  1. Leaving a tile keeps it, and the way back puts it back.
+    ///  2. A window maximised and then sent fullscreen left its tile at the
+    ///     maximise, and the fullscreen -- a second `leave_tile` with no tile to
+    ///     take -- does not forget it.
+    ///  3. A tile a layout has placed the window in since wins over the kept
+    ///     one.
+    ///  4. A window the layout lets go of while it is maximised is not put back
+    ///     in its old tile by the un-maximise that follows.
+    #[test]
+    fn a_tile_left_for_a_maximise_is_kept_for_the_way_back_and_no_longer() {
+        let tile = Rectangle::new((0, 0).into(), (494, 600).into());
+        let newer = Rectangle::new((506, 0).into(), (494, 600).into());
+        let mut pane = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
+
+        pane.set_placed(tile);
+        pane.leave_tile();
+        assert_eq!(pane.placed(), None, "a maximised window is in no tile");
+        pane.leave_tile();
+        pane.return_to_tile();
+        assert_eq!(
+            pane.placed(),
+            Some(tile),
+            "and the way back puts it in the tile it left, through a second \
+             leave with nothing to take"
+        );
+
+        pane.leave_tile();
+        pane.set_placed(newer);
+        pane.return_to_tile();
+        assert_eq!(
+            pane.placed(),
+            Some(newer),
+            "a layout's newer tile is not overwritten by the kept one"
+        );
+
+        pane.leave_tile();
+        pane.untile();
+        pane.return_to_tile();
+        assert_eq!(
+            pane.placed(),
+            None,
+            "a window let go by its layout stays out of every tile"
         );
     }
 
