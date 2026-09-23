@@ -5735,8 +5735,12 @@ mod shipped {
     ///
     /// Built the way that filter builds it: `modified` is `key_get_one_sym`
     /// under the held modifiers, which is what smithay's `modified_sym` calls,
-    /// and `raw` is the key's only keysym at level 0 of its layout, which is
-    /// what `raw_syms` returns and the filter keeps. Then the same
+    /// and `raw` is the key's first keysym at level 0 of its layout, which is
+    /// what the filter's `raw_latin_sym_or_raw_current_sym` comes to on a
+    /// keymap with one layout -- there is no other to look in, and `us_keymap`
+    /// makes no other kind. The filter itself, on two layouts, is
+    /// `input::tests::every_shipped_binding_fires_on_both_groups_of_us_ru`.
+    /// Then the same
     /// `input::combos_for`, so the string compared below is the string the
     /// compositor looks up and not a second opinion of it.
     fn names_for(
@@ -5762,10 +5766,10 @@ mod shipped {
         state.update_mask(mask, 0, 0, 0, 0, 0);
         let code = xkb::Keycode::new(code);
         let modified = state.key_get_one_sym(code);
-        let raw = match keymap.key_get_syms_by_level(code, state.key_get_layout(code), 0) {
-            [only] => Some(*only),
-            _ => None,
-        };
+        let raw = keymap
+            .key_get_syms_by_level(code, state.key_get_layout(code), 0)
+            .first()
+            .copied();
         crate::input::combos_for(held, modified, raw)
     }
 
