@@ -275,7 +275,11 @@ end)
 -- and a layout handing it to a neighbour now would take it off the window the
 -- user is still looking at.
 sol.on("closing", function(id)
-    if not reflows_at_once() then
+    -- Only while this layout is in charge, for the reason `tiling.lua` gives:
+    -- a strip nobody is using is not on screen, and one rearranged anyway
+    -- comes back with its focus on the refused window -- which
+    -- `scrolling.started` hands the keyboard to when the user switches here.
+    if not scrolling.active or not reflows_at_once() then
         return
     end
     local kept
@@ -294,6 +298,17 @@ sol.on("closing", function(id)
     scrolling.apply(config.scrolling.snap)
 end)
 
+-- The strip a window belongs in now, its key and its monitor: its own
+-- workspace's, on the monitor it is on. See `tiling.lua`'s `home_of`.
+local function home_of(id)
+    local monitor = monitors.of(id)
+    local key = monitors.key(workspaces.at(id, monitor), monitor)
+    if not scrolling.views[key] then
+        scrolling.views[key] = sol.layout.scroller(config.scrolling)
+    end
+    return scrolling.views[key], key, monitor
+end
+
 -- The application declined, and the window is back: in the strip it left, in a
 -- column after the window that came before it there -- the one on its left, or
 -- above it in a column they shared -- or in front of the one after it when it
@@ -304,10 +319,14 @@ end)
 -- has focused, which after `insert` is this window -- and the usual reason for a
 -- refusal is a "save your changes?" dialog that has the keyboard and must keep
 -- it. For the same reason this is not `open`, whose handler settles.
+--
+-- Put back by the same rule as `tiling.lua`'s: taken out by `closing`, whatever
+-- the setting says now, or missing from a strip that is in charge; beside its
+-- old neighbours only if it still belongs in the strip it left.
 sol.on("refused", function(id)
     local kept = scrolling.leaving[id]
     scrolling.leaving[id] = nil
-    if not reflows_at_once() then
+    if not kept and not scrolling.active then
         return
     end
     local window = dialogs.by_id(id)
@@ -319,8 +338,10 @@ sol.on("refused", function(id)
             return
         end
     end
-    local monitor = monitors.of(id)
-    local view = (kept and scrolling.views[kept.view]) or view_for(monitor)
+    local view, key, monitor = home_of(id)
+    if kept and kept.view ~= key then
+        kept = nil
+    end
     local area = options(monitor)
     if kept and kept.left and view:contains(kept.left) then
         view:focus_window(kept.left, area)

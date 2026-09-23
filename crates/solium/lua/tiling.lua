@@ -251,7 +251,13 @@ end)
 -- `reflow_on_close = "when_gone"` is the old behaviour, and these two handlers
 -- then do nothing and `close` does it all.
 sol.on("closing", function(id)
-    if not reflows_at_once() then
+    -- Only while this layout is in charge. A tree nobody is using is not on
+    -- screen, and a window taken out of it here would be put back at
+    -- `refused` from a centre measured in another mode's geometry, at the
+    -- configured split rather than its own -- a rearrangement of a layout the
+    -- user is not even looking at. `adopt` leaves a window being closed out
+    -- if the user switches to tiling during the close.
+    if not tiling.active or not reflows_at_once() then
         return
     end
     local window = dialogs.by_id(id)
@@ -266,8 +272,8 @@ sol.on("closing", function(id)
     end
     -- The centre of where it stood, which is inside whichever window has just
     -- grown over its space -- its old sibling, when that was a single window.
-    -- A dialog is in no tree and nothing is kept for it.
-    if window and not dialogs.floats(window) then
+    -- Kept only for a window this took out of a tree: a dialog is in none.
+    if window and from then
         tiling.leaving[id] = {
             x = window.x + window.w / 2,
             y = window.y + window.h / 2,
@@ -276,6 +282,18 @@ sol.on("closing", function(id)
     end
     tiling.apply()
 end)
+
+-- The tree a window belongs in now, and its key: its own workspace's, on the
+-- monitor it is on. Not `tree_for`, which answers for the workspace that
+-- monitor is showing -- the user may have switched away during the close.
+local function home_of(id)
+    local monitor = monitors.of(id)
+    local key = monitors.key(workspaces.at(id, monitor), monitor)
+    if not tiling.trees[key] then
+        tiling.trees[key] = sol.layout.tree()
+    end
+    return tiling.trees[key], key, monitor
+end
 
 -- The application declined -- "save your changes?" -- and the window is back.
 -- It goes back into the tree it left, split off whichever window now covers the
@@ -290,10 +308,17 @@ end)
 --
 -- Not `open`, which the compositor deliberately does not send for this: the
 -- window never went, and an arrival would run `open.lua`'s animation again.
+--
+-- **Decided by what happened, not by the setting.** A window is put back if
+-- `closing` took it out -- whatever `reflow_on_close` says now, since a script
+-- may have changed it in between -- or if it is missing from a layout that is
+-- in charge, which is where `adopt` leaves a window being closed. Where it
+-- stood is used only if that is still the tree the window belongs in: a
+-- monitor unplugged during the close leaves a tree `apply` never walks.
 sol.on("refused", function(id)
     local stood = tiling.leaving[id]
     tiling.leaving[id] = nil
-    if not reflows_at_once() then
+    if not stood and not tiling.active then
         return
     end
     local window = dialogs.by_id(id)
@@ -305,8 +330,10 @@ sol.on("refused", function(id)
             return
         end
     end
-    local monitor = monitors.of(id)
-    local tree = (stood and stood.tree and tiling.trees[stood.tree]) or tree_for(monitor)
+    local tree, key, monitor = home_of(id)
+    if stood and stood.tree ~= key then
+        stood = nil
+    end
     tree:insert(id, nil, stood and stood.x, stood and stood.y, options(monitor))
     tiling.apply()
 end)

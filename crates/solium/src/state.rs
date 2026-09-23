@@ -2591,6 +2591,15 @@ impl Solium {
                 if !pane.managed() {
                     return None;
                 }
+                // A window scripts have been told has gone, in any event after
+                // that one: its pane is only waiting for `sync_panes` to retire
+                // it. Listed, it was a window a layout could place or `adopt`
+                // put back into a tree. `close`'s own snapshot still lists it,
+                // so a script can ask which window it was. See
+                // `adopt_in_the_frame_a_window_went_keeps_no_leaf_for_it`.
+                if pane.gone() && self.closing != Some(pane.id()) {
+                    return None;
+                }
                 let outer = self.pane_outer(pane);
                 let drawn = self.drawn_at(pane, outer, now);
                 Some(WindowInfo {
@@ -2621,13 +2630,15 @@ impl Solium {
                     parent: pane
                         .client()
                         .map_or(Parentage::None, |window| self.parent_of(window)),
-                    // Both halves, because they are two moments of one fact.
-                    // `leaving` covers `closing` until the window is given back
-                    // or goes; `self.closing` covers `close` itself, whose
-                    // snapshot still lists the window so a script can ask which
-                    // one it was -- and a client that closed itself was never
-                    // `leaving` at all. See `WindowInfo::leaving`.
-                    leaving: pane.leaving() || self.closing == Some(pane.id()),
+                    // From `closing` until the window is given back, and in
+                    // `close`'s own snapshot, which still lists the window so a
+                    // script can ask which one it was. That includes a client
+                    // that closed itself and was never `closing`, because
+                    // `trigger_close` marks every pane it tells scripts about
+                    // as gone, and a gone pane is leaving. See
+                    // `WindowInfo::leaving` and
+                    // `the_window_list_says_which_windows_are_leaving`.
+                    leaving: pane.leaving(),
                 })
             })
             .collect();
@@ -2778,6 +2789,57 @@ impl Solium {
     ) {
         self.space.map_element(window.clone(), location, activate);
         self.lift_modals_over(&window);
+    }
+
+    /// Map a window a layout has placed, raised as [`Self::map_stacked`]
+    /// raises it -- but never past a window that is leaving, or drawn at less
+    /// than full opacity.
+    ///
+    /// **Issue #128's review, findings 2 and 6.** Every placement is a raise,
+    /// and a layout places the windows it moves one after another, so the
+    /// stack after a sweep was the sweep's order. Since #128 a close reflows at
+    /// once: the neighbour growing into the space of a window that is fading
+    /// there was placed and the fading window was not, so the neighbour was
+    /// stacked over the fade and covered most of it -- and the refused window
+    /// fading back in was covered the same way by the neighbour giving its
+    /// space back. See
+    /// `a_closing_window_fades_in_front_of_the_neighbour_moving_into_its_space`
+    /// and `a_refused_window_fades_back_in_front_of_the_neighbour_making_room`.
+    ///
+    /// **"Not past" rather than "raise those again afterwards".** What goes
+    /// back on top is the lowest such window above this one *and everything
+    /// that was above it*, in the order they were in, so the placed window
+    /// ends just below it and the windows above it keep their order. Raising
+    /// only the fading window would lift it over windows it had been under.
+    ///
+    /// Only for layout placements. A click, a new window and a fullscreen raise
+    /// through `map_stacked` as they always have: those mean "this one, in
+    /// front", and a sweep means nothing about the stack at all.
+    fn map_laid_out(&mut self, window: Window, location: Point<i32, Logical>, now: Duration) {
+        // Collected before anything moves, bottom to top: everything from the
+        // lowest window above this one that must stay above it, upward.
+        let kept_over: Vec<Window> = self
+            .space
+            .elements()
+            .skip_while(|element| **element != window)
+            .skip(1)
+            .skip_while(|element| !self.stays_over_a_layout(element, now))
+            .cloned()
+            .collect();
+        self.map_stacked(window, location, false);
+        for element in &kept_over {
+            self.space.raise_element(element, false);
+        }
+    }
+
+    /// Whether a layout placing another window must leave this one above it:
+    /// a window being closed, from the press until it is given back or gone,
+    /// and one drawn translucent -- which is where a refused window is from
+    /// the moment it is given back until its return lands.
+    fn stays_over_a_layout(&self, window: &Window, now: Duration) -> bool {
+        self.panes.of(window).is_some_and(|pane| {
+            pane.leaving() || present::frame(pane, self.pane_outer(pane), now).opacity < 1.0
+        })
     }
 
     /// Put every modal waiting on this window back above it, and their own
@@ -3497,9 +3559,11 @@ impl Solium {
             if !leaving && self.offers_size(pane, &window, client, now) {
                 size_window(&window, client);
             }
-            // `false`: laying out must not restack. A tiling arrangement that
-            // reordered windows every time it ran would fight the user's focus.
-            self.map_stacked(window, client.loc, false);
+            // Placing is not focusing. It is still a raise -- see
+            // `map_stacked` -- and `map_laid_out` is what keeps that raise from
+            // burying a window that is leaving or fading; see the note on the
+            // transform below.
+            self.map_laid_out(window, client.loc, now);
         }
         // And the pane is told either way. For a mapped window this is what
         // `sync_panes` would write next frame anyway; for a pane whose
@@ -3556,37 +3620,31 @@ impl Solium {
         //   layout is not the authority over where a leaving pane is *drawn*,
         //   and this line was the only place that said otherwise.
         //
-        // The cost is that a closing window can overlap the one moving into its
-        // space for up to 190ms. It is shrinking and fading throughout, so what
-        // that reads as is the window dissolving with its replacement arriving
-        // underneath — against a full-opacity snap followed by nothing, which
-        // is what shipped.
+        // The cost is that a closing window overlaps the one moving into its
+        // space for up to 190ms -- on every close since #128, because a layout
+        // closes up the moment the close is asked for. It is shrinking and
+        // fading throughout, and what that reads as depends on which of the two
+        // is in front.
         //
-        // **"Underneath" is not guaranteed, and the decision is to accept
-        // that** (#127's third review, finding 4). `map_stacked` above is let
-        // through for a leaving pane, and `Space::map_element` removes and
-        // re-inserts on top whatever the `false` says — that flag decides only
-        // who is told they are focused, which `map_stacked`'s own doc is where
-        // this is written down. So a sweep that touches the dying pane after it
-        // touches the replacement draws the dying one above.
+        // **The window being closed is, and that is decided rather than left
+        // to the sweep** (#128's review, findings 2 and 6). `Space::map_element`
+        // puts every window a layout places on top, whatever `activate` says,
+        // and the `closing` sweep places every survivor and not the
+        // window being closed -- so the neighbour growing into the space was
+        // stacked over it on every close and covered most of the fade, which
+        // is the reverse of the look this note was written to buy. So
+        // `close_pane` raises the window as its close begins, and
+        // `map_laid_out` never raises a placed window past one that is leaving
+        // or drawn translucent, so no later sweep in the fade buries it either.
+        // A refused window fading back in is the same case in reverse. See
+        // `a_closing_window_fades_in_front_of_the_neighbour_moving_into_its_space`
+        // and `a_refused_window_fades_back_in_front_of_the_neighbour_making_room`.
         //
-        // Three things make that the cheaper side, and they are worth stating
-        // because the paragraph above reads like a promise otherwise.
-        //
-        // * **The z-order after any sweep is the sweep's order, for every pane
-        //   it moves and not just this one.** Pinning the leaving pane alone
-        //   would be a guarantee standing on a background that offers none, and
-        //   the honest fix — deciding the whole stack a layout sweep produces —
-        //   is a change about stacking rather than about closing.
-        // * **It costs pixels and not input.** The dying pane is at opacity
-        //   zero from the end of `CLOSING` onwards, and `Frame::covers` gates
-        //   every hit test on `shows()` — so a pane drawn on top owns no pixel
-        //   the moment it stops being visible, and while it *is* visible
-        //   keeping its clicks is that predicate's whole argument.
-        // * **It is bounded by the fade.** 190ms of a window that is shrinking
-        //   and going transparent, over one that is arriving. Restacking it
-        //   mid-close would itself be a visible reorder on the one path with
-        //   the least to gain from one.
+        // In front costs the window underneath no input once the fade is over:
+        // the dying pane is at opacity zero from the end of `CLOSING`, and
+        // `Frame::covers` gates every hit test on `shows()`, so a press there
+        // reaches what is drawn there. See
+        // `a_press_where_a_closed_window_used_to_be_reaches_what_is_drawn_there`.
         //
         // **The bookkeeping is what survives, not the presentation.** All three
         // copies of where this pane lives — the space, the slot and
@@ -3603,11 +3661,27 @@ impl Solium {
         // destination and the release flag, so a closing transform rebased by a
         // workspace slide is still a closing transform. It is this function's
         // unconditional `from` that was the exception.
+        //
+        // **From what is on screen, not from where the books say the pane was**
+        // (#128's review, finding 1). `was` is `pane_outer`: the space's
+        // location and the size the client last committed. Between two sweeps
+        // in one dispatch those are the first sweep's answer and not anything
+        // that has been drawn, and a dialog answering a close, sent in one
+        // flush, is several sweeps in one dispatch -- `give_back`'s `refused`,
+        // then `parent_changed`, then `modal_changed`. Starting from
+        // `Frame::real(was)` put the refused window back at full opacity before
+        // its fade had drawn a frame, and in tiling threw its neighbour to its
+        // new position at its old size. `present::frame` is what the next
+        // frame would draw, and for a pane with no transform it is
+        // `Frame::real(was)`, so a placement from rest starts where it always
+        // did. See
+        // `a_refusal_by_dialog_fades_the_window_back_and_moves_its_neighbour_once`.
         if let Some(held) = self.panes.get(pane).filter(|_| !leaving) {
+            let start = present::frame(held, was, now);
             present::from(
                 held,
                 outer,
-                present::Frame::real(was),
+                start,
                 now,
                 animation.duration,
                 animation.easing,
@@ -4126,7 +4200,7 @@ impl Solium {
     /// animating it would mean holding a snapshot of every window on the
     /// chance that it might be the next to leave. That is issue #126.
     ///
-    /// **Asked at most once per window.** See [`Pane::leaving`] for the three
+    /// **Asked at most once per window.** See [`Pane::leaving`] for the four
     /// states that answer it, and why the narrower question this used to ask
     /// was wrong for most of the time a window spends leaving.
     pub(crate) fn close_pane(&mut self, id: crate::pane::PaneId) {
@@ -4175,6 +4249,18 @@ impl Solium {
         present::close(pane, outer, now);
         if let Some(pane) = self.panes.get_mut(id) {
             pane.begin_closing(now + present::CLOSING);
+        }
+        // **In front for its fade** (#128's review, findings 2 and 6). The
+        // layout is about to move a neighbour into this window's space, and the
+        // window closed is not always the one on top: a strip's sweeps stack
+        // its columns left to right, whichever has the keyboard. Raised here,
+        // before `closing`, so the sweep below meets a leaving window above
+        // whatever it moves -- and `map_laid_out` keeps it there. Its modals
+        // go above it as on any raise. See
+        // `a_closing_window_fades_in_front_of_the_neighbour_moving_into_its_space`.
+        if let Some(window) = self.panes.get(id).and_then(Pane::client).cloned() {
+            self.space.raise_element(&window, false);
+            self.lift_modals_over(&window);
         }
         self.redraw = true;
         // **And the layout is told now, not when the client has gone** (#128).
@@ -5711,9 +5797,6 @@ impl Solium {
             return true;
         };
         let outer = self.pane_outer(pane);
-        // What is on screen before anything is restored: the held, shrunk,
-        // transparent end of the leaving animation. Kept for the restart below.
-        let vanished = present::frame(pane, outer, now);
         if !present::clear(pane, outer, now, RETURN, solium_animation::Curve::OutCubic) {
             return false;
         }
@@ -5735,34 +5818,17 @@ impl Solium {
         // whose first give-back was declined -- end in this function, and a
         // declined attempt returns above without telling anyone. See
         // `a_refusal_tells_the_layout_once_on_the_frame_the_window_comes_back`.
-        // The pane is not `leaving` any more, so `move_pane` treats the layout
-        // putting it back like any other placement -- which is why the restart
-        // below is needed.
+        //
+        // The pane is not `leaving` any more, so a layout putting it back moves
+        // it like any other window -- and `move_pane` animates from what is on
+        // screen, which here is the held, shrunk, transparent end of the close:
+        // the window fades in as it slides to wherever the layout puts it, over
+        // the layout's duration rather than `RETURN`. Placed by nothing, it
+        // plays the fade above. See
+        // `a_refused_window_fades_back_in_from_where_it_vanished`, and
+        // `a_refusal_by_dialog_fades_the_window_back_and_moves_its_neighbour_once`
+        // for the dialog route, which sweeps several times in one dispatch.
         self.trigger_refused(id);
-        // **And the return is started again from where the window vanished,**
-        // because a layout that put it back has just replaced the fade above.
-        // `move_pane` animates from `Frame::real` of where the pane *was* --
-        // full size and full opacity -- so without this a window refused in a
-        // tiled layout appeared at once at its old rectangle, over the
-        // neighbour that had grown into it, and slid to its new one. Whatever
-        // the placement is heading for, and whether it releases, is kept; only
-        // the start is put back. With no layout, or one that did not move the
-        // pane, this states the fade above a second time, unchanged. See
-        // `a_refused_window_fades_back_in_from_where_it_vanished`.
-        if let Some(pane) = self.panes.get(id) {
-            let outer = self.pane_outer(pane);
-            // The answer is not needed: the fade above has already taken, so a
-            // declined restart leaves whatever the slot holds -- that fade or
-            // the layout's slide -- and both are visible and both release.
-            let _ = present::restart_from(
-                pane,
-                outer,
-                vanished,
-                now,
-                RETURN,
-                solium_animation::Curve::OutCubic,
-            );
-        }
         self.settle_focus();
         true
     }
@@ -7140,20 +7206,6 @@ impl Solium {
 
     pub(crate) fn trigger_close(&mut self, pane: crate::pane::PaneId) {
         let id = pane.get();
-        // Only for the snapshot, and the snapshot is the whole of what a script
-        // sees. The pane is still here -- it is retired in `sync_panes`, a frame
-        // from now -- so a dialog waiting on this window would otherwise be
-        // re-centred on the rect of the window that is leaving, and this pass is
-        // the last one: nothing runs again to take it off the window that moves
-        // into that space. See [`Self::parented`].
-        self.closing = Some(pane);
-        let snapshot = self.snapshot();
-        self.closing = None;
-        if let Some(mut scripts) = self.scripts.take() {
-            let outcome = scripts.closed(id, snapshot);
-            self.scripts = Some(scripts);
-            self.apply(outcome);
-        }
         // **The close is over, so nothing may bring this window back** (#128).
         // The pane outlives this call by the rest of the frame: every frame runs
         // the Wayland dispatch -- where a client destroying its toplevel lands
@@ -7170,17 +7222,43 @@ impl Solium {
         // test; the second needs a declined give-back to reach, and the one way
         // this suite has to decline one, `present::jam_slot`, never lets go.
         //
-        // After the dispatch rather than before it, so the handlers above still
-        // see a pane that is leaving, and a layout placing it there -- a
-        // stateless one places every row it is handed -- leaves alone the
-        // transform that is holding it invisible. See
-        // `a_layout_placing_a_closed_window_does_not_show_it_again`. And outside
-        // the scripts' `if`, because a session with no scripts has a deadline
-        // to disarm all the same.
+        // **And the pane is marked gone, which is what keeps it leaving once
+        // the timers are cleared** (#128's review, findings 5 and 7). Clearing
+        // them alone made a window that no longer exists an ordinary window
+        // for the rest of the frame: listed in `sol.windows()` as not leaving,
+        // placed by a stateless layout and drawn at full opacity by
+        // `move_pane`, closed a second time by `close_pane`, and put back into a
+        // tree by an `adopt`. `Pane::leaving` answers yes for a gone pane, and
+        // the snapshot leaves it out of every event but this one. See
+        // `a_window_that_has_gone_is_neither_placed_nor_closed_again` and
+        // `adopt_in_the_frame_a_window_went_keeps_no_leaf_for_it`.
+        //
+        // Before the dispatch, now that `gone` answers for it: a layout placing
+        // the window in `close` itself -- a stateless one places every row it
+        // is handed -- still finds it leaving and leaves alone the transform
+        // holding it invisible. See
+        // `a_layout_placing_a_closed_window_does_not_show_it_again`. And
+        // whether or not there are scripts, because a session with none has a
+        // deadline to disarm all the same.
         if let Some(pane) = self.panes.get_mut(pane) {
             pane.forget_asked();
             pane.stop_closing();
             pane.settled_answer();
+            pane.went();
+        }
+        // Only for the snapshot, and the snapshot is the whole of what a script
+        // sees. The pane is still here -- it is retired in `sync_panes`, a frame
+        // from now -- so a dialog waiting on this window would otherwise be
+        // re-centred on the rect of the window that is leaving, and this pass is
+        // the last one: nothing runs again to take it off the window that moves
+        // into that space. See [`Self::parented`].
+        self.closing = Some(pane);
+        let snapshot = self.snapshot();
+        self.closing = None;
+        if let Some(mut scripts) = self.scripts.take() {
+            let outcome = scripts.closed(id, snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
         }
     }
 
@@ -15708,6 +15786,165 @@ end
                     self.pump();
                     now
                 }
+
+                /// [`Self::open`], with the client's surface as well: for a
+                /// test that has to make the client answer a configure with a
+                /// buffer of the size it was given, as a real one does.
+                fn open_surface(&mut self) -> Opened {
+                    let (window, toplevel, surface, _xdg) = open_xdg(
+                        &mut self.display,
+                        &mut self.state,
+                        &self.conn,
+                        &self.client,
+                        &self.qh,
+                    );
+                    self.state.sync_panes();
+                    self.pump();
+                    let pane = self
+                        .state
+                        .panes
+                        .id_of(&window)
+                        .expect("a client in the space has a pane");
+                    Opened {
+                        toplevel,
+                        pane,
+                        surface,
+                    }
+                }
+
+                /// The client commits a buffer of exactly the client area the
+                /// layout last gave this pane -- the answer to its configure.
+                fn answer(&mut self, opened: &Opened) {
+                    let client = inner(self.placed(opened.pane), self.state.insets_of(opened.pane));
+                    commit_buffer(
+                        &self.client,
+                        &self.qh,
+                        &opened.surface,
+                        client.size.w,
+                        client.size.h,
+                    );
+                    self.pump();
+                }
+
+                /// A modal dialog for `parent`: the toplevel, `set_parent`,
+                /// `set_modal` and its first buffer in one flush, so the
+                /// compositor reads every one of them in a single dispatch.
+                /// Returns the dialog.
+                fn open_dialog_for(&mut self, parent: &xdg_toplevel::XdgToplevel) -> Window {
+                    let compositor = self.client.compositor.clone().expect("wl_compositor bound");
+                    let wm_base = self.client.wm_base.clone().expect("xdg_wm_base bound");
+                    let dialogs = self.client.dialogs.clone().expect("xdg_wm_dialog_v1 bound");
+                    let before: Vec<Window> = self.state.space.elements().cloned().collect();
+                    let surface = compositor.create_surface(&self.qh, ());
+                    let xdg = wm_base.get_xdg_surface(&surface, &self.qh, ());
+                    let toplevel = xdg.get_toplevel(&self.qh, ());
+                    toplevel.set_parent(Some(parent));
+                    dialogs.get_xdg_dialog(&toplevel, &self.qh, ()).set_modal();
+                    commit_buffer(&self.client, &self.qh, &surface, 64, 64);
+                    self.conn.flush().expect("flushing the dialog's requests");
+                    self.display
+                        .dispatch_clients(&mut self.state)
+                        .expect("dispatching the dialog's requests");
+                    self.state
+                        .space
+                        .elements()
+                        .find(|window| !before.contains(window))
+                        .cloned()
+                        .expect("new_toplevel mapped the dialog")
+                }
+            }
+
+            /// A window [`Desk::open_surface`] opened.
+            struct Opened {
+                toplevel: xdg_toplevel::XdgToplevel,
+                pane: crate::pane::PaneId,
+                surface: wl_surface::WlSurface,
+            }
+
+            /// A window a test closes under `layout`, and the windows beside
+            /// it: `(closed, others)`.
+            ///
+            /// Chosen so that a sweep places some other window *after* the one
+            /// being closed, which is the one `Space::map_element` leaves above
+            /// it: both shipped layouts place left to right. In tiling that is
+            /// the left of two windows. In scrolling it is the middle of three,
+            /// because closing the left of two moves nothing: the strip keeps
+            /// the column that is left where it was. Which of the others moves
+            /// into the space is the layout's business, so the tests find out
+            /// rather than say.
+            fn closing_scene(desk: &mut Desk, layout: &str) -> (Opened, Vec<Opened>) {
+                let count = if layout == "tiling" { 2 } else { 3 };
+                let mut opened: Vec<Opened> = (0..count).map(|_| desk.open_surface()).collect();
+                desk.arrange(layout, "");
+                opened.sort_by_key(|each| desk.placed(each.pane).loc.x);
+                let closed = opened.remove(count - 2);
+                assert!(
+                    opened.iter().all(
+                        |other| desk.placed(other.pane).loc.x != desk.placed(closed.pane).loc.x
+                    ),
+                    "{layout}: the premise is windows side by side"
+                );
+                (closed, opened)
+            }
+
+            /// Close `closed`, and say which of `others` the layout moved.
+            fn close_and_see_who_moved<'a>(
+                desk: &mut Desk,
+                layout: &str,
+                closed: &Opened,
+                others: &'a [Opened],
+            ) -> &'a Opened {
+                let before: Vec<Rectangle<i32, Logical>> =
+                    others.iter().map(|other| desk.placed(other.pane)).collect();
+                desk.state.close_pane(closed.pane);
+                others
+                    .iter()
+                    .zip(before)
+                    .find(|(other, was)| desk.placed(other.pane) != *was)
+                    .map(|(other, _)| other)
+                    .unwrap_or_else(|| {
+                        panic!("{layout}: the premise is a neighbour moving into the space")
+                    })
+            }
+
+            /// How far a pane can have moved in `seconds` of real time without
+            /// jumping, in pixels, and how far its opacity can have changed.
+            ///
+            /// The clock is real time, so the sweeps of one dispatch are
+            /// microseconds apart and each starts from where the one before it
+            /// had got to by then. That is motion rather than a jump, and it is
+            /// bounded: no placement these tests drive is faster than 180 ms
+            /// (tiling's `snap`), the return fade is 150 ms, and `OutCubic`'s
+            /// steepest slope is 3, at the start -- across at most a screen's
+            /// width and one unit of opacity.
+            fn drift(seconds: f64) -> (f64, f32) {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "an opacity bound, far inside f32"
+                )]
+                let opacity = (3.0 / 0.15 * seconds) as f32;
+                (1.0 + 1920.0 * 3.0 / 0.18 * seconds, opacity)
+            }
+
+            /// Whether `top` is drawn over `under`: earlier in `on_screen`,
+            /// which is topmost first and the order `render` draws in, after
+            /// `sync_panes` has brought it in line with the space the way every
+            /// frame does.
+            fn above(
+                state: &mut Solium,
+                top: crate::pane::PaneId,
+                under: crate::pane::PaneId,
+            ) -> bool {
+                state.sync_panes();
+                let order: Vec<crate::pane::PaneId> = state
+                    .on_screen()
+                    .into_iter()
+                    .map(|(pane, _)| pane)
+                    .collect();
+                let at = |pane| order.iter().position(|each| *each == pane);
+                at(top)
+                    .zip(at(under))
+                    .is_some_and(|(top, under)| top < under)
             }
 
             const LAYOUTS: [&str; 2] = ["tiling", "scrolling"];
@@ -15871,8 +16108,9 @@ end
             ///
             /// `give_back` starts the return from the held, transparent end of
             /// the leaving animation; the layout putting the window back then
-            /// replaces that with `move_pane`'s slide, which begins at full
-            /// opacity. `present::restart_from` is what puts the start back.
+            /// replaces that with `move_pane`'s slide, which begins from what is
+            /// on screen -- that same transparent frame -- rather than from full
+            /// opacity at the rectangle the window had.
             #[test]
             fn a_refused_window_fades_back_in_from_where_it_vanished() {
                 for layout in LAYOUTS {
@@ -15886,9 +16124,12 @@ end
                         "{layout}: the premise is a refusal the layout heard"
                     );
 
+                    // The slide starts from the fade as it was when the layout
+                    // placed the window, a moment of real time after `back`.
+                    let (_, fading) = drift((desk.state.clock.now() - back).as_secs_f64());
                     let first = drawn_now(&desk.state, dying, back);
                     assert!(
-                        first.opacity < 0.05,
+                        first.opacity < 0.05 + fading,
                         "{layout}: the refused window was drawn at opacity {} on the frame it \
                          came back, rather than fading in from nothing",
                         first.opacity
@@ -16232,6 +16473,316 @@ end)
                 assert!(
                     desk.state.is_focused(&dialog),
                     "the layout took the keyboard off the dialog when it put its window back"
+                );
+            }
+
+            /// **A window refused by a dialog fades back in, and its neighbour
+            /// moves once, from where it was drawn.**
+            ///
+            /// The dialog route is the common refusal -- "save your changes?"
+            /// -- and a client that sends the toplevel, `set_parent` and
+            /// `set_modal` in one flush (GTK, by the account of the review that
+            /// found this) makes it several layout sweeps in one dispatch:
+            /// `refused` runs one from inside `give_back`, `parent_changed`
+            /// another, and `modal_changed` a third. Each sweep after the
+            /// first used to start every window it placed from `Frame::real` of
+            /// the rectangle the previous sweep had just written to the space:
+            /// the refused window at full opacity, and -- in tiling, where the
+            /// neighbour changes size as well as place -- the neighbour at its
+            /// new position and its old, committed size, a 954px jump before
+            /// anything had been drawn. So both are read at the instant the
+            /// dialog arrived, which is before any of those animations has
+            /// moved more than real time allows, and must be what was on screen
+            /// then.
+            ///
+            /// The neighbour's client answers its configure first, as a real
+            /// one does: the space holding the size the layout gave it is what
+            /// makes the jump a jump, rather than an artefact of a fixture that
+            /// never resizes.
+            #[test]
+            fn a_refusal_by_dialog_fades_the_window_back_and_moves_its_neighbour_once() {
+                for layout in LAYOUTS {
+                    let mut desk = Desk::new();
+                    let (dying, others) = closing_scene(&mut desk, layout);
+                    let survivor = close_and_see_who_moved(&mut desk, layout, &dying, &others);
+                    desk.ask();
+                    desk.answer(survivor);
+                    // Past the neighbour's slide into the space, and well inside
+                    // the grace period.
+                    desk.state.clock.advance(Duration::from_millis(300));
+                    let settled = desk.state.clock.now();
+                    desk.state.settle(settled);
+
+                    let arrived = desk.state.clock.now();
+                    let neighbour = drawn_now(&desk.state, survivor.pane, arrived);
+                    let dialog = desk.open_dialog_for(&dying.toplevel);
+                    let (moving, fading) = drift((desk.state.clock.now() - arrived).as_secs_f64());
+                    assert!(
+                        desk.state.is_modal(&dialog)
+                            && desk
+                                .events()
+                                .contains(&format!("refused {}", dying.pane.get())),
+                        "{layout}: the premise is a modal dialog whose answer was a refusal the \
+                         layout heard: {}",
+                        desk.events()
+                    );
+
+                    let back = drawn_now(&desk.state, dying.pane, arrived);
+                    assert!(
+                        back.opacity < 0.05 + fading,
+                        "{layout}: the refused window was drawn at opacity {} on the frame its \
+                         dialog arrived, rather than fading in from nothing",
+                        back.opacity
+                    );
+                    let moved = drawn_now(&desk.state, survivor.pane, arrived);
+                    assert!(
+                        (moved.rect.loc.x - neighbour.rect.loc.x).abs() < moving
+                            && (moved.rect.size.w - neighbour.rect.size.w).abs() < moving,
+                        "{layout}: the neighbour jumped on the frame the dialog arrived: it was \
+                         drawn at {:?} and is now drawn at {:?}",
+                        neighbour.rect,
+                        moved.rect
+                    );
+
+                    // And both still land where the layout put them.
+                    let later = arrived + Duration::from_secs(1);
+                    let landed = drawn_now(&desk.state, dying.pane, later);
+                    let slot = desk.placed(dying.pane);
+                    assert!(
+                        (landed.opacity - 1.0).abs() < f32::EPSILON
+                            && (landed.rect.loc.x - f64::from(slot.loc.x)).abs() < 1.0,
+                        "{layout}: the refused window did not land in its slot: {landed:?}, \
+                         placed at {slot:?}"
+                    );
+                    let slot = desk.placed(survivor.pane);
+                    let landed = drawn_now(&desk.state, survivor.pane, later);
+                    assert!(
+                        (landed.rect.loc.x - f64::from(slot.loc.x)).abs() < 1.0,
+                        "{layout}: the neighbour did not land in its slot: {landed:?}, placed \
+                         at {slot:?}"
+                    );
+                }
+            }
+
+            /// **A window being closed fades in front of the neighbour that
+            /// moves into its space.**
+            ///
+            /// The sweep `closing` runs places every survivor and none of the
+            /// dying window, and `Space::map_element` puts each window it places
+            /// on top -- so the neighbour growing into the space (tiling) or
+            /// sliding into it (scrolling) was stacked over the window fading
+            /// there, and covered most of the fade. And in scrolling the
+            /// window the keyboard is on can be below its neighbour to begin
+            /// with, because the strip's own sweeps stack left to right. So a
+            /// window is raised as its close begins, and a later sweep inside
+            /// the fade -- another window opening, a client's `set_parent` --
+            /// does not bury it either.
+            #[test]
+            fn a_closing_window_fades_in_front_of_the_neighbour_moving_into_its_space() {
+                for layout in LAYOUTS {
+                    let mut desk = Desk::new();
+                    let (dying, others) = closing_scene(&mut desk, layout);
+                    let moved = close_and_see_who_moved(&mut desk, layout, &dying, &others);
+                    assert!(
+                        above(&mut desk.state, dying.pane, moved.pane),
+                        "{layout}: the neighbour moving into the closed window's space is drawn \
+                         over the window fading there"
+                    );
+                    for other in &others {
+                        assert!(
+                            above(&mut desk.state, dying.pane, other.pane),
+                            "{layout}: a window the close did not move was stacked over the \
+                             window fading"
+                        );
+                    }
+
+                    desk.state.clock.advance(Duration::from_millis(80));
+                    desk.state.trigger_relayout();
+                    for other in &others {
+                        assert!(
+                            above(&mut desk.state, dying.pane, other.pane),
+                            "{layout}: a layout sweep during the fade stacked a neighbour over \
+                             the window fading"
+                        );
+                    }
+                }
+            }
+
+            /// **A refused window fades back in front of the neighbour giving
+            /// its space back.**
+            ///
+            /// The mirror of the close: the sweep `refused` runs places every
+            /// window, left to right, so a neighbour placed after the window
+            /// coming back -- giving back the space it had moved into -- was
+            /// stacked over the window fading into it. And the dialog route
+            /// sweeps again inside the return, so a relayout during it is
+            /// driven too.
+            #[test]
+            fn a_refused_window_fades_back_in_front_of_the_neighbour_making_room() {
+                for layout in LAYOUTS {
+                    let mut desk = Desk::new();
+                    let (dying, others) = closing_scene(&mut desk, layout);
+                    close_and_see_who_moved(&mut desk, layout, &dying, &others);
+                    desk.ask();
+                    desk.refuse();
+                    assert!(
+                        desk.events()
+                            .ends_with(&format!("refused {}", dying.pane.get())),
+                        "{layout}: the premise is a refusal the layout heard"
+                    );
+                    for other in &others {
+                        assert!(
+                            above(&mut desk.state, dying.pane, other.pane),
+                            "{layout}: a neighbour giving the space back is drawn over the \
+                             window fading back into it"
+                        );
+                    }
+
+                    desk.state.clock.advance(Duration::from_millis(50));
+                    desk.state.trigger_relayout();
+                    for other in &others {
+                        assert!(
+                            above(&mut desk.state, dying.pane, other.pane),
+                            "{layout}: a layout sweep during the return stacked a neighbour \
+                             over the window fading back in"
+                        );
+                    }
+                }
+            }
+
+            /// **A window that has gone is not laid out again, or closed again,
+            /// in the frame it went.**
+            ///
+            /// The pane outlives `close` by the rest of the frame -- it is
+            /// retired in `sync_panes` -- and `trigger_close` retires its close
+            /// timers so nothing gives it back. That used to make it an
+            /// ordinary window to everything else in the frame: listed in
+            /// `sol.windows()` as not leaving, so a stateless layout placed it
+            /// and `move_pane` replaced the transform holding it invisible with
+            /// one at full opacity, and `close_pane` would start a close on it,
+            /// telling a layout `closing` after `close`.
+            #[test]
+            fn a_window_that_has_gone_is_neither_placed_nor_closed_again() {
+                let mut desk = Desk::new();
+                let (_, toplevel, pane) = desk.open();
+                desk.install(&format!(
+                    r#"{RECORDER}
+sol.on("layout", function()
+    for _, window in ipairs(sol.windows()) do
+        sol.place(window.id, {{ x = window.x, y = window.y, w = window.w, h = window.h }})
+    end
+end)
+"#
+                ));
+                desk.state.close_pane(pane);
+                desk.ask();
+                toplevel.destroy();
+                desk.pump();
+                let id = pane.get();
+                assert!(
+                    desk.events() == format!("closing {id}*,close {id}*")
+                        && desk.state.panes.get(pane).is_some(),
+                    "the premise: `close` was told and the pane is still here until \
+                     `sync_panes`: {}",
+                    desk.events()
+                );
+
+                desk.state.trigger_relayout();
+                let now = desk.state.clock.now();
+                let drawn = drawn_now(&desk.state, pane, now);
+                assert!(
+                    drawn.opacity.abs() < f32::EPSILON,
+                    "a layout sweep after `close` drew the window that went at opacity {}",
+                    drawn.opacity
+                );
+
+                desk.state.close_pane(pane);
+                assert_eq!(
+                    desk.events(),
+                    format!("closing {id}*,close {id}*"),
+                    "the window that went was closed again, after `close`"
+                );
+            }
+
+            /// **A `monitors` event in the frame a window went keeps no leaf
+            /// for it.** `adopt` exists to put back whatever the arrangement is
+            /// missing, and the window that went was still listed, as a window
+            /// that was not leaving -- so it was put back into its tree, for
+            /// good: nothing sends a second `close`.
+            ///
+            /// Both settings: `"when_gone"` treats a leaving window as an
+            /// ordinary one, so for it only leaving the window that went out of
+            /// the list entirely is enough.
+            #[test]
+            fn adopt_in_the_frame_a_window_went_keeps_no_leaf_for_it() {
+                for before in [
+                    "",
+                    "require(\"config\").tiling.reflow_on_close = \"when_gone\"",
+                ] {
+                    let mut desk = Desk::new();
+                    let (_, _, kept) = desk.open();
+                    let (_, toplevel, going) = desk.open();
+                    desk.arrange("tiling", before);
+                    let half = desk.placed(kept);
+
+                    desk.state.close_pane(going);
+                    desk.ask();
+                    toplevel.destroy();
+                    desk.pump();
+                    desk.state.trigger_monitors_changed();
+                    desk.state.space.refresh();
+                    desk.state.sync_panes();
+                    desk.pump();
+                    assert!(
+                        desk.state.panes.get(going).is_none(),
+                        "the premise: the pane is retired"
+                    );
+
+                    desk.state.trigger_relayout();
+                    assert!(
+                        desk.placed(kept).size.w > half.size.w,
+                        "{before:?}: the tree still divides the screen with a window that is \
+                         gone: {:?}",
+                        desk.placed(kept)
+                    );
+                }
+            }
+
+            /// **A client slower to quit than the grace period moves the layout
+            /// three times.** Not a fault this suite can fix and not one it
+            /// hides: the compositor cannot tell a client that is still quitting
+            /// from one that has decided to stay, so at the grace deadline the
+            /// window is given back, and it goes when the client finally does.
+            /// A layout that closes up at once therefore grows the neighbour at
+            /// the press, shrinks it when `refused` puts the window back, and
+            /// grows it again at `close`. `reflow_on_close = "when_gone"` is the
+            /// setting that moves it once; `config.lua` says so.
+            #[test]
+            fn a_client_slower_than_the_grace_period_moves_the_layout_three_times() {
+                let mut desk = Desk::new();
+                let (_, _, kept) = desk.open();
+                let (_, toplevel, slow) = desk.open();
+                desk.arrange("tiling", "");
+                let half = desk.placed(kept);
+
+                desk.state.close_pane(slow);
+                let grown = desk.placed(kept);
+                desk.ask();
+                desk.refuse();
+                let back = desk.placed(kept);
+                toplevel.destroy();
+                desk.pump();
+                let gone = desk.placed(kept);
+
+                let id = slow.get();
+                assert_eq!(
+                    desk.events(),
+                    format!("closing {id}*,refused {id},close {id}*")
+                );
+                assert!(
+                    grown.size.w > half.size.w && back == half && gone.size.w > half.size.w,
+                    "the neighbour was {half:?}, {grown:?} at the press, {back:?} at the \
+                     refusal and {gone:?} once the client went"
                 );
             }
         }

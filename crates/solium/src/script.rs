@@ -143,7 +143,9 @@ pub(crate) struct WindowInfo {
     /// `close`'s own snapshot, where the window that went is still listed so a
     /// script can ask which one it was -- whether or not it was ever
     /// `closing`, because a client that quits by itself goes straight to
-    /// `close`. See `Solium::snapshot`.
+    /// `close`. In no snapshot after that one: the pane waits for the end of
+    /// the frame to be retired, and nothing may lay it out meanwhile. See
+    /// `Solium::snapshot`.
     ///
     /// For a layout that works from this list rather than from a structure of
     /// its own: a leaving window is fading where it stands, and a slot kept
@@ -7034,6 +7036,220 @@ mod dialogs {
                 order, "4,1,2,3",
                 "the strip is [4] [1 over 2] [3], and read as {order}"
             );
+        }
+
+        /// Everything a layout holds, as text: every tree's or strip's
+        /// arrangement of one screen, in key order, and for a strip which
+        /// column it has focused. What a test compares to say a layout was
+        /// left exactly as it was, since a layout that is not in charge places
+        /// nothing and its commands say nothing.
+        fn structure(scripts: &Scripts, layout: &str) -> String {
+            let (table, extra) = if layout == "tiling" {
+                ("trees", "")
+            } else {
+                ("views", " .. \" focus=\" .. tostring(each:focused())")
+            };
+            scripts.evaluate(&format!(
+                "local layout = require({layout:?})\n\
+                 local keys = {{}}\n\
+                 for key in pairs(layout.{table}) do keys[#keys + 1] = key end\n\
+                 table.sort(keys)\n\
+                 local area = {{ x = 0, y = 0, w = 2560, h = 1440, gap = 12, split = 0.5 }}\n\
+                 local out = {{}}\n\
+                 for _, key in ipairs(keys) do\n\
+                     local each = layout.{table}[key]\n\
+                     local slots = {{}}\n\
+                     for _, slot in ipairs(each:layout(area)) do\n\
+                         slots[#slots + 1] = string.format(\"%d@%.0f,%.0f,%.0fx%.0f\",\n\
+                             slot.id, slot.x, slot.y, slot.w, slot.h)\n\
+                     end\n\
+                     out[#out + 1] = key .. \"=\" .. table.concat(slots, \" \"){extra}\n\
+                 end\n\
+                 return table.concat(out, \" | \")"
+            ))
+        }
+
+        /// Three windows opened while `layout` is not in charge, which is
+        /// every session's start: floating is the default mode. Each layout
+        /// hears `open` whether it is in charge or not and keeps the window in
+        /// its structure, so there is something there to be disturbed.
+        fn opened_while_floating(scripts: &mut Scripts) -> Vec<WindowInfo> {
+            let windows: Vec<WindowInfo> = (1..=3_u32)
+                .map(|n| {
+                    let mut each = window(u64::from(n), 700.0, 500.0);
+                    each.rect.x = f64::from(n) * 300.0;
+                    each.rect.y = f64::from(n) * 150.0;
+                    each
+                })
+                .collect();
+            for count in 1..=windows.len() {
+                let id = windows[count - 1].id;
+                let _ = scripts.opened(id, snapshot(windows[..count].to_vec()));
+            }
+            windows
+        }
+
+        fn leaving(windows: &[WindowInfo], ids: &[u64]) -> Vec<WindowInfo> {
+            windows
+                .iter()
+                .cloned()
+                .map(|window| WindowInfo {
+                    leaving: ids.contains(&window.id),
+                    ..window
+                })
+                .collect()
+        }
+
+        /// **A layout that is not in charge is left exactly as it was by a
+        /// close and its refusal.**
+        ///
+        /// Floating is the default mode, and both layouts listen all the same.
+        /// `closing` used to take the window out of a tree or strip nobody was
+        /// using and record where it stood in some other mode's geometry, and
+        /// `refused` put it back from that: at the configured split rather
+        /// than its old one, or with the inactive strip's focus moved onto it
+        /// -- which `scrolling.started` then hands the keyboard to when the
+        /// user switches to it. Whichever layout the user had set to
+        /// `"when_gone"`, the other still did it.
+        #[test]
+        fn a_layout_not_in_charge_is_left_as_it_was_by_a_refused_close() {
+            for (layout, _) in LAYOUTS {
+                let (mut scripts, _) = layout_with(layout, "");
+                let windows = opened_while_floating(&mut scripts);
+                let before = structure(&scripts, layout);
+                assert!(
+                    before.contains("2@"),
+                    "{layout}: the premise is a structure holding the window: {before}"
+                );
+
+                let told = scripts.closing(2, snapshot(leaving(&windows, &[2])));
+                assert!(
+                    placed(&told.commands).is_empty(),
+                    "{layout}: a layout not in charge placed something: {:?}",
+                    told.commands
+                );
+                assert_eq!(
+                    structure(&scripts, layout),
+                    before,
+                    "{layout}: `closing` rearranged a layout that is not in charge"
+                );
+                let _ = scripts.refused(2, snapshot(windows.clone()));
+                assert_eq!(
+                    structure(&scripts, layout),
+                    before,
+                    "{layout}: `refused` rearranged a layout that is not in charge"
+                );
+
+                // And a window it never held -- one open before the scripts
+                // were -- is not put into it by a refusal either.
+                let mut more = windows.clone();
+                more.push(window(4, 700.0, 500.0));
+                let _ = scripts.closing(4, snapshot(leaving(&more, &[4])));
+                let _ = scripts.refused(4, snapshot(more));
+                assert_eq!(
+                    structure(&scripts, layout),
+                    before,
+                    "{layout}: `refused` put a window into a layout that is not in charge"
+                );
+            }
+        }
+
+        /// **Switched on during a close, a layout still puts a refused window
+        /// back.** Not in charge at `closing`, it took nothing out -- but
+        /// `adopt`, when the user switches to it, leaves a window being closed
+        /// out of the arrangement, so `refused` has to put back a window it did
+        /// not itself take out. The rule is "missing from a layout that is in
+        /// charge", not only "taken out by `closing`".
+        #[test]
+        fn a_layout_switched_on_during_a_close_puts_the_refused_window_back() {
+            for (layout, key) in LAYOUTS {
+                let (mut scripts, _) = layout_with(layout, "");
+                let windows = opened_while_floating(&mut scripts);
+                let _ = scripts.closing(3, snapshot(leaving(&windows, &[3])));
+                let on = placed(&scripts.key(key, snapshot(leaving(&windows, &[3]))).commands);
+                assert!(
+                    on.contains_key(&1) && !on.contains_key(&3),
+                    "{layout}: switched on during the close, the layout placed the window being \
+                     closed, or nothing: {on:?}"
+                );
+                let back = placed(&scripts.refused(3, snapshot(windows.clone())).commands);
+                assert!(
+                    back.contains_key(&3),
+                    "{layout}: the refused window was left out of the arrangement: {back:?}"
+                );
+            }
+        }
+
+        /// **A refused window goes back whatever the setting says now.**
+        ///
+        /// The setting is read at each event, so a script can change it while
+        /// the session runs -- including between a `closing` that took the
+        /// window out and the `refused` that has to put it back. `refused`
+        /// decided from the setting as it was then, and returned: a live
+        /// window, out of every tree and strip, drawn over the neighbour that
+        /// had grown into its space until some later event rebuilt the layout.
+        #[test]
+        fn a_refused_window_goes_back_whatever_the_setting_says_now() {
+            for (layout, _) in LAYOUTS {
+                let (mut scripts, _) = layout_with(layout, "");
+                let before = arranged(&mut scripts, layout);
+                let closed = placed(&scripts.closing(3, desk(&before, &[1, 2, 3], &[3])).commands);
+                assert!(
+                    !closed.is_empty() && !closed.contains_key(&3),
+                    "{layout}: the premise is a layout that closed up at once: {closed:?}"
+                );
+                let _ = scripts.evaluate(&format!("{}\nreturn \"\"", when_gone(layout)));
+                let mut now = before.clone();
+                now.extend(closed);
+                let back = placed(&scripts.refused(3, desk(&now, &[1, 2, 3], &[])).commands);
+                assert!(
+                    back.contains_key(&3),
+                    "{layout}: the setting changed during the close and the refused window was \
+                     left out of the arrangement: {back:?}"
+                );
+            }
+        }
+
+        /// **A refused window goes back onto the screen it is on now.**
+        ///
+        /// A monitor can go during the grace period. Its windows are on one
+        /// that is still there, `monitors` is announced, and `adopt` re-homes
+        /// them -- except the one being closed, which it leaves out on purpose.
+        /// `refused` then put that one back into the tree or strip it had been
+        /// in, which is keyed by a monitor that no longer exists and which
+        /// `apply` never walks: a window on screen that nothing lays out.
+        #[test]
+        fn a_refused_window_goes_back_onto_the_screen_it_is_on_now() {
+            for (layout, _) in LAYOUTS {
+                let (mut scripts, _) = layout_with(layout, "");
+                let before = arranged(&mut scripts, layout);
+                let _ = scripts.closing(3, desk(&before, &[1, 2, 3], &[3]));
+
+                let moved = |leaving: bool| {
+                    snapshot_on(
+                        vec![second_monitor()],
+                        (1..=3)
+                            .map(|id| WindowInfo {
+                                leaving: leaving && id == 3,
+                                ..on(&second_monitor(), window(id, 800.0, 600.0))
+                            })
+                            .collect(),
+                    )
+                };
+                let adopted = adopt(&mut scripts, moved(true));
+                assert!(
+                    adopted.contains_key(&1) && !adopted.contains_key(&3),
+                    "{layout}: the premise is the other windows re-homed onto the screen that is \
+                     left, without the window being closed: {adopted:?}"
+                );
+
+                let back = placed(&scripts.refused(3, moved(false)).commands);
+                assert!(
+                    back.get(&3).is_some_and(|rect| rect.x >= BESIDE.x),
+                    "{layout}: the refused window was not put back onto the screen it is on: \
+                     {back:?}"
+                );
+            }
         }
     }
 }
