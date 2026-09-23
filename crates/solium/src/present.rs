@@ -542,6 +542,33 @@ fn with_slot<T>(pane: &Pane, f: impl FnOnce(&mut Option<Transform<Frame>>) -> T)
     }
 }
 
+/// Leave a pane's transform slot borrowed, so every write to it declines from
+/// here on.
+///
+/// **The only way to reach the `Err` arm above from a test**, and the reason it
+/// exists at all. Every writer in this module answers "declined" by doing
+/// nothing, which from the compositor's own side is indistinguishable from
+/// having done the work — so the recovery a caller owes a declined write is
+/// exactly the kind of claim that survives review by never being exercised.
+/// Issue #127's review findings 5 and 3 are that claim, made twice. A test that
+/// wants the decline has to create the one condition that produces it, and the
+/// slot is deliberately opaque outside this module.
+///
+/// **`mem::forget` and not a returned guard, which is not a shortcut.** A
+/// `RefMut` borrows the `Pane`, and therefore the whole `Solium` it lives in —
+/// so a test could not hold one across the `&mut self` call it wants to see
+/// decline, which is every call worth testing. Leaking the borrow token moves
+/// the jam into the `RefCell` itself and leaves no Rust borrow behind. It is
+/// one-way: nothing un-jams a slot, and a test that needs the slot back should
+/// open another pane.
+///
+/// `borrow_mut` and not `try_borrow_mut`: a test that silently failed to take
+/// the borrow would assert the ordinary path under the name of the hard one.
+#[cfg(test)]
+pub(crate) fn jam_slot(pane: &Pane) {
+    std::mem::forget(pane.drawn().transform.borrow_mut());
+}
+
 /// Draw `pane` at `to`, animating from wherever it is being drawn right now.
 ///
 /// Animating from the *current* frame rather than from real geometry is what
