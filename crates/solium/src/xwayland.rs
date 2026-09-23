@@ -330,11 +330,23 @@ impl XwmHandler for Solium {
         // precede. Without this an XWayland application's unsaved-changes
         // prompt floated over a 1.19 s hole where its own document had been.
         //
-        // The managed branch only. A window that places itself is a menu, a
-        // tooltip or a splash, and one of those appearing over a window that is
-        // closing says nothing about whether the close was refused -- it is not
-        // the answer to anything. `Dialog` is deliberately not in
-        // `places_itself` (see #72), so the windows this is about come here.
+        // A window that places itself is a menu, a tooltip or a splash, and one
+        // of those appearing over a window that is closing says nothing about
+        // whether the close was refused -- it is not the answer to anything.
+        // `Dialog` is deliberately not in `places_itself` (see #72), so the
+        // windows this is about come here.
+        //
+        // **That rule is kept in `refused_with_a_dialog`'s own body and not
+        // here**, which is the correction #127's third review made. It stood at
+        // this one call site, with the reasoning attached to it, and the second
+        // X11 hook added in the same round -- `property_notify` for
+        // `TransientFor` -- did not repeat it: an X11 tooltip that named its
+        // parent *after* mapping cancelled that parent's close. The gate asks
+        // `Pane::managed`, which is exactly what `take_unmanaged_pane` sets and
+        // therefore the one fact all three of a menu, an override-redirect
+        // window and a splash already share. Being on the managed branch here
+        // makes this call a no-op through the gate rather than a caller that
+        // remembered.
         self.refused_with_a_dialog(&element);
     }
 
@@ -381,6 +393,13 @@ impl XwmHandler for Solium {
             // mutably. Not in the space means not mapped, and a window that has
             // not appeared cannot be an answer to anything yet;
             // `map_window_request` will read the property it is carrying.
+            //
+            // **Every kind of X11 window reaches this**, which is what makes
+            // the gate's placement matter: menus, tooltips, splashes and
+            // override-redirect windows are all in `self.space` and all receive
+            // `PROPERTY_CHANGE`, and any of them may set `WM_TRANSIENT_FOR`
+            // after mapping. `refused_with_a_dialog` asks `Pane::managed` in its
+            // own body, so none of them can cancel a close from here.
             let child = self
                 .space
                 .elements()

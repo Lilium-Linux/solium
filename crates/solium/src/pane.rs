@@ -223,6 +223,23 @@ pub(crate) struct Pane {
     /// window has either gone or been brought back. See
     /// `Solium::settle_refused`.
     asked_at: Option<Duration>,
+    /// Whether this close has already been answered, and the window is owed its
+    /// place back.
+    ///
+    /// Set by `Solium::refused_with_a_dialog` and cleared by
+    /// `Solium::give_back` on the frame the give-back actually takes. It exists
+    /// because a give-back can *decline*: `present::clear` goes through
+    /// `with_slot`, which answers `None` rather than panicking when the
+    /// transform slot is already borrowed, and on such a frame nothing is
+    /// retired. `settle_refused` cannot retry a pane that is still inside
+    /// `CLOSING`, where `asked_at` is `None` by definition — so without this
+    /// the declined give-back was simply dropped and `settle_closing` went on
+    /// to close the parent out from under its own dialog.
+    ///
+    /// A fact about the close rather than an instant, because there is no
+    /// deadline in it: the retry is "every frame until the slot is free", which
+    /// is what a busy slot costs everywhere else.
+    answered: bool,
     opened: Duration,
     /// Whether a client mapped *into* this pane rather than creating it.
     ///
@@ -297,6 +314,7 @@ impl Pane {
             frame: Frame::Pending,
             closing_at: None,
             asked_at: None,
+            answered: false,
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -320,6 +338,7 @@ impl Pane {
             frame: Frame::Pending,
             closing_at: None,
             asked_at: None,
+            answered: false,
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -452,6 +471,23 @@ impl Pane {
     /// Stop waiting on an answer that was never going to come in words.
     pub(crate) const fn forget_asked(&mut self) {
         self.asked_at = None;
+    }
+
+    /// Whether this close has been answered and the window is owed its place
+    /// back. See the field.
+    pub(crate) const fn answered(&self) -> bool {
+        self.answered
+    }
+
+    /// The client answered this close in as many words, by putting a window on
+    /// screen. The give-back is owed from here until it is taken.
+    pub(crate) const fn mark_answered(&mut self) {
+        self.answered = true;
+    }
+
+    /// The give-back took. Nothing is owed.
+    pub(crate) const fn settled_answer(&mut self) {
+        self.answered = false;
     }
 
     /// Whether this pane is on its way off the screen.
