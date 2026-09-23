@@ -46,7 +46,11 @@ is centred must not be cut to the size it was centred at. `sol.unplace` is for
 a layout letting go, and `modes.use` sends it for every window whenever the
 layout in charge changes — so a mode registered through `modes` gets it for
 free, and one that is not must send it itself. Maximising and fullscreen take a
-window out of its tile on their own, and the way back puts it in again.
+window out of its tile on their own, and the way back puts it in again — but
+only until your layout next places it. A script cannot see that a window is
+maximised, so a layout that places every window on every pass (as
+`tiling.apply` does) puts a maximised one back in its tile and resizes it
+there.
 
 `present` is a transform. The window still lives where it lived and the client
 never learns anything happened; it is simply drawn somewhere else. Use it for

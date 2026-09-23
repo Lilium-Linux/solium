@@ -4184,4 +4184,88 @@ mod tests {
             );
         });
     }
+
+    /// **#133: a narrow tile hides a titlebar's pieces rather than squeezing
+    /// them**, in every shipped style that has buttons.
+    ///
+    /// Below the width a piece needs, the title was given a width of nothing
+    /// and still drawn, and a button `Row` that never hid ran off the frame's
+    /// left edge. Each style now says how much room each piece has -- close
+    /// needs 13px, `Theme.margin` either side, 37px; maximise another
+    /// `Theme.gap` and 13px, 59px; the title 24px of its own beyond what the
+    /// file already held back for the buttons -- and binds the piece's
+    /// `visible` to it. `left` runs its bar down the window, so there it is
+    /// the height that runs out.
+    ///
+    /// Read off the real files, built through the real `style::load` and
+    /// `Decoration::from_style`, at each threshold and one pixel under it.
+    /// The last assertion is about the source text, and says only that each
+    /// piece is bound to its property: an item's `visible` is not a property
+    /// of the scene's root, and the root is all the host can read.
+    #[test]
+    fn a_narrow_tile_hides_the_titlebars_pieces_in_every_shipped_style() {
+        // The style, whether its bar runs across the window, and the extent
+        // along the bar below which the title goes.
+        const STYLES: [(&str, bool, i32); 6] = [
+            ("top", true, 174),
+            ("bottom", true, 174),
+            ("pulse", true, 174),
+            ("reactive", true, 144),
+            ("reveal", true, 164),
+            ("left", false, 144),
+        ];
+        on_the_qt_thread(|| {
+            if crate::qml::on_gpu() {
+                // Built at 1x1 on the GPU path, so the root is not the size
+                // asked for until a draw rebinds it; see `LayerScene::build`.
+                return;
+            }
+            let shipped = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes"));
+            for (name, across, title) in STYLES {
+                let dir = shipped.join(name);
+                let style = crate::style::load(&dir).expect("a shipped style loads");
+                // [title, maximise, close] for a pane `extent` long along its
+                // bar and 400 the other way.
+                let room = |extent: i32| {
+                    let (w, h) = if across { (extent, 400) } else { (400, extent) };
+                    let decoration = Decoration::from_style(
+                        &style,
+                        w - style.insets.horizontal(),
+                        h - style.insets.vertical(),
+                    )
+                    .expect("the style builds");
+                    let scene = &decoration.layers[0].scene;
+                    [
+                        scene.get_bool("roomForTitle"),
+                        scene.get_bool("roomForMaximize"),
+                        scene.get_bool("roomForClose"),
+                    ]
+                };
+                for (extent, expected) in [
+                    (400, [true, true, true]),
+                    (title, [true, true, true]),
+                    (title - 1, [false, true, true]),
+                    (59, [false, true, true]),
+                    (58, [false, false, true]),
+                    (37, [false, false, true]),
+                    (36, [false, false, false]),
+                ] {
+                    assert_eq!(
+                        room(extent),
+                        expected,
+                        "{name} at {extent}: room for [title, maximise, close]"
+                    );
+                }
+
+                let source =
+                    std::fs::read_to_string(dir.join("Frame.qml")).expect("the style's frame");
+                assert!(
+                    source.contains("visible: frame.roomForTitle")
+                        && source.contains("frame.roomForMaximize")
+                        && source.contains("frame.roomForClose"),
+                    "{name}: a piece is no longer bound to the room it has"
+                );
+            }
+        });
+    }
 }

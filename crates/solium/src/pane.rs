@@ -210,13 +210,22 @@ pub(crate) struct Pane {
     /// the layout's answer back, and a drag begun in between starts from a
     /// rectangle the window really is at, which is the right answer anyway. A
     /// rescue keeps a pane's standing as it found it: a tiled pane is still
-    /// tiled at the rectangle it was rescued to, and a floating one is still
-    /// floating.
+    /// tiled at the rectangle it was rescued to
+    /// (`a_tiled_window_brought_back_onto_a_screen_is_still_tiled`), and a
+    /// floating one is still floating
+    /// (`a_floating_window_brought_back_onto_a_screen_is_not_given_a_tile`).
     ///
     /// `None` for a pane no layout holds in a tile — a floating window, a
-    /// dialog a layout centres over its parent, a maximised or fullscreen
-    /// window, or one in the frames between mapping and the first sweep —
-    /// where the pane's own rectangle is the only answer there is.
+    /// dialog a layout centres over its parent, or one in the frames between
+    /// mapping and the first sweep — where the pane's own rectangle is the
+    /// only answer there is. **And for a maximised or fullscreen window only
+    /// until the next sweep:** `tiling.apply` places every leaf of its trees,
+    /// a script cannot see that a window is maximised, and a maximise takes no
+    /// window out of its tree -- so a relayout while one is maximised, which
+    /// `unfullscreen_request` and a layer surface arriving each cause, puts it
+    /// back here and `move_pane` configures it into the tile. That configure
+    /// is what stage did as well; it is read from `tiling.lua` and `move_pane`,
+    /// and no test pins it.
     placed: Option<Rectangle<i32, Logical>>,
     /// The tile this pane left when it was maximised or sent fullscreen, kept
     /// for the way back to put it in again.
@@ -490,6 +499,27 @@ impl Pane {
     pub(crate) const fn untile(&mut self) {
         self.placed = None;
         self.left_tile = None;
+    }
+
+    /// The tile this pane is waiting to go back into, while it is maximised or
+    /// fullscreen. See [`Self::left_tile`]; read by `Solium::pane_laid_out`,
+    /// for a drag on the maximised window, and by `Solium::rescue_offscreen`.
+    pub(crate) const fn left_tile(&self) -> Option<Rectangle<i32, Logical>> {
+        self.left_tile
+    }
+
+    /// Move the tile this pane is waiting to go back into, if it is waiting
+    /// for one.
+    ///
+    /// For `Solium::rescue_offscreen`, which drags a maximised window off a
+    /// monitor that went away: the tile it left was on that monitor too, and
+    /// a restore before the next sweep would put it back there -- where
+    /// `Solium::pane_laid_out` would start a drag from, on no screen at all.
+    /// `a_maximised_window_brought_back_onto_a_screen_brings_its_tile` pins it.
+    pub(crate) const fn move_left_tile(&mut self, to: Rectangle<i32, Logical>) {
+        if self.left_tile.is_some() {
+            self.left_tile = Some(to);
+        }
     }
 
     /// Where this window goes back to, if a maximise or a fullscreen kept

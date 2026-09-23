@@ -200,8 +200,8 @@ pub(crate) enum Fill {
     /// resampling is close to free of artefacts anyway. See [`factor`].
     ///
     /// **Since #133 there is a clip, and this does not use it yet.**
-    /// `render::fit` cuts a *settled* tiled client to its tile, and
-    /// `Solium::tile_of` answers `None` under a hold, so a held pane is drawn
+    /// `render::fit` cuts a tiled client to the rectangle its frame pictures,
+    /// and `Solium::tile_of` answers `None` under a hold, so a held pane is drawn
     /// exactly as this describes. Holding a shrinking buffer at 1.0 inside that
     /// cut is #125's change and not #133's.
     Hold,
