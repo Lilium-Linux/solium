@@ -377,6 +377,12 @@ does Alt+Shift, because `grp:` options are implemented inside the keymap and
 work without the compositor being involved — the binding exists so that the
 feature is discoverable from `solium --check` rather than from knowing xkb.
 
+Bindings follow the key, not the layout. With a Cyrillic layout active,
+`super+q` is still the key `us` has Q on, and so is `super+shift+k`. A binding
+you write in the other alphabet, such as `super+Cyrillic_shorti`, gets that key
+first. A key the active layout already labels in ASCII keeps its own name:
+Russian puts `.` where `us` has `/`, so on Russian that key is `super+period`.
+
 `variant` takes one per layout in the same order, blank for plain:
 `layout = "us,ua", variant = ",dvorak"` is ordinary US and Ukrainian Dvorak.
 `options` also carries `compose:ralt`, which is the nearest thing to an input
