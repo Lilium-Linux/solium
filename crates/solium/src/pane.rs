@@ -250,6 +250,23 @@ pub(crate) struct Pane {
     /// window has either gone or been brought back. See
     /// `Solium::settle_refused`.
     asked_at: Option<Duration>,
+    /// Whether this close has already been answered, and the window is owed its
+    /// place back.
+    ///
+    /// Set by `Solium::refused_with_a_dialog` and cleared by
+    /// `Solium::give_back` on the frame the give-back actually takes. It exists
+    /// because a give-back can *decline*: `present::clear` goes through
+    /// `with_slot`, which answers `None` rather than panicking when the
+    /// transform slot is already borrowed, and on such a frame nothing is
+    /// retired. `settle_refused` cannot retry a pane that is still inside
+    /// `CLOSING`, where `asked_at` is `None` by definition — so without this
+    /// the declined give-back was simply dropped and `settle_closing` went on
+    /// to close the parent out from under its own dialog.
+    ///
+    /// A fact about the close rather than an instant, because there is no
+    /// deadline in it: the retry is "every frame until the slot is free", which
+    /// is what a busy slot costs everywhere else.
+    answered: bool,
     opened: Duration,
     /// Whether a client mapped *into* this pane rather than creating it.
     ///
@@ -325,6 +342,7 @@ impl Pane {
             frame: Frame::Pending,
             closing_at: None,
             asked_at: None,
+            answered: false,
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -349,6 +367,7 @@ impl Pane {
             frame: Frame::Pending,
             closing_at: None,
             asked_at: None,
+            answered: false,
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -498,6 +517,79 @@ impl Pane {
     /// Stop waiting on an answer that was never going to come in words.
     pub(crate) const fn forget_asked(&mut self) {
         self.asked_at = None;
+    }
+
+    /// Whether this close has been answered and the window is owed its place
+    /// back. See the field.
+    pub(crate) const fn answered(&self) -> bool {
+        self.answered
+    }
+
+    /// The client answered this close in as many words, by putting a window on
+    /// screen. The give-back is owed from here until it is taken.
+    pub(crate) const fn mark_answered(&mut self) {
+        self.answered = true;
+    }
+
+    /// The give-back took. Nothing is owed.
+    pub(crate) const fn settled_answer(&mut self) {
+        self.answered = false;
+    }
+
+    /// Whether this pane is on its way off the screen.
+    ///
+    /// **One question with one answer, because asking half of it is issue
+    /// #127.** "On its way out" spans three states and the two callers that
+    /// have to know — `Solium::close_pane`, which must not start a second
+    /// close, and `Solium::move_pane`, which must not overwrite the transform
+    /// that is playing one — each used to ask a different, narrower question.
+    /// `close_pane` asked `closing_at().is_some()`, which is false for the
+    /// whole of the grace period after the request has gone out, so a second
+    /// `super+q` restarted an invisible animation and asked the client to close
+    /// a second time. `move_pane` asked nothing at all, and put a dying window
+    /// back at full opacity.
+    ///
+    /// The three states, in the order a window passes through them:
+    ///
+    /// 1. `closing_at` — the leaving animation is playing and the request has
+    ///    not gone out yet. 190 ms.
+    /// 2. `asked_at` — the request has gone out and the client has not
+    ///    answered. The window is held invisible for as long as this lasts, so
+    ///    it is *more* in need of the guard than (1), not less: there is
+    ///    nothing on screen for a second press to have been aimed at.
+    /// 3. [`Content::Leaving`] — the client has gone and the pane is still
+    ///    being drawn. Nothing constructs this today; it is issue #126's state.
+    ///
+    /// **What the third arm is and is not.** It is here so that this predicate
+    /// is total over `Content` and cannot answer "not leaving" for a variant
+    /// whose name is `Leaving` — nothing more than that. It is *not* the
+    /// #126-shaped case being handled in advance, and the first draft of this
+    /// comment said it was: "the relayout #126 will put on a still-drawn pane
+    /// is already covered". That was the same promise-in-a-comment that kept
+    /// #126 itself unfiled behind a note about an animation nothing could play,
+    /// and it is worth less than nothing, because the next reader trusts it.
+    ///
+    /// What is actually true is that **the first `Content::Leaving` pane anyone
+    /// constructs will never go away.** Three separate places keep it alive, and
+    /// #126 has to answer all three:
+    ///
+    /// * `Panes::sync` retains exactly the panes whose `client()` is `None`,
+    ///   which is how a still-loading pane survives a sweep — and a `Leaving`
+    ///   pane's `client()` is `None` too, so it is retained by the same line
+    ///   with nothing to ever drop it.
+    /// * [`Self::expired`] only answers for [`Self::is_loading`], so the
+    ///   patience timeout that retires an application that never arrived does
+    ///   not look at this state at all.
+    /// * `Solium::close_pane` declines any pane that is `leaving()` — this
+    ///   function — so it cannot be closed by hand either.
+    ///
+    /// So #126 owes this state a retirement: something that ends the animation
+    /// and drops the pane. Until then the arm is correct and unreachable, which
+    /// is the only combination worth writing down.
+    pub(crate) const fn leaving(&self) -> bool {
+        self.closing_at.is_some()
+            || self.asked_at.is_some()
+            || matches!(self.content, Content::Leaving { .. })
     }
 
     /// The client's window, if one has arrived.
@@ -814,8 +906,22 @@ impl Panes {
         }
 
         // A pane still waiting for a client stays, and rides on top, where a
-        // window just asked for belongs. One whose client has gone is retired
-        // here; step 5 is where it lingers to animate out instead of vanishing.
+        // window just asked for belongs.
+        //
+        // **One whose client has gone is dropped here, and vanishes.** Nothing
+        // in the compositor constructs `Content::Leaving` -- `Pane::leave` has
+        // no production caller -- so there is no state in which a pane outlives
+        // its client, and the line below is where a window that closed itself
+        // stops being drawn: on the first `sync` after its surface went, with
+        // no animation. That is issue #126, and it is a design limit rather
+        // than an oversight: animating it means holding a texture for every
+        // window on the chance that it is the next to leave. This comment used
+        // to say step 5 was "where it lingers to animate out", in the present
+        // tense, describing an animation nothing could play -- which is how
+        // #126 went unfiled for as long as it did.
+        //
+        // The compositor's *own* closes do animate; they keep the client alive
+        // for the length of it and ask afterwards. See `Solium::close_pane`.
         ordered.extend(
             held.into_iter()
                 .flatten()

@@ -45,7 +45,7 @@
 //! The last of those still holds if everything above it is someday wrong.
 
 use smithay::{
-    desktop::{PopupUngrabStrategy, Window},
+    desktop::{PopupUngrabStrategy, Window, find_popup_root_surface},
     input::keyboard::KeyboardGrab,
     reexports::wayland_server::{Resource, protocol::wl_surface::WlSurface},
     utils::{SERIAL_COUNTER, Serial},
@@ -182,6 +182,58 @@ impl Solium {
         }
         if let Some(pointer) = self.seat.get_pointer()
             && pointer.is_grabbed()
+        {
+            let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
+            pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+        }
+    }
+
+    /// [`Self::release_grabs`] for one window: dismiss the menus `window` has
+    /// open, and take their grabs off both devices.
+    ///
+    /// For a window that is going and taking the keyboard with it. A menu's
+    /// keyboard grab ignores every `set_focus` until its chain ends, and
+    /// [`Self::focused_window`] answers for a menu with the window it belongs
+    /// to, so giving the keyboard to nothing did nothing: a window closed with
+    /// a menu open kept the keyboard on that menu, and every key typed after
+    /// the close went to it, for the whole of the close's grace period.
+    /// `a_close_with_a_menu_open_takes_the_keyboard_off_the_menu` is the case.
+    ///
+    /// The order is `release_grabs`'s, keyboard before pointer, for its reason.
+    /// A grab is taken off only if its serial is the menu's: a device grabbed
+    /// by something else, a drag of another window, is not this window's to
+    /// end.
+    pub(crate) fn release_grabs_of(&mut self, window: &Window) {
+        let Some(root) = window.wl_surface() else {
+            return;
+        };
+        let Some(grab) = self.popup_grab.as_ref() else {
+            return;
+        };
+        // The chain's topmost menu, or its root once no menu is left.
+        let ours = !grab.has_ended()
+            && grab.current_grab().is_some_and(|top| {
+                top == *root
+                    || self
+                        .popups
+                        .find_popup(&top)
+                        .and_then(|popup| find_popup_root_surface(&popup).ok())
+                        .is_some_and(|found| found == *root)
+            });
+        if !ours {
+            return;
+        }
+        let serial = grab.serial();
+        if let Some(mut grab) = self.popup_grab.take() {
+            grab.ungrab(PopupUngrabStrategy::All);
+        }
+        if let Some(keyboard) = self.seat.get_keyboard()
+            && keyboard.has_grab(serial)
+        {
+            keyboard.unset_grab(self);
+        }
+        if let Some(pointer) = self.seat.get_pointer()
+            && pointer.has_grab(serial)
         {
             let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
             pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
