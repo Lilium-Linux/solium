@@ -32,6 +32,7 @@ mod resizing;
 mod screencopy;
 mod script;
 mod scripted;
+mod single_pixel;
 mod state;
 mod style;
 mod surface;
