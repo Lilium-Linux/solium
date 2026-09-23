@@ -225,16 +225,11 @@ fn press(
     }
 
     // A press answers to two names, tried in order -- see
-    // `combos_for` for why both and why this order. `raw_syms` is
-    // the key at level 0 of its layout: the same handle and the same
-    // xkb lock `modified_sym` takes, which smithay does not hold while
-    // this filter runs. A key with more than one keysym at that level
-    // gets no second name, the rule `modified_sym` already applies to
-    // the first.
-    let raw = match handle.raw_syms().as_slice() {
-        [only] => Some(*only),
-        _ => None,
-    };
+    // `combos_for` for why both, why this order, and why the second is
+    // the key as a Latin layout names it rather than the active one.
+    // The same handle and the same xkb lock `modified_sym` takes, which
+    // smithay does not hold while this filter runs.
+    let raw = handle.raw_latin_sym_or_raw_current_sym();
     let combos = combos_for(modifiers, handle.modified_sym(), raw);
     let claimed = state.scripts.as_ref().and_then(|scripts| {
         combos
@@ -345,11 +340,11 @@ fn combo_for(modifiers: &ModifiersState, keysym: Keysym) -> String {
 /// So a press has two names. `modified` first, which is the only name it had
 /// before this and so the one every binding that already fired still fires
 /// under -- including one written for a layout where the symbol *is* the key,
-/// `super+shift+exclam` among them. Then `raw`, the key as its layout names it
-/// with no modifiers applied, which is the key a person pressed and the name a
-/// combination like `super+shift+1` spells. When the two come out the same
-/// string, as they do for a letter and for any key no held modifier moved off
-/// level 0, there is one name.
+/// `super+shift+exclam` among them. Then `raw`, the key as a Latin layout names
+/// it with no modifiers applied, which is the key a person pressed and the name
+/// a combination like `super+shift+1` spells. When the two come out the same
+/// string, as they do for a letter on a Latin layout and for any key no held
+/// modifier moved off level 0, there is one name.
 ///
 /// `raw` is level 0, which applies no modifiers at all, so it sheds AltGr as
 /// well as shift: on `de`, super+AltGr+7 is `super+braceleft` and then
@@ -358,9 +353,19 @@ fn combo_for(modifiers: &ModifiersState, keysym: Keysym) -> String {
 /// tell those two presses apart by the symbol, and the symbol is still tried
 /// first. `altgr_falls_back_to_the_key_it_is_held_on` pins both halves.
 ///
-/// Not the layout-agnostic lookup (`raw_latin_sym_or_raw_current_sym`): that
-/// would also rescue bindings under a non-Latin layout, which is a different
-/// change and one somebody should decide on.
+/// "A Latin layout" is smithay's `raw_latin_sym_or_raw_current_sym` (#132):
+/// level 0 of the active layout when that keysym is ASCII or no character at
+/// all -- a digit, `Return`, an arrow -- and otherwise level 0 of the first
+/// *other* layout in the keymap, in group order, that puts a printable ASCII
+/// character there. Without it, a `us,ru` keyboard on Russian sends `super+q`
+/// as `super+cyrillic_shorti` under both names, and every letter binding is
+/// dead until the layout is switched back. Only a non-ASCII key is looked up
+/// again, so a key the active layout already spells in ASCII keeps that
+/// spelling even where `us` has something else: on Russian the key `us` calls
+/// `slash` is `period`, so it fires `super+period` and not `super+slash`. And a
+/// binding written in the other alphabet still wins, because `modified` is
+/// tried first. `letters_fire_while_russian_is_active` and
+/// `a_binding_written_in_cyrillic_still_wins` pin these.
 pub(crate) fn combos_for(
     modifiers: &ModifiersState,
     modified: Keysym,
@@ -1491,16 +1496,31 @@ mod tests {
     /// What a real `Solium` does with `keys`, pressed in order and then let go
     /// in reverse, under `script` and the named xkb `layout`: the status the
     /// binding that fired left behind, or an empty string if none did.
+    fn status_after(name: &str, layout: &str, script: &str, keys: &[u32]) -> String {
+        with_keyboard(name, layout, 0, script, |state| chord(state, keys))
+    }
+
+    /// `run` against a real `Solium` with `script` loaded, the named xkb
+    /// `layout` compiled, and its layout group locked to `group` -- zero-based,
+    /// as xkb counts, so `1` on `us,ru` is Russian.
     ///
     /// The whole input path the hardware takes -- `keyboard`, smithay's own
     /// xkb state and its filter, `Scripts::has_binding`, `Solium::trigger` --
     /// with nothing standing in for any of it but the key events. The keymap
     /// is set rather than inherited, because `XkbConfig::default()` reads
     /// `XKB_DEFAULT_LAYOUT`, and a test whose answer depends on the layout of
-    /// whoever runs it answers nothing.
-    fn status_after(name: &str, layout: &str, script: &str, keys: &[u32]) -> String {
-        use smithay::backend::input::KeyState;
-        use smithay::input::keyboard::XkbConfig;
+    /// whoever runs it answers nothing. The group is locked the way
+    /// `sol.keyboard` locks it, through smithay's own `set_layout`, and read
+    /// back before `run` sees it: a lock that quietly did not take would leave
+    /// a test about Russian asking `us` instead, and passing.
+    fn with_keyboard<T>(
+        name: &str,
+        layout: &str,
+        group: u32,
+        script: &str,
+        run: impl FnOnce(&mut Solium) -> T,
+    ) -> T {
+        use smithay::input::keyboard::{Layout, XkbConfig};
 
         let directory = std::env::temp_dir().join(format!("solium-keys-{name}"));
         let _ = std::fs::remove_dir_all(&directory);
@@ -1523,9 +1543,31 @@ mod tests {
         let scripts = crate::script::Scripts::load(&config).expect("loading the test script");
         state.start_scripts(Some(scripts));
 
+        let active = keyboard.with_xkb_state(&mut state, |mut context| {
+            context.set_layout(Layout(group));
+            context
+                .xkb()
+                .lock()
+                .map(|xkb| xkb.active_layout().0)
+                .expect("reading the layout group back")
+        });
+        assert_eq!(
+            active, group,
+            "locking {layout:?} to group {group} did not take, so this would test \
+             another layout"
+        );
+        run(&mut state)
+    }
+
+    /// Presses `keys` in order and lets go in reverse, and hands back the
+    /// status the binding that fired left -- empty if none did -- clearing it,
+    /// so the next chord on the same `Solium` starts from nothing.
+    fn chord(state: &mut Solium, keys: &[u32]) -> String {
+        use smithay::backend::input::KeyState;
+
         for &code in keys {
             super::keyboard(
-                &mut state,
+                state,
                 Key {
                     code,
                     state: KeyState::Pressed,
@@ -1534,14 +1576,14 @@ mod tests {
         }
         for &code in keys.iter().rev() {
             super::keyboard(
-                &mut state,
+                state,
                 Key {
                     code,
                     state: KeyState::Released,
                 },
             );
         }
-        state.status.clone()
+        std::mem::take(&mut state.status)
     }
 
     /// **`super+shift+1` fires the binding spelled `super+shift+1`.** #121.
@@ -1663,12 +1705,277 @@ mod tests {
             combos_for(&shifted, Keysym::Q, Some(Keysym::q)),
             ["shift+super+q"]
         );
-        // A key with no single level-0 keysym has one name, and so does a
-        // level 0 with nothing on it.
+        // A key with nothing at level 0 has one name, whether that arrives
+        // as no keysym or as `NoSymbol`.
         assert_eq!(combos_for(&shifted, Keysym::Q, None), ["shift+super+q"]);
         assert_eq!(
             combos_for(&shifted, Keysym::Q, Some(Keysym::NoSymbol)),
             ["shift+super+q"]
+        );
+    }
+
+    /// The keys #132 is about, as xkb keycodes: evdev plus eight, the same
+    /// physical key on every layout. `SLASH` is the key `us` calls `slash`.
+    const RETURN: u32 = 36;
+    const G: u32 = 42;
+    const M: u32 = 58;
+    const S: u32 = 39;
+    const T: u32 = 28;
+    const D: u32 = 40;
+    const K: u32 = 45;
+    const DIGIT_3: u32 = 12;
+    const DIGIT_9: u32 = 18;
+    const BRACKET_RIGHT: u32 = 35;
+    const COMMA: u32 = 59;
+    const PERIOD: u32 = 60;
+    const SLASH: u32 = 61;
+
+    /// Every binding `russian_script` makes, and the keys that press it.
+    const RUSSIAN_CHORDS: &[(&str, &[u32])] = &[
+        ("super+q", &[SUPER, Q]),
+        ("super+return", &[SUPER, RETURN]),
+        ("super+g", &[SUPER, G]),
+        ("super+m", &[SUPER, M]),
+        ("super+s", &[SUPER, S]),
+        ("super+t", &[SUPER, T]),
+        ("super+shift+q", &[SUPER, SHIFT, Q]),
+        ("super+shift+d", &[SUPER, SHIFT, D]),
+        ("super+shift+k", &[SUPER, SHIFT, K]),
+        ("super+1", &[SUPER, DIGIT_1]),
+        ("super+9", &[SUPER, DIGIT_9]),
+        ("super+shift+1", &[SUPER, SHIFT, DIGIT_1]),
+        ("super+shift+3", &[SUPER, SHIFT, DIGIT_3]),
+        ("super+shift+9", &[SUPER, SHIFT, DIGIT_9]),
+        ("super+bracketleft", &[SUPER, BRACKET_LEFT]),
+        ("super+shift+bracketleft", &[SUPER, SHIFT, BRACKET_LEFT]),
+        ("super+shift+bracketright", &[SUPER, SHIFT, BRACKET_RIGHT]),
+        ("super+comma", &[SUPER, COMMA]),
+        ("super+period", &[SUPER, PERIOD]),
+    ];
+
+    /// `RUSSIAN_CHORDS`, each bound to put its own name in the status.
+    fn russian_script() -> String {
+        RUSSIAN_CHORDS
+            .iter()
+            .map(|(combo, _)| {
+                format!("sol.bind({combo:?}, function() sol.status({combo:?}) end)\n")
+            })
+            .collect()
+    }
+
+    /// **On `us,ru` with Russian active, a binding fires from the key its
+    /// Latin name is on.** #132.
+    ///
+    /// The second name a press answered to was level 0 of the *active* layout
+    /// -- the layout `modified` reads too -- so on Russian the Q key was
+    /// `cyrillic_shorti` under both names and every letter binding was dead
+    /// until the layout was switched back. The letters, `[`, `]`, `,` and `.`
+    /// are the keys Russian labels in Cyrillic, and they are what this caught.
+    /// The digits are here because Russian leaves them digits and shifts them
+    /// to its own symbols -- `numerosign` on 3 -- so they are the keys most
+    /// likely to be broken by a fix that got the letters right.
+    ///
+    /// The same chords on `us` alone and on `us,ru` with `us` active are the
+    /// half that must not move, and every failure is reported, not the first.
+    #[test]
+    fn letters_fire_while_russian_is_active() {
+        let script = russian_script();
+        let mut dead = Vec::new();
+        for (name, layout, group) in [
+            ("latin-us", "us", 0),
+            ("latin-us-ru", "us,ru", 0),
+            ("russian", "us,ru", 1),
+        ] {
+            with_keyboard(name, layout, group, &script, |state| {
+                for (combo, keys) in RUSSIAN_CHORDS {
+                    let fired = chord(state, keys);
+                    if fired != *combo {
+                        dead.push(format!("{layout} group {group}: {combo} fired {fired:?}"));
+                    }
+                }
+            });
+        }
+        assert!(
+            dead.is_empty(),
+            "each of these pressed the key its binding names and did not fire \
+             it: {dead:#?}"
+        );
+
+        // And the edge of it, pinned so nobody reads more into the fix than
+        // it does. A key the active layout already spells in ASCII keeps that
+        // spelling: Russian puts `period` where `us` has `slash`, so on
+        // Russian that key is `super+period` and not `super+slash`.
+        let slash = r#"
+            sol.bind("super+slash", function() sol.status("slash") end)
+            sol.bind("super+period", function() sol.status("period") end)
+        "#;
+        for (group, expected) in [(0, "slash"), (1, "period")] {
+            assert_eq!(
+                with_keyboard("slash", "us,ru", group, slash, |state| {
+                    chord(state, &[SUPER, SLASH])
+                }),
+                expected,
+                "on `us,ru` group {group}, the key `us` calls slash"
+            );
+        }
+    }
+
+    /// **A binding written in Cyrillic still wins on Russian.**
+    ///
+    /// `modified` is tried before the Latin name, so somebody who bound the
+    /// Russian letter keeps it and the Latin binding on the same key is only
+    /// the fallback. The last assertion is the direction the fallback does
+    /// not go: on `us`, the Q key is `q` and never `cyrillic_shorti`.
+    #[test]
+    fn a_binding_written_in_cyrillic_still_wins() {
+        let both = r#"
+            sol.bind("super+q", function() sol.status("latin") end)
+            sol.bind("super+Cyrillic_shorti", function() sol.status("cyrillic") end)
+        "#;
+        assert_eq!(
+            with_keyboard("cyrillic", "us,ru", 1, both, |state| chord(
+                state,
+                &[SUPER, Q]
+            )),
+            "cyrillic",
+            "on Russian the Q key is `cyrillic_shorti` first, and a binding on \
+             that takes the press"
+        );
+        assert_eq!(
+            with_keyboard("cyrillic-latin", "us,ru", 0, both, |state| {
+                chord(state, &[SUPER, Q])
+            }),
+            "latin",
+            "on `us` the same key is `q`"
+        );
+        let cyrillic =
+            r#"sol.bind("super+Cyrillic_shorti", function() sol.status("cyrillic") end)"#;
+        assert_eq!(
+            with_keyboard("cyrillic-only", "us,ru", 1, cyrillic, |state| {
+                chord(state, &[SUPER, Q])
+            }),
+            "cyrillic",
+            "a Cyrillic binding alone fires on Russian"
+        );
+        assert_eq!(
+            with_keyboard("cyrillic-only-latin", "us,ru", 0, cyrillic, |state| {
+                chord(state, &[SUPER, Q])
+            }),
+            "",
+            "the fallback is to a Latin name, not to every layout's"
+        );
+    }
+
+    /// **Every shipped binding fires on both halves of `us,ru`.** #132.
+    ///
+    /// `letters_fire_while_russian_is_active` asks about chords somebody
+    /// chose; this asks about the ones the compositor ships, read out of the
+    /// real `init.lua`, so a binding added later is asked about too. Each is
+    /// pressed on the key whose level 0 on `us` is the key it names, under
+    /// the modifiers it names, and must fire with either group active. The
+    /// scripts are loaded only for their list of combinations; what is
+    /// pressed is a script binding each one to its own name, because the
+    /// shipped handlers open terminals.
+    #[test]
+    fn every_shipped_binding_fires_on_both_groups_of_us_ru() {
+        use smithay::input::keyboard::xkb;
+
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+        let directory = std::env::temp_dir().join("solium-reachable-us-ru");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("creating the entry directory");
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\ndofile({shipped:?} .. \"/init.lua\")\n"
+            ),
+        )
+        .expect("writing the entry point");
+        let bound: Vec<String> = crate::script::Scripts::load(&entry)
+            .expect("loading the shipped init.lua")
+            .bindings()
+            .into_iter()
+            .map(|binding| binding.combo)
+            .collect();
+        for combo in [
+            "super+q",
+            "super+return",
+            "shift+super+1",
+            "shift+super+bracketleft",
+        ] {
+            assert!(
+                bound.iter().any(|bound| bound == combo),
+                "the shipped scripts no longer bind {combo:?}, so this checks less than \
+                 it says; they bind {bound:?}"
+            );
+        }
+
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let us = xkb::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            "us",
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .expect("no `us` keymap; xkb data is missing, so this proves nothing");
+        let key_on_us = |name: &str| {
+            (us.min_keycode().raw()..=us.max_keycode().raw()).find(|&code| {
+                us.key_get_syms_by_level(xkb::Keycode::new(code), 0, 0)
+                    .first()
+                    .is_some_and(|sym| xkb::keysym_get_name(*sym).eq_ignore_ascii_case(name))
+            })
+        };
+
+        let mut chords = Vec::new();
+        for combo in &bound {
+            let names: Vec<&str> = combo.split('+').collect();
+            let Some((key, held)) = names.split_last() else {
+                continue;
+            };
+            let mut keys: Vec<u32> = held
+                .iter()
+                .map(|modifier| match *modifier {
+                    "ctrl" => 37,
+                    "alt" => 64,
+                    "shift" => SHIFT,
+                    "super" => SUPER,
+                    other => panic!("the shipped {combo:?} holds {other:?}, which is no modifier"),
+                })
+                .collect();
+            keys.push(key_on_us(key).unwrap_or_else(|| {
+                panic!("the shipped {combo:?} names {key:?}, which is on no `us` key")
+            }));
+            chords.push((combo.clone(), keys));
+        }
+        let script: String = bound
+            .iter()
+            .map(|combo| format!("sol.bind({combo:?}, function() sol.status({combo:?}) end)\n"))
+            .collect();
+
+        let mut dead = Vec::new();
+        for group in [0, 1] {
+            with_keyboard(
+                &format!("shipped-{group}"),
+                "us,ru",
+                group,
+                &script,
+                |state| {
+                    for (combo, keys) in &chords {
+                        let fired = chord(state, keys);
+                        if fired != *combo {
+                            dead.push(format!("group {group}: {combo} fired {fired:?}"));
+                        }
+                    }
+                },
+            );
+        }
+        assert!(
+            dead.is_empty(),
+            "shipped bindings that do not fire from their own key on `us,ru`: {dead:#?}"
         );
     }
 }
