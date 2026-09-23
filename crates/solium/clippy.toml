@@ -1,0 +1,21 @@
+# Who may hold the keyboard is decided in one place, `src/focus.rs`, and these
+# are the calls that would decide it anywhere else. Each one is allowed inside
+# that file under an `#[expect]`, and denied everywhere else by the gate's
+# `-D warnings`.
+#
+# This is here because the rule used to be something every caller had to
+# remember. Four of them did not, and each one was a way for an application
+# behind the lock screen to take the keyboard -- and with it the password
+# typed at that lock screen. A rule that can be forgotten is a rule that will
+# be; a call that does not compile past the gate cannot be.
+#
+# The `#[expect]`s are the other half: if a path below ever stops resolving --
+# smithay renames a function, this file is moved -- the lint stops firing, the
+# expectation goes unfulfilled, and *that* fails the gate instead of the ban
+# quietly lapsing.
+disallowed-methods = [
+    { path = "smithay::input::keyboard::KeyboardHandle::set_focus", reason = "keyboard focus goes through `Solium::give_keyboard` (src/focus.rs), which refuses anything but a lock surface while the session is locked" },
+    { path = "smithay::input::keyboard::KeyboardHandle::set_grab", reason = "a keyboard grab decides where keys go regardless of focus; install one through `Solium::grab_keyboard` (src/focus.rs)" },
+    { path = "smithay::wayland::selection::data_device::set_data_device_focus", reason = "the clipboard follows the keyboard: `Solium::give_keyboard` (src/focus.rs) moves both" },
+    { path = "smithay::wayland::selection::primary_selection::set_primary_focus", reason = "the primary selection follows the keyboard: `Solium::give_keyboard` (src/focus.rs) moves both" },
+]

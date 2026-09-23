@@ -13,6 +13,7 @@ mod capture;
 mod cursor;
 mod decoration;
 mod dev;
+mod focus;
 mod group;
 mod idle;
 mod input;
