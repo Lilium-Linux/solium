@@ -144,11 +144,31 @@ fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>
                 return FilterResult::Forward;
             }
 
-            let combo = combo_for(modifiers, handle.modified_sym());
-            let claimed = state
-                .scripts
-                .as_ref()
-                .is_some_and(|scripts| scripts.has_binding(&combo));
+            // A press answers to two names, tried in order -- see
+            // `combos_for` for why both and why this order. `raw_syms` is
+            // the key at level 0 of its layout: the same handle and the same
+            // xkb lock `modified_sym` takes, which smithay does not hold while
+            // this filter runs. A key with more than one keysym at that level
+            // gets no second name, the rule `modified_sym` already applies to
+            // the first.
+            let raw = match handle.raw_syms().as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            };
+            let combos = combos_for(modifiers, handle.modified_sym(), raw);
+            let claimed = state.scripts.as_ref().and_then(|scripts| {
+                combos
+                    .iter()
+                    .find(|combo| scripts.has_binding(combo))
+                    .cloned()
+            });
+            // What the log calls this press when nothing claimed it: the
+            // modified spelling, which is what this line has always printed.
+            // The key-cap spelling rides along as `or` when it differs,
+            // because the point of the line is to show someone the names a
+            // binding could have used, and there are now two.
+            let spelled = combos.first().map(String::as_str).unwrap_or_default();
+            let or = combos.get(1).map(String::as_str);
 
             // Logged for every press, because "my binding does nothing" has two
             // very different causes and they are indistinguishable without it:
@@ -162,13 +182,18 @@ fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>
             // worth one line at info, and it is the line that would have
             // answered this question on the first hardware run instead of the
             // fourth.
-            if !claimed && modifiers.logo {
-                tracing::info!(combo, "no script has bound this");
-            } else {
-                tracing::debug!(combo, claimed, "key");
+            match &claimed {
+                Some(combo) => tracing::debug!(combo, claimed = true, "key"),
+                None if modifiers.logo => {
+                    tracing::info!(combo = spelled, or, "no script has bound this");
+                }
+                None => tracing::debug!(combo = spelled, or, claimed = false, "key"),
             }
 
-            if claimed {
+            if let Some(combo) = claimed {
+                // The spelling that matched, not the modified one: the handler
+                // is found by the same lookup, and `super+shift+1` has no
+                // entry under `super+shift+exclam`.
                 FilterResult::Intercept(Some(Action::Bound(combo)))
             } else if state.script_grab {
                 // A mode owns input: keys it did not bind are swallowed rather
@@ -238,6 +263,50 @@ fn combo_for(modifiers: &ModifiersState, keysym: Keysym) -> String {
     }
     combo.push_str(&xkb::keysym_get_name(keysym));
     script::normalise_combo(&combo)
+}
+
+/// Every name a key press answers to, in the order bindings are tried.
+///
+/// A combination names its modifiers *and* its key, and the keysym xkb reports
+/// for a press has the modifiers applied already -- so shift is counted twice.
+/// A letter survives that, because `shift+q` arrives as `Q` and
+/// `normalise_combo` lowercases it back to `q`. Nothing else does: on a `us`
+/// layout `super+shift+1` arrives as `super+shift+exclam`, and the nine
+/// `super+shift+N` in `workspaces.lua` and the two shifted brackets in
+/// `scrolling.lua` were bindings nothing could produce (#121).
+///
+/// So a press has two names. `modified` first, which is the only name it had
+/// before this and so the one every binding that already fired still fires
+/// under -- including one written for a layout where the symbol *is* the key,
+/// `super+shift+exclam` among them. Then `raw`, the key as its layout names it
+/// with no modifiers applied, which is the key a person pressed and the name a
+/// combination like `super+shift+1` spells. When the two come out the same
+/// string, as they do for a letter and for any key no held modifier moved off
+/// level 0, there is one name.
+///
+/// `raw` is level 0, which applies no modifiers at all, so it sheds AltGr as
+/// well as shift: on `de`, super+AltGr+7 is `super+braceleft` and then
+/// `super+7`. Accepted rather than filtered out, because `combo_for` names
+/// ctrl, alt, shift and super and nothing else -- a binding could only ever
+/// tell those two presses apart by the symbol, and the symbol is still tried
+/// first. `altgr_falls_back_to_the_key_it_is_held_on` pins both halves.
+///
+/// Not the layout-agnostic lookup (`raw_latin_sym_or_raw_current_sym`): that
+/// would also rescue bindings under a non-Latin layout, which is a different
+/// change and one somebody should decide on.
+pub(crate) fn combos_for(
+    modifiers: &ModifiersState,
+    modified: Keysym,
+    raw: Option<Keysym>,
+) -> Vec<String> {
+    let mut combos = vec![combo_for(modifiers, modified)];
+    if let Some(raw) = raw.filter(|raw| *raw != Keysym::NoSymbol) {
+        let unmodified = combo_for(modifiers, raw);
+        if !combos.contains(&unmodified) {
+            combos.push(unmodified);
+        }
+    }
+    combos
 }
 
 fn pointer_motion<B: InputBackend>(
@@ -1058,7 +1127,7 @@ fn absolute_location<B: InputBackend>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Request, Solium, combo_for, confine, escape, release_cursor};
+    use super::{Request, Solium, combo_for, combos_for, confine, escape, release_cursor};
     use smithay::{
         input::keyboard::{Keysym, ModifiersState},
         input::pointer::{CursorIcon, CursorImageStatus},
@@ -1305,6 +1374,234 @@ mod tests {
             state.pointer.showing(),
             CursorImageStatus::Named(CursorIcon::Text),
             "a pointer over a client's surface is that client's to describe"
+        );
+    }
+
+    /// A key event from nowhere, for driving the real keyboard filter.
+    ///
+    /// `Synthetic` has no keyboard of its own -- keys had `SOLIUM_TRIGGER_AT`
+    /// -- but `keyboard` takes any `KeyboardKeyEvent`, so this is all it needs.
+    /// `code` is an xkb keycode, evdev plus eight, which is what both real
+    /// backends hand over.
+    struct Key {
+        code: u32,
+        state: smithay::backend::input::KeyState,
+    }
+
+    impl smithay::backend::input::Event<crate::synth::Synthetic> for Key {
+        fn time(&self) -> u64 {
+            0
+        }
+        fn device(&self) -> crate::synth::SynthDevice {
+            crate::synth::SynthDevice
+        }
+    }
+
+    impl smithay::backend::input::KeyboardKeyEvent<crate::synth::Synthetic> for Key {
+        fn key_code(&self) -> smithay::backend::input::Keycode {
+            self.code.into()
+        }
+        fn state(&self) -> smithay::backend::input::KeyState {
+            self.state
+        }
+        fn count(&self) -> u32 {
+            0
+        }
+    }
+
+    /// `Super_L`, `Shift_L`, and the top-row keys this is about, as xkb
+    /// keycodes on a `us` keymap. Evdev 125, 42, 2, 16 and 26, plus eight.
+    const SUPER: u32 = 133;
+    const SHIFT: u32 = 50;
+    const DIGIT_1: u32 = 10;
+    const Q: u32 = 24;
+    const BRACKET_LEFT: u32 = 34;
+    /// Right Alt, which on a `de` layout is AltGr (evdev 100), and the `7` of
+    /// the top row (evdev 8).
+    const RIGHT_ALT: u32 = 108;
+    const DIGIT_7: u32 = 16;
+
+    /// What a real `Solium` does with `keys`, pressed in order and then let go
+    /// in reverse, under `script` and the named xkb `layout`: the status the
+    /// binding that fired left behind, or an empty string if none did.
+    ///
+    /// The whole input path the hardware takes -- `keyboard`, smithay's own
+    /// xkb state and its filter, `Scripts::has_binding`, `Solium::trigger` --
+    /// with nothing standing in for any of it but the key events. The keymap
+    /// is set rather than inherited, because `XkbConfig::default()` reads
+    /// `XKB_DEFAULT_LAYOUT`, and a test whose answer depends on the layout of
+    /// whoever runs it answers nothing.
+    fn status_after(name: &str, layout: &str, script: &str, keys: &[u32]) -> String {
+        use smithay::backend::input::KeyState;
+        use smithay::input::keyboard::XkbConfig;
+
+        let directory = std::env::temp_dir().join(format!("solium-keys-{name}"));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("creating the script directory");
+        let config = directory.join("init.lua");
+        std::fs::write(&config, script).expect("writing the test script");
+
+        let display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        let keyboard = state.seat.get_keyboard().expect("the seat has a keyboard");
+        keyboard
+            .set_xkb_config(
+                &mut state,
+                XkbConfig {
+                    layout,
+                    ..Default::default()
+                },
+            )
+            .expect("compiling the keymap; xkb data is missing, so this proves nothing");
+        let scripts = crate::script::Scripts::load(&config).expect("loading the test script");
+        state.start_scripts(Some(scripts));
+
+        for &code in keys {
+            super::keyboard(
+                &mut state,
+                Key {
+                    code,
+                    state: KeyState::Pressed,
+                },
+            );
+        }
+        for &code in keys.iter().rev() {
+            super::keyboard(
+                &mut state,
+                Key {
+                    code,
+                    state: KeyState::Released,
+                },
+            );
+        }
+        state.status.clone()
+    }
+
+    /// **`super+shift+1` fires the binding spelled `super+shift+1`.** #121.
+    ///
+    /// Before #121, shift+1 arrived as `exclam` and the binding matched on
+    /// that alone, so this press produced `super+shift+exclam`, the lookup
+    /// missed, and the key did nothing -- which is what all nine
+    /// send-to-workspace keys in `workspaces.lua` did, and `scrolling.lua`'s
+    /// two shifted brackets. The bracket is here as the second shape of the
+    /// same defect: a symbol key rather than a digit.
+    #[test]
+    fn a_shifted_digit_fires_the_binding_that_names_the_digit() {
+        let script = r#"
+            sol.bind("super+shift+1", function() sol.status("digit") end)
+            sol.bind("super+shift+bracketleft", function() sol.status("bracket") end)
+        "#;
+        assert_eq!(
+            status_after("digit", "us", script, &[SUPER, SHIFT, DIGIT_1]),
+            "digit",
+            "super+shift+1 on a `us` keyboard must reach `super+shift+1`; it \
+             arrives as `exclam`, and matching on that alone is #121"
+        );
+        assert_eq!(
+            status_after("bracket", "us", script, &[SUPER, SHIFT, BRACKET_LEFT]),
+            "bracket",
+            "super+shift+[ must reach `super+shift+bracketleft`; it arrives as \
+             `braceleft`"
+        );
+    }
+
+    /// **And every binding that already worked still works the same way.**
+    ///
+    /// The half of the fix that keeps it safe. The modified spelling is tried
+    /// first, so a letter under shift is still found under its own name, and a
+    /// configuration that bound the *symbol* -- `super+shift+exclam`, which is
+    /// the only spelling that worked before -- keeps that key even where
+    /// somebody also bound the digit. Were the order reversed, the second
+    /// assertion here is the one that would say so.
+    #[test]
+    fn the_modified_spelling_still_wins() {
+        let both = r#"
+            sol.bind("super+shift+exclam", function() sol.status("symbol") end)
+            sol.bind("super+shift+1", function() sol.status("digit") end)
+            sol.bind("super+shift+q", function() sol.status("letter") end)
+        "#;
+        assert_eq!(
+            status_after("letter", "us", both, &[SUPER, SHIFT, Q]),
+            "letter",
+            "super+shift+q is a letter under shift, and has always worked"
+        );
+        assert_eq!(
+            status_after("symbol", "us", both, &[SUPER, SHIFT, DIGIT_1]),
+            "symbol",
+            "a press whose modified spelling is bound goes there, and the \
+             key-cap spelling is only a fallback"
+        );
+        // Nothing but the key-cap spelling bound, and the key held without
+        // shift: `super+1` is not `super+shift+1`, and the modifiers are never
+        // what the fallback drops.
+        assert_eq!(
+            status_after(
+                "unshifted",
+                "us",
+                r#"sol.bind("super+shift+1", function() sol.status("digit") end)"#,
+                &[SUPER, DIGIT_1]
+            ),
+            "",
+            "super+1 must not fire a binding on super+shift+1"
+        );
+    }
+
+    /// **The fallback drops AltGr as well as shift, and that is a decision.**
+    ///
+    /// The key-cap spelling is level 0 of the layout, which applies no
+    /// modifiers at all, and `combo_for` has no word for AltGr to put back. So
+    /// on a `de` keyboard, where AltGr+7 types `{`, super+AltGr+7 is looked up
+    /// as `super+braceleft` and then as `super+7` -- and with only the second
+    /// bound, it fires workspace 7's key. Before #121 that press did nothing.
+    /// Pinned here so the behaviour is one somebody chose rather than one that
+    /// came along: the combination syntax cannot name AltGr, so a binding can
+    /// only ever tell the two presses apart by the symbol, and the symbol
+    /// spelling still wins (the second assertion).
+    #[test]
+    fn altgr_falls_back_to_the_key_it_is_held_on() {
+        let seven = r#"sol.bind("super+7", function() sol.status("seven") end)"#;
+        assert_eq!(
+            status_after("altgr", "de", seven, &[SUPER, RIGHT_ALT, DIGIT_7]),
+            "seven",
+            "super+AltGr+7 on `de` has no binding under `super+braceleft` and \
+             falls back to `super+7`"
+        );
+        let brace = r#"
+            sol.bind("super+7", function() sol.status("seven") end)
+            sol.bind("super+braceleft", function() sol.status("brace") end)
+        "#;
+        assert_eq!(
+            status_after("altgr-brace", "de", brace, &[SUPER, RIGHT_ALT, DIGIT_7]),
+            "brace",
+            "a binding on the AltGr symbol still takes the press first"
+        );
+    }
+
+    /// The names themselves, without a keyboard: modified first, the key-cap
+    /// spelling second, and one name when the two agree. In the canonical
+    /// order `normalise_combo` gives them, which puts shift before super.
+    #[test]
+    fn a_press_is_named_under_both_spellings() {
+        let shifted = ModifiersState {
+            shift: true,
+            logo: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            combos_for(&shifted, Keysym::exclam, Some(Keysym::_1)),
+            ["shift+super+exclam", "shift+super+1"]
+        );
+        // A letter lowercases back to itself, so there is nothing to add.
+        assert_eq!(
+            combos_for(&shifted, Keysym::Q, Some(Keysym::q)),
+            ["shift+super+q"]
+        );
+        // A key with no single level-0 keysym has one name, and so does a
+        // level 0 with nothing on it.
+        assert_eq!(combos_for(&shifted, Keysym::Q, None), ["shift+super+q"]);
+        assert_eq!(
+            combos_for(&shifted, Keysym::Q, Some(Keysym::NoSymbol)),
+            ["shift+super+q"]
         );
     }
 }
