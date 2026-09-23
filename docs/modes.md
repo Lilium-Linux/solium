@@ -122,7 +122,9 @@ simply does not contain it. There is nothing to clean up.
 
 ```lua
 sol.on("open",   function(id) end)                 -- a window's life began
-sol.on("close",  function(id) end)                 -- it is going
+sol.on("closing", function(id) end)                -- a close was asked for
+sol.on("refused", function(id) end)                -- ...and declined: it is back
+sol.on("close",  function(id) end)                 -- it is gone
 sol.on("focus",  function(id) end)                 -- the keyboard moved
 sol.on("drop",   function(id, x, y) end)           -- a drag finished
 sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side) end)
@@ -133,7 +135,7 @@ sol.on("monitors", function() end)                 -- the screens are not the sc
 sol.on("restore",  function() end)                 -- you have replaced a running session
 ```
 
-Five of these are worth reading twice.
+Six of these are worth reading twice.
 
 **`open` fires when the window opens, which is before its application exists.**
 A window's life begins when the user asks for the program. Your mode is told
@@ -142,6 +144,43 @@ later. Nothing special is required of you for that to work — but it is why
 `open` is the event that puts a window into your arrangement, and `layout` is
 not. A layout keeps its own structure and adds to it on `open`; `layout` only
 means "re-run what you already hold".
+
+**A close is three events, because a close is a request.** The compositor
+cannot take a window away; it can only ask the application to go, and an
+application with unsaved work puts up a dialog and stays. So:
+
+| event | sent | means |
+|---|---|---|
+| `closing(id)` | the moment a close is asked for -- the frame's button, `sol.close`, `super+q` -- as the window starts fading | reflow now, if you want to |
+| `refused(id)` | when the application declines -- it said nothing for a second, or answered with a dialog -- and the window is back on screen | put it back, if you took it out |
+| `close(id)` | when the window is gone | forget it |
+
+In that order. After `closing` exactly one of the other two follows, and
+**`refused` never follows `close`**: once a window has gone, nothing brings it
+back. A refused window is an ordinary window again, and closing it a second
+time starts over with a second `closing`. A window whose application quit on
+its own was never asked, so it gets `close` and nothing before it.
+
+`close` still means *gone*, and nothing else. Anything a script keeps about a
+window -- `dialogs.forget`, `tiling.exiled` -- is dropped there and not at
+`closing`, because a window that was only asked may be about to come back.
+`refused` is not `open`: the window never went, and nothing about an arrival
+should run again.
+
+While a window is between `closing` and whichever comes next, its row in
+`sol.windows()` says `leaving = true` (and so does its row in `close`'s own
+snapshot). It is fading where it stood whatever you do: the compositor pins
+the rectangle it is drawn at, so placing it moves nothing you can see.
+
+The shipped layouts close up at `closing` and put the window back at
+`refused`; `reflow_on_close = "when_gone"` in their section of `config.lua`
+makes both events do nothing and leaves the reflow to `close`, which is how
+every close worked before #128. A layout that listens for neither event hears
+exactly what it always heard -- `close`, once the window is gone -- so a mode
+written before these two existed keeps working unchanged, and keeps its slot
+for a closing window until the application has gone. To close up at once,
+handle `closing`, leave `leaving` windows out of any arrangement you build from
+`sol.windows()`, and put the window back on `refused`.
 
 **`resize` gives you where the dragged edge should go, not where the pointer
 is and not a delta.** `edge_x` and `edge_y` are in the same coordinates
@@ -227,7 +266,7 @@ issue #116, and both halves above are what it cost.
 
 ```lua
 sol.windows()          -- every window: id, rect, drawn, title, focused, monitor,
-                       --                modal, parent
+                       --                modal, parent, leaving
 sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale,
                        --                 transform, focused, primary
 sol.monitor()          -- the active monitor's work area

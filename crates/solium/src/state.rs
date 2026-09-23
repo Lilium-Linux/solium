@@ -2621,6 +2621,13 @@ impl Solium {
                     parent: pane
                         .client()
                         .map_or(Parentage::None, |window| self.parent_of(window)),
+                    // Both halves, because they are two moments of one fact.
+                    // `leaving` covers `closing` until the window is given back
+                    // or goes; `self.closing` covers `close` itself, whose
+                    // snapshot still lists the window so a script can ask which
+                    // one it was -- and a client that closed itself was never
+                    // `leaving` at all. See `WindowInfo::leaving`.
+                    leaving: pane.leaving() || self.closing == Some(pane.id()),
                 })
             })
             .collect();
@@ -4170,6 +4177,22 @@ impl Solium {
             pane.begin_closing(now + present::CLOSING);
         }
         self.redraw = true;
+        // **And the layout is told now, not when the client has gone** (#128).
+        // After `begin_closing`, so the snapshot already lists the window as
+        // `leaving`. The animation above is already pinned to the rectangle the
+        // window is closing at -- `move_pane` declines to move a leaving pane's
+        // transform -- so a layout that reflows here grows the neighbours into
+        // the space while the window fades where it stood. See
+        // `a_closing_window_hands_its_space_over_before_its_client_is_gone`.
+        //
+        // Every route here arrives with the scripts back in their slot, which
+        // is what `trigger_closing` needs to deliver this at all: the frame
+        // button is `frame_action` off a pointer press, and `sol.close` --
+        // `super+q` included, which is a binding in `init.lua` -- is a
+        // `Command::Close`, applied by `apply` after the dispatch that asked for
+        // it has returned the scripts. See
+        // `every_close_route_tells_the_layout_the_close_has_begun`.
+        self.trigger_closing(id);
     }
 
     /// Send the close to every window whose leaving animation has landed.
@@ -5680,19 +5703,18 @@ impl Solium {
     /// `a_refused_close_gives_the_keyboard_back_to_the_window_it_brings_back`,
     /// which pins the progress-zero case rather than hoping for it.
     fn give_back(&mut self, id: crate::pane::PaneId, now: std::time::Duration) -> bool {
+        /// How long the window takes to fade back in.
+        const RETURN: std::time::Duration = std::time::Duration::from_millis(150);
         let Some(pane) = self.panes.get(id) else {
             // No pane, nothing to give back and nothing left waiting: a window
             // that went while this ran answered the close after all.
             return true;
         };
         let outer = self.pane_outer(pane);
-        if !present::clear(
-            pane,
-            outer,
-            now,
-            std::time::Duration::from_millis(150),
-            solium_animation::Curve::OutCubic,
-        ) {
+        // What is on screen before anything is restored: the held, shrunk,
+        // transparent end of the leaving animation. Kept for the restart below.
+        let vanished = present::frame(pane, outer, now);
+        if !present::clear(pane, outer, now, RETURN, solium_animation::Curve::OutCubic) {
             return false;
         }
         if let Some(pane) = self.panes.get_mut(id) {
@@ -5705,6 +5727,42 @@ impl Solium {
             pane.settled_answer();
         }
         self.redraw = true;
+        // **The layout hears the refusal here, which is once per refusal.**
+        // After the transform took and the timers were retired, and at no other
+        // point: all three routes a refused window comes back by -- the grace
+        // deadline in `settle_refused`, a dialog's answer in
+        // `refused_with_a_dialog`, and `settle_closing`'s retry of an answer
+        // whose first give-back was declined -- end in this function, and a
+        // declined attempt returns above without telling anyone. See
+        // `a_refusal_tells_the_layout_once_on_the_frame_the_window_comes_back`.
+        // The pane is not `leaving` any more, so `move_pane` treats the layout
+        // putting it back like any other placement -- which is why the restart
+        // below is needed.
+        self.trigger_refused(id);
+        // **And the return is started again from where the window vanished,**
+        // because a layout that put it back has just replaced the fade above.
+        // `move_pane` animates from `Frame::real` of where the pane *was* --
+        // full size and full opacity -- so without this a window refused in a
+        // tiled layout appeared at once at its old rectangle, over the
+        // neighbour that had grown into it, and slid to its new one. Whatever
+        // the placement is heading for, and whether it releases, is kept; only
+        // the start is put back. With no layout, or one that did not move the
+        // pane, this states the fade above a second time, unchanged. See
+        // `a_refused_window_fades_back_in_from_where_it_vanished`.
+        if let Some(pane) = self.panes.get(id) {
+            let outer = self.pane_outer(pane);
+            // The answer is not needed: the fade above has already taken, so a
+            // declined restart leaves whatever the slot holds -- that fade or
+            // the layout's slide -- and both are visible and both release.
+            let _ = present::restart_from(
+                pane,
+                outer,
+                vanished,
+                now,
+                RETURN,
+                solium_animation::Curve::OutCubic,
+            );
+        }
         self.settle_focus();
         true
     }
@@ -7091,10 +7149,63 @@ impl Solium {
         self.closing = Some(pane);
         let snapshot = self.snapshot();
         self.closing = None;
+        if let Some(mut scripts) = self.scripts.take() {
+            let outcome = scripts.closed(id, snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
+        }
+        // **The close is over, so nothing may bring this window back** (#128).
+        // The pane outlives this call by the rest of the frame: every frame runs
+        // the Wayland dispatch -- where a client destroying its toplevel lands
+        // here -- then `settle`, and only then `sync_panes`, which retires it.
+        // A client that went near its grace deadline was still `asked_at` in
+        // that `settle`, so `settle_refused` gave the dead window back and the
+        // layout was told `refused` after `close`: a leaf kept for a window
+        // that no longer exists, for good. See
+        // `a_client_that_goes_at_its_grace_deadline_is_not_refused_after_it_closed`.
+        //
+        // All three fields, because two routes lead back into `give_back`:
+        // `settle_refused` on `asked_at`, and `settle_closing`'s retry on a due
+        // `closing_at` with an answer owed. Only the first is driven by that
+        // test; the second needs a declined give-back to reach, and the one way
+        // this suite has to decline one, `present::jam_slot`, never lets go.
+        //
+        // After the dispatch rather than before it, so the handlers above still
+        // see a pane that is leaving, and a layout placing it there -- a
+        // stateless one places every row it is handed -- leaves alone the
+        // transform that is holding it invisible. See
+        // `a_layout_placing_a_closed_window_does_not_show_it_again`. And outside
+        // the scripts' `if`, because a session with no scripts has a deadline
+        // to disarm all the same.
+        if let Some(pane) = self.panes.get_mut(pane) {
+            pane.forget_asked();
+            pane.stop_closing();
+            pane.settled_answer();
+        }
+    }
+
+    /// Tell scripts a close has begun, so a layout can reflow now.
+    ///
+    /// See [`Scripts::closing`]. Fired from [`Self::close_pane`] alone.
+    fn trigger_closing(&mut self, pane: crate::pane::PaneId) {
+        let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return;
         };
-        let outcome = scripts.closed(id, snapshot);
+        let outcome = scripts.closing(pane.get(), snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
+    /// Tell scripts a close was refused and the window is back.
+    ///
+    /// See [`Scripts::refused`]. Fired from [`Self::give_back`] alone.
+    fn trigger_refused(&mut self, pane: crate::pane::PaneId) {
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.refused(pane.get(), snapshot);
         self.scripts = Some(scripts);
         self.apply(outcome);
     }
@@ -15368,6 +15479,759 @@ mod tests {
                 assert!(
                     session.state.x11_may_read_selection(),
                     "and unlocked again, it can"
+                );
+            }
+        }
+
+        /// **#128: the layout hears a close when it is asked for, and hears a
+        /// refusal when the window comes back.**
+        ///
+        /// The compositor's half of the contract, against the shipped layouts
+        /// and a real client: when `closing`, `refused` and `close` are sent,
+        /// in what order, over which routes, and what the window being closed
+        /// looks like meanwhile. What the layouts *do* with each event is
+        /// `script.rs`'s `reflow_on_close` module, which can drive them without
+        /// a display.
+        ///
+        /// Scripts are installed straight into `Solium::scripts` rather than
+        /// through `start_scripts`, and after the windows have opened. Both are
+        /// to keep the arrangement down to `adopt`'s, which is one call with a
+        /// known order, and to keep what the scripts asked for at load -- a
+        /// wallpaper, in the shipped `init.lua` -- from being built at all: a
+        /// Qt scene in a process holding a libwayland connection of its own
+        /// aborts the test binary (see the #99 test).
+        mod reflow_on_close {
+            use super::*;
+
+            /// Writes down every event it hears, in order, as `"name id"` --
+            /// with a `*` when the window's own row in that event's snapshot
+            /// says `leaving`, and a `?` when the window is not in it at all.
+            const RECORDER: &str = r#"
+events = {}
+local function row(id)
+    for _, window in ipairs(sol.windows()) do
+        if window.id == id then return window end
+    end
+end
+for _, name in ipairs({ "open", "closing", "refused", "close" }) do
+    sol.on(name, function(id)
+        local window = row(id)
+        local mark = (window == nil and "?") or (window.leaving and "*") or ""
+        events[#events + 1] = name .. " " .. id .. mark
+    end)
+end
+"#;
+
+            /// The same, for the two events every layout written before #128
+            /// knows: a layout that listens for neither of the new ones.
+            const OLD_RECORDER: &str = r#"
+events = {}
+for _, name in ipairs({ "open", "close" }) do
+    sol.on(name, function(id) events[#events + 1] = name .. " " .. id end)
+end
+"#;
+
+            /// One monitor, one client, and the scripts in `body`.
+            struct Desk {
+                display: Display<Solium>,
+                state: Solium,
+                conn: Connection,
+                queue: wayland_client::EventQueue<Client>,
+                qh: QueueHandle<Client>,
+                client: Client,
+            }
+
+            impl Desk {
+                fn new() -> Self {
+                    let mut display =
+                        Display::<Solium>::new().expect("creating a test wayland display");
+                    let mut state = Solium::new(display.handle());
+                    state
+                        .decorations
+                        .set_style(&mut state.panes, Some("none".to_string()));
+                    let output = Output::new(
+                        "reflow-test".to_string(),
+                        PhysicalProperties {
+                            size: (0, 0).into(),
+                            subpixel: Subpixel::Unknown,
+                            make: "solium".to_string(),
+                            model: "reflow".to_string(),
+                        },
+                    );
+                    output.change_current_state(
+                        Some(Mode {
+                            size: (1920, 1080).into(),
+                            refresh: 60_000,
+                        }),
+                        None,
+                        Some(Scale::Fractional(1.0)),
+                        None,
+                    );
+                    state.space.map_output(&output, (0, 0));
+                    let (conn, queue, client) = connect(&mut display, &mut state);
+                    let qh = queue.handle();
+                    Self {
+                        display,
+                        state,
+                        conn,
+                        queue,
+                        qh,
+                        client,
+                    }
+                }
+
+                /// Load an entry point that runs `body` against the shipped
+                /// scripts, and hand the compositor those scripts.
+                ///
+                /// `package.path` is written by the entry for the reason the
+                /// layout harness in `script.rs` gives: `Scripts::load` would
+                /// otherwise search the developer's own configuration first.
+                /// A directory per call, for the reason it gives too.
+                fn install(&mut self, body: &str) {
+                    static NEXT: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let directory = std::env::temp_dir().join(format!(
+                        "solium-reflow-state-{}-{serial}",
+                        std::process::id()
+                    ));
+                    let _ = std::fs::create_dir_all(&directory);
+                    let entry = directory.join("init.lua");
+                    std::fs::write(
+                        &entry,
+                        format!(
+                            "package.path = {shipped:?} .. \"/?.lua\"\n{body}\n",
+                            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                        ),
+                    )
+                    .expect("writing the entry point");
+                    self.state.scripts =
+                        Some(Scripts::load(&entry).expect("loading the test scripts"));
+                }
+
+                /// A shipped layout, switched on over the windows already
+                /// open, with `before` run ahead of it and the recorder after.
+                fn arrange(&mut self, layout: &str, before: &str) {
+                    self.install(&format!(
+                        "{before}\nrequire(\"modes\")\nrequire({layout:?})\n{RECORDER}"
+                    ));
+                    let key = if layout == "tiling" {
+                        "super+t"
+                    } else {
+                        "super+s"
+                    };
+                    assert!(
+                        self.state.trigger(key),
+                        "{layout}: the layout key was not handled"
+                    );
+                    // And let the arrangement land, so a close starts from a
+                    // window drawn where it lives rather than part way along
+                    // the slide into its slot.
+                    self.state.clock.advance(Duration::from_secs(1));
+                    let now = self.state.clock.now();
+                    self.state.settle(now);
+                }
+
+                fn open(&mut self) -> (Window, xdg_toplevel::XdgToplevel, crate::pane::PaneId) {
+                    let (window, toplevel, _surface, _xdg) = open_xdg(
+                        &mut self.display,
+                        &mut self.state,
+                        &self.conn,
+                        &self.client,
+                        &self.qh,
+                    );
+                    self.state.sync_panes();
+                    self.pump();
+                    let pane = self
+                        .state
+                        .panes
+                        .id_of(&window)
+                        .expect("a client in the space has a pane");
+                    (window, toplevel, pane)
+                }
+
+                fn pump(&mut self) {
+                    pump(
+                        &mut self.display,
+                        &mut self.state,
+                        &self.conn,
+                        &self.qh,
+                        &mut self.queue,
+                        &mut self.client,
+                    );
+                }
+
+                /// What the recorder heard, comma-separated.
+                fn events(&self) -> String {
+                    self.state
+                        .scripts
+                        .as_ref()
+                        .map(|scripts| scripts.evaluate("return table.concat(events, \",\")"))
+                        .unwrap_or_default()
+                }
+
+                /// The rectangle the layout last asked for this pane.
+                fn placed(&self, pane: crate::pane::PaneId) -> Rectangle<i32, Logical> {
+                    self.state
+                        .panes
+                        .get(pane)
+                        .and_then(Pane::placed)
+                        .expect("the layout has placed this pane")
+                }
+
+                /// The pane the keyboard is on.
+                fn focused(&self) -> crate::pane::PaneId {
+                    self.state
+                        .focused_window()
+                        .and_then(|window| self.state.panes.id_of(&window))
+                        .expect("a window has the keyboard")
+                }
+
+                /// The close's request goes out: past `CLOSING`, and the
+                /// client hears it. Returns the instant it was asked at.
+                fn ask(&mut self) -> Duration {
+                    self.state
+                        .clock
+                        .advance(present::CLOSING + Duration::from_millis(10));
+                    let asked = self.state.clock.now();
+                    self.state.settle_closing(asked);
+                    self.pump();
+                    asked
+                }
+
+                /// The client says nothing, and the grace period runs out.
+                /// Returns the instant the window was given back at.
+                fn refuse(&mut self) -> Duration {
+                    self.state.clock.advance(Duration::from_millis(1100));
+                    let now = self.state.clock.now();
+                    self.state.settle_refused(now);
+                    self.pump();
+                    now
+                }
+            }
+
+            const LAYOUTS: [&str; 2] = ["tiling", "scrolling"];
+
+            /// Two windows side by side under `layout`, and which is which:
+            /// `(the one the keyboard is on, the other)`.
+            fn two(
+                desk: &mut Desk,
+                layout: &str,
+                before: &str,
+            ) -> (crate::pane::PaneId, crate::pane::PaneId) {
+                let (_, _, first) = desk.open();
+                let (_, _, second) = desk.open();
+                desk.arrange(layout, before);
+                let focused = desk.focused();
+                let other = if focused == first { second } else { first };
+                assert_ne!(
+                    desk.placed(focused).loc.x,
+                    desk.placed(other).loc.x,
+                    "{layout}: the premise is two windows side by side"
+                );
+                (focused, other)
+            }
+
+            /// **Close a window and the layout closes up around it at once,
+            /// while the client is still there and has not even been asked.**
+            ///
+            /// The window closed is the one the keyboard is on, and the
+            /// keyboard stays on it: it leaves when the animation lands
+            /// (`hand_off_keyboard`), and a layout that moved it now -- the
+            /// scrolling layout's `settle` would -- takes it off a window that
+            /// is still on screen.
+            ///
+            /// The window closed fades where it stood. Nothing places it once
+            /// it is out of the arrangement, and #127's pinning keeps it from
+            /// following anything that does.
+            #[test]
+            fn a_closing_window_hands_its_space_over_before_its_client_is_gone() {
+                for layout in LAYOUTS {
+                    let mut desk = Desk::new();
+                    let (dying, survivor) = two(&mut desk, layout, "");
+                    let was = desk.placed(survivor);
+                    let stood = desk.placed(dying);
+                    let outer = desk
+                        .state
+                        .pane_outer_of(dying)
+                        .expect("a mapped pane has a rectangle");
+
+                    let pressed = desk.state.clock.now();
+                    desk.state.close_pane(dying);
+                    desk.pump();
+
+                    assert!(
+                        desk.client.closes.is_empty() && desk.state.panes.get(dying).is_some(),
+                        "{layout}: the premise -- the client has not even been asked, so \
+                         everything below happened before it could have gone"
+                    );
+                    assert_eq!(
+                        desk.events(),
+                        format!("closing {}*", dying.get()),
+                        "{layout}"
+                    );
+                    let now = desk.placed(survivor);
+                    assert_ne!(
+                        now, was,
+                        "{layout}: the survivor is where it was, so the closed window's space \
+                         is still reserved for it"
+                    );
+                    match layout {
+                        "tiling" => assert!(
+                            now.size.w > was.size.w,
+                            "tiling: the neighbour did not grow into the space: {was:?} -> {now:?}"
+                        ),
+                        _ => assert_eq!(
+                            now.loc.x, stood.loc.x,
+                            "scrolling: the strip did not close the gap: {was:?} -> {now:?}"
+                        ),
+                    }
+                    assert_eq!(
+                        desk.focused(),
+                        dying,
+                        "{layout}: the keyboard left the closing window before its animation \
+                         landed"
+                    );
+                    let fading = drawn_now(&desk.state, dying, pressed + Duration::from_millis(95));
+                    assert!(
+                        fading.opacity < 0.9
+                            && (fading.rect.loc.x - f64::from(outer.loc.x)).abs() < 100.0,
+                        "{layout}: the closing window is not fading where it stood: {fading:?}, \
+                         and it stood at {outer:?}"
+                    );
+                }
+            }
+
+            /// **Refuse the close, and the window comes back beside its old
+            /// neighbour.**
+            ///
+            /// Two windows, so the neighbour was a single window and tiling
+            /// puts everything back exactly; scrolling is asserted as order and
+            /// adjacency, because putting a window back focuses its column and
+            /// the view may follow.
+            ///
+            /// And `refused` is sent once, and `open` not at all: the window
+            /// never went, and an `open` would animate it in a second time and
+            /// run the scrolling layout's `settle`.
+            #[test]
+            fn a_refused_close_comes_back_beside_its_old_neighbour() {
+                for layout in LAYOUTS {
+                    let mut desk = Desk::new();
+                    let (dying, survivor) = two(&mut desk, layout, "");
+                    let before = (desk.placed(dying), desk.placed(survivor));
+
+                    desk.state.close_pane(dying);
+                    desk.ask();
+                    desk.refuse();
+                    // And more frames, well past every deadline, which must not
+                    // produce a second one.
+                    desk.state.clock.advance(Duration::from_secs(3));
+                    let later = desk.state.clock.now();
+                    desk.state.settle(later);
+                    desk.pump();
+
+                    let id = dying.get();
+                    assert_eq!(
+                        desk.events(),
+                        format!("closing {id}*,refused {id}"),
+                        "{layout}: the refusal was not told once, and once only, with the window \
+                         no longer leaving"
+                    );
+                    let after = (desk.placed(dying), desk.placed(survivor));
+                    match layout {
+                        "tiling" => assert_eq!(
+                            after, before,
+                            "tiling: the window did not come back where it was"
+                        ),
+                        _ => {
+                            let (back, other) = after;
+                            let (left, right) = if back.loc.x < other.loc.x {
+                                (back, other)
+                            } else {
+                                (other, back)
+                            };
+                            assert_eq!(
+                                before.0.loc.x < before.1.loc.x,
+                                back.loc.x < other.loc.x,
+                                "scrolling: the window came back on the other side of its \
+                                 neighbour"
+                            );
+                            assert_eq!(
+                                left.loc.x + left.size.w + 12,
+                                right.loc.x,
+                                "scrolling: the two are not neighbours: {left:?}, {right:?}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            /// **A refused window fades back in from where it vanished**, and
+            /// does not appear at once over the neighbour that grew into it.
+            ///
+            /// `give_back` starts the return from the held, transparent end of
+            /// the leaving animation; the layout putting the window back then
+            /// replaces that with `move_pane`'s slide, which begins at full
+            /// opacity. `present::restart_from` is what puts the start back.
+            #[test]
+            fn a_refused_window_fades_back_in_from_where_it_vanished() {
+                for layout in LAYOUTS {
+                    let mut desk = Desk::new();
+                    let (dying, _) = two(&mut desk, layout, "");
+                    desk.state.close_pane(dying);
+                    desk.ask();
+                    let back = desk.refuse();
+                    assert!(
+                        desk.events().ends_with(&format!("refused {}", dying.get())),
+                        "{layout}: the premise is a refusal the layout heard"
+                    );
+
+                    let first = drawn_now(&desk.state, dying, back);
+                    assert!(
+                        first.opacity < 0.05,
+                        "{layout}: the refused window was drawn at opacity {} on the frame it \
+                         came back, rather than fading in from nothing",
+                        first.opacity
+                    );
+                    let landed = drawn_now(&desk.state, dying, back + Duration::from_millis(400));
+                    let slot = desk.placed(dying);
+                    assert!(
+                        (landed.opacity - 1.0).abs() < f32::EPSILON
+                            && (landed.rect.loc.x - f64::from(slot.loc.x)).abs() < 1.0,
+                        "{layout}: the return did not land where the layout put the window: \
+                         {landed:?}, placed at {slot:?}"
+                    );
+                }
+            }
+
+            /// **A client that goes at its grace deadline is not refused after
+            /// it closed.**
+            ///
+            /// The order a frame runs in is the whole of it: the Wayland
+            /// dispatch -- where the client's destroy arrives and `close` is
+            /// sent -- then `settle`, where the grace deadline is read, and
+            /// only then `sync_panes`, which retires the pane. A client
+            /// destroying its toplevel on the frame its grace ran out was
+            /// still `asked_at` in that `settle`, was given back, and the
+            /// layout was told `refused` after `close` -- and put a window that
+            /// no longer exists back into its tree for good.
+            #[test]
+            fn a_client_that_goes_at_its_grace_deadline_is_not_refused_after_it_closed() {
+                let mut desk = Desk::new();
+                let (_, _, kept) = desk.open();
+                let (_, toplevel, going) = desk.open();
+                desk.arrange("tiling", "");
+                let whole = desk.placed(kept);
+
+                desk.state.close_pane(going);
+                let asked = desk.ask();
+                // The frame on which the grace runs out: the client goes in the
+                // dispatch, and `settle` runs after it at the deadline.
+                toplevel.destroy();
+                desk.pump();
+                desk.state.settle(asked + Duration::from_millis(1000));
+                desk.state.space.refresh();
+                desk.state.sync_panes();
+                desk.pump();
+
+                let id = going.get();
+                assert_eq!(
+                    desk.events(),
+                    format!("closing {id}*,close {id}*"),
+                    "the layout was told something after the window was gone"
+                );
+                assert!(
+                    desk.state.panes.get(going).is_none(),
+                    "the premise: the pane is retired"
+                );
+                // And the arrangement holds no leaf for it: laid out again, the
+                // window that stayed has the screen.
+                desk.state.trigger_relayout();
+                assert!(
+                    desk.placed(kept).size.w > whole.size.w,
+                    "the tree still divides the screen with a window that is gone: {:?}",
+                    desk.placed(kept)
+                );
+            }
+
+            /// **A layout placing a window in `close` does not show it again.**
+            ///
+            /// A stateless layout places every row it is handed, and `close`'s
+            /// snapshot still lists the window that went. The close timers are
+            /// disarmed after that dispatch rather than before it, so the pane
+            /// is still leaving while the handler runs and `move_pane` leaves
+            /// the invisible transform alone; the other order made it an
+            /// ordinary pane for one frame and put it back at full opacity.
+            #[test]
+            fn a_layout_placing_a_closed_window_does_not_show_it_again() {
+                let mut desk = Desk::new();
+                let (_, toplevel, pane) = desk.open();
+                desk.install(
+                    r#"
+sol.on("close", function()
+    for _, window in ipairs(sol.windows()) do
+        sol.place(window.id, { x = window.x, y = window.y, w = window.w, h = window.h })
+    end
+end)
+"#,
+                );
+
+                desk.state.close_pane(pane);
+                let asked = desk.ask();
+                assert!(
+                    drawn_now(&desk.state, pane, asked).opacity.abs() < f32::EPSILON,
+                    "the premise: the window is held invisible while the client decides"
+                );
+                toplevel.destroy();
+                desk.pump();
+                let now = desk.state.clock.now();
+                assert!(
+                    desk.state.panes.get(pane).is_some(),
+                    "the premise: the pane is still here until `sync_panes`"
+                );
+                assert!(
+                    drawn_now(&desk.state, pane, now).opacity.abs() < f32::EPSILON,
+                    "a layout placing the window in `close` drew it again at opacity {}",
+                    drawn_now(&desk.state, pane, now).opacity
+                );
+            }
+
+            /// **Every way to close a window tells the layout at once.**
+            ///
+            /// Script events are dispatched by taking the scripts out of
+            /// `Solium::scripts` for the length of the call, so a close that
+            /// reached `close_pane` *during* a dispatch would find nothing there
+            /// and `closing` would be lost without a word. Each route is driven
+            /// the way it arrives: the frame's close button through
+            /// `frame_action`, which the pointer calls; `sol.close` from a
+            /// binding and from an event handler, both of which queue a
+            /// command that `apply` runs after the dispatch has put the
+            /// scripts back; the same from inside a `closing` handler, which is
+            /// a dispatch inside `apply`; and `super+q`, the shipped binding in
+            /// `init.lua`.
+            #[test]
+            fn every_close_route_tells_the_layout_the_close_has_begun() {
+                let mut desk = Desk::new();
+                let (_, _, button) = desk.open();
+                let (_, _, bound) = desk.open();
+                let (_, _, handled) = desk.open();
+                let (_, _, first) = desk.open();
+                let (_, _, second) = desk.open();
+                desk.install(&format!(
+                    "{RECORDER}\n\
+                     sol.bind(\"super+x\", function() sol.close({bound}) end)\n\
+                     local armed = true\n\
+                     sol.on(\"layout\", function()\n\
+                         if armed then armed = false; sol.close({handled}) end\n\
+                     end)\n\
+                     sol.on(\"closing\", function(id)\n\
+                         if id == {first} then sol.close({second}) end\n\
+                     end)\n",
+                    bound = bound.get(),
+                    handled = handled.get(),
+                    first = first.get(),
+                    second = second.get(),
+                ));
+
+                desk.state.frame_action(button, Action::Close);
+                assert!(desk.state.trigger("super+x"), "the binding was not handled");
+                desk.state.trigger_relayout();
+                desk.state.close_pane(first);
+
+                assert_eq!(
+                    desk.events(),
+                    format!(
+                        "closing {}*,closing {}*,closing {}*,closing {}*,closing {}*",
+                        button.get(),
+                        bound.get(),
+                        handled.get(),
+                        first.get(),
+                        second.get()
+                    ),
+                    "a close route did not tell the layout it had begun"
+                );
+
+                // `super+q`, as it ships: the whole of `init.lua`, whose
+                // binding closes the window the keyboard is on.
+                let mut desk = Desk::new();
+                let (_, _, focused) = desk.open();
+                assert_eq!(
+                    desk.focused(),
+                    focused,
+                    "the premise: a window has the keyboard"
+                );
+                desk.install(&format!(
+                    "dofile({init:?})\n{RECORDER}",
+                    init = concat!(env!("CARGO_MANIFEST_DIR"), "/lua/init.lua"),
+                ));
+                assert!(desk.state.trigger("super+q"), "super+q was not handled");
+                assert_eq!(
+                    desk.events(),
+                    format!("closing {}*", focused.get()),
+                    "super+q did not tell the layout the close had begun"
+                );
+            }
+
+            /// **A layout that listens for neither new event hears exactly what
+            /// it always heard.** `close` when the window is gone and not a
+            /// moment before -- whether it was asked to close or went by
+            /// itself -- and nothing at all for a close that was refused: not a
+            /// `close` for the moment it was asked, and not an `open` for the
+            /// moment it came back.
+            ///
+            /// This is not a change and did not fail before it; it is here so
+            /// that one cannot be made quietly. Against a `give_back` that
+            /// told scripts `opened` instead of `refused`, it fails at "a
+            /// refused close".
+            #[test]
+            fn a_layout_that_knows_neither_new_event_hears_what_it_always_did() {
+                let mut desk = Desk::new();
+                let (_, toplevel, asked) = desk.open();
+                let (_, itself_toplevel, itself) = desk.open();
+                desk.install(OLD_RECORDER);
+
+                desk.state.close_pane(asked);
+                desk.ask();
+                assert_eq!(
+                    desk.events(),
+                    "",
+                    "the close was announced before the window went"
+                );
+                desk.refuse();
+                assert_eq!(
+                    desk.events(),
+                    "",
+                    "a refused close told the layout something"
+                );
+
+                desk.state.close_pane(asked);
+                desk.ask();
+                toplevel.destroy();
+                desk.pump();
+                itself_toplevel.destroy();
+                desk.pump();
+                assert_eq!(
+                    desk.events(),
+                    format!("close {},close {}", asked.get(), itself.get()),
+                    "the layout was not told each window went, once"
+                );
+            }
+
+            /// **The window list says which windows are on their way out**, in
+            /// every event about one: `closing`'s, `close`'s -- including for a
+            /// window that closed itself and was never `closing` -- and not
+            /// `refused`'s, where the window is staying.
+            #[test]
+            fn the_window_list_says_which_windows_are_leaving() {
+                let mut desk = Desk::new();
+                let (_, _, refused) = desk.open();
+                let (_, itself_toplevel, itself) = desk.open();
+                desk.install(RECORDER);
+
+                desk.state.close_pane(refused);
+                desk.ask();
+                desk.refuse();
+                itself_toplevel.destroy();
+                desk.pump();
+
+                assert_eq!(
+                    desk.events(),
+                    format!(
+                        "closing {r}*,refused {r},close {i}*",
+                        r = refused.get(),
+                        i = itself.get()
+                    )
+                );
+            }
+
+            /// **A refusal is told once, on the frame the window comes back**,
+            /// by whichever route brings it back -- and not on a frame whose
+            /// give-back was declined, when the window is still invisible and a
+            /// layout putting it back would be putting back nothing.
+            ///
+            /// The dialog route here; the grace deadline is
+            /// `a_refused_close_comes_back_beside_its_old_neighbour`. The
+            /// declined one is driven with `present::jam_slot`, which never
+            /// lets go, so what is asserted is the half this can reach: nothing
+            /// is told while the give-back is owed.
+            #[test]
+            fn a_refusal_tells_the_layout_once_on_the_frame_the_window_comes_back() {
+                let mut desk = Desk::new();
+                let (_, parent_top, parent) = desk.open();
+                let (_, jammed_top, jammed) = desk.open();
+                desk.install(RECORDER);
+
+                desk.state.close_pane(parent);
+                let (_, dialog_top, _) = desk.open();
+                dialog_top.set_parent(Some(&parent_top));
+                desk.pump();
+                desk.ask();
+                desk.refuse();
+                let id = parent.get();
+                let heard = desk.events();
+                assert!(
+                    heard.starts_with(&format!("closing {id}*,"))
+                        && heard.ends_with(&format!("refused {id}")),
+                    "the dialog's answer was not told as a refusal: {heard}"
+                );
+                assert_eq!(
+                    heard.matches("refused").count(),
+                    1,
+                    "a refusal was told more than once: {heard}"
+                );
+
+                desk.state.close_pane(jammed);
+                if let Some(busy) = desk.state.panes.get(jammed) {
+                    present::jam_slot(busy);
+                }
+                let (_, answer_top, _) = desk.open();
+                answer_top.set_parent(Some(&jammed_top));
+                desk.pump();
+                desk.ask();
+                desk.state.clock.advance(Duration::from_millis(100));
+                let later = desk.state.clock.now();
+                desk.state.settle_closing(later);
+                assert!(
+                    desk.state.panes.get(jammed).is_some_and(Pane::leaving),
+                    "the premise: the give-back is still owed"
+                );
+                assert!(
+                    !desk.events().contains(&format!("refused {}", jammed.get())),
+                    "a refusal was told on a frame its give-back was declined: {}",
+                    desk.events()
+                );
+            }
+
+            /// **A dialog that answers a close keeps the keyboard, in the
+            /// scrolling layout too.** Putting the window back focuses its
+            /// column, and `settle` would hand the keyboard to that column --
+            /// off the "save your changes?" the user is being asked. `refused`
+            /// uses `apply`, and `open` is not sent, because its handler
+            /// settles.
+            #[test]
+            fn a_dialog_that_refuses_a_close_keeps_the_keyboard() {
+                let mut desk = Desk::new();
+                let (_, parent_top, parent) = desk.open();
+                let (_, _, _other) = desk.open();
+                desk.arrange("scrolling", "");
+
+                desk.state.close_pane(parent);
+                let (dialog, dialog_top, _) = desk.open();
+                assert!(
+                    desk.state.is_focused(&dialog),
+                    "the premise: the dialog has the keyboard"
+                );
+                dialog_top.set_parent(Some(&parent_top));
+                desk.pump();
+                assert!(
+                    desk.events()
+                        .ends_with(&format!("refused {}", parent.get())),
+                    "the premise: the dialog's answer was a refusal the layout heard: {}",
+                    desk.events()
+                );
+                assert!(
+                    desk.state.is_focused(&dialog),
+                    "the layout took the keyboard off the dialog when it put its window back"
                 );
             }
         }

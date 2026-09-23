@@ -24,7 +24,21 @@ local dialogs = require("dialogs")
 -- modal dialogs, and it is what makes `unset_modal` reversible: only a window
 -- that was taken out is ever put back. See `dialogs.settle` for why it is not
 -- simply "re-admit whatever is missing".
-local tiling = { active = false, trees = {}, exiled = {} }
+--
+-- `leaving` is where each window that is being closed stood when it was taken
+-- out of its tree, by id: the centre of its rectangle and the key of the tree
+-- it was in. It is what a refused close puts the window back by. See the
+-- `closing` and `refused` handlers.
+local tiling = { active = false, trees = {}, exiled = {}, leaving = {} }
+
+-- Whether the other windows close up the moment a close is asked for, rather
+-- than once the application has gone. Read when each event arrives rather than
+-- captured when this file loads, so a script that changes the setting while the
+-- session runs changes the next close. See `reflow_on_close` in config.lua;
+-- anything but "when_gone" is the default.
+local function reflows_at_once()
+    return config.tiling.reflow_on_close ~= "when_gone"
+end
 
 -- One tree per workspace *per monitor*.
 --
@@ -138,12 +152,21 @@ function tiling.adopt()
     for _, each in ipairs(monitors.each(workspaces.visible())) do
         local tree = tree_for(each.monitor.name)
         for _, window in ipairs(each.windows) do
+            -- A window being closed is, to a layout that reflows at once,
+            -- already gone: `closing` took it out of its tree, and putting it
+            -- back is `refused`'s decision and nobody else's. So it is neither
+            -- inserted nor counted as present -- the sweep below takes it out
+            -- of any tree that still holds it, which is what makes a missed
+            -- `closing` recoverable here like any other missed event. Waiting
+            -- for the client instead, it is an ordinary window until `close`.
+            if window.leaving and reflows_at_once() then
+                -- Nothing: see above.
             -- A dialog is deliberately absent from every tree, so `adopt` --
             -- whose whole job is to put back whatever is missing -- has to be
             -- told that this one is missing on purpose. It is left out of
             -- `present` too, so the sweep below does not go looking for it in
             -- a tree it was never in.
-            if not dialogs.floats(window) then
+            elseif not dialogs.floats(window) then
                 present[window.id] = each.monitor.name
                 if not tree:contains(window.id) then
                     tree:insert(window.id, nil, nil, nil, options(each.monitor.name))
@@ -219,6 +242,79 @@ end)
 
 -- ...and a window leaving hands its space to its neighbour, rather than
 -- re-tiling the screen around the hole.
+--
+-- At the moment the close is asked for, by default. The compositor answers
+-- every interaction at once and lets the application catch up -- a window has a
+-- place before its program has started, and a dragged edge is where the hand
+-- is before the client has redrawn -- and a close is the same: the window
+-- fades where it stood while its neighbours grow into the space (#128).
+-- `reflow_on_close = "when_gone"` is the old behaviour, and these two handlers
+-- then do nothing and `close` does it all.
+sol.on("closing", function(id)
+    if not reflows_at_once() then
+        return
+    end
+    local window = dialogs.by_id(id)
+    local from
+    for key, tree in pairs(tiling.trees) do
+        if tree:contains(id) then
+            from = key
+        end
+        -- Every tree, as `close` does: one window in two trees is one window
+        -- given two slots.
+        tree:remove(id)
+    end
+    -- The centre of where it stood, which is inside whichever window has just
+    -- grown over its space -- its old sibling, when that was a single window.
+    -- A dialog is in no tree and nothing is kept for it.
+    if window and not dialogs.floats(window) then
+        tiling.leaving[id] = {
+            x = window.x + window.w / 2,
+            y = window.y + window.h / 2,
+            tree = from,
+        }
+    end
+    tiling.apply()
+end)
+
+-- The application declined -- "save your changes?" -- and the window is back.
+-- It goes back into the tree it left, split off whichever window now covers the
+-- centre of where it stood. When its neighbour was a single window that is the
+-- neighbour, grown into both their spaces, and the window comes back on the
+-- same side of it -- so an arrangement that had not otherwise changed comes
+-- back as it was. When the neighbour was a group, it splits one of the group.
+--
+-- Not the old split *ratio*. `remove` deleted the split, and the window returns
+-- at the configured `split`; keeping the ratio would mean a tree that can hold
+-- an absent leaf, which nothing has needed yet.
+--
+-- Not `open`, which the compositor deliberately does not send for this: the
+-- window never went, and an arrival would run `open.lua`'s animation again.
+sol.on("refused", function(id)
+    local stood = tiling.leaving[id]
+    tiling.leaving[id] = nil
+    if not reflows_at_once() then
+        return
+    end
+    local window = dialogs.by_id(id)
+    if not window or dialogs.floats(window) then
+        return
+    end
+    for _, tree in pairs(tiling.trees) do
+        if tree:contains(id) then
+            return
+        end
+    end
+    local monitor = monitors.of(id)
+    local tree = (stood and stood.tree and tiling.trees[stood.tree]) or tree_for(monitor)
+    tree:insert(id, nil, stood and stood.x, stood and stood.y, options(monitor))
+    tiling.apply()
+end)
+
+-- The window is gone. Unchanged by `reflow_on_close`: a window that closed
+-- itself was never `closing`, so this is the one event every layout hears for
+-- every window that goes. For one `closing` already took out, the `remove`
+-- below finds nothing to remove.
 sol.on("close", function(id)
     for _, tree in pairs(tiling.trees) do
         tree:remove(id)
@@ -226,6 +322,7 @@ sol.on("close", function(id)
     -- Ids are never reused, so a stale entry here would not put the wrong
     -- window back -- it would simply accumulate for the life of the session.
     tiling.exiled[id] = nil
+    tiling.leaving[id] = nil
     dialogs.forget(id)
     tiling.apply()
 end)

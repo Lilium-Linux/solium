@@ -445,6 +445,22 @@ local defaults = {
         motion = { duration = 240, easing = "outCubic" },
         -- The shorter feel for a window snapping back after a drag.
         snap = { duration = 180, easing = "outCubic" },
+        -- When the other windows close up around one you close.
+        --
+        -- "immediate", the default: the moment you close it. The window fades
+        -- out where it stood while its neighbours grow into its space. If the
+        -- application refuses to go -- an unsaved-changes prompt -- the window
+        -- comes back split off whichever window now covers where it was, which
+        -- is its old neighbour when nothing else has moved, at `split` rather
+        -- than the ratio it had.
+        --
+        -- "when_gone": once the application has actually quit. Its tile stays
+        -- reserved for the length of the fade and for however long the
+        -- application then takes, and a refusal has nothing to put back. This
+        -- is how every close behaved before #128.
+        --
+        -- Anything else is read as "immediate".
+        reflow_on_close = "immediate",
     },
 
     scrolling = {
@@ -470,6 +486,15 @@ local defaults = {
         motion = { duration = 260, easing = "outCubic" },
         -- The shorter feel for bringing a column into view.
         snap = { duration = 200, easing = "outCubic" },
+        -- When the strip closes the gap a window you close leaves: the moment
+        -- you close it ("immediate", the default), or once the application has
+        -- actually quit ("when_gone", how it was before #128).
+        -- A window whose application refuses to go comes back in a column of
+        -- its own after the window that was before it; one that was first
+        -- comes back first. Anything else is read as "immediate". The same
+        -- setting as `tiling.reflow_on_close`, kept apart so the two layouts
+        -- can be set differently.
+        reflow_on_close = "immediate",
     },
 
     workspaces = {
