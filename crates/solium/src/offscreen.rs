@@ -229,8 +229,9 @@ pub(crate) fn capture(
     Some((texture, size))
 }
 
-/// Draw `window`'s **client and nothing else** at its real size, into a
-/// texture.
+/// Draw `window`'s **client and nothing else** at the size its pane shows it,
+/// into a texture — its real size, cut to its tile when it is tiled and
+/// committed more than the tile has (#133).
 ///
 /// The sibling of [`capture`], and the difference is the whole reason there
 /// are two. That one draws the window as it appears — frame, layers, popups —
@@ -245,7 +246,8 @@ pub(crate) fn capture(
 /// `render::prepare` picks between them rather than doing both.
 ///
 /// The surface tree is drawn at `-window.geometry().loc`, so the texture is
-/// exactly the window's geometry rectangle. A client that draws its own shadow
+/// exactly the window's geometry rectangle — or as much of it, from its
+/// top-left corner, as fits the tile. A client that draws its own shadow
 /// outside that rectangle — `set_window_geometry` is how it says so — has the
 /// shadow clipped off by this, which is a real limit and the right one: the
 /// rectangle being masked is the one the client called its window.
@@ -267,10 +269,23 @@ pub(crate) fn capture_client(
     scale: f64,
 ) -> Option<(GlesTexture, Size<i32, Physical>, bool)> {
     let real = state.real_geometry(window)?;
+    // **At the size the pane shows the client, which for a tiled client that
+    // committed more than its tile is the tile's share (#133).** The surfaces
+    // are drawn at the origin into a texture this big, so whatever reaches
+    // past it is simply not in the picture -- the cut `render::elements` makes
+    // with a crop on the ordinary path, made here by the framebuffer's edge.
+    // Captured at the committed size instead, the whole buffer would be
+    // pressed into the tile-sized rectangle it is drawn at, and cutting the
+    // element afterwards would cut the mask's far corners off with it: the
+    // radius is in the texture's own space, at its corners.
+    let shown = state
+        .panes
+        .get(pane)
+        .map_or(real.size, |held| state.shown_size(held, real.size));
     // Rounded and not ceiled, and it is the `opaque` below that needs it: see
     // [`client_pixels`], where the one-pixel disagreement it avoids is spelled
     // out.
-    let size = client_pixels(real.size, scale);
+    let size = client_pixels(shown, scale);
 
     let elements = crate::render::client_elements(renderer, window, scale);
     if elements.is_empty() {

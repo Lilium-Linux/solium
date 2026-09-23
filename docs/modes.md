@@ -29,6 +29,25 @@ sol.present(id, { rect = { x = 40, y = 40, w = 320, h = 180 } })  -- where it is
 told, and asked to redraw. Use it for arrangements — tiling, scrolling, a
 window snapping back after a drag.
 
+**A placed rect is a tile, and the window is held inside it.** A client that
+will not shrink as far as you asked — a terminal on its cell grid, a browser at
+its minimum width — is cut to the rect rather than drawn over its neighbours,
+and its frame and its hit test stop at the rect's edge too. A client smaller
+than the rect keeps its own size. Two things let go of that:
+
+```lua
+sol.place(id, { x = 0, y = 0, w = 400, h = 300, tile = false })  -- placed, not tiled
+sol.unplace(id)                                                   -- no longer tiled
+```
+
+`tile = false` is for a window you place without tiling it; `dialogs.lua`
+centres a modal over its parent that way, because a dialog that grows after it
+is centred must not be cut to the size it was centred at. `sol.unplace` is for
+a layout letting go, and `modes.use` sends it for every window whenever the
+layout in charge changes — so a mode registered through `modes` gets it for
+free, and one that is not must send it itself. Maximising and fullscreen take a
+window out of its tile on their own, and the way back puts it in again.
+
 `present` is a transform. The window still lives where it lived and the client
 never learns anything happened; it is simply drawn somewhere else. Use it for
 anything temporary — overview, an app switcher, a peek, a genie. Then:

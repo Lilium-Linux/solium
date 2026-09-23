@@ -1229,6 +1229,29 @@ fn inner(outer: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logic
     )
 }
 
+/// What a placement says about the tile a pane is held in.
+///
+/// Since #133 `Pane::placed` is two things: the layout's own rectangle for a
+/// pane, which a tiled edge drag starts from (#124), and the tile a client is
+/// held inside, which `Solium::pane_geometry` caps a client at and
+/// `render::elements` cuts it to. The second is only right for a *tile*, and
+/// `Solium::move_pane` is reached by more than tiles, so every caller says
+/// which it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Standing {
+    /// A layout's tile. The client is held inside this rectangle from now on.
+    Tile,
+    /// A layout placing a window it does not tile: `dialogs.lua` centring a
+    /// modal over its parent, through `sol.place` with `tile = false`. The pane
+    /// is taken out of any tile it was in, because a dialog is a floating
+    /// window whichever mode is running.
+    Free,
+    /// Not a layout at all -- `Solium::rescue_offscreen` dragging a window
+    /// back onto a screen. A tiled pane is still tiled, at the rectangle it was
+    /// brought back to; a floating one is still floating.
+    Kept,
+}
+
 /// Tell a window how big it is, in whichever protocol it speaks.
 ///
 /// An xdg toplevel is asked and answers on its own schedule; an X11 window is
@@ -1441,10 +1464,64 @@ impl Solium {
         // most of the moment an application is starting, and is exactly the
         // blank gap between the scene and the client. The slot is what the
         // layout said, and it is still the truth. Same rule as `Panes::sync`.
+        //
+        // **And a tiled client is held inside its tile (#133).** The space's
+        // size is whatever the client committed, and a client that will not
+        // shrink as far as its tile -- kitty on its cell grid, Firefox at its
+        // minimum width -- committed more than the tile has. Taken as it is,
+        // that rectangle is the frame canvas, the titlebar's width and the hit
+        // test, all reaching over the neighbouring window; and it is also what
+        // every sibling looks like for the moment between a new window opening
+        // and each shrinking client answering. So the size is cut, per axis,
+        // to the client's share of the tile -- the tile is the answer, and the
+        // client catches up inside it. Cut and not replaced: a client *smaller*
+        // than its tile keeps its own size, which is the cell-grid residue
+        // `pane_laid_out` describes and must go on seeing. `render::elements`
+        // cuts the surfaces to the same rectangle. See `Self::shown_size`.
         match self.real_geometry(window) {
-            Some(real) if real.size.w > 0 && real.size.h > 0 => real,
+            Some(real) if real.size.w > 0 && real.size.h > 0 => {
+                Rectangle::new(real.loc, self.shown_size(pane, real.size))
+            }
             _ => pane.slot(),
         }
+    }
+
+    /// The client's share of the tile a layout holds this pane in, while one
+    /// does and nothing outranks it.
+    ///
+    /// `None` for a pane in no tile -- see `Pane::placed` for every way out of
+    /// one -- and `None` while a resize hold is live. The hold is the other
+    /// authority over a tiled pane's size, and a stronger one: the dragged
+    /// rectangle is the truth for as long as it lasts, and the client's last
+    /// buffer is bridged into it by `resizing::factor`. Capping that as well
+    /// would cut the bridge down to a tile the drag is in the middle of
+    /// moving. `a_held_pane_is_bridged_and_not_cut_to_its_tile` pins it.
+    ///
+    /// The share is taken with the insets as they are now, which is the same
+    /// arithmetic `move_pane` configured the client with.
+    pub(crate) fn tile_of(&self, pane: &Pane) -> Option<Size<i32, Logical>> {
+        if self.holding_resize(pane.id()) {
+            return None;
+        }
+        Some(inner(pane.placed()?, self.insets_of(pane.id())).size)
+    }
+
+    /// A committed size, as this pane shows it: cut per axis to its tile.
+    ///
+    /// The committed size itself for a pane in no tile, and on any axis the
+    /// client is already inside. Shared by `pane_geometry`, which is what the
+    /// frame, the hit test and every transform read, and by the two places
+    /// that draw a client's pixels -- `render::elements` cuts the surfaces to
+    /// it, and `offscreen::capture_client` captures a masked client at it --
+    /// so none of the three can hold the client to a different rectangle.
+    pub(crate) fn shown_size(
+        &self,
+        pane: &Pane,
+        committed: Size<i32, Logical>,
+    ) -> Size<i32, Logical> {
+        self.tile_of(pane).map_or(committed, |tile| {
+            (committed.w.min(tile.w), committed.h.min(tile.h)).into()
+        })
     }
 
     /// Whether a client has anything worth showing yet.
@@ -1514,18 +1591,23 @@ impl Solium {
     /// and the far edges carry the whole of the client's disagreement. See
     /// `crate::input::resize::dragged_edge`.
     ///
-    /// Falls back to `pane_outer` for a pane no layout has ever placed. That is
+    /// Falls back to `pane_outer` for a pane no layout holds in a tile. That is
     /// a floating window — where nothing reads this, because no layout claims
-    /// the drag — or the frames between a window mapping and the first sweep,
-    /// where the pane's own rectangle is the only answer there is.
+    /// the drag — a dialog a layout centred without tiling it, a maximised or
+    /// fullscreen window, or the frames between a window mapping and the first
+    /// sweep, where the pane's own rectangle is the only answer there is.
     ///
-    /// A pane that *was* laid out and is not any more — tiling switched off
-    /// under it — answers with where the last layout left it, which is stale.
-    /// That is deliberate rather than overlooked: the only reader is the edge a
-    /// tiled drag sends, no layout is offered a drag it has stopped claiming,
-    /// and the first sweep after tiling comes back makes it current again.
-    /// Clearing it on the way out would mean teaching every mode that stops
-    /// placing a window to say so, for a value nobody is reading.
+    /// **A pane that was laid out and is not any more answers `pane_outer`
+    /// too, and until #133 it did not.** It answered where the last layout
+    /// left it, deliberately: the only reader was this edge, and clearing the
+    /// field meant teaching every mode that stops placing a window to say so.
+    /// #133 made `Pane::placed` the tile a client is held inside as well, and
+    /// a stale one of those is a window cut down to where it used to be — so
+    /// every way out of a tile clears it now, and `modes.use` is taught to say
+    /// so with `sol.unplace`. What this function answers for a pane that *is*
+    /// tiled is unchanged: `a_client_that_rounds_its_size_does_not_move_the_seam`
+    /// still drives it, and `a_restored_window_goes_back_into_its_tile` covers
+    /// the one way back that has to put the layout's rectangle back as well.
     pub(crate) fn pane_laid_out(&self, window: &Window) -> Option<crate::input::resize::LaidOut> {
         let pane = self.panes.get(self.panes.id_of(window)?)?;
         Some(crate::input::resize::LaidOut(
@@ -2976,7 +3058,18 @@ impl Solium {
                     id,
                     rect,
                     animation,
-                } => self.place(id, rect, animation, now),
+                    tile,
+                } => {
+                    let standing = if tile { Standing::Tile } else { Standing::Free };
+                    self.place(id, rect, animation, now, standing);
+                }
+                Command::Unplace { id } => {
+                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id)
+                        && let Some(pane) = self.panes.get_mut(pane)
+                    {
+                        pane.untile();
+                    }
+                }
                 Command::Close { id } => {
                     if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
                         self.close_pane(pane);
@@ -3372,7 +3465,14 @@ impl Solium {
     /// its old rectangle and lands on the new one — so a layout change and a
     /// mode use the same machinery and cannot disagree about where a window is
     /// going.
-    fn place(&mut self, id: u64, rect: Rect, animation: AnimationSpec, now: Duration) {
+    fn place(
+        &mut self,
+        id: u64,
+        rect: Rect,
+        animation: AnimationSpec,
+        now: Duration,
+        standing: Standing,
+    ) {
         let Some(pane) = self.panes.by_script_id(id).map(Pane::id) else {
             return;
         };
@@ -3394,7 +3494,7 @@ impl Solium {
                 .into(),
         );
 
-        self.move_pane(pane, outer, was, animation, now);
+        self.move_pane(pane, outer, was, animation, now, standing);
     }
 
     /// Put a pane's outer rectangle somewhere, and make every copy of that
@@ -3424,6 +3524,7 @@ impl Solium {
         was: Rectangle<i32, Logical>,
         animation: AnimationSpec,
         now: Duration,
+        standing: Standing,
     ) {
         // The frame's share comes off whichever sides it reserved; what is
         // left is the client's.
@@ -3510,7 +3611,19 @@ impl Solium {
             // exception. `Pane::placed` records the rectangle that was *asked
             // for*, which is the only copy of the layout's opinion the
             // compositor keeps; see `Self::pane_laid_out`.
-            held.set_placed(outer);
+            //
+            // **Only for a tile**, because since #133 that field is also the
+            // rectangle the client is held inside, and a placement that is not
+            // a tile must not hold anything. See `Standing`.
+            match standing {
+                Standing::Tile => held.set_placed(outer),
+                Standing::Free => held.untile(),
+                Standing::Kept => {
+                    if held.placed().is_some() {
+                        held.set_placed(outer);
+                    }
+                }
+            }
         }
 
         // **And the transform, unless this pane is leaving.**
@@ -5882,8 +5995,20 @@ impl Solium {
             None => (filled.loc, filled.size, true),
         };
 
-        if maximized && let Some(pane) = self.panes.get_mut(id) {
-            pane.set_restore(Some(current));
+        // **And out of its tile, or back into it (#133).** A tiled client is
+        // held inside `Pane::placed`, and a maximised one is not tiled: left
+        // there, the work area it is about to be configured to would be cut
+        // down to the tile it is leaving. The tile is kept for the way back,
+        // so a window restored into it is tiled again at once rather than at
+        // the next sweep -- which is what a tiled edge drag started from it
+        // reads (#124).
+        if let Some(pane) = self.panes.get_mut(id) {
+            if maximized {
+                pane.set_restore(Some(current));
+                pane.leave_tile();
+            } else {
+                pane.return_to_tile();
+            }
         }
 
         toplevel.with_pending_state(|state| {
@@ -7035,8 +7160,19 @@ impl Solium {
             // in from the edge the monitor was on rather than appearing. That
             // is worth the two lines: a window that teleports is one the user
             // has to find again.
+            //
+            // `Kept`, because a rescue is not a layout's opinion: a tiled pane
+            // is still tiled, at the rectangle it was brought back to, and a
+            // floating one must not become held inside a tile nobody gave it.
             let now = self.clock.now();
-            self.move_pane(pane, moved, outer, AnimationSpec::default(), now);
+            self.move_pane(
+                pane,
+                moved,
+                outer,
+                AnimationSpec::default(),
+                now,
+                Standing::Kept,
+            );
             tracing::info!(
                 from = ?outer.loc,
                 to = ?moved.loc,
@@ -7704,6 +7840,15 @@ impl XdgShellHandler for Solium {
         {
             pane.set_restore(Some(real));
         }
+        // Out of its tile, for `toggle_maximize`'s reason: a fullscreen window
+        // cut down to the tile it came from is a video playing in a corner of
+        // the monitor. Unconditionally rather than beside the rect above,
+        // because a window that is already fullscreen, or was maximised first,
+        // may have been put back in a tile by a sweep since -- and
+        // `leave_tile` keeps an older way back when there is no tile to take.
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.leave_tile();
+        }
 
         // The whole monitor, and no frame over it. The frame is dropped and
         // the pane marked bare, and leaving fullscreen builds a new one from
@@ -7791,7 +7936,13 @@ impl XdgShellHandler for Solium {
             self.real_geometry(&window)
                 .and_then(|real| self.maximised(&window, real))
         } else {
-            let kept = self.panes.get_mut(id).and_then(Pane::take_restore);
+            // Back into the tile it left as well, with the rect that goes with
+            // it; see `toggle_maximize`. A window still maximised stays out of
+            // one, which is the arm above.
+            let kept = self.panes.get_mut(id).and_then(|pane| {
+                pane.return_to_tile();
+                pane.take_restore()
+            });
             kept.map(|kept| self.back_on_a_screen(&window, kept))
         };
 
@@ -12070,6 +12221,7 @@ mod tests {
                     ..AnimationSpec::default()
                 },
                 now,
+                Standing::Tile,
             );
             state.resize_gesture = None;
             // The claimed branch's own line: the bridge is watching every pane
@@ -12298,6 +12450,592 @@ mod tests {
             );
         }
 
+        /// Everything a #133 test needs after the fixture: one window in a
+        /// one-leaf tree, swept through `Solium::place` as `tiling.apply`
+        /// would, with every finished transform retired so that what is drawn
+        /// is what the pane's own geometry says -- the state a desktop is in
+        /// between gestures. Returns the pane and the tile it was given.
+        fn tiled_alone(
+            state: &mut Solium,
+            window: &Window,
+        ) -> (crate::pane::PaneId, Rectangle<i32, Logical>) {
+            use solium_layout::tree::Tiling;
+
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(window)
+                .expect("a client in the space has a pane");
+            let mut tiling = Tiling::new();
+            tiling.insert(
+                state.window_id(window),
+                None,
+                None,
+                tiled_area(),
+                tiled_settings(),
+            );
+            sweep(state, &tiling);
+            let tile = state
+                .panes
+                .get(pane)
+                .and_then(Pane::placed)
+                .expect("a pane the layout has just placed is in a tile");
+            state.settle(state.clock.now());
+            (pane, tile)
+        }
+
+        /// A frame's worth of bookkeeping after a client has committed: the
+        /// space into the panes, and finished transforms retired.
+        fn a_frame(state: &mut Solium) {
+            state.sync_panes();
+            state.settle(state.clock.now());
+        }
+
+        /// **#133: a tiled client that commits more than its tile is held
+        /// inside it**, and the hit test stops where the tile does.
+        ///
+        /// Two windows side by side, and the left one's client answers with a
+        /// buffer 120 pixels wider than its tile and 8 shorter -- a browser at
+        /// its minimum width, with a terminal's cell-grid residue on the other
+        /// axis. On stage `pane_geometry` answered the committed size, so the
+        /// pane, its frame canvas and its hit test all reached 120 pixels into
+        /// the right-hand window, and a press there went to the left one.
+        ///
+        /// The left window is raised first, so that it is the one a hit test
+        /// meets first. Without that the right window would win the overlap by
+        /// being on top, and the last two assertions would pass on stage.
+        #[test]
+        fn a_tiled_client_that_commits_more_than_its_tile_is_held_inside_it() {
+            use solium_layout::tree::Tiling;
+
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (left, _left_toplevel, left_surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            let (right, _right_toplevel, right_surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&left)
+                .expect("a client in the space has a pane");
+            let beside_pane = state
+                .panes
+                .id_of(&right)
+                .expect("a client in the space has a pane");
+            let (left_id, right_id) = (state.window_id(&left), state.window_id(&right));
+
+            let (area, settings) = (tiled_area(), tiled_settings());
+            let mut tiling = Tiling::new();
+            tiling.insert(left_id, None, None, area, settings);
+            tiling.insert(right_id, Some(left_id), None, area, settings);
+            sweep(&mut state, &tiling);
+            let placed = |state: &Solium, pane| {
+                state
+                    .panes
+                    .get(pane)
+                    .and_then(Pane::placed)
+                    .expect("a pane the layout has placed is in a tile")
+            };
+            let (tile, beside) = (placed(&state, pane), placed(&state, beside_pane));
+            assert!(
+                beside.loc.x > tile.loc.x + tile.size.w,
+                "the fixture is two tiles side by side, left then right: {tile:?}, {beside:?}"
+            );
+
+            // The right-hand client does as it is told, so its tile is all
+            // its own; the left one does not.
+            commit_buffer(&client, &qh, &right_surface, beside.size.w, beside.size.h);
+            let wide = (tile.size.w + 120, tile.size.h - 8);
+            commit_buffer(&client, &qh, &left_surface, wide.0, wide.1);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            state.space.raise_element(&left, false);
+            a_frame(&mut state);
+            assert_eq!(
+                left.geometry().size,
+                Size::from(wide),
+                "the client really did commit more than its tile, or there is \
+                 nothing here to hold"
+            );
+
+            assert_eq!(
+                state.pane_outer_of(pane),
+                Some(Rectangle::new(tile.loc, (tile.size.w, wide.1).into())),
+                "cut to the tile across, where the client is too wide, and left \
+                 at the client's own height, where it is short of the tile"
+            );
+            assert_eq!(
+                state.pane_laid_out(&left).map(|laid_out| laid_out.0),
+                Some(tile),
+                "a tiled edge drag still starts from the layout's rectangle (#124)"
+            );
+            let drawn = state.drawn(pane, state.pane_outer_of(pane).expect("the pane is here"));
+            assert!(
+                (drawn.rect.size.w - f64::from(tile.size.w)).abs() < 0.5,
+                "and drawn at the tile's width, which is what the frame canvas \
+                 and the titlebar are sized from: {drawn:?}"
+            );
+
+            // Inside the right-hand tile, and inside the left client's
+            // committed width.
+            let point: Point<f64, Logical> =
+                (f64::from(beside.loc.x + 20), f64::from(beside.loc.y + 100)).into();
+            assert!(
+                point.x < f64::from(tile.loc.x + wide.0),
+                "the point has to be one the oversized client would reach"
+            );
+            assert_eq!(
+                state.window_under(point).map(|(window, _)| window),
+                Some(right.clone()),
+                "a press in the right-hand tile is the right-hand window's, \
+                 whatever the left one committed"
+            );
+            let right_surface = right
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface().clone());
+            assert_eq!(
+                state.surface_under(point).map(|(surface, _)| surface),
+                right_surface,
+                "and so is the pointer's motion there"
+            );
+        }
+
+        /// **Maximised is not tiled**: the work area a maximise configures is
+        /// not cut down to the tile the window left.
+        ///
+        /// `Pane::placed` is the tile a client is held inside, and on stage
+        /// `toggle_maximize` never touched it -- harmless while nothing read
+        /// it but #124's edge drag. With the cap it is a maximised window
+        /// drawn in the corner its tile used to occupy.
+        #[test]
+        fn a_maximised_window_is_not_held_in_its_old_tile() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let output = one_screen(&mut state);
+            let screen = state
+                .space
+                .output_geometry(&output)
+                .expect("the monitor is mapped");
+            let (window, toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            let (pane, tile) = tiled_alone(&mut state, &window);
+            assert!(
+                tile.size.w < screen.size.w && tile.size.h < screen.size.h,
+                "the tile has to be smaller than the monitor, or a cap to it \
+                 would cut nothing: {tile:?}"
+            );
+
+            state.toggle_maximize(&window);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                last_configured(&client, &toplevel),
+                Some((screen.size.w, screen.size.h)),
+                "the client was asked for the work area"
+            );
+            commit_buffer(&client, &qh, &surface, screen.size.w, screen.size.h);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+
+            assert_eq!(
+                state.panes.get(pane).and_then(Pane::placed),
+                None,
+                "a maximised window is in no tile"
+            );
+            assert_eq!(
+                state.pane_outer_of(pane),
+                Some(screen),
+                "and it is the size it was maximised to, not the tile it left"
+            );
+        }
+
+        /// **And the way back puts it in the tile again**, so a tiled edge drag
+        /// started from it begins at the layout's rectangle (#124).
+        ///
+        /// The client answers a cell short on the way back, the way a terminal
+        /// does, so that the layout's rectangle and the pane's own differ: a
+        /// window that came back in no tile would have `pane_laid_out` fall
+        /// back to the client's rectangle, and a drag begun from it would move
+        /// the seam by the client's rounding on its first frame.
+        #[test]
+        fn a_restored_window_goes_back_into_its_tile() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let output = one_screen(&mut state);
+            let screen = state
+                .space
+                .output_geometry(&output)
+                .expect("the monitor is mapped");
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            let (pane, tile) = tiled_alone(&mut state, &window);
+
+            state.toggle_maximize(&window);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            commit_buffer(&client, &qh, &surface, screen.size.w, screen.size.h);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+
+            state.toggle_maximize(&window);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            let short = tile.size.w - 8;
+            commit_buffer(&client, &qh, &surface, short, tile.size.h);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+
+            assert_eq!(
+                state.panes.get(pane).and_then(Pane::placed),
+                Some(tile),
+                "the un-maximise put the window back in the tile it left"
+            );
+            assert_eq!(
+                state.pane_outer_of(pane).map(|outer| outer.size.w),
+                Some(short),
+                "the client kept a cell short of its tile, so the two \
+                 rectangles below can be told apart"
+            );
+            assert_eq!(
+                state.pane_laid_out(&window).map(|laid_out| laid_out.0),
+                Some(tile),
+                "and an edge drag starts from the layout's rectangle, not the \
+                 client's"
+            );
+        }
+
+        /// **Fullscreen is not tiled either**, and leaving it goes back into
+        /// the tile.
+        ///
+        /// The same field and the same stage behaviour as the maximise above:
+        /// `fullscreen_request` kept a way back and moved the window, and left
+        /// `Pane::placed` saying it was still in its tile -- which with the cap
+        /// is a video cut down to the corner of the monitor it was tiled in.
+        #[test]
+        fn a_fullscreen_window_is_not_held_in_its_old_tile() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let output = one_screen(&mut state);
+            let screen = state
+                .space
+                .output_geometry(&output)
+                .expect("the monitor is mapped");
+            let (window, toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            let (pane, tile) = tiled_alone(&mut state, &window);
+
+            toplevel.set_fullscreen(None);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                last_configured(&client, &toplevel),
+                Some((screen.size.w, screen.size.h)),
+                "the client was asked for the whole monitor"
+            );
+            commit_buffer(&client, &qh, &surface, screen.size.w, screen.size.h);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+
+            assert_eq!(state.panes.get(pane).and_then(Pane::placed), None);
+            assert_eq!(
+                state.pane_outer_of(pane),
+                Some(screen),
+                "a fullscreen window covers its monitor, not the tile it left"
+            );
+
+            toplevel.unset_fullscreen();
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                state.panes.get(pane).and_then(Pane::placed),
+                Some(tile),
+                "and leaving fullscreen puts it back in that tile"
+            );
+        }
+
+        /// **A window a layout lets go of is not held in the tile it had.**
+        ///
+        /// `sol.unplace` is what `modes.use` sends for every window when the
+        /// layout in charge changes: the mode is the script's, so this is the
+        /// only way the compositor hears that a window is floating now. Without
+        /// it, a window left in its tile by a switch to floating is cut back to
+        /// that tile the moment its client commits more -- which a floating
+        /// window does whenever it is resized or grows itself.
+        #[test]
+        fn a_window_let_go_by_its_layout_is_not_held_in_its_old_tile() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            let (pane, tile) = tiled_alone(&mut state, &window);
+
+            state.apply(Outcome {
+                commands: vec![Command::Unplace {
+                    id: state.window_id(&window),
+                }],
+                ..Outcome::default()
+            });
+            let grown = (tile.size.w + 200, tile.size.h + 50);
+            commit_buffer(&client, &qh, &surface, grown.0, grown.1);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+
+            assert_eq!(state.panes.get(pane).and_then(Pane::placed), None);
+            assert_eq!(
+                state.pane_outer_of(pane).map(|outer| outer.size),
+                Some(Size::from(grown)),
+                "a floating window is the size its client committed"
+            );
+        }
+
+        /// **A dialog a layout centres is placed and not tiled**, through
+        /// `sol.place` with `tile = false`.
+        ///
+        /// A dialog is floating whichever layout is running -- `dialogs.lua`
+        /// centres it over its parent at the size it had -- and one that grows
+        /// after it was centred, as a file chooser settling on its size does,
+        /// must be drawn at the size it grew to. A layout's ordinary placement
+        /// beside it is still a tile, which the last assertion holds the
+        /// fixture to.
+        #[test]
+        fn a_dialog_a_layout_centres_is_not_held_in_its_rect() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            let id = state.window_id(&window);
+            let rect = Rect {
+                x: 300.0,
+                y: 200.0,
+                w: 400.0,
+                h: 300.0,
+            };
+            let instant = AnimationSpec {
+                duration: Duration::ZERO,
+                ..AnimationSpec::default()
+            };
+            state.apply(Outcome {
+                commands: vec![Command::Place {
+                    id,
+                    rect,
+                    animation: instant,
+                    tile: false,
+                }],
+                ..Outcome::default()
+            });
+            commit_buffer(&client, &qh, &surface, 520, 380);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+
+            assert_eq!(state.panes.get(pane).and_then(Pane::placed), None);
+            assert_eq!(
+                state.pane_outer_of(pane),
+                Some(at(300, 200, 520, 380)),
+                "placed where the layout said, at the size the client grew to"
+            );
+
+            state.apply(Outcome {
+                commands: vec![Command::Place {
+                    id,
+                    rect,
+                    animation: instant,
+                    tile: true,
+                }],
+                ..Outcome::default()
+            });
+            a_frame(&mut state);
+            assert_eq!(
+                state.pane_outer_of(pane),
+                Some(at(300, 200, 400, 300)),
+                "the same rect as a tile holds the same client inside it"
+            );
+        }
+
+        /// **A pane under a resize hold is bridged, not cut to its tile.**
+        ///
+        /// While an edge is being dragged the dragged rectangle is the truth
+        /// and the client's last buffer is stretched or held into it by
+        /// `resizing::factor` (#113, #123). The tile the drag is moving is
+        /// `Pane::placed` all the while, so a cut to it would cut the bridge:
+        /// `Solium::tile_of` answers `None` under a hold, and the committed
+        /// size is shown whole. Here the client is larger than the rectangle
+        /// the drag has reached, which is exactly the case a cut would change.
+        #[test]
+        fn a_held_pane_is_bridged_and_not_cut_to_its_tile() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (400, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+            commit_buffer(&client, &qh, &surface, 400, 300);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            state.sync_panes();
+
+            let outer = at(400, 300, 200, 150);
+            let request = ResizeRequest {
+                window: window.clone(),
+                wanted: outer,
+                edge_at: (600.0, 450.0),
+                edges: ResizeEdge::BottomRight,
+            };
+            state.begin_resize(&window);
+            tiled_frame(&mut state, &request, pane, outer, Duration::ZERO);
+            assert!(state.holding_resize(pane), "the drag is holding the pane");
+            assert_eq!(
+                state.panes.get(pane).and_then(Pane::placed),
+                Some(outer),
+                "and the layout has it in the dragged tile, which a cut would use"
+            );
+
+            let held = state.panes.get(pane).expect("the pane is still here");
+            assert_eq!(
+                state.shown_size(held, window.geometry().size),
+                Size::from((400, 300)),
+                "the whole of the client's last buffer is shown, to be bridged \
+                 into the dragged rectangle rather than cut to it"
+            );
+            assert_eq!(
+                state.pane_geometry(held),
+                outer,
+                "and the pane is the dragged rectangle, as #113 made it"
+            );
+        }
+
+        /// **A floating window brought back onto a screen is still floating.**
+        ///
+        /// `rescue_offscreen` reaches `move_pane`, which is where a layout's
+        /// tile is written -- so on the way to #133 a window lost off a
+        /// departed monitor came back *tiled* at the rectangle it was rescued
+        /// to, and was cut to it from then on. A rescue is not a layout's
+        /// opinion, and keeps a pane's standing as it found it.
+        #[test]
+        fn a_floating_window_brought_back_onto_a_screen_is_not_given_a_tile() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let _output = one_screen(&mut state);
+            let (window, _toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(window.clone(), (-5000, 300), false);
+            state.sync_panes();
+            let pane = state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane");
+
+            state.rescue_offscreen();
+            assert!(
+                state
+                    .pane_outer_of(pane)
+                    .is_some_and(|outer| state.on_any_output(outer)),
+                "the rescue brought the window back, or it proves nothing"
+            );
+            commit_buffer(&client, &qh, &surface, 700, 500);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            a_frame(&mut state);
+
+            assert_eq!(state.panes.get(pane).and_then(Pane::placed), None);
+            assert_eq!(
+                state.pane_outer_of(pane).map(|outer| outer.size),
+                Some(Size::from((700, 500))),
+                "and it is the size its client committed"
+            );
+        }
+
         /// The work area every tiled-tree fixture in this module lays out over.
         fn tiled_area() -> solium_layout::Rect {
             solium_layout::Rect::new(0.0, 0.0, 1000.0, 600.0)
@@ -12344,6 +13082,7 @@ mod tests {
                         ..AnimationSpec::default()
                     },
                     Duration::ZERO,
+                    Standing::Tile,
                 );
             }
         }
@@ -12901,6 +13640,7 @@ mod tests {
                 was,
                 AnimationSpec::default(),
                 Duration::ZERO,
+                Standing::Tile,
             );
 
             assert!(
@@ -13530,6 +14270,7 @@ mod tests {
                 was,
                 AnimationSpec::default(),
                 Duration::from_millis(16),
+                Standing::Tile,
             );
             pump(
                 &mut display,
@@ -15466,6 +16207,7 @@ mod tests {
                 was,
                 AnimationSpec::default(),
                 pressed + Duration::from_millis(95),
+                Standing::Tile,
             );
 
             let landed = drawn_now(&state, pane, pressed + Duration::from_millis(400));
@@ -15808,7 +16550,14 @@ mod tests {
             // The layout reflows into the space, which is the ordinary
             // consequence of a close and the reason the stale rectangle matters
             // at all.
-            state.move_pane(survivor, vacated, was, AnimationSpec::default(), asked);
+            state.move_pane(
+                survivor,
+                vacated,
+                was,
+                AnimationSpec::default(),
+                asked,
+                Standing::Tile,
+            );
             // Past the survivor's own move, so what is drawn at the point is
             // the survivor itself rather than a frame of it in transit.
             state.clock.advance(Duration::from_millis(400));
@@ -15904,6 +16653,7 @@ mod tests {
                 was,
                 AnimationSpec::default(),
                 pressed + Duration::from_millis(95),
+                Standing::Tile,
             );
             pump(
                 &mut display,
@@ -17194,7 +17944,14 @@ mod tests {
             // this is not quietly testing a move nobody suppressed.
             let elsewhere = at(1000, 500, 250, 180);
             let configures = client.configures.len();
-            state.move_pane(pane, elsewhere, was, AnimationSpec::default(), asked);
+            state.move_pane(
+                pane,
+                elsewhere,
+                was,
+                AnimationSpec::default(),
+                asked,
+                Standing::Tile,
+            );
             pump(
                 &mut display,
                 &mut state,
@@ -17265,6 +18022,7 @@ mod tests {
                 elsewhere,
                 AnimationSpec::default(),
                 refused + Duration::from_millis(200),
+                Standing::Tile,
             );
             pump(
                 &mut display,

@@ -72,10 +72,19 @@ Item {
         }
     }
 
+    // What a short tile leaves room for, by `top/Frame.qml`'s arithmetic
+    // turned on its side (#133): this bar runs down the window, so its buttons
+    // stack along the height, and the height is what runs out. The title keeps
+    // this file's own 120px and the same 24px of its own.
+    readonly property bool roomForTitle: frame.height - 120 >= 24
+    readonly property bool roomForClose: frame.height >= 37
+    readonly property bool roomForMaximize: frame.height >= 59
+
     // Rotated about its own centre, then placed: rotation happens after
     // layout, so a Text that is as wide as the window is tall ends up as tall
     // as the window once turned.
     Text {
+        visible: frame.roomForTitle
         width: Math.min(implicitWidth, Math.max(frame.height - 120, 0))
         text: frame.title
         elide: Text.ElideRight
@@ -99,7 +108,7 @@ Item {
         }
         spacing: Theme.gap
 
-        FrameButton { name: "maximize"; tint: Theme.warning }
-        FrameButton { name: "close"; tint: Theme.danger }
+        FrameButton { name: "maximize"; tint: Theme.warning; visible: frame.roomForMaximize }
+        FrameButton { name: "close"; tint: Theme.danger; visible: frame.roomForClose }
     }
 }

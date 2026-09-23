@@ -72,8 +72,16 @@ Item {
         }
     }
 
+    // What a narrow tile leaves room for, by `top/Frame.qml`'s arithmetic and
+    // for its reasons (#133): the title below 174px, maximise below 59px,
+    // close below 37px, and a bare bar under that.
+    readonly property bool roomForTitle: frame.width - 150 >= 24
+    readonly property bool roomForClose: frame.width >= 37
+    readonly property bool roomForMaximize: frame.width >= 59
+
     Text {
         anchors.centerIn: bar
+        visible: frame.roomForTitle
         width: Math.min(implicitWidth, Math.max(frame.width - 150, 0))
         text: frame.title
         elide: Text.ElideRight
@@ -86,7 +94,7 @@ Item {
         anchors { right: bar.right; rightMargin: Theme.margin; verticalCenter: bar.verticalCenter }
         spacing: Theme.gap
 
-        FrameButton { name: "maximize"; tint: Theme.warning }
-        FrameButton { name: "close"; tint: Theme.danger }
+        FrameButton { name: "maximize"; tint: Theme.warning; visible: frame.roomForMaximize }
+        FrameButton { name: "close"; tint: Theme.danger; visible: frame.roomForClose }
     }
 }
