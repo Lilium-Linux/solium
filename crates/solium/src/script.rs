@@ -338,6 +338,16 @@ pub(crate) enum Command {
         id: u64,
         rect: Rect,
         animation: AnimationSpec,
+        /// Whether `rect` is a tile the client is held inside (#133) — true
+        /// unless the script said `tile = false`, which `dialogs.lua` does for
+        /// a modal it centres over its parent. See `state::Standing`.
+        tile: bool,
+    },
+    /// No layout holds this window in a tile any more: whatever it commits,
+    /// it is drawn at. What `modes.use` sends for every window when the layout
+    /// in charge changes, since only the script knows that it has.
+    Unplace {
+        id: u64,
     },
     /// Ask a window to close. A request, not a kill: the client decides.
     Close {
@@ -2390,19 +2400,40 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // *drawn*. A layout uses this one — and leaving a mode afterwards restores
     // it to wherever the layout has since put it, which is the correct answer
     // and comes out for free.
+    //
+    // The rect is a *tile* unless it says `tile = false`: the client is held
+    // inside it, cut to it where it commits more than it has (#133). A
+    // layout's arrangement wants that and gets it by default; a window a
+    // layout places without tiling it — a dialog centred on its parent — says
+    // so, and is drawn at whatever it commits.
     sol.set(
         "place",
         lua.create_function(|lua, (id, options): (u64, Table)| {
             let Some(rect) = rect_from(&options)? else {
                 return Err(mlua::Error::runtime("sol.place needs a rect"));
             };
+            let tile = options.get::<Option<bool>>("tile")?.unwrap_or(true);
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 pending.commands.push(Command::Place {
                     id,
                     rect,
                     animation,
+                    tile,
                 });
+            })
+        })?,
+    )?;
+
+    // The other half of a tile: let a window go from one. Without it the
+    // compositor cannot know a layout has stopped — the mode is the script's —
+    // and a window left in the tile it last had would go on being cut to that
+    // tile after a switch to floating, the moment it committed anything larger.
+    sol.set(
+        "unplace",
+        lua.create_function(|lua, id: u64| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Unplace { id })
             })
         })?,
     )?;
@@ -6236,6 +6267,114 @@ mod dialogs {
 
     fn arrange(name: &str, windows: Vec<WindowInfo>) -> std::collections::HashMap<u64, Rect> {
         arrange_on(name, vec![monitor()], windows)
+    }
+
+    /// Whether each window's placements in `commands` were tiles, by id, in
+    /// the order they were sent. See `Command::Place::tile`.
+    fn tiles(commands: &[Command]) -> std::collections::HashMap<u64, Vec<bool>> {
+        let mut out: std::collections::HashMap<u64, Vec<bool>> = std::collections::HashMap::new();
+        for command in commands {
+            if let Command::Place { id, tile, .. } = command {
+                out.entry(*id).or_default().push(*tile);
+            }
+        }
+        out
+    }
+
+    /// **#133: a layout's arrangement is a tile, and a dialog it centres is
+    /// not.**
+    ///
+    /// The compositor holds a tile's client inside it. That is what an
+    /// arrangement wants -- a window that will not shrink as far as its slot
+    /// is cut to the slot rather than drawn over its neighbour -- and it is
+    /// wrong for a modal, which `dialogs.lua` centres over its parent at the
+    /// size it had and which may grow afterwards. So `sol.place` defaults to a
+    /// tile and `dialogs.place` says `tile = false`. Both layouts, since both
+    /// go through `dialogs.place`.
+    #[test]
+    fn a_layouts_arrangement_is_a_tile_and_a_dialog_it_centres_is_not() {
+        for (name, key) in LAYOUTS {
+            let mut scripts = scripts(name, name);
+            let outcome = scripts.key(
+                key,
+                snapshot(vec![
+                    window(1, 800.0, 600.0),
+                    window(2, 800.0, 600.0),
+                    modal(3, 600.0, 400.0, Parentage::Window(1)),
+                ]),
+            );
+            assert!(outcome.handled, "{name}: the layout key was not handled");
+            let placed = tiles(&outcome.commands);
+            for id in [1, 2] {
+                assert!(
+                    placed
+                        .get(&id)
+                        .is_some_and(|each| !each.is_empty() && each.iter().all(|tile| *tile)),
+                    "{name}: window {id} is in the arrangement and was not placed as a tile: {placed:?}"
+                );
+            }
+            assert!(
+                placed
+                    .get(&3)
+                    .is_some_and(|each| !each.is_empty() && each.iter().all(|tile| !*tile)),
+                "{name}: the dialog was placed as a tile, so a dialog that grows is cut to \
+                 the size it was centred at: {placed:?}"
+            );
+        }
+    }
+
+    /// **A layout that stops lets every window out of its tile.**
+    ///
+    /// The mode is the script's, so the compositor cannot see a switch to
+    /// floating happen: `modes.use` tells it, with `sol.unplace` for every
+    /// window. Pressing a layout's key a second time is the switch to
+    /// floating, and asserted here as the one that must send it for every
+    /// window and place none. Turning a layout on sends it too -- the layout
+    /// being replaced may have been another -- and then places everything,
+    /// which the first half holds to: each window's last word is a tile.
+    #[test]
+    fn a_layout_that_stops_lets_every_window_out_of_its_tile() {
+        for (name, key) in LAYOUTS {
+            let mut scripts = scripts(name, name);
+            let windows = || snapshot(vec![window(1, 800.0, 600.0), window(2, 800.0, 600.0)]);
+
+            let on = scripts.key(key, windows());
+            assert!(on.handled, "{name}: the layout key was not handled");
+            for id in [1_u64, 2] {
+                let last = on.commands.iter().rev().find_map(|command| match command {
+                    Command::Place {
+                        id: placed, tile, ..
+                    } if *placed == id => Some(*tile),
+                    Command::Unplace { id: unplaced } if *unplaced == id => Some(false),
+                    _ => None,
+                });
+                assert_eq!(
+                    last,
+                    Some(true),
+                    "{name}: turning the layout on left window {id} out of a tile"
+                );
+            }
+
+            let off = scripts.key(key, windows());
+            let mut unplaced: Vec<u64> = off
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Unplace { id } => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            unplaced.sort_unstable();
+            assert_eq!(
+                unplaced,
+                vec![1, 2],
+                "{name}: switching to floating did not let every window go"
+            );
+            assert!(
+                tiles(&off.commands).is_empty(),
+                "{name}: nothing is laid out once the layout has stopped"
+            );
+        }
     }
 
     /// **A modal dialog takes no share of the screen.**

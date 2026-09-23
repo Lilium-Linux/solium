@@ -100,8 +100,29 @@ Item {
         }
     }
 
+    // What a narrow tile leaves room for (#133). Below 150px the title was
+    // given no width and the buttons never hid, so a crowded corner of a tiled
+    // desktop drew fragments of text with the buttons on top of them. Pieces
+    // are hidden with `visible` rather than squeezed: that takes a piece out
+    // of the picture and out of the pointer's reach in one property, since an
+    // invisible item receives no mouse events -- so a hidden button cannot set
+    // `hovered`, which the compositor reads to decide whether a press on the
+    // bar starts a drag. The `Row` lays out only its visible buttons, so close
+    // stays against the right edge when maximise goes.
+    //
+    // The close button needs its own 13px, `Theme.margin` to its right and as
+    // much again to its left: 37px. The maximise button needs another
+    // `Theme.gap` and 13px on top: 59px. The title keeps the 150px this file
+    // already held back from it for the buttons, and needs 24px of its own
+    // before a few letters of it read as anything but a fragment. Under 37px
+    // the bar is bare.
+    readonly property bool roomForTitle: frame.width - 150 >= 24
+    readonly property bool roomForClose: frame.width >= 37
+    readonly property bool roomForMaximize: frame.width >= 59
+
     Text {
         anchors.centerIn: bar
+        visible: frame.roomForTitle
         width: Math.min(implicitWidth, Math.max(frame.width - 150, 0))
         text: frame.title
         elide: Text.ElideRight
@@ -120,7 +141,7 @@ Item {
         }
         spacing: Theme.gap
 
-        FrameButton { name: "maximize"; tint: Theme.warning }
-        FrameButton { name: "close"; tint: Theme.danger }
+        FrameButton { name: "maximize"; tint: Theme.warning; visible: frame.roomForMaximize }
+        FrameButton { name: "close"; tint: Theme.danger; visible: frame.roomForClose }
     }
 }
