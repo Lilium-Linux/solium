@@ -111,7 +111,34 @@ fn anywhere_on(
     screens.into_iter().any(|screen| screen.overlaps(rect))
 }
 
-/// How far past the present [`Solium::everything_is_off_stage`] looks.
+/// How far past the present a question about where a window is *going* looks.
+///
+/// **Focus judges where a window is settling; the pointer judges where it is
+/// drawn.** That is the rule, and this constant is the line between its two
+/// halves. A click lands on what is on screen this frame, so the hit test —
+/// [`Solium::window_under`], through `Frame::covers` — samples the present
+/// and must go on doing so. Focus is a decision about what the user is about
+/// to work with, so it belongs to the destination: [`Solium::settle_focus`]
+/// and [`Solium::everything_is_off_stage`] both ask [`Solium::drawn_at`] this
+/// far ahead, through [`Solium::settling`]. Where the two meet —
+/// `settle_focus` asking which window is under the pointer — it is still a
+/// focus decision, and it hit-tests the destination.
+///
+/// The cases, each pinned by the test named:
+///
+/// * a closing window is headed for `present::close`'s opacity zero, so it is
+///   no candidate from the press onwards, even while it is still visibly
+///   fading and still takes clicks —
+///   `a_window_mid_close_under_the_pointer_is_not_handed_the_keyboard`;
+/// * a window being given back is headed for full opacity, so it is a
+///   candidate on the frame its restore starts, when it is still drawn at
+///   nothing — `a_refused_close_gives_the_keyboard_back_to_the_window_it_brings_back`;
+/// * a desk just switched to is headed on stage and a desk just left is headed
+///   off, on the switch's first frame, by either arm —
+///   `the_first_frame_of_a_workspace_switch_focuses_the_desk_switched_to` and
+///   `a_pointer_over_the_desk_being_left_does_not_hand_it_the_keyboard`, which
+///   also asserts the click on the same pixel on the same frame still goes to
+///   what is drawn.
 ///
 /// A reload *starts* the workspace slide; it does not finish it. Asking where
 /// the windows are at that instant asks where they were before it, so the
@@ -1515,6 +1542,11 @@ impl Solium {
     /// unchanged: a window drawn in perspective is still clicked where the
     /// layout put it, and a mode that wants otherwise inverts its own transform
     /// through `present::to_window_space`.
+    ///
+    /// **The instant is the caller's, and which one is a rule rather than a
+    /// habit.** The renderer and a press pass the present; the focus questions
+    /// pass [`Self::settling`]. [`SETTLED`] states it and names the tests on
+    /// both sides of it.
     pub(crate) fn drawn_at(
         &self,
         pane: &Pane,
@@ -1902,25 +1934,40 @@ impl Solium {
             .collect()
     }
 
-    /// Whether a pane is drawn somewhere the user can see it.
+    /// The instant a question about where windows are *going* is put to.
     ///
-    /// **The visibility question `window_under` asks of a point, asked of the
-    /// screens instead**, and the two halves are the same two. `Frame::covers`
-    /// is `shows() && rect.contains(point)`; this is `shows()` and *is any of
-    /// that rectangle on a monitor*. Both go through [`Self::drawn_at`], which
-    /// is deliberate and is the whole reason this cannot be asked of
-    /// `pane_outer`: a hidden workspace is **parked a screen away, not
-    /// unmapped**. Its windows keep the rectangle their layout gave them and a
-    /// selection carries them off-stage, so the real rectangle says they are on
-    /// screen and only the drawn one knows better. See `workspaces.lua`.
+    /// Far enough ahead that every transform running now has landed. One
+    /// function, so the two focus readers cannot drift apart on it again: see
+    /// [`SETTLED`] for the rule and the tests that pin it.
+    fn settling(&self) -> Duration {
+        self.clock.now().saturating_add(SETTLED)
+    }
+
+    /// Whether a pane is headed somewhere the user can see it.
+    ///
+    /// **The two halves `Frame::covers` asks of a point — `shows()` and the
+    /// rectangle — asked of the screens instead, and of the destination rather
+    /// than the frame being drawn.** `landed` is [`Self::settling`]; [`SETTLED`]
+    /// says why and names the tests. It was the present until #127's fourth
+    /// review, and that put the question to a restore at its progress zero —
+    /// which answers `present::close`'s opacity-zero end, so the window being
+    /// given back declined itself — and to a workspace switch before it had
+    /// moved anything.
+    ///
+    /// Through [`Self::drawn_at`] and not `pane_outer`, for one reason: a
+    /// hidden workspace is **parked a screen away, not unmapped**. Its windows
+    /// keep the rectangle their layout gave them and a selection carries them
+    /// off-stage, so the real rectangle says they are on screen and only the
+    /// drawn one knows better. See `workspaces.lua`, and
+    /// `a_close_does_not_hand_the_keyboard_to_a_workspace_nobody_can_see`.
     ///
     /// **No screens is not "invisible".** `nothing_on_stage` answers `None`
     /// when there is nothing to measure against, and a compositor with no
     /// output bound yet must not decide that every window is unreachable — the
     /// caller would then refuse to focus anything at all. "Not known to be off
     /// stage" is the honest reading and the safe one.
-    fn on_stage(&self, pane: &Pane, screens: &[Rectangle<i32, Logical>], now: Duration) -> bool {
-        let frame = self.drawn_at(pane, self.pane_outer(pane), now);
+    fn on_stage(&self, pane: &Pane, screens: &[Rectangle<i32, Logical>], landed: Duration) -> bool {
+        let frame = self.drawn_at(pane, self.pane_outer(pane), landed);
         frame.shows() && nothing_on_stage([frame.rect], screens) != Some(true)
     }
 
@@ -3089,7 +3136,7 @@ impl Solium {
         // Having no screens is `nothing_on_stage`'s answer to give, and it does
         // -- a second check here would be a second place that decides what an
         // unanswerable question comes back as.
-        let landed = self.clock.now().saturating_add(SETTLED);
+        let landed = self.settling();
         nothing_on_stage(
             self.panes
                 .iter()
@@ -3871,13 +3918,28 @@ impl Solium {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(Window, Rectangle<i32, Logical>)> {
+        self.window_under_at(location, self.clock.now())
+    }
+
+    /// The same walk, at an instant the caller names.
+    ///
+    /// [`Self::window_under`] is this at the present, which is what a press is
+    /// answered from and must stay. The one other caller is
+    /// [`Self::settle_focus`]'s pointer arm, which is a focus decision and so
+    /// asks at [`Self::settling`] — see [`SETTLED`] for the rule and
+    /// `a_pointer_over_the_desk_being_left_does_not_hand_it_the_keyboard` for
+    /// the two asked of one pixel on one frame.
+    fn window_under_at(
+        &self,
+        location: Point<f64, Logical>,
+        now: Duration,
+    ) -> Option<(Window, Rectangle<i32, Logical>)> {
         // Locked, so there is no window under the pointer however many are
         // still mapped. Everything built on this -- click to focus, focus
         // follows mouse, drag, resize -- stops at once, in one place.
         if self.lock.is_some() {
             return None;
         }
-        let now = self.clock.now();
         for pane in self.panes.iter().rev() {
             let outer = self.pane_outer(pane);
             // `covers`, not `rect.contains`: a pane drawn at opacity zero is
@@ -5261,12 +5323,23 @@ impl Solium {
     /// otherwise. Called where a window went, and only when nothing has focus,
     /// so it cannot argue with a script that has just chosen one.
     ///
+    /// **Both arms judge where windows are settling, not where they are
+    /// drawn.** That is [`SETTLED`]'s rule, and the tests for each case are
+    /// named there. Asking at the present was #127's fourth review, twice
+    /// over: `give_back`'s call here found the window it was giving back still
+    /// at its restore's progress zero — `present::close`'s opacity zero — and
+    /// declined it, and a workspace switch's first frame had the desk being
+    /// left on stage and the desk arriving off it.
+    ///
     /// **Neither candidate may be a window on its way out.** The pointer arm
-    /// gets that from `window_under`, which declines a pane nothing can see.
-    /// The topmost arm had to be told: it reads the pane list directly, and the
-    /// pane a close is playing on is usually the topmost one there is, so
-    /// without the filter [`Self::hand_off_keyboard`] would take the keyboard
-    /// off a closing window and give it straight back.
+    /// gets that from hit-testing the destination, where a closing pane is at
+    /// opacity zero from the press onwards; hit-testing the present, as it did
+    /// before, only got it once the fade had landed, and a pane still fading
+    /// under the pointer was handed the keyboard. The topmost arm had to be
+    /// told as well: it reads the pane list directly, and the pane a close is
+    /// playing on is usually the topmost one there is, so without the filter
+    /// [`Self::hand_off_keyboard`] would take the keyboard off a closing window
+    /// and give it straight back.
     ///
     /// **And neither may be a window that is not on screen**, which is the
     /// other half of the same sentence and was missing from the topmost arm
@@ -5291,19 +5364,20 @@ impl Solium {
             .seat
             .get_pointer()
             .map(|pointer| pointer.current_location());
-        // Once for the whole walk, and at the instant the walk is about to draw
-        // -- the same `now` every other reader of a drawn rectangle uses.
-        let now = self.clock.now();
+        // Once for the whole walk, and at the destination rather than the
+        // frame being drawn: focus is about what the user is going to work
+        // with. See `SETTLED`.
+        let landed = self.settling();
         let screens = self.screens();
         let next = at
-            .and_then(|at| self.window_under(at))
+            .and_then(|at| self.window_under_at(at, landed))
             .map(|(window, _)| window)
             .or_else(|| {
                 self.panes
                     .iter()
                     .rev()
                     .filter(|pane| !pane.leaving())
-                    .filter(|pane| self.on_stage(pane, &screens, now))
+                    .filter(|pane| self.on_stage(pane, &screens, landed))
                     .find_map(|pane| pane.client().cloned())
             });
         if let Some(window) = next {
@@ -5352,8 +5426,12 @@ impl Solium {
     /// That is the right answer rather than a gap: typing into a window that is
     /// not on screen is the fault, and typing into nothing at least loses no
     /// keystrokes to the wrong application. [`Self::give_back`] calls
-    /// `settle_focus` again for the window that comes back to a session with an
-    /// idle keyboard.
+    /// `settle_focus` again, and the window that comes back takes the keyboard
+    /// on the frame its restore starts —
+    /// `a_refused_close_gives_the_keyboard_back_to_the_window_it_brings_back`
+    /// asserts both the empty seat and the return. The sentence that stood here
+    /// before it claimed the second half and it did not hold: focus was judged
+    /// at the restore's progress zero, where the window is still invisible.
     fn hand_off_keyboard(&mut self, leaving: &Window) {
         if !self.is_focused(leaving) {
             return;
@@ -5533,6 +5611,14 @@ impl Solium {
     /// back to a session whose keyboard is idle is exactly the case
     /// `settle_focus` exists for. It declines when something else has focus,
     /// so a window the user has moved on from does not steal it back.
+    ///
+    /// **Called on the frame the restore starts, and that is safe only because
+    /// `settle_focus` judges the destination.** Here the pane is still drawn at
+    /// `present::close`'s opacity zero; asked about the present, `settle_focus`
+    /// declined the very window being given back, whenever too little real
+    /// time had passed since `now` for the fade to show. See [`SETTLED`], and
+    /// `a_refused_close_gives_the_keyboard_back_to_the_window_it_brings_back`,
+    /// which pins the progress-zero case rather than hoping for it.
     fn give_back(&mut self, id: crate::pane::PaneId, now: std::time::Duration) -> bool {
         let Some(pane) = self.panes.get(id) else {
             // No pane, nothing to give back and nothing left waiting: a window
@@ -13506,8 +13592,10 @@ mod tests {
         /// the compositor's own side a seat holding an off-stage surface looks
         /// exactly like one holding a visible one. Here the right answer is
         /// that the keystroke goes *nowhere* — an idle keyboard loses no
-        /// characters to the wrong application, and the window that comes back
-        /// takes it, which is what `give_back` calls `settle_focus` for.
+        /// characters to the wrong application. This test stops at the
+        /// request; that the window which then comes back takes the keyboard is
+        /// `a_refused_close_gives_the_keyboard_back_to_the_window_it_brings_back`'s
+        /// to show, and until #127's fourth review nothing did.
         #[test]
         fn a_close_does_not_hand_the_keyboard_to_a_workspace_nobody_can_see() {
             tiled_fixture!(display, state, conn, queue, client, qh);
@@ -13694,6 +13782,473 @@ mod tests {
                  `give_back`'s `settle_focus` declines when something already \
                  has focus, which is what would make this permanent rather \
                  than a wrong answer for one second"
+            );
+        }
+
+        /// One 1920x1080 monitor at the origin.
+        ///
+        /// "On stage" is a question with no answer without one —
+        /// `nothing_on_stage` says so itself — so a focus test that maps no
+        /// output is asking only about opacity.
+        fn one_screen(state: &mut Solium) {
+            let screen = Output::new(
+                "focus-test".to_string(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "solium".to_string(),
+                    model: "test".to_string(),
+                },
+            );
+            screen.change_current_state(
+                Some(Mode {
+                    size: (1920, 1080).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                Some(Scale::Fractional(1.0)),
+                None,
+            );
+            state.space.map_output(&screen, (0, 0));
+        }
+
+        /// Whether any of this pane's drawn rectangle at `at` reaches a screen,
+        /// and whether it paints anything there — the two halves of "on stage",
+        /// measured the way the premises below need them measured.
+        fn drawn_on_stage(state: &Solium, pane: crate::pane::PaneId, at: Duration) -> bool {
+            let frame = drawn_now(state, pane, at);
+            let screens: Vec<Rectangle<i32, Logical>> = state
+                .space
+                .outputs()
+                .filter_map(|output| state.space.output_geometry(output))
+                .collect();
+            frame.shows() && nothing_on_stage([frame.rect], &screens) == Some(false)
+        }
+
+        /// **#127 fourth review, NEW-1: a refused window came back with the
+        /// keyboard on nothing.**
+        ///
+        /// `give_back` calls `settle_focus` straight after `present::clear`, so
+        /// the restore it has just started is at progress zero, and at progress
+        /// zero a transform answers its `from` — which past `CLOSING` is
+        /// `present::close`'s opacity-zero end. Judged by the frame being
+        /// drawn, the window being given back was invisible, so the topmost arm
+        /// declined the only window there was to focus, and the window stood
+        /// back up at full opacity with the seat holding nothing.
+        ///
+        /// **Deterministic, where the fault was not.** In the running
+        /// compositor `settle_focus` reads the clock a little after the frame's
+        /// `now`, and the window escaped whenever enough real time had passed
+        /// between the two for the fade to clear one step of eight bits. This
+        /// hands `settle_refused` an instant the clock has not reached, so
+        /// every reading `settle_focus` takes falls at or before the restore's
+        /// start, where `Animation::progress` is exactly zero. The failing case,
+        /// made certain rather than likely.
+        ///
+        /// Nothing else is open, so `hand_off_keyboard` empties the seat at the
+        /// request — asserted, because that is the path the fault needs.
+        /// Asserted at the client as well as the seat, for the reason
+        /// `typing_after_a_close_reaches_the_window_that_is_drawn` gives.
+        #[test]
+        fn a_refused_close_gives_the_keyboard_back_to_the_window_it_brings_back() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            one_screen(&mut state);
+            let (window, pane) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (400, 300));
+            // Twice: the keyboard is a request the client makes in answer to
+            // the seat's capabilities. See `typing_after_a_close...`.
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert!(
+                client.keyboard.is_some(),
+                "the client bound a keyboard; without one this test cannot \
+                 observe anything"
+            );
+            // Past the opening animation and settled, so the untouched pointer
+            // at the origin is over nothing and the topmost arm is the one
+            // asked.
+            state.clock.advance(Duration::from_millis(300));
+            state.settle(state.clock.now());
+            assert!(
+                state.window_under((0.0, 0.0).into()).is_none(),
+                "the pointer is over nothing, which makes this the keyboard's \
+                 question and not the mouse's"
+            );
+
+            state.focus_window(&window, SERIAL_COUNTER.next_serial());
+            state.close_pane(pane);
+            state
+                .clock
+                .advance(present::CLOSING + Duration::from_millis(10));
+            let asked = state.clock.now();
+            state.settle_closing(asked);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(client.closes.len(), 1, "the request went out");
+            assert!(
+                state.focused_window().is_none(),
+                "the premise: with nothing else open, handing the keyboard off \
+                 at the request leaves the seat holding nothing"
+            );
+
+            // The refusal, at an instant the clock has not reached. Past the
+            // grace period, so the window is due.
+            let refused = asked + Duration::from_millis(1500);
+            state.settle_refused(refused);
+            assert!(
+                !drawn_now(&state, pane, state.clock.now()).shows(),
+                "the premise: at every instant `settle_focus` could have read, \
+                 the window being given back is still drawn at nothing"
+            );
+            assert!(
+                drawn_on_stage(&state, pane, refused + Duration::from_millis(200)),
+                "and it is on its way back: once the restore lands it is on \
+                 screen and opaque"
+            );
+
+            assert_eq!(
+                state.focused_window().as_ref(),
+                Some(&window),
+                "a window given back to a session whose keyboard is idle takes \
+                 the keyboard, even on the frame its restore starts"
+            );
+            let before = client.typed.len();
+            types(&mut state, KEY_A);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.typed.get(before),
+                Some(&(Some(surface_id(&window)), KEY_A)),
+                "and typing reaches it, rather than going nowhere until the \
+                 user clicks"
+            );
+        }
+
+        /// How far a hidden desk is carried: a screen and a bit to the left,
+        /// `workspaces.lua`'s own arrangement and its own numbers.
+        const AWAY: f64 = -1920.0 * 1.06;
+
+        /// Two desks with one window each, and a switch between them on its
+        /// first frame.
+        ///
+        /// Returns `(leaving, arriving)`. `leaving` is on the desk in view and
+        /// is opened second, so it is the topmost pane: a walk whose right
+        /// answer is also the topmost one is not testing the walk. `arriving`
+        /// starts parked `AWAY` and settled there.
+        ///
+        /// **The switch starts at an instant the clock has not reached**, so
+        /// every reading `settle_focus` takes falls at or before its start,
+        /// where `Animation::progress` is exactly zero — the first frame, made
+        /// certain rather than likely. Its premises are asserted here, both
+        /// ends of them: on that frame `leaving` is drawn on stage and
+        /// `arriving` off it, and once the switch lands it is the other way
+        /// round. Focus that follows the drawn frame and focus that follows the
+        /// destination give different answers only because of this.
+        ///
+        /// The seat is emptied by hand at the end. How it came to be empty is
+        /// not the question — a close, a lock, a window going — what
+        /// `settle_focus` does about it is.
+        fn a_switch_on_its_first_frame(
+            display: &mut Display<Solium>,
+            state: &mut Solium,
+            conn: &Connection,
+            qh: &QueueHandle<Client>,
+            queue: &mut wayland_client::EventQueue<Client>,
+            client: &mut Client,
+        ) -> ((Window, crate::pane::PaneId), (Window, crate::pane::PaneId)) {
+            one_screen(state);
+            let arriving = opened_at(display, state, conn, client, qh, (1000, 300));
+            let leaving = opened_at(display, state, conn, client, qh, (400, 300));
+            pump(display, state, conn, qh, queue, client);
+            pump(display, state, conn, qh, queue, client);
+            assert!(
+                client.keyboard.is_some(),
+                "the client bound a keyboard; without one this test cannot \
+                 observe anything"
+            );
+            state.clock.advance(Duration::from_millis(300));
+            state.settle(state.clock.now());
+
+            let parked = state.clock.now();
+            for (name, window) in [("desk-1", &leaving.0), ("desk-2", &arriving.0)] {
+                let id = state.window_id(window);
+                state.groups.declare(
+                    name,
+                    crate::group::Selection {
+                        members: vec![crate::group::Member::Window(id)],
+                        on: None,
+                    },
+                    parked,
+                );
+            }
+            state.groups.present(
+                "desk-2",
+                crate::group::Shift {
+                    dx: AWAY,
+                    ..crate::group::Shift::NONE
+                },
+                parked,
+                Duration::from_millis(300),
+                present::Curve::OutCubic,
+            );
+            state.clock.advance(Duration::from_millis(400));
+            state.settle(state.clock.now());
+
+            let switch = state.clock.now() + Duration::from_millis(50);
+            state.groups.present(
+                "desk-1",
+                crate::group::Shift {
+                    dx: AWAY,
+                    ..crate::group::Shift::NONE
+                },
+                switch,
+                Duration::from_millis(300),
+                present::Curve::OutCubic,
+            );
+            state.groups.present(
+                "desk-2",
+                crate::group::Shift::NONE,
+                switch,
+                Duration::from_millis(300),
+                present::Curve::OutCubic,
+            );
+
+            let first = state.clock.now();
+            let landed = switch + Duration::from_millis(400);
+            assert!(
+                drawn_on_stage(state, leaving.1, first)
+                    && !drawn_on_stage(state, arriving.1, first),
+                "the premise: on the switch's first frame the desk being left is \
+                 still the one drawn"
+            );
+            assert!(
+                !drawn_on_stage(state, leaving.1, landed)
+                    && drawn_on_stage(state, arriving.1, landed),
+                "and once it lands the desk switched to is"
+            );
+
+            let keyboard = state.seat.get_keyboard().expect(
+                "the fixture's seat has a keyboard; without one there is no \
+                 focus to be wrong about",
+            );
+            keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
+            assert!(state.focused_window().is_none(), "the seat is empty");
+            (leaving, arriving)
+        }
+
+        /// **#127 fourth review, NEW-2: on a workspace switch's first frame,
+        /// focus judged by where the windows had been.**
+        ///
+        /// `on_stage` sampled the instant it was called, while
+        /// `everything_is_off_stage` — the one other caller asking the same
+        /// question — samples `SETTLED` ahead, because a group transform that
+        /// has just started is at progress zero. So `settle_focus` inside the
+        /// first frames of a switch handed the keyboard to the desk being left
+        /// and passed over the desk being switched to. The pointer is over
+        /// nothing, so this is the topmost arm.
+        #[test]
+        fn the_first_frame_of_a_workspace_switch_focuses_the_desk_switched_to() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let ((leaving, _), (arriving, _)) = a_switch_on_its_first_frame(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert!(
+                state.window_under((0.0, 0.0).into()).is_none(),
+                "the pointer is over nothing, so the topmost arm is the one \
+                 asked"
+            );
+
+            state.settle_focus();
+            assert_eq!(
+                state.focused_window().as_ref(),
+                Some(&arriving),
+                "focus goes to the desk being switched to, not to the one being \
+                 left (surface {}), which is topmost and still drawn",
+                surface_id(&leaving)
+            );
+            let before = client.typed.len();
+            types(&mut state, KEY_A);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            assert_eq!(
+                client.typed.get(before),
+                Some(&(Some(surface_id(&arriving)), KEY_A)),
+                "and typing reaches it"
+            );
+        }
+
+        /// **The pointer arm of the same question, and where the two rules
+        /// meet.**
+        ///
+        /// `settle_focus` asks the window under the pointer first, because with
+        /// focus-follows-mouse that is where focus would land the moment the
+        /// pointer moved — and *the moment it moved* is after the switch has
+        /// landed, not on this frame. So a pointer resting where the desk being
+        /// left is drawn must not hand that desk the keyboard.
+        ///
+        /// **And the click on the same pixel still goes to what is drawn**,
+        /// which is the half that must not change: `window_under` is the hit
+        /// test, a press lands on what is on screen this frame, and on this
+        /// frame that is the window being left. Both are asserted at the same
+        /// point on the same frame, so a fix that moved the hit test instead
+        /// fails here.
+        #[test]
+        fn a_pointer_over_the_desk_being_left_does_not_hand_it_the_keyboard() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let ((leaving, _), (arriving, _)) = a_switch_on_its_first_frame(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            // The middle of the window being left, as it is drawn this frame.
+            let point: Point<f64, Logical> = (432.0, 332.0).into();
+            let pointer = state.seat.get_pointer().expect(
+                "the fixture's seat has a pointer; without one there is no \
+                 pointer arm to test",
+            );
+            pointer.motion(
+                &mut state,
+                None,
+                &smithay::input::pointer::MotionEvent {
+                    location: point,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: 0,
+                },
+            );
+            pointer.frame(&mut state);
+            assert_eq!(
+                state.window_under(point).map(|(window, _)| window).as_ref(),
+                Some(&leaving),
+                "a press on this pixel this frame lands on the window drawn \
+                 there, which is the desk being left -- the hit test judges \
+                 the present frame, and that is right"
+            );
+
+            state.settle_focus();
+            assert_eq!(
+                state.focused_window().as_ref(),
+                Some(&arriving),
+                "but the keyboard goes where the desks are settling: the window \
+                 under the pointer is sliding off stage (surface {}), so the \
+                 desk switched to takes it",
+                surface_id(&leaving)
+            );
+        }
+
+        /// **A closing window under the pointer, while it is still fading.**
+        ///
+        /// The case [`SETTLED`] lists first. `settle_focus`'s pointer arm used
+        /// to get "never a window on its way out" from `window_under`, which
+        /// declines a pane only once it shows nothing — so for the 190 ms a
+        /// close is still playing, a seat left empty by anything else handed
+        /// the keyboard to the window being closed, if the pointer was resting
+        /// on it. The topmost arm's `leaving()` filter never reached it: the
+        /// pointer arm answers first.
+        ///
+        /// Judged at the destination, a closing pane is at opacity zero from
+        /// the press, so it is no candidate; and the same press on the same
+        /// frame still lands on it, because it is still drawn and a half-faded
+        /// window keeps its clicks. Both are asserted.
+        #[test]
+        fn a_window_mid_close_under_the_pointer_is_not_handed_the_keyboard() {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            one_screen(&mut state);
+            let (kept, _) = opened_at(&mut display, &mut state, &conn, &client, &qh, (1000, 300));
+            let (doomed, closing) =
+                opened_at(&mut display, &mut state, &conn, &client, &qh, (400, 300));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            state.clock.advance(Duration::from_millis(300));
+            state.settle(state.clock.now());
+
+            let point: Point<f64, Logical> = (432.0, 332.0).into();
+            let pointer = state.seat.get_pointer().expect(
+                "the fixture's seat has a pointer; without one there is no \
+                 pointer arm to test",
+            );
+            pointer.motion(
+                &mut state,
+                None,
+                &smithay::input::pointer::MotionEvent {
+                    location: point,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: 0,
+                },
+            );
+            pointer.frame(&mut state);
+
+            // A quarter of the way into the fade: drawn, visibly, and still
+            // taking its clicks.
+            state.close_pane(closing);
+            state.clock.advance(Duration::from_millis(50));
+            assert!(
+                drawn_now(&state, closing, state.clock.now()).shows(),
+                "the premise: the window being closed is still on screen"
+            );
+            assert_eq!(
+                state.window_under(point).map(|(window, _)| window).as_ref(),
+                Some(&doomed),
+                "and a press on it this frame lands on it, which is right"
+            );
+
+            let keyboard = state.seat.get_keyboard().expect(
+                "the fixture's seat has a keyboard; without one there is no \
+                 focus to be wrong about",
+            );
+            keyboard.set_focus(&mut state, None, SERIAL_COUNTER.next_serial());
+            state.settle_focus();
+            assert_eq!(
+                state.focused_window().as_ref(),
+                Some(&kept),
+                "but the keyboard is not handed to a window that is on its way \
+                 out (surface {}): the one staying takes it",
+                surface_id(&doomed)
             );
         }
 
