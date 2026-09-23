@@ -24,15 +24,80 @@
 //! **`Ctrl+Alt+Backspace` is not allowed** while locked, and that one would be
 //! a hole: it ends the session, and ending the session is how you get to the
 //! desktop underneath.
+//!
+//! ## Who holds the lock
+//!
+//! Exactly one `ext_session_lock_v1`: the one that was told `locked`. Every
+//! other lock object is answered `finished` the moment it is made, and nothing
+//! it asks for afterwards is acted on. That is the whole of what a lock screen
+//! is worth, because the gate in `focus.rs` hands the keyboard to "a lock
+//! surface", and a lock surface is only as trustworthy as the client that made
+//! it. Before this was kept, a second lock simply *replaced* the first:
+//!
+//! * **A fake lock screen.** Any application could lock the session itself,
+//!   wiping the real lock screen's surfaces, then put up a surface of its own
+//!   that looked like one. The gate gave it the keyboard, and the password
+//!   typed into it.
+//! * **An unlock by anyone.** Lock, then `unlock_and_destroy`: two requests,
+//!   from any client, and the session was open.
+//! * **Locked out of your own session.** `swayidle`'s `before-sleep` starting a
+//!   second `swaylock` while the first was showing pushed the real lock screen's
+//!   surfaces out, and nothing could be typed into it again.
+//!
+//! So: [`Lock::holder`] records the lock that was granted; a lock asked for
+//! while the holder is alive is refused with `finished` and changes nothing;
+//! a lock surface asked for on any other lock is never shown or focused; and
+//! an unlock from any other lock is a protocol error and unlocks nothing.
+//!
+//! ### How an unlock knows who asked
+//!
+//! [`SessionLockHandler::unlock`] is not told, and smithay 0.7 calls it for an
+//! `unlock_and_destroy` on *any* lock object -- even one it has just posted
+//! `invalid_unlock` on, because there is no `return` after that error. Nor can
+//! liveness stand in for identity: the requesting object is destroyed only
+//! after its request has been dispatched, so at the moment `unlock` runs the
+//! holder and the stranger are both alive. What does know is the dispatch
+//! itself, which is handed the object the request came in on. So
+//! `ext_session_lock_v1` is not delegated to smithay wholesale: the
+//! `Dispatch` impl at the bottom of this file sees every request first,
+//! answers the two that only the holder may make, and passes everything else
+//! -- and the holder's own requests -- to smithay's implementation unchanged.
+//! No patch to smithay is needed.
+//!
+//! ### When the holder dies
+//!
+//! The protocol is explicit: a lock client dying must not unlock the session.
+//! It does not. The session stays locked, the backdrop is drawn where its
+//! surfaces were, and the keyboard goes nowhere. What changes is that the lock
+//! is now *abandoned* -- its holder's lock object is gone, whether the client
+//! crashed, was killed, or was disconnected for a protocol error -- and a new
+//! lock request is granted and takes over, which is the recovery the protocol
+//! allows ("compositors may allow a new client to create a
+//! ext_session_lock_v1 object and take responsibility for unlocking the
+//! session"). Without it the only way out of a crashed lock screen would be
+//! ending the session, and everything in it with it. The one lock that is
+//! never granted is a second one while the holder is still there.
 
 use smithay::{
     backend::renderer::element::Id,
     input::pointer::MotionEvent,
     output::Output,
-    reexports::wayland_server::{DisplayHandle, protocol::wl_output::WlOutput},
+    reexports::{
+        wayland_protocols::ext::session_lock::v1::server::{
+            ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+            ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
+            ext_session_lock_v1::{self, ExtSessionLockV1},
+        },
+        wayland_server::{
+            Client, DataInit, Dispatch, DisplayHandle, Resource,
+            backend::ClientId,
+            protocol::{wl_output::WlOutput, wl_surface::WlSurface},
+        },
+    },
     utils::SERIAL_COUNTER,
     wayland::session_lock::{
-        LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
+        ExtLockSurfaceUserData, LockSurface, SessionLockHandler, SessionLockManagerGlobalData,
+        SessionLockManagerState, SessionLockState, SessionLocker,
     },
 };
 
@@ -50,6 +115,13 @@ pub(crate) const BLANK: [f32; 4] = [0.06, 0.05, 0.11, 1.0];
 /// The session lock, while there is one.
 #[derive(Debug)]
 pub(crate) struct Lock {
+    /// The lock object that was granted the session, and the only one whose
+    /// requests are acted on. See the module documentation.
+    ///
+    /// Held for as long as the session is locked, including after it has died:
+    /// a dead holder is what [`Lock::abandoned`] reads, and it is what lets a
+    /// new lock client take over rather than being refused as a second lock.
+    holder: ExtSessionLockV1,
     /// One surface per monitor, by the output it was given for.
     ///
     /// A monitor with no entry is drawn blank. That is the honest state: the
@@ -64,32 +136,57 @@ pub(crate) struct Lock {
     blank: Id,
 }
 
-impl Default for Lock {
-    fn default() -> Self {
+impl Lock {
+    /// A lock held by `holder`, with nothing on any monitor yet.
+    fn new(holder: ExtSessionLockV1) -> Self {
         Self {
+            holder,
             surfaces: Vec::new(),
             blank: Id::new(),
         }
     }
-}
 
-impl Lock {
+    /// Whether `lock` is the lock object holding the session.
+    pub(crate) fn is_held_by(&self, lock: &ExtSessionLockV1) -> bool {
+        self.holder == *lock
+    }
+
+    /// Whether the holder has gone without unlocking.
+    ///
+    /// Its lock object is destroyed, and a held lock object has only one way
+    /// to be destroyed that is not its client going: `unlock_and_destroy`,
+    /// which clears the lock before the object goes. (`destroy` while locked
+    /// is a protocol error, which disconnects the client.) So this is "the
+    /// lock client crashed, was killed, or was thrown off", and the session is
+    /// still locked -- see the module documentation for what follows.
+    pub(crate) fn abandoned(&self) -> bool {
+        !self.holder.is_alive()
+    }
+
     /// The identity to draw the backdrop under.
     pub(crate) fn blank(&self) -> Id {
         self.blank.clone()
     }
 
-    /// The surface covering this monitor, if the client has provided one.
+    /// The surface covering this monitor, if the client has provided one and
+    /// it is still there.
     pub(crate) fn surface_for(&self, output: &Output) -> Option<&LockSurface> {
         self.surfaces
             .iter()
-            .find(|(each, _)| each == output)
+            .find(|(each, surface)| each == output && surface.alive())
             .map(|(_, surface)| surface)
     }
 
-    /// Every surface, for hit-testing and focus.
+    /// Every surface that is still there, for hit-testing and focus.
+    ///
+    /// Live ones only. A dead surface can be sent nothing, so a keyboard left
+    /// on one is a keyboard on nothing, and counting it as the lock screen's
+    /// would let `settle_focus` believe the keyboard already had a home.
     pub(crate) fn surfaces(&self) -> impl Iterator<Item = &LockSurface> {
-        self.surfaces.iter().map(|(_, surface)| surface)
+        self.surfaces
+            .iter()
+            .map(|(_, surface)| surface)
+            .filter(|surface| surface.alive())
     }
 
     /// Drop surfaces whose client has gone, so a dead one is not drawn.
@@ -112,8 +209,28 @@ impl SessionLockHandler for Solium {
     /// at once is truthful because `render::elements` stops drawing windows
     /// the moment `lock` is set: by the time the client hears "locked", there
     /// is nothing of anyone's data left on any screen.
+    ///
+    /// Unless the session is already locked by a client that is still here.
+    /// Then the answer is `finished`, which is what dropping `confirmation`
+    /// sends, and nothing about the existing lock changes: not its surfaces,
+    /// not the keyboard, not who may unlock it. That is the case the protocol
+    /// names ("there is already another ext_session_lock_v1 object held by a
+    /// client"), and in practice it is `swayidle` starting a second `swaylock`
+    /// over the first, which reads `finished` and exits.
+    ///
+    /// A lock whose holder has died is taken over instead. See the module
+    /// documentation: it stays locked throughout, and this is the way back in.
     fn lock(&mut self, confirmation: SessionLocker) {
-        self.lock = Some(Lock::default());
+        let asking = confirmation.ext_session_lock().clone();
+        if let Some(held) = self.lock.as_ref() {
+            if !held.abandoned() {
+                tracing::info!("refused a second session lock: the session is already locked");
+                drop(confirmation);
+                return;
+            }
+            tracing::warn!("a new lock client took over from one that went without unlocking");
+        }
+        self.lock = Some(Lock::new(asking));
         // Input is pointed at whatever the user was doing a moment ago, and it
         // stays pointed there until something moves. Between the lock and the
         // client's first surface -- which is a client starting up, so tens of
@@ -125,6 +242,11 @@ impl SessionLockHandler for Solium {
         tracing::info!("session locked");
     }
 
+    /// The holder has unlocked.
+    ///
+    /// Only the holder reaches this. Smithay would call it for an unlock on
+    /// any lock object at all; the `Dispatch` below answers every other one
+    /// itself and never passes it on.
     fn unlock(&mut self) {
         // First, and the order is load-bearing: `settle_focus` below asks the
         // gate in `focus.rs`, and the gate refuses every window for as long as
@@ -142,7 +264,12 @@ impl SessionLockHandler for Solium {
         tracing::info!("session unlocked");
     }
 
-    /// A surface for one monitor.
+    /// A surface for one monitor, from the holder.
+    ///
+    /// Only the holder's reach here: a lock surface asked for on any other lock
+    /// is answered by the `Dispatch` below and never shown. That is what stops
+    /// an application putting up a lock screen of its own -- on a monitor the
+    /// real one has not covered yet, or plugged in while locked, or at all.
     ///
     /// Told the whole monitor, not the work area: a lock screen covers the
     /// bars too. A dock left visible over a lock screen is a list of what the
@@ -176,7 +303,155 @@ impl SessionLockHandler for Solium {
     }
 }
 
-smithay::delegate_session_lock!(Solium);
+// `delegate_session_lock!`, less the one interface the `Dispatch` below takes
+// over. The macro and that impl cannot both exist -- they would be two impls of
+// the same trait -- so a future edit that puts the macro back fails to compile
+// rather than quietly handing unlocks back to smithay.
+smithay::reexports::wayland_server::delegate_global_dispatch!(Solium: [
+    ExtSessionLockManagerV1: SessionLockManagerGlobalData
+] => SessionLockManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Solium: [
+    ExtSessionLockManagerV1: ()
+] => SessionLockManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Solium: [
+    ExtSessionLockSurfaceV1: ExtLockSurfaceUserData
+] => SessionLockManagerState);
+
+/// Every request on an `ext_session_lock_v1`, seen before smithay sees it.
+///
+/// This is where "who asked" is known, because it is handed the object the
+/// request came in on and nothing after it is. See "How an unlock knows who
+/// asked" in the module documentation.
+///
+/// The holder's requests go to smithay untouched. So does `destroy` from
+/// anyone: smithay refuses it for a lock that was told `locked`, which only the
+/// holder ever is. The two a non-holder may not make are answered here:
+///
+/// * `unlock_and_destroy` is `invalid_unlock`, which is the protocol's own
+///   error for exactly this -- unlocking on a lock that was never told
+///   `locked` -- and disconnects the client. Smithay posts the same error and
+///   then unlocks anyway.
+/// * `get_lock_surface` is legal (the protocol says such a surface is simply
+///   never displayed), so the client is not disconnected for it. It gets an
+///   [`Unheld`] object, which does nothing: smithay never sees it, so it is
+///   never given the role, configured, drawn or focused, and `new_surface`
+///   never hears of it.
+impl Dispatch<ExtSessionLockV1, SessionLockState> for Solium {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        lock: &ExtSessionLockV1,
+        request: ext_session_lock_v1::Request,
+        data: &SessionLockState,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        let holds = state
+            .lock
+            .as_ref()
+            .is_some_and(|held| held.is_held_by(lock));
+        let request = if holds {
+            request
+        } else {
+            match request {
+                ext_session_lock_v1::Request::UnlockAndDestroy => {
+                    tracing::warn!("refused an unlock from a client that does not hold the lock");
+                    lock.post_error(
+                        ext_session_lock_v1::Error::InvalidUnlock,
+                        "this lock was never granted the session",
+                    );
+                    return;
+                }
+                ext_session_lock_v1::Request::GetLockSurface { id, .. } => {
+                    tracing::debug!("a lock surface on a lock that does not hold the session");
+                    data_init.init(id, Unheld);
+                    return;
+                }
+                other => other,
+            }
+        };
+        <SessionLockManagerState as Dispatch<ExtSessionLockV1, SessionLockState, Self>>::request(
+            state, client, lock, request, data, display, data_init,
+        );
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        client: ClientId,
+        lock: &ExtSessionLockV1,
+        data: &SessionLockState,
+    ) {
+        // The holder going while the session is still locked: `unlock` has
+        // already cleared the lock by the time an unlocking holder's object is
+        // destroyed, so this is the lock client dying. Nothing is unlocked --
+        // see `Lock::abandoned` -- but it is worth a line, because from the
+        // other side of the screen it is a lock screen that vanished.
+        if state
+            .lock
+            .as_ref()
+            .is_some_and(|held| held.is_held_by(lock))
+        {
+            tracing::warn!(
+                "the lock client went without unlocking; the session stays locked \
+                 until a new lock client takes over"
+            );
+            state.redraw = true;
+        }
+        <SessionLockManagerState as Dispatch<ExtSessionLockV1, SessionLockState, Self>>::destroyed(
+            state, client, lock, data,
+        );
+    }
+}
+
+/// A lock surface asked for on a lock that does not hold the session.
+///
+/// Inert on purpose: see the `Dispatch` for `ext_session_lock_v1` above. Its
+/// two requests are `destroy`, which needs nothing doing, and `ack_configure`
+/// for a configure it was never sent.
+#[derive(Debug)]
+pub(crate) struct Unheld;
+
+impl Dispatch<ExtSessionLockSurfaceV1, Unheld> for Solium {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _surface: &ExtSessionLockSurfaceV1,
+        _request: ext_session_lock_surface_v1::Request,
+        _data: &Unheld,
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+    }
+}
+
+impl Solium {
+    /// A surface has been destroyed; if it was one of the lock screen's, the
+    /// keyboard needs somewhere else to be.
+    ///
+    /// This is a monitor unplugged or a laptop undocked while locked: the lock
+    /// client destroys that monitor's surface when its output goes, and if the
+    /// keyboard was on it, it was on nothing from then on. `focus_lock` runs
+    /// only when a surface maps, and `settle_focus` is not called for a
+    /// surface that is not a window. So the keyboard is resettled here, through
+    /// `settle_focus`, which while locked means a surviving lock surface.
+    pub(crate) fn lock_surface_destroyed(&mut self, surface: &WlSurface) {
+        let Some(lock) = self.lock.as_mut() else {
+            return;
+        };
+        if !lock
+            .surfaces
+            .iter()
+            .any(|(_, each)| each.wl_surface() == surface)
+        {
+            return;
+        }
+        lock.surfaces
+            .retain(|(_, each)| each.wl_surface() != surface && each.alive());
+        self.redraw = true;
+        tracing::debug!("a lock surface went; resettling the keyboard");
+        self.settle_focus();
+    }
+}
 
 /// Take keyboard and pointer focus away from everything.
 ///
@@ -213,6 +488,7 @@ pub(crate) fn state(display: &DisplayHandle) -> SessionLockManagerState {
     // compositor gives, and the reasoning is that locking is not a privilege —
     // it denies access rather than granting it, and a client that could be
     // trusted to run at all can be trusted to blank the screen. *Unlocking* is
-    // the privileged half, and only the client holding the lock can do it.
+    // the privileged half, and only the lock's holder can do it: see the
+    // `Dispatch` for `ext_session_lock_v1` above.
     SessionLockManagerState::new::<Solium, _>(display, |_| true)
 }
