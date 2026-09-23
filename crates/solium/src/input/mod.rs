@@ -22,7 +22,7 @@ use smithay::{
     },
     input::pointer::CursorImageStatus,
     input::{
-        keyboard::{FilterResult, Keysym, ModifiersState, xkb},
+        keyboard::{FilterResult, Keycode, Keysym, ModifiersState, xkb},
         pointer::{
             AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, PointerHandle,
             RelativeMotionEvent,
@@ -103,23 +103,40 @@ pub(crate) fn handle<B: InputBackend>(
 }
 
 fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>) {
+    key(state, event.key_code(), event.state(), event.time_msec());
+}
+
+/// One key, from whichever backend it came.
+///
+/// Split out of [`keyboard`] so that a test can press a key through the real
+/// filter -- the lock's included -- without building an `InputBackend`, which
+/// is some twenty associated types for the sake of three numbers.
+pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: u32) {
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };
 
-    let pressed = event.state() == KeyState::Pressed;
+    let pressed = key_state == KeyState::Pressed;
 
     let bound = keyboard.input(
         state,
-        event.key_code(),
-        event.state(),
+        code,
+        key_state,
         SERIAL_COUNTER.next_serial(),
-        event.time_msec(),
+        time,
         |state, modifiers, handle| {
+            let locked = state.lock.is_some();
+            // Locked, and the keyboard is on something the lock screen does
+            // not own, or a grab is steering it: the key goes nowhere. See
+            // `Solium::keys_may_pass`, which is the last word of the rule in
+            // `focus.rs` -- nothing should ever get the keyboard into this
+            // state, and this is what holds if something does.
+            let sealed = locked && !state.keys_may_pass();
+
             if !pressed {
                 // Releases are never bindings, but they must still reach a
                 // client that received the press, or it holds the key forever.
-                return if state.script_grab {
+                return if state.script_grab || sealed {
                     FilterResult::Intercept(None)
                 } else {
                     FilterResult::Forward
@@ -130,18 +147,32 @@ fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>
             // the only keys that must work when everything else is broken:
             // without them a compositor that mishandles input is a machine you
             // can only recover with the power button.
-            let locked = state.lock.is_some();
             if let Some(request) = escape(modifiers, handle.modified_sym(), locked) {
                 return FilterResult::Intercept(Some(Action::Backend(request)));
             }
 
             // Locked: nothing is bound. A binding runs a script, and a script
             // can spawn a terminal in one line -- so leaving bindings live
-            // would turn the lock screen into a menu of ways past it. Keys go
-            // to whatever has focus, which while locked is the lock surface or
-            // nothing at all.
+            // would turn the lock screen into a menu of ways past it.
+            //
+            // What is forwarded reaches a lock surface or nothing. This line
+            // used to say so while it was not true: a window opening or
+            // closing, a menu grab or a script could each hand the keyboard to
+            // an application behind the lock, and nothing handed it back. What
+            // makes it true now is the gate in `focus.rs`. Every hand-off of
+            // keyboard focus goes through `Solium::give_keyboard`, and every
+            // keyboard grab through `Solium::grab_keyboard`, and while locked
+            // both refuse anything but a lock surface. `clippy.toml` bans
+            // smithay's own `set_focus` and `set_grab` everywhere else, and
+            // every grab is released the moment the session locks. `sealed`
+            // is the last line: it drops the key if the keyboard is on
+            // anything the gate would have refused, or held by any grab.
             if locked {
-                return FilterResult::Forward;
+                return if sealed {
+                    FilterResult::Intercept(None)
+                } else {
+                    FilterResult::Forward
+                };
             }
 
             let combo = combo_for(modifiers, handle.modified_sym());
