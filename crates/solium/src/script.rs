@@ -5226,7 +5226,7 @@ mod tests {
 /// not fail a build.
 #[cfg(test)]
 mod shipped {
-    use super::{Curve, normalise_combo};
+    use super::{Curve, Scripts, normalise_combo};
 
     /// The Lua the compositor ships, as `(file, text)`.
     ///
@@ -5648,19 +5648,18 @@ mod shipped {
     /// forgiving and `keysym_get_name` is not, and it is the second one that
     /// decides what a key is called at run time.
     ///
-    /// Only the bindings written as literals. `workspaces.lua` builds nine of
-    /// them from a loop counter and they cannot be read from the text -- see
-    /// this module's header.
+    /// Only the bindings written as literals after `sol.bind(`. `workspaces.lua`
+    /// builds nine of them from a loop counter and they cannot be read from the
+    /// text -- see this module's header -- and `scrolling.lua` binds through a
+    /// local `bind` helper this marker does not match.
     ///
     /// And it checks the *spelling*, not that the key can be reached. Those are
-    /// not the same question, because `combo_for` names the key from
-    /// `modified_sym` -- the keysym with the modifiers already applied. A letter
-    /// survives that (`shift+q` gives `Q`, which lowercases back to `q`) and a
-    /// digit does not: on a `us` layout `shift+1` arrives as `exclam`, so
-    /// `workspaces.lua`'s `"super+shift+" .. index` binds nine combinations
-    /// nothing will ever produce. Spelled perfectly and unreachable. Fixing it
-    /// means changing which keysym every binding in the compositor is matched
-    /// on, which is not something to do without a keyboard in front of you.
+    /// not the same question: `super+shift+1` is spelled perfectly, and until
+    /// #121 no key on a `us` keyboard produced it, because `shift+1` arrives as
+    /// `exclam` and that was the only name a press was looked up by.
+    /// Reachability is `every_shipped_binding_is_reachable_on_us` below, which
+    /// reads the bindings from the loaded scripts rather than from the text and
+    /// so sees the loop-built and helper-built ones this one skips.
     #[test]
     fn every_key_bound_is_spelled_the_way_it_arrives() {
         use smithay::input::keyboard::xkb;
@@ -5692,32 +5691,11 @@ mod shipped {
         }
     }
 
-    /// **The two height binds in `tiling.lua` are combinations a `us` keyboard
-    /// can actually produce.**
+    /// A `us` keymap, compiled from the real rules, and its modifier indices.
     ///
-    /// Reachability, which the test above deliberately does not check: it asks
-    /// whether a key is *spelled* the way xkb names it, and `underscore` passes
-    /// that while being a combination no one can press with the modifiers the
-    /// binding also names.
-    ///
-    /// So this goes the other way round. It starts from the physical keys --
-    /// `AE11` and `AE12`, the `-` and `=` of the top row, which are evdev 12
-    /// and 13 and so xkb keycodes 20 and 21 -- presses them under the modifiers
-    /// the bindings name, and builds the string `input::combo_for` would build.
-    /// A real keymap compiled from the real `us` rules, because the question is
+    /// Real rather than described, because the question these tests ask is
     /// what xkb does and not what anyone believes it does.
-    ///
-    /// The shift case is asserted too, and asserted as *not* arriving. That is
-    /// the reason these are bound on ctrl, and without it here the next reader
-    /// tidies them back to the shift spelling this branch started with -- it
-    /// looks more natural, it passes the spelling test, and it is dead. #121 is
-    /// the underlying defect: bindings match on `modified_sym`, so every
-    /// shifted non-letter in the compositor is unreachable, nine
-    /// `super+shift+<digit>` in `workspaces.lua` among them. Fixing that is not
-    /// this branch's work. Choosing a spelling that is correct before *and*
-    /// after it is.
-    #[test]
-    fn every_height_bind_is_a_key_that_arrives() {
+    fn us_keymap() -> (smithay::input::keyboard::xkb::Keymap, UsModifiers) {
         use smithay::input::keyboard::xkb;
 
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
@@ -5735,50 +5713,216 @@ mod shipped {
             // it could not look.
             panic!("no `us` keymap; xkb data is missing, so this proves nothing");
         };
-        let shift = keymap.mod_get_index(xkb::MOD_NAME_SHIFT);
-        let ctrl = keymap.mod_get_index(xkb::MOD_NAME_CTRL);
-        let logo = keymap.mod_get_index(xkb::MOD_NAME_LOGO);
-
-        // What `combo_for` produces for a press of `code` while `mask` is held.
-        // The modifier order is that function's fixed one, and `normalise_combo`
-        // is the very function it finishes with, so this is the whole of the
-        // string a binding is looked up by.
-        let arrives = |code: u32, mask: u32, names: &str| -> String {
-            let mut state = xkb::State::new(&keymap);
-            state.update_mask(mask, 0, 0, 0, 0, 0);
-            let sym = state.key_get_one_sym(code.into());
-            normalise_combo(&format!("{names}{}", xkb::keysym_get_name(sym)))
+        let modifiers = UsModifiers {
+            shift: keymap.mod_get_index(xkb::MOD_NAME_SHIFT),
+            ctrl: keymap.mod_get_index(xkb::MOD_NAME_CTRL),
+            alt: keymap.mod_get_index(xkb::MOD_NAME_ALT),
+            logo: keymap.mod_get_index(xkb::MOD_NAME_LOGO),
         };
+        (keymap, modifiers)
+    }
 
+    /// Where `us_keymap` keeps each modifier the combination syntax can name.
+    struct UsModifiers {
+        shift: u32,
+        ctrl: u32,
+        alt: u32,
+        logo: u32,
+    }
+
+    /// Every name a press of xkb keycode `code` answers to while `held` is
+    /// down -- the list `input::keyboard` tries bindings in.
+    ///
+    /// Built the way that filter builds it: `modified` is `key_get_one_sym`
+    /// under the held modifiers, which is what smithay's `modified_sym` calls,
+    /// and `raw` is the key's only keysym at level 0 of its layout, which is
+    /// what `raw_syms` returns and the filter keeps. Then the same
+    /// `input::combos_for`, so the string compared below is the string the
+    /// compositor looks up and not a second opinion of it.
+    fn names_for(
+        keymap: &smithay::input::keyboard::xkb::Keymap,
+        indices: &UsModifiers,
+        code: u32,
+        held: &smithay::input::keyboard::ModifiersState,
+    ) -> Vec<String> {
+        use smithay::input::keyboard::xkb;
+
+        let mut mask = 0;
+        for (on, index) in [
+            (held.shift, indices.shift),
+            (held.ctrl, indices.ctrl),
+            (held.alt, indices.alt),
+            (held.logo, indices.logo),
+        ] {
+            if on {
+                mask |= 1 << index;
+            }
+        }
+        let mut state = xkb::State::new(keymap);
+        state.update_mask(mask, 0, 0, 0, 0, 0);
+        let code = xkb::Keycode::new(code);
+        let modified = state.key_get_one_sym(code);
+        let raw = match keymap.key_get_syms_by_level(code, state.key_get_layout(code), 0) {
+            [only] => Some(*only),
+            _ => None,
+        };
+        crate::input::combos_for(held, modified, raw)
+    }
+
+    /// The modifiers a canonical combination names, as a keyboard would hold
+    /// them.
+    fn held_for(combo: &str) -> smithay::input::keyboard::ModifiersState {
+        let named: Vec<&str> = combo.split('+').collect();
+        let modifiers = named
+            .split_last()
+            .map(|(_, modifiers)| modifiers)
+            .unwrap_or_default();
+        smithay::input::keyboard::ModifiersState {
+            ctrl: modifiers.contains(&"ctrl"),
+            alt: modifiers.contains(&"alt"),
+            shift: modifiers.contains(&"shift"),
+            logo: modifiers.contains(&"super"),
+            ..Default::default()
+        }
+    }
+
+    /// **The two height binds in `tiling.lua` are combinations a `us` keyboard
+    /// can actually produce.**
+    ///
+    /// Reachability, which the spelling test above deliberately does not check:
+    /// it asks whether a key is *spelled* the way xkb names it, and
+    /// `underscore` passes that while being a combination no one can press
+    /// with the modifiers the binding also names.
+    ///
+    /// So this goes the other way round. It starts from the physical keys --
+    /// `AE11` and `AE12`, the `-` and `=` of the top row, which are evdev 12
+    /// and 13 and so xkb keycodes 20 and 21 -- presses them under the modifiers
+    /// the bindings name, and asks `names_for` what that press is called.
+    ///
+    /// These were bound on ctrl because until #121 the shift spelling was
+    /// dead: shift+`-` arrives as `underscore`, and that was the only name a
+    /// press had. Ctrl selects no shift level, so it is right before that fix
+    /// and after it. The second half pins the fix itself for this key: the
+    /// spelling #120 started with is now one a press answers to, so the next
+    /// reader who tidies these back to shift gets a working binding rather
+    /// than a dead one.
+    #[test]
+    fn every_height_bind_is_a_key_that_arrives() {
+        use smithay::input::keyboard::ModifiersState;
+
+        let (keymap, indices) = us_keymap();
         let minus = 20;
         let equal = 21;
-        let with_ctrl = (1 << ctrl) | (1 << logo);
-        let with_shift = (1 << shift) | (1 << logo);
+        let with_ctrl = ModifiersState {
+            ctrl: true,
+            logo: true,
+            ..Default::default()
+        };
+        let with_shift = ModifiersState {
+            shift: true,
+            logo: true,
+            ..Default::default()
+        };
 
         // What `tiling.lua` binds, and what the keyboard sends. These have to
         // be the same string or the binding is an entry in a table nothing
         // looks up.
         for (code, bound) in [(minus, "super+ctrl+minus"), (equal, "super+ctrl+equal")] {
-            let sent = arrives(code, with_ctrl, "ctrl+super+");
-            assert_eq!(
-                sent,
-                normalise_combo(bound),
-                "`tiling.lua` binds {bound:?}, and that keypress arrives as {sent:?}"
+            let sent = names_for(&keymap, &indices, code, &with_ctrl);
+            assert!(
+                sent.contains(&normalise_combo(bound)),
+                "`tiling.lua` binds {bound:?}, and that keypress answers only to {sent:?}"
             );
         }
 
-        // And the spelling not to go back to. `underscore` and `plus` are what
-        // shift makes of these keys, so `super+shift+minus` names a press that
-        // does not exist.
-        for (code, tempting) in [(minus, "super+shift+minus"), (equal, "super+shift+equal")] {
-            let sent = arrives(code, with_shift, "shift+super+");
-            assert_ne!(
+        // And the spelling it started as, which #121 made reachable. Shift
+        // still changes the keysym -- the press is called `underscore` first
+        // -- but it also answers to the key it was.
+        for (code, shifted, bound) in [
+            (minus, "super+shift+underscore", "super+shift+minus"),
+            (equal, "super+shift+plus", "super+shift+equal"),
+        ] {
+            let sent = names_for(&keymap, &indices, code, &with_shift);
+            assert_eq!(
                 sent,
-                normalise_combo(tempting),
-                "{tempting:?} looks reachable now; if shift has stopped changing \
-                 the keysym then #121 has landed and this test wants rewriting"
+                [normalise_combo(shifted), normalise_combo(bound)],
+                "shift on this key should arrive as {shifted:?} and fall back to \
+                 {bound:?}, modified spelling first"
             );
         }
+    }
+
+    /// **Every key a shipped script binds can be pressed on a `us` keyboard.**
+    ///
+    /// The question the spelling test cannot ask. This one loads the shipped
+    /// `init.lua` -- so the bindings are what the running compositor has, the
+    /// nine `super+shift+N` built by a loop in `workspaces.lua` and the keys
+    /// `scrolling.lua` binds through its own helper included -- and for each,
+    /// looks for a physical key that, held under the modifiers the binding
+    /// names, answers to that exact string.
+    ///
+    /// Eleven failed this before #121: all nine send-to-workspace keys and both
+    /// `super+shift+bracketleft`/`bracketright`, because shift turned the key
+    /// into `exclam` or `braceleft` and that was the only name looked up.
+    ///
+    /// `package.path` is written by the entry rather than left to
+    /// `Scripts::load`, which prepends the developer's own `~/.config/solium`
+    /// and would make this a test of somebody's configuration -- the trap the
+    /// layout harness below documents.
+    #[test]
+    fn every_shipped_binding_is_reachable_on_us() {
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+        let directory = std::env::temp_dir().join("solium-reachable");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("creating the entry directory");
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\ndofile({shipped:?} .. \"/init.lua\")\n"
+            ),
+        )
+        .expect("writing the entry point");
+        let scripts = Scripts::load(&entry).expect("loading the shipped init.lua");
+        let bound: Vec<String> = scripts
+            .bindings()
+            .into_iter()
+            .map(|binding| binding.combo)
+            .collect();
+
+        // The ones this is for, by name, so a load that quietly bound nothing
+        // -- or a scan that lost the loop -- cannot pass by having nothing to
+        // check.
+        let expected = (1..=9).map(|index| format!("shift+super+{index}")).chain([
+            "shift+super+bracketleft".to_owned(),
+            "shift+super+bracketright".to_owned(),
+        ]);
+        for combo in expected {
+            assert!(
+                bound.contains(&combo),
+                "the shipped scripts no longer bind {combo:?}; they bind {bound:?}"
+            );
+        }
+
+        // Every one that fails, not the first: eleven at once is a different
+        // bug from one, and a report that stops at the first cannot say which.
+        let (keymap, indices) = us_keymap();
+        let codes = keymap.min_keycode().raw()..=keymap.max_keycode().raw();
+        let dead: Vec<&String> = bound
+            .iter()
+            .filter(|combo| {
+                let combo = normalise_combo(combo);
+                let held = held_for(&combo);
+                !codes
+                    .clone()
+                    .any(|code| names_for(&keymap, &indices, code, &held).contains(&combo))
+            })
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "shipped scripts bind {dead:?}, and for each no key on a `us` keyboard, held \
+             under the modifiers it names, answers to that name -- they can never fire"
+        );
     }
 }
 
