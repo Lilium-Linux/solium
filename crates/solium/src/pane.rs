@@ -267,6 +267,14 @@ pub(crate) struct Pane {
     /// deadline in it: the retry is "every frame until the slot is free", which
     /// is what a busy slot costs everywhere else.
     answered: bool,
+    /// Whether scripts have been told this window has gone.
+    ///
+    /// Set by `Solium::trigger_close`, and never cleared: nothing brings a
+    /// window back once `close` has been sent. The pane itself outlives that
+    /// call by the rest of the frame -- it is retired in `sync_panes` -- and
+    /// this is what keeps it from being an ordinary window meanwhile. See
+    /// [`Self::leaving`] and `Solium::snapshot`.
+    gone: bool,
     opened: Duration,
     /// Whether a client mapped *into* this pane rather than creating it.
     ///
@@ -343,6 +351,7 @@ impl Pane {
             closing_at: None,
             asked_at: None,
             answered: false,
+            gone: false,
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -368,6 +377,7 @@ impl Pane {
             closing_at: None,
             asked_at: None,
             answered: false,
+            gone: false,
             opened: now,
             adopted: false,
             drawn: crate::present::Slot::default(),
@@ -536,10 +546,20 @@ impl Pane {
         self.answered = false;
     }
 
+    /// Whether scripts have been told this window has gone. See the field.
+    pub(crate) const fn gone(&self) -> bool {
+        self.gone
+    }
+
+    /// Scripts are being told this window has gone. See the field.
+    pub(crate) const fn went(&mut self) {
+        self.gone = true;
+    }
+
     /// Whether this pane is on its way off the screen.
     ///
     /// **One question with one answer, because asking half of it is issue
-    /// #127.** "On its way out" spans three states and the two callers that
+    /// #127.** "On its way out" spans four states and the two callers that
     /// have to know — `Solium::close_pane`, which must not start a second
     /// close, and `Solium::move_pane`, which must not overwrite the transform
     /// that is playing one — each used to ask a different, narrower question.
@@ -549,7 +569,7 @@ impl Pane {
     /// a second time. `move_pane` asked nothing at all, and put a dying window
     /// back at full opacity.
     ///
-    /// The three states, in the order a window passes through them:
+    /// The four states, in the order a window passes through them:
     ///
     /// 1. `closing_at` — the leaving animation is playing and the request has
     ///    not gone out yet. 190 ms.
@@ -557,10 +577,19 @@ impl Pane {
     ///    answered. The window is held invisible for as long as this lasts, so
     ///    it is *more* in need of the guard than (1), not less: there is
     ///    nothing on screen for a second press to have been aimed at.
-    /// 3. [`Content::Leaving`] — the client has gone and the pane is still
+    /// 3. `gone` — scripts have been told `close`, and the pane has not been
+    ///    retired yet, which it is at the end of the frame. `trigger_close`
+    ///    clears both timers above so that no deadline gives the window back,
+    ///    and without this arm that left a window that no longer exists
+    ///    answering "not leaving" to both callers for the rest of the frame:
+    ///    `close_pane` started a close on it, and `move_pane` drew it again at
+    ///    full opacity for a layout placing it in `close`. See
+    ///    `a_window_that_has_gone_is_neither_placed_nor_closed_again` and
+    ///    `a_layout_placing_a_closed_window_does_not_show_it_again`.
+    /// 4. [`Content::Leaving`] — the client has gone and the pane is still
     ///    being drawn. Nothing constructs this today; it is issue #126's state.
     ///
-    /// **What the third arm is and is not.** It is here so that this predicate
+    /// **What the fourth arm is and is not.** It is here so that this predicate
     /// is total over `Content` and cannot answer "not leaving" for a variant
     /// whose name is `Leaving` — nothing more than that. It is *not* the
     /// #126-shaped case being handled in advance, and the first draft of this
@@ -589,6 +618,7 @@ impl Pane {
     pub(crate) const fn leaving(&self) -> bool {
         self.closing_at.is_some()
             || self.asked_at.is_some()
+            || self.gone
             || matches!(self.content, Content::Leaving { .. })
     }
 
