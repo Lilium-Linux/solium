@@ -370,6 +370,10 @@ pub(crate) struct Solium {
     /// password auto-repeated. Smithay keeps the same set, privately.
     pub(crate) keys_forwarded: std::collections::HashSet<u32>,
 
+    /// The session has just unlocked with a key still held, and the keyboard
+    /// goes back to a window once it is let go. See `Solium::unlock`.
+    pub(crate) refocus_on_release: bool,
+
     /// The socket clients connect on. Held so that a program started from a
     /// script finds *this* compositor rather than the session it is nested in.
     pub(crate) socket_name: String,
@@ -1298,6 +1302,7 @@ impl Solium {
             status: String::new(),
             script_grab: false,
             keys_forwarded: std::collections::HashSet::new(),
+            refocus_on_release: false,
             socket_name: String::new(),
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
@@ -6636,6 +6641,24 @@ impl XdgShellHandler for Solium {
         // anything, so the tidying has to live there or happen twice.
     }
 
+    /// A menu has gone. If it was the last of the chain `popup_grab` holds,
+    /// that grab is over and is let go of here.
+    ///
+    /// Nothing else ever cleared it. A menu that closed normally stayed
+    /// recorded as "the chain holding the seat's grabs", keeping its window's
+    /// surface with it, until the next menu replaced it or the next lock
+    /// dismissed a chain that had ended long before -- which is harmless today
+    /// only because dismissing an ended chain does nothing, and is not what
+    /// the field says it is. `has_ended` reads the chain as live until the
+    /// popup manager has tidied the dead popup out of it, which is what the
+    /// `cleanup` first is for: the same call both backends make every frame.
+    fn popup_destroyed(&mut self, _surface: PopupSurface) {
+        self.popups.cleanup();
+        if self.popup_grab.as_ref().is_some_and(PopupGrab::has_ended) {
+            self.popup_grab = None;
+        }
+    }
+
     /// A client is opening a menu, a tooltip or a combo-box list.
     ///
     /// The positioner is the client's entire description of *where*: an anchor
@@ -8862,6 +8885,9 @@ mod tests {
         use wayland_protocols::xdg::shell::client::{
             xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
         };
+        use wayland_protocols_wlr::screencopy::v1::client::{
+            zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
+        };
 
         /// The `edge_at` a `ResizeGrab` would record on the frame it produced
         /// `wanted`, for a pane the layout has at that same rectangle.
@@ -8933,6 +8959,7 @@ mod tests {
             outputs: Vec<wl_output::WlOutput>,
             locks: Option<ext_session_lock_manager_v1::ExtSessionLockManagerV1>,
             data_devices: Option<wl_data_device_manager::WlDataDeviceManager>,
+            screencopy: Option<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1>,
             /// Every `wl_keyboard.key` this client has been sent, as evdev
             /// codes, presses and releases alike. What the lock tests are
             /// about in the end: a key that reaches an application's client
@@ -8942,10 +8969,16 @@ mod tests {
             /// question `keys` cannot answer: whether a key the client was
             /// told went down was ever told it came up.
             key_events: Vec<(u32, bool)>,
+            /// The keys the last `wl_keyboard.enter` said were already held.
+            enter_keys: Vec<u32>,
             /// The lock objects this client was told `locked` on, and the
             /// ones it was told `finished` on.
             locked: Vec<wayland_client::backend::ObjectId>,
             finished: Vec<wayland_client::backend::ObjectId>,
+            /// Screen captures this client was offered a buffer for, and ones
+            /// it was told failed.
+            captures_offered: usize,
+            captures_failed: usize,
             /// The surface this client's keyboard is on, as its own
             /// `enter`/`leave` events say -- the client's view, which is the
             /// one that matters, and not the server's.
@@ -8988,6 +9021,9 @@ mod tests {
                         state.outputs.push(output.clone());
                         state.output = Some(output);
                     }
+                    "zwlr_screencopy_manager_v1" => {
+                        state.screencopy = Some(registry.bind(name, 3, qh, ()));
+                    }
                     "ext_session_lock_manager_v1" => {
                         state.locks = Some(registry.bind(name, 1, qh, ()));
                     }
@@ -9017,6 +9053,10 @@ mod tests {
         wayland_client::delegate_noop!(
             Client: ignore ext_session_lock_manager_v1::ExtSessionLockManagerV1
         );
+        wayland_client::delegate_noop!(
+            Client: ignore zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1
+        );
+
         /// See [`Client::locked`] and [`Client::finished`].
         impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for Client {
             fn event(
@@ -9031,6 +9071,24 @@ mod tests {
                 match event {
                     ext_session_lock_v1::Event::Locked => state.locked.push(id),
                     ext_session_lock_v1::Event::Finished => state.finished.push(id),
+                    _ => {}
+                }
+            }
+        }
+
+        /// See [`Client::captures_offered`].
+        impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for Client {
+            fn event(
+                state: &mut Self,
+                _frame: &zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
+                event: zwlr_screencopy_frame_v1::Event,
+                _data: &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+                match event {
+                    zwlr_screencopy_frame_v1::Event::Buffer { .. } => state.captures_offered += 1,
+                    zwlr_screencopy_frame_v1::Event::Failed => state.captures_failed += 1,
                     _ => {}
                 }
             }
@@ -9052,10 +9110,18 @@ mod tests {
             ) {
                 match event {
                     wl_keyboard::Event::Enter {
-                        serial, surface, ..
+                        serial,
+                        surface,
+                        keys,
                     } => {
                         state.keyboard_on = Some(wayland_client::Proxy::id(&surface));
                         state.serial = serial;
+                        state.enter_keys = keys
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|key| u32::from_ne_bytes(*key))
+                            .collect();
                     }
                     wl_keyboard::Event::Leave { .. } => state.keyboard_on = None,
                     wl_keyboard::Event::Key {
@@ -12014,9 +12080,10 @@ mod tests {
         /// Then the tests of **who holds the lock**, from `the lock's holder`
         /// on: a second lock client, an application asking for a lock of its
         /// own, an unlock from a lock that was never granted, the lock client
-        /// crashing, a mode active at the lock, and a lock surface dying. Each
-        /// of those drives real clients too, with a third one where the attack
-        /// or the second lock screen needs one, and each fails against
+        /// crashing, a mode active at the lock, a lock surface dying, the key
+        /// held at unlock, a capture while locked and a menu closing. Each of
+        /// those drives real clients too, with a third one where the attack or
+        /// the second lock screen needs one, and each fails against
         /// `2b6550e`; the doc of each says where.
         ///
         /// The X11 test at the end is the exception to both: see its doc.
@@ -12958,6 +13025,153 @@ mod tests {
                 let selections = session.app.client.selections;
                 session.assert_sealed("the focused lock surface died", selections);
                 session.assert_unlocks(lock);
+            }
+
+            /// **The key that unlocks is not handed to the window.** The Enter
+            /// that submits the password is still held when the lock client
+            /// unlocks, and the keyboard went straight back to the window,
+            /// whose `wl_keyboard.enter` then said Enter was held -- a key it
+            /// never saw pressed, typed at the lock screen.
+            ///
+            /// Against `2b6550e`, fails at "told a key is held".
+            #[test]
+            fn the_key_that_unlocks_is_not_handed_to_the_window() {
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                let lock = session.lock();
+
+                // Enter, which is evdev 28 and 36 to xkb, down at the lock
+                // screen when the lock client unlocks.
+                crate::input::key(&mut session.state, Keycode::new(36), KeyState::Pressed, 1);
+                lock.unlock_and_destroy();
+                session
+                    .locker
+                    .pump(&mut session.display, &mut session.state);
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session.state.lock.is_none(),
+                    "the lock client unlocked and the session did not"
+                );
+                assert!(
+                    session.app.client.keyboard_on.is_none()
+                        || !session.app.client.enter_keys.contains(&28),
+                    "the window was told a key is held that it never saw pressed: \
+                     the Enter typed at the lock screen"
+                );
+
+                session.app.client.keys.clear();
+                crate::input::key(&mut session.state, Keycode::new(36), KeyState::Released, 2);
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session.app.client.keyboard_on.is_some(),
+                    "the key came up and the keyboard did not go back to the window"
+                );
+                assert!(
+                    !session.app.client.enter_keys.contains(&28),
+                    "the window was told a key is held that it never saw pressed"
+                );
+                assert!(
+                    !session.app.client.keys.contains(&28),
+                    "the window was sent the release of a key it never saw pressed"
+                );
+                let (app, _) = session.type_key();
+                assert!(app, "unlocked, and typing does not reach the application");
+            }
+
+            /// **Nothing captures the screen while the session is locked.**
+            /// What is on it then is the lock screen, and a recording of that
+            /// is the password's length and the rhythm it was typed at. Every
+            /// client but the lock client is behind the lock and any of them
+            /// can ask. Both ways in are driven: a capture asked for while
+            /// locked, and one asked for before the lock and copied after. A
+            /// capture already *queued* when the session locks is refused in
+            /// `screencopy::settle`, which needs a renderer and is not reached
+            /// from here.
+            ///
+            /// Against `2b6550e`, fails at "was offered a buffer".
+            #[test]
+            fn nothing_captures_the_screen_while_the_session_is_locked() {
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                let manager = session
+                    .app
+                    .client
+                    .screencopy
+                    .clone()
+                    .expect("zwlr_screencopy_manager_v1 bound");
+                let output = session.app.client.output.clone().expect("wl_output bound");
+                let before = manager.capture_output(0, &output, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+                assert_eq!(
+                    session.app.client.captures_offered, 1,
+                    "unlocked, a capture was not offered a buffer, so refusing one \
+                     proves nothing"
+                );
+                let lock = session.lock();
+
+                let _during = manager.capture_output(0, &output, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+                assert_eq!(
+                    session.app.client.captures_offered, 1,
+                    "a capture asked for while locked was offered a buffer: an \
+                     application can record the lock screen"
+                );
+                assert_eq!(
+                    session.app.client.captures_failed, 1,
+                    "and it was never told it failed"
+                );
+
+                let shm = session.app.client.shm.clone().expect("wl_shm bound");
+                let fd = anon_file(64 * 64 * 4);
+                let pool = shm.create_pool(fd.as_fd(), 64 * 64 * 4, &session.app.qh, ());
+                let buffer = pool.create_buffer(
+                    0,
+                    64,
+                    64,
+                    64 * 4,
+                    wl_shm::Format::Xrgb8888,
+                    &session.app.qh,
+                    (),
+                );
+                before.copy(&buffer);
+                session.app.pump(&mut session.display, &mut session.state);
+                assert_eq!(
+                    session.app.client.captures_failed, 2,
+                    "a capture asked for before the lock and copied after it was \
+                     not refused"
+                );
+
+                session.assert_unlocks(lock);
+            }
+
+            /// **A menu that closes lets go of its grab.** `popup_grab` was set
+            /// when a menu grabbed and cleared only by `release_grabs` at the
+            /// next lock, so a menu closed an hour before was still recorded
+            /// as the chain holding the seat when the session next locked.
+            /// Harmless as things stand -- see `popup_destroyed` -- and tested
+            /// because the field's one reader is the lock.
+            ///
+            /// Against `2b6550e`, fails at "still recorded".
+            #[test]
+            fn a_menu_that_closes_lets_go_of_its_grab() {
+                let mut session = Session::new();
+                let (_window, _toplevel, _surface, parent) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let menu = session
+                    .app
+                    .menu(&mut session.display, &mut session.state, &parent);
+                assert!(
+                    session.state.popup_grab.is_some(),
+                    "the menu's grab was never recorded, so this proves nothing"
+                );
+
+                menu.destroy();
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session.state.popup_grab.is_none(),
+                    "a menu closed and its grab is still recorded as the one \
+                     holding the seat"
+                );
             }
 
             /// **The rule the X11 clipboard bridge asks: no X11 client may

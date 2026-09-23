@@ -169,6 +169,15 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
         }
         _ => {}
     }
+
+    // The session unlocked while a key was held -- the Enter that unlocked it,
+    // nearly always -- and the keyboard waited for it to come up before going
+    // back to a window. See `Solium::unlock`. Out here, not in the filter,
+    // because `settle_focus` moves the keyboard and the filter runs inside it.
+    if state.refocus_on_release && keyboard.pressed_keys().is_empty() {
+        state.refocus_on_release = false;
+        state.settle_focus();
+    }
 }
 
 /// What the keyboard filter answers for a press.
