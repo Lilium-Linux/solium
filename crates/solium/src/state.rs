@@ -28,7 +28,7 @@ use smithay::{
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_layer_shell,
     delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
-        LayerSurface, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
+        LayerSurface, PopupGrab, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
         PopupUngrabStrategy, Space, Window, WindowSurfaceType, find_popup_root_surface,
         get_popup_toplevel_coords, layer_map_for_output, utils::under_from_surface_tree,
     },
@@ -58,11 +58,11 @@ use smithay::{
         selection::data_device::{
             ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
             clear_data_device_selection, request_data_device_client_selection,
-            set_data_device_focus, set_data_device_selection,
+            set_data_device_selection,
         },
         selection::primary_selection::{
             PrimarySelectionHandler, PrimarySelectionState, clear_primary_selection,
-            request_primary_client_selection, set_primary_focus, set_primary_selection,
+            request_primary_client_selection, set_primary_selection,
         },
         selection::{SelectionHandler, SelectionSource, SelectionTarget},
         session_lock::SessionLockManagerState,
@@ -335,6 +335,10 @@ pub(crate) struct Solium {
     pub(crate) panes: crate::pane::Panes,
 
     pub(crate) popups: PopupManager,
+    /// The menu chain holding the seat's grabs, while one does. Kept so that
+    /// locking can close it rather than leave it steering the keyboard: see
+    /// `Solium::release_grabs` in `focus.rs`.
+    pub(crate) popup_grab: Option<PopupGrab<Self>>,
     pub(crate) seat: Seat<Self>,
 
     /// The one animation clock. Ticked by the render loop, read by everything.
@@ -1274,6 +1278,7 @@ impl Solium {
             arrangement: monitor::Arrangement::default(),
             panes: crate::pane::Panes::default(),
             popups: PopupManager::default(),
+            popup_grab: None,
             seat,
             clock: Clock::new(),
             profile: Profile::from_env(),
@@ -4968,6 +4973,13 @@ impl Solium {
     /// that is where focus would land the moment you moved; the topmost
     /// otherwise. Called where a window went, and only when nothing has focus,
     /// so it cannot argue with a script that has just chosen one.
+    ///
+    /// **While locked it gets as far as `focus_window` and no further.** The
+    /// keyboard is the lock screen's then, and `focused_window` cannot see
+    /// that -- a lock surface is not a window -- so the early return below
+    /// does not fire and the topmost arm picks an application. The gate in
+    /// `focus.rs` is what says no, which is why this function has no lock
+    /// check of its own to forget.
     pub(crate) fn settle_focus(&mut self) {
         if self.focused_window().is_some() {
             return;
@@ -5453,10 +5465,9 @@ impl Solium {
         }) else {
             return;
         };
-        if let Some(keyboard) = self.seat.get_keyboard() {
-            keyboard.set_focus(self, Some(surface.clone()), SERIAL_COUNTER.next_serial());
-            self.focus_selection(Some(&surface));
-        }
+        // Through the gate like everything else, and the one call it must
+        // always let through: this surface is the lock's own.
+        self.give_keyboard(Some(surface), SERIAL_COUNTER.next_serial());
     }
 
     /// Whether anything is holding the machine awake.
@@ -5521,39 +5532,31 @@ impl Solium {
         })
     }
 
-    /// Give the selection to nobody, for the moments where the keyboard has
-    /// gone somewhere that is not a client -- or nowhere at all.
-    pub(crate) fn clear_selection_focus(&mut self) {
-        self.focus_selection(None);
-    }
-
-    /// A client may only read a selection while it holds the seat's data
-    /// device focus, and that is a separate thing from keyboard focus. Set one
-    /// and not the other and every paste hangs forever: the client asks for
-    /// the selection and no offer ever arrives, which presents as a broken
-    /// clipboard in the *pasting* application.
-    fn focus_selection(&mut self, surface: Option<&WlSurface>) {
-        let client = surface.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
-        set_data_device_focus(&self.display_handle, &self.seat, client.clone());
-        set_primary_focus(&self.display_handle, &self.seat, client);
-    }
-
     pub(crate) fn focus_window(&mut self, window: &Window, serial: Serial) {
         let Some(location) = self.space.element_location(window) else {
             return;
         };
+        // The rule in `focus.rs`, asked before anything happens rather than
+        // left to `give_keyboard` to refuse halfway through. A focus that is
+        // refused must not restack a window behind the lock, activate an X11
+        // window, or tell a layout that something is focused when nothing is.
+        // Scripts (`sol.focus`), layouts' event handlers, xdg-activation and
+        // `settle_focus` all arrive here, and all of them can while locked.
+        if !self.may_focus(window) {
+            tracing::debug!("refused to focus a window: the session is locked");
+            return;
+        }
         // Frames are drawn differently focused and unfocused, and restacking
         // changes what covers what. Both are the screen changing.
         self.redraw = true;
         // `true` restacks: a clicked window comes to the front.
         self.map_stacked(window.clone(), location, true);
 
-        if let Some(keyboard) = self.seat.get_keyboard() {
+        if self.seat.get_keyboard().is_some() {
             // The window's own surface, so this works for an X11 window as
             // well as an xdg one.
             let surface = window.wl_surface().map(|surface| surface.into_owned());
-            keyboard.set_focus(self, surface.clone(), serial);
-            self.focus_selection(surface.as_ref());
+            self.give_keyboard(surface.clone(), serial);
             // X11 wants telling separately, in its own terms: a window that
             // has keyboard focus but was never activated draws itself
             // unfocused however much typing goes into it.
@@ -6531,11 +6534,14 @@ impl XdgShellHandler for Solium {
         self.adopt_or_open(window);
 
         // Focus follows the newest window. #12 turns this into a policy.
-        if let Some(keyboard) = self.seat.get_keyboard() {
-            let focused = surface.wl_surface().clone();
-            keyboard.set_focus(self, Some(focused.clone()), SERIAL_COUNTER.next_serial());
-            self.focus_selection(Some(&focused));
-        }
+        //
+        // Through the gate, which refuses it while locked: this is a client
+        // opening a window of its own accord, with nobody at the machine, and
+        // until the gate existed it was the shortest way to the password.
+        self.give_keyboard(
+            Some(surface.wl_surface().clone()),
+            SERIAL_COUNTER.next_serial(),
+        );
     }
 
     /// `xdg_toplevel.set_parent` — a window saying which window it belongs to.
@@ -6660,12 +6666,32 @@ impl XdgShellHandler for Solium {
             return;
         };
 
+        // A grab is the keyboard by another name -- see `grab_keyboard` in
+        // `focus.rs` -- so it answers to the same rule, asked here because
+        // this is before `grab_popup` has recorded anything that would then
+        // have to be undone. A popup's root is a window or a layer surface,
+        // never a lock surface, so while locked every grab stops here. Before
+        // this line, a client that merely opened a menu behind the lock took
+        // the keyboard from the lock screen and kept it.
+        if !self.may_hold_keyboard(&root) {
+            // And the client is told. The protocol's word for a denied grab is
+            // a dismissed popup, and a menu left waiting on a grab that is not
+            // coming would still be open when the session unlocked. Sent to
+            // the popup directly: it has not been committed yet, so it is in
+            // no tree that `PopupManager::dismiss_popup` could find it in.
+            if let PopupKind::Xdg(surface) = &popup {
+                surface.send_popup_done();
+            }
+            tracing::debug!("refused a popup grab: the session is locked");
+            return;
+        }
+
         // A stale serial is a refusal, not a crash. `grab_popup` returns
         // `Err` for a popup that is already mapped, one whose parent was
         // dismissed, and one that is not the topmost — and posts the protocol
         // error itself where the protocol calls for one, so there is nothing
         // to do here but decline and say so.
-        let mut grab = match self.popups.grab_popup(root, popup, &seat, serial) {
+        let mut grab = match self.popups.grab_popup(root.clone(), popup, &seat, serial) {
             Ok(grab) => grab,
             Err(err) => {
                 tracing::debug!(?err, "refused a popup grab");
@@ -6713,7 +6739,7 @@ impl XdgShellHandler for Solium {
             return;
         }
 
-        if let Some(keyboard) = keyboard {
+        if keyboard.is_some() {
             // Keyboard before pointer, and the order matters. Installing the
             // pointer grab runs the *previous* pointer grab's `unset`, which
             // for a parent popup's `PopupPointerGrab` tries to take the
@@ -6721,17 +6747,17 @@ impl XdgShellHandler for Solium {
             // serial is the parent's, so setting ours first is what makes a
             // submenu keep the keyboard instead of handing it back to the
             // window while its menu is still open.
+            //
+            // `give_keyboard` moves the selection focus with the keyboard, as
+            // it does everywhere, and a menu opened from an unfocused window
+            // is exactly the case where the two would otherwise part company:
+            // the popup would take the keyboard while the clipboard still
+            // answered to whoever had it before. Both are per-client, so for
+            // the ordinary case of a menu in the already-focused window this
+            // changes nothing.
             let focus = grab.current_grab();
-            keyboard.set_focus(self, focus.clone(), serial);
-            // Solium moves the selection focus with the keyboard focus
-            // everywhere else it sets one — see `focus_window` — and a menu
-            // opened from an unfocused window is exactly the case where the
-            // two would otherwise part company: the popup would take the
-            // keyboard while the clipboard still answered to whoever had it
-            // before. Both are per-client, so for the ordinary case of a menu
-            // in the already-focused window this changes nothing.
-            self.focus_selection(focus.as_ref());
-            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+            self.give_keyboard(focus, serial);
+            self.grab_keyboard(&root, PopupKeyboardGrab::new(&grab), serial);
         }
         if let Some(pointer) = pointer {
             // `Focus::Keep`, not `Focus::Clear` as Solium's move and resize
@@ -6740,6 +6766,8 @@ impl XdgShellHandler for Solium {
             // keep receiving enter/motion so its entries highlight.
             pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
         }
+        // Kept, so that locking can dismiss the chain: see `release_grabs`.
+        self.popup_grab = Some(grab);
     }
 
     /// A window asking for the whole screen.
@@ -8766,11 +8794,18 @@ mod tests {
         use std::os::unix::io::{AsFd, OwnedFd};
         use std::os::unix::net::UnixStream;
         use wayland_client::protocol::{
-            wl_buffer, wl_callback, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+            wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
+            wl_data_offer, wl_keyboard, wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool,
+            wl_surface,
         };
         use wayland_client::{Connection, Dispatch, QueueHandle};
+        use wayland_protocols::ext::session_lock::v1::client::{
+            ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
+        };
         use wayland_protocols::xdg::dialog::v1::client::{xdg_dialog_v1, xdg_wm_dialog_v1};
-        use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+        use wayland_protocols::xdg::shell::client::{
+            xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
+        };
 
         /// The `edge_at` a `ResizeGrab` would record on the frame it produced
         /// `wanted`, for a pane the layout has at that same rectangle.
@@ -8829,6 +8864,35 @@ mod tests {
             /// compositor that sends the same size sixty times a second looks
             /// identical from its own side and costs nothing on the wire.
             configures: Vec<(wayland_client::backend::ObjectId, i32, i32)>,
+
+            /// The seat, the monitor, the lock manager and the clipboard, for
+            /// `lock_focus`: the only tests that need a keyboard, a surface to
+            /// lock a screen with, or a data device. Bound by every client and
+            /// used by none of the others, which is harmless -- binding a
+            /// global asks for nothing until a request is made on it.
+            seat: Option<wl_seat::WlSeat>,
+            output: Option<wl_output::WlOutput>,
+            locks: Option<ext_session_lock_manager_v1::ExtSessionLockManagerV1>,
+            data_devices: Option<wl_data_device_manager::WlDataDeviceManager>,
+            /// Every `wl_keyboard.key` this client has been sent, as evdev
+            /// codes, presses and releases alike. What the lock tests are
+            /// about in the end: a key that reaches an application's client
+            /// is a key the application has.
+            keys: Vec<u32>,
+            /// The surface this client's keyboard is on, as its own
+            /// `enter`/`leave` events say -- the client's view, which is the
+            /// one that matters, and not the server's.
+            keyboard_on: Option<wayland_client::backend::ObjectId>,
+            /// The serial of the last `wl_keyboard.enter`, for a menu to grab
+            /// with the way a real one does.
+            serial: u32,
+            /// How many `wl_data_device.selection` events have arrived. One is
+            /// sent each time this client is made the clipboard's client, so a
+            /// count that moves while the session is locked is an application
+            /// behind the lock being handed the clipboard.
+            selections: usize,
+            /// How many `xdg_popup.popup_done` events have arrived.
+            popups_done: usize,
         }
 
         impl Dispatch<wl_registry::WlRegistry, ()> for Client {
@@ -8851,6 +8915,14 @@ mod tests {
                     "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
                     "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                     "xdg_wm_dialog_v1" => state.dialogs = Some(registry.bind(name, 1, qh, ())),
+                    "wl_seat" => state.seat = Some(registry.bind(name, 1, qh, ())),
+                    "wl_output" => state.output = Some(registry.bind(name, 1, qh, ())),
+                    "ext_session_lock_manager_v1" => {
+                        state.locks = Some(registry.bind(name, 1, qh, ()));
+                    }
+                    "wl_data_device_manager" => {
+                        state.data_devices = Some(registry.bind(name, 1, qh, ()));
+                    }
                     _ => {}
                 }
             }
@@ -8866,6 +8938,81 @@ mod tests {
         wayland_client::delegate_noop!(Client: ignore xdg_wm_base::XdgWmBase);
         wayland_client::delegate_noop!(Client: ignore xdg_surface::XdgSurface);
         wayland_client::delegate_noop!(Client: ignore wl_callback::WlCallback);
+        wayland_client::delegate_noop!(Client: ignore wl_seat::WlSeat);
+        wayland_client::delegate_noop!(Client: ignore wl_output::WlOutput);
+        wayland_client::delegate_noop!(Client: ignore wl_data_device_manager::WlDataDeviceManager);
+        wayland_client::delegate_noop!(Client: ignore wl_data_offer::WlDataOffer);
+        wayland_client::delegate_noop!(Client: ignore xdg_positioner::XdgPositioner);
+        wayland_client::delegate_noop!(
+            Client: ignore ext_session_lock_manager_v1::ExtSessionLockManagerV1
+        );
+        wayland_client::delegate_noop!(Client: ignore ext_session_lock_v1::ExtSessionLockV1);
+        wayland_client::delegate_noop!(
+            Client: ignore ext_session_lock_surface_v1::ExtSessionLockSurfaceV1
+        );
+
+        /// See [`Client::keys`] and [`Client::keyboard_on`].
+        impl Dispatch<wl_keyboard::WlKeyboard, ()> for Client {
+            fn event(
+                state: &mut Self,
+                _keyboard: &wl_keyboard::WlKeyboard,
+                event: wl_keyboard::Event,
+                _data: &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+                match event {
+                    wl_keyboard::Event::Enter {
+                        serial, surface, ..
+                    } => {
+                        state.keyboard_on = Some(wayland_client::Proxy::id(&surface));
+                        state.serial = serial;
+                    }
+                    wl_keyboard::Event::Leave { .. } => state.keyboard_on = None,
+                    wl_keyboard::Event::Key { key, .. } => state.keys.push(key),
+                    _ => {}
+                }
+            }
+        }
+
+        /// See [`Client::selections`].
+        impl Dispatch<wl_data_device::WlDataDevice, ()> for Client {
+            fn event(
+                state: &mut Self,
+                _device: &wl_data_device::WlDataDevice,
+                event: wl_data_device::Event,
+                _data: &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+                if let wl_data_device::Event::Selection { .. } = event {
+                    state.selections += 1;
+                }
+            }
+
+            // An offer is a new object the server creates, so the client has to
+            // be told what to make of one even though no test sets a selection
+            // and none should ever arrive.
+            wayland_client::event_created_child!(Client, wl_data_device::WlDataDevice, [
+                wl_data_device::EVT_DATA_OFFER_OPCODE => (wl_data_offer::WlDataOffer, ()),
+            ]);
+        }
+
+        /// See [`Client::popups_done`].
+        impl Dispatch<xdg_popup::XdgPopup, ()> for Client {
+            fn event(
+                state: &mut Self,
+                _popup: &xdg_popup::XdgPopup,
+                event: xdg_popup::Event,
+                _data: &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+                if let xdg_popup::Event::PopupDone = event {
+                    state.popups_done += 1;
+                }
+            }
+        }
 
         /// The one event this fixture does not ignore. See [`Client::configures`].
         ///
@@ -8992,6 +9139,25 @@ mod tests {
             client: &Client,
             qh: &QueueHandle<Client>,
         ) -> (Window, xdg_toplevel::XdgToplevel, wl_surface::WlSurface) {
+            let (window, toplevel, surface, _xdg_surface) =
+                open_xdg(display, state, conn, client, qh);
+            (window, toplevel, surface)
+        }
+
+        /// The same again, with the `xdg_surface` too: a menu names its parent
+        /// by that, and there is no other way to open one.
+        fn open_xdg(
+            display: &mut Display<Solium>,
+            state: &mut Solium,
+            conn: &Connection,
+            client: &Client,
+            qh: &QueueHandle<Client>,
+        ) -> (
+            Window,
+            xdg_toplevel::XdgToplevel,
+            wl_surface::WlSurface,
+            xdg_surface::XdgSurface,
+        ) {
             let compositor = client.compositor.clone().expect("wl_compositor bound");
             let wm_base = client.wm_base.clone().expect("xdg_wm_base bound");
 
@@ -9015,7 +9181,7 @@ mod tests {
                 .find(|window| !before.contains(window))
                 .cloned()
                 .expect("new_toplevel mapped a window");
-            (window, toplevel, surface)
+            (window, toplevel, surface, xdg_surface)
         }
 
         /// Attach a buffer of exactly this size and commit it.
@@ -11722,6 +11888,537 @@ mod tests {
                  space can say where its client was: without a hold nothing \
                  throttles it and nothing ever ends it"
             );
+        }
+
+        /// **The keyboard belongs to the lock screen, whatever the session
+        /// behind it does.**
+        ///
+        /// One test per route by which the keyboard used to reach an
+        /// application while the session was locked, each driven the way it
+        /// happens: a real application client and a real lock client on two
+        /// sockets, each with a `wl_keyboard` of its own, keys pressed through
+        /// the same filter the backends feed. Every route ends on the same
+        /// four measures, taken from both ends of the wire: the server's
+        /// keyboard is on a lock surface, the application's client was never
+        /// told it has the keyboard, it was never made the clipboard's client,
+        /// and a key typed reaches the lock client and not the application.
+        /// Then each one unlocks and checks that the keyboard comes back,
+        /// because a fix that sealed the keyboard for good would pass
+        /// everything before that.
+        ///
+        /// Each of these fails against `69835bc`, the stage this was fixed
+        /// on. That was checked by putting that commit's code back under these
+        /// tests and watching each one fail -- a security test that passes
+        /// either way is worse than none.
+        mod lock_focus {
+            use super::*;
+            use smithay::backend::input::KeyState;
+            use smithay::input::keyboard::Keycode;
+
+            /// One client's end of the wire.
+            struct Side {
+                conn: Connection,
+                queue: wayland_client::EventQueue<Client>,
+                qh: QueueHandle<Client>,
+                client: Client,
+            }
+
+            impl Side {
+                /// A client with a keyboard and a data device, bound the way
+                /// any application binds them.
+                fn connect(display: &mut Display<Solium>, state: &mut Solium) -> Self {
+                    let (conn, queue, client) = connect(display, state);
+                    let qh = queue.handle();
+                    let mut side = Self {
+                        conn,
+                        queue,
+                        qh,
+                        client,
+                    };
+                    let seat = side.client.seat.clone().expect("wl_seat bound");
+                    seat.get_keyboard(&side.qh, ());
+                    side.client
+                        .data_devices
+                        .clone()
+                        .expect("wl_data_device_manager bound")
+                        .get_data_device(&seat, &side.qh, ());
+                    side.pump(display, state);
+                    side
+                }
+
+                fn pump(&mut self, display: &mut Display<Solium>, state: &mut Solium) {
+                    pump(
+                        display,
+                        state,
+                        &self.conn,
+                        &self.qh,
+                        &mut self.queue,
+                        &mut self.client,
+                    );
+                }
+
+                /// Open a window, and run the frame that follows it.
+                ///
+                /// `sync_panes` is what the backends call once a frame, and it
+                /// is where a window arriving or going is noticed -- and where
+                /// `settle_focus` is called from. A test that skipped it would
+                /// skip one of the routes.
+                fn open(
+                    &mut self,
+                    display: &mut Display<Solium>,
+                    state: &mut Solium,
+                ) -> (
+                    Window,
+                    xdg_toplevel::XdgToplevel,
+                    wl_surface::WlSurface,
+                    xdg_surface::XdgSurface,
+                ) {
+                    let opened = open_xdg(display, state, &self.conn, &self.client, &self.qh);
+                    state.sync_panes();
+                    self.pump(display, state);
+                    opened
+                }
+
+                /// Open a menu on `parent` that asks for a grab, as a context
+                /// menu does: the grab before the first commit, as the
+                /// protocol requires, with the serial of the keyboard's last
+                /// enter.
+                fn menu(
+                    &mut self,
+                    display: &mut Display<Solium>,
+                    state: &mut Solium,
+                    parent: &xdg_surface::XdgSurface,
+                ) -> xdg_popup::XdgPopup {
+                    let compositor = self.client.compositor.clone().expect("wl_compositor bound");
+                    let wm_base = self.client.wm_base.clone().expect("xdg_wm_base bound");
+                    let seat = self.client.seat.clone().expect("wl_seat bound");
+
+                    let surface = compositor.create_surface(&self.qh, ());
+                    let xdg = wm_base.get_xdg_surface(&surface, &self.qh, ());
+                    let positioner = wm_base.create_positioner(&self.qh, ());
+                    positioner.set_size(32, 32);
+                    positioner.set_anchor_rect(0, 0, 1, 1);
+                    let popup = xdg.get_popup(Some(parent), &positioner, &self.qh, ());
+                    popup.grab(&seat, self.client.serial);
+                    surface.commit();
+                    self.pump(display, state);
+                    popup
+                }
+            }
+
+            /// One monitor, an application client and a lock client that has
+            /// not locked anything yet.
+            struct Session {
+                display: Display<Solium>,
+                state: Solium,
+                app: Side,
+                locker: Side,
+            }
+
+            impl Session {
+                fn new() -> Self {
+                    let mut display =
+                        Display::<Solium>::new().expect("creating a test wayland display");
+                    let mut state = Solium::new(display.handle());
+                    // See the #99 test: a Qt scene in a process holding a
+                    // libwayland connection of its own aborts the test binary.
+                    state
+                        .decorations
+                        .set_style(&mut state.panes, Some("none".to_string()));
+
+                    let output = Output::new(
+                        "lock-focus-test".to_string(),
+                        PhysicalProperties {
+                            size: (0, 0).into(),
+                            subpixel: Subpixel::Unknown,
+                            make: "solium".to_string(),
+                            model: "lock-focus".to_string(),
+                        },
+                    );
+                    output.change_current_state(
+                        Some(Mode {
+                            size: (1920, 1080).into(),
+                            refresh: 60_000,
+                        }),
+                        None,
+                        Some(Scale::Fractional(1.0)),
+                        None,
+                    );
+                    // A global, which the other fixtures' monitors are not: a
+                    // lock surface is asked for per `wl_output`, so the lock
+                    // client has to be able to name one. Before either client
+                    // connects, so it is in both registries.
+                    let _global = output.create_global::<Solium>(&display.handle());
+                    state.space.map_output(&output, (0, 0));
+
+                    let app = Side::connect(&mut display, &mut state);
+                    let locker = Side::connect(&mut display, &mut state);
+                    Self {
+                        display,
+                        state,
+                        app,
+                        locker,
+                    }
+                }
+
+                /// Whether the server's keyboard is on one of the lock
+                /// client's surfaces.
+                ///
+                /// Asked of the lock itself and not of anything in `focus.rs`:
+                /// a test that checked the gate by asking the gate would pass
+                /// whatever the gate did.
+                fn keyboard_on_lock(&self) -> bool {
+                    let Some(focus) = self
+                        .state
+                        .seat
+                        .get_keyboard()
+                        .and_then(|keyboard| keyboard.current_focus())
+                    else {
+                        return false;
+                    };
+                    self.state
+                        .lock
+                        .as_ref()
+                        .is_some_and(|lock| lock.surfaces().any(|each| each.wl_surface() == &focus))
+                }
+
+                /// Lock the session the way a lock screen does: lock, then a
+                /// surface for the monitor.
+                fn lock(&mut self) -> ext_session_lock_v1::ExtSessionLockV1 {
+                    let client = &self.locker.client;
+                    let locks = client
+                        .locks
+                        .clone()
+                        .expect("ext_session_lock_manager_v1 bound");
+                    let output = client.output.clone().expect("wl_output bound");
+                    let compositor = client.compositor.clone().expect("wl_compositor bound");
+
+                    let lock = locks.lock(&self.locker.qh, ());
+                    let surface = compositor.create_surface(&self.locker.qh, ());
+                    lock.get_lock_surface(&surface, &output, &self.locker.qh, ());
+                    self.locker.pump(&mut self.display, &mut self.state);
+                    self.app.pump(&mut self.display, &mut self.state);
+
+                    assert!(
+                        self.state.lock.is_some(),
+                        "the lock client asked and the session did not lock, so \
+                         nothing after this is about a locked session"
+                    );
+                    assert!(
+                        self.keyboard_on_lock(),
+                        "the lock surface mapped and the keyboard is not on it: \
+                         `focus_lock` is the one hand-off the gate must let through"
+                    );
+                    assert!(
+                        self.locker.client.keyboard_on.is_some(),
+                        "and the lock client was told so"
+                    );
+                    assert!(
+                        self.app.client.keyboard_on.is_none(),
+                        "locking did not take the keyboard away from the application"
+                    );
+                    lock
+                }
+
+                /// Type one key, and say who heard it: the application, and
+                /// the lock client.
+                fn type_key(&mut self) -> (bool, bool) {
+                    self.app.client.keys.clear();
+                    self.locker.client.keys.clear();
+                    // `a`, which is evdev 30 and 38 to xkb.
+                    crate::input::key(&mut self.state, Keycode::new(38), KeyState::Pressed, 1);
+                    crate::input::key(&mut self.state, Keycode::new(38), KeyState::Released, 2);
+                    self.app.pump(&mut self.display, &mut self.state);
+                    self.locker.pump(&mut self.display, &mut self.state);
+                    (
+                        !self.app.client.keys.is_empty(),
+                        !self.locker.client.keys.is_empty(),
+                    )
+                }
+
+                /// What every route ends on: the keyboard is still the lock
+                /// screen's by every measure there is.
+                fn assert_sealed(&mut self, route: &str, selections_before: usize) {
+                    assert!(
+                        self.keyboard_on_lock(),
+                        "{route}: the keyboard left the lock screen"
+                    );
+                    assert!(
+                        self.app.client.keyboard_on.is_none(),
+                        "{route}: the application's client was told it has the keyboard"
+                    );
+                    assert_eq!(
+                        self.app.client.selections, selections_before,
+                        "{route}: the application behind the lock was made the \
+                         clipboard's client"
+                    );
+                    let (app, locker) = self.type_key();
+                    assert!(
+                        !app,
+                        "{route}: a key typed at the lock screen reached the \
+                         application behind it, and that key is a password"
+                    );
+                    assert!(
+                        locker,
+                        "{route}: the key reached nobody at all, so the line \
+                         above proves nothing"
+                    );
+                }
+
+                /// Unlock, and the keyboard comes back to a window without the
+                /// mouse being touched.
+                fn assert_unlocks(&mut self, lock: ext_session_lock_v1::ExtSessionLockV1) {
+                    lock.unlock_and_destroy();
+                    self.locker.pump(&mut self.display, &mut self.state);
+                    self.app.pump(&mut self.display, &mut self.state);
+
+                    assert!(
+                        self.state.lock.is_none(),
+                        "the lock client unlocked and the session did not"
+                    );
+                    let focus = self
+                        .state
+                        .seat
+                        .get_keyboard()
+                        .and_then(|keyboard| keyboard.current_focus());
+                    assert!(
+                        focus
+                            .as_ref()
+                            .is_some_and(|surface| self.state.window_for(surface).is_some()),
+                        "the session unlocked with the keyboard on no window. \
+                         `unlock` clears `lock` before `settle_focus` so that the \
+                         gate lets it through; a session that ignores typing until \
+                         you move the mouse reads as one that did not unlock"
+                    );
+                    assert!(
+                        self.app.client.keyboard_on.is_some(),
+                        "and the application was not told it has it back"
+                    );
+                    let (app, _) = self.type_key();
+                    assert!(app, "unlocked, and typing does not reach the application");
+                }
+            }
+
+            /// **A window opening while locked.** `new_toplevel` set the
+            /// keyboard itself, straight onto the new window: an application
+            /// that opened a window behind the lock took the password.
+            #[test]
+            fn a_window_that_opens_while_locked_does_not_take_the_keyboard() {
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                assert!(
+                    session.app.client.keyboard_on.is_some(),
+                    "the application has the keyboard before the lock, or \
+                     taking it away proves nothing"
+                );
+                let lock = session.lock();
+                let selections = session.app.client.selections;
+
+                session.app.open(&mut session.display, &mut session.state);
+
+                session.assert_sealed("a window opened while locked", selections);
+                session.assert_unlocks(lock);
+            }
+
+            /// **A window closing while locked.** `sync_panes` calls
+            /// `settle_focus`, which returns early only if a *window* has
+            /// focus. A lock surface is not a window, so it went on to its
+            /// topmost arm and gave the keyboard to the top application.
+            #[test]
+            fn a_window_that_closes_while_locked_does_not_take_the_keyboard() {
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                let (_window, toplevel, surface, xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let lock = session.lock();
+                let selections = session.app.client.selections;
+
+                toplevel.destroy();
+                xdg.destroy();
+                surface.destroy();
+                session.app.pump(&mut session.display, &mut session.state);
+                // The frame after it: the space lets go of the dead window and
+                // `sync_panes` sees the set of windows change.
+                session.state.space.refresh();
+                assert!(
+                    session.state.sync_panes(),
+                    "closing a window did not change the set of windows, so \
+                     `settle_focus` never ran and this proves nothing"
+                );
+
+                session.assert_sealed("a window closed while locked", selections);
+                session.assert_unlocks(lock);
+            }
+
+            /// **A menu opened while locked.** `grab` set the keyboard itself,
+            /// onto the menu, and installed a keyboard grab that ignores every
+            /// later attempt to move it.
+            #[test]
+            fn a_menu_that_grabs_while_locked_does_not_take_the_keyboard() {
+                let mut session = Session::new();
+                let (_window, _toplevel, _surface, parent) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let lock = session.lock();
+                let selections = session.app.client.selections;
+
+                let _menu = session
+                    .app
+                    .menu(&mut session.display, &mut session.state, &parent);
+
+                assert!(
+                    !session
+                        .state
+                        .seat
+                        .get_keyboard()
+                        .expect("the seat has a keyboard")
+                        .is_grabbed(),
+                    "a menu behind the lock was given a keyboard grab"
+                );
+                assert!(
+                    session.app.client.popups_done > 0,
+                    "the grab was refused and the menu was not told, so it waits \
+                     on a grab that is not coming and is still open after unlock"
+                );
+                session.assert_sealed("a menu grabbed while locked", selections);
+                session.assert_unlocks(lock);
+            }
+
+            /// **A menu already open when the session locks.** Its keyboard
+            /// grab ignored `lock`'s attempt to take the keyboard away and
+            /// `focus_lock`'s attempt to give it to the lock screen, then
+            /// re-aimed the keyboard at the menu on every key.
+            #[test]
+            fn a_menu_open_when_the_session_locks_gives_the_keyboard_up() {
+                let mut session = Session::new();
+                let (_window, _toplevel, _surface, parent) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let _menu = session
+                    .app
+                    .menu(&mut session.display, &mut session.state, &parent);
+                let keyboard = session
+                    .state
+                    .seat
+                    .get_keyboard()
+                    .expect("the seat has a keyboard");
+                assert!(
+                    keyboard.is_grabbed(),
+                    "the menu asked for a grab and did not get one, so locking \
+                     over it proves nothing"
+                );
+
+                let lock = session.lock();
+                assert!(
+                    !keyboard.is_grabbed(),
+                    "the menu's keyboard grab outlived the lock"
+                );
+                assert!(
+                    session.app.client.popups_done > 0,
+                    "the menu open at the lock was not dismissed, so its chain \
+                     outlives the lock"
+                );
+                let selections = session.app.client.selections;
+                session.assert_sealed("a menu was open when the session locked", selections);
+                session.assert_unlocks(lock);
+
+                // The chain really was ended, not just ungrabbed. Left recorded
+                // on the seat, this second menu would be told it is not the
+                // topmost popup -- a protocol error, which kills the client and
+                // fails the round trip inside `menu`.
+                let _again = session
+                    .app
+                    .menu(&mut session.display, &mut session.state, &parent);
+                assert!(
+                    keyboard.is_grabbed(),
+                    "after unlock, a menu could not grab: the chain from before \
+                     the lock is still in the way"
+                );
+            }
+
+            /// **`focus_window`, called while locked**, as a script's
+            /// `sol.focus` calls it, and as a layout's event handler, a
+            /// focus-follows-view workspace and xdg-activation all do -- none
+            /// of which stop running when the session locks.
+            #[test]
+            fn focusing_a_window_while_locked_does_not_move_the_keyboard() {
+                let mut session = Session::new();
+                let (window, ..) = session.app.open(&mut session.display, &mut session.state);
+                let lock = session.lock();
+                let selections = session.app.client.selections;
+
+                session
+                    .state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                session.app.pump(&mut session.display, &mut session.state);
+
+                session.assert_sealed("focus_window while locked", selections);
+                session.assert_unlocks(lock);
+            }
+
+            /// **The last line: a key cannot reach a surface the gate would
+            /// have refused, even when something has got the keyboard there.**
+            ///
+            /// Done here the only way it can be, by calling the one method
+            /// the gate exists to own -- which stands for the route nobody has
+            /// found yet.
+            #[test]
+            fn a_key_does_not_reach_an_application_that_got_past_the_gate() {
+                let mut session = Session::new();
+                let (window, ..) = session.app.open(&mut session.display, &mut session.state);
+                let lock = session.lock();
+
+                let surface = window
+                    .wl_surface()
+                    .expect("the window has a surface")
+                    .into_owned();
+                let keyboard = session
+                    .state
+                    .seat
+                    .get_keyboard()
+                    .expect("the seat has a keyboard");
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "going round the gate on purpose: this is the test of what holds when something does"
+                )]
+                keyboard.set_focus(
+                    &mut session.state,
+                    Some(surface),
+                    SERIAL_COUNTER.next_serial(),
+                );
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session.app.client.keyboard_on.is_some(),
+                    "the keyboard was not moved onto the application, so this \
+                     proves nothing"
+                );
+
+                let (app, _) = session.type_key();
+                assert!(
+                    !app,
+                    "a key typed while locked reached an application that held \
+                     the keyboard: nothing at delivery checks the rule"
+                );
+                session.assert_unlocks(lock);
+            }
+
+            /// **X11 clients cannot read the clipboard while locked.** There is
+            /// no focus to gate on the X11 side of the bridge, and every X11
+            /// client is behind the lock.
+            #[test]
+            fn x11_cannot_read_the_clipboard_while_the_session_is_locked() {
+                let display = Display::<Solium>::new().expect("creating a test wayland display");
+                let mut state = Solium::new(display.handle());
+                assert!(
+                    state.x11_may_read_selection(),
+                    "unlocked, the two halves of the session paste into each other"
+                );
+                state.lock = Some(crate::lock::Lock::default());
+                assert!(
+                    !state.x11_may_read_selection(),
+                    "locked, an X11 client could read whatever the lock screen copied"
+                );
+                state.lock = None;
+                assert!(state.x11_may_read_selection(), "and unlocked again, it can");
+            }
         }
     }
 

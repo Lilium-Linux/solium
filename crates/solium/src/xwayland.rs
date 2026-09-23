@@ -524,12 +524,14 @@ impl XwmHandler for Solium {
 
     /// Whether an X11 client may read a selection a Wayland client owns.
     ///
-    /// Yes. The default is `false`, which is the right default for a library
-    /// that cannot know what its user wants; here the two halves of one
-    /// session should be able to paste into each other, and refusing is what
-    /// made copying in Steam and pasting in a terminal silently do nothing.
+    /// Yes, unless the session is locked. The default is `false`, which is the
+    /// right default for a library that cannot know what its user wants; here
+    /// the two halves of one session should be able to paste into each other,
+    /// and refusing is what made copying in Steam and pasting in a terminal
+    /// silently do nothing. While locked, every X11 client is behind the lock:
+    /// see `Solium::x11_may_read_selection`.
     fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
-        true
+        self.x11_may_read_selection()
     }
 
     /// An X11 client wants a Wayland client's selection written to `fd`.

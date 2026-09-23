@@ -126,6 +126,10 @@ impl SessionLockHandler for Solium {
     }
 
     fn unlock(&mut self) {
+        // First, and the order is load-bearing: `settle_focus` below asks the
+        // gate in `focus.rs`, and the gate refuses every window for as long as
+        // `lock` is `Some`. Cleared after, the session would unlock with the
+        // keyboard on nothing.
         self.lock = None;
         self.redraw = true;
         // Cleared before it is re-aimed: keyboard focus is still on a lock
@@ -179,11 +183,14 @@ smithay::delegate_session_lock!(Solium);
 /// Separate from pointing them at the lock screen, because there is a moment
 /// -- and, if the client never draws, a permanent state -- where there is
 /// nothing to point them at, and "nothing" has to be reachable on its own.
+///
+/// Grabs first. A menu's keyboard grab ignores `set_focus` until the menu
+/// closes, so with a menu open at the moment of locking the line after this
+/// one did nothing at all, `focus_lock` did nothing either, and every key
+/// typed at the lock screen went to the menu's client.
 fn blind(state: &mut Solium) {
-    if let Some(keyboard) = state.seat.get_keyboard() {
-        keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
-    }
-    state.clear_selection_focus();
+    state.release_grabs();
+    state.give_keyboard(None, SERIAL_COUNTER.next_serial());
 
     // The pointer does not re-ask what is under it until it moves, so a button
     // press with a still mouse would go to whatever it was over before. Sending
