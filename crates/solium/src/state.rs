@@ -5088,17 +5088,17 @@ impl Solium {
         };
 
         let insets = self.frame_insets(window);
-        let restore = self
-            .panes
-            .get_mut(id)
-            .and_then(Pane::decoration_mut)
-            .map(|decoration| decoration.restore.take());
+        // On the pane and not on its frame, which is where it was until #92: a
+        // window with no server-side frame -- one that draws its own, or any
+        // window under `pane = "none"` -- had nowhere to keep this, so every
+        // press maximised it again and none ever brought it back.
+        let restore = self.panes.get_mut(id).and_then(Pane::take_restore);
 
         let (location, size, maximized) = match restore {
             // Restoring: back to exactly where it was, because that rect was
             // stored rather than recomputed.
-            Some(Some(previous)) => (previous.loc, previous.size, false),
-            _ => (
+            Some(previous) => (previous.loc, previous.size, false),
+            None => (
                 (work_area.loc.x + insets.left, work_area.loc.y + insets.top).into(),
                 (
                     (work_area.size.w - insets.horizontal()).max(1),
@@ -5109,9 +5109,8 @@ impl Solium {
             ),
         };
 
-        if maximized && let Some(decoration) = self.panes.get_mut(id).and_then(Pane::decoration_mut)
-        {
-            decoration.restore = Some(current);
+        if maximized && let Some(pane) = self.panes.get_mut(id) {
+            pane.set_restore(Some(current));
         }
 
         toplevel.with_pending_state(|state| {
@@ -6777,26 +6776,30 @@ impl XdgShellHandler for Solium {
             return;
         };
 
-        // Where to come back to, kept before anything moves. The same slot
-        // `restore` holds for a maximised window, and for the same reason: a
-        // rect that was stored is a rect that comes back exactly, where one
-        // recomputed afterwards is a guess.
+        // Where to come back to, kept before anything moves. The same slot a
+        // maximise keeps, and for the same reason: a rect that was stored is a
+        // rect that comes back exactly, where one recomputed afterwards is a
+        // guess.
+        //
+        // Only if nothing is kept already. A window maximised and then sent
+        // fullscreen keeps the rect from before the maximise, which is the one
+        // #92 found lost; and a client asking for fullscreen a second time while
+        // it already is must not overwrite the way back with the monitor.
         if let Some(real) = self.real_geometry(&window)
-            && let Some(decoration) = self.panes.get_mut(id).and_then(Pane::decoration_mut)
-            && decoration.restore.is_none()
+            && let Some(pane) = self.panes.get_mut(id)
+            && pane.restore().is_none()
         {
-            decoration.restore = Some(real);
+            pane.set_restore(Some(real));
         }
 
-        // The whole monitor, and no frame over it. Marked bare rather than
-        // having its decoration destroyed, so leaving fullscreen can build it
-        // again from the style that is current then.
+        // The whole monitor, and no frame over it. The frame is dropped and
+        // the pane marked bare, and leaving fullscreen builds a new one from
+        // the style that is current then.
         //
-        // Except that `remove` on the line below destroys the decoration the
-        // two lines above just wrote `restore` into, so the rect never comes
-        // back. Filed as #92, and left alone here: this commit moved where a
-        // decoration lives, and lifting `restore` onto the pane would fix a
-        // visible bug inside a change whose contract is that nothing changes.
+        // Which is why the way back is kept on the pane and not on the frame:
+        // it was kept on the frame until #92, and `remove` below dropped it
+        // with the frame, so leaving fullscreen never had a rect to put any
+        // window back at.
         self.decorations.remove(&mut self.panes, id);
         self.decorations.set_bare(&mut self.panes, id);
 
@@ -6847,12 +6850,7 @@ impl XdgShellHandler for Solium {
             self.decorations.insert(&mut self.panes, id, size.0, size.1);
         }
 
-        if let Some(back) = self
-            .panes
-            .get_mut(id)
-            .and_then(Pane::decoration_mut)
-            .and_then(|decoration| decoration.restore.take())
-        {
+        if let Some(back) = self.panes.get_mut(id).and_then(Pane::take_restore) {
             surface.with_pending_state(|state| state.size = Some(back.size));
             surface.send_pending_configure();
             if let Some(pane) = self.panes.get_mut(id) {
@@ -9252,6 +9250,236 @@ mod tests {
                  never runs for it at all -- and separately, b's window was \
                  never on the monitor that changed, so it must be untouched \
                  even if it had been"
+            );
+        }
+
+        /// One 1920x1080 monitor at the origin, at 1x.
+        ///
+        /// Fullscreen fills the monitor a window is on and maximise fills its
+        /// work area, so both need one to exist; with no layer surfaces on it,
+        /// the work area is the whole monitor.
+        fn one_screen(state: &mut Solium) -> Output {
+            let output = Output::new(
+                "restore-test".to_string(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "solium".to_string(),
+                    model: "restore-test".to_string(),
+                },
+            );
+            output.change_current_state(
+                Some(Mode {
+                    size: (1920, 1080).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                Some(Scale::Fractional(1.0)),
+                None,
+            );
+            state.space.map_output(&output, (0, 0));
+            output
+        }
+
+        /// The last size this toplevel was configured with, as the client saw it.
+        fn last_configured(
+            client: &Client,
+            toplevel: &xdg_toplevel::XdgToplevel,
+        ) -> Option<(i32, i32)> {
+            let id = wayland_client::Proxy::id(toplevel);
+            client
+                .configures
+                .iter()
+                .rev()
+                .find(|(to, _, _)| *to == id)
+                .map(|&(_, width, height)| (width, height))
+        }
+
+        /// **Issue #92: a window leaving fullscreen went nowhere.**
+        ///
+        /// `fullscreen_request` kept the rect to come back to on the window's
+        /// `Decoration`, and then dropped that decoration so the fullscreen
+        /// window would have no titlebar; the one `unfullscreen_request` built
+        /// in its place had no rect in it. With nothing to re-place it, which is
+        /// how this test runs -- no layout script at all -- the window stayed
+        /// where fullscreen put it, covering the monitor, and was configured
+        /// with no size. A layout that re-places windows on the relayout that
+        /// follows covers for it, which is why the issue saw it on floating
+        /// layouts and not on tiled ones.
+        ///
+        /// Run with `pane = "none"` for the reason every test in this module is
+        /// (see the #99 test), which means this window never has a `Decoration`
+        /// to lose. That fails on the old code all the same, and for the second
+        /// half of the same defect: a window with no server-side frame had
+        /// nowhere to keep the rect in the first place. The half with a real
+        /// frame is `decoration.rs`'s
+        /// `a_rebuilt_frame_does_not_take_the_way_back_with_it`.
+        ///
+        /// The request is sent twice, because a client may, and the second one
+        /// must not overwrite the way back with the monitor it is already
+        /// covering.
+        #[test]
+        fn a_window_leaving_fullscreen_is_back_where_it_was() {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            state
+                .decorations
+                .set_style(&mut state.panes, Some("none".to_string()));
+            let output = one_screen(&mut state);
+            let screen = state
+                .space
+                .output_geometry(&output)
+                .expect("the monitor is mapped");
+
+            let (conn, mut event_queue, mut client) = connect(&mut display, &mut state);
+            let qh = event_queue.handle();
+            let (window, toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+            state.space.map_element(window.clone(), (400, 300), false);
+            state.space.refresh();
+            let before = state.real_geometry(&window).expect("the window is mapped");
+            assert_eq!(
+                before,
+                Rectangle::new((400, 300).into(), (64, 64).into()),
+                "the fixture's window, where this test put it"
+            );
+            let id = state.panes.id_of(&window).expect("the window has a pane");
+
+            toplevel.set_fullscreen(None);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut event_queue,
+                &mut client,
+            );
+            toplevel.set_fullscreen(None);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut event_queue,
+                &mut client,
+            );
+            assert_eq!(
+                state.panes.get(id).map(Pane::slot),
+                Some(screen),
+                "fullscreen really did move the window, or coming back would \
+                 prove nothing"
+            );
+            assert_eq!(state.space.element_location(&window), Some(screen.loc));
+
+            toplevel.unset_fullscreen();
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut event_queue,
+                &mut client,
+            );
+
+            assert_eq!(
+                state.panes.get(id).map(Pane::slot),
+                Some(before),
+                "a window leaving fullscreen goes back to the rect it had before \
+                 -- not the monitor it was covering, which is where it stayed \
+                 when there was no rect kept to go back to"
+            );
+            assert_eq!(
+                state.space.element_location(&window),
+                Some(before.loc),
+                "and it is drawn there, not only recorded there"
+            );
+            assert_eq!(
+                last_configured(&client, &toplevel),
+                Some((before.size.w, before.size.h)),
+                "and the client is told the size it had, rather than being \
+                 configured with no size and left to guess"
+            );
+        }
+
+        /// **A window with no frame toggles back from maximised.**
+        ///
+        /// The rect a maximise goes back to lived on the window's `Decoration`,
+        /// and a window with no server-side frame -- one that draws its own, or
+        /// any window under `pane = "none"` -- has none. So the first press
+        /// maximised it without keeping anything, and every press after that
+        /// maximised it again. Found with #92, and fixed by the same move.
+        #[test]
+        fn a_window_with_no_frame_toggles_back_from_maximised() {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            state
+                .decorations
+                .set_style(&mut state.panes, Some("none".to_string()));
+            let output = one_screen(&mut state);
+            let screen = state
+                .space
+                .output_geometry(&output)
+                .expect("the monitor is mapped");
+
+            let (conn, mut event_queue, mut client) = connect(&mut display, &mut state);
+            let qh = event_queue.handle();
+            let (window, toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+            state.space.map_element(window.clone(), (400, 300), false);
+            state.space.refresh();
+            let before = state.real_geometry(&window).expect("the window is mapped");
+            let surface = window.toplevel().cloned().expect("an xdg toplevel");
+            // The server's `xdg_toplevel`, which this module's `use` of the
+            // client's shadows.
+            let maximized = || {
+                surface.with_pending_state(|pending| {
+                    pending.states.contains(
+                        smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
+                    )
+                })
+            };
+
+            state.toggle_maximize(&window);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut event_queue,
+                &mut client,
+            );
+            assert!(maximized(), "the first press maximises");
+            assert_eq!(
+                state.space.element_location(&window),
+                Some(screen.loc),
+                "and moves the window to the work area, which is the whole \
+                 monitor here, or coming back would prove nothing"
+            );
+            assert_eq!(
+                last_configured(&client, &toplevel),
+                Some((screen.size.w, screen.size.h))
+            );
+
+            state.toggle_maximize(&window);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut event_queue,
+                &mut client,
+            );
+            assert!(
+                !maximized(),
+                "the second press restores, rather than maximising again"
+            );
+            assert_eq!(
+                state.space.element_location(&window),
+                Some(before.loc),
+                "back to exactly where it was"
+            );
+            assert_eq!(
+                last_configured(&client, &toplevel),
+                Some((before.size.w, before.size.h)),
+                "at exactly the size it was"
             );
         }
 

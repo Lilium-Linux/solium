@@ -197,6 +197,24 @@ pub(crate) struct Pane {
     /// in the frames between mapping and the first sweep — where the pane's own
     /// rectangle is the only answer there is.
     placed: Option<Rectangle<i32, Logical>>,
+    /// Where this window goes back to when it leaves maximised or fullscreen.
+    ///
+    /// Written by `Solium::toggle_maximize` and `Solium::fullscreen_request`
+    /// before they move the window, and taken -- used once -- by whichever of
+    /// `toggle_maximize` and `Solium::unfullscreen_request` puts it back.
+    ///
+    /// **A property of the window, not of its frame**, and it lived on the
+    /// frame until #92. `Solium::fullscreen_request` wrote it into the pane's
+    /// `Decoration` and then, two lines later, dropped that decoration so a
+    /// fullscreen window has no titlebar; leaving fullscreen built a new one
+    /// with this empty, so there was never a rect to put the window back at.
+    /// A window with no server-side frame at all -- one that draws its own, or
+    /// any window under `pane = "none"` -- had nowhere to keep it in the first
+    /// place, so its maximise never toggled back either.
+    ///
+    /// Here, it survives every [`Self::set_frame`], which is what
+    /// `a_windows_way_back_outlives_its_frame` pins.
+    restore: Option<Rectangle<i32, Logical>>,
     content: Content,
     /// What is drawn around this pane's client. See [`Frame`].
     ///
@@ -288,6 +306,7 @@ impl Pane {
             id: PaneId::next(),
             slot,
             placed: None,
+            restore: None,
             content: Content::Loading {
                 program: program.to_owned(),
                 pid,
@@ -312,6 +331,7 @@ impl Pane {
             id: PaneId::next(),
             slot,
             placed: None,
+            restore: None,
             content: Content::Client {
                 window,
                 scene: None,
@@ -369,6 +389,23 @@ impl Pane {
         self.placed = Some(placed);
     }
 
+    /// Where this window goes back to, if a maximise or a fullscreen kept
+    /// one. See the field.
+    pub(crate) const fn restore(&self) -> Option<Rectangle<i32, Logical>> {
+        self.restore
+    }
+
+    /// Remember where this window goes back to, or forget it.
+    pub(crate) const fn set_restore(&mut self, restore: Option<Rectangle<i32, Logical>>) {
+        self.restore = restore;
+    }
+
+    /// Where this window goes back to, and forget it: the way back is used
+    /// once.
+    pub(crate) const fn take_restore(&mut self) -> Option<Rectangle<i32, Logical>> {
+        self.restore.take()
+    }
+
     pub(crate) const fn content(&self) -> &Content {
         &self.content
     }
@@ -388,7 +425,7 @@ impl Pane {
 
     /// The same, to write to: the readers that want the scene itself rather
     /// than a fact about it — drawing it, giving it the pointer, taking its
-    /// button presses, its pre-maximise rectangle.
+    /// button presses.
     ///
     /// The narrowing and not a `frame_mut`, deliberately. Handing out
     /// `&mut Frame` would let any caller swap a `Styled` for a `None` without
@@ -1196,6 +1233,50 @@ mod tests {
              a pane now pays for the tag as well as for the decoration -- and \
              the case for boxing, which was rejected on these two numbers being \
              equal, is worth making again"
+        );
+    }
+
+    /// **Issue #92: a window's way back is not its frame's to lose.**
+    ///
+    /// Going fullscreen drops a window's frame and marks it bare; leaving
+    /// builds it again, going through `Pending` on the way. The rect a window
+    /// goes back to used to live on the `Decoration`, so the first of those
+    /// dropped it. This walks the same frame changes past a kept rect.
+    ///
+    /// `Styled` is not among them because building one needs Qt, which this
+    /// module does not start: `decoration.rs`'s
+    /// `a_rebuilt_frame_does_not_take_the_way_back_with_it` walks the real
+    /// fullscreen sequence on a pane with a real `Decoration` on it.
+    #[test]
+    fn a_windows_way_back_outlives_its_frame() {
+        let mut pane = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
+        assert_eq!(
+            pane.restore(),
+            None,
+            "a new window has nowhere to go back to"
+        );
+
+        let before = Rectangle::new((400, 300).into(), (640, 480).into());
+        pane.set_restore(Some(before));
+        pane.set_frame(Frame::None);
+        pane.set_frame(Frame::Pending);
+        pane.set_frame(Frame::None);
+
+        assert_eq!(
+            pane.restore(),
+            Some(before),
+            "reading it does not use it up"
+        );
+        assert_eq!(
+            pane.take_restore(),
+            Some(before),
+            "the frame came and went three times, and the way back is still here"
+        );
+        assert_eq!(
+            pane.take_restore(),
+            None,
+            "and it is used once: the next maximise toggle maximises, rather \
+             than jumping back to a rect from before the last one"
         );
     }
 }
