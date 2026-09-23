@@ -491,9 +491,6 @@ pub(crate) struct Decoration {
     /// is being swapped and the answer must not depend on which path this is.
     buffer_size: (i32, i32),
     shown: Shown,
-    /// Where the window was before it was maximised. `Some` means maximised —
-    /// one field rather than a flag and a rect that can disagree.
-    pub(crate) restore: Option<Rectangle<i32, Logical>>,
 }
 
 impl Decoration {
@@ -595,7 +592,6 @@ impl Decoration {
             effects: Vec::new(),
             buffer_size: (0, 0),
             shown: Shown::default(),
-            restore: None,
         })
     }
 
@@ -638,7 +634,6 @@ impl Decoration {
             effects: style.effects.clone(),
             buffer_size: (0, 0),
             shown: Shown::default(),
-            restore: None,
         })
     }
 
@@ -4130,5 +4125,63 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// **Issue #92, on a pane that really is framed.**
+    ///
+    /// The calls below are `Solium::fullscreen_request`'s and then
+    /// `Solium::unfullscreen_request`'s, in their order: the frame is dropped,
+    /// the pane marked bare, the ban lifted and a new frame built. The rect a
+    /// window goes back to lived on the `Decoration` until this issue, so the
+    /// `remove` dropped it and the new frame came up without it.
+    ///
+    /// The compositor-level test, `a_window_leaving_fullscreen_is_back_where_it_was`
+    /// in `state.rs`, drives the real handlers from a real client, but it has
+    /// to run with `pane = "none"`: a Qt scene in a process holding a raw
+    /// libwayland connection aborts the test binary. So that test never has a
+    /// `Styled` frame to lose, and this one is the half with one.
+    #[test]
+    fn a_rebuilt_frame_does_not_take_the_way_back_with_it() {
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let (mut panes, id) = one_pane();
+            let mut decorations = Decorations::default();
+            decorations.insert(&mut panes, id, 300, 200);
+            assert!(
+                panes.get(id).and_then(Pane::decoration).is_some(),
+                "the claim is about a frame being dropped and rebuilt, so building \
+                 one has to have worked -- if this is what failed, Qt did not \
+                 come up, not the thing under test"
+            );
+
+            let before = Rectangle::new((400, 300).into(), (300, 200).into());
+            if let Some(pane) = panes.get_mut(id) {
+                pane.set_restore(Some(before));
+            }
+
+            decorations.remove(&mut panes, id);
+            decorations.set_bare(&mut panes, id);
+            assert!(
+                panes.get(id).and_then(Pane::decoration).is_none(),
+                "going fullscreen really does drop the frame, which is the whole \
+                 of what made #92"
+            );
+
+            decorations.unset_bare(&mut panes, id);
+            decorations.insert(&mut panes, id, 1920, 1080);
+            assert!(
+                panes.get(id).and_then(Pane::decoration).is_some(),
+                "and leaving builds a new one"
+            );
+
+            assert_eq!(
+                panes.get_mut(id).and_then(Pane::take_restore),
+                Some(before),
+                "the frame was dropped and a new one built, and the rect from \
+                 before fullscreen is still there to go back to"
+            );
+        });
     }
 }

@@ -83,7 +83,11 @@ pkg-config = "0.3"
 # they compile because they asked for it, not because smithay happens to.
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
-# The client half of `zwlr_screencopy_v1`, for the test that a capture is
-# refused while the session is locked. Also already in the lockfile, at this
-# version with this feature, through `wl-probe`.
+# The client halves of two wlroots protocols, both for tests. `zwlr_screencopy_v1`
+# is for the test that a capture is refused while the session is locked.
+# `zwlr_layer_shell_v1` gives the #92 tests a bar: maximise fills the work area
+# and fullscreen the whole monitor, and with no layer surface on it the two are
+# the same rectangle -- so a test without a bar cannot tell a window put back at
+# its work area from one left where fullscreen put it. Already in the lockfile,
+# at this version with this feature, through `wl-probe`.
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
