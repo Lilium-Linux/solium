@@ -22,7 +22,7 @@ protocol at all.
 `zwlr_screencopy_manager_v1` · `ext_session_lock_manager_v1` ·
 `ext_idle_notifier_v1` · `zwp_idle_inhibit_manager_v1` · `wp_presentation` ·
 `wp_viewporter` · `wp_fractional_scale_manager_v1` · `zwp_linux_dmabuf_v1` ·
-`xdg_wm_dialog_v1` ·
+`xdg_wm_dialog_v1` · `wp_single_pixel_buffer_manager_v1` ·
 `zwp_relative_pointer_manager_v1` · `zwp_pointer_constraints_v1` ·
 `zwp_primary_selection_device_manager_v1` · `wp_cursor_shape_manager_v1`, plus
 `xwayland_shell_v1` to the X server only.
@@ -67,7 +67,7 @@ Not a whole day lost — one application, or one workflow, that does not work.
 | [#47](https://github.com/Lilium-Linux/solium/issues/47) `ext-image-copy-capture-v1` | the successor to `wlr-screencopy`. Nothing speaks it here yet; everything will |
 | ~~[#72](https://github.com/Lilium-Linux/solium/issues/72) `xdg_dialog_v1`~~ | **done**. The global was the small half: a modal dialog now says so, and `tiling.lua` and `scrolling.lua` both lift it out of the arrangement and centre it on the window waiting on it. The half that took the work was that the script layer had no notion of a parent at all — `sol.windows()` now carries `modal` and `parent`, and `parent` distinguishes "none named" from "named and gone". X11 rides along through `_NET_WM_WINDOW_TYPE`, which is the promise #104 deferred |
 | [#73](https://github.com/Lilium-Linux/solium/issues/73) `xdg_toplevel_icon_v1` | window icons — which a task switcher needs and cannot get any other way |
-| [#74](https://github.com/Lilium-Linux/solium/issues/74) `wp_single_pixel_buffer_v1` | three lines of work; a handful of clients use it for solid backgrounds and fail without it |
+| ~~[#74](https://github.com/Lilium-Linux/solium/issues/74) `wp_single_pixel_buffer_v1`~~ | **done**. It was the global and nothing more: smithay already recognises the buffer, keeps it through a commit and draws it as a solid colour without uploading it. See `single_pixel.rs` for which of those the test pins and which were read in smithay's source |
 | [#75](https://github.com/Lilium-Linux/solium/issues/75) `wp_alpha_modifier_v1` | per-window opacity without asking the client to redraw. Free, given the render path already scales and warps |
 
 ## 3. Later, or for the shape this project is going

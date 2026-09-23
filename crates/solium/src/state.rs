@@ -452,6 +452,18 @@ pub(crate) struct Solium {
         reason = "registers wp_viewporter; dropping it would remove the global"
     )]
     pub(crate) viewporter_state: ViewporterState,
+    /// Buffers that are one colour rather than a grid of pixels.
+    ///
+    /// A client that wants a solid rectangle names the colour and stretches
+    /// the result with a viewport, instead of filling shared memory with one
+    /// value. Smithay draws such a buffer without uploading it; see
+    /// `single_pixel.rs` for what was checked and how.
+    #[expect(
+        dead_code,
+        reason = "registers wp_single_pixel_buffer_manager_v1; dropping it would remove the global"
+    )]
+    pub(crate) single_pixel_buffer_state:
+        smithay::wayland::single_pixel_buffer::SinglePixelBufferState,
     /// Telling a surface what scale it is really being drawn at.
     ///
     /// Without it a client has only the integer scale from `wl_output`, so on
@@ -1269,6 +1281,7 @@ impl Solium {
             pending_selection: None,
             activation_state: XdgActivationState::new::<Self>(&display_handle),
             viewporter_state: ViewporterState::new::<Self>(&display_handle),
+            single_pixel_buffer_state: crate::single_pixel::state(&display_handle),
             // 1 is CLOCK_MONOTONIC, which is the clock every timestamp in this
             // compositor comes from -- both the DRM page-flip time and our own
             // animation clock. Telling a client a different clock id than the
