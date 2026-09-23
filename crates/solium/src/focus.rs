@@ -64,6 +64,13 @@ impl Solium {
     /// the lock client's own may. A window, a popup, a layer surface or an X11
     /// window never qualifies, because each of them belongs to the session the
     /// lock is there to seal.
+    ///
+    /// "The lock client's own" is `Lock::surfaces`, and this is only as sound
+    /// as what can get into that list. For a while, anything could: any client
+    /// could take the lock over with a lock of its own and fill the list with
+    /// its surfaces, which this then waved through. What keeps the list to the
+    /// real lock screen is `lock.rs`, where the lock has one holder and only
+    /// the holder's surfaces are ever added.
     pub(crate) fn may_hold_keyboard(&self, surface: &WlSurface) -> bool {
         match self.lock.as_ref() {
             None => true,

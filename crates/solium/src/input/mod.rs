@@ -136,78 +136,26 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
             if !pressed {
                 // Releases are never bindings, but they must still reach a
                 // client that received the press, or it holds the key forever.
-                return if state.script_grab || sealed {
+                // So the question is whether the *press* was forwarded, not
+                // whether a mode is active now. A mode active when the session
+                // locked used to intercept every release while the lock screen
+                // got every press, and each key of the password auto-repeated
+                // at the lock screen until the next one was pressed. A release
+                // whose press no one was given stays with the mode that took
+                // it. Sealed, nothing goes anywhere, whoever had the press.
+                let forwarded = state.keys_forwarded.remove(&code.raw());
+                return if sealed || (state.script_grab && !forwarded) {
                     FilterResult::Intercept(None)
                 } else {
                     FilterResult::Forward
                 };
             }
 
-            // Escape hatches, before anything else can claim them. These are
-            // the only keys that must work when everything else is broken:
-            // without them a compositor that mishandles input is a machine you
-            // can only recover with the power button.
-            if let Some(request) = escape(modifiers, handle.modified_sym(), locked) {
-                return FilterResult::Intercept(Some(Action::Backend(request)));
+            let result = press(state, modifiers, handle, locked, sealed);
+            if matches!(result, FilterResult::Forward) {
+                state.keys_forwarded.insert(code.raw());
             }
-
-            // Locked: nothing is bound. A binding runs a script, and a script
-            // can spawn a terminal in one line -- so leaving bindings live
-            // would turn the lock screen into a menu of ways past it.
-            //
-            // What is forwarded reaches a lock surface or nothing. This line
-            // used to say so while it was not true: a window opening or
-            // closing, a menu grab or a script could each hand the keyboard to
-            // an application behind the lock, and nothing handed it back. What
-            // makes it true now is the gate in `focus.rs`. Every hand-off of
-            // keyboard focus goes through `Solium::give_keyboard`, and every
-            // keyboard grab through `Solium::grab_keyboard`, and while locked
-            // both refuse anything but a lock surface. `clippy.toml` bans
-            // smithay's own `set_focus` and `set_grab` everywhere else, and
-            // every grab is released the moment the session locks. `sealed`
-            // is the last line: it drops the key if the keyboard is on
-            // anything the gate would have refused, or held by any grab.
-            if locked {
-                return if sealed {
-                    FilterResult::Intercept(None)
-                } else {
-                    FilterResult::Forward
-                };
-            }
-
-            let combo = combo_for(modifiers, handle.modified_sym());
-            let claimed = state
-                .scripts
-                .as_ref()
-                .is_some_and(|scripts| scripts.has_binding(&combo));
-
-            // Logged for every press, because "my binding does nothing" has two
-            // very different causes and they are indistinguishable without it:
-            // either the key never arrived — the host compositor kept it — or it
-            // arrived under a name no script bound.
-            //
-            // An *unclaimed* Super combination is logged louder than the rest.
-            // Super is the compositor's own modifier, so pressing one and
-            // getting nothing is never ordinary typing: it is someone using a
-            // binding that is not there, under a name they cannot see. That is
-            // worth one line at info, and it is the line that would have
-            // answered this question on the first hardware run instead of the
-            // fourth.
-            if !claimed && modifiers.logo {
-                tracing::info!(combo, "no script has bound this");
-            } else {
-                tracing::debug!(combo, claimed, "key");
-            }
-
-            if claimed {
-                FilterResult::Intercept(Some(Action::Bound(combo)))
-            } else if state.script_grab {
-                // A mode owns input: keys it did not bind are swallowed rather
-                // than leaking to whatever is underneath it.
-                FilterResult::Intercept(None)
-            } else {
-                FilterResult::Forward
-            }
+            result
         },
     );
 
@@ -220,6 +168,85 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
             state.request = Some(request);
         }
         _ => {}
+    }
+}
+
+/// What the keyboard filter answers for a press.
+///
+/// Split out of [`key`] so that its caller can see the answer: a press it
+/// forwards is recorded in `Solium::keys_forwarded`, so that the release
+/// follows the press to whoever was given it.
+fn press(
+    state: &mut Solium,
+    modifiers: &ModifiersState,
+    handle: smithay::input::keyboard::KeysymHandle<'_>,
+    locked: bool,
+    sealed: bool,
+) -> FilterResult<Option<Action>> {
+    // Escape hatches, before anything else can claim them. These are
+    // the only keys that must work when everything else is broken:
+    // without them a compositor that mishandles input is a machine you
+    // can only recover with the power button.
+    if let Some(request) = escape(modifiers, handle.modified_sym(), locked) {
+        return FilterResult::Intercept(Some(Action::Backend(request)));
+    }
+
+    // Locked: nothing is bound. A binding runs a script, and a script
+    // can spawn a terminal in one line -- so leaving bindings live
+    // would turn the lock screen into a menu of ways past it.
+    //
+    // What is forwarded reaches a lock surface or nothing. This line
+    // used to say so while it was not true: a window opening or
+    // closing, a menu grab or a script could each hand the keyboard to
+    // an application behind the lock, and nothing handed it back. What
+    // makes it true now is the gate in `focus.rs`. Every hand-off of
+    // keyboard focus goes through `Solium::give_keyboard`, and every
+    // keyboard grab through `Solium::grab_keyboard`, and while locked
+    // both refuse anything but a lock surface. `clippy.toml` bans
+    // smithay's own `set_focus` and `set_grab` everywhere else, and
+    // every grab is released the moment the session locks. `sealed`
+    // is the last line: it drops the key if the keyboard is on
+    // anything the gate would have refused, or held by any grab.
+    if locked {
+        return if sealed {
+            FilterResult::Intercept(None)
+        } else {
+            FilterResult::Forward
+        };
+    }
+
+    let combo = combo_for(modifiers, handle.modified_sym());
+    let claimed = state
+        .scripts
+        .as_ref()
+        .is_some_and(|scripts| scripts.has_binding(&combo));
+
+    // Logged for every press, because "my binding does nothing" has two
+    // very different causes and they are indistinguishable without it:
+    // either the key never arrived — the host compositor kept it — or it
+    // arrived under a name no script bound.
+    //
+    // An *unclaimed* Super combination is logged louder than the rest.
+    // Super is the compositor's own modifier, so pressing one and
+    // getting nothing is never ordinary typing: it is someone using a
+    // binding that is not there, under a name they cannot see. That is
+    // worth one line at info, and it is the line that would have
+    // answered this question on the first hardware run instead of the
+    // fourth.
+    if !claimed && modifiers.logo {
+        tracing::info!(combo, "no script has bound this");
+    } else {
+        tracing::debug!(combo, claimed, "key");
+    }
+
+    if claimed {
+        FilterResult::Intercept(Some(Action::Bound(combo)))
+    } else if state.script_grab {
+        // A mode owns input: keys it did not bind are swallowed rather
+        // than leaking to whatever is underneath it.
+        FilterResult::Intercept(None)
+    } else {
+        FilterResult::Forward
     }
 }
 
