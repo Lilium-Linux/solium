@@ -1004,6 +1004,7 @@ mod desk {
             monitor: "DP-1".to_owned(),
             modal: false,
             parent: crate::script::Parentage::None,
+            leaving: false,
         }
     }
 

@@ -48,7 +48,18 @@ local dialogs = require("dialogs")
 -- modal dialogs, and it is what makes `unset_modal` reversible: only a window
 -- that was taken out is ever put back. Same table, same reason, same name as
 -- `tiling.lua` -- see `dialogs.settle`.
-local scrolling = { active = false, views = {}, exiled = {} }
+--
+-- `leaving` is, for each window being closed, which strip it was in and the
+-- windows either side of it there: what a refused close puts it back beside.
+-- See the `closing` and `refused` handlers.
+local scrolling = { active = false, views = {}, exiled = {}, leaving = {} }
+
+-- Whether the strip closes up the moment a close is asked for, rather than once
+-- the application has gone. Read when each event arrives, like `tiling.lua`'s.
+-- See `reflow_on_close` in config.lua; anything but "when_gone" is the default.
+local function reflows_at_once()
+    return config.scrolling.reflow_on_close ~= "when_gone"
+end
 
 -- One strip per workspace per monitor.
 --
@@ -172,10 +183,16 @@ function scrolling.adopt()
     for _, each in ipairs(monitors.each(workspaces.visible())) do
         local view = view_for(each.monitor.name)
         for _, window in ipairs(each.windows) do
+            -- A window being closed is already gone to a strip that closes up
+            -- at once, and only `refused` puts it back: neither inserted nor
+            -- present, so the sweep below takes it out of a strip that still
+            -- has it. The same rule, for the same reason, as `tiling.adopt`.
+            if window.leaving and reflows_at_once() then
+                -- Nothing: see above.
             -- A dialog is deliberately absent from every strip, so `adopt` --
             -- whose whole job is to put back whatever is missing -- has to be
             -- told that this one is missing on purpose.
-            if not dialogs.floats(window) then
+            elseif not dialogs.floats(window) then
                 present[window.id] = each.monitor.name
                 if not view:contains(window.id) then
                     view:insert(window.id, options(each.monitor.name))
@@ -245,6 +262,106 @@ sol.on("open", function(id)
     settle(config.scrolling.snap)
 end)
 
+-- A window being closed leaves the strip the moment the close is asked for, and
+-- the strip closes the gap while the window fades where it stood -- the same
+-- rule as `tiling.lua`'s, for the same reason (#128). Which columns move to do
+-- it is exactly what `close` would have moved; `script.rs`'s
+-- `closing_reflows_the_survivors_as_close_would_have` compares the two.
+-- `reflow_on_close = "when_gone"` makes these two do nothing and leaves it all
+-- to `close`.
+--
+-- `apply` and not `settle`, as `close` has always been: the keyboard leaves a
+-- closing window when its animation lands, which is the compositor's to decide,
+-- and a layout handing it to a neighbour now would take it off the window the
+-- user is still looking at.
+sol.on("closing", function(id)
+    -- Only while this layout is in charge, for the reason `tiling.lua` gives:
+    -- a strip nobody is using is not on screen, and one rearranged anyway
+    -- comes back with its focus on the refused window -- which
+    -- `scrolling.started` hands the keyboard to when the user switches here.
+    if not scrolling.active or not reflows_at_once() then
+        return
+    end
+    local kept
+    for key, view in pairs(scrolling.views) do
+        if view:contains(id) then
+            local order = view:windows()
+            for index, other in ipairs(order) do
+                if other == id then
+                    kept = { view = key, left = order[index - 1], right = order[index + 1] }
+                end
+            end
+        end
+        view:remove(id)
+    end
+    scrolling.leaving[id] = kept
+    scrolling.apply(config.scrolling.snap)
+end)
+
+-- The strip a window belongs in now, its key and its monitor: its own
+-- workspace's, on the monitor it is on. See `tiling.lua`'s `home_of`.
+local function home_of(id)
+    local monitor = monitors.of(id)
+    local key = monitors.key(workspaces.at(id, monitor), monitor)
+    if not scrolling.views[key] then
+        scrolling.views[key] = sol.layout.scroller(config.scrolling)
+    end
+    return scrolling.views[key], key, monitor
+end
+
+-- The application declined, and the window is back: in the strip it left, in a
+-- column after the window that came before it there -- the one on its left, or
+-- above it in a column they shared -- or in front of the one after it when it
+-- was the first. A column it shared comes back as a column of its own, and at
+-- the width a new one opens at, because `remove` kept neither.
+--
+-- `apply` and never `settle`. `settle` hands the keyboard to whatever the strip
+-- has focused, which after `insert` is this window -- and the usual reason for a
+-- refusal is a "save your changes?" dialog that has the keyboard and must keep
+-- it. For the same reason this is not `open`, whose handler settles.
+--
+-- Put back by the same rule as `tiling.lua`'s: taken out by `closing`, whatever
+-- the setting says now, or missing from a strip that is in charge; beside its
+-- old neighbours only if it still belongs in the strip it left.
+sol.on("refused", function(id)
+    local kept = scrolling.leaving[id]
+    scrolling.leaving[id] = nil
+    if not kept and not scrolling.active then
+        return
+    end
+    local window = dialogs.by_id(id)
+    if not window or dialogs.floats(window) then
+        return
+    end
+    for _, view in pairs(scrolling.views) do
+        if view:contains(id) then
+            return
+        end
+    end
+    local view, key, monitor = home_of(id)
+    if kept and kept.view ~= key then
+        kept = nil
+    end
+    local area = options(monitor)
+    if kept and kept.left and view:contains(kept.left) then
+        view:focus_window(kept.left, area)
+        view:insert(id, area)
+    elseif kept and kept.right and view:contains(kept.right) then
+        -- `insert` opens a column to the right of the focused one, so a window
+        -- that was first goes in after its old right-hand neighbour and then
+        -- changes places with it.
+        view:focus_window(kept.right, area)
+        view:insert(id, area)
+        view:move_column(-1, area)
+    else
+        view:insert(id, area)
+    end
+    scrolling.apply(config.scrolling.snap)
+end)
+
+-- The window is gone. Unchanged by `reflow_on_close`: this is the one event
+-- every layout hears for every window that goes, including one that closed
+-- itself and was never `closing`.
 sol.on("close", function(id)
     for _, view in pairs(scrolling.views) do
         view:remove(id)
@@ -252,6 +369,7 @@ sol.on("close", function(id)
     -- Ids are never reused, so a stale entry here would not put the wrong
     -- window back -- it would simply accumulate for the life of the session.
     scrolling.exiled[id] = nil
+    scrolling.leaving[id] = nil
     dialogs.forget(id)
     scrolling.apply(config.scrolling.snap)
 end)

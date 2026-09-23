@@ -57,6 +57,17 @@ toplevel becomes that pane's content. Nothing is created, nothing is replaced,
 and nothing else in the compositor notices — a decoration keyed by pane id
 carries its animation straight through the handover.
 
+**Panes are how the compositor answers every interaction at once.** The
+application catches up inside that answer; the compositor never waits for it
+first. Opening reserves the window's slot, frame and all, before the program
+has even started. Resizing makes the rectangle being dragged the truth, and the
+client's last picture fills it until the client redraws. Closing reflows the
+other windows the moment the close is asked for, while the window fades where
+it stood and the application decides whether it can go -- and if it says no, a
+layout puts it back (#128, and `docs/modes.md` for the events). A feature that
+has to wait for a client before anything on screen responds is the one this
+design exists to rule out.
+
 A client is matched to its pane by an activation token first and by walking up
 from its process id second. The token is what survives a launcher that forks and
 exits; the process walk is the fast path for everything that does not.
