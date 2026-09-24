@@ -719,6 +719,31 @@ fn by_depth<T>(nodes: &mut [(T, f32)]) {
     });
 }
 
+/// Whether a pane that lives at `slot` is drawn on `screen` at all.
+///
+/// **The renderer's containment rule, written once.** [`elements`] asks it of
+/// every pane for every screen before drawing anything -- the comment where it
+/// does says why the slot and not the transform decides -- and [`prepare`]
+/// asks it through `Solium::on_any_output` before capturing one. Exclusive, as
+/// `Rectangle::overlaps` is: a slot whose right edge is a monitor's left edge
+/// has no pixel on it.
+///
+/// **And every question about whether the user can see a window asks it
+/// too**, which until #134's third review none did: `Solium::on_stage` of the
+/// screens a window is headed for, and the hit tests of the screen under the
+/// point. They asked where the frame was drawn against *every* screen, which
+/// is the same question only while there is one. With two side by side, a
+/// workspace parked a screen away is parked on the other monitor -- which does
+/// not draw it -- so a window there counted as on stage, was handed the
+/// keyboard and took the clicks meant for what the other monitor does draw.
+/// `on_two_monitors_a_window_on_the_left_monitors_hidden_workspace_is_not_on_stage`
+/// and `on_two_monitors_a_press_on_the_right_monitor_reaches_what_it_draws`
+/// pin the two halves; `state::nothing_on_stage` and `state::shown_at` are
+/// where they ask.
+pub(crate) fn drawn_on(slot: Rectangle<i32, Logical>, screen: Rectangle<i32, Logical>) -> bool {
+    slot.overlaps(screen)
+}
+
 /// What to draw for one frame, topmost first.
 ///
 /// Called once per monitor. `frame.screen` is where that output sits in the
@@ -990,7 +1015,10 @@ pub(crate) fn elements(
         // — dragged between screens, where the slot itself is on both — is
         // still drawn on both. A transform can move a window around its own
         // monitors and off them. It cannot put it on somebody else's.
-        if !global.overlaps(screen) {
+        //
+        // Through [`drawn_on`], which is this rule and is also what every
+        // question about whether the user can see a window asks.
+        if !drawn_on(global, screen) {
             continue;
         }
         // And within its own monitors, one that has been transformed clean off
