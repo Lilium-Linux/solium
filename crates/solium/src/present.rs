@@ -260,11 +260,21 @@ pub(crate) struct Frame {
     /// drawn size over the size of the pane rectangle it shows, per axis.
     ///
     /// **1.0 for a pane drawn at a rectangle it really has**, which is a pane
-    /// at rest and also every frame of a layout's glide: `Solium::move_pane`
-    /// animates from `Frame::real` of the old tile to `Frame::real` of the new
-    /// one, so the rectangle in between is the window part of the way there,
-    /// not the new tile drawn larger. Below 1.0 at the start of an open, and
-    /// whatever `sol.present` makes it for a thumbnail.
+    /// at rest and also every frame of a layout's glide from rest:
+    /// `Solium::move_pane` animates from [`frame`] -- what is on screen, which
+    /// for a pane at rest is `Frame::real` of the old tile -- to `Frame::real`
+    /// of the new one, so the rectangle in between is the window part of the
+    /// way there, not the new tile drawn larger. Below 1.0 at the start of an
+    /// open, and whatever `sol.present` makes it for a thumbnail.
+    ///
+    /// **From [`frame`] and not from `Frame::real`, since #128's review**, so a
+    /// glide that begins part of the way through another animation begins at
+    /// that animation's zoom rather than at 1.0: a window whose open, or whose
+    /// return from a refused close, is under way when a new window's layout
+    /// pass moves it goes on growing from where it had got to, and reaches 1.0
+    /// as it lands.
+    /// `a_layout_pass_part_way_through_an_open_or_a_return_keeps_the_window_cut`
+    /// drives both.
     ///
     /// Carried rather than worked out from `rect` and the pane's own rectangle
     /// (#133). The renderer used to divide the one by the other, which reads a
@@ -272,8 +282,8 @@ pub(crate) struct Frame {
     /// up to 2x: a sweep that halved a window zoomed its contents from the
     /// first frame, where the frame before had drawn them 1:1. It measures, so a
     /// blend sweeps it -- from the open's scale up to `1.0`, and `1.0` all the
-    /// way through a glide. `a_glide_is_drawn_as_the_window_on_its_way` and
-    /// `an_open_pictures_the_window_it_opens_at_every_frame` pin the two.
+    /// way through a glide from rest. `a_glide_is_drawn_as_the_window_on_its_way`
+    /// and `an_open_pictures_the_window_it_opens_at_every_frame` pin the two.
     pub(crate) zoom: (f64, f64),
 }
 

@@ -160,6 +160,14 @@ pub(crate) enum Frame {
     Styled(crate::decoration::Decoration),
 }
 
+/// The two tiles a pane can hold -- the one it is in and the one it left for a
+/// maximise -- as [`Pane::take_let_go`] takes them out together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Tiles {
+    placed: Option<Rectangle<i32, Logical>>,
+    left_tile: Option<Rectangle<i32, Logical>>,
+}
+
 /// A window, as the compositor thinks of one.
 #[derive(Debug)]
 pub(crate) struct Pane {
@@ -202,6 +210,28 @@ pub(crate) struct Pane {
     /// `a_window_let_go_by_its_layout_is_not_held_in_its_old_tile` are the
     /// three.
     ///
+    /// **Every way out but one, and the one is load-bearing: a close (#128).**
+    /// A layout's `closing` handler takes the window out of its tree and says
+    /// nothing about this field, and nothing in the compositor clears it at a
+    /// close either, so a window being closed keeps the tile it is fading in
+    /// until it is gone. That is what keeps it cut. `present::close` pins every
+    /// frame of the fade to the rectangle the window was closed at, which is a
+    /// picture of this tile, and `render::fit` cuts only a pane that is in a
+    /// tile. Cleared at `closing`, a client wider than its tile has its whole
+    /// buffer scaled into each frame of the fade -- squashed -- and cleared
+    /// before `present::close` reads the rectangle, the fade starts at the
+    /// width the client committed and spills over the neighbour growing into
+    /// the space, which is what #133 removed. Making the paragraph above true
+    /// of a close would do one or the other on every close of such a client.
+    /// `a_closed_window_is_cut_to_the_tile_it_left_for_the_whole_fade` fails
+    /// both ways.
+    ///
+    /// **And while a window is leaving, a let-go waits for it.** A
+    /// `sol.unplace`, or a `sol.place` with `tile = false`, that arrives during
+    /// the close -- `modes.use` sends the first for every window, so a mode
+    /// switch inside the fade is one -- leaves this set and is owed instead,
+    /// in [`Self::let_go`], until the window comes back. See [`Self::untile`].
+    ///
     /// **Usually from the rectangle a layout handed `sol.place`, but not
     /// always**: `Solium::rescue_offscreen` reaches `move_pane` too, with a
     /// rectangle it worked out itself to drag a window back onto a screen that
@@ -227,6 +257,29 @@ pub(crate) struct Pane {
     /// is what stage did as well; it is read from `tiling.lua` and `move_pane`,
     /// and no test pins it.
     placed: Option<Rectangle<i32, Logical>>,
+    /// A layout let this pane out of its tile while it was leaving, and the
+    /// let-go is waiting for the window to come back.
+    ///
+    /// Set by [`Self::untile`] on a pane that is [`Self::leaving`], in place of
+    /// clearing [`Self::placed`], because a leaving window is still drawn as it
+    /// was closed and its tile is what cuts it -- see that field. So a switch
+    /// of mode inside the fade no longer squashes the window fading:
+    /// `a_mode_switched_during_a_fade_does_not_squash_the_window_leaving`.
+    ///
+    /// Taken by `Solium::give_back`, before it aims the window's return, so a
+    /// window refused after a switch to floating comes back at the size its
+    /// client committed and is not held in the tile it left; the same test
+    /// asserts both. Cancelled by a tile a layout gives the window since,
+    /// which is the layout's newer word ([`Self::set_placed`]), and kept by a
+    /// rescue, which moves the tile and changes nothing else
+    /// ([`Self::move_tile`]), which
+    /// `a_rescue_during_a_fade_keeps_the_let_go_it_is_waiting_on` drives
+    /// through `Solium::rescue_offscreen`. Only `give_back` takes it: a window
+    /// that goes is retired with the let-go still owed, and nothing reads it
+    /// after that.
+    /// `a_let_go_while_leaving_waits_until_the_window_is_back` pins each of
+    /// those on one pane.
+    let_go: bool,
     /// The tile this pane left when it was maximised or sent fullscreen, kept
     /// for the way back to put it in again.
     ///
@@ -383,6 +436,7 @@ impl Pane {
             id: PaneId::next(),
             slot,
             placed: None,
+            let_go: false,
             left_tile: None,
             restore: None,
             content: Content::Loading {
@@ -411,6 +465,7 @@ impl Pane {
             id: PaneId::next(),
             slot,
             placed: None,
+            let_go: false,
             left_tile: None,
             restore: None,
             content: Content::Client {
@@ -468,8 +523,27 @@ impl Pane {
     /// Separate from [`Self::set_slot`] rather than folded into it, because the
     /// two have different writers on purpose: every path that hears from a
     /// client sets the slot, and only a layout's sweep sets this.
+    ///
+    /// **A tile given to a leaving window cancels a let-go it was waiting on**
+    /// ([`Self::let_go`]): the layout's newer word is that the window is tiled,
+    /// and the window coming back must not be let out of the tile it was just
+    /// given.
     pub(crate) const fn set_placed(&mut self, placed: Rectangle<i32, Logical>) {
         self.placed = Some(placed);
+        self.let_go = false;
+    }
+
+    /// Move the tile this pane is held in, if it is held in one, and change
+    /// nothing else about its standing.
+    ///
+    /// For `Solium::rescue_offscreen`, which brings a window back onto a screen
+    /// as whatever it was: a tiled pane still tiled, a floating one still
+    /// floating, and a leaving one still owed the let-go it was waiting on --
+    /// which [`Self::set_placed`] would cancel.
+    pub(crate) const fn move_tile(&mut self, to: Rectangle<i32, Logical>) {
+        if self.placed.is_some() {
+            self.placed = Some(to);
+        }
     }
 
     /// Take this pane out of its tile for a maximise or a fullscreen, keeping
@@ -506,9 +580,43 @@ impl Pane {
     /// layout — `modes.use` switching to floating — must not be put back in its
     /// old tile by the un-maximise that follows, when there is no layout left
     /// to hold it there.
+    ///
+    /// **Except for a window that is leaving, which keeps both until it is
+    /// back** and owes the let-go instead: see [`Self::let_go`], and
+    /// [`Self::placed`] for why a leaving window's tile is load-bearing. A
+    /// window that goes never takes it; one that comes back does, in
+    /// [`Self::take_let_go`].
     pub(crate) const fn untile(&mut self) {
+        if self.leaving() {
+            self.let_go = true;
+            return;
+        }
         self.placed = None;
         self.left_tile = None;
+    }
+
+    /// Take the let-go this pane was waiting on, now that it is coming back:
+    /// out of both tiles, as [`Self::untile`] would have left it.
+    ///
+    /// Hands back what it held, so that a give-back which then declines can
+    /// owe the let-go again with [`Self::owe_let_go`] and the rest of the fade
+    /// is still cut. `None` when nothing was owed, and then nothing changes.
+    pub(crate) const fn take_let_go(&mut self) -> Option<Tiles> {
+        if !self.let_go {
+            return None;
+        }
+        self.let_go = false;
+        Some(Tiles {
+            placed: self.placed.take(),
+            left_tile: self.left_tile.take(),
+        })
+    }
+
+    /// Put back what [`Self::take_let_go`] took, still owed.
+    pub(crate) const fn owe_let_go(&mut self, held: Tiles) {
+        self.placed = held.placed;
+        self.left_tile = held.left_tile;
+        self.let_go = true;
     }
 
     /// The tile this pane is waiting to go back into, while it is maximised or
@@ -1533,6 +1641,78 @@ mod tests {
             pane.placed(),
             None,
             "a window let go by its layout stays out of every tile"
+        );
+    }
+
+    /// **#128 with #133: a let-go that arrives while a window is leaving waits
+    /// until the window is back.**
+    ///
+    /// Each promise [`Pane::let_go`] makes, on one pane, in the order a session
+    /// would reach them. The pane holds both tiles -- one it left for a
+    /// maximise, and one a sweep has put it in since -- so that "both" can be
+    /// seen to mean both:
+    ///
+    ///  1. Let go while it is leaving, a window keeps its tiles.
+    ///  2. A rescue moves the tile it is in and leaves the let-go owed.
+    ///  3. Coming back takes the let-go, out of both tiles.
+    ///  4. A take that is put back, as a declined give-back does, is owed
+    ///     again with both tiles.
+    ///  5. A tile given since cancels it.
+    ///  6. A window that is not leaving is let go at once, as it always was.
+    #[test]
+    fn a_let_go_while_leaving_waits_until_the_window_is_back() {
+        let left = Rectangle::new((0, 0).into(), (494, 600).into());
+        let tile = Rectangle::new((506, 0).into(), (494, 600).into());
+        let rescued = Rectangle::new((1426, 0).into(), (494, 600).into());
+        let mut pane = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
+        pane.set_placed(left);
+        pane.leave_tile();
+        pane.set_placed(tile);
+        let tiles = |pane: &Pane| (pane.placed(), pane.left_tile());
+
+        pane.begin_closing(Duration::from_millis(190));
+        assert!(pane.leaving(), "the premise: the pane is being closed");
+        pane.untile();
+        assert_eq!(
+            tiles(&pane),
+            (Some(tile), Some(left)),
+            "a window let go while it is leaving keeps its tiles"
+        );
+
+        pane.move_tile(rescued);
+        assert_eq!(
+            tiles(&pane),
+            (Some(rescued), Some(left)),
+            "a rescue moves the tile the window is in"
+        );
+        let held = pane.take_let_go();
+        assert_eq!(
+            tiles(&pane),
+            (None, None),
+            "and leaves the let-go owed, so coming back takes the window out of both"
+        );
+
+        pane.owe_let_go(held.expect("a let-go was owed"));
+        assert_eq!(
+            tiles(&pane),
+            (Some(rescued), Some(left)),
+            "a take that is put back gives back both tiles"
+        );
+        pane.set_placed(tile);
+        assert_eq!(
+            pane.take_let_go(),
+            None,
+            "a tile given since is the layout's newer word, and cancels the let-go"
+        );
+        assert_eq!(tiles(&pane), (Some(tile), Some(left)));
+
+        pane.stop_closing();
+        assert!(!pane.leaving(), "the premise: the pane is back");
+        pane.untile();
+        assert_eq!(
+            tiles(&pane),
+            (None, None),
+            "a window that is not leaving is let go at once"
         );
     }
 

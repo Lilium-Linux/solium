@@ -65,6 +65,12 @@ function modes.use(name)
     -- to its old tile whenever it grew. Every window rather than the ones the
     -- old layout placed, because nothing here knows which those were -- and a
     -- layout starting below places its own windows again at once.
+    --
+    -- A window being closed is in the list too, and is let go like the rest;
+    -- the compositor is what makes that wait. Its tile is what cuts it while
+    -- it fades, so it keeps the tile until it has gone, or until a refused
+    -- close brings it back, which is when the let-go is taken. See
+    -- `a_mode_switched_during_a_fade_does_not_squash_the_window_leaving`.
     for _, window in ipairs(sol.windows()) do
         sol.unplace(window.id)
     end
