@@ -40,6 +40,93 @@ local function reflows_at_once()
     return config.tiling.reflow_on_close ~= "when_gone"
 end
 
+-- A line in the log the first time it is said, and never again this session.
+--
+-- For a setting that is wrong: it is read on every event, and a line per event
+-- would bury the log under one mistake. Cleared by a reload, which is also how
+-- a correction is applied -- so a value that is still wrong afterwards is said
+-- once more.
+local told = {}
+local function once(message)
+    if not told[message] then
+        told[message] = true
+        sol.log(message)
+    end
+end
+
+-- The smallest a tile may be, frame included: `config.tiling.minimum`, as the
+-- layout is handed it.
+--
+-- A side that is not a size in pixels -- a string, a negative, `0/0` -- is no
+-- minimum on that side, and is named in the log once. Absent altogether is no
+-- minimum at all, which is how tiling behaved before #134, and says nothing: a
+-- configuration written then has no reason to know the setting exists. See
+-- `a_minimum_that_is_not_a_size_is_named_once_and_ignored`.
+local function minimum()
+    local given = config.tiling.minimum
+    local out = { w = 0, h = 0 }
+    if given == nil then
+        return out
+    end
+    if type(given) ~= "table" then
+        once("tiling.minimum is not a table like { w = 160, h = 96 }; tiles have no minimum")
+        return out
+    end
+    for _, side in ipairs({ "w", "h" }) do
+        local value = given[side]
+        -- NaN fails `>= 0`, and `math.huge` is no tile anybody can have.
+        if type(value) == "number" and value >= 0 and value < math.huge then
+            out[side] = value
+        elseif value ~= nil then
+            once(string.format(
+                "tiling.minimum.%s is %s, which is not a size in pixels; no minimum on that side",
+                side,
+                tostring(value)
+            ))
+        end
+    end
+    return out
+end
+
+-- Where a window being opened goes when the tile under the pointer has no room
+-- for it, either way: `config.tiling.overflow`, the steps in order.
+--
+-- An entry that is not a step is skipped and named once. Absent altogether is
+-- the shipped list, for the same reason an absent `minimum` is none: an older
+-- configuration says nothing about it because it could not. What happens when
+-- the steps run out is `open_in`'s business, not this.
+local STEPS = { largest = true, workspace = true, allow = true }
+local function overflow()
+    local given = config.tiling.overflow
+    if given == nil then
+        return { "largest", "workspace", "allow" }
+    end
+    if type(given) ~= "table" then
+        once("tiling.overflow is not a list of steps; a window with no room splits the tile "
+            .. "under the pointer anyway")
+        return {}
+    end
+    local out = {}
+    for _, step in ipairs(given) do
+        if STEPS[step] then
+            out[#out + 1] = step
+        else
+            once(string.format(
+                "tiling.overflow names %s, which is not a step (largest, workspace or allow); "
+                    .. "it is skipped",
+                tostring(step)
+            ))
+        end
+    end
+    return out
+end
+
+-- Whether the view goes with a window that opened on another workspace. Read
+-- at each open, like `reflow_on_close`; anything but `false` is the default.
+local function follows_overflow()
+    return config.tiling.follow_overflow ~= false
+end
+
 -- One tree per workspace *per monitor*.
 --
 -- Per workspace because a window closing on workspace 2 must not disturb the
@@ -66,7 +153,43 @@ local function options(monitor)
     local out = { x = area.x, y = area.y, w = area.w, h = area.h }
     out.gap = config.gap
     out.split = config.tiling.split
+    -- In every options table, so the seams are held to it as well as the
+    -- splits: `tree:drag_seam` and `tree:resize` read it from here.
+    out.minimum = minimum()
     return out
+end
+
+-- A window that is already open, going back into `tree`.
+--
+-- Tiling switched on, a reload, a monitor change (all three `adopt`), a dialog
+-- that stops being modal: none of these knows where the window should be, so
+-- it is found a tile -- the one `insert` would choose from `target`, `x` and
+-- `y`, either way; then the largest with room; then the first one anyway,
+-- below the minimum.
+--
+-- A close the application refused, and a drop, *do* know, and say so with
+-- `stays`: where the window stood, where it was let go. The window goes back
+-- to the tile there, either way, and below the minimum if that is what it
+-- takes -- not to the largest tile, which is somewhere else. A refused window
+-- was in that tile a second ago, and an arrangement that had not otherwise
+-- changed has to come back as it was, including a tile `"allow"` made under
+-- the minimum; see `a_refused_window_under_the_minimum_comes_back_where_it_was`
+-- and `a_dropped_window_goes_to_the_tile_it_was_let_go_over`.
+--
+-- **Never another workspace, whatever `config.tiling.overflow` says.** Overflow
+-- is for a window being opened, which has no place yet. A window coming back
+-- has one: sending it off to the next empty workspace would scatter a desktop
+-- across the workspaces on every reload, and a window whose close was refused
+-- would come back somewhere else entirely. See
+-- `nothing_already_open_is_sent_to_another_workspace` in `script.rs`.
+local function rejoin(tree, id, target, x, y, area, stays)
+    if tree:insert_fitting(id, target, x, y, area) then
+        return
+    end
+    if not stays and tree:insert_largest(id, area) then
+        return
+    end
+    tree:insert(id, target, x, y, area)
 end
 
 -- A modal dialog is in no tree, and one that stops being modal rejoins.
@@ -97,7 +220,7 @@ local function settle_dialogs(windows)
                 -- pointer is wherever it is now, which has nothing to do with
                 -- a dialog the user has just dismissed. `adopt` inserts the
                 -- same way and for the same reason.
-                tree:insert(id, nil, nil, nil, options(monitor))
+                rejoin(tree, id, nil, nil, nil, options(monitor))
             end
         end
     )
@@ -169,7 +292,10 @@ function tiling.adopt()
             elseif not dialogs.floats(window) then
                 present[window.id] = each.monitor.name
                 if not tree:contains(window.id) then
-                    tree:insert(window.id, nil, nil, nil, options(each.monitor.name))
+                    -- `rejoin`, never `open_in`: these windows are open
+                    -- already, and a reload must not scatter them across the
+                    -- workspaces.
+                    rejoin(tree, window.id, nil, nil, nil, options(each.monitor.name))
                 end
             end
         end
@@ -219,6 +345,68 @@ sol.on("layout", function()
     tiling.apply()
 end)
 
+-- Where a window being opened goes (#134): the tile under the pointer, either
+-- way, and when that has no room, `config.tiling.overflow` one step at a time.
+-- Returns the workspace it was sent to, or nil when it went into the tree of
+-- the one in view.
+--
+-- Decided here, at `open`. For a window launched with `sol.spawn` that is the
+-- moment it is asked for, before its application has connected
+-- (`Solium::begin_loading`), so a window that goes to another workspace is
+-- placed there in the same dispatch that opens it -- the one tile it is ever
+-- given -- rather than in this workspace's first and moved later.
+local function open_in(id, monitor, target, cursor)
+    local tree = tree_for(monitor)
+    local area = options(monitor)
+    if tree:insert_fitting(id, target, cursor.x, cursor.y, area) then
+        return nil
+    end
+    local from = workspaces.on(monitor)
+    for _, step in ipairs(overflow()) do
+        if step == "largest" then
+            if tree:insert_largest(id, area) then
+                return nil
+            end
+        elseif step == "workspace" then
+            local index = workspaces.vacant(monitor, id)
+            if index then
+                workspaces.of[id] = index
+                -- A new tree rather than the one that may be there. Nothing is
+                -- on that workspace, but its tree can still hold a window that
+                -- was on it: `workspaces.send` moves a window without telling
+                -- any tree, and only the next `adopt` sweeps the leaf it left.
+                -- Split, that leaf would keep half the screen for a window
+                -- that is not there. See
+                -- `a_workspace_left_empty_by_a_send_is_given_whole`.
+                local fresh = sol.layout.tree()
+                tiling.trees[monitors.key(index, monitor)] = fresh
+                fresh:insert(id, nil, nil, nil, area)
+                sol.log(string.format(
+                    "tiling: no room for window %d on workspace %d; it opens on workspace %d",
+                    id,
+                    from,
+                    index
+                ))
+                return index
+            end
+        else
+            tree:insert(id, target, cursor.x, cursor.y, area)
+            return nil
+        end
+    end
+    -- A window has to go somewhere, so a list that ran out without an "allow"
+    -- ends in one all the same -- said, so that a list which was meant to
+    -- keep windows at the minimum can be seen not to have.
+    sol.log(string.format(
+        "tiling: no room for window %d on workspace %d and no step of tiling.overflow "
+            .. "placed it; it splits the tile under the pointer, below tiling.minimum",
+        id,
+        from
+    ))
+    tree:insert(id, target, cursor.x, cursor.y, area)
+    return nil
+end
+
 sol.on("open", function(id)
     -- A dialog joins no tree. `apply` places it over its parent and records it
     -- as exiled, so there is nothing to do here but let that happen.
@@ -226,18 +414,52 @@ sol.on("open", function(id)
         tiling.apply()
         return
     end
-    local tree = tree_for(monitors.of(id))
+    local monitor = monitors.of(id)
     local cursor = sol.cursor()
     -- Skip the window being opened: it is already mapped and under the
     -- pointer, so asking without skipping names it as its own split target.
-    tree:insert(
-        id,
-        sol.window_at(cursor.x, cursor.y, id),
-        cursor.x,
-        cursor.y,
-        options(monitors.of(id))
-    )
+    local target = sol.window_at(cursor.x, cursor.y, id)
+
+    -- Every layout hears `open` whether or not it is in charge, and keeps the
+    -- window in its own structure for when it is. One that is not in charge
+    -- sends nobody anywhere: the workspace step moves the view and puts the
+    -- window on another desk, and a floating desktop whose windows went off to
+    -- other workspaces because a tree nobody is looking at was full would be
+    -- a layout rearranging a session it is not running. So it keeps its tree
+    -- by `rejoin`'s rule, from the tile under the pointer: that tile either
+    -- way, the largest with room, that tile anyway. See
+    -- `a_layout_not_in_charge_sends_nothing_to_another_workspace`.
+    if not tiling.active then
+        rejoin(tree_for(monitor), id, target, cursor.x, cursor.y, options(monitor))
+        tiling.apply()
+        return
+    end
+
+    local elsewhere = open_in(id, monitor, target, cursor)
+    local follows = follows_overflow()
+    if elsewhere and follows then
+        -- The view goes with it, as `super+<n>` would take it, keyboard and
+        -- all. Focused by name afterwards as well: `go` hands the keyboard to
+        -- the first window it finds on the workspace, and a window still
+        -- fading out there is not one the user can be sent to.
+        workspaces.go(elsewhere, monitor)
+        sol.focus(id)
+    elseif elsewhere then
+        -- Regrouped now, so the window joins its own desk's selection -- the
+        -- one carried a screen away -- in the same dispatch that places it,
+        -- rather than whenever something next regroups.
+        workspaces.apply()
+    end
     tiling.apply()
+    if elsewhere and not follows then
+        -- Its tree is not one `apply` walks, since that workspace is not in
+        -- view. Placed here so it is already in its tile when the user goes
+        -- there, and so that until then it is where its desk carries it.
+        local key = monitors.key(elsewhere, monitor)
+        for _, slot in ipairs(tiling.trees[key]:layout(options(monitor))) do
+            sol.place(slot.id, slot)
+        end
+    end
 end)
 
 -- ...and a window leaving hands its space to its neighbour, rather than
@@ -308,6 +530,9 @@ end
 --
 -- Not `open`, which the compositor deliberately does not send for this: the
 -- window never went, and an arrival would run `open.lua`'s animation again.
+-- Nor `open`'s placement: a refused window is never sent to another workspace
+-- for want of room, and goes back into the tile where it stood even under
+-- `tiling.minimum` (#134). See `rejoin`.
 --
 -- **Decided by what happened, not by the setting.** A window is put back if
 -- `closing` took it out -- whatever `reflow_on_close` says now, since a script
@@ -334,7 +559,7 @@ sol.on("refused", function(id)
     if stood and stood.tree ~= key then
         stood = nil
     end
-    tree:insert(id, nil, stood and stood.x, stood and stood.y, options(monitor))
+    rejoin(tree, id, nil, stood and stood.x, stood and stood.y, options(monitor), stood ~= nil)
     tiling.apply()
 end)
 
@@ -380,14 +605,17 @@ sol.on("drop", function(id, x, y)
         tree:remove(id)
     end
     local tree = tree_for(landed)
+    -- Where it was let go, and not the largest tile, which is somewhere else;
+    -- `rejoin` with a place turns the split rather than go under the minimum,
+    -- and goes under it rather than leave the tile it was dropped on.
     if target and target ~= id then
         -- Re-inserting where it was dropped is the swap: out of its old seam,
         -- into the one under the pointer.
-        tree:insert(id, target, x, y, options(landed))
+        rejoin(tree, id, target, x, y, options(landed), true)
     else
         -- Dropped on nothing: it still belongs to whatever screen it landed
         -- on, so it rejoins that tree rather than falling out of the layout.
-        tree:insert(id, nil, x, y, options(landed))
+        rejoin(tree, id, nil, x, y, options(landed), true)
     end
     tiling.apply(config.tiling.snap)
 end)
@@ -469,7 +697,10 @@ local function nudge(axis, by)
     return function()
         local focused = focused_window()
         if focused then
-            tree_for(monitors.of(focused)):resize(focused, axis, by)
+            -- With the monitor's options, which carry `tiling.minimum`: a
+            -- press no more takes a tile under it than a drag does.
+            local monitor = monitors.of(focused)
+            tree_for(monitor):resize(focused, axis, by, options(monitor))
             tiling.apply(config.tiling.snap)
         end
     end

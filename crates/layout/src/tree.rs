@@ -16,8 +16,24 @@
 //!
 //! Per-branch ratios are the other half of it: resizing a window moves one
 //! seam, and everything on the far side of the tree stays exactly where it is.
+//!
+//! [`Tiling::insert`] splits the tile it is pointed at however small that tile
+//! already is, so tiles go on halving for as long as windows keep opening.
+//! [`Settings::minimum`] is the floor (#134). `insert` still ignores it, because
+//! it is what a layout falls back to when nothing else will do; the two
+//! `insert_*` methods beside it refuse a split that would go under it, so a
+//! layout can try them first, and the seam movers will not move a seam to take
+//! a tile under it either.
 
 use crate::{Rect, Settings};
+
+/// How far under the minimum a tile may come out and still count as at it.
+///
+/// A split's halves are `f64` arithmetic on a box that has already been
+/// through a division or two, so a tile laid out at exactly the minimum can
+/// land a rounding error short of it. A millionth of a pixel is far below
+/// anything drawn and far above that error.
+const SLACK: f64 = 1e-6;
 
 /// Which way a branch was cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +42,26 @@ pub enum Axis {
     Vertical,
     /// Children sit one above the other.
     Horizontal,
+}
+
+impl Axis {
+    /// The cut a box would get from [`Tiling::insert`]: across whichever side
+    /// is longer, so the split follows the shape of the space being divided.
+    fn longer(rect: Rect) -> Self {
+        if rect.w >= rect.h {
+            Self::Vertical
+        } else {
+            Self::Horizontal
+        }
+    }
+
+    /// The other one.
+    const fn across(self) -> Self {
+        match self {
+            Self::Vertical => Self::Horizontal,
+            Self::Horizontal => Self::Vertical,
+        }
+    }
 }
 
 /// Which side of a window was grabbed.
@@ -142,6 +178,11 @@ impl Tiling {
     /// new window lands on — dropping a window on the right half of another
     /// puts it on the right — which is the part that makes this feel like
     /// placing a window rather than appending to a list.
+    ///
+    /// Splits whatever it is pointed at, across that box's longer side,
+    /// however small the halves come out: [`Settings::minimum`] is not read
+    /// here. This is the last resort, `"allow"` in `config.tiling.overflow`;
+    /// [`Self::insert_fitting`] is the same placement with the floor on it.
     pub fn insert(
         &mut self,
         id: u64,
@@ -153,55 +194,166 @@ impl Tiling {
         if self.contains(id) {
             return;
         }
-        let fresh = self.push(Node::Window { id });
-
         let Some(root) = self.root else {
-            self.root = Some(fresh);
+            self.root = Some(self.push(Node::Window { id }));
             return;
         };
-
-        // The target's *current* box decides the axis, so the split follows the
-        // shape of the space being divided rather than the shape of the screen.
         let boxes = self.layout(area, settings);
-        // Named target, else the window under the pointer, else the window
-        // *nearest* it. The last step matters more than it looks: falling back
-        // to the root instead means splitting the whole screen, and every new
-        // window then lands as another full-height column — which is not
-        // dwindle at all, and is exactly what this did before. Hyprland calls
-        // this `getClosestNode`.
-        // A window cannot be split by itself. The caller can easily name it —
-        // a new window is mapped and under the pointer before this runs, so
-        // hit-testing the cursor answers with the very window being inserted —
-        // and `leaf` would then find the node pushed a moment ago. The branch
-        // would take that node as both children and hang from nothing, and the
-        // window would vanish from the tree without any error at all.
+        let target = self.split_target(id, target, at, &boxes).unwrap_or(root);
+        let rect = self.box_of(target, &boxes, area);
+        self.split(id, target, rect, Axis::longer(rect), at, settings);
+    }
+
+    /// [`Self::insert`], unless that would make a tile smaller than
+    /// [`Settings::minimum`] — in which case the other axis is tried, and
+    /// failing that nothing is done at all.
+    ///
+    /// The same target as `insert` and the same side of it: this is "open
+    /// where the pointer is" with a floor under it, not a different rule. The
+    /// other axis first because a box that cannot be divided one way often can
+    /// be divided the other — a wide, short tile that has no room side by side
+    /// may still have room one above the other — and that is still the tile
+    /// the user was pointing at.
+    ///
+    /// Returns whether the window is in the tree now. `false` leaves the tree
+    /// exactly as it was, so the caller can try somewhere else; nothing is
+    /// pushed until a split has been chosen, because a node pushed and then
+    /// abandoned would be found by [`Self::contains`] for ever after. An empty
+    /// tree always has room: its one window takes the whole area whatever
+    /// size that is, since there is nothing to divide.
+    pub fn insert_fitting(
+        &mut self,
+        id: u64,
+        target: Option<u64>,
+        at: Option<(f64, f64)>,
+        area: Rect,
+        settings: Settings,
+    ) -> bool {
+        if self.contains(id) {
+            return true;
+        }
+        let Some(root) = self.root else {
+            self.root = Some(self.push(Node::Window { id }));
+            return true;
+        };
+        let boxes = self.layout(area, settings);
+        let target = self.split_target(id, target, at, &boxes).unwrap_or(root);
+        let rect = self.box_of(target, &boxes, area);
+        let Some(axis) = room_in(rect, settings) else {
+            return false;
+        };
+        self.split(id, target, rect, axis, at, settings);
+        true
+    }
+
+    /// Split the largest tile that has room for another window without going
+    /// under [`Settings::minimum`]: `"largest"` in `config.tiling.overflow`.
+    ///
+    /// Largest by area, and the largest *with room* rather than the largest:
+    /// a big square tile can fail both ways where a smaller, longer one has
+    /// room along its length, and skipping it is the difference between
+    /// placing the window and sending it off this workspace. Ties go to the
+    /// earlier tile in tree order, so the choice does not depend on anything
+    /// the tree does not hold.
+    ///
+    /// Each tile is tried across its longer side and then the other, as
+    /// [`Self::insert_fitting`] tries the one under the pointer. The new
+    /// window takes the far side, as it does from `insert` with no pointer:
+    /// the pointer is in some other tile by now, so it says nothing about this
+    /// one.
+    ///
+    /// Only windows the tree holds have tiles here. A window a layout took out
+    /// at `closing` (#128) has none, and the neighbour that grew into its
+    /// space is measured at the size it is now.
+    ///
+    /// Returns whether the window is in the tree now; `false` leaves the tree
+    /// as it was. An empty tree always has room, as for `insert_fitting`.
+    pub fn insert_largest(&mut self, id: u64, area: Rect, settings: Settings) -> bool {
+        if self.contains(id) {
+            return true;
+        }
+        if self.root.is_none() {
+            self.root = Some(self.push(Node::Window { id }));
+            return true;
+        }
+        let mut boxes = self.layout(area, settings);
+        // Stable, so equal areas keep tree order.
+        boxes.sort_by(|(_, a), (_, b)| (b.w * b.h).total_cmp(&(a.w * a.h)));
+        for (other, rect) in boxes {
+            if let Some(axis) = room_in(rect, settings)
+                && let Some(target) = self.leaf(other)
+            {
+                self.split(id, target, rect, axis, None, settings);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The leaf a new window would split: the one named, else the one under
+    /// the pointer, else the one nearest it. `None` only for an empty tree.
+    ///
+    /// The last step matters more than it looks: falling back to the root
+    /// instead means splitting the whole screen, and every new window then
+    /// lands as another full-height column — which is not dwindle at all, and
+    /// is exactly what this did before. Hyprland calls this `getClosestNode`.
+    fn split_target(
+        &self,
+        id: u64,
+        target: Option<u64>,
+        at: Option<(f64, f64)>,
+        boxes: &[(u64, Rect)],
+    ) -> Option<usize> {
+        // A window cannot be split by itself, and the caller can easily name
+        // it: a new window is mapped and under the pointer before this runs,
+        // so hit-testing the cursor answers with the very window being
+        // inserted. Back when its node was pushed before this lookup, `leaf`
+        // found that node, the branch took it as both children and hung from
+        // nothing, and the window vanished without any error at all. The node
+        // is pushed after the lookup now, in [`Self::split`], so `leaf` would
+        // find nothing; the filter says so outright instead of leaving it to
+        // the order of two calls. `a_window_named_as_its_own_target_is_still_added`
+        // pins the outcome.
         //
         // Hyprland guards the same case in `addTarget`, calling it a fail-safe
         // and picking a different node. This is that guard.
-        let target = target
+        target
             .filter(|named| *named != id)
-            .and_then(|id| self.leaf(id))
-            .filter(|found| *found != fresh)
-            .or_else(|| self.leaf_at(at, &boxes))
-            .or_else(|| self.closest_leaf(at, &boxes))
-            .unwrap_or(root);
+            .and_then(|named| self.leaf(named))
+            .or_else(|| self.leaf_at(at, boxes))
+            .or_else(|| self.closest_leaf(at, boxes))
+    }
 
-        let box_of = self
-            .id_of(target)
+    /// The box a split target has now, which is what decides the axis: the
+    /// split follows the shape of the space being divided rather than the
+    /// shape of the screen.
+    fn box_of(&self, target: usize, boxes: &[(u64, Rect)], area: Rect) -> Rect {
+        self.id_of(target)
             .and_then(|id| boxes.iter().find(|(other, _)| *other == id))
-            .map_or(area, |(_, rect)| *rect);
+            .map_or(area, |(_, rect)| *rect)
+    }
 
-        let axis = if box_of.w >= box_of.h {
-            Axis::Vertical
-        } else {
-            Axis::Horizontal
-        };
+    /// Hang window `id` beside `target`, which occupies `rect`, across `axis`.
+    ///
+    /// Everything that decides *whether* and *where* is done by the callers;
+    /// this is the one place a node is pushed for a window that is not the
+    /// root, so a caller that has decided against a split has pushed nothing.
+    fn split(
+        &mut self,
+        id: u64,
+        target: usize,
+        rect: Rect,
+        axis: Axis,
+        at: Option<(f64, f64)>,
+        settings: Settings,
+    ) {
+        let fresh = self.push(Node::Window { id });
 
         // Which side the new window takes: the half the pointer is in, and the
         // far side by default.
         let second = at.is_none_or(|(x, y)| match axis {
-            Axis::Vertical => x >= box_of.x + box_of.w / 2.0,
-            Axis::Horizontal => y >= box_of.y + box_of.h / 2.0,
+            Axis::Vertical => x >= rect.x + rect.w / 2.0,
+            Axis::Horizontal => y >= rect.y + rect.h / 2.0,
         });
         let children = if second {
             [target, fresh]
@@ -353,10 +505,10 @@ impl Tiling {
             Axis::Vertical => (edge_at.0 - rect.x - leading) / (rect.w - gap).max(1.0),
             Axis::Horizontal => (edge_at.1 - rect.y - leading) / (rect.h - gap).max(1.0),
         };
-        // **The only clamp on a tiled drag, which is why it has to be here.**
-        // `edge_at` arrives unbounded: the compositor sends this pane's own
-        // laid-out edge displaced by the pointer, and it deliberately does not
-        // floor it. It cannot usefully. `resize::MINIMUM` is a floor on a
+        // **The only clamps on a tiled drag, which is why they have to be
+        // here.** `edge_at` arrives unbounded: the compositor sends this pane's
+        // own laid-out edge displaced by the pointer, and it deliberately does
+        // not floor it. It cannot usefully. `resize::MINIMUM` is a floor on a
         // *window's* size, and applying it to a seam's position put a 120-pixel
         // window's floor on a tile that was narrower than that to begin with --
         // which reported an edge 120px from where it was on the first frame of
@@ -364,18 +516,111 @@ impl Tiling {
         // own box is the quantity this layout actually owns, and the box is not
         // the window.
         //
-        // The bounds are 0.05..0.95 because a seam driven to either end of its
-        // box leaves a child of no width, and a window of no width cannot be
-        // grabbed again to undo it. Not attributable to an issue: #115 is
-        // "minimum size is never read", about a client's own `min_size`, which
-        // is still unimplemented and is a different quantity in different units
-        // against a different rectangle.
+        // Two bounds on that ratio, and [`Self::room`] works out both. One is
+        // 0.05..0.95, because a seam driven to either end of its box leaves a
+        // child of no width, and a window of no width cannot be grabbed again
+        // to undo it. The other, since #134, is `settings.minimum`: no tile on
+        // either side of the seam is taken under it, so a seam cannot be
+        // dragged to make a tile smaller than a new window is allowed to open
+        // in. A tile, not a window, so it is this layout's to hold -- and it
+        // bends for a side that is already under it rather than snapping that
+        // side up to it, which is what keeps the first frame of such a drag
+        // where it was. See `room`.
+        //
+        // Neither is #115, which is about a client's own `min_size`: that is
+        // still unread, and is a different quantity against a different
+        // rectangle.
         //
         // This is also the tighter of two clamps on a *floating* drag, where
         // `resize::MINIMUM` does apply -- to the window, in `resized`, for the
         // floating path's own rectangle. The two never meet on one number.
+        let (low, high) = self.room(seam, rect, settings);
         if let Some(Node::Split { ratio: current, .. }) = self.nodes[seam].as_mut() {
-            *current = ratio.clamp(0.05, 0.95);
+            *current = within(ratio, low, high, *current);
+        }
+    }
+
+    /// The ratios a seam may take: 0.05..0.95, narrowed so that no tile on
+    /// either side of it is made smaller than [`Settings::minimum`].
+    ///
+    /// `rect` is the seam's own box, from [`Self::node_box`]. Each side needs
+    /// [`Self::floor`] of it along the seam's axis, and a side's share of the
+    /// box less the gap is what the ratio divides, so the floors turn into
+    /// ratios by the same arithmetic [`cut`] runs forwards.
+    ///
+    /// **A side already under its floor is held where it is rather than moved
+    /// up to it.** Tiles under the minimum are ordinary: `"allow"` makes them,
+    /// a monitor change or a smaller work area can, and so can raising the
+    /// minimum in a running session. Clamping such a seam into its range on
+    /// the first frame of a drag would throw it across the screen before the
+    /// pointer had moved -- the #124 class of bug, reached through a floor
+    /// instead of a skew. So the range is widened to take in the ratio the
+    /// seam has now: that side can be grown, and cannot be made smaller still.
+    /// With both sides under, the seam cannot move at all, because any move
+    /// shrinks one of them.
+    ///
+    /// No minimum on the seam's axis leaves exactly 0.05..0.95, which is what
+    /// this clamp was before #134.
+    fn room(&self, seam: usize, rect: Rect, settings: Settings) -> (f64, f64) {
+        let Some(Node::Split {
+            axis,
+            ratio,
+            children,
+        }) = self.nodes.get(seam).copied().flatten()
+        else {
+            return (0.05, 0.95);
+        };
+        let least = match axis {
+            Axis::Vertical => settings.minimum.w,
+            Axis::Horizontal => settings.minimum.h,
+        };
+        // NaN is spelled out because it compares false both ways, and a NaN
+        // floor would make every ratio below NaN too.
+        if least.is_nan() || least <= 0.0 {
+            return (0.05, 0.95);
+        }
+        let span = match axis {
+            Axis::Vertical => rect.w - settings.gap,
+            Axis::Horizontal => rect.h - settings.gap,
+        }
+        .max(1.0);
+        let low = self.floor(children[0], axis, least, settings.gap) / span;
+        let high = 1.0 - self.floor(children[1], axis, least, settings.gap) / span;
+        (low.min(ratio).max(0.05), high.max(ratio).min(0.95))
+    }
+
+    /// The least room along `axis` the subtree at `index` needs for every tile
+    /// in it to be at least `least` long on that axis, with its own seams
+    /// where they are now.
+    ///
+    /// At the ratios it has rather than at the best ratios it could have: a
+    /// drag moves one seam, so a subtree's inner seams stay where they are and
+    /// its tiles grow and shrink in proportion. A branch cut along `axis`
+    /// needs each child's floor divided by that child's share, plus the gap
+    /// between them. A branch cut the other way gives each child the whole of
+    /// its extent along `axis`, so it needs only the larger of the two floors
+    /// -- a column of stacked windows is as narrow as its widest floor, not
+    /// the sum of them.
+    fn floor(&self, index: usize, axis: Axis, least: f64, gap: f64) -> f64 {
+        match self.nodes.get(index).copied().flatten() {
+            Some(Node::Window { .. }) => least,
+            Some(Node::Split {
+                axis: cut_on,
+                ratio,
+                children,
+            }) => {
+                let first = self.floor(children[0], axis, least, gap);
+                let second = self.floor(children[1], axis, least, gap);
+                if cut_on == axis {
+                    // Clamped as `cut` clamps it, since that is the share the
+                    // children are actually laid out at.
+                    let ratio = ratio.clamp(0.05, 0.95);
+                    gap + (first / ratio).max(second / (1.0 - ratio))
+                } else {
+                    first.max(second)
+                }
+            }
+            None => 0.0,
         }
     }
 
@@ -463,7 +708,13 @@ impl Tiling {
     /// dwindle every leaf's parent is a horizontal split, so the centre
     /// vertical seam could not be reached from the keyboard at all and
     /// `super+equal` silently changed the height instead.
-    pub fn resize(&mut self, id: u64, axis: Axis, by: f64) {
+    ///
+    /// Bounded as a drag is, by [`Self::room`]: a press does not make a tile
+    /// smaller than [`Settings::minimum`], nor one already under it any
+    /// smaller. That is why this takes the area and the settings, which it did
+    /// not need before #134 -- the floor is in pixels, and the seam's box is
+    /// what turns pixels into a ratio.
+    pub fn resize(&mut self, id: u64, axis: Axis, by: f64, area: Rect, settings: Settings) {
         let Some(leaf) = self.leaf(id) else {
             return;
         };
@@ -482,8 +733,13 @@ impl Tiling {
                 None => return,
             },
         };
+        // `seam_beside` only returns a branch it reached by walking up from a
+        // leaf of this tree, so `node_box` finds it walking down; the whole
+        // area is a fallback that keeps some bound rather than none.
+        let rect = self.node_box(seam, area, settings).unwrap_or(area);
+        let (low, high) = self.room(seam, rect, settings);
         if let Some(Node::Split { ratio, .. }) = self.nodes[seam].as_mut() {
-            *ratio = (*ratio + towards).clamp(0.05, 0.95);
+            *ratio = within(*ratio + towards, low, high, *ratio);
         }
     }
 
@@ -594,6 +850,38 @@ impl Tiling {
                 }
             }
         }
+    }
+}
+
+/// Which way `rect` can be split with neither half under
+/// [`Settings::minimum`]: across its longer side if that has room, else across
+/// the other, else neither.
+///
+/// Measured with [`cut`] itself, at the configured split and gap, so "has
+/// room" means exactly what the layout will then draw. Both halves on both
+/// sides: a split across the width leaves the height alone, and a tile that is
+/// already too short does not become tall enough by being divided.
+fn room_in(rect: Rect, settings: Settings) -> Option<Axis> {
+    let longer = Axis::longer(rect);
+    [longer, longer.across()].into_iter().find(|axis| {
+        let (first, second) = cut(rect, *axis, settings.split, settings.gap);
+        [first, second].iter().all(|half| {
+            half.w + SLACK >= settings.minimum.w && half.h + SLACK >= settings.minimum.h
+        })
+    })
+}
+
+/// `value` held to `low..=high`, or `otherwise` when that range is empty.
+///
+/// Not `f64::clamp` alone, which panics when `low > high` or either is NaN --
+/// and a compositor that panics takes the session with it. [`Tiling::room`]
+/// always includes the current ratio, so its range is empty only when that
+/// ratio is itself NaN; `otherwise` is then the seam left as it was.
+fn within(value: f64, low: f64, high: f64, otherwise: f64) -> f64 {
+    if low <= high {
+        value.clamp(low, high)
+    } else {
+        otherwise
     }
 }
 
@@ -762,7 +1050,7 @@ mod tests {
         tiling.insert(3, Some(2), None, area(), settings());
         let untouched = rect_of(&tiling, 1);
 
-        tiling.resize(2, Axis::Horizontal, 0.2);
+        tiling.resize(2, Axis::Horizontal, 0.2, area(), settings());
         assert!(rect_of(&tiling, 2).h > 300.0, "the seam moved");
         assert!(
             (rect_of(&tiling, 1).w - untouched.w).abs() < 1.0,
@@ -1226,7 +1514,7 @@ mod dragged_edge_tests {
     #[test]
     fn the_keyboard_can_reach_the_centre_vertical_seam() {
         let mut tiling = quad();
-        tiling.resize(1, Axis::Vertical, 0.1);
+        tiling.resize(1, Axis::Vertical, 0.1, area(), settings());
 
         let one = rect_of(&tiling, 1);
         assert!((one.w - 600.0).abs() < 2.0, "it got wider: {one:?}");
@@ -1240,7 +1528,7 @@ mod dragged_edge_tests {
     #[test]
     fn a_window_against_the_container_grows_from_the_other_side() {
         let mut tiling = quad();
-        tiling.resize(2, Axis::Vertical, 0.1);
+        tiling.resize(2, Axis::Vertical, 0.1, area(), settings());
 
         let two = rect_of(&tiling, 2);
         assert!((two.w - 600.0).abs() < 2.0, "it got wider: {two:?}");
@@ -1492,5 +1780,460 @@ mod dragged_edge_tests {
             (once.w - twice.w).abs() < 0.001,
             "the second drag moved it: {once:?} then {twice:?}"
         );
+    }
+}
+
+/// #134: a floor under the tiles, and the seams that honour it.
+///
+/// Every arrangement here is built with `insert`, which does not read the
+/// minimum, and with drags at [`free`] -- no minimum, the tree as it was
+/// before #134 -- and only then is a question asked with a minimum in force.
+/// A fixture built under the floor would already have been bent by it, and
+/// the question would be about the fixture.
+#[cfg(test)]
+mod minimum_tests {
+    use super::{Axis, Edge, Tiling};
+    use crate::{Minimum, Rect, Settings};
+
+    fn free(gap: f64) -> Settings {
+        Settings {
+            gap,
+            split: 0.5,
+            ..Settings::default()
+        }
+    }
+
+    fn floored(gap: f64, w: f64, h: f64) -> Settings {
+        Settings {
+            minimum: Minimum { w, h },
+            ..free(gap)
+        }
+    }
+
+    /// What `config.tiling.minimum` ships as, and `config.gap`.
+    fn shipped() -> Settings {
+        floored(12.0, 160.0, 96.0)
+    }
+
+    fn rect_in(tiling: &Tiling, id: u64, area: Rect, settings: Settings) -> Rect {
+        tiling
+            .layout(area, settings)
+            .into_iter()
+            .find(|(other, _)| *other == id)
+            .expect("in the tree")
+            .1
+    }
+
+    fn every_rect(tiling: &Tiling, area: Rect, settings: Settings) -> Vec<(u64, Rect)> {
+        let mut out = tiling.layout(area, settings);
+        out.sort_by_key(|(id, _)| *id);
+        out
+    }
+
+    fn near(left: Rect, right: Rect) -> bool {
+        (left.x - right.x).abs() < 0.5
+            && (left.y - right.y).abs() < 0.5
+            && (left.w - right.w).abs() < 0.5
+            && (left.h - right.h).abs() < 0.5
+    }
+
+    /// **The tile under the pointer tries the other direction first.** A wide,
+    /// short tile with no room side by side still has room one above the
+    /// other, and that is still the tile the user pointed at.
+    ///
+    /// 300x200 at no gap: side by side is two 150-wide halves, under a
+    /// 160-wide floor; one above the other is two 300x100s, over a 96-high one.
+    /// `insert` -- the rule before #134, and `"allow"` now -- cuts it side by
+    /// side regardless, which is the contrast that makes this a test of the
+    /// turn rather than of the arrangement.
+    #[test]
+    fn a_tile_with_no_room_side_by_side_splits_one_above_the_other() {
+        let area = Rect::new(0.0, 0.0, 300.0, 200.0);
+        let settings = floored(0.0, 160.0, 96.0);
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area, settings);
+
+        let mut allowed = tiling.clone();
+        allowed.insert(2, None, Some((150.0, 150.0)), area, settings);
+        assert!(
+            (rect_in(&allowed, 2, area, settings).w - 150.0).abs() < 0.5,
+            "the premise: `insert` cuts this tile side by side"
+        );
+
+        // The pointer in the lower half, so the new window goes below.
+        assert!(tiling.insert_fitting(2, None, Some((150.0, 150.0)), area, settings));
+        let (one, two) = (
+            rect_in(&tiling, 1, area, settings),
+            rect_in(&tiling, 2, area, settings),
+        );
+        assert!(
+            (one.w - 300.0).abs() < 0.5 && (two.w - 300.0).abs() < 0.5,
+            "split one above the other, full width each: {one:?} {two:?}"
+        );
+        assert!(
+            (one.h - 100.0).abs() < 0.5 && (two.h - 100.0).abs() < 0.5,
+            "and half the height each: {one:?} {two:?}"
+        );
+        assert!(two.y > one.y, "on the pointer's side, below: {two:?}");
+    }
+
+    /// **A tile with room neither way is left alone**, and so is the whole
+    /// tree: `false` is only useful to a caller if trying somewhere else
+    /// starts from where it was. Then `insert` still takes the window, once,
+    /// which is what a node pushed and abandoned by the refusal would break --
+    /// `contains` would find it, and `insert` would return without adding it.
+    #[test]
+    fn a_tile_with_no_room_either_way_is_left_alone() {
+        let area = Rect::new(0.0, 0.0, 300.0, 180.0);
+        let settings = floored(0.0, 160.0, 96.0);
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area, settings);
+        let before = every_rect(&tiling, area, settings);
+
+        assert!(!tiling.insert_fitting(2, None, Some((150.0, 90.0)), area, settings));
+        assert!(!tiling.insert_largest(2, area, settings));
+        assert!(!tiling.contains(2), "a refused window is not in the tree");
+        assert_eq!(every_rect(&tiling, area, settings), before);
+
+        tiling.insert(2, None, Some((150.0, 90.0)), area, settings);
+        assert_eq!(tiling.windows().len(), 2, "{:?}", tiling.windows());
+    }
+
+    /// **Exactly the minimum is enough; a pixel less is not.** 356 wide less
+    /// a 12 gap on each side is a 332 tile, and 332 less the 12 between the
+    /// halves is two of exactly 160. One pixel narrower and each half is
+    /// 159.5, and turning it does not help: 200 high splits into two of 94,
+    /// under 96.
+    #[test]
+    fn a_split_that_lands_exactly_on_the_minimum_has_room() {
+        let settings = shipped();
+        let exact = Rect::new(0.0, 0.0, 356.0, 224.0);
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, exact, settings);
+        assert!(
+            tiling.insert_fitting(2, None, Some((300.0, 100.0)), exact, settings),
+            "two halves of exactly the minimum were refused"
+        );
+        for id in [1, 2] {
+            let rect = rect_in(&tiling, id, exact, settings);
+            assert!(
+                (rect.w - 160.0).abs() < 1e-9,
+                "window {id} is not at the minimum: {rect:?}"
+            );
+        }
+
+        let short = Rect::new(0.0, 0.0, 355.0, 224.0);
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, short, settings);
+        assert!(
+            !tiling.insert_fitting(2, None, Some((300.0, 100.0)), short, settings),
+            "halves of 159.5 were let under a 160 minimum"
+        );
+    }
+
+    /// An empty tree has room whatever size it is: its one window is not a
+    /// division of anything, so there is no tile to keep above the floor.
+    #[test]
+    fn an_empty_tree_always_has_room() {
+        let tiny = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let mut fitting = Tiling::new();
+        assert!(fitting.insert_fitting(1, None, None, tiny, shipped()));
+        let mut largest = Tiling::new();
+        assert!(largest.insert_largest(1, tiny, shipped()));
+        assert_eq!(fitting.windows(), vec![1]);
+        assert_eq!(largest.windows(), vec![1]);
+    }
+
+    /// Window 1 on the left, 599x700; windows 2 over 3 on the right, 601x401
+    /// and 601x299. Built without a minimum, then asked about one of 300x360.
+    ///
+    /// Window 1 is the largest and has no room: across it is two of 299.5,
+    /// under 300, and down it is two of 350, under 360. Window 3 is already
+    /// shorter than 360 and no split makes it taller. Window 2 has room across,
+    /// two of 300.5 by 401.
+    fn crowded() -> (Tiling, Rect) {
+        let area = Rect::new(0.0, 0.0, 1200.0, 700.0);
+        let settings = free(0.0);
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area, settings);
+        tiling.insert(2, Some(1), None, area, settings);
+        tiling.insert(3, Some(2), None, area, settings);
+        tiling.drag_seam(1, Edge::Right, (599.0, 0.0), area, settings);
+        tiling.drag_seam(2, Edge::Bottom, (0.0, 401.0), area, settings);
+        (tiling, area)
+    }
+
+    /// **`"largest"` splits the largest tile that has room, which is not
+    /// always the largest tile.** See [`crowded`].
+    #[test]
+    fn largest_splits_the_largest_tile_that_has_room() {
+        let (mut tiling, area) = crowded();
+        let settings = floored(0.0, 300.0, 360.0);
+        let one = rect_in(&tiling, 1, area, settings);
+        let three = rect_in(&tiling, 3, area, settings);
+        assert!(
+            (one.w - 599.0).abs() < 0.5 && (three.h - 299.0).abs() < 0.5,
+            "the fixture is not the one described: {:?}",
+            every_rect(&tiling, area, settings)
+        );
+
+        // Pointing into window 3, which has no room.
+        assert!(!tiling.insert_fitting(4, None, Some((900.0, 600.0)), area, settings));
+        assert!(tiling.insert_largest(4, area, settings));
+
+        let (two, four) = (
+            rect_in(&tiling, 2, area, settings),
+            rect_in(&tiling, 4, area, settings),
+        );
+        assert!(
+            (two.w - 300.5).abs() < 0.5 && (four.w - 300.5).abs() < 0.5,
+            "window 2's tile was not the one split: {:?}",
+            every_rect(&tiling, area, settings)
+        );
+        assert!(four.x > two.x, "the new window takes the far side");
+        assert!(near(rect_in(&tiling, 1, area, settings), one), "1 moved");
+        assert!(near(rect_in(&tiling, 3, area, settings), three), "3 moved");
+    }
+
+    /// Two columns of two at a real gap, with no minimum, exactly as
+    /// `dragged_edge_tests::quad_at` builds them: 1 top-left, 2 top-right, 3
+    /// bottom-left, 4 bottom-right, each 482x282 in a 1000x600 area.
+    fn quad(settings: Settings) -> Tiling {
+        let area = area();
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area, settings);
+        tiling.insert(2, Some(1), None, area, settings);
+        tiling.insert(3, Some(1), None, area, settings);
+        tiling.insert(4, Some(2), None, area, settings);
+        tiling
+    }
+
+    fn area() -> Rect {
+        Rect::new(0.0, 0.0, 1000.0, 600.0)
+    }
+
+    /// **No drag takes a tile under the minimum**, on any of the four sides
+    /// that have a seam. The box is 976 wide less a 12 gap, so a 300 floor on
+    /// either side of the root seam leaves 364 of travel, and each is dragged
+    /// well past it.
+    #[test]
+    fn a_seam_cannot_be_dragged_to_make_a_tile_smaller_than_the_minimum() {
+        let settings = floored(12.0, 300.0, 150.0);
+        for (id, edge, to, measured, wanted) in [
+            (1_u64, Edge::Right, (100.0, 150.0), 1_u64, 300.0),
+            (2, Edge::Left, (950.0, 150.0), 2, 300.0),
+            (1, Edge::Bottom, (250.0, 50.0), 1, 150.0),
+            (3, Edge::Top, (250.0, 580.0), 3, 150.0),
+        ] {
+            let mut tiling = quad(free(12.0));
+            tiling.drag_seam(id, edge, to, area(), settings);
+            let rect = rect_in(&tiling, measured, area(), settings);
+            let size = match edge.axis() {
+                Axis::Vertical => rect.w,
+                Axis::Horizontal => rect.h,
+            };
+            assert!(
+                (size - wanted).abs() < 0.5,
+                "dragging window {id}'s {edge:?} edge to {to:?} left window {measured} at \
+                 {rect:?}, not stopped at the {wanted} minimum"
+            );
+        }
+    }
+
+    /// **The floor counts every tile beyond the seam, not only the one beside
+    /// it.** Window 4 is split again, so the right column holds 2 above a pair
+    /// side by side, and the root seam -- window 4's left edge -- has to leave
+    /// room for both halves of that pair: 160, the gap, 160.
+    #[test]
+    fn a_seam_leaves_room_for_every_tile_beyond_it() {
+        let settings = shipped();
+        let mut tiling = quad(free(12.0));
+        tiling.insert(5, Some(4), None, area(), free(12.0));
+        tiling.drag_seam(4, Edge::Left, (900.0, 450.0), area(), settings);
+        let (four, five) = (
+            rect_in(&tiling, 4, area(), settings),
+            rect_in(&tiling, 5, area(), settings),
+        );
+        assert!(
+            (four.w - 160.0).abs() < 0.5 && (five.w - 160.0).abs() < 0.5,
+            "the pair beyond the seam was squeezed under the minimum: {four:?} {five:?}"
+        );
+        assert!(
+            (five.x + five.w - 988.0).abs() < 0.5,
+            "and the far edge stayed against the container: {five:?}"
+        );
+    }
+
+    /// **A drag on a seam that is already under the minimum does not jump.**
+    /// The #124 class of bug, through a floor instead of a skew: clamping a
+    /// ratio that is outside its range moves the seam on the first frame of
+    /// the drag, with the pointer still where it pressed.
+    ///
+    /// Window 1 is dragged to 328 wide with no minimum, then a 600 minimum is
+    /// put on it. Handed its own edge, nothing moves. Asked to shrink further,
+    /// nothing moves. Asked to grow, it follows -- until window 2, at 636 and
+    /// so over the floor, reaches 600 on the other side of the seam.
+    #[test]
+    fn a_drag_on_a_seam_already_under_the_minimum_does_not_jump() {
+        let settings = floored(12.0, 600.0, 96.0);
+        let lopsided = || {
+            let mut tiling = quad(free(12.0));
+            tiling.drag_seam(1, Edge::Right, (340.0, 150.0), area(), free(12.0));
+            tiling
+        };
+        let before = every_rect(&lopsided(), area(), settings);
+        let one = rect_in(&lopsided(), 1, area(), settings);
+        assert!(
+            (one.x + one.w - 340.0).abs() < 0.5,
+            "the premise: window 1's right edge at 340: {one:?}"
+        );
+
+        for (to, says) in [
+            (340.0, "handed its own edge"),
+            (300.0, "asked to shrink a tile already under the minimum"),
+        ] {
+            let mut tiling = lopsided();
+            tiling.drag_seam(1, Edge::Right, (to, 150.0), area(), settings);
+            assert_eq!(
+                every_rect(&tiling, area(), settings),
+                before,
+                "{says}, the seam moved"
+            );
+        }
+
+        let mut tiling = lopsided();
+        tiling.drag_seam(1, Edge::Right, (350.0, 150.0), area(), settings);
+        let one = rect_in(&tiling, 1, area(), settings);
+        assert!(
+            (one.x + one.w - 350.0).abs() < 0.5,
+            "growing the small side was refused: {one:?}"
+        );
+
+        tiling.drag_seam(1, Edge::Right, (900.0, 150.0), area(), settings);
+        let two = rect_in(&tiling, 2, area(), settings);
+        assert!(
+            (two.w - 600.0).abs() < 0.5,
+            "the far side went under its own minimum: {two:?}"
+        );
+    }
+
+    /// With both sides of a seam under the minimum, any move shrinks one of
+    /// them, so the seam holds still. The quad's columns are 482 each, both
+    /// under 600.
+    #[test]
+    fn a_seam_with_both_sides_under_the_minimum_holds_still() {
+        let settings = floored(12.0, 600.0, 96.0);
+        for to in [100.0, 494.0, 900.0] {
+            let mut tiling = quad(free(12.0));
+            let before = every_rect(&tiling, area(), settings);
+            tiling.drag_seam(1, Edge::Right, (to, 150.0), area(), settings);
+            assert_eq!(
+                every_rect(&tiling, area(), settings),
+                before,
+                "dragged to {to}, a seam with no room on either side moved"
+            );
+        }
+    }
+
+    /// **The shipped minimum changes none of the #120 and #124 drags.** Each
+    /// is the drag from `dragged_edge_tests` -- the four lopsided moves of
+    /// `a_window_handed_its_own_edge_does_not_move`, then the window handed
+    /// its own edge, and the two-sided 700 of the #120 case -- run once with
+    /// no minimum and once at 160x96, and the two have to agree to the pixel.
+    /// Every tile involved stays over 160x96, so a floor that moved any of
+    /// them would be a floor clamping where it has no business to.
+    #[test]
+    fn the_shipped_minimum_leaves_every_existing_drag_where_it_was() {
+        let cases: [(u64, Edge, (f64, f64)); 6] = [
+            (1, Edge::Right, (340.0, 150.0)),
+            (2, Edge::Left, (640.0, 150.0)),
+            (1, Edge::Bottom, (250.0, 200.0)),
+            (3, Edge::Top, (250.0, 420.0)),
+            (1, Edge::Right, (700.0, 150.0)),
+            (2, Edge::Left, (700.0, 150.0)),
+        ];
+        for (id, edge, to) in cases {
+            let run = |settings: Settings| {
+                let mut tiling = quad(settings);
+                tiling.drag_seam(id, edge, to, area(), settings);
+                let placed = rect_in(&tiling, id, area(), settings);
+                let own = match edge {
+                    Edge::Left => (placed.x, placed.y + placed.h / 2.0),
+                    Edge::Right => (placed.x + placed.w, placed.y + placed.h / 2.0),
+                    Edge::Top => (placed.x + placed.w / 2.0, placed.y),
+                    Edge::Bottom => (placed.x + placed.w / 2.0, placed.y + placed.h),
+                };
+                tiling.drag_seam(id, edge, own, area(), settings);
+                every_rect(&tiling, area(), settings)
+            };
+            let (without, with) = (run(free(12.0)), run(shipped()));
+            assert!(
+                without
+                    .iter()
+                    .zip(&with)
+                    .all(|((a, left), (b, right))| a == b && near(*left, *right)),
+                "window {id}'s {edge:?} drag to {to:?} came out differently under the \
+                 shipped minimum: {without:?} against {with:?}"
+            );
+        }
+    }
+
+    /// **The keyboard is held to the same floor**, and to the same rule for a
+    /// tile already under it. At a 400 minimum window 1 shrinks to 400 and no
+    /// further. Then, lopsided to 328 and put under a 600 minimum, a press
+    /// that would shrink it does nothing and one that grows it stops where
+    /// window 2 reaches 600.
+    #[test]
+    fn the_keyboard_does_not_shrink_a_tile_under_the_minimum() {
+        let settings = floored(12.0, 400.0, 96.0);
+        let mut tiling = quad(free(12.0));
+        for _ in 0..5 {
+            tiling.resize(1, Axis::Vertical, -0.05, area(), settings);
+        }
+        let one = rect_in(&tiling, 1, area(), settings);
+        assert!((one.w - 400.0).abs() < 0.5, "shrunk past 400: {one:?}");
+
+        let settings = floored(12.0, 600.0, 96.0);
+        let mut tiling = quad(free(12.0));
+        tiling.drag_seam(1, Edge::Right, (340.0, 150.0), area(), free(12.0));
+        let before = every_rect(&tiling, area(), settings);
+        tiling.resize(1, Axis::Vertical, -0.05, area(), settings);
+        assert_eq!(
+            every_rect(&tiling, area(), settings),
+            before,
+            "a press shrank a tile already under the minimum"
+        );
+        tiling.resize(1, Axis::Vertical, 0.05, area(), settings);
+        let two = rect_in(&tiling, 2, area(), settings);
+        assert!(
+            (two.w - 600.0).abs() < 0.5,
+            "growing window 1 took window 2 under the minimum, or stopped short: {two:?}"
+        );
+    }
+
+    /// A split of NaN -- `split = 0/0` in a configuration -- is a seam whose
+    /// ratio is NaN, and [`Tiling::room`] then cannot widen its range to take
+    /// that ratio in. With a minimum no ratio can satisfy -- 600 on each side
+    /// of a 964 span -- the range is empty, which is exactly where `f64::clamp`
+    /// panics, and a panic here is the session gone. The press and the drag
+    /// below have to come back; that is the assertion, with every rect finite
+    /// besides.
+    #[test]
+    fn a_nan_split_leaves_the_clamp_standing() {
+        let broken = Settings {
+            split: f64::NAN,
+            ..floored(12.0, 600.0, 96.0)
+        };
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area(), broken);
+        tiling.insert(2, Some(1), None, area(), broken);
+        tiling.resize(1, Axis::Vertical, 0.05, area(), broken);
+        tiling.drag_seam(1, Edge::Right, (500.0, 300.0), area(), broken);
+        for (id, rect) in tiling.layout(area(), broken) {
+            assert!(
+                rect.w.is_finite() && rect.h.is_finite(),
+                "window {id} was laid out at {rect:?}"
+            );
+        }
     }
 }

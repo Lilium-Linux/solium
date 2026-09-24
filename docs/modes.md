@@ -481,13 +481,21 @@ They are held by the script that made one, not by the compositor:
 
 ```lua
 tree:insert(id, target, x, y, options)
+tree:insert_fitting(id, target, x, y, options)  -- the same, if it keeps options.minimum
+tree:insert_largest(id, options)                -- the largest tile with room
 tree:remove(id)
 tree:contains(id)
 tree:windows()
 tree:layout(options)      -- the slots, to hand to sol.place
-tree:resize(id, "width", share)                        -- keyboard: an axis
+tree:resize(id, "width", share, options)               -- keyboard: an axis
 tree:drag_seam(id, "right", edge_x, edge_y, options)   -- pointer: a side
 ```
+
+`insert` splits whatever it is pointed at, however small that leaves the
+halves. `insert_fitting` and `insert_largest` refuse a split that would leave a
+tile under `options.minimum` -- `{ w = ..., h = ... }`, frame included -- and
+answer `false` with the tree untouched, so a layout can try one, then the
+other, then fall back to `insert`. That is what `tiling.lua` does; see below.
 
 The two resize calls take different things on purpose. A drag names a side —
 the hand is on one specific edge, and which seam moves follows from that. A
@@ -503,16 +511,69 @@ side names — which is what lets a corner drag call it twice with one pair and
 have each axis take its own. Hand it the `edge_x`, `edge_y` a `resize` gave you
 and the gesture is relative; hand it the pointer and you have rebuilt #124.
 The ratio it computes is separately clamped to `0.05..0.95`, so a window shoved
-hard against a seam stops there rather than vanishing. That clamp is the only
-bound on a tiled drag: the compositor sends an unfloored edge, deliberately,
-because a floor measured in a window's pixels cannot bound a seam's position —
-see `Tiling::drag_seam`.
+hard against a seam stops there rather than vanishing, and to whatever keeps
+every tile on either side of the seam at `options.minimum`. Those clamps are
+the only bounds on a tiled drag: the compositor sends an unfloored edge,
+deliberately, because a floor measured in a window's pixels cannot bound a
+seam's position — see `Tiling::drag_seam`. A tile already under the minimum
+is not snapped up to it when grabbed, which would move it on the first frame:
+it can be grown, and not shrunk further. `resize` is bounded the same way when
+it is given `options`; without them, as a script written before #134 calls
+it, only `0.05..0.95` applies.
 
-`options` is a monitor's work area with `gap` and `split` added. Passing the
-monitor in rather than the tree asking for it is what lets one tree per
-workspace *per monitor* exist without any of them knowing about either. Copy
-the rect before adding keys — the one from `sol.monitors()` belongs to the
+`options` is a monitor's work area with `gap`, `split` and `minimum` added.
+Passing the monitor in rather than the tree asking for it is what lets one tree
+per workspace *per monitor* exist without any of them knowing about either.
+Copy the rect before adding keys — the one from `sol.monitors()` belongs to the
 snapshot.
+
+### When a new window has no room
+
+`tiling.lua` gives a new window the tile under the pointer, split across its
+longer side. When that would leave a tile under `config.tiling.minimum` it tries
+the tile's other side — a wide, short tile with no room side by side may still
+have room one above the other — and when neither has room it works through
+`config.tiling.overflow`, in order, until a step places the window:
+
+| step | what it does | when it does nothing |
+|---|---|---|
+| `"largest"` | splits the largest tile on this workspace that has room | no tile has room either way |
+| `"workspace"` | opens the window on the next empty workspace of the monitor it opened on, after the one in view and round again | every workspace has a window on it |
+| `"allow"` | splits the tile under the pointer anyway, below the minimum | never |
+
+The default is `{ "largest", "workspace", "allow" }`. A list that runs out
+ends in `"allow"` regardless, with a line in the log, because a window has to
+go somewhere.
+
+"Empty" does not count a window that is being closed, and with
+`workspaces.per_monitor` off it means empty on every screen, since that
+workspace is every screen at once. The workspaces are the fixed set
+`workspaces.count()` describes, so nothing is ever created. With
+`follow_overflow` on, the view goes with the window as `workspaces.go` takes
+it, keyboard included; off, the window is placed in its tile over there and the
+view stays where it was.
+
+The decision is made at `open`. For a window launched with `sol.spawn` that is
+before its application has connected, so a window that overflows is placed in
+its final tile, on its final workspace, in the same dispatch that opens it --
+not in this workspace first and moved later.
+
+**Only a window being opened overflows, and only while tiling is the layout in
+charge.** Everything that puts an *existing* window back into a tree —
+`tiling.adopt` on switching tiling on, on a reload and on a monitor change;
+`refused`, for a close the application declined; a dialog that stops being
+modal; a drop — never sends it to another workspace, whatever the list says.
+One that has nowhere in particular to go takes the tile `insert` would choose,
+either way, then `"largest"`, then `"allow"`. A refused window and a dropped
+one go back to the tile they were in or were let go over, either way, and below
+the minimum if that is what it takes: the largest tile is somewhere else, and a
+refused window's arrangement has to come back as it was. And while floating or
+scrolling is in charge, `tiling.lua` still keeps new windows in its trees for
+later, the same way, without sending any of them anywhere.
+
+The minimum is a tile's, not an application's: the tile is decided before any
+application exists to have an opinion. An application's own minimum size is
+#115.
 
 ## A whole mode
 

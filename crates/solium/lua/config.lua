@@ -442,6 +442,58 @@ local defaults = {
         -- Where a split falls, as a share of the window being divided.
         -- Hyprland calls this dwindle:default_split_ratio.
         split = 0.5,
+
+        -- The smallest a tile may be, frame included, in logical pixels.
+        --
+        -- A new window that would make a tile smaller than this goes where
+        -- `overflow` says instead. And a seam cannot be dragged, or moved from
+        -- the keyboard, to make a tile smaller than this; a tile that is
+        -- already smaller -- `"allow"` below makes them -- can be grown and
+        -- not shrunk, and does not jump when you grab it.
+        --
+        -- A tile and not an application's own minimum size: a window you
+        -- launch from here is given its tile the moment you ask for it,
+        -- before its application has started, so there is no application yet
+        -- to ask.
+        --
+        -- 0 on a side is no minimum on that side.
+        minimum = { w = 160, h = 96 },
+
+        -- Where a new window goes when splitting the tile under the pointer
+        -- would make a tile smaller than `minimum` -- side by side and one
+        -- above the other, since a tile with no room one way may have it the
+        -- other. Tried in order; the first with room wins.
+        --
+        --   "largest"    split the largest tile on this workspace that has
+        --                room for it
+        --   "workspace"  open it on the next empty workspace of the monitor
+        --                it opened on. The workspaces are the fixed set
+        --                `workspaces` describes, so when none is empty this
+        --                step does nothing and the next one runs.
+        --   "allow"      split the tile under the pointer anyway, below
+        --                `minimum`
+        --
+        -- A list that runs out without placing the window -- one with no
+        -- "allow" -- ends in "allow" all the same, with a line in the log: a
+        -- window has to go somewhere. Put "workspace" first and a window goes
+        -- straight to the next empty workspace once the tile under the pointer
+        -- is full; leave "workspace" out and no window ever changes workspace
+        -- for want of room.
+        --
+        -- Only a window being opened overflows, and only while tiling is the
+        -- layout in charge. A window already open that goes back into the
+        -- arrangement -- tiling switched on, a reload, a monitor change, a
+        -- close the application refused -- never leaves its workspace for
+        -- this: it takes a tile with room if there is one and a tile under
+        -- `minimum` if there is not. A refused window and a dropped one go
+        -- back to the tile where they were, whatever its size.
+        overflow = { "largest", "workspace", "allow" },
+
+        -- Whether the view goes with a window that opened on another
+        -- workspace, the way `super+<n>` takes it there, keyboard included.
+        -- false opens it there and leaves you where you are.
+        follow_overflow = true,
+
         motion = { duration = 240, easing = "outCubic" },
         -- The shorter feel for a window snapping back after a drag.
         snap = { duration = 180, easing = "outCubic" },
