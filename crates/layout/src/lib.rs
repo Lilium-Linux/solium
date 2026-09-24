@@ -83,6 +83,8 @@ pub struct Settings {
     pub padding: f64,
     /// Where a dwindle split falls, as a share of the space being divided.
     pub split: f64,
+    /// The smallest a dwindle tile may be. See [`Minimum`].
+    pub minimum: Minimum,
 }
 
 impl Default for Settings {
@@ -93,8 +95,30 @@ impl Default for Settings {
             column: 0.5,
             padding: 24.0,
             split: 0.5,
+            minimum: Minimum::default(),
         }
     }
+}
+
+/// The smallest a dwindle tile may be, frame included, in the caller's units.
+///
+/// A tile and not a window's own minimum size. A new window's tile is decided
+/// when the window is asked for, before its application has connected, so
+/// there is no client yet to say how small it can go (#134).
+///
+/// Zero on a side is no minimum on that side, and zero on both is the default
+/// here: a caller that never names one -- the preview, a script written before
+/// #134 -- gets exactly the arithmetic it had. The compositor's tiling passes
+/// `config.tiling.minimum` in every options table it builds.
+///
+/// Read by [`tree::Tiling::insert_fitting`] and [`tree::Tiling::insert_largest`],
+/// which refuse a split that would go under it, and by
+/// [`tree::Tiling::drag_seam`] and [`tree::Tiling::resize`], which will not move
+/// a seam to make a tile any smaller than it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Minimum {
+    pub w: f64,
+    pub h: f64,
 }
 
 /// A column of the scrolling strip: how wide, and how many windows share it.

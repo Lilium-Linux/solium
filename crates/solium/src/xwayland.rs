@@ -348,6 +348,11 @@ impl XwmHandler for Solium {
         // makes this call a no-op through the gate rather than a caller that
         // remembered.
         self.refused_with_a_dialog(&element);
+
+        // No keyboard yet, as for an xdg window in `new_toplevel`: it is given
+        // at the window's first frame, once a layout has said where it goes,
+        // by `Solium::offer_keyboard`. X11 windows are named in that rule
+        // (`first_focus`) because for a while they were in none: see there.
     }
 
     /// A property changed on a window we already know about.

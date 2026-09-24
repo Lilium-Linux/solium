@@ -28,9 +28,9 @@ use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use mlua::{IntoLua, Lua, Table, Value};
-use smithay::utils::{Logical, Point};
+use smithay::utils::{Logical, Point, Rectangle};
 
-use crate::present::Curve;
+use crate::present::{Curve, Frame};
 
 /// A rectangle as a script sees it: plain numbers, no coordinate-space types.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -49,10 +49,6 @@ impl Rect {
         table.set("w", self.w)?;
         table.set("h", self.h)?;
         Ok(table)
-    }
-
-    fn contains(self, x: f64, y: f64) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
     }
 }
 
@@ -109,8 +105,9 @@ pub(crate) struct WindowInfo {
     /// The window including its frame, which is what "the window" means to
     /// anything positioning it.
     pub(crate) rect: Rect,
-    /// Where it is being drawn right now, which in a mode is somewhere else.
-    pub(crate) drawn: Rect,
+    /// Where it is being drawn right now, which in a mode is somewhere else --
+    /// in the two terms the compositor's own hit test asks. See [`Drawn`].
+    pub(crate) drawn: Drawn,
     pub(crate) title: String,
     pub(crate) focused: bool,
     /// Which monitor it is on, by name.
@@ -154,6 +151,35 @@ pub(crate) struct WindowInfo {
     pub(crate) leaving: bool,
 }
 
+/// How a window is drawn this instant, as `Solium::window_under` reads it:
+/// the slot it lives at, which is what decides the screens that draw it at all
+/// ([`crate::render::drawn_on`]), and the frame it is drawn with, which is
+/// what decides the pixels it owns on them ([`Frame::covers`]).
+///
+/// **A rectangle until #134's fourth review**, and a rectangle can say
+/// neither. `sol.window_at` asked it whether it contained the point, so a
+/// window on a hidden workspace carried over the next monitor -- which never
+/// draws it -- was under the cursor there, and so was a window fading out at
+/// opacity zero over the neighbour that grew into its place (#135). Handed to
+/// scripts only through `sol.window_at`, which asks [`crate::state::owns`] of
+/// it, the rule the Rust hit test asks; nothing reads it in Lua.
+/// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws` and
+/// `sol_window_at_over_a_window_fading_out_answers_the_neighbour_in_its_place`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Drawn {
+    pub(crate) slot: Rectangle<i32, Logical>,
+    pub(crate) frame: Frame,
+}
+
+impl Default for Drawn {
+    fn default() -> Self {
+        Self {
+            slot: Rectangle::default(),
+            frame: Frame::real(Rectangle::default()),
+        }
+    }
+}
+
 /// A monitor as a script sees it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MonitorInfo {
@@ -193,6 +219,12 @@ pub(crate) struct Snapshot {
     /// because almost every script wants exactly this and nothing else.
     pub(crate) work_area: Rect,
     pub(crate) cursor: (f64, f64),
+    /// Every monitor's rectangle, as `Solium::window_under` is handed them:
+    /// the screens [`crate::state::owns`] asks about for `sol.window_at`.
+    /// Empty in a snapshot with no screens, which `owns` reads as "not known
+    /// to be nowhere", as the compositor's own walk does.
+    /// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
+    pub(crate) screens: Vec<Rectangle<i32, Logical>>,
 }
 
 /// How a batch of transforms should animate.
@@ -1134,7 +1166,36 @@ fn tuning(options: &Table) -> mlua::Result<Settings> {
         split: options
             .get::<Option<f64>>("split")?
             .unwrap_or(defaults.split),
+        minimum: minimum_from(options),
     })
+}
+
+/// `options.minimum`, the smallest a dwindle tile may be: `{ w = ..., h = ... }`.
+///
+/// Absent is no minimum, which is what every options table held before #134.
+/// So is a side that is not a finite size of zero or more -- a string, a
+/// negative, `0/0` -- on that side only. Quietly, unlike `scroller_from`,
+/// because this runs on every layout call and a line per call would bury the
+/// log; `tiling.lua` checks `config.tiling.minimum` itself before handing it
+/// over and says so there, once per value. See
+/// `a_minimum_that_is_not_a_size_is_named_once_and_ignored`.
+fn minimum_from(options: &Table) -> solium_layout::Minimum {
+    let Ok(Value::Table(minimum)) = options.get::<Value>("minimum") else {
+        return solium_layout::Minimum::default();
+    };
+    let side = |name: &str| {
+        minimum
+            .get::<Value>(name)
+            .ok()
+            .as_ref()
+            .and_then(number)
+            .filter(|size| size.is_finite() && *size >= 0.0)
+            .unwrap_or(0.0)
+    };
+    solium_layout::Minimum {
+        w: side("w"),
+        h: side("h"),
+    }
 }
 
 /// Which way a script means a seam to run.
@@ -1956,18 +2017,41 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // Hit-testing against *drawn* rects, not real ones: in a mode a window is
     // where the script put it, and asking the compositor is what keeps the
     // script from reimplementing the transform to find out.
+    //
+    // **And asked exactly as the compositor asks it**, through
+    // `crate::state::owns` -- the predicate `Solium::window_under` walks with:
+    // on a screen that draws the window, and inside what it paints there.
+    // Until #134's fourth review this asked only whether the drawn rectangle
+    // held the point. With two monitors side by side the left one's hidden
+    // workspace is carried over the right one, so a click on empty space
+    // there in overview found a window nobody could see and `sol.focus` gave
+    // it the keyboard; a window fading out at opacity zero was found over the
+    // neighbour that grew into its place, so a drop there went nowhere (#135).
+    // `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`,
+    // `on_two_monitors_an_overview_click_on_the_right_monitor_leaves_the_keyboard_on_screen`
+    // and `sol_window_at_over_a_window_fading_out_answers_the_neighbour_in_its_place`.
     sol.set(
         "window_at",
         lua.create_function(|lua, (x, y, skip): (f64, f64, Option<u64>)| {
+            let snapshot = snapshot(lua)?;
+            let point = Point::<f64, Logical>::from((x, y));
             // `skip` is what makes this usable while dragging. A dragged
             // window follows the cursor, so it is always the topmost thing
             // under it — ask without skipping and the answer is always the
             // window in your hand, which is why dropping one onto another
             // never swapped anything.
-            Ok(snapshot(lua)?
+            Ok(snapshot
                 .windows
                 .iter()
-                .find(|window| Some(window.id) != skip && window.drawn.contains(x, y))
+                .find(|window| {
+                    Some(window.id) != skip
+                        && crate::state::owns(
+                            window.drawn.slot,
+                            window.drawn.frame,
+                            point,
+                            &snapshot.screens,
+                        )
+                })
                 .map(|window| window.id))
         })?,
     )?;
@@ -2942,6 +3026,30 @@ impl mlua::UserData for TilingTree {
             },
         );
 
+        // `insert` with `options.minimum` under it (#134): the same target and
+        // the same side, then the other axis, and `false` -- with the tree
+        // untouched -- when neither leaves both halves at the minimum. What a
+        // layout tries first, before anything in `config.tiling.overflow`.
+        methods.add_method_mut(
+            "insert_fitting",
+            |_, this, (id, target, x, y, options): (u64, Option<u64>, Option<f64>, Option<f64>, Table)| {
+                let at = x.zip(y);
+                Ok(this
+                    .0
+                    .insert_fitting(id, target, at, area(&options)?, tuning(&options)?))
+            },
+        );
+
+        // `"largest"` in `config.tiling.overflow`: split the largest tile that
+        // has room for another window at `options.minimum`, or answer `false`
+        // and leave the tree alone. No target and no pointer, because the tile
+        // under the pointer is the one that has just been found to be full.
+        methods.add_method_mut("insert_largest", |_, this, (id, options): (u64, Table)| {
+            Ok(this
+                .0
+                .insert_largest(id, area(&options)?, tuning(&options)?))
+        });
+
         methods.add_method_mut("remove", |_, this, id: u64| {
             this.0.remove(id);
             Ok(())
@@ -2957,14 +3065,26 @@ impl mlua::UserData for TilingTree {
         // own doc has always had right. The trailing seam is preferred and the
         // leading one is a fallback only when there is no trailing seam at all
         // — the window is against its container on that side. A trailing seam
-        // that exists but is already at the 0.95 clamp does nothing, and does
-        // not hand the press to the seam on the other side. That is the
-        // behaviour; whether it is the behaviour a user expects is a separate
-        // question from whether the comment describes it.
-        methods.add_method_mut("resize", |_, this, (id, axis, by): (u64, String, f64)| {
-            this.0.resize(id, axis_named(&axis), by);
-            Ok(())
-        });
+        // that exists but is already at its clamp -- 0.95, or since #134 the
+        // point where a tile beside it reaches `options.minimum` -- does
+        // nothing, and does not hand the press to the seam on the other side.
+        // That is the behaviour; whether it is the behaviour a user expects is
+        // a separate question from whether the comment describes it.
+        //
+        // `options` is optional because it was not an argument before #134,
+        // and a script written then still passes three. Without it there is no
+        // minimum and nothing to measure one in, which is the bound this had.
+        methods.add_method_mut(
+            "resize",
+            |_, this, (id, axis, by, options): (u64, String, f64, Option<Table>)| {
+                let (area, settings) = match options {
+                    Some(options) => (area(&options)?, tuning(&options)?),
+                    None => (Slot::default(), Settings::default()),
+                };
+                this.0.resize(id, axis_named(&axis), by, area, settings);
+                Ok(())
+            },
+        );
 
         // The drag path: `edge` is the side the pointer has hold of, which is
         // what the `resize` event hands the script. Not an axis — see
@@ -3451,19 +3571,22 @@ mod tests {
         assert_eq!(normalise_combo("ctrl+ctrl+c"), "ctrl+c");
     }
 
+    /// What `sol.window_at` asks of a window, [`crate::state::owns`], which
+    /// was `Rect::contains` on the drawn rectangle until #134's fourth review.
     #[test]
-    fn a_rect_covers_its_own_top_left_but_not_its_bottom_right() {
-        let rect = Rect {
-            x: 10.0,
-            y: 20.0,
-            w: 100.0,
-            h: 50.0,
+    fn a_drawn_window_covers_its_own_top_left_but_not_its_bottom_right() {
+        let drawn = Rectangle::<f64, Logical>::new((10.0, 20.0).into(), (100.0, 50.0).into());
+        let slot = drawn.to_i32_round();
+        let frame = Frame {
+            rect: drawn,
+            ..Frame::real(slot)
         };
-        assert!(rect.contains(10.0, 20.0));
-        assert!(rect.contains(109.0, 69.0));
+        let covers = |x: f64, y: f64| crate::state::owns(slot, frame, (x, y).into(), &[]);
+        assert!(covers(10.0, 20.0));
+        assert!(covers(109.0, 69.0));
         // Exclusive, so adjacent thumbnails cannot both claim the same pixel.
-        assert!(!rect.contains(110.0, 70.0));
-        assert!(!rect.contains(9.0, 20.0));
+        assert!(!covers(110.0, 70.0));
+        assert!(!covers(9.0, 20.0));
     }
 
     /// The whole round trip, without a compositor: a script binds a key, the
@@ -3504,7 +3627,7 @@ mod tests {
                     w: 800.0,
                     h: 600.0,
                 },
-                drawn: Rect::default(),
+                drawn: Drawn::default(),
                 title: "a window".to_owned(),
                 focused: true,
                 monitor: "test-1".to_owned(),
@@ -3538,6 +3661,7 @@ mod tests {
                 h: 866.0,
             },
             cursor: (0.0, 0.0),
+            screens: Vec::new(),
         };
 
         let outcome = scripts.key("super+space", snapshot);
@@ -4350,7 +4474,7 @@ mod tests {
         let window = |id: u64, modal: bool, parent: Parentage| WindowInfo {
             id,
             rect: Rect::default(),
-            drawn: Rect::default(),
+            drawn: Drawn::default(),
             title: String::new(),
             focused: false,
             monitor: "test-1".to_owned(),
@@ -4396,6 +4520,7 @@ mod tests {
             monitors: Vec::new(),
             work_area: Rect::default(),
             cursor: (0.0, 0.0),
+            screens: Vec::new(),
         }
     }
 
@@ -4829,7 +4954,7 @@ mod tests {
                         w: 800.0,
                         h: 600.0,
                     },
-                    drawn: Rect::default(),
+                    drawn: Drawn::default(),
                     title: String::new(),
                     focused: false,
                     monitor: "test-1".to_owned(),
@@ -4869,6 +4994,7 @@ mod tests {
                 h: 900.0,
             },
             cursor: (0.0, 0.0),
+            screens: Vec::new(),
         }
     }
 
@@ -6049,7 +6175,9 @@ mod shipped {
 /// is honest about where the seam is.
 #[cfg(test)]
 mod dialogs {
-    use super::{Command, MonitorInfo, Parentage, Rect, Scripts, Snapshot, WindowInfo};
+    use super::{Command, Drawn, MonitorInfo, Parentage, Rect, Scripts, Snapshot, WindowInfo};
+    use crate::present::Frame;
+    use smithay::utils::{Logical, Rectangle};
 
     /// One screen, no bar, round numbers so a wrong answer reads as a wrong
     /// place rather than as arithmetic.
@@ -6170,13 +6298,30 @@ mod dialogs {
                 w,
                 h,
             },
-            drawn: Rect::default(),
+            drawn: Drawn::default(),
             title: format!("window {id}"),
             focused: false,
             monitor: "DP-1".to_owned(),
             modal: false,
             parent: Parentage::None,
             leaving: false,
+        }
+    }
+
+    /// Drawn at `rect`, where it lives: a window at rest, as the compositor
+    /// hands it to a script that has just placed it -- so `sol.window_at`
+    /// finds it there, which is what makes
+    /// `a_dropped_window_goes_to_the_tile_it_was_let_go_over` a drop onto
+    /// window 1. No screens in these snapshots, so no screen refuses it.
+    fn drawn(rect: Rect) -> Drawn {
+        let rect = Rectangle::<f64, Logical>::new((rect.x, rect.y).into(), (rect.w, rect.h).into());
+        let slot = rect.to_i32_round();
+        Drawn {
+            slot,
+            frame: Frame {
+                rect,
+                ..Frame::real(slot)
+            },
         }
     }
 
@@ -6760,7 +6905,7 @@ mod dialogs {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
                             rect,
-                            drawn: rect,
+                            drawn: drawn(rect),
                             leaving: leaving.contains(&id),
                             ..window(id, rect.w, rect.h)
                         }
@@ -7391,6 +7536,951 @@ mod dialogs {
             }
         }
     }
+
+    /// **#134: a configurable minimum tile, and a new window with no room
+    /// overflowing -- by default to the next empty workspace.**
+    ///
+    /// Against the shipped `tiling.lua` and `workspaces.lua`, as the modules
+    /// above run them. The chain is `tiling.lua`'s and the tree steps it calls
+    /// are `solium_layout::tree::minimum_tests`'; this is the chain.
+    ///
+    /// Most tests set a minimum of 1300x800 on a 2560x1440 screen at the
+    /// shipped 12px gap. The first window takes the whole 2536x1416 tile, and
+    /// no split of that has room -- side by side is 1262 wide, one above the
+    /// other is 702 high -- so a workspace holds one window unless something
+    /// allows a second, and where each window goes is never in doubt.
+    mod overflow {
+        use super::super::Outcome;
+        use super::*;
+
+        /// [`AREA`] less the shipped gap all round: the one tile a workspace
+        /// with one window has.
+        const FULL: Rect = Rect {
+            x: 12.0,
+            y: 12.0,
+            w: 2536.0,
+            h: 1416.0,
+        };
+
+        /// The shipped layouts in the order `init.lua` requires them, `before`
+        /// run ahead of them, and the entry point for a reload. A directory
+        /// per call, for the reason [`scripts`] gives.
+        ///
+        /// `scrolling.lua` too, although no test here switches it on: every
+        /// layout hears `open` whether or not it is in charge, and until #134's
+        /// review this harness left it out -- which is how a strip that was
+        /// not in charge handing the keyboard to a window parked on another
+        /// workspace went unseen. See
+        /// `with_follow_overflow_off_the_window_opens_there_and_the_view_stays`.
+        fn tiling_with(before: &str) -> (Scripts, std::path::PathBuf) {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let directory = std::env::temp_dir().join(format!("solium-overflow-{serial}"));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    "package.path = {shipped:?} .. \"/?.lua\"\n\
+                     {before}\n\
+                     require(\"modes\")\n\
+                     require(\"workspaces\")\n\
+                     require(\"tiling\")\n\
+                     require(\"scrolling\")\n",
+                    shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                ),
+            )
+            .expect("writing the entry point");
+            let scripts = Scripts::load(&entry).expect("loading the shipped layout");
+            (scripts, entry)
+        }
+
+        /// Everything `sol.log` is handed, kept in `_G.logged` as well as
+        /// logged. `tiling.lua` looks `sol.log` up when it speaks, so a
+        /// replacement installed before it loads is the one it calls.
+        const CAPTURE: &str = "_G.logged = {}\n\
+             local log = sol.log\n\
+             sol.log = function(message)\n\
+                 _G.logged[#_G.logged + 1] = message\n\
+                 log(message)\n\
+             end";
+
+        fn logged(scripts: &Scripts) -> String {
+            scripts.evaluate("return table.concat(_G.logged or {}, \"\\n\")")
+        }
+
+        fn minimum(w: u32, h: u32) -> String {
+            format!("require(\"config\").tiling.minimum = {{ w = {w}, h = {h} }}")
+        }
+
+        /// The windows `ids`, where a toplevel maps, with the pointer at
+        /// `cursor`. Nothing here is drawn anywhere, so `sol.window_at`
+        /// finds nothing and the tree's own hit test is what picks the tile
+        /// under the pointer -- the same tile, from the same rectangles, that
+        /// the layout placed.
+        fn desk_at(ids: &[u64], cursor: (f64, f64)) -> Snapshot {
+            Snapshot {
+                cursor,
+                ..snapshot(ids.iter().map(|&id| window(id, 800.0, 600.0)).collect())
+            }
+        }
+
+        /// Windows `ids`, each drawn and placed where `placed` says, the ones
+        /// in `leaving` being closed. What a layout reading the snapshot after
+        /// its own pass would see.
+        fn desk(placed: &HashMap<u64, Rect>, ids: &[u64], leaving: &[u64]) -> Snapshot {
+            snapshot(
+                ids.iter()
+                    .map(|&id| {
+                        let rect = placed.get(&id).copied().unwrap_or_default();
+                        WindowInfo {
+                            rect,
+                            drawn: drawn(rect),
+                            leaving: leaving.contains(&id),
+                            ..window(id, rect.w, rect.h)
+                        }
+                    })
+                    .collect(),
+            )
+        }
+
+        type HashMap<K, V> = std::collections::HashMap<K, V>;
+
+        /// Tiling switched on over an empty desk, so every window after this
+        /// arrives through `open`, as a window does in a session.
+        fn switched_on(scripts: &mut Scripts) {
+            let outcome = scripts.key("super+t", desk_at(&[], (0.0, 0.0)));
+            assert!(outcome.handled, "the tiling key was not handled");
+        }
+
+        /// The workspace a window belongs to, as `workspaces.at` answers.
+        fn workspace_of(scripts: &Scripts, id: u64) -> String {
+            scripts.evaluate(&format!(
+                "return tostring(require(\"workspaces\").at({id}, \"DP-1\"))"
+            ))
+        }
+
+        /// The workspace `DP-1` is showing.
+        fn showing(scripts: &Scripts) -> String {
+            scripts.evaluate("return tostring(require(\"workspaces\").on(\"DP-1\"))")
+        }
+
+        fn last_focus(commands: &[Command]) -> Option<u64> {
+            commands.iter().rev().find_map(|command| match command {
+                Command::Focus { id } => Some(*id),
+                _ => None,
+            })
+        }
+
+        fn same(left: Rect, right: Rect) -> bool {
+            about(left.x, right.x)
+                && about(left.y, right.y)
+                && about(left.w, right.w)
+                && about(left.h, right.h)
+        }
+
+        /// Every rect `commands` placed window `id` at, in order.
+        fn places_of(commands: &[Command], id: u64) -> Vec<Rect> {
+            commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Place {
+                        id: placed, rect, ..
+                    } if *placed == id => Some(*rect),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// **A window with no room opens on the next empty workspace, and the
+        /// view goes with it, keyboard included.**
+        ///
+        /// Window 2 has no room beside window 1 (see the module note), and the
+        /// default list is largest, workspace, allow: no tile has room, so it
+        /// is workspace 2. The view switches there as `super+2` would -- the
+        /// status line says so -- the keyboard is handed to the new window,
+        /// and the window is placed once, at its final tile. Window 1 stays
+        /// where it was, on workspace 1.
+        #[test]
+        fn a_window_with_no_room_opens_on_the_next_empty_workspace_and_the_view_follows() {
+            let (mut scripts, _) = tiling_with(&minimum(1300, 800));
+            switched_on(&mut scripts);
+            let first = open(&mut scripts, 1, &[1]);
+            assert!(
+                places_of(&first.commands, 1)
+                    .last()
+                    .is_some_and(|rect| same(*rect, FULL)),
+                "the premise: window 1 takes the whole screen: {:?}",
+                first.commands
+            );
+
+            let told = open(&mut scripts, 2, &[1, 2]);
+            assert_eq!(workspace_of(&scripts, 2), "2", "window 2 was not sent on");
+            assert_eq!(workspace_of(&scripts, 1), "1", "window 1 moved workspace");
+            assert_eq!(showing(&scripts), "2", "the view did not follow");
+            assert_eq!(told.status.as_deref(), Some("workspace 2"));
+            assert_eq!(
+                last_focus(&told.commands),
+                Some(2),
+                "the keyboard was left on a workspace nobody is looking at"
+            );
+            let placed = places_of(&told.commands, 2);
+            assert!(
+                !placed.is_empty() && placed.iter().all(|rect| same(*rect, FULL)),
+                "window 2 was placed somewhere on its way to its tile: {placed:?}"
+            );
+            assert!(
+                places_of(&told.commands, 1).is_empty(),
+                "window 1 was placed again, from a workspace that is not in view"
+            );
+        }
+
+        /// **`follow_overflow = false`: the window opens over there, and the
+        /// view stays.** It is still placed in its tile, and grouped onto its
+        /// desk in the same dispatch, so it is never drawn over this one.
+        ///
+        /// And no script hands it the keyboard. `scrolling.lua`, which was not
+        /// in charge, did: its `open` handler inserted the window into a strip
+        /// and focused the strip's new column, so the keyboard followed the
+        /// window to a desk nobody could see (#134 review). This checks the
+        /// scripts; that the compositor does not give it the keyboard either is
+        /// `a_window_that_overflows_to_a_hidden_workspace_does_not_take_the_keyboard`
+        /// in `state.rs`, which types and sees where the key lands.
+        #[test]
+        fn with_follow_overflow_off_the_window_opens_there_and_the_view_stays() {
+            let (mut scripts, _) = tiling_with(&format!(
+                "{}\nrequire(\"config\").tiling.follow_overflow = false",
+                minimum(1300, 800)
+            ));
+            switched_on(&mut scripts);
+            let _ = open(&mut scripts, 1, &[1]);
+            let told = open(&mut scripts, 2, &[1, 2]);
+
+            assert_eq!(workspace_of(&scripts, 2), "2", "window 2 was not sent on");
+            assert_eq!(showing(&scripts), "1", "the view went with it");
+            assert_eq!(
+                last_focus(&told.commands),
+                None,
+                "the keyboard was moved: {:?}",
+                told.commands
+            );
+            assert!(
+                places_of(&told.commands, 2)
+                    .last()
+                    .is_some_and(|rect| same(*rect, FULL)),
+                "window 2 was not placed in its tile over there: {:?}",
+                told.commands
+            );
+            let grouped = told.commands.iter().any(|command| {
+                matches!(
+                    command,
+                    Command::Group { name, selection: Some(selection), .. }
+                        if name == "desk-2@DP-1" && selection.windows.contains(&2)
+                )
+            });
+            assert!(
+                grouped,
+                "window 2 was not put on its own desk in the same dispatch: {:?}",
+                told.commands
+            );
+        }
+
+        /// **With every workspace taken, `"workspace"` does nothing and
+        /// `"allow"` places the window here, under the minimum.** The
+        /// workspaces are a fixed four, so there is none to make. `"allow"`
+        /// is a step the list names, so this is not a fall-through and is not
+        /// logged as one.
+        #[test]
+        fn with_every_workspace_taken_the_window_is_allowed_under_the_minimum() {
+            let (mut scripts, _) = tiling_with(&format!("{CAPTURE}\n{}", minimum(1300, 800)));
+            switched_on(&mut scripts);
+            let _ = scripts.evaluate(
+                "local workspaces = require(\"workspaces\")\n\
+                 workspaces.of[12] = 2\n\
+                 workspaces.of[13] = 3\n\
+                 workspaces.of[14] = 4\n\
+                 return \"\"",
+            );
+            assert_eq!(
+                scripts.evaluate("return tostring(require(\"workspaces\").count())"),
+                "4"
+            );
+            let _ = open(&mut scripts, 1, &[1, 12, 13, 14]);
+            let told = open(&mut scripts, 2, &[1, 2, 12, 13, 14]);
+
+            assert_eq!(workspace_of(&scripts, 2), "1");
+            assert_eq!(showing(&scripts), "1");
+            let placed = placed(&told.commands);
+            let (one, two) = (placed.get(&1).copied(), placed.get(&2).copied());
+            assert!(
+                one.zip(two).is_some_and(|(one, two)| !overlap(one, two)
+                    && one.w < 1300.0
+                    && two.w < 1300.0),
+                "the two were not split under the minimum: {one:?} {two:?}"
+            );
+            assert!(
+                !logged(&scripts).contains("below tiling.minimum"),
+                "an \"allow\" the list names was reported as a fall-through: {}",
+                logged(&scripts)
+            );
+        }
+
+        /// **A list with no `"allow"` still places the window, and says so.**
+        /// `{ "largest" }` finds no tile with room, and the list is over; the
+        /// window splits the tile under the pointer all the same, on this
+        /// workspace, and the log says it went under the minimum.
+        #[test]
+        fn a_list_without_allow_still_places_the_window_and_says_so() {
+            let (mut scripts, _) = tiling_with(&format!(
+                "{CAPTURE}\n{}\nrequire(\"config\").tiling.overflow = {{ \"largest\" }}",
+                minimum(1300, 800)
+            ));
+            switched_on(&mut scripts);
+            let _ = open(&mut scripts, 1, &[1]);
+            let told = open(&mut scripts, 2, &[1, 2]);
+
+            assert_eq!(
+                workspace_of(&scripts, 2),
+                "1",
+                "a list with no workspace step moved it"
+            );
+            let placed = placed(&told.commands);
+            assert!(
+                placed.get(&2).is_some_and(|rect| rect.w < 1300.0) && placed.contains_key(&1),
+                "window 2 was not placed beside window 1: {placed:?}"
+            );
+            let said = logged(&scripts);
+            assert!(
+                said.contains("window 2") && said.contains("below tiling.minimum"),
+                "the fall-through was silent: {said:?}"
+            );
+        }
+
+        /// Four windows at 600x750, each opened with the pointer at the left
+        /// edge. 2 goes left of 1, 1262 wide each. 3 has no room one above the
+        /// other in 2 -- 702 high -- and so turns, and goes beside it at 625.
+        /// 4 has room in 3 neither way, while 1, the largest tile, still has
+        /// room across.
+        fn four_at_the_left_edge(before: &str) -> (Scripts, Outcome) {
+            let (mut scripts, _) = tiling_with(&format!("{}\n{before}", minimum(600, 750)));
+            switched_on(&mut scripts);
+            let at = (100.0, 700.0);
+            let _ = scripts.opened(1, desk_at(&[1], at));
+            let _ = scripts.opened(2, desk_at(&[1, 2], at));
+            let third = scripts.opened(3, desk_at(&[1, 2, 3], at));
+            let placed = placed(&third.commands);
+            assert!(
+                placed
+                    .get(&3)
+                    .is_some_and(|rect| about(rect.w, 625.0) && about(rect.h, 1416.0))
+                    && placed.get(&2).is_some_and(|rect| about(rect.w, 625.0)),
+                "the premise: window 3 turned and went beside window 2: {placed:?}"
+            );
+            let fourth = scripts.opened(4, desk_at(&[1, 2, 3, 4], at));
+            (scripts, fourth)
+        }
+
+        /// **The steps are tried in the order written.** Window 4 has no room
+        /// under the pointer and window 1 has room across (see
+        /// [`four_at_the_left_edge`]): the shipped order puts it there, and
+        /// `workspace` ahead of `largest` sends it to workspace 2 instead.
+        #[test]
+        fn the_steps_are_tried_in_the_order_written() {
+            let (shipped, told) = four_at_the_left_edge("");
+            assert_eq!(
+                workspace_of(&shipped, 4),
+                "1",
+                "largest comes first by default"
+            );
+            let one = placed(&told.commands).get(&1).copied();
+            let four = placed(&told.commands).get(&4).copied();
+            assert!(
+                one.zip(four).is_some_and(|(one, four)| about(one.w, 625.0)
+                    && about(four.w, 625.0)
+                    && four.x > one.x
+                    && one.x > 1200.0),
+                "window 4 did not split window 1, the largest tile with room: {one:?} {four:?}"
+            );
+
+            let (reordered, told) = four_at_the_left_edge(
+                "require(\"config\").tiling.overflow = { \"workspace\", \"largest\", \"allow\" }",
+            );
+            assert_eq!(
+                workspace_of(&reordered, 4),
+                "2",
+                "workspace was written first"
+            );
+            assert!(
+                placed(&told.commands)
+                    .get(&4)
+                    .is_some_and(|rect| same(*rect, FULL)),
+                "window 4 is alone on workspace 2 and has the whole of it: {:?}",
+                told.commands
+            );
+        }
+
+        /// **A window being closed is room for the next one** (#128). The
+        /// layout takes it out of its tree at `closing`, and its neighbour
+        /// grows into the space -- so the next window has room there and stays
+        /// on this workspace, where a tile still held for the closing window
+        /// would have sent it to the next.
+        ///
+        /// And a workspace whose only window is being closed is empty: the
+        /// next window with no room goes there, and it is that window the
+        /// keyboard goes to, not the one fading out ahead of it in the list.
+        #[test]
+        fn a_window_being_closed_is_room_for_the_next_one() {
+            let (mut scripts, _) = tiling_with(&minimum(1200, 800));
+            switched_on(&mut scripts);
+            let _ = open(&mut scripts, 1, &[1]);
+            let second = open(&mut scripts, 2, &[1, 2]);
+            let before = placed(&second.commands);
+            assert!(
+                before
+                    .get(&1)
+                    .zip(before.get(&2))
+                    .is_some_and(|(one, two)| about(one.w, 1262.0) && about(two.w, 1262.0)),
+                "the premise: 1 and 2 side by side, with no room left: {before:?}"
+            );
+            let _ = scripts.closing(2, desk(&before, &[1, 2], &[2]));
+            let _ = scripts.opened(
+                3,
+                Snapshot {
+                    cursor: (500.0, 500.0),
+                    ..desk(&before, &[1, 2, 3], &[2])
+                },
+            );
+            assert_eq!(
+                workspace_of(&scripts, 3),
+                "1",
+                "the closing window's tile was counted as taken"
+            );
+
+            let (mut scripts, _) = tiling_with(&minimum(1300, 800));
+            switched_on(&mut scripts);
+            let _ = scripts.evaluate("require(\"workspaces\").of[5] = 2\nreturn \"\"");
+            let _ = open(&mut scripts, 1, &[5, 1]);
+            let mut windows = vec![
+                window(5, 800.0, 600.0),
+                window(1, 800.0, 600.0),
+                window(3, 800.0, 600.0),
+            ];
+            windows[0].leaving = true;
+            let told = scripts.opened(
+                3,
+                Snapshot {
+                    cursor: (500.0, 500.0),
+                    ..snapshot(windows)
+                },
+            );
+            assert_eq!(
+                workspace_of(&scripts, 3),
+                "2",
+                "a workspace holding only a closing window was counted as taken"
+            );
+            assert_eq!(last_focus(&told.commands), Some(3));
+        }
+
+        /// **A layout not in charge sends nothing to another workspace.**
+        /// Tiling hears `open` while floating is the mode and keeps the window
+        /// in its tree for later. That tree is full, and the window goes into
+        /// it anyway -- under the minimum -- rather than off to workspace 2
+        /// with the view behind it, on a desktop tiling is not arranging.
+        #[test]
+        fn a_layout_not_in_charge_sends_nothing_to_another_workspace() {
+            let (mut scripts, _) = tiling_with(&minimum(1300, 800));
+            let _ = open(&mut scripts, 1, &[1]);
+            let told = open(&mut scripts, 2, &[1, 2]);
+            assert_eq!(workspace_of(&scripts, 2), "1");
+            assert_eq!(showing(&scripts), "1");
+            assert_eq!(last_focus(&told.commands), None);
+            let held = scripts.evaluate(
+                "local trees = require(\"tiling\").trees\n\
+                 local out = {}\n\
+                 for key, tree in pairs(trees) do\n\
+                     local ids = tree:windows()\n\
+                     table.sort(ids)\n\
+                     if #ids > 0 then out[#out + 1] = key .. \"=\" .. table.concat(ids, \",\") end\n\
+                 end\n\
+                 table.sort(out)\n\
+                 return table.concat(out, \" \")",
+            );
+            assert_eq!(held, "1@DP-1=1,2", "the trees tiling keeps for later");
+        }
+
+        /// **Nothing already open is sent to another workspace**, by any route
+        /// that puts one back into a tree -- only a window being opened
+        /// overflows.
+        ///
+        /// Four windows at a minimum where a workspace holds one, so every
+        /// route below has three windows with no room and three empty
+        /// workspaces to send them to. Each must keep every window on
+        /// workspace 1 of its screen and place it there:
+        ///
+        ///   * `adopt`, by switching tiling on;
+        ///   * `adopt`, on a monitor change -- every window now on `DP-2`,
+        ///     missing from that screen's tree;
+        ///   * `restore`, a reload, which builds every tree from nothing;
+        ///   * `refused`, a close the application declined;
+        ///   * a dialog that stops being modal and rejoins its tree.
+        #[test]
+        fn nothing_already_open_is_sent_to_another_workspace() {
+            let (mut scripts, entry) = tiling_with(&minimum(1300, 800));
+            let ids = [1, 2, 3, 4];
+            let everyone_home = |scripts: &Scripts, monitor: &str, route: &str| {
+                let away = scripts.evaluate(&format!(
+                    "local workspaces = require(\"workspaces\")\n\
+                     local out = {{}}\n\
+                     for id = 1, 5 do\n\
+                         local at = workspaces.at(id, {monitor:?})\n\
+                         if at ~= 1 then out[#out + 1] = id .. \"@\" .. tostring(at) end\n\
+                     end\n\
+                     out[#out + 1] = \"showing=\" .. tostring(workspaces.on({monitor:?}))\n\
+                     return table.concat(out, \" \")"
+                ));
+                assert_eq!(
+                    away, "showing=1",
+                    "{route} sent a window to another workspace"
+                );
+            };
+
+            let switched = scripts.key("super+t", desk_at(&ids, (500.0, 500.0)));
+            let placed_on = placed(&switched.commands);
+            assert!(
+                ids.iter().all(|id| placed_on.contains_key(id)),
+                "switching tiling on left a window out: {placed_on:?}"
+            );
+            everyone_home(&scripts, "DP-1", "switching tiling on");
+
+            let moved = snapshot_on(
+                vec![second_monitor()],
+                ids.iter()
+                    .map(|&id| on(&second_monitor(), window(id, 800.0, 600.0)))
+                    .collect(),
+            );
+            let _ = scripts.monitors_changed(moved.clone());
+            let after = placed(&scripts.relayout(moved).commands);
+            assert!(
+                ids.iter()
+                    .all(|id| after.get(id).is_some_and(|rect| rect.x >= BESIDE.x)),
+                "a monitor change left a window out of the screen it is on: {after:?}"
+            );
+            everyone_home(&scripts, "DP-2", "a monitor change");
+
+            let mut scripts = Scripts::load_carrying(&entry, scripts.kept()).expect("reloading");
+            let restored = placed(&scripts.restored(desk_at(&ids, (500.0, 500.0))).commands);
+            assert!(
+                ids.iter().all(|id| restored.contains_key(id)),
+                "a reload left a window out: {restored:?}"
+            );
+            everyone_home(&scripts, "DP-1", "a reload");
+
+            let _ = scripts.closing(4, desk(&restored, &ids, &[4]));
+            let back = placed(&scripts.refused(4, desk(&restored, &ids, &[])).commands);
+            assert!(
+                back.contains_key(&4),
+                "the refused window was not put back: {back:?}"
+            );
+            everyone_home(&scripts, "DP-1", "a refused close");
+
+            let mut with_dialog: Vec<WindowInfo> =
+                ids.iter().map(|&id| window(id, 800.0, 600.0)).collect();
+            with_dialog.push(modal(5, 600.0, 400.0, Parentage::Window(1)));
+            let _ = scripts.relayout(snapshot(with_dialog.clone()));
+            if let Some(dialog) = with_dialog.last_mut() {
+                dialog.modal = false;
+                dialog.parent = Parentage::None;
+            }
+            let rejoined = placed(&scripts.relayout(snapshot(with_dialog)).commands);
+            assert!(
+                rejoined.get(&5).is_some_and(|rect| rect.w < 1300.0),
+                "the dialog that stopped being modal did not rejoin the arrangement: {rejoined:?}"
+            );
+            everyone_home(&scripts, "DP-1", "a dialog rejoining");
+        }
+
+        /// 1 over 3 on the left, 2 on the right, at a 700x800 minimum; then
+        /// the seam between them dragged left to 1136, through the `resize`
+        /// event, so the left column is 1112 wide and window 2 is 1412.
+        ///
+        /// `adopt` builds it: 2 has room beside 1, and 3 has none anywhere --
+        /// window 1 splits to 702 high or 625 wide -- so it is allowed in over
+        /// window 1. After the drag the left column has no room either way,
+        /// and window 2 has room across: two of 700.
+        fn lopsided() -> (Scripts, HashMap<u64, Rect>) {
+            let (mut scripts, _) = tiling_with(&minimum(700, 800));
+            let switched = scripts.key("super+t", desk_at(&[1, 2, 3], (500.0, 500.0)));
+            let first = placed(&switched.commands);
+            let dragged = scripts.resized(
+                2,
+                (1136.0, 700.0),
+                (Some("left"), None),
+                desk(&first, &[1, 2, 3], &[]),
+            );
+            let mut now = first;
+            now.extend(placed(&dragged.commands));
+            assert!(
+                now.get(&1)
+                    .is_some_and(|rect| about(rect.w, 1112.0) && about(rect.h, 702.0))
+                    && now.get(&3).is_some_and(|rect| about(rect.w, 1112.0))
+                    && now.get(&2).is_some_and(|rect| about(rect.w, 1412.0)),
+                "the fixture is not the one described: {now:?}"
+            );
+            (scripts, now)
+        }
+
+        /// **A refused window under the minimum comes back where it was**,
+        /// not into the largest tile. Window 3's tile was under the minimum
+        /// before it was closed, so the tile it goes back to has no room
+        /// either -- and window 2's does. Taking that would move a window the
+        /// user never moved; the arrangement comes back rect for rect.
+        #[test]
+        fn a_refused_window_under_the_minimum_comes_back_where_it_was() {
+            let (mut scripts, before) = lopsided();
+            let closed = placed(&scripts.closing(3, desk(&before, &[1, 2, 3], &[3])).commands);
+            let mut now = before.clone();
+            now.extend(closed);
+            let back = placed(&scripts.refused(3, desk(&now, &[1, 2, 3], &[])).commands);
+            for id in [1, 2, 3] {
+                let was = before.get(&id).copied();
+                let is = back.get(&id).copied();
+                assert!(
+                    was.zip(is).is_some_and(|(was, is)| same(was, is)),
+                    "window {id} was at {was:?} before 3 was closed and is at {is:?} after the \
+                     close was refused"
+                );
+            }
+            assert_eq!(workspace_of(&scripts, 3), "1");
+        }
+
+        /// **A dropped window goes to the tile it was let go over**, under the
+        /// minimum if it must, and not to the largest tile. Window 3 is dropped
+        /// on window 1, whose tile has no room; window 2's has.
+        #[test]
+        fn a_dropped_window_goes_to_the_tile_it_was_let_go_over() {
+            let (mut scripts, before) = lopsided();
+            let one = before.get(&1).copied().unwrap_or_default();
+            let (x, y) = (one.x + one.w / 2.0, one.y + one.h * 0.75);
+            let dropped = placed(
+                &scripts
+                    .dropped(3, x, y, desk(&before, &[1, 2, 3], &[]))
+                    .commands,
+            );
+            let (one, two, three) = (
+                dropped.get(&1).copied(),
+                dropped.get(&2).copied(),
+                dropped.get(&3).copied(),
+            );
+            assert!(
+                two.zip(before.get(&2).copied())
+                    .is_some_and(|(now, was)| same(now, was)),
+                "window 2's tile was split for a window dropped somewhere else: {two:?}"
+            );
+            assert!(
+                one.zip(three)
+                    .is_some_and(|(one, three)| about(one.x + one.w, 1124.0)
+                        && about(three.x + three.w, 1124.0)
+                        && !overlap(one, three)),
+                "window 3 did not go back into the left column it was dropped on: {one:?} \
+                 {three:?}"
+            );
+            assert_eq!(workspace_of(&scripts, 3), "1");
+        }
+
+        /// **The seams stop at the minimum, by the drag and by the keyboard.**
+        /// The shipped 160: window 1's right edge dragged to x=50 stops where
+        /// window 1 is 160 wide, where 0.05..0.95 alone stopped it at 126; and
+        /// `super+minus` pressed until nothing changes stops at 160 too.
+        #[test]
+        fn the_shipped_seams_stop_at_the_minimum() {
+            let (mut scripts, _) = tiling_with("");
+            let switched = scripts.key("super+t", desk_at(&[1, 2], (500.0, 500.0)));
+            let first = placed(&switched.commands);
+            let dragged = placed(
+                &scripts
+                    .resized(
+                        1,
+                        (50.0, 700.0),
+                        (Some("right"), None),
+                        desk(&first, &[1, 2], &[]),
+                    )
+                    .commands,
+            );
+            assert!(
+                dragged.get(&1).is_some_and(|rect| about(rect.w, 160.0)),
+                "the drag went under the minimum: {dragged:?}"
+            );
+
+            let (mut scripts, _) = tiling_with("");
+            let switched = scripts.key("super+t", desk_at(&[1, 2], (500.0, 500.0)));
+            let mut now = placed(&switched.commands);
+            for _ in 0..12 {
+                let mut focused = desk(&now, &[1, 2], &[]);
+                for window in &mut focused.windows {
+                    window.focused = window.id == 1;
+                }
+                now.extend(placed(&scripts.key("super+minus", focused).commands));
+            }
+            assert!(
+                now.get(&1).is_some_and(|rect| about(rect.w, 160.0)),
+                "the keyboard went under the minimum: {now:?}"
+            );
+        }
+
+        /// **A minimum that is not a size is named once, and ignored on that
+        /// side only.** `w = "wide"` is no minimum across, so window 3 turns
+        /// and goes beside window 1 when one above the other would take it
+        /// under the 800 that `h` still asks for. Three dispatches, one line.
+        #[test]
+        fn a_minimum_that_is_not_a_size_is_named_once_and_ignored() {
+            let (mut scripts, _) = tiling_with(&format!(
+                "{CAPTURE}\nrequire(\"config\").tiling.minimum = {{ w = \"wide\", h = 800 }}"
+            ));
+            let switched = scripts.key("super+t", desk_at(&[1, 2, 3], (500.0, 500.0)));
+            let _ = scripts.relayout(desk_at(&[1, 2, 3], (500.0, 500.0)));
+            let _ = scripts.relayout(desk_at(&[1, 2, 3], (500.0, 500.0)));
+            let placed = placed(&switched.commands);
+            assert!(
+                placed
+                    .get(&1)
+                    .zip(placed.get(&3))
+                    .is_some_and(|(one, three)| about(one.y, three.y)
+                        && about(one.h, 1416.0)
+                        && about(three.h, 1416.0)),
+                "window 3 was not put beside window 1: {placed:?}"
+            );
+            let said = logged(&scripts);
+            assert_eq!(
+                said.matches("tiling.minimum.w").count(),
+                1,
+                "the bad side was not named exactly once: {said:?}"
+            );
+            assert!(
+                !said.contains("tiling.minimum.h"),
+                "the good side was named: {said:?}"
+            );
+        }
+
+        /// **An empty workspace is given whole, even when its tree still holds
+        /// a window that was sent away.** `workspaces.send` moves a window
+        /// without telling any tree, so window 7, opened on workspace 2 and
+        /// sent to 3, leaves a leaf in workspace 2's tree. Workspace 2 is empty
+        /// all the same, and window 2 gets the whole of it rather than half.
+        #[test]
+        fn a_workspace_left_empty_by_a_send_is_given_whole() {
+            let (mut scripts, _) = tiling_with(&minimum(1300, 800));
+            switched_on(&mut scripts);
+            let _ = scripts.key("super+2", desk_at(&[], (0.0, 0.0)));
+            let _ = open(&mut scripts, 7, &[7]);
+            let mut sending = desk_at(&[7], (0.0, 0.0));
+            for window in &mut sending.windows {
+                window.focused = true;
+            }
+            let _ = scripts.key("super+shift+3", sending);
+            let _ = scripts.key("super+1", desk_at(&[7], (0.0, 0.0)));
+            assert_eq!(workspace_of(&scripts, 7), "3");
+            assert_eq!(showing(&scripts), "1");
+
+            let _ = open(&mut scripts, 1, &[7, 1]);
+            let told = open(&mut scripts, 2, &[7, 1, 2]);
+            assert_eq!(workspace_of(&scripts, 2), "2");
+            assert!(
+                places_of(&told.commands, 2)
+                    .last()
+                    .is_some_and(|rect| same(*rect, FULL)),
+                "window 2 shared workspace 2 with a window that is not there: {:?}",
+                told.commands
+            );
+        }
+
+        /// **The next empty workspace is after the one in view, and round
+        /// again**; a window being closed does not take one; and with
+        /// workspaces not per monitor, a window on any screen does.
+        #[test]
+        fn the_next_empty_workspace_is_after_the_one_in_view_and_round_again() {
+            let vacant = |per_monitor: bool, windows: Vec<WindowInfo>| {
+                let (mut scripts, _) = tiling_with(&format!(
+                    "require(\"config\").workspaces.per_monitor = {per_monitor}"
+                ));
+                let _ = scripts.evaluate(
+                    "local workspaces = require(\"workspaces\")\n\
+                     workspaces.showing[\"DP-1\"] = 3\n\
+                     workspaces.showing[\"*all*\"] = 3\n\
+                     workspaces.of[21] = 4\n\
+                     workspaces.of[22] = 2\n\
+                     workspaces.of[23] = 1\n\
+                     workspaces.of[24] = 1\n\
+                     return \"\"",
+                );
+                let _ = scripts.relayout(snapshot_on(vec![monitor(), second_monitor()], windows));
+                scripts.evaluate("return tostring(require(\"workspaces\").vacant(\"DP-1\"))")
+            };
+            let closing = |id| WindowInfo {
+                leaving: true,
+                ..window(id, 800.0, 600.0)
+            };
+            let taken = |id| window(id, 800.0, 600.0);
+
+            // Showing 3, with 4 and 2 taken: round to 1, whose only window is
+            // being closed.
+            assert_eq!(vacant(true, vec![taken(21), taken(22), closing(23)]), "1");
+            // The same with 1 taken for real: nothing left.
+            assert_eq!(vacant(true, vec![taken(21), taken(22), taken(23)]), "nil");
+            // Per monitor, a window on the other screen is its own screen's.
+            let elsewhere = on(&second_monitor(), window(24, 800.0, 600.0));
+            assert_eq!(
+                vacant(true, vec![taken(21), taken(22), elsewhere.clone()]),
+                "1"
+            );
+            // Together, the same window takes workspace 1 on every screen.
+            assert_eq!(vacant(false, vec![taken(21), taken(22), elsewhere]), "nil");
+            // And a window that belongs to no workspace in particular is on
+            // every one, since the view carries it along: 25 was never given
+            // one, so no workspace is empty (#134 review).
+            assert_eq!(
+                vacant(true, vec![taken(21), window(25, 800.0, 600.0)]),
+                "nil"
+            );
+        }
+
+        /// **A tree handed a minimum that is not a size has none on that
+        /// side.** `tiling.lua` cleans `config.tiling.minimum` before handing
+        /// it over, so this is the binding's own answer for a script that does
+        /// not: `0/0` and a string are no floor, where a real 160x150 on the
+        /// same 300x200 tile refuses the split both ways.
+        #[test]
+        fn a_tree_handed_a_minimum_that_is_not_a_size_has_none_on_that_side() {
+            let (scripts, _) = tiling_with("");
+            let answer = scripts.evaluate(
+                "local function try(minimum)\n\
+                     local area = { x = 0, y = 0, w = 300, h = 200, gap = 0, split = 0.5,\n\
+                         minimum = minimum }\n\
+                     local tree = sol.layout.tree()\n\
+                     tree:insert(1, nil, nil, nil, area)\n\
+                     return tostring(tree:insert_fitting(2, nil, 150, 100, area))\n\
+                 end\n\
+                 return try({ w = 0/0, h = \"tall\" }) .. \" \" .. try({ w = 160, h = 150 })",
+            );
+            assert_eq!(answer, "true false");
+        }
+
+        /// **With `follow_new_windows` off, no workspace is empty.** A window
+        /// that belongs to no workspace in particular is on every one -- the
+        /// view carries it along, which is what `workspaces.at` says -- so
+        /// window 1 is on workspace 2 as much as on this one. Sending window 2
+        /// there moved the view, left window 1 on screen, and laid window 2
+        /// over the whole of it from workspace 2's empty tree (#134 review).
+        /// So the step does nothing and `"allow"` puts window 2 beside window
+        /// 1, here.
+        #[test]
+        fn with_follow_new_windows_off_no_workspace_is_empty() {
+            let (mut scripts, _) = tiling_with(&format!(
+                "{}\nrequire(\"config\").workspaces.follow_new_windows = false",
+                minimum(1300, 800)
+            ));
+            switched_on(&mut scripts);
+            let _ = open(&mut scripts, 1, &[1]);
+            let told = open(&mut scripts, 2, &[1, 2]);
+
+            assert_eq!(
+                showing(&scripts),
+                "1",
+                "the view went to a workspace window 1 is on as well"
+            );
+            assert_eq!(
+                scripts.evaluate("return tostring(require(\"workspaces\").of[2])"),
+                "nil",
+                "window 2 was given a workspace of its own"
+            );
+            let placed = placed(&told.commands);
+            let (one, two) = (placed.get(&1).copied(), placed.get(&2).copied());
+            assert!(
+                one.zip(two).is_some_and(|(one, two)| !overlap(one, two)),
+                "window 2 was not placed beside window 1: {one:?} {two:?}"
+            );
+        }
+
+        /// **With `reflow_on_close = "when_gone"`, a window being closed
+        /// still takes its workspace.** That setting keeps a closing window's
+        /// tile until its application has gone, so a workspace whose only
+        /// window is closing is not empty to it: window 3 goes on to workspace
+        /// 3, rather than into a fresh tree on workspace 2 that has it cover
+        /// window 5 while window 5 fades (#134 review). Closing up at once, the
+        /// same workspace is empty -- that half is
+        /// `a_window_being_closed_is_room_for_the_next_one`.
+        #[test]
+        fn with_reflow_when_gone_a_closing_window_still_takes_its_workspace() {
+            let (mut scripts, _) = tiling_with(&format!(
+                "{}\nrequire(\"config\").tiling.reflow_on_close = \"when_gone\"",
+                minimum(1300, 800)
+            ));
+            switched_on(&mut scripts);
+            let _ = scripts.evaluate("require(\"workspaces\").of[5] = 2\nreturn \"\"");
+            let _ = open(&mut scripts, 1, &[5, 1]);
+            let mut windows = vec![
+                window(5, 800.0, 600.0),
+                window(1, 800.0, 600.0),
+                window(3, 800.0, 600.0),
+            ];
+            windows[0].leaving = true;
+            let _ = scripts.opened(
+                3,
+                Snapshot {
+                    cursor: (500.0, 500.0),
+                    ..snapshot(windows)
+                },
+            );
+            assert_eq!(
+                workspace_of(&scripts, 3),
+                "3",
+                "a workspace whose only window keeps its tile while it closes was counted as \
+                 empty"
+            );
+        }
+
+        /// **With `follow_overflow` off, each window with no room takes
+        /// another empty workspace**, whether or not the one the window
+        /// before went to has room.
+        ///
+        /// At 1000x1000, 1 and 2 share workspace 1 side by side at 1262x1416,
+        /// and neither of those halves has room either way. The view stays on
+        /// workspace 1, so 3, 4 and 5 each open against those tiles, and each
+        /// finds the workspace the last one went to no longer empty: 3 goes to
+        /// 2, 4 to 3, 5 to 4. With none left empty, 6 is allowed in on
+        /// workspace 1 under the minimum -- although workspace 2, holding
+        /// window 3 alone, could still have taken it beside window 3. That is
+        /// the step as written, "the next empty workspace"; `config.lua` says
+        /// so beside `follow_overflow`.
+        #[test]
+        fn with_follow_overflow_off_each_window_with_no_room_takes_another_empty_workspace() {
+            let (mut scripts, _) = tiling_with(&format!(
+                "{}\nrequire(\"config\").tiling.follow_overflow = false",
+                minimum(1000, 1000)
+            ));
+            switched_on(&mut scripts);
+            for id in 1..=6 {
+                let ids: Vec<u64> = (1..=id).collect();
+                let _ = open(&mut scripts, id, &ids);
+            }
+            let went: Vec<String> = (1..=6).map(|id| workspace_of(&scripts, id)).collect();
+            assert_eq!(went, ["1", "1", "2", "3", "4", "1"]);
+            assert_eq!(showing(&scripts), "1");
+            assert_eq!(
+                scripts.evaluate(
+                    "local area = { x = 0, y = 0, w = 2560, h = 1440, gap = 12, split = 0.5,\n\
+                         minimum = { w = 1000, h = 1000 } }\n\
+                     local tree = require(\"tiling\").trees[\"2@DP-1\"]\n\
+                     return tostring(tree:insert_fitting(99, nil, nil, nil, area))"
+                ),
+                "true",
+                "the premise: workspace 2 had room for window 6"
+            );
+        }
+
+        fn open(scripts: &mut Scripts, id: u64, ids: &[u64]) -> Outcome {
+            scripts.opened(id, desk_at(ids, (500.0, 500.0)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -7407,5 +8497,16 @@ impl Scripts {
             .load(chunk)
             .eval::<String>()
             .unwrap_or_else(|err| format!("error: {err}"))
+    }
+
+    /// [`Self::evaluate`], with `snapshot` as what the compositor looks like:
+    /// so a chunk that asks `sol.window_at` is answered from the snapshot a
+    /// handler dispatched at that instant would be handed, rather than from
+    /// whichever the last dispatch left behind. For a test that asks from Lua
+    /// what the compositor asks in Rust --
+    /// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
+    pub(crate) fn evaluate_in(&self, snapshot: Snapshot, chunk: &str) -> String {
+        self.lua.set_app_data(snapshot);
+        self.evaluate(chunk)
     }
 }
