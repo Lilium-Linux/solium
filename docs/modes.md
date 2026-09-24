@@ -195,7 +195,11 @@ While a window is between `closing` and whichever comes next, its row in
 snapshot). After `close` it is in no snapshot but that one. It is fading where
 it stood whatever you do: the compositor pins the rectangle it is drawn at, so
 placing it moves nothing you can see, and it stays in front of any window you
-move into its space -- as does a refused window while it fades back in.
+move into its space -- as does a refused window while it fades back in. It also
+stays cut to the tile it was closed in, so a client wider than that tile does
+not spill or squash as it fades: `sol.unplace`, or `tile = false`, on a window
+that is leaving waits, and takes effect if a refused close brings it back.
+`modes.use` counts on that, since it lets every window go.
 
 The shipped layouts close up at `closing`, while they are the layout in
 charge, and put the window back at `refused`; `reflow_on_close = "when_gone"`
