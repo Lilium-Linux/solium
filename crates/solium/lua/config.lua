@@ -447,9 +447,12 @@ local defaults = {
         --
         -- A new window that would make a tile smaller than this goes where
         -- `overflow` says instead. And a seam cannot be dragged, or moved from
-        -- the keyboard, to make a tile smaller than this; a tile that is
-        -- already smaller -- `"allow"` below makes them -- can be grown and
-        -- not shrunk, and does not jump when you grab it.
+        -- the keyboard, to make a tile smaller than this. A tile that is
+        -- already smaller does not jump when you grab it, and cannot be made
+        -- smaller still; it can be grown only while the tiles across the seam
+        -- have room to give. So a seam with a tile under this on both sides
+        -- does not move at all -- and that is what `"allow"` below usually
+        -- makes, since it halves a tile too small to split.
         --
         -- A tile and not an application's own minimum size: a window you
         -- launch from here is given its tile the moment you ask for it,
@@ -469,7 +472,10 @@ local defaults = {
         --   "workspace"  open it on the next empty workspace of the monitor
         --                it opened on. The workspaces are the fixed set
         --                `workspaces` describes, so when none is empty this
-        --                step does nothing and the next one runs.
+        --                step does nothing and the next one runs. A window
+        --                that belongs to no workspace in particular is on all
+        --                of them, and with `workspaces.follow_new_windows`
+        --                off that is every window -- so then none is empty.
         --   "allow"      split the tile under the pointer anyway, below
         --                `minimum`
         --
@@ -490,8 +496,15 @@ local defaults = {
         overflow = { "largest", "workspace", "allow" },
 
         -- Whether the view goes with a window that opened on another
-        -- workspace, the way `super+<n>` takes it there, keyboard included.
-        -- false opens it there and leaves you where you are.
+        -- workspace, the way `super+<n>` takes it there. The keyboard goes to
+        -- the window -- for one launched from a binding, once its application
+        -- has put up its window; until then it is not on the new window, and
+        -- can still be on the one you were working in, a screen away by then.
+        --
+        -- false opens it there and leaves you, keyboard and all, where you
+        -- are. Each window with no room then goes to another empty workspace,
+        -- since the one the window before went to is no longer empty --
+        -- whether or not it has room -- until none is left empty.
         follow_overflow = true,
 
         motion = { duration = 240, easing = "outCubic" },

@@ -866,6 +866,20 @@ fn ancestry(pid: u32) -> Vec<u32> {
     family
 }
 
+/// What the scripts did with a window opening, as [`Solium::trigger_open`]
+/// reports it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Opened {
+    /// A script answered with commands of its own, so the built-in open
+    /// animation is not wanted.
+    handled: bool,
+    /// A script asked for the keyboard to go somewhere -- a `sol.focus`
+    /// among its commands. Where a new window's keyboard goes is then the
+    /// script's decision and not [`Solium::offer_keyboard`]'s: see
+    /// `a_script_that_moves_the_keyboard_at_open_has_the_last_word`.
+    focused: bool,
+}
+
 /// Which region of the compositor's own chrome a point is in.
 ///
 /// Carries no window and no pane on purpose: this is the part that is a
@@ -6473,7 +6487,25 @@ impl Solium {
                 None
             }
         };
+        self.open_loading(name, pid, source, scene)
+    }
 
+    /// The rest of [`Self::begin_loading`]: the window itself, once its scene
+    /// has been built, or has failed to be and is `None`.
+    ///
+    /// Apart so that a test can open a window for an application without
+    /// starting Qt, which a test process holding a raw libwayland connection
+    /// does not survive -- see
+    /// `changed_output_resends_fractional_scale_and_unchanged_output_does_not`.
+    /// Everything a layout hears and does about the window is on this side of
+    /// the cut, and `None` is the path a failed scene already takes.
+    fn open_loading(
+        &mut self,
+        name: &str,
+        pid: Option<u32>,
+        source: std::path::PathBuf,
+        scene: Option<crate::surface::ShellSurface>,
+    ) -> crate::pane::PaneId {
         // A window's worth of screen from the very first frame, before anyone
         // is asked where it should go. A layout usually moves it in the same
         // breath, but this is what it falls back to -- and the fallback has to
@@ -6889,6 +6921,9 @@ impl Solium {
             // room than it was first told.
             size_window(window, slot);
             self.map_stacked(window.clone(), slot.loc, false);
+            // Its place was decided at the launch, so the keyboard is decided
+            // now: nothing was asked of a script on the way here.
+            self.offer_keyboard(window, pane);
             return;
         }
 
@@ -6905,12 +6940,70 @@ impl Solium {
         // dock-icon genie a script rather than a feature. The built-in is only
         // a fallback for when nothing has an opinion; a window popping into
         // existence with no animation at all is worse than a plain one.
-        if !self.trigger_open(pane)
+        let opened = self.trigger_open(pane);
+        if !opened.handled
             && let Some(outer) = self.outer_geometry(window)
             && let Some(pane) = self.panes.get(pane)
         {
             present::open(pane, outer, self.clock.now());
         }
+        // After `open`, which is where the layout says where the window goes,
+        // and only if no script said where the keyboard goes.
+        if !opened.focused {
+            self.offer_keyboard(window, pane);
+        }
+    }
+
+    /// Give a window the keyboard as it is first shown, if it is headed
+    /// somewhere the user can see.
+    ///
+    /// Focus follows the newest window; #12 turns this into a policy. It used
+    /// to happen in `new_toplevel`, which is too early to know where the window
+    /// is going: a window opened by its application is told to the layout only
+    /// here, at its first frame, so every new toplevel took the keyboard before
+    /// anything had placed it -- and one a layout then parked on a workspace
+    /// nobody is looking at kept it. A window launched with `sol.spawn` was
+    /// placed before its application existed, and took the keyboard when the
+    /// application arrived, wherever that was. With `follow_overflow = false`
+    /// both are ordinary, and every key typed afterwards went to a window the
+    /// user could not see (#134 review). So the grant waits for the window to
+    /// have its place, and asks [`Self::on_stage`] -- the question the focus
+    /// rules ask everywhere else -- first. Declined, the keyboard is left where
+    /// it was. The two routes are
+    /// `a_window_that_overflows_to_a_hidden_workspace_does_not_take_the_keyboard`
+    /// and
+    /// `a_launched_window_parked_on_a_hidden_workspace_does_not_take_the_keyboard_when_it_arrives`;
+    /// a launched window that is on screen still takes it, in
+    /// `a_launched_window_that_overflows_with_the_view_takes_the_keyboard_when_it_arrives`.
+    ///
+    /// An xdg toplevel only. X11 windows come through `show_if_new` as well,
+    /// from their surface's commit, and `new_toplevel` -- xdg only -- never
+    /// gave one the keyboard at map; this keeps it that way.
+    ///
+    /// Through the gate, which refuses it while locked: this is a client
+    /// opening a window of its own accord, with nobody at the machine, and
+    /// until the gate existed it was the shortest way to the password.
+    fn offer_keyboard(&mut self, window: &Window, pane: crate::pane::PaneId) {
+        if window.toplevel().is_none() {
+            return;
+        }
+        let landed = self.settling();
+        let screens = self.screens();
+        if !self
+            .panes
+            .get(pane)
+            .is_some_and(|held| self.on_stage(held, &screens, landed))
+        {
+            tracing::debug!(
+                pane = pane.get(),
+                "a window opened where nobody can see it, and the keyboard stayed put"
+            );
+            return;
+        }
+        self.give_keyboard(
+            window.wl_surface().map(|surface| surface.into_owned()),
+            SERIAL_COUNTER.next_serial(),
+        );
     }
 
     /// Offer a newly shown window to whatever script wants to animate it in.
@@ -7548,18 +7641,24 @@ impl Solium {
         handled
     }
 
-    fn trigger_open(&mut self, pane: crate::pane::PaneId) -> bool {
+    fn trigger_open(&mut self, pane: crate::pane::PaneId) -> Opened {
         let id = pane.get();
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
-            return false;
+            return Opened::default();
         };
         let outcome = scripts.opened(id, snapshot);
         self.scripts = Some(scripts);
 
-        let handled = outcome.handled && !outcome.commands.is_empty();
+        let opened = Opened {
+            handled: outcome.handled && !outcome.commands.is_empty(),
+            focused: outcome
+                .commands
+                .iter()
+                .any(|command| matches!(command, Command::Focus { .. })),
+        };
         self.apply(outcome);
-        handled
+        opened
     }
 
     /// Where a new window goes.
@@ -7798,15 +7897,8 @@ impl XdgShellHandler for Solium {
         // that has no pane -- `trigger_open` is about to ask for its id.
         self.adopt_or_open(window);
 
-        // Focus follows the newest window. #12 turns this into a policy.
-        //
-        // Through the gate, which refuses it while locked: this is a client
-        // opening a window of its own accord, with nobody at the machine, and
-        // until the gate existed it was the shortest way to the password.
-        self.give_keyboard(
-            Some(surface.wl_surface().clone()),
-            SERIAL_COUNTER.next_serial(),
-        );
+        // No keyboard yet. It is given at the window's first frame, once a
+        // layout has said where the window goes: see `offer_keyboard`.
     }
 
     /// `xdg_toplevel.set_parent` — a window saying which window it belongs to.
@@ -18586,6 +18678,316 @@ end)
                     "the neighbour was {half:?}, {grown:?} at the press, {back:?} at the \
                      refusal and {gone:?} once the client went"
                 );
+            }
+
+            /// **#134 review: a window opened onto a workspace nobody is looking
+            /// at took the keyboard with it.**
+            ///
+            /// Inside `reflow_on_close` for [`Desk`], the one fixture with the
+            /// shipped scripts and a real client, and this needs both: the
+            /// scripts to decide where a window goes, and the client to say
+            /// where a key lands.
+            ///
+            /// With `follow_overflow = false` a window with no room is placed on
+            /// the next empty workspace, a screen away, and the view stays.
+            /// `new_toplevel` gave every new toplevel the keyboard -- before any
+            /// layout had said where it goes, or, for a window launched with
+            /// `sol.spawn`, after the layout had already put it there -- and
+            /// `scrolling.lua`, while not in charge, focused it again. Every
+            /// key typed after that went to a window the user could not see,
+            /// until they clicked. That is #127's fault by another door.
+            mod keyboard_at_open {
+                use super::*;
+
+                /// The shipped layouts, as `init.lua` requires them, at a
+                /// minimum one window fills: the desk's one tile at the shipped
+                /// gap is 1896x1056, and neither half of it -- 942 across, 522
+                /// down -- is 1000x600.
+                fn one_window_fills_a_workspace(follow: bool) -> String {
+                    format!(
+                        "local config = require(\"config\")\n\
+                         config.tiling.minimum = {{ w = 1000, h = 600 }}\n\
+                         config.tiling.follow_overflow = {follow}\n\
+                         require(\"modes\")\n\
+                         require(\"workspaces\")\n\
+                         require(\"tiling\")\n\
+                         require(\"scrolling\")"
+                    )
+                }
+
+                /// Tiling in charge and one window open, with the keyboard,
+                /// typing reaching it, and every animation landed.
+                fn working_in_one(follow: bool) -> (Desk, Window) {
+                    let mut desk = Desk::new();
+                    desk.install(&one_window_fills_a_workspace(follow));
+                    assert!(
+                        desk.state.trigger("super+t"),
+                        "the tiling key was not handled"
+                    );
+                    let (working, _, _) = desk.open();
+                    // Twice more, for the reason `typing_after_a_close...`
+                    // gives: the keyboard is a request the client makes in
+                    // answer to the seat's capabilities.
+                    desk.pump();
+                    desk.pump();
+                    assert!(
+                        desk.client.keyboard.is_some(),
+                        "the client bound a keyboard; without one this test cannot \
+                         observe anything"
+                    );
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(working.clone()),
+                        "the premise: the window the user is working in has the keyboard"
+                    );
+                    typed_into(&mut desk, &working, "the premise: typing reaches it");
+                    (desk, working)
+                }
+
+                /// One key, and where it landed, as the client saw it.
+                fn typed_into(desk: &mut Desk, window: &Window, says: &str) {
+                    types(&mut desk.state, KEY_A);
+                    desk.pump();
+                    assert_eq!(
+                        desk.client.typed.last(),
+                        Some(&(Some(surface_id(window)), KEY_A)),
+                        "{says}"
+                    );
+                }
+
+                /// Whether a pane is headed somewhere the user can see it, as
+                /// the focus rules ask.
+                fn headed_on_stage(state: &Solium, pane: crate::pane::PaneId) -> bool {
+                    let landed = state.settling();
+                    let screens = state.screens();
+                    state
+                        .panes
+                        .get(pane)
+                        .is_some_and(|held| state.on_stage(held, &screens, landed))
+                }
+
+                /// What the scripts say, for a premise.
+                fn says(desk: &Desk, chunk: &str) -> String {
+                    desk.state
+                        .scripts
+                        .as_ref()
+                        .map(|scripts| scripts.evaluate(chunk))
+                        .unwrap_or_default()
+                }
+
+                fn workspace_of(desk: &Desk, pane: crate::pane::PaneId) -> String {
+                    says(
+                        desk,
+                        &format!(
+                            "return tostring(require(\"workspaces\").of[{}])",
+                            pane.get()
+                        ),
+                    )
+                }
+
+                fn showing(desk: &Desk) -> String {
+                    says(
+                        desk,
+                        "return tostring(require(\"workspaces\").on(\"reflow-test\"))",
+                    )
+                }
+
+                /// What `sol.spawn` does before it forks, for a program whose
+                /// process is this one -- so the client this fixture connects
+                /// is the application it asked for. `open_loading` rather than
+                /// `begin_loading`, which would build the loading scene in Qt:
+                /// see `Solium::open_loading`.
+                fn asked_for(desk: &mut Desk) -> crate::pane::PaneId {
+                    let source = crate::pane::loading_source(None);
+                    desk.state
+                        .open_loading("app", Some(std::process::id()), source, None)
+                }
+
+                /// The application asked for arrives: a toplevel and its first
+                /// frame, in one dispatch.
+                fn arrives(desk: &mut Desk) -> Window {
+                    let (window, _toplevel, _surface, _xdg) = open_xdg(
+                        &mut desk.display,
+                        &mut desk.state,
+                        &desk.conn,
+                        &desk.client,
+                        &desk.qh,
+                    );
+                    desk.state.sync_panes();
+                    desk.pump();
+                    window
+                }
+
+                /// **A window opened by its application, with nowhere on this
+                /// workspace to go and `follow_overflow` off, leaves the
+                /// keyboard where it was.**
+                #[test]
+                fn a_window_that_overflows_to_a_hidden_workspace_does_not_take_the_keyboard() {
+                    let (mut desk, working) = working_in_one(false);
+                    let (_parked, _, pane) = desk.open();
+                    assert_eq!(
+                        workspace_of(&desk, pane),
+                        "2",
+                        "the premise: the new window was sent to workspace 2"
+                    );
+                    assert_eq!(showing(&desk), "1", "the premise: the view stayed");
+                    assert!(
+                        !headed_on_stage(&desk.state, pane),
+                        "the premise: it is parked a screen away"
+                    );
+
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(working.clone()),
+                        "the keyboard went with the window to a workspace nobody is looking at"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &working,
+                        "a key typed after the window opened went somewhere else",
+                    );
+                }
+
+                /// **The same for a window launched with `sol.spawn`**, whose
+                /// place is decided before its application exists: it is on
+                /// workspace 2 already when the application arrives, and the
+                /// application arriving is not a reason to take the keyboard
+                /// there.
+                #[test]
+                fn a_launched_window_parked_on_a_hidden_workspace_does_not_take_the_keyboard_when_it_arrives()
+                 {
+                    let (mut desk, working) = working_in_one(false);
+                    let pane = asked_for(&mut desk);
+                    assert_eq!(
+                        workspace_of(&desk, pane),
+                        "2",
+                        "the premise: the launched window was sent to workspace 2"
+                    );
+                    assert!(
+                        !headed_on_stage(&desk.state, pane),
+                        "the premise: it is parked a screen away"
+                    );
+
+                    let arrived = arrives(&mut desk);
+                    assert_eq!(
+                        desk.state.panes.id_of(&arrived),
+                        Some(pane),
+                        "the premise: the application arrived in the window opened for it"
+                    );
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(working.clone()),
+                        "the application arriving took the keyboard to a workspace nobody is \
+                         looking at"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &working,
+                        "a key typed after the application arrived went somewhere else",
+                    );
+                }
+
+                /// **With `follow_overflow` on, a launched window that
+                /// overflows takes the keyboard when its application arrives.**
+                ///
+                /// The view goes to workspace 2 at the launch and `tiling.lua`
+                /// focuses the window by name, but `open` for a launched window
+                /// fires before its application exists and a window with no
+                /// client cannot be given the keyboard (`window_by_id`), so that
+                /// request does nothing. Until the application arrives the
+                /// keyboard stays on the window it was on, now a screen away --
+                /// where `super+2` onto an empty workspace leaves it as well. That
+                /// gap is asserted below as it stands, because `tiling.lua` and
+                /// `config.lua` describe it; closing it is a rule about a desk
+                /// carried away taking the keyboard with it, which is `go`'s case
+                /// as much as this one's.
+                ///
+                /// The half this pins is the arrival. The keyboard used to be
+                /// given in `new_toplevel` and is given at the window's first
+                /// frame now, when it is known to be on screen; that move is
+                /// what could have lost it.
+                #[test]
+                fn a_launched_window_that_overflows_with_the_view_takes_the_keyboard_when_it_arrives()
+                 {
+                    let (mut desk, working) = working_in_one(true);
+                    let pane = asked_for(&mut desk);
+                    assert_eq!(
+                        workspace_of(&desk, pane),
+                        "2",
+                        "the premise: the launched window was sent to workspace 2"
+                    );
+                    assert_eq!(showing(&desk), "2", "the premise: the view went with it");
+                    assert!(
+                        headed_on_stage(&desk.state, pane),
+                        "the premise: it is headed on screen"
+                    );
+                    let left = desk
+                        .state
+                        .panes
+                        .id_of(&working)
+                        .expect("an open window has a pane");
+                    assert!(
+                        desk.state.focused_window() == Some(working.clone())
+                            && !headed_on_stage(&desk.state, left),
+                        "the gap as it stands: until the application arrives the keyboard is \
+                         on the window the view has just left"
+                    );
+
+                    let arrived = arrives(&mut desk);
+                    assert_eq!(desk.state.panes.id_of(&arrived), Some(pane));
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(arrived.clone()),
+                        "the application arrived in a window on screen and was not given the \
+                         keyboard"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &arrived,
+                        "a key typed after the application arrived did not reach it",
+                    );
+                }
+
+                /// **A script that moves the keyboard as a window opens has the
+                /// last word.** While `new_toplevel` gave the keyboard, it did so
+                /// before `open` and a script's `sol.focus` there came after it.
+                /// The keyboard is given after `open` now, and must not take a
+                /// script's choice back: this one keeps it on the window that was
+                /// already open.
+                #[test]
+                fn a_script_that_moves_the_keyboard_at_open_has_the_last_word() {
+                    let mut desk = Desk::new();
+                    desk.install(
+                        "sol.on(\"open\", function(id)\n\
+                             for _, window in ipairs(sol.windows()) do\n\
+                                 if window.id ~= id then\n\
+                                     sol.focus(window.id)\n\
+                                     return\n\
+                                 end\n\
+                             end\n\
+                         end)",
+                    );
+                    let (first, _, _) = desk.open();
+                    desk.pump();
+                    desk.pump();
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(first.clone()),
+                        "the premise: with nothing else open and no script moving it, the new \
+                         window has the keyboard"
+                    );
+                    let _second = desk.open();
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(first.clone()),
+                        "the script put the keyboard back on the first window and the compositor \
+                         took it away again"
+                    );
+                    typed_into(&mut desk, &first, "the key went to the new window");
+                }
             }
         }
 
