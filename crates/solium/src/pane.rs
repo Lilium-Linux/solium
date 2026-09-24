@@ -98,9 +98,9 @@ pub(crate) enum Content {
         faded: Option<Duration>,
     },
     /// The remains of a window whose client has gone, on screen for the length
-    /// of its fade and not a moment longer (#126). Boxed: it carries a group's
-    /// shift, which holds a matrix, and a window that is not leaving should not
-    /// pay for one. See [`Left`].
+    /// of its fade and not a moment longer (#126). Boxed: it carries two
+    /// rectangles, a title, two lists and a picture, and a window that is not
+    /// leaving should not pay for them. See [`Left`].
     Leaving(Box<Left>),
 }
 
@@ -150,12 +150,43 @@ pub(crate) struct Left {
     pub(crate) outer: Rectangle<i32, Logical>,
     /// The client's share of it, as `Solium::pane_geometry` answered.
     pub(crate) geometry: Rectangle<i32, Logical>,
-    /// What its selections were doing to it, frozen. A group's members are a
+    /// The selections it was in when its client went, by name, whose shift it
+    /// is drawn under for as long as it fades -- the shift they have *now*, so
+    /// a window that goes during a workspace slide, or just before one, goes on
+    /// moving with its desk rather than stopping where the slide had it.
+    ///
+    /// **The names and not the members**, because a group's members are a
     /// script's to declare, and `workspaces.lua` rebuilds a desk's membership
-    /// from `sol.windows()` -- which this pane is no longer in -- so a live
-    /// lookup would lose the desk's shift on the next `layout` event.
-    /// `a_window_that_left_keeps_the_shift_its_desk_had`.
-    pub(crate) shift: crate::group::Shift,
+    /// from `sol.windows()` -- which this pane is no longer in -- so asking the
+    /// groups which ones hold it would lose the desk's shift on the next
+    /// `layout` event. `a_window_that_left_keeps_the_shift_its_desk_had` pins
+    /// the rebuild and `a_window_that_left_moves_with_its_desk` the desk moving
+    /// afterwards. A selection forgotten by name while it fades stops carrying
+    /// it, as it stops carrying every member -- read, not tested; the shipped
+    /// scripts forget a desk only when the number of desks goes down.
+    pub(crate) groups: Vec<Box<str>>,
+    /// The panes it is drawn over, which is where it stays in the stack while
+    /// it fades: [`Panes::sync`] puts it directly above whichever of them is
+    /// highest, wherever that one has been raised to since.
+    ///
+    /// Every pane stacked under it when its client went, and every one the
+    /// layout grew into its space at `close`. So a window that goes behind
+    /// another one fades behind it -- a terminal behind a browser does not
+    /// jump in front of it to fade
+    /// (`a_window_that_closes_itself_behind_another_fades_behind_it`); one that
+    /// goes from the top stays over the window the keyboard moves to, although
+    /// focusing that window raises it
+    /// (`a_window_that_goes_from_the_top_stays_over_the_window_the_keyboard_moves_to`);
+    /// and the neighbour a layout grows into its place grows in behind the
+    /// fade, as it does behind a close the compositor asks for (#128), which
+    /// raises the window at the press
+    /// (`a_window_that_closes_itself_hands_its_space_over_as_it_fades`).
+    ///
+    /// **What that costs**: the rule cannot tell a raise that is the keyboard
+    /// moving on from one that is a click, so a window it was over that is
+    /// clicked to the front inside those 190 ms takes the fade up with it, over
+    /// whatever was covering both. Read, not tested.
+    pub(crate) over: Vec<PaneId>,
     /// What its frame said, and whether it was drawn focused, so a titlebar
     /// fades out as it stood rather than losing its title on the way. Both
     /// read back in `a_window_that_left_is_nobodys_to_find`.
@@ -1197,22 +1228,14 @@ impl Panes {
         removed
     }
 
-    /// Put a pane on top, and say the window list changed.
+    /// Say the window list changed, for a change `sync` cannot see by itself.
     ///
-    /// For a pane whose client has just gone: it has left the space, so the
-    /// space's stacking no longer has an opinion about it, and `sync` would put
-    /// it on top with the other panes that have no client at the next sweep
-    /// anyway. Doing it now keeps the frame drawn before that sweep from
-    /// stacking it anywhere else, and matches #128, which raises a window the
-    /// compositor closes so it fades in front of the neighbour growing into
-    /// its place. Reported as a change because the pane has stopped being a
-    /// window, and a window going is what `sync_panes` settles the keyboard on:
+    /// A pane whose client has just gone stays in the list, where it was, as
+    /// what fades out -- so the ids `sync` compares are the ones it had, and it
+    /// would report nothing. The pane has stopped being a window all the same,
+    /// and a window going is what `sync_panes` settles the keyboard on:
     /// `a_window_that_left_is_nobodys_to_find` has the keyboard move.
-    pub(crate) fn raise(&mut self, id: PaneId) {
-        if let Some(at) = self.panes.iter().position(|pane| pane.id == id) {
-            let pane = self.panes.remove(at);
-            self.panes.push(pane);
-        }
+    pub(crate) const fn changed(&mut self) {
         self.changed = true;
     }
 
@@ -1292,7 +1315,11 @@ impl Panes {
         // here if `Solium::settle_leaving` has not dropped it first. That is
         // step 5 of the window-provider migration: `Solium::depart` turns a
         // pane whose client went into one of these, drawn from what its client
-        // left, and nothing else about it is a window any more.
+        // left, and nothing else about it is a window any more. It does not
+        // ride on top: it goes back where it was in the stack, directly above
+        // the highest of the panes it is drawn over (`Left::over`, which says
+        // why), and above any other that is fading out from the same place --
+        // put there first, so below it before this sweep too.
         //
         // **A pane whose client went without `depart` hearing of it is still
         // dropped here, and vanishes**: its client is `Some`, and not in the
@@ -1302,11 +1329,27 @@ impl Panes {
         // it would take an X11 window whose Xwayland went away without an
         // unmap. `syncing_retires_a_pane_that_has_finished_leaving` pins the
         // ghost half.
-        ordered.extend(
-            held.into_iter()
-                .flatten()
-                .filter(|pane| pane.client().is_none() && !pane.faded_out(now)),
-        );
+        for pane in held
+            .into_iter()
+            .flatten()
+            .filter(|pane| pane.client().is_none() && !pane.faded_out(now))
+        {
+            let Some(left) = pane.left() else {
+                ordered.push(pane);
+                continue;
+            };
+            let above = ordered
+                .iter()
+                .rposition(|each| left.over.contains(&each.id))
+                .map_or(0, |at| at + 1);
+            let at = above
+                + ordered
+                    .iter()
+                    .skip(above)
+                    .take_while(|each| each.ghost())
+                    .count();
+            ordered.insert(at, pane);
+        }
         self.panes = ordered;
 
         let after: Vec<PaneId> = self.panes.iter().map(|pane| pane.id).collect();
@@ -1380,7 +1423,8 @@ mod tests {
             since,
             outer: slot(),
             geometry: slot(),
-            shift: crate::group::Shift::NONE,
+            groups: Vec::new(),
+            over: Vec::new(),
             title: String::new(),
             focused: false,
             remains: Remains::Lost,
@@ -1514,6 +1558,53 @@ mod tests {
         assert!(
             !pane.expired(went + LEAVING - Duration::from_millis(1), Duration::ZERO),
             "and not before it, however short patience is"
+        );
+    }
+
+    /// **#126's review: `sync` keeps a pane fading out where it was in the
+    /// stack**, directly above the highest pane it is drawn over, rather than
+    /// on top with the panes still waiting for an application.
+    ///
+    /// Loading panes stand in for the windows here, because a `Window` cannot
+    /// be made without a client; the rule is the same one for both, and
+    /// `a_window_that_closes_itself_behind_another_fades_behind_it` drives it
+    /// with real windows. Two panes fading out over the same one keep the order
+    /// they were in.
+    #[test]
+    fn syncing_keeps_a_pane_that_left_where_it_was_in_the_stack() {
+        let went = Duration::from_secs(3);
+        let loading = |pid| {
+            Pane::loading(
+                "kitty",
+                Some(pid),
+                slot(),
+                PathBuf::new(),
+                None,
+                Duration::ZERO,
+            )
+        };
+        // On top of the list, where `Panes::open` puts a pane -- and where
+        // #126 first put one whose client had gone, whatever it had been under.
+        let mut panes = Panes::default();
+        let bottom = panes.open(loading(1));
+        let top = panes.open(loading(2));
+        let first = panes.open(loading(3));
+        let second = panes.open(loading(4));
+        for going in [first, second] {
+            if let Some(pane) = panes.get_mut(going) {
+                pane.leave(Left {
+                    over: vec![bottom],
+                    ..left(went)
+                });
+            }
+        }
+        panes.sync(&[], went);
+        let order: Vec<PaneId> = panes.iter().map(Pane::id).collect();
+        assert_eq!(
+            order,
+            vec![bottom, first, second, top],
+            "two panes fading out over the bottom one stay directly above it, in the \
+             order they were in, and under the one that was over them"
         );
     }
 

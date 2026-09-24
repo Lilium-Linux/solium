@@ -184,8 +184,9 @@ back. A refused window is an ordinary window again, and closing it a second
 time starts over with a second `closing`. A window whose application quit on
 its own -- `exit`, its own Quit, a crash -- was never asked, so it gets `close`
 and nothing before it; it still fades out where it stood, from what the
-application last showed, while a layout that reflows at `close` grows its
-neighbours into the space. Its row is in `close`'s own snapshot, leaving, and
+application last showed -- in front of the windows it was in front of and
+behind the rest -- while a layout that reflows at `close` grows its
+neighbours into the space, behind it. Its row is in `close`'s own snapshot, leaving, and
 in no snapshot after.
 
 `close` still means *gone*, and nothing else. Anything a script keeps about a

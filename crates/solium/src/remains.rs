@@ -35,6 +35,18 @@
 //!   destruction if Xwayland tears the surface down first; whichever comes
 //!   first takes it. No test here has an X server; an `xmessage -timeout`
 //!   closing itself in a nested session was seen to fade from its picture.
+//! * **A window that unmaps itself before it goes** -- attaches no buffer and
+//!   commits, and only then destroys `xdg_toplevel` -- leaves nothing, and
+//!   vanishes as every window did before #126: smithay's reset drops the
+//!   textures at that commit, and `Solium::depart` then finds a window with no
+//!   buffer, which to it is one that was never on screen. Fading one would
+//!   mean treating an unmap as a close, and an unmapped toplevel may map
+//!   again. No client seen does it. Traced nested with `WAYLAND_DEBUG=1`,
+//!   GTK 4.22 (a PyGObject window calling `close()`), Qt 6.11 (a PySide6
+//!   window calling `close()`) and Firefox 156 (closed with `super+q`) each
+//!   destroyed `xdg_toplevel` and `xdg_surface` first, and attached a null
+//!   buffer, if at all, only after. `zenity --timeout` exits without tearing
+//!   anything down, which is the disconnect above.
 //!
 //! **And the picture outlives the surface it was read from.** `GlesTexture` is
 //! an `Arc` round the GL object (`backend/renderer/gles/texture.rs`), and the
@@ -44,7 +56,10 @@
 //! and not ours. A dmabuf-backed texture holds its `EGLImage`s the same way, in
 //! the same struct, and `EGL_EXT_image_dma_buf_import` lets the fds behind an
 //! image be closed once it exists -- which is what a departed client's are. A
-//! shared-memory texture is the compositor's own copy of the pixels. None of
+//! shared-memory texture is the compositor's own copy of the pixels, **but not
+//! this picture's alone**: smithay keeps one per surface and uploads the
+//! surface's next buffer of the same size into it, so a surface the client
+//! keeps and gives a new buffer ends the fade ([`Picture::holds`]). None of
 //! this can be driven without a GPU, so it is read, not tested.
 //!
 //! **Every surface of the tree, not the root alone**, topmost first, the order
@@ -53,16 +68,40 @@
 //! picture of such a window's root alone is its chrome around a hole. The cost
 //! per extra surface is one more handle.
 //!
+//! **As the tree is when the window goes**, which is not always all of it. A
+//! subsurface already unlinked is not in it: one a client takes down before
+//! its window on an orderly exit
+//! (`a_window_whose_subsurface_goes_first_fades_without_it`), and, on a
+//! disconnect, one whose `wl_subsurface` object has a lower id than the
+//! window's surface -- ids are recycled -- since that object's destructor
+//! unlinks it and tells the compositor nothing. One whose own `wl_surface` is
+//! the older is kept: the window is taken at that surface instead
+//! (`a_client_that_disconnects_keeps_a_subsurface_older_than_its_window`).
+//! Firefox 156, traced nested, is that case: its page is a subsurface whose
+//! `wl_surface` (#25) is older than the window's (#49) and whose
+//! `wl_subsurface` (#55) is younger, and closed, it destroyed `xdg_toplevel`
+//! before the subsurface. No client that takes a subsurface down first was
+//! found.
+//!
 //! **What is not in it.** A surface whose current buffer the renderer never
 //! imported -- committed after the last frame that drew it, or never drawn on
 //! this GPU because it was off every screen -- has no texture to keep; it is
-//! kept as a surface with no pixels, and drawn as nothing. A picture none of
-//! whose surfaces has pixels is not drawn at all: the pane falls back to its
-//! frame and a fill (see [`FILL`]), which is what every test without a
-//! renderer gets (`a_window_that_closes_itself_fades_out_and_is_gone_on_time`
-//! asserts it). A single-pixel buffer, which the renderer never imports, is
-//! kept as the colour smithay's own surface element would draw -- read, not
-//! tested. Popups are not in it: they are not in the tree walked.
+//! kept as a surface with no pixels, and drawn as [`FILL`] where it was. A
+//! picture none of whose surfaces has pixels is not drawn at all: the pane
+//! falls back to its frame and the fill over its client's rectangle, which is
+//! what every test without a renderer gets
+//! (`a_window_that_closes_itself_fades_out_and_is_gone_on_time` asserts it).
+//!
+//! **That is not rare**, and "never imported" undersells it: smithay clears a
+//! surface's textures on every new buffer it is given
+//! (`RendererSurfaceState::update_buffer`) and imports only when it draws, so
+//! a client that commits a last frame and goes before the next frame is drawn
+//! -- one that paints and exits inside a frame, one killed mid-animation --
+//! leaves no texture for that surface, whatever it showed before.
+//!
+//! A single-pixel buffer, which the renderer never imports, is kept as the
+//! colour smithay's own surface element would draw -- read, not tested.
+//! Popups are not in it: they are not in the tree walked.
 //!
 //! ## What the buffers are held for
 //!
@@ -81,6 +120,7 @@ use smithay::{
         utils::{Buffer, CommitCounter, RendererSurfaceStateUserData, SurfaceView},
     },
     desktop::Window,
+    reexports::wayland_server::{Resource as _, backend::ObjectId},
     utils::{Buffer as BufferCoords, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
     wayland::{
         compositor::{TraversalAction, with_surface_tree_downward},
@@ -88,15 +128,35 @@ use smithay::{
     },
 };
 
-/// The fill a window is drawn with when nothing of its client survived.
+/// The fill a window is drawn with where its client left nothing to draw it
+/// from, straight (not premultiplied) RGBA.
 ///
-/// `Theme.surface` as `qml/Solium/Theme.qml` ships it, which is the colour the
-/// default `top` style's bar is painted in: the window reads as its frame
-/// grown over the place its client was. **The shipped value, not the theme's**:
-/// there is no channel from a style's QML to the compositor for a colour, and a
-/// theme dropped into the user's directory is not consulted. Only a window
-/// whose client left no picture at all is drawn with it.
-pub(crate) const FILL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// **A mid grey at half opacity, because nothing here knows what was there.**
+/// The client's own pixels are what is missing, and there is no channel from a
+/// style's QML to the compositor for the theme's colours either. This was
+/// `Theme.surface` as shipped -- opaque white -- until #126's review, and on a
+/// dark terminal or under a dark theme that is a white rectangle flashed where
+/// the window stood, for the first frames of its fade. A grey sits between
+/// whatever it replaces and its opposite, and at half opacity what is behind
+/// the window shows through it as well; the fade takes it from there.
+/// `a_window_that_left_no_picture_is_filled_with_a_translucent_grey`.
+///
+/// Drawn alone, over the client's rectangle, for a window that left nothing at
+/// all ([`crate::pane::Remains::Lost`]), and in the place of each surface of a
+/// picture that has no pixels ([`Picture::elements`]): a window whose page
+/// survived and whose root did not, or the other way round, would otherwise be
+/// its frame and one surface round a hole. The second is not hypothetical:
+/// Firefox, closed nested with `WAYLAND_DEBUG=1`, committed its page
+/// subsurface's last frame 6 ms before it destroyed its toplevel -- less than
+/// a frame at 60 Hz, so a frame drawn in between is not to be counted on.
+/// `a_surface_that_left_no_picture_is_filled_where_it_was`.
+pub(crate) const FILL: [f32; 4] = [0.5, 0.5, 0.5, 0.5];
+
+/// [`FILL`], premultiplied, which is what a solid draw is given.
+fn fill() -> Color32F {
+    let [r, g, b, a] = FILL;
+    Color32F::new(r * a, g * a, b * a, a)
+}
 
 /// Which renderer's imports a picture is read from.
 ///
@@ -122,7 +182,7 @@ enum Pixels {
     /// A single-pixel buffer: a colour, which the renderer never imports.
     Colour(Color32F),
     /// A buffer the renderer never imported. Kept for its place in the tree and
-    /// for the buffer, and drawn as nothing.
+    /// for the buffer, and drawn as [`FILL`].
     Unimported,
 }
 
@@ -133,6 +193,13 @@ struct Kept {
     /// life of the picture, so that a fade redraws what changed rather than the
     /// whole of the window every frame.
     id: Id,
+    /// Which surface it was, for [`Picture::holds`]. The id alone, which holds
+    /// nothing of the surface: its serial tells a recycled protocol id apart.
+    surface: ObjectId,
+    /// Whether it is the window's own surface, whose fill is the window's
+    /// rectangle rather than the whole buffer: a client that draws its own
+    /// shadow draws it outside that rectangle, on the same surface.
+    root: bool,
     /// Where the surface's top-left is, from the root surface's.
     offset: Point<i32, Logical>,
     view: SurfaceView,
@@ -185,7 +252,7 @@ impl Picture {
                         None => TraversalAction::SkipChildren,
                     }
                 },
-                |_, states, at| {
+                |surface, states, at| {
                     let Some(data) = states.data_map.get::<RendererSurfaceStateUserData>() else {
                         return;
                     };
@@ -217,6 +284,8 @@ impl Picture {
                     };
                     surfaces.push(Kept {
                         id: Id::new(),
+                        surface: surface.id(),
+                        root: *surface == *root,
                         offset: *at + view.offset,
                         view,
                         scale: data.buffer_scale(),
@@ -234,6 +303,27 @@ impl Picture {
             committed: geometry.size,
             inset: geometry.loc,
         }
+    }
+
+    /// Whether it is drawn from this surface.
+    ///
+    /// For a client that keeps a surface after its window has gone and gives
+    /// it a new buffer: one that hides a window and shows it again can map a
+    /// new role on the same `wl_surface`. Not seen -- the GTK 4 and Qt 6
+    /// windows traced for #126 destroyed their surface a few milliseconds
+    /// after their toplevel -- and cheap to answer. smithay's GLES renderer
+    /// keeps a shared-memory texture per surface (`import_shm_buffer`'s
+    /// `CacheMap`, in the surface's own data, which
+    /// `RendererSurfaceState::reset` leaves alone) and uploads the next buffer
+    /// of the same size into that same texture, which is the one this picture
+    /// holds a handle to: the fade would show the new window's pixels. So a new buffer on a surface this
+    /// holds ends the fade there and then (`Solium::let_go_of_reused`). Read
+    /// in smithay 0.7.0, where a dmabuf's texture is kept per buffer rather
+    /// than per surface, so a new buffer does not touch it; the fade ends all
+    /// the same, since which kind a texture is cannot be told from here.
+    /// `a_window_that_went_ends_its_fade_when_its_surface_is_given_a_new_buffer`.
+    pub(crate) fn holds(&self, surface: &ObjectId) -> bool {
+        self.surfaces.iter().any(|kept| kept.surface == *surface)
     }
 
     /// Whether any of it can be drawn.
@@ -256,12 +346,24 @@ impl Picture {
         self.inset
     }
 
-    /// Every drawable surface as an element, topmost first, with the root's
-    /// top-left at `origin` and every one of them at `alpha`.
+    /// Every surface as an element, topmost first, with the root's top-left
+    /// at `origin` and every one of them at `alpha`.
     ///
     /// At the surfaces' own size, like the live client's elements, so the
     /// caller puts them through the same `render::fitted` a live client's
-    /// surfaces go through.
+    /// surfaces go through. **A surface with no pixels is drawn as [`FILL`]**,
+    /// where it was and as big as it was -- the window's own rectangle for the
+    /// root -- and at its place in the stack, so no surface that did survive is
+    /// left standing in a hole. Only [`Self::drawable`] pictures are drawn
+    /// from; one that is all fill is drawn as the client's rectangle instead.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::unnecessary_filter_map,
+            reason = "every surface is kept outside a test; under test a dummy texture, \
+                      which no GLES frame can draw, is dropped"
+        )
+    )]
     pub(crate) fn elements(
         &self,
         origin: Point<i32, Physical>,
@@ -270,18 +372,29 @@ impl Picture {
     ) -> impl Iterator<Item = Surface> + '_ {
         let origin = origin.to_f64();
         self.surfaces.iter().filter_map(move |kept| {
-            let pixels = match &kept.pixels {
-                Pixels::Texture(texture) => Drawn::Texture(texture.clone()),
-                Pixels::Colour(colour) => Drawn::Colour(*colour),
+            let (pixels, offset, view) = match &kept.pixels {
+                Pixels::Texture(texture) => {
+                    (Drawn::Texture(texture.clone()), kept.offset, kept.view)
+                }
+                Pixels::Colour(colour) => (Drawn::Colour(*colour), kept.offset, kept.view),
                 #[cfg(test)]
                 Pixels::Dummy(_) => return None,
-                Pixels::Unimported => return None,
+                Pixels::Unimported if kept.root => (
+                    Drawn::Fill,
+                    self.inset,
+                    SurfaceView {
+                        src: Rectangle::from_size(self.committed.to_f64()),
+                        dst: self.committed,
+                        offset: Point::default(),
+                    },
+                ),
+                Pixels::Unimported => (Drawn::Fill, kept.offset, kept.view),
             };
             Some(Surface {
                 id: kept.id.clone(),
-                location: origin + kept.offset.to_f64().to_physical(scale),
+                location: origin + offset.to_f64().to_physical(scale),
                 alpha,
-                view: kept.view,
+                view,
                 scale: kept.scale,
                 transform: kept.transform,
                 size: kept.size,
@@ -318,11 +431,13 @@ pub(crate) fn taken() -> usize {
     TAKEN.with(std::cell::Cell::get)
 }
 
-/// What an element is drawn from. [`Pixels`] less the cases that draw nothing.
+/// What an element is drawn from. [`Pixels`], with the pixels that did not
+/// survive drawn as [`FILL`].
 #[derive(Debug)]
 enum Drawn {
     Texture(GlesTexture),
     Colour(Color32F),
+    Fill,
 }
 
 /// One kept surface, placed for one frame.
@@ -345,6 +460,13 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
+    /// Whether this stands in for a surface that left no pixels. Under test,
+    /// where it is the one kind of element a picture can be seen to draw.
+    #[cfg(test)]
+    pub(crate) const fn filled(&self) -> bool {
+        matches!(self.pixels, Drawn::Fill)
+    }
+
     fn physical_size(&self, scale: Scale<f64>) -> Size<i32, Physical> {
         ((self.view.dst.to_f64().to_physical(scale).to_point() + self.location).to_i32_round()
             - self.location.to_i32_round())
@@ -411,6 +533,7 @@ impl RenderElement<GlesRenderer> for Surface {
                 self.alpha,
             ),
             Drawn::Colour(colour) => Frame::draw_solid(frame, dst, damage, *colour * self.alpha),
+            Drawn::Fill => Frame::draw_solid(frame, dst, damage, fill() * self.alpha),
         }
     }
 

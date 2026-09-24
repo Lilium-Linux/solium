@@ -55,9 +55,10 @@ render_elements! {
     /// A surface drawn straight, with no rescale wrapper: the offscreen pass
     /// draws at real size, so there is nothing to scale.
     Window2 = WaylandSurfaceRenderElement<GlesRenderer>,
-    /// A flat colour. The only thing that draws one is the lock screen's
-    /// backdrop, which has to be a real element rather than a clear colour
-    /// because the lock client's surface is composited on top of it.
+    /// A flat colour. Two things draw one: the lock screen's backdrop, which
+    /// has to be a real element rather than a clear colour because the lock
+    /// client's surface is composited on top of it, and the fill a window that
+    /// has gone is drawn with where its client left nothing (`remains::FILL`).
     Solid = smithay::backend::renderer::element::solid::SolidColorRenderElement,
     /// Something already drawn into a texture of its own.
     ///
@@ -2130,8 +2131,23 @@ impl Fitted<crate::remains::Surface> {
 /// A picture with no pixels in it -- a client whose last buffer was never
 /// imported -- is not drawn from at all: the client rectangle is filled with
 /// `remains::FILL` instead, so what fades out is the window's shape and never
-/// nothing.
-fn remains_elements(
+/// nothing. A picture with some draws each surface that has none as the same
+/// fill, where that surface was (`remains::Picture::elements`).
+///
+/// **Two things the live path does are not done here**, both read and neither
+/// tested, since no test has a GPU. A style's client pass (`Prepared::pass`:
+/// the `client.radius` mask of `rounded` and `flush`) is not applied, so under
+/// those styles the corners of what fades are square from its first frame.
+/// And a matrix or a deform (`Prepared::texture`: a tilt, a genie) is not
+/// either: what fades is flat at `frame.rect`, so a tilted window snaps flat
+/// on its first frame and one pulled into the dock by a genie pops back to
+/// full size before it fades. Both are keyed by the client's `Window`, which a
+/// window that has gone no longer has, and [`prepare`] releases the pane's
+/// `offscreen::Scratch` on the first frame it has none -- where the last
+/// capture of it was, which either could have been drawn from. The default
+/// style, `top`, has no client pass, and the tilt and the genie are what
+/// `init.lua`'s dev bindings and `tweaks.lua`'s effects ask for.
+pub(crate) fn remains_elements(
     state: &Solium,
     pane: crate::pane::PaneId,
     frame: &present::Frame,
@@ -2145,42 +2161,42 @@ fn remains_elements(
         return Vec::new();
     };
     let output_scale = Scale::from(scale);
-    match &left.remains {
-        crate::pane::Remains::Picture(picture) if picture.drawable() => {
-            let placed = place_client(state, held, frame, outer, picture.committed());
-            let origin = placed.origin.to_physical_precise_round(scale);
-            // Where the buffer's own corner goes: the window's rectangle
-            // starts `inset` into it for a client that draws a shadow, which is
-            // the same offset the live path takes off.
-            let surfaces = origin - picture.inset().to_physical_precise_round(scale);
-            picture
-                .elements(surfaces, scale, frame.opacity)
-                .filter_map(|surface| {
-                    fitted(surface, origin, placed.fit, output_scale).map(Fitted::into_remains)
-                })
-                .collect()
-        }
-        crate::pane::Remains::Picture(_) | crate::pane::Remains::Lost => {
-            let placed = place_client(state, held, frame, outer, left.geometry.size);
-            let area = Rectangle::new(
-                placed.client.loc.to_physical_precise_round(scale),
-                placed.client.size.to_physical_precise_round(scale),
-            );
-            let fill = crate::remains::FILL;
-            let alpha = fill[3] * frame.opacity;
-            vec![Element::Solid(
-                smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
-                    left.fill.clone(),
-                    area,
-                    CommitCounter::default(),
-                    [fill[0] * alpha, fill[1] * alpha, fill[2] * alpha, alpha],
-                    Kind::Unspecified,
-                ),
-            )]
-        }
+    let picture = match &left.remains {
+        crate::pane::Remains::Picture(picture) if picture.drawable() => Some(picture),
+        crate::pane::Remains::Picture(_) | crate::pane::Remains::Lost => None,
         // Drawn by `scene`, through the walk that draws a loading pane.
-        crate::pane::Remains::Scene(_) => Vec::new(),
+        crate::pane::Remains::Scene(_) => return Vec::new(),
+    };
+    if let Some(picture) = picture {
+        let placed = place_client(state, held, frame, outer, picture.committed());
+        let origin = placed.origin.to_physical_precise_round(scale);
+        // Where the buffer's own corner goes: the window's rectangle starts
+        // `inset` into it for a client that draws a shadow, which is the same
+        // offset the live path takes off.
+        let surfaces = origin - picture.inset().to_physical_precise_round(scale);
+        return picture
+            .elements(surfaces, scale, frame.opacity)
+            .filter_map(|surface| {
+                fitted(surface, origin, placed.fit, output_scale).map(Fitted::into_remains)
+            })
+            .collect();
     }
+    let placed = place_client(state, held, frame, outer, left.geometry.size);
+    let area = Rectangle::new(
+        placed.client.loc.to_physical_precise_round(scale),
+        placed.client.size.to_physical_precise_round(scale),
+    );
+    let fill = crate::remains::FILL;
+    let alpha = fill[3] * frame.opacity;
+    vec![Element::Solid(
+        smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
+            left.fill.clone(),
+            area,
+            CommitCounter::default(),
+            [fill[0] * alpha, fill[1] * alpha, fill[2] * alpha, alpha],
+            Kind::Unspecified,
+        ),
+    )]
 }
 
 /// Put one surface through a fit. `None` when the cut leaves nothing of it,
