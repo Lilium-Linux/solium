@@ -1244,7 +1244,8 @@ pub(crate) enum Standing {
     /// A layout placing a window it does not tile: `dialogs.lua` centring a
     /// modal over its parent, through `sol.place` with `tile = false`. The pane
     /// is taken out of any tile it was in, because a dialog is a floating
-    /// window whichever mode is running.
+    /// window whichever mode is running -- at once, or, for a window being
+    /// closed, once it is back: see `Pane::let_go`.
     Free,
     /// Not a layout at all -- `Solium::rescue_offscreen` dragging a window
     /// back onto a screen. A tiled pane is still tiled, at the rectangle it was
@@ -1621,10 +1622,21 @@ impl Solium {
     /// #133 made `Pane::placed` the tile a client is held inside as well, and
     /// a stale one of those is a window cut down to where it used to be — so
     /// every way out of a tile clears it now, and `modes.use` is taught to say
-    /// so with `sol.unplace`. What this function answers for a pane that *is*
-    /// tiled is unchanged: `a_client_that_rounds_its_size_does_not_move_the_seam`
-    /// still drives it, and `a_restored_window_goes_back_into_its_tile` covers
-    /// the one way back that has to put the layout's rectangle back as well.
+    /// so with `sol.unplace`.
+    ///
+    /// **Every way out but a close, and that one is deliberate (#128).** A
+    /// layout's `closing` handler takes the window out of its tree and nothing
+    /// clears the field, because the tile is what cuts the window for the
+    /// whole of its fade; and a `sol.unplace` that arrives during the fade
+    /// waits until the window is back. `Pane::placed` has the reasons and
+    /// `Pane::let_go` the waiting, and
+    /// `a_closed_window_is_cut_to_the_tile_it_left_for_the_whole_fade` fails
+    /// if the field is cleared at `closing`.
+    ///
+    /// What this function answers for a pane that *is* tiled is unchanged:
+    /// `a_client_that_rounds_its_size_does_not_move_the_seam` still drives it,
+    /// and `a_restored_window_goes_back_into_its_tile` covers the one way back
+    /// that has to put the layout's rectangle back as well.
     pub(crate) fn pane_laid_out(&self, window: &Window) -> Option<crate::input::resize::LaidOut> {
         let pane = self.panes.get(self.panes.id_of(window)?)?;
         Some(crate::input::resize::LaidOut(
@@ -3718,11 +3730,10 @@ impl Solium {
             match standing {
                 Standing::Tile => held.set_placed(outer),
                 Standing::Free => held.untile(),
-                Standing::Kept => {
-                    if held.placed().is_some() {
-                        held.set_placed(outer);
-                    }
-                }
+                // Moved and not set, so a let-go a leaving pane is waiting on
+                // is still owed after a rescue. See `Pane::move_tile`, and
+                // `a_rescue_during_a_fade_keeps_the_let_go_it_is_waiting_on`.
+                Standing::Kept => held.move_tile(outer),
             }
         }
 
@@ -3797,6 +3808,14 @@ impl Solium {
         // which left the configure running; the second suppressed the space as
         // well, which left the three copies disagreeing. See the note above
         // them for both.
+        //
+        // **With one exception, and it is about the presentation too:** a
+        // `Standing::Free` placement does not clear `Pane::placed` on a leaving
+        // pane. That field is the tile the fading window is cut to, so
+        // `Pane::untile` keeps it and owes the let-go until the window is back.
+        // See `Pane::let_go`, and
+        // `a_mode_switched_during_a_fade_does_not_squash_the_window_leaving`,
+        // which places a leaving window with `tile = false`.
         //
         // Note what needs no guard. `present::rebase` — the group path — is
         // safe for a leaving pane by construction: it preserves both the
@@ -5985,6 +6004,19 @@ impl Solium {
     fn give_back(&mut self, id: crate::pane::PaneId, now: std::time::Duration) -> bool {
         /// How long the window takes to fade back in.
         const RETURN: std::time::Duration = std::time::Duration::from_millis(150);
+        // **A let-go the close kept waiting is taken first, before the return
+        // is aimed** (`Pane::let_go`). A layout that let the window out of its
+        // tile during the fade -- a switch to floating inside it -- has said it
+        // is in no tile now, and the return below lands on `pane_outer`, which
+        // a tile caps. Aimed with the tile still held, a window wider than its
+        // tile would fade back in to the tile's width rather than its own. And
+        // it is put back if the give-back declines, because the window is then
+        // still fading and its tile is still what cuts it.
+        // `a_mode_switched_during_a_fade_does_not_squash_the_window_leaving`
+        // asserts where the return lands, and
+        // `a_give_back_that_declines_keeps_a_fade_cut_after_a_mode_switch` the
+        // putting back.
+        let owed = self.panes.get_mut(id).and_then(Pane::take_let_go);
         let Some(pane) = self.panes.get(id) else {
             // No pane, nothing to give back and nothing left waiting: a window
             // that went while this ran answered the close after all.
@@ -5992,6 +6024,9 @@ impl Solium {
         };
         let outer = self.pane_outer(pane);
         if !present::clear(pane, outer, now, RETURN, solium_animation::Curve::OutCubic) {
+            if let (Some(owed), Some(pane)) = (owed, self.panes.get_mut(id)) {
+                pane.owe_let_go(owed);
+            }
             return false;
         }
         if let Some(pane) = self.panes.get_mut(id) {
@@ -17593,7 +17628,7 @@ end
                 /// test that has to make the client answer a configure with a
                 /// buffer of the size it was given, as a real one does.
                 fn open_surface(&mut self) -> Opened {
-                    let (window, toplevel, surface, _xdg) = open_xdg(
+                    let (window, toplevel, surface, xdg) = open_xdg(
                         &mut self.display,
                         &mut self.state,
                         &self.conn,
@@ -17611,6 +17646,7 @@ end
                         toplevel,
                         pane,
                         surface,
+                        xdg,
                     }
                 }
 
@@ -17661,6 +17697,8 @@ end
                 toplevel: xdg_toplevel::XdgToplevel,
                 pane: crate::pane::PaneId,
                 surface: wl_surface::WlSurface,
+                /// What a menu names as its parent.
+                xdg: xdg_surface::XdgSurface,
             }
 
             /// A window a test closes under `layout`, and the windows beside
@@ -18585,6 +18623,734 @@ end)
                     grown.size.w > half.size.w && back == half && gone.size.w > half.size.w,
                     "the neighbour was {half:?}, {grown:?} at the press, {back:?} at the \
                      refusal and {gone:?} once the client went"
+                );
+            }
+
+            // #128 and #133 together.
+            //
+            // Every test above commits a 64x64 buffer, which no tile cuts, and
+            // no #133 test closes a window, so the cut never engaged in a close
+            // or a refusal. The ones below give a window a client that will not
+            // shrink as far as its tile, and close it.
+
+            /// Two windows side by side under tiling, and the left one's client
+            /// committing a buffer 200 pixels wider than its tile -- a browser
+            /// at its minimum width -- while the right one's fills its own:
+            /// `(left, right, the left one's tile)`. The left one, because a
+            /// tiling sweep places it first and its neighbour after it, which
+            /// is the order a close has to raise it against.
+            fn an_oversized_window_beside_another(
+                desk: &mut Desk,
+                before: &str,
+            ) -> (Opened, Opened, Rectangle<i32, Logical>) {
+                let mut opened: Vec<Opened> = (0..2).map(|_| desk.open_surface()).collect();
+                desk.arrange("tiling", before);
+                opened.sort_by_key(|each| desk.placed(each.pane).loc.x);
+                let right = opened.pop().expect("two windows were opened");
+                let left = opened.pop().expect("two windows were opened");
+                let tile = desk.placed(left.pane);
+                desk.answer(&right);
+                commit_buffer(
+                    &desk.client,
+                    &desk.qh,
+                    &left.surface,
+                    tile.size.w + 200,
+                    tile.size.h,
+                );
+                desk.pump();
+                desk.state.sync_panes();
+                assert_eq!(
+                    committed(&desk.state, left.pane),
+                    Size::from((tile.size.w + 200, tile.size.h)),
+                    "the premise: the client committed more than its tile"
+                );
+                assert_eq!(
+                    desk.state.pane_outer_of(left.pane),
+                    Some(tile),
+                    "the premise: and it is held inside the tile"
+                );
+                (left, right, tile)
+            }
+
+            /// The size `pane`'s client last committed.
+            fn committed(state: &Solium, pane: crate::pane::PaneId) -> Size<i32, Logical> {
+                state
+                    .panes
+                    .get(pane)
+                    .and_then(Pane::client)
+                    .map(|window| window.geometry().size)
+                    .expect("the pane has a client")
+            }
+
+            /// How `pane` is drawn at `at`, and how its client's buffer goes
+            /// into that frame: through `render::place_client`, which is what
+            /// `render::elements` draws the surfaces with and what
+            /// `surface_under` inverts.
+            fn pictured(
+                state: &Solium,
+                pane: crate::pane::PaneId,
+                at: Duration,
+            ) -> (Frame, crate::render::Placed) {
+                let held = state.panes.get(pane).expect("the pane is here");
+                let outer = state.pane_outer(held);
+                let frame = state.drawn_at(held, outer, at);
+                let drawn = crate::render::place_client(
+                    state,
+                    held,
+                    &frame,
+                    outer.size,
+                    committed(state, pane),
+                );
+                (frame, drawn)
+            }
+
+            /// What is wrong with how a client wider than its picture is drawn
+            /// into a frame, or `None` when nothing is.
+            ///
+            /// Across, where every window these tests assert on is wider than
+            /// anything its frame pictures, the buffer is cut to the drawn
+            /// client rectangle and scaled by the frame's zoom and by nothing
+            /// else: a picture of the window, cut, and not the window squashed
+            /// into it. Down, a glide can picture the window taller than its
+            /// buffer and stretch it, as every glide does, so there it is only
+            /// held to not being scaled below the zoom. A thousandth under is
+            /// allowed for the half pixel `render::fit` does not call a cut;
+            /// the squash this looks for is a sixth.
+            fn why_not_cut(frame: &Frame, drawn: &crate::render::Placed) -> Option<String> {
+                let factor = drawn.fit.factor;
+                if drawn.fit.crop != Some(drawn.client) {
+                    return Some(format!("not cut to its picture: {:?}", drawn.fit));
+                }
+                if (factor.x - frame.zoom.0).abs() > 1e-9 {
+                    return Some(format!(
+                        "scaled across by {} at a zoom of {}",
+                        factor.x, frame.zoom.0
+                    ));
+                }
+                if factor.y < frame.zoom.1 * (1.0 - 1e-3) {
+                    return Some(format!(
+                        "squashed down to {} at a zoom of {}",
+                        factor.y, frame.zoom.1
+                    ));
+                }
+                None
+            }
+
+            /// Whether `rect` lies inside `tile`, give or take half a pixel.
+            fn inside(rect: Rectangle<f64, Logical>, tile: Rectangle<i32, Logical>) -> bool {
+                let tile = tile.to_f64();
+                rect.loc.x >= tile.loc.x - 0.5
+                    && rect.loc.y >= tile.loc.y - 0.5
+                    && rect.loc.x + rect.size.w <= tile.loc.x + tile.size.w + 0.5
+                    && rect.loc.y + rect.size.h <= tile.loc.y + tile.size.h + 0.5
+            }
+
+            /// Whether two rectangles are the same to within a millionth of a
+            /// pixel: a blend's last frame is float arithmetic.
+            fn same(one: Rectangle<f64, Logical>, other: Rectangle<f64, Logical>) -> bool {
+                (one.loc.x - other.loc.x).abs() < 1e-6
+                    && (one.loc.y - other.loc.y).abs() < 1e-6
+                    && (one.size.w - other.size.w).abs() < 1e-6
+                    && (one.size.h - other.size.h).abs() < 1e-6
+            }
+
+            /// Put the pointer at `point`, as a motion with no surface under it
+            /// would: what `sol.cursor()` reads when a layout decides where a
+            /// new window goes.
+            fn point_at(state: &mut Solium, point: Point<f64, Logical>) {
+                let pointer = state.seat.get_pointer().expect("the seat has a pointer");
+                pointer.motion(
+                    state,
+                    None,
+                    &smithay::input::pointer::MotionEvent {
+                        location: point,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: 0,
+                    },
+                );
+                pointer.frame(state);
+            }
+
+            /// **A window being closed is cut to the tile it left for every
+            /// frame of its fade.**
+            ///
+            /// `closing` takes the window out of the tiling tree and the
+            /// neighbour grows into its space at once, and nothing lets the
+            /// window out of its tile: `Pane::placed` is kept on purpose,
+            /// because it is what `render::fit` cuts the fading window to. The
+            /// client committed 200 pixels more than its tile. Cleared either
+            /// way below, the assertion on `Pane::placed` fails first, and the
+            /// two under it fail on their own without it: cleared at `closing`,
+            /// that whole buffer is scaled into every frame of the fade and the
+            /// cut assertion fails; cleared before `present::close` reads the
+            /// pane's rectangle, the fade starts at the committed width, over
+            /// the neighbour, and the one before it fails.
+            ///
+            /// Every 10 ms from the press to past `CLOSING`, where the window
+            /// is held invisible, and across a relayout 80 ms in -- a window
+            /// opening or a client's `set_parent` causes one.
+            #[test]
+            fn a_closed_window_is_cut_to_the_tile_it_left_for_the_whole_fade() {
+                let mut desk = Desk::new();
+                let (dying, survivor, tile) = an_oversized_window_beside_another(&mut desk, "");
+                let beside = desk.placed(survivor.pane);
+
+                let pressed = desk.state.clock.now();
+                desk.state.close_pane(dying.pane);
+                desk.pump();
+                assert!(
+                    desk.placed(survivor.pane).size.w > beside.size.w,
+                    "the premise: the neighbour grew into the space at once"
+                );
+
+                for step in 0..=21_u64 {
+                    if step == 8 {
+                        desk.state.clock.advance(Duration::from_millis(80));
+                        desk.state.trigger_relayout();
+                    }
+                    let ms = 10 * step;
+                    assert_eq!(
+                        desk.state.panes.get(dying.pane).and_then(Pane::placed),
+                        Some(tile),
+                        "{ms}ms into the fade the window was let out of the tile it left"
+                    );
+                    let (frame, drawn) =
+                        pictured(&desk.state, dying.pane, pressed + Duration::from_millis(ms));
+                    assert!(
+                        inside(frame.rect, tile),
+                        "{ms}ms into the fade the window reaches outside the tile it left: \
+                         {:?}, and the tile is {tile:?}",
+                        frame.rect
+                    );
+                    if let Some(why) = why_not_cut(&frame, &drawn) {
+                        panic!("{ms}ms into the fade the window is {why}");
+                    }
+                }
+                let (held, _) = pictured(
+                    &desk.state,
+                    dying.pane,
+                    pressed + Duration::from_millis(210),
+                );
+                assert!(
+                    held.opacity.abs() < f32::EPSILON && (held.zoom.0 - 0.86).abs() < 1e-9,
+                    "the premise: the fade ran to its held end: {held:?}"
+                );
+            }
+
+            /// **A mode switched during a fade does not squash the window
+            /// leaving.**
+            ///
+            /// `modes.use` lets every window out of its tile when the layout in
+            /// charge changes, and that includes a window being closed. On
+            /// stage the let-go cleared `Pane::placed` at once while the fade's
+            /// frames stayed pinned at the size of the tile the window was
+            /// closed in, so `render::fit`, which cuts only a tiled pane,
+            /// scaled the whole of a buffer 200 pixels wider than that tile
+            /// into them for the rest of the fade. A let-go now waits while the
+            /// window is leaving (`Pane::let_go`), and each way one arrives is
+            /// driven 60 ms in: a switch to floating, a switch to scrolling, a
+            /// script placing the window with `tile = false`, and a switch to
+            /// scrolling with both layouts waiting for the client -- where
+            /// scrolling adopts the leaving window and gives it a column during
+            /// the fade.
+            ///
+            /// And a let-go that waited is not lost. Refused after the switch to
+            /// floating, the window is in no tile, and its return lands at the
+            /// size its client committed, because `give_back` takes the let-go
+            /// before it aims the return; aimed first, the return lands at the
+            /// tile's width. Refused after scrolling gave it a column, it is
+            /// still in a tile: the column cancelled the let-go. That last case
+            /// passes on stage too, where nothing waited to be cancelled; it is
+            /// here for the cancel, and fails without it.
+            #[test]
+            fn a_mode_switched_during_a_fade_does_not_squash_the_window_leaving() {
+                // Scrolling loaded as well as tiling, so that `super+s` has a
+                // layout to switch to.
+                const SCROLLING: &str = "require(\"scrolling\")";
+                const BOTH_WAIT: &str = "require(\"scrolling\")\n\
+                                         require(\"config\").tiling.reflow_on_close = \"when_gone\"\n\
+                                         require(\"config\").scrolling.reflow_on_close = \"when_gone\"";
+                for (name, before, key) in [
+                    ("a switch to floating", SCROLLING, Some("super+t")),
+                    ("a switch to scrolling", SCROLLING, Some("super+s")),
+                    ("a place with tile = false", SCROLLING, None),
+                    (
+                        "a switch to scrolling waiting for the client",
+                        BOTH_WAIT,
+                        Some("super+s"),
+                    ),
+                ] {
+                    let mut desk = Desk::new();
+                    let (dying, _survivor, tile) =
+                        an_oversized_window_beside_another(&mut desk, before);
+                    let pressed = desk.state.clock.now();
+                    desk.state.close_pane(dying.pane);
+                    desk.pump();
+
+                    desk.state.clock.advance(Duration::from_millis(60));
+                    match key {
+                        Some(key) => {
+                            assert!(desk.state.trigger(key), "{name}: {key} was not handled");
+                        }
+                        None => desk.state.apply(Outcome {
+                            commands: vec![Command::Place {
+                                id: dying.pane.get(),
+                                rect: to_rect(tile),
+                                animation: AnimationSpec::default(),
+                                tile: false,
+                            }],
+                            ..Outcome::default()
+                        }),
+                    }
+                    assert!(
+                        desk.state
+                            .panes
+                            .get(dying.pane)
+                            .and_then(Pane::placed)
+                            .is_some(),
+                        "{name}: the window being closed was let out of its tile during its fade"
+                    );
+                    for step in 6..=21_u64 {
+                        let ms = 10 * step;
+                        let (frame, drawn) =
+                            pictured(&desk.state, dying.pane, pressed + Duration::from_millis(ms));
+                        if let Some(why) = why_not_cut(&frame, &drawn) {
+                            panic!("{name}: {ms}ms into the fade the window is {why}");
+                        }
+                    }
+
+                    desk.ask();
+                    let back = desk.refuse();
+                    assert!(
+                        desk.events()
+                            .ends_with(&format!("refused {}", dying.pane.get())),
+                        "{name}: the premise is a refusal the layout heard: {}",
+                        desk.events()
+                    );
+                    let placed = desk.state.panes.get(dying.pane).and_then(Pane::placed);
+                    if key == Some("super+t") {
+                        assert_eq!(
+                            placed, None,
+                            "{name}: the window came back floating and still held in its old tile"
+                        );
+                        let outer = desk
+                            .state
+                            .pane_outer_of(dying.pane)
+                            .expect("the pane is here");
+                        assert_eq!(
+                            outer.size,
+                            committed(&desk.state, dying.pane),
+                            "{name}: the premise: out of every tile, the pane is the size its \
+                             client committed"
+                        );
+                        let landed =
+                            drawn_now(&desk.state, dying.pane, back + Duration::from_secs(1));
+                        assert!(
+                            same(landed.rect, outer.to_f64()),
+                            "{name}: the return lands at {:?} rather than at the size the client \
+                             committed, {outer:?}",
+                            landed.rect
+                        );
+                    } else {
+                        assert!(
+                            placed.is_some(),
+                            "{name}: the layout in charge holds the window in a tile, and the \
+                             refusal let it out"
+                        );
+                    }
+                }
+            }
+
+            /// **A give-back that declines keeps the fade cut, after a mode
+            /// switch as before one.**
+            ///
+            /// `give_back` takes a let-go that waited before it aims the
+            /// window's return, and a give-back can decline -- `present::clear`
+            /// answers `false` when the transform slot is busy -- which leaves
+            /// the window fading. So what it took is put back, and the fade is
+            /// still cut to its tile. Declined here on the dialog route, inside
+            /// `CLOSING`, with `present::jam_slot`, 60 ms after a switch to
+            /// floating let the window go.
+            #[test]
+            fn a_give_back_that_declines_keeps_a_fade_cut_after_a_mode_switch() {
+                let mut desk = Desk::new();
+                let (dying, _survivor, tile) = an_oversized_window_beside_another(&mut desk, "");
+                desk.state.close_pane(dying.pane);
+                desk.state.clock.advance(Duration::from_millis(60));
+                assert!(desk.state.trigger("super+t"), "super+t was not handled");
+                if let Some(busy) = desk.state.panes.get(dying.pane) {
+                    present::jam_slot(busy);
+                }
+                let _dialog = desk.open_dialog_for(&dying.toplevel);
+
+                let held = desk.state.panes.get(dying.pane).expect("the pane is here");
+                assert!(
+                    held.leaving() && held.answered(),
+                    "the premise: the dialog answered the close, and the give-back declined"
+                );
+                assert_eq!(
+                    held.placed(),
+                    Some(tile),
+                    "a give-back that declined let the fading window out of the tile it is cut to"
+                );
+            }
+
+            /// **A rescue during a fade keeps the let-go the window is waiting
+            /// on.**
+            ///
+            /// `rescue_offscreen` drags a window left on no screen back onto
+            /// one, and keeps its standing as it found it -- which for a window
+            /// let go of during its close is "tiled for the fade, and owed the
+            /// let-go". So it moves the tile and does not set it: setting it is
+            /// a layout's newer word and cancels the let-go, and the window,
+            /// refused after the switch to floating, would come back held in
+            /// the tile it was rescued to.
+            #[test]
+            fn a_rescue_during_a_fade_keeps_the_let_go_it_is_waiting_on() {
+                let mut desk = Desk::new();
+                let (dying, _survivor, tile) = an_oversized_window_beside_another(&mut desk, "");
+                desk.state.close_pane(dying.pane);
+                desk.state.clock.advance(Duration::from_millis(60));
+                assert!(desk.state.trigger("super+t"), "super+t was not handled");
+                let window = desk
+                    .state
+                    .panes
+                    .get(dying.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("the pane has a client");
+                desk.state.map_stacked(window, (-5000, 300), false);
+                desk.state.sync_panes();
+
+                desk.state.rescue_offscreen();
+                let rescued = desk.state.panes.get(dying.pane).and_then(Pane::placed);
+                assert!(
+                    rescued.is_some_and(|rescued| rescued != tile && rescued.loc.x >= 0),
+                    "the premise: the rescue brought the fading window back, still in the tile \
+                     it is cut to, moved with it: {rescued:?}"
+                );
+                desk.ask();
+                desk.refuse();
+                assert_eq!(
+                    desk.state.panes.get(dying.pane).and_then(Pane::placed),
+                    None,
+                    "the rescue cancelled the let-go, and the window came back floating and held \
+                     in a tile"
+                );
+            }
+
+            /// **A refused window wider than its tile is cut to its new tile
+            /// from the frame it comes back on, while its zoom grows from the
+            /// close's 0.86 to 1.**
+            ///
+            /// A third window opens while the first is held invisible, so the
+            /// tile the refused window comes back to is not the one it was
+            /// closed in. Its return starts from the held end of the close --
+            /// the old tile's picture, shrunk to 0.86 -- and glides into the new
+            /// tile at the layout's pace. The pane is held inside the new tile
+            /// from the first frame; every frame draws the buffer at its own
+            /// size times the zoom, cut to the picture and never squashed into
+            /// it; and the zoom only grows, reaching 1 as the window lands cut
+            /// to exactly its new tile.
+            #[test]
+            fn a_refused_oversized_window_is_cut_to_its_new_tile_as_it_grows_back() {
+                let mut desk = Desk::new();
+                let (dying, _survivor, tile) = an_oversized_window_beside_another(&mut desk, "");
+                let wide = committed(&desk.state, dying.pane);
+                desk.state.close_pane(dying.pane);
+                desk.ask();
+                let _third = desk.open_surface();
+                let back = desk.refuse();
+                assert!(
+                    desk.events()
+                        .ends_with(&format!("refused {}", dying.pane.get())),
+                    "the premise is a refusal the layout heard: {}",
+                    desk.events()
+                );
+                let new_tile = desk.placed(dying.pane);
+                assert!(
+                    new_tile != tile && new_tile.size.w < wide.w,
+                    "the premise: back in a different tile, which it is still wider than: \
+                     {tile:?} became {new_tile:?}"
+                );
+                assert_eq!(
+                    desk.state.pane_outer_of(dying.pane),
+                    Some(new_tile),
+                    "the refused window is held inside its new tile from the frame it comes back"
+                );
+
+                let (_, fading) = drift((desk.state.clock.now() - back).as_secs_f64());
+                let (first, _) = pictured(&desk.state, dying.pane, back);
+                assert!(
+                    (first.zoom.0 - 0.86).abs() < 1e-9 + 0.14 * f64::from(fading)
+                        && first.opacity < 0.05 + fading,
+                    "the return starts from the held end of the close, not from the window at \
+                     rest: {first:?}"
+                );
+                let mut zoom = first.zoom.0;
+                for step in 0..=30_u64 {
+                    let ms = 10 * step;
+                    let (frame, drawn) =
+                        pictured(&desk.state, dying.pane, back + Duration::from_millis(ms));
+                    if let Some(why) = why_not_cut(&frame, &drawn) {
+                        panic!("{ms}ms into the return the window is {why}");
+                    }
+                    assert!(
+                        frame.zoom.0 >= zoom - 1e-9,
+                        "{ms}ms into the return the zoom went back from {zoom} to {}",
+                        frame.zoom.0
+                    );
+                    zoom = frame.zoom.0;
+                }
+                let (landed, drawn) =
+                    pictured(&desk.state, dying.pane, back + Duration::from_secs(1));
+                assert!(
+                    (landed.zoom.0 - 1.0).abs() < 1e-9 && (landed.zoom.1 - 1.0).abs() < 1e-9,
+                    "the return lands at a zoom of {:?}",
+                    landed.zoom
+                );
+                assert!(
+                    same(landed.rect, new_tile.to_f64())
+                        && drawn
+                            .fit
+                            .crop
+                            .is_some_and(|crop| same(crop, new_tile.to_f64())),
+                    "the return lands cut to its new tile {new_tile:?}: drawn at {:?}, cut to {:?}",
+                    landed.rect,
+                    drawn.fit.crop
+                );
+            }
+
+            /// **A new window's layout pass part of the way through another
+            /// window's open, or through its return from a refused close,
+            /// carries that animation on, still cut.**
+            ///
+            /// `move_pane` starts every glide from what is on screen
+            /// (`present::frame`), so a window a sweep moves while it is still
+            /// opening, or still fading back in, goes on from where it had got
+            /// to -- the zoom it had reached and the opacity -- rather than
+            /// from a window at rest. For a client wider than its tile that
+            /// zoom is what the cut is a picture of, so both are driven with
+            /// one: 80 ms in, with the pointer over it, a new window opens and
+            /// the layout splits the window being watched. On the frame the new
+            /// window arrives it is drawn where it was, every frame after is
+            /// cut at its zoom, and it lands cut to the tile the pass gave it.
+            ///
+            /// The open is the shipped `open.lua`'s, which `tiling`'s own
+            /// placement carries on from, in the order `init.lua` loads them.
+            #[test]
+            fn a_layout_pass_part_way_through_an_open_or_a_return_keeps_the_window_cut() {
+                for case in ["open", "return"] {
+                    let mut desk = Desk::new();
+                    let pane = if case == "open" {
+                        desk.arrange("tiling", "require(\"open\")");
+                        let opening = desk.open_surface();
+                        let tile = desk.placed(opening.pane);
+                        commit_buffer(
+                            &desk.client,
+                            &desk.qh,
+                            &opening.surface,
+                            tile.size.w + 200,
+                            tile.size.h,
+                        );
+                        desk.pump();
+                        desk.state.sync_panes();
+                        opening.pane
+                    } else {
+                        let (dying, _survivor, _tile) =
+                            an_oversized_window_beside_another(&mut desk, "");
+                        desk.state.close_pane(dying.pane);
+                        desk.ask();
+                        desk.refuse();
+                        dying.pane
+                    };
+                    let was = desk.placed(pane);
+                    assert!(
+                        committed(&desk.state, pane).w > was.size.w,
+                        "{case}: the premise: the client is wider than its tile"
+                    );
+
+                    desk.state.clock.advance(Duration::from_millis(80));
+                    let arrived = desk.state.clock.now();
+                    let (before, _) = pictured(&desk.state, pane, arrived);
+                    assert!(
+                        before.zoom.0 > 0.9 && before.zoom.0 < 0.99 && before.opacity < 0.99,
+                        "{case}: the premise: part of the way in: {before:?}"
+                    );
+                    let centre = was.to_f64();
+                    point_at(
+                        &mut desk.state,
+                        (
+                            centre.loc.x + centre.size.w / 2.0,
+                            centre.loc.y + centre.size.h / 2.0,
+                        )
+                            .into(),
+                    );
+                    let _new = desk.open_surface();
+                    let now = desk.placed(pane);
+                    assert_ne!(
+                        now, was,
+                        "{case}: the premise: the new window's pass gave the window a new tile"
+                    );
+                    assert!(
+                        committed(&desk.state, pane).w > now.size.w,
+                        "{case}: the premise: which the client is wider than too"
+                    );
+
+                    let (moving, fading) = drift((desk.state.clock.now() - arrived).as_secs_f64());
+                    let (after, _) = pictured(&desk.state, pane, arrived);
+                    assert!(
+                        (after.rect.loc.x - before.rect.loc.x).abs() < moving
+                            && (after.rect.loc.y - before.rect.loc.y).abs() < moving
+                            && (after.rect.size.w - before.rect.size.w).abs() < moving
+                            && (after.rect.size.h - before.rect.size.h).abs() < moving
+                            && (after.zoom.0 - before.zoom.0).abs() < f64::from(fading)
+                            && (after.opacity - before.opacity).abs() < fading,
+                        "{case}: the window jumped on the frame the new window arrived: drawn at \
+                         {before:?}, and then at {after:?}"
+                    );
+                    let mut zoom = after.zoom.0;
+                    for step in 0..=30_u64 {
+                        let ms = 10 * step;
+                        let (frame, drawn) =
+                            pictured(&desk.state, pane, arrived + Duration::from_millis(ms));
+                        if let Some(why) = why_not_cut(&frame, &drawn) {
+                            panic!(
+                                "{case}: {ms}ms after the new window arrived the window is {why}"
+                            );
+                        }
+                        assert!(
+                            frame.zoom.0 >= zoom - 1e-9,
+                            "{case}: {ms}ms after the new window arrived the zoom went back from \
+                             {zoom} to {}",
+                            frame.zoom.0
+                        );
+                        zoom = frame.zoom.0;
+                    }
+                    let (landed, drawn) =
+                        pictured(&desk.state, pane, arrived + Duration::from_secs(1));
+                    assert!(
+                        (landed.zoom.0 - 1.0).abs() < 1e-9
+                            && same(landed.rect, now.to_f64())
+                            && drawn.fit.crop.is_some_and(|crop| same(crop, now.to_f64())),
+                        "{case}: the window lands cut to the tile the pass gave it, {now:?}: drawn \
+                         at {landed:?}, cut to {:?}",
+                        drawn.fit.crop
+                    );
+                }
+            }
+
+            /// **A menu reaching past the tile of a window fading out in front
+            /// is that window's while it shows, and not once it has gone.**
+            ///
+            /// A menu is drawn uncut, past its parent's tile, and a press on it
+            /// is the menu's even over the neighbour's tile
+            /// (`a_menu_past_its_parents_tile_takes_the_press`). A close raises
+            /// the window and fades it in front of the neighbour growing into
+            /// its space, so the menu is in front too, over a neighbour that
+            /// now reaches under it. Part of the way through the fade a press
+            /// on the menu lands on the menu's own pixel through the fade's
+            /// zoom -- a menu scales with its window -- and once the window is
+            /// invisible the neighbour has it.
+            #[test]
+            fn a_menu_past_the_tile_of_a_window_fading_out_is_the_windows_while_it_shows() {
+                let mut desk = Desk::new();
+                let (dying, survivor, tile) = an_oversized_window_beside_another(&mut desk, "");
+                let anchor = (tile.size.w - 20, 50);
+                let _menu = drawn_popup(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &desk.conn,
+                    &desk.qh,
+                    &mut desk.queue,
+                    &mut desk.client,
+                    &dying.xdg,
+                    anchor,
+                    (120, 80),
+                );
+                desk.state.sync_panes();
+                // The compositor's side of each surface, which is what
+                // `surface_under` answers with.
+                let toplevel_of = |state: &Solium, pane| {
+                    state
+                        .panes
+                        .get(pane)
+                        .and_then(Pane::client)
+                        .and_then(Window::toplevel)
+                        .map(|toplevel| toplevel.wl_surface().clone())
+                        .expect("the pane has an xdg toplevel")
+                };
+                let menu = smithay::desktop::PopupManager::popups_for_surface(&toplevel_of(
+                    &desk.state,
+                    dying.pane,
+                ))
+                .next()
+                .map(|(popup, _)| popup.wl_surface().clone())
+                .expect("the menu is tracked on its parent");
+                let neighbour = toplevel_of(&desk.state, survivor.pane);
+
+                desk.state.close_pane(dying.pane);
+                desk.pump();
+                desk.state.sync_panes();
+                let beside = desk.placed(survivor.pane);
+
+                desk.state.clock.advance(Duration::from_millis(60));
+                let (frame, drawn) = pictured(&desk.state, dying.pane, desk.state.clock.now());
+                assert!(
+                    frame.shows() && frame.opacity < 0.95 && frame.zoom.0 < 0.99,
+                    "the premise: part of the way through the fade: {frame:?}"
+                );
+                // The menu's pixel 60,40, where the fade draws it: the buffer's
+                // corner, and the menu's place in the window plus the pixel's
+                // place in the menu, scaled with the window.
+                let into = (60.0, 40.0);
+                let on_the_menu =
+                    |drawn: &crate::render::Placed, into: (f64, f64)| -> Point<f64, Logical> {
+                        (
+                            drawn.origin.x + (f64::from(anchor.0) + into.0) * drawn.fit.factor.x,
+                            drawn.origin.y + (f64::from(anchor.1) + into.1) * drawn.fit.factor.y,
+                        )
+                            .into()
+                    };
+                let point = on_the_menu(&drawn, into);
+                assert!(
+                    point.x > f64::from(tile.loc.x + tile.size.w)
+                        && beside.to_f64().contains(point),
+                    "the premise: the point is past the fading window's tile, over the neighbour \
+                     that has grown into its space: {point:?}, {tile:?}, {beside:?}"
+                );
+                let (under, origin) = desk
+                    .state
+                    .surface_under(point)
+                    .expect("something is under the point");
+                assert_eq!(
+                    under, menu,
+                    "the menu of a window fading in front of its neighbour lost the pixel it drew"
+                );
+                let within = point - origin;
+                assert!(
+                    (within.x - into.0).abs() < 1.0 && (within.y - into.1).abs() < 1.0,
+                    "a press on the fading menu reached {within:?} of it, not {into:?}"
+                );
+
+                // And where the held end of the fade would draw a pixel of the
+                // menu, had it anything to draw: the menu shrinks with its
+                // window, so the point it had 60 ms in is no longer on it. Its
+                // pixel 110,40, which the held end still draws past the tile.
+                desk.state.clock.advance(Duration::from_millis(150));
+                let (gone, drawn) = pictured(&desk.state, dying.pane, desk.state.clock.now());
+                assert!(!gone.shows(), "the premise: the fade is over: {gone:?}");
+                let point = on_the_menu(&drawn, (110.0, 40.0));
+                assert!(
+                    point.x > f64::from(tile.loc.x + tile.size.w)
+                        && beside.to_f64().contains(point),
+                    "the premise: that point is past the tile too, over the neighbour: {point:?}"
+                );
+                assert_eq!(
+                    desk.state.surface_under(point).map(|(surface, _)| surface),
+                    Some(neighbour),
+                    "once the window is invisible its menu has no pixel, and the neighbour \
+                     has the press"
                 );
             }
         }
