@@ -368,7 +368,11 @@ local function open_in(id, monitor, target, cursor)
                 return nil
             end
         elseif step == "workspace" then
-            local index = workspaces.vacant(monitor, id)
+            -- A window being closed keeps its workspace when it keeps its
+            -- tile: with "when_gone" its leaf is still in that workspace's
+            -- tree, which the fresh tree below would throw away while the
+            -- window is still drawn there.
+            local index = workspaces.vacant(monitor, id, not reflows_at_once())
             if index then
                 workspaces.of[id] = index
                 -- A new tree rather than the one that may be there. Nothing is
@@ -438,16 +442,31 @@ sol.on("open", function(id)
     local elsewhere = open_in(id, monitor, target, cursor)
     local follows = follows_overflow()
     if elsewhere and follows then
-        -- The view goes with it, as `super+<n>` would take it, keyboard and
-        -- all. Focused by name afterwards as well: `go` hands the keyboard to
-        -- the first window it finds on the workspace, and a window still
-        -- fading out there is not one the user can be sent to.
+        -- The view goes with it, as `super+<n>` would take it. Focused by name
+        -- afterwards as well: `go` hands the keyboard to the first window it
+        -- finds on the workspace, which can be one still fading out there
+        -- (`a_window_being_closed_is_room_for_the_next_one`).
+        --
+        -- For a window launched with `sol.spawn` the compositor drops that
+        -- request, because `open` comes before the application exists and
+        -- there is nothing yet to give the keyboard to. The keyboard goes to
+        -- this window with the application's first frame; until then it is
+        -- not on it, and it can be on the window the view has just left, as
+        -- `super+<n>` onto an empty workspace leaves it. Both halves are
+        -- `a_launched_window_that_overflows_with_the_view_takes_the_keyboard_when_it_arrives`
+        -- in `state.rs`.
         workspaces.go(elsewhere, monitor)
         sol.focus(id)
     elseif elsewhere then
         -- Regrouped now, so the window joins its own desk's selection -- the
         -- one carried a screen away -- in the same dispatch that places it,
         -- rather than whenever something next regroups.
+        --
+        -- The keyboard is not this file's to move, and stays where it was:
+        -- the compositor gives a new window the keyboard only if it is headed
+        -- somewhere the user can see (`Solium::offer_keyboard`). See
+        -- `a_window_that_overflows_to_a_hidden_workspace_does_not_take_the_keyboard`
+        -- and its launched twin in `state.rs`.
         workspaces.apply()
     end
     tiling.apply()

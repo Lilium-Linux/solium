@@ -517,9 +517,12 @@ the only bounds on a tiled drag: the compositor sends an unfloored edge,
 deliberately, because a floor measured in a window's pixels cannot bound a
 seam's position — see `Tiling::drag_seam`. A tile already under the minimum
 is not snapped up to it when grabbed, which would move it on the first frame:
-it can be grown, and not shrunk further. `resize` is bounded the same way when
-it is given `options`; without them, as a script written before #134 calls
-it, only `0.05..0.95` applies.
+it cannot be shrunk further, and can be grown only while the tiles across the
+seam have room to give. A seam with a tile under the minimum on both sides
+therefore does not move at all, and that is what `"allow"` below usually
+leaves, since it halves a tile too small to split. `resize` is bounded the
+same way when it is given `options`; without them, as a script written before
+#134 calls it, only `0.05..0.95` applies.
 
 `options` is a monitor's work area with `gap`, `split` and `minimum` added.
 Passing the monitor in rather than the tree asking for it is what lets one tree
@@ -545,13 +548,24 @@ The default is `{ "largest", "workspace", "allow" }`. A list that runs out
 ends in `"allow"` regardless, with a line in the log, because a window has to
 go somewhere.
 
-"Empty" does not count a window that is being closed, and with
+"Empty" does not count a window that is being closed, unless
+`reflow_on_close = "when_gone"` is keeping its tile. With
 `workspaces.per_monitor` off it means empty on every screen, since that
-workspace is every screen at once. The workspaces are the fixed set
-`workspaces.count()` describes, so nothing is ever created. With
-`follow_overflow` on, the view goes with the window as `workspaces.go` takes
-it, keyboard included; off, the window is placed in its tile over there and the
-view stays where it was.
+workspace is every screen at once. A window that belongs to no workspace in
+particular is on every one — the view carries it along — so it leaves none
+empty; with `workspaces.follow_new_windows` off every window is one. The
+workspaces are the fixed set `workspaces.count()` describes, so nothing is ever
+created.
+
+With `follow_overflow` on, the view goes with the window as `workspaces.go`
+takes it, and the keyboard goes to the window. For a window launched with
+`sol.spawn` that happens when its application arrives: until then there is no
+client to give it to, and the keyboard can still be on the window the view has
+just left. Off, the window is placed in its tile over there, and the view and
+the keyboard stay where they were — the compositor gives a new window the
+keyboard only if it is headed somewhere the user can see. Each window with no
+room then goes to another empty workspace, since the one the window before went
+to is no longer empty, whether or not it has room.
 
 The decision is made at `open`. For a window launched with `sol.spawn` that is
 before its application has connected, so a window that overflows is placed in

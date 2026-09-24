@@ -299,20 +299,34 @@ end
 -- so there is never one to make; when all are taken the answer is nil and the
 -- caller does something else.
 --
--- A window being closed is not counted: it is fading out, and a layout that
--- closes up at once has already given its space away (#128). With workspaces
--- not per monitor a workspace is every screen at once, so a window on any
--- screen takes it; per monitor, only this screen's windows count.
-function workspaces.vacant(monitor, except)
+-- A window being closed is not counted unless `closing_counts` says so. It is
+-- fading out, and a layout that closes up at once has already given its space
+-- away (#128); one that keeps the tile until the application has gone -- tiling
+-- with `reflow_on_close = "when_gone"` -- has not, and passes true. See
+-- `with_reflow_when_gone_a_closing_window_still_takes_its_workspace`. With
+-- workspaces not per monitor a workspace is every screen at once, so a window on
+-- any screen takes it; per monitor, only this screen's windows count.
+--
+-- A window that belongs to no workspace in particular takes all of them. `at`
+-- answers for such a window with whatever its monitor is showing, so the view
+-- carries it along and it is on screen whichever workspace that is -- the
+-- workspace this would name included. Every window is one with
+-- `follow_new_windows` off, so then nothing is empty (#134 review; see
+-- `with_follow_new_windows_off_no_workspace_is_empty`).
+function workspaces.vacant(monitor, except, closing_counts)
     local count = workspaces.count()
     local showing = workspaces.on(monitor)
     local taken = {}
     for _, window in ipairs(sol.windows()) do
         if window.id ~= except
-            and not window.leaving
+            and (closing_counts or not window.leaving)
             and (not workspaces.settings.per_monitor or window.monitor == monitor)
         then
-            taken[workspaces.at(window.id, window.monitor)] = true
+            local index = workspaces.of[window.id]
+            if index == nil then
+                return nil
+            end
+            taken[index] = true
         end
     end
     for step = 1, count - 1 do

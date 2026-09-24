@@ -7482,9 +7482,16 @@ mod dialogs {
             h: 1416.0,
         };
 
-        /// The shipped scripts, `before` run ahead of them, and the entry
-        /// point for a reload. A directory per call, for the reason
-        /// [`scripts`] gives.
+        /// The shipped layouts in the order `init.lua` requires them, `before`
+        /// run ahead of them, and the entry point for a reload. A directory
+        /// per call, for the reason [`scripts`] gives.
+        ///
+        /// `scrolling.lua` too, although no test here switches it on: every
+        /// layout hears `open` whether or not it is in charge, and until #134's
+        /// review this harness left it out -- which is how a strip that was
+        /// not in charge handing the keyboard to a window parked on another
+        /// workspace went unseen. See
+        /// `with_follow_overflow_off_the_window_opens_there_and_the_view_stays`.
         fn tiling_with(before: &str) -> (Scripts, std::path::PathBuf) {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -7498,7 +7505,8 @@ mod dialogs {
                      {before}\n\
                      require(\"modes\")\n\
                      require(\"workspaces\")\n\
-                     require(\"tiling\")\n",
+                     require(\"tiling\")\n\
+                     require(\"scrolling\")\n",
                     shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
                 ),
             )
@@ -7649,8 +7657,15 @@ mod dialogs {
 
         /// **`follow_overflow = false`: the window opens over there, and the
         /// view stays.** It is still placed in its tile, and grouped onto its
-        /// desk in the same dispatch, so it is never drawn over this one; the
-        /// keyboard stays where it was.
+        /// desk in the same dispatch, so it is never drawn over this one.
+        ///
+        /// And no script hands it the keyboard. `scrolling.lua`, which was not
+        /// in charge, did: its `open` handler inserted the window into a strip
+        /// and focused the strip's new column, so the keyboard followed the
+        /// window to a desk nobody could see (#134 review). This checks the
+        /// scripts; that the compositor does not give it the keyboard either is
+        /// `a_window_that_overflows_to_a_hidden_workspace_does_not_take_the_keyboard`
+        /// in `state.rs`, which types and sees where the key lands.
         #[test]
         fn with_follow_overflow_off_the_window_opens_there_and_the_view_stays() {
             let (mut scripts, _) = tiling_with(&format!(
@@ -8239,6 +8254,13 @@ mod dialogs {
             );
             // Together, the same window takes workspace 1 on every screen.
             assert_eq!(vacant(false, vec![taken(21), taken(22), elsewhere]), "nil");
+            // And a window that belongs to no workspace in particular is on
+            // every one, since the view carries it along: 25 was never given
+            // one, so no workspace is empty (#134 review).
+            assert_eq!(
+                vacant(true, vec![taken(21), window(25, 800.0, 600.0)]),
+                "nil"
+            );
         }
 
         /// **A tree handed a minimum that is not a size has none on that
@@ -8260,6 +8282,119 @@ mod dialogs {
                  return try({ w = 0/0, h = \"tall\" }) .. \" \" .. try({ w = 160, h = 150 })",
             );
             assert_eq!(answer, "true false");
+        }
+
+        /// **With `follow_new_windows` off, no workspace is empty.** A window
+        /// that belongs to no workspace in particular is on every one -- the
+        /// view carries it along, which is what `workspaces.at` says -- so
+        /// window 1 is on workspace 2 as much as on this one. Sending window 2
+        /// there moved the view, left window 1 on screen, and laid window 2
+        /// over the whole of it from workspace 2's empty tree (#134 review).
+        /// So the step does nothing and `"allow"` puts window 2 beside window
+        /// 1, here.
+        #[test]
+        fn with_follow_new_windows_off_no_workspace_is_empty() {
+            let (mut scripts, _) = tiling_with(&format!(
+                "{}\nrequire(\"config\").workspaces.follow_new_windows = false",
+                minimum(1300, 800)
+            ));
+            switched_on(&mut scripts);
+            let _ = open(&mut scripts, 1, &[1]);
+            let told = open(&mut scripts, 2, &[1, 2]);
+
+            assert_eq!(
+                showing(&scripts),
+                "1",
+                "the view went to a workspace window 1 is on as well"
+            );
+            assert_eq!(
+                scripts.evaluate("return tostring(require(\"workspaces\").of[2])"),
+                "nil",
+                "window 2 was given a workspace of its own"
+            );
+            let placed = placed(&told.commands);
+            let (one, two) = (placed.get(&1).copied(), placed.get(&2).copied());
+            assert!(
+                one.zip(two).is_some_and(|(one, two)| !overlap(one, two)),
+                "window 2 was not placed beside window 1: {one:?} {two:?}"
+            );
+        }
+
+        /// **With `reflow_on_close = "when_gone"`, a window being closed
+        /// still takes its workspace.** That setting keeps a closing window's
+        /// tile until its application has gone, so a workspace whose only
+        /// window is closing is not empty to it: window 3 goes on to workspace
+        /// 3, rather than into a fresh tree on workspace 2 that has it cover
+        /// window 5 while window 5 fades (#134 review). Closing up at once, the
+        /// same workspace is empty -- that half is
+        /// `a_window_being_closed_is_room_for_the_next_one`.
+        #[test]
+        fn with_reflow_when_gone_a_closing_window_still_takes_its_workspace() {
+            let (mut scripts, _) = tiling_with(&format!(
+                "{}\nrequire(\"config\").tiling.reflow_on_close = \"when_gone\"",
+                minimum(1300, 800)
+            ));
+            switched_on(&mut scripts);
+            let _ = scripts.evaluate("require(\"workspaces\").of[5] = 2\nreturn \"\"");
+            let _ = open(&mut scripts, 1, &[5, 1]);
+            let mut windows = vec![
+                window(5, 800.0, 600.0),
+                window(1, 800.0, 600.0),
+                window(3, 800.0, 600.0),
+            ];
+            windows[0].leaving = true;
+            let _ = scripts.opened(
+                3,
+                Snapshot {
+                    cursor: (500.0, 500.0),
+                    ..snapshot(windows)
+                },
+            );
+            assert_eq!(
+                workspace_of(&scripts, 3),
+                "3",
+                "a workspace whose only window keeps its tile while it closes was counted as \
+                 empty"
+            );
+        }
+
+        /// **With `follow_overflow` off, each window with no room takes
+        /// another empty workspace**, whether or not the one the window
+        /// before went to has room.
+        ///
+        /// At 1000x1000, 1 and 2 share workspace 1 side by side at 1262x1416,
+        /// and neither of those halves has room either way. The view stays on
+        /// workspace 1, so 3, 4 and 5 each open against those tiles, and each
+        /// finds the workspace the last one went to no longer empty: 3 goes to
+        /// 2, 4 to 3, 5 to 4. With none left empty, 6 is allowed in on
+        /// workspace 1 under the minimum -- although workspace 2, holding
+        /// window 3 alone, could still have taken it beside window 3. That is
+        /// the step as written, "the next empty workspace"; `config.lua` says
+        /// so beside `follow_overflow`.
+        #[test]
+        fn with_follow_overflow_off_each_window_with_no_room_takes_another_empty_workspace() {
+            let (mut scripts, _) = tiling_with(&format!(
+                "{}\nrequire(\"config\").tiling.follow_overflow = false",
+                minimum(1000, 1000)
+            ));
+            switched_on(&mut scripts);
+            for id in 1..=6 {
+                let ids: Vec<u64> = (1..=id).collect();
+                let _ = open(&mut scripts, id, &ids);
+            }
+            let went: Vec<String> = (1..=6).map(|id| workspace_of(&scripts, id)).collect();
+            assert_eq!(went, ["1", "1", "2", "3", "4", "1"]);
+            assert_eq!(showing(&scripts), "1");
+            assert_eq!(
+                scripts.evaluate(
+                    "local area = { x = 0, y = 0, w = 2560, h = 1440, gap = 12, split = 0.5,\n\
+                         minimum = { w = 1000, h = 1000 } }\n\
+                     local tree = require(\"tiling\").trees[\"2@DP-1\"]\n\
+                     return tostring(tree:insert_fitting(99, nil, nil, nil, area))"
+                ),
+                "true",
+                "the premise: workspace 2 had room for window 6"
+            );
         }
 
         fn open(scripts: &mut Scripts, id: u64, ids: &[u64]) -> Outcome {
