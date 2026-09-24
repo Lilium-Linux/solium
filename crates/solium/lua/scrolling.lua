@@ -167,7 +167,20 @@ end
 --
 -- The *active* monitor's strip: with two screens there are two focused
 -- columns, and the keyboard belongs to the one you are looking at.
+--
+-- Only while this layout is in charge. `open` is heard whether or not it is,
+-- and its handler settles, so a strip nobody was using focused every window
+-- that opened: its new column. That was harmless while every window opened in
+-- view, and it stopped being when tiling's `follow_overflow = false` began
+-- parking a window on another workspace -- the strip took the keyboard there
+-- (#134 review; `with_follow_overflow_off_the_window_opens_there_and_the_view_stays`
+-- and `a_layout_not_in_charge_sends_nothing_to_another_workspace` in
+-- `script.rs`, which load this file beside tiling as `init.lua` does). Every
+-- other caller already asks `scrolling.active` first.
 local function settle(animation)
+    if not scrolling.active then
+        return
+    end
     scrolling.apply(animation)
     local active = monitors.active()
     local focused = view_for(active and active.name):focused()

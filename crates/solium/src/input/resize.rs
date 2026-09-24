@@ -366,11 +366,14 @@ pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'
 ///
 /// **Nothing is floored here, and that is the point.** The layout clamps what
 /// the layout owns: `drag_seam` bounds a *ratio* of the seam's box to
-/// 0.05..0.95, which is measured against a rectangle that is not this window
-/// and knows nothing of its pixels. [`MINIMUM`] is a floor on a *window's*
-/// size and belongs to `resized` and the floating path, where a window is what
-/// is being sized. Applying it here put a window's floor on a seam's position,
-/// which is the sub-`MINIMUM` jump above.
+/// 0.05..0.95, and since #134 to what keeps the tiles beside the seam at the
+/// layout's own `minimum` -- both measured against a rectangle that is not this
+/// window and knows nothing of its pixels. [`MINIMUM`] is a floor on a
+/// *window's* size and belongs to `resized` and the floating path, where a
+/// window is what is being sized. Applying it here put a window's floor on a
+/// seam's position, which is the sub-`MINIMUM` jump above. The layout's floor
+/// does not jump either: a tile already under it is held where it is rather
+/// than moved up to it -- see `solium_layout::tree::minimum_tests::a_drag_on_a_seam_already_under_the_minimum_does_not_jump`.
 ///
 /// An axis the drag has no hold of has no dragged edge, and there the
 /// pointer's own coordinate is passed through unchanged. The only shipped
@@ -1035,17 +1038,20 @@ mod tests {
         /// over 72px of travel nobody asked for, and then been dead in one
         /// direction and 72px behind in the other for the rest of the gesture.
         ///
-        /// Sub-`MINIMUM` tiles are not hypothetical: `tree:resize` will make
-        /// one from the keyboard, deep dwindle nesting produces them on its own,
-        /// and a small `split` setting does it at the first window. Nothing
-        /// bounds a *tile* at 120px, because `MINIMUM` is a floor on a
-        /// floating window's size and a tiled window does not have one.
+        /// Sub-`MINIMUM` tiles are not hypothetical. The tiling layout's own
+        /// floor, `config.tiling.minimum`, is a setting, and the height it ships
+        /// with -- 96 -- is under 120 already; its `"allow"` step makes tiles
+        /// under any floor; and a script's own layout need have no floor at
+        /// all. Nothing in the compositor bounds a *tile* at 120px, because
+        /// `MINIMUM` is a floor on a floating window's size and a tiled window
+        /// does not have one.
         ///
         /// The two floors were never the same quantity: `drag_seam` bounds a
         /// *ratio* of the seam's own box, which is a different number in
-        /// different units against a rectangle that is not this window. That
-        /// clamp is now the only one on a tiled drag, which is where a clamp on
-        /// the layout's arrangement belongs. `resized` keeps its floor for the
+        /// different units against a rectangle that is not this window. Its
+        /// clamps -- 0.05..0.95, and since #134 the layout's tile minimum --
+        /// are now the only ones on a tiled drag, which is where a clamp on the
+        /// layout's arrangement belongs. `resized` keeps its floor for the
         /// floating path, which is what it was always for.
         ///
         /// Both halves are asserted: an untouched pointer leaves a tiny tile's

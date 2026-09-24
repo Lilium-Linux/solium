@@ -158,7 +158,7 @@ sol.on("monitors", function() end)                 -- the screens are not the sc
 sol.on("restore",  function() end)                 -- you have replaced a running session
 ```
 
-Six of these are worth reading twice.
+Seven of these are worth reading twice.
 
 **`open` fires when the window opens, which is before its application exists.**
 A window's life begins when the user asks for the program. Your mode is told
@@ -216,6 +216,23 @@ keeps working unchanged, and keeps its slot for a closing window until the
 application has gone. To close up at once, handle `closing`, leave `leaving`
 windows out of any arrangement you build from `sol.windows()`, and put the
 window back on `refused`.
+
+**`focus` is heard for a new window too**, in every mode and for an X11
+window as much as a Wayland one. The compositor gives a window the keyboard at
+its first frame, once your `open` handler has placed it, and only if it is
+headed somewhere the user can see; it does that as `sol.focus` would, so you
+hear `focus` for it. If your `open` handler calls `sol.focus` itself, yours is
+the last word and the compositor does not give it again. A window launched with
+`sol.spawn` gets it the same way when its application arrives; a `sol.focus`
+for it during `open` finds no application yet to give it to.
+
+An application asking to be brought forward with a token from something you
+were using -- a notification you clicked -- is focused first and asked
+afterwards: you hear `focus`, and if your handler brings the window into view
+(the scroller scrolls its column onto the screen) it keeps the keyboard. If it
+is still somewhere nobody can see, a workspace nobody is looking at, the
+keyboard goes back to a window on screen. Nothing switches workspaces for it
+yet.
 
 **`resize` gives you where the dragged edge should go, not where the pointer
 is and not a delta.** `edge_x` and `edge_y` are in the same coordinates
@@ -485,13 +502,21 @@ They are held by the script that made one, not by the compositor:
 
 ```lua
 tree:insert(id, target, x, y, options)
+tree:insert_fitting(id, target, x, y, options)  -- the same, if it keeps options.minimum
+tree:insert_largest(id, options)                -- the largest tile with room
 tree:remove(id)
 tree:contains(id)
 tree:windows()
 tree:layout(options)      -- the slots, to hand to sol.place
-tree:resize(id, "width", share)                        -- keyboard: an axis
+tree:resize(id, "width", share, options)               -- keyboard: an axis
 tree:drag_seam(id, "right", edge_x, edge_y, options)   -- pointer: a side
 ```
+
+`insert` splits whatever it is pointed at, however small that leaves the
+halves. `insert_fitting` and `insert_largest` refuse a split that would leave a
+tile under `options.minimum` -- `{ w = ..., h = ... }`, frame included -- and
+answer `false` with the tree untouched, so a layout can try one, then the
+other, then fall back to `insert`. That is what `tiling.lua` does; see below.
 
 The two resize calls take different things on purpose. A drag names a side —
 the hand is on one specific edge, and which seam moves follows from that. A
@@ -507,16 +532,83 @@ side names — which is what lets a corner drag call it twice with one pair and
 have each axis take its own. Hand it the `edge_x`, `edge_y` a `resize` gave you
 and the gesture is relative; hand it the pointer and you have rebuilt #124.
 The ratio it computes is separately clamped to `0.05..0.95`, so a window shoved
-hard against a seam stops there rather than vanishing. That clamp is the only
-bound on a tiled drag: the compositor sends an unfloored edge, deliberately,
-because a floor measured in a window's pixels cannot bound a seam's position —
-see `Tiling::drag_seam`.
+hard against a seam stops there rather than vanishing, and to whatever keeps
+every tile on either side of the seam at `options.minimum`. Those clamps are
+the only bounds on a tiled drag: the compositor sends an unfloored edge,
+deliberately, because a floor measured in a window's pixels cannot bound a
+seam's position — see `Tiling::drag_seam`. A tile already under the minimum
+is not snapped up to it when grabbed, which would move it on the first frame:
+it cannot be shrunk further, and can be grown only while the tiles across the
+seam have room to give. A seam with a tile under the minimum on both sides
+therefore does not move at all, and that is what `"allow"` below usually
+leaves, since it halves a tile too small to split. `resize` is bounded the
+same way when it is given `options`; without them, as a script written before
+#134 calls it, only `0.05..0.95` applies.
 
-`options` is a monitor's work area with `gap` and `split` added. Passing the
-monitor in rather than the tree asking for it is what lets one tree per
-workspace *per monitor* exist without any of them knowing about either. Copy
-the rect before adding keys — the one from `sol.monitors()` belongs to the
+`options` is a monitor's work area with `gap`, `split` and `minimum` added.
+Passing the monitor in rather than the tree asking for it is what lets one tree
+per workspace *per monitor* exist without any of them knowing about either.
+Copy the rect before adding keys — the one from `sol.monitors()` belongs to the
 snapshot.
+
+### When a new window has no room
+
+`tiling.lua` gives a new window the tile under the pointer, split across its
+longer side. When that would leave a tile under `config.tiling.minimum` it tries
+the tile's other side — a wide, short tile with no room side by side may still
+have room one above the other — and when neither has room it works through
+`config.tiling.overflow`, in order, until a step places the window:
+
+| step | what it does | when it does nothing |
+|---|---|---|
+| `"largest"` | splits the largest tile on this workspace that has room | no tile has room either way |
+| `"workspace"` | opens the window on the next empty workspace of the monitor it opened on, after the one in view and round again | every workspace has a window on it |
+| `"allow"` | splits the tile under the pointer anyway, below the minimum | never |
+
+The default is `{ "largest", "workspace", "allow" }`. A list that runs out
+ends in `"allow"` regardless, with a line in the log, because a window has to
+go somewhere.
+
+"Empty" does not count a window that is being closed, unless
+`reflow_on_close = "when_gone"` is keeping its tile. With
+`workspaces.per_monitor` off it means empty on every screen, since that
+workspace is every screen at once. A window that belongs to no workspace in
+particular is on every one — the view carries it along — so it leaves none
+empty; with `workspaces.follow_new_windows` off every window is one. The
+workspaces are the fixed set `workspaces.count()` describes, so nothing is ever
+created.
+
+With `follow_overflow` on, the view goes with the window as `workspaces.go`
+takes it, and the keyboard goes to the window. For a window launched with
+`sol.spawn` that happens when its application arrives: until then there is no
+client to give it to, and the keyboard can still be on the window the view has
+just left. Off, the window is placed in its tile over there, and the view and
+the keyboard stay where they were — the compositor gives a new window the
+keyboard only if it is headed somewhere the user can see. Each window with no
+room then goes to another empty workspace, since the one the window before went
+to is no longer empty, whether or not it has room.
+
+The decision is made at `open`. For a window launched with `sol.spawn` that is
+before its application has connected, so a window that overflows is placed in
+its final tile, on its final workspace, in the same dispatch that opens it --
+not in this workspace first and moved later.
+
+**Only a window being opened overflows, and only while tiling is the layout in
+charge.** Everything that puts an *existing* window back into a tree —
+`tiling.adopt` on switching tiling on, on a reload and on a monitor change;
+`refused`, for a close the application declined; a dialog that stops being
+modal; a drop — never sends it to another workspace, whatever the list says.
+One that has nowhere in particular to go takes the tile `insert` would choose,
+either way, then `"largest"`, then `"allow"`. A refused window and a dropped
+one go back to the tile they were in or were let go over, either way, and below
+the minimum if that is what it takes: the largest tile is somewhere else, and a
+refused window's arrangement has to come back as it was. And while floating or
+scrolling is in charge, `tiling.lua` still keeps new windows in its trees for
+later, the same way, without sending any of them anywhere.
+
+The minimum is a tile's, not an application's: the tile is decided before any
+application exists to have an opinion. An application's own minimum size is
+#115.
 
 ## A whole mode
 
