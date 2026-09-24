@@ -28,9 +28,9 @@ use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use mlua::{IntoLua, Lua, Table, Value};
-use smithay::utils::{Logical, Point};
+use smithay::utils::{Logical, Point, Rectangle};
 
-use crate::present::Curve;
+use crate::present::{Curve, Frame};
 
 /// A rectangle as a script sees it: plain numbers, no coordinate-space types.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -49,10 +49,6 @@ impl Rect {
         table.set("w", self.w)?;
         table.set("h", self.h)?;
         Ok(table)
-    }
-
-    fn contains(self, x: f64, y: f64) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
     }
 }
 
@@ -109,8 +105,9 @@ pub(crate) struct WindowInfo {
     /// The window including its frame, which is what "the window" means to
     /// anything positioning it.
     pub(crate) rect: Rect,
-    /// Where it is being drawn right now, which in a mode is somewhere else.
-    pub(crate) drawn: Rect,
+    /// Where it is being drawn right now, which in a mode is somewhere else --
+    /// in the two terms the compositor's own hit test asks. See [`Drawn`].
+    pub(crate) drawn: Drawn,
     pub(crate) title: String,
     pub(crate) focused: bool,
     /// Which monitor it is on, by name.
@@ -154,6 +151,35 @@ pub(crate) struct WindowInfo {
     pub(crate) leaving: bool,
 }
 
+/// How a window is drawn this instant, as `Solium::window_under` reads it:
+/// the slot it lives at, which is what decides the screens that draw it at all
+/// ([`crate::render::drawn_on`]), and the frame it is drawn with, which is
+/// what decides the pixels it owns on them ([`Frame::covers`]).
+///
+/// **A rectangle until #134's fourth review**, and a rectangle can say
+/// neither. `sol.window_at` asked it whether it contained the point, so a
+/// window on a hidden workspace carried over the next monitor -- which never
+/// draws it -- was under the cursor there, and so was a window fading out at
+/// opacity zero over the neighbour that grew into its place (#135). Handed to
+/// scripts only through `sol.window_at`, which asks [`crate::state::owns`] of
+/// it, the rule the Rust hit test asks; nothing reads it in Lua.
+/// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws` and
+/// `sol_window_at_over_a_window_fading_out_answers_the_neighbour_in_its_place`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Drawn {
+    pub(crate) slot: Rectangle<i32, Logical>,
+    pub(crate) frame: Frame,
+}
+
+impl Default for Drawn {
+    fn default() -> Self {
+        Self {
+            slot: Rectangle::default(),
+            frame: Frame::real(Rectangle::default()),
+        }
+    }
+}
+
 /// A monitor as a script sees it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MonitorInfo {
@@ -193,6 +219,12 @@ pub(crate) struct Snapshot {
     /// because almost every script wants exactly this and nothing else.
     pub(crate) work_area: Rect,
     pub(crate) cursor: (f64, f64),
+    /// Every monitor's rectangle, as `Solium::window_under` is handed them:
+    /// the screens [`crate::state::owns`] asks about for `sol.window_at`.
+    /// Empty in a snapshot with no screens, which `owns` reads as "not known
+    /// to be nowhere", as the compositor's own walk does.
+    /// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
+    pub(crate) screens: Vec<Rectangle<i32, Logical>>,
 }
 
 /// How a batch of transforms should animate.
@@ -1985,18 +2017,41 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // Hit-testing against *drawn* rects, not real ones: in a mode a window is
     // where the script put it, and asking the compositor is what keeps the
     // script from reimplementing the transform to find out.
+    //
+    // **And asked exactly as the compositor asks it**, through
+    // `crate::state::owns` -- the predicate `Solium::window_under` walks with:
+    // on a screen that draws the window, and inside what it paints there.
+    // Until #134's fourth review this asked only whether the drawn rectangle
+    // held the point. With two monitors side by side the left one's hidden
+    // workspace is carried over the right one, so a click on empty space
+    // there in overview found a window nobody could see and `sol.focus` gave
+    // it the keyboard; a window fading out at opacity zero was found over the
+    // neighbour that grew into its place, so a drop there went nowhere (#135).
+    // `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`,
+    // `on_two_monitors_an_overview_click_on_the_right_monitor_leaves_the_keyboard_on_screen`
+    // and `sol_window_at_over_a_window_fading_out_answers_the_neighbour_in_its_place`.
     sol.set(
         "window_at",
         lua.create_function(|lua, (x, y, skip): (f64, f64, Option<u64>)| {
+            let snapshot = snapshot(lua)?;
+            let point = Point::<f64, Logical>::from((x, y));
             // `skip` is what makes this usable while dragging. A dragged
             // window follows the cursor, so it is always the topmost thing
             // under it — ask without skipping and the answer is always the
             // window in your hand, which is why dropping one onto another
             // never swapped anything.
-            Ok(snapshot(lua)?
+            Ok(snapshot
                 .windows
                 .iter()
-                .find(|window| Some(window.id) != skip && window.drawn.contains(x, y))
+                .find(|window| {
+                    Some(window.id) != skip
+                        && crate::state::owns(
+                            window.drawn.slot,
+                            window.drawn.frame,
+                            point,
+                            &snapshot.screens,
+                        )
+                })
                 .map(|window| window.id))
         })?,
     )?;
@@ -3516,19 +3571,22 @@ mod tests {
         assert_eq!(normalise_combo("ctrl+ctrl+c"), "ctrl+c");
     }
 
+    /// What `sol.window_at` asks of a window, [`crate::state::owns`], which
+    /// was `Rect::contains` on the drawn rectangle until #134's fourth review.
     #[test]
-    fn a_rect_covers_its_own_top_left_but_not_its_bottom_right() {
-        let rect = Rect {
-            x: 10.0,
-            y: 20.0,
-            w: 100.0,
-            h: 50.0,
+    fn a_drawn_window_covers_its_own_top_left_but_not_its_bottom_right() {
+        let drawn = Rectangle::<f64, Logical>::new((10.0, 20.0).into(), (100.0, 50.0).into());
+        let slot = drawn.to_i32_round();
+        let frame = Frame {
+            rect: drawn,
+            ..Frame::real(slot)
         };
-        assert!(rect.contains(10.0, 20.0));
-        assert!(rect.contains(109.0, 69.0));
+        let covers = |x: f64, y: f64| crate::state::owns(slot, frame, (x, y).into(), &[]);
+        assert!(covers(10.0, 20.0));
+        assert!(covers(109.0, 69.0));
         // Exclusive, so adjacent thumbnails cannot both claim the same pixel.
-        assert!(!rect.contains(110.0, 70.0));
-        assert!(!rect.contains(9.0, 20.0));
+        assert!(!covers(110.0, 70.0));
+        assert!(!covers(9.0, 20.0));
     }
 
     /// The whole round trip, without a compositor: a script binds a key, the
@@ -3569,7 +3627,7 @@ mod tests {
                     w: 800.0,
                     h: 600.0,
                 },
-                drawn: Rect::default(),
+                drawn: Drawn::default(),
                 title: "a window".to_owned(),
                 focused: true,
                 monitor: "test-1".to_owned(),
@@ -3603,6 +3661,7 @@ mod tests {
                 h: 866.0,
             },
             cursor: (0.0, 0.0),
+            screens: Vec::new(),
         };
 
         let outcome = scripts.key("super+space", snapshot);
@@ -4415,7 +4474,7 @@ mod tests {
         let window = |id: u64, modal: bool, parent: Parentage| WindowInfo {
             id,
             rect: Rect::default(),
-            drawn: Rect::default(),
+            drawn: Drawn::default(),
             title: String::new(),
             focused: false,
             monitor: "test-1".to_owned(),
@@ -4461,6 +4520,7 @@ mod tests {
             monitors: Vec::new(),
             work_area: Rect::default(),
             cursor: (0.0, 0.0),
+            screens: Vec::new(),
         }
     }
 
@@ -4894,7 +4954,7 @@ mod tests {
                         w: 800.0,
                         h: 600.0,
                     },
-                    drawn: Rect::default(),
+                    drawn: Drawn::default(),
                     title: String::new(),
                     focused: false,
                     monitor: "test-1".to_owned(),
@@ -4934,6 +4994,7 @@ mod tests {
                 h: 900.0,
             },
             cursor: (0.0, 0.0),
+            screens: Vec::new(),
         }
     }
 
@@ -6114,7 +6175,9 @@ mod shipped {
 /// is honest about where the seam is.
 #[cfg(test)]
 mod dialogs {
-    use super::{Command, MonitorInfo, Parentage, Rect, Scripts, Snapshot, WindowInfo};
+    use super::{Command, Drawn, MonitorInfo, Parentage, Rect, Scripts, Snapshot, WindowInfo};
+    use crate::present::Frame;
+    use smithay::utils::{Logical, Rectangle};
 
     /// One screen, no bar, round numbers so a wrong answer reads as a wrong
     /// place rather than as arithmetic.
@@ -6235,13 +6298,30 @@ mod dialogs {
                 w,
                 h,
             },
-            drawn: Rect::default(),
+            drawn: Drawn::default(),
             title: format!("window {id}"),
             focused: false,
             monitor: "DP-1".to_owned(),
             modal: false,
             parent: Parentage::None,
             leaving: false,
+        }
+    }
+
+    /// Drawn at `rect`, where it lives: a window at rest, as the compositor
+    /// hands it to a script that has just placed it -- so `sol.window_at`
+    /// finds it there, which is what makes
+    /// `a_dropped_window_goes_to_the_tile_it_was_let_go_over` a drop onto
+    /// window 1. No screens in these snapshots, so no screen refuses it.
+    fn drawn(rect: Rect) -> Drawn {
+        let rect = Rectangle::<f64, Logical>::new((rect.x, rect.y).into(), (rect.w, rect.h).into());
+        let slot = rect.to_i32_round();
+        Drawn {
+            slot,
+            frame: Frame {
+                rect,
+                ..Frame::real(slot)
+            },
         }
     }
 
@@ -6825,7 +6905,7 @@ mod dialogs {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
                             rect,
-                            drawn: rect,
+                            drawn: drawn(rect),
                             leaving: leaving.contains(&id),
                             ..window(id, rect.w, rect.h)
                         }
@@ -7555,7 +7635,7 @@ mod dialogs {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
                             rect,
-                            drawn: rect,
+                            drawn: drawn(rect),
                             leaving: leaving.contains(&id),
                             ..window(id, rect.w, rect.h)
                         }
@@ -8417,5 +8497,16 @@ impl Scripts {
             .load(chunk)
             .eval::<String>()
             .unwrap_or_else(|err| format!("error: {err}"))
+    }
+
+    /// [`Self::evaluate`], with `snapshot` as what the compositor looks like:
+    /// so a chunk that asks `sol.window_at` is answered from the snapshot a
+    /// handler dispatched at that instant would be handed, rather than from
+    /// whichever the last dispatch left behind. For a test that asks from Lua
+    /// what the compositor asks in Rust --
+    /// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
+    pub(crate) fn evaluate_in(&self, snapshot: Snapshot, chunk: &str) -> String {
+        self.lua.set_app_data(snapshot);
+        self.evaluate(chunk)
     }
 }
