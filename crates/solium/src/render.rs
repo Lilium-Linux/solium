@@ -69,6 +69,11 @@ render_elements! {
     /// too: Qt rendered it into a buffer the compositor allocated, so there is
     /// nothing to upload and nothing that is a memory buffer. See `surface.rs`.
     Screen = smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>,
+    /// A surface of a window whose client has gone, drawn from the texture the
+    /// renderer had imported for it. See `crate::remains`.
+    Remains = RescaleRenderElement<crate::remains::Surface>,
+    /// The same, cut to the tile the window left, as a live `Tiled` is.
+    RemainsTiled = CropRenderElement<RescaleRenderElement<crate::remains::Surface>>,
     /// A client drawn from a texture of its own, *through a fragment program*.
     ///
     /// The one thing `Screen` above cannot be. `TextureRenderElement` has no
@@ -545,9 +550,7 @@ fn chrome(
     let title = state.pane_title(pane);
     let look = crate::decoration::Look {
         title: &title,
-        focused: state
-            .focused_window()
-            .is_some_and(|window| state.panes.id_of(&window) == Some(pane)),
+        focused: state.looks_focused(pane),
         pointer_inside: state.pointer_over(pane),
     };
     let mut animating = false;
@@ -961,9 +964,18 @@ pub(crate) fn elements(
         let ours = !window
             .as_ref()
             .is_some_and(|window| state.client_ready(window));
-        // Nothing of the client's left to draw and nothing of ours either:
-        // this is a window on its way out. Do not draw half of it.
-        if ours && !state.pane_has_scene(pane) {
+        // The remains of a window whose client has gone: drawn from its
+        // picture, or from a fill if it left none, below. One that kept the
+        // scene standing in for it is `ours` with a scene, and the ordinary
+        // walk for one of those draws it.
+        let remains = state
+            .panes
+            .get(pane)
+            .is_some_and(|held| held.ghost() && !held.has_scene());
+        // Nothing of the client's left to draw and nothing of ours either --
+        // a client that has mapped and not painted, or that unmapped itself --
+        // so do not draw half of it.
+        if ours && !state.pane_has_scene(pane) && !remains {
             continue;
         }
 
@@ -1046,6 +1058,17 @@ pub(crate) fn elements(
             alpha: frame.opacity,
             scale,
         };
+
+        // Its client has gone: its frame's layers, fading with the rest of it,
+        // round what the client left. In `PANE_ORDER`, like a live client.
+        if remains {
+            let mut client = Some(remains_elements(state, pane, &frame, outer.size, scale));
+            pane_pieces(&mut elements, |elements, piece| match piece {
+                Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
+                Piece::Client => elements.extend(client.take().into_iter().flatten()),
+            });
+            continue;
+        }
 
         // Nothing of the application to draw yet, so this window is entirely
         // ours and the scene has all of it, bar included. The frame is built
@@ -2081,6 +2104,82 @@ impl Fitted<WaylandSurfaceRenderElement<GlesRenderer>> {
             Self::Whole(whole) => Element::Window(whole),
             Self::Cut(cut) => Element::Tiled(cut),
         }
+    }
+}
+
+impl Fitted<crate::remains::Surface> {
+    /// Into the frame's element list. Not `into_element`, which the path
+    /// `Fitted::into_element` above has to name without a type.
+    fn into_remains(self) -> Element {
+        match self {
+            Self::Whole(whole) => Element::Remains(whole),
+            Self::Cut(cut) => Element::RemainsTiled(cut),
+        }
+    }
+}
+
+/// What stands where the client of a window that has gone was, for one frame.
+///
+/// **Through [`place_client`] and [`fitted`], exactly as a live client's
+/// surfaces go**, with the size the client last committed and the geometry it
+/// was drawn at kept on the pane, so the picture lands on the pixels the client
+/// occupied, is cut to the tile the window left (#133) and shrinks with its
+/// frame. `frame` is the pane's drawn frame on this screen and `outer` its
+/// outer size, the two things the live path hands `place_client`.
+///
+/// A picture with no pixels in it -- a client whose last buffer was never
+/// imported -- is not drawn from at all: the client rectangle is filled with
+/// `remains::FILL` instead, so what fades out is the window's shape and never
+/// nothing.
+fn remains_elements(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+    frame: &present::Frame,
+    outer: Size<i32, Logical>,
+    scale: f64,
+) -> Vec<Element> {
+    let Some(held) = state.panes.get(pane) else {
+        return Vec::new();
+    };
+    let Some(left) = held.left() else {
+        return Vec::new();
+    };
+    let output_scale = Scale::from(scale);
+    match &left.remains {
+        crate::pane::Remains::Picture(picture) if picture.drawable() => {
+            let placed = place_client(state, held, frame, outer, picture.committed());
+            let origin = placed.origin.to_physical_precise_round(scale);
+            // Where the buffer's own corner goes: the window's rectangle
+            // starts `inset` into it for a client that draws a shadow, which is
+            // the same offset the live path takes off.
+            let surfaces = origin - picture.inset().to_physical_precise_round(scale);
+            picture
+                .elements(surfaces, scale, frame.opacity)
+                .filter_map(|surface| {
+                    fitted(surface, origin, placed.fit, output_scale).map(Fitted::into_remains)
+                })
+                .collect()
+        }
+        crate::pane::Remains::Picture(_) | crate::pane::Remains::Lost => {
+            let placed = place_client(state, held, frame, outer, left.geometry.size);
+            let area = Rectangle::new(
+                placed.client.loc.to_physical_precise_round(scale),
+                placed.client.size.to_physical_precise_round(scale),
+            );
+            let fill = crate::remains::FILL;
+            let alpha = fill[3] * frame.opacity;
+            vec![Element::Solid(
+                smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
+                    left.fill.clone(),
+                    area,
+                    CommitCounter::default(),
+                    [fill[0] * alpha, fill[1] * alpha, fill[2] * alpha, alpha],
+                    Kind::Unspecified,
+                ),
+            )]
+        }
+        // Drawn by `scene`, through the walk that draws a loading pane.
+        crate::pane::Remains::Scene(_) => Vec::new(),
     }
 }
 

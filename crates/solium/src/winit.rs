@@ -156,6 +156,11 @@ pub(crate) fn run() -> Result<()> {
             .with_inner_size(LogicalSize::new(1600.0, 900.0)),
     )
     .map_err(|e| anyhow::anyhow!("initialising the winit backend: {e}"))?;
+    // Whose imports a departing window's picture is read from. See
+    // `crate::remains`.
+    state.textures = Some(crate::remains::Textures::Gles(
+        smithay::backend::renderer::Renderer::context_id(backend.renderer()),
+    ));
 
     // The same hardware buffer sharing the hardware backend offers, so that a
     // client taking the fast path is exercised here rather than first

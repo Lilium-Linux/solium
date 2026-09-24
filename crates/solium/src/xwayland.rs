@@ -460,11 +460,16 @@ impl XwmHandler for Solium {
             .find(|element| element.x11_surface() == Some(&window))
             .cloned();
         if let Some(element) = going {
+            // The way every window goes (#126): the scripts are told, and the
+            // window fades out from its last picture, frame and all. The frame
+            // used to be dropped here first, before the unmap, so there was
+            // never a frame left to draw it with -- it now goes with the pane
+            // when the fade is over. A menu or a tooltip still goes at once;
+            // `depart` says why. If Xwayland destroyed the window's surface
+            // first, `CompositorHandler::destroyed` has departed it already,
+            // and a second `depart` does nothing.
             if let Some(pane) = self.panes.id_of(&element) {
-                self.trigger_close(pane);
-            }
-            if let Some(id) = self.panes.id_of(&element) {
-                self.decorations.remove(&mut self.panes, id);
+                self.depart(pane);
             }
             self.space.unmap_elem(&element);
         }
