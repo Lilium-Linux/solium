@@ -101,14 +101,16 @@ use crate::{
 /// is the two-line adapter that feeds it `space.outputs()`. Same trick, same
 /// reason, as `offscreen::Scratch` being generic over what it keeps.
 ///
-/// Exclusive, through `Rectangle::overlaps`, and deliberately the same call
-/// `render::elements` makes when it culls a pane against one screen: a window
+/// Through [`crate::render::drawn_on`], the very call `render::elements`
+/// makes when it culls a pane against one screen -- so exclusive: a window
 /// whose right edge is exactly the monitor's left edge has no pixel on it.
 fn anywhere_on(
     rect: Rectangle<i32, Logical>,
     screens: impl IntoIterator<Item = Rectangle<i32, Logical>>,
 ) -> bool {
-    screens.into_iter().any(|screen| screen.overlaps(rect))
+    screens
+        .into_iter()
+        .any(|screen| crate::render::drawn_on(rect, screen))
 }
 
 /// How far past the present a question about where a window is *going* looks.
@@ -151,7 +153,18 @@ fn anywhere_on(
 /// enough that it cannot be one.
 const SETTLED: Duration = Duration::from_secs(60 * 60);
 
-/// Whether none of these drawn rectangles reaches any screen.
+/// Whether none of these windows is drawn on any screen: each a slot, where
+/// the window lives, and the rectangle it is drawn at.
+///
+/// **A drawn rectangle counts only on a screen its slot is on**, because that
+/// is the only kind of screen that draws it: [`crate::render::drawn_on`], the
+/// renderer's own cull. Until #134's third review this asked whether the
+/// drawn rectangle reached *any* screen, and with two monitors side by side
+/// the left one's workspace next door is carried onto the right one -- which
+/// never draws it -- so its windows came back on stage.
+/// `a_window_is_on_stage_only_on_a_monitor_that_draws_it` pins the rule, and
+/// `on_two_monitors_a_window_on_the_left_monitors_hidden_workspace_is_not_on_stage`
+/// the shipped workspaces meeting it.
 ///
 /// `None` when there is nothing to ask about — no screens, or no windows. The
 /// free function over plain rectangles, for the same reason [`anywhere_on`] is
@@ -160,20 +173,63 @@ const SETTLED: Duration = Duration::from_secs(60 * 60);
 /// measured at is the caller's, and is the other half — see
 /// [`Solium::everything_is_off_stage`], which got it wrong.
 fn nothing_on_stage(
-    drawn: impl IntoIterator<Item = Rectangle<f64, Logical>>,
+    drawn: impl IntoIterator<Item = (Rectangle<i32, Logical>, Rectangle<f64, Logical>)>,
     screens: &[Rectangle<i32, Logical>],
 ) -> Option<bool> {
     if screens.is_empty() {
         return None;
     }
     let mut any = false;
-    for rect in drawn {
+    for (slot, rect) in drawn {
         any = true;
-        if screens.iter().any(|screen| screen.to_f64().overlaps(rect)) {
+        if screens
+            .iter()
+            .any(|screen| crate::render::drawn_on(slot, *screen) && screen.to_f64().overlaps(rect))
+        {
             return Some(false);
         }
     }
     any.then_some(true)
+}
+
+/// [`Solium::on_stage`]'s rule, for a window living at `slot` and drawn as
+/// `frame`: it paints something, on a screen that draws it.
+fn staged(
+    slot: Rectangle<i32, Logical>,
+    frame: Frame,
+    screens: &[Rectangle<i32, Logical>],
+) -> bool {
+    frame.shows() && nothing_on_stage([(slot, frame.rect)], screens) != Some(true)
+}
+
+/// Whether `point` is somewhere a window living at `slot` could be drawn: on a
+/// screen that draws it, by [`crate::render::drawn_on`].
+///
+/// **The hit tests' half of the rule [`nothing_on_stage`] is the focus half
+/// of**, and asked by every walk that decides where a press goes --
+/// `window_under`, `surface_under`, `pane_chrome` -- and by `decorated_under`,
+/// which only looks. `Frame::covers` says whether the point is inside what a
+/// pane draws; this says whether the screen under the point draws the pane at
+/// all. With two monitors side by side the left one's hidden workspace is
+/// carried over the right one, where its rectangle covers pixels the right
+/// monitor never drew it on, and a press there went into a window nobody could
+/// see (#134's third review).
+/// `on_two_monitors_a_press_on_the_right_monitor_reaches_what_it_draws`.
+///
+/// **No screens is not "nowhere"**, for the reason [`Solium::on_stage`] gives:
+/// a pointer with no monitor to be on is not a reason to decide that nothing
+/// is under it. A point on no screen while there are some is on nothing,
+/// because nothing is drawn there -- and `input::confine` keeps the pointer
+/// from ever being there. `a_point_is_on_a_window_only_on_a_monitor_that_draws_it`.
+fn shown_at(
+    slot: Rectangle<i32, Logical>,
+    point: Point<f64, Logical>,
+    screens: &[Rectangle<i32, Logical>],
+) -> bool {
+    screens.is_empty()
+        || screens
+            .iter()
+            .any(|screen| screen.to_f64().contains(point) && crate::render::drawn_on(slot, *screen))
 }
 
 /// A rectangle grown outward by the frame drawn around it.
@@ -892,9 +948,17 @@ enum ClientKind {
 
 impl ClientKind {
     fn of(window: &Window) -> Option<Self> {
-        if window.toplevel().is_some() {
+        Self::from_roles(window.toplevel().is_some(), window.x11_surface().is_some())
+    }
+
+    /// The kind a window with these roles is, apart from [`Self::of`] so it
+    /// can be asked about an X11 window, which a test cannot make. `None` for a
+    /// window with neither role, which smithay's `Window` cannot be today.
+    /// `a_managed_x11_window_is_offered_the_keyboard_as_an_xdg_one_is`.
+    const fn from_roles(xdg: bool, x11: bool) -> Option<Self> {
+        if xdg {
             Some(Self::Xdg)
-        } else if window.x11_surface().is_some() {
+        } else if x11 {
             Some(Self::X11)
         } else {
             None
@@ -930,15 +994,25 @@ enum FirstFocus {
 /// Only a managed window: an unmanaged one is a menu, a tooltip or a splash,
 /// placed by its client (`xwayland.rs`'s `places_itself`). And only one headed
 /// somewhere the user can see, which is [`Solium::on_stage`].
-const fn first_focus(kind: ClientKind, managed: bool, on_stage: bool) -> FirstFocus {
+///
+/// **The kind is an `Option`, so that the whole decision is here.**
+/// `offer_keyboard` used to return early when [`ClientKind::of`] answered
+/// nothing, and in #134's first round that early return was the line --
+/// `toplevel().is_none()` -- that left every X11 window without the keyboard.
+/// A kind nobody knows is `Stay` here instead, and `offer_keyboard` asks this
+/// once with no return of its own:
+/// `a_managed_x11_window_is_offered_the_keyboard_as_an_xdg_one_is` pins the
+/// rule, [`ClientKind::from_roles`] and that shape.
+const fn first_focus(kind: Option<ClientKind>, managed: bool, on_stage: bool) -> FirstFocus {
     match kind {
-        ClientKind::Xdg | ClientKind::X11 => {
+        Some(ClientKind::Xdg | ClientKind::X11) => {
             if managed && on_stage {
                 FirstFocus::Focus
             } else {
                 FirstFocus::Stay
             }
         }
+        None => FirstFocus::Stay,
     }
 }
 
@@ -2174,14 +2248,48 @@ impl Solium {
     /// drawn one knows better. See `workspaces.lua`, and
     /// `a_close_does_not_hand_the_keyboard_to_a_workspace_nobody_can_see`.
     ///
+    /// **On a screen that draws it, and not merely on a screen.** A pane is
+    /// drawn only on the monitors its slot is on -- the renderer's own cull,
+    /// [`crate::render::drawn_on`] -- so its drawn rectangle is measured
+    /// against those. Measured against every screen, as it was until #134's
+    /// third review, the left monitor's hidden workspace -- carried a screen
+    /// and a bit to the right by the shipped `spread` -- was on stage on the
+    /// right monitor, and `offer_keyboard`, `settle_focus` and an activation
+    /// all handed it the keyboard. `nothing_on_stage` has the rule and the
+    /// `on_two_monitors_` tests in `keyboard_at_open` have each caller.
+    ///
     /// **No screens is not "invisible".** `nothing_on_stage` answers `None`
     /// when there is nothing to measure against, and a compositor with no
     /// output bound yet must not decide that every window is unreachable — the
     /// caller would then refuse to focus anything at all. "Not known to be off
     /// stage" is the honest reading and the safe one.
     fn on_stage(&self, pane: &Pane, screens: &[Rectangle<i32, Logical>], landed: Duration) -> bool {
-        let frame = self.drawn_at(pane, self.pane_outer(pane), landed);
-        frame.shows() && nothing_on_stage([frame.rect], screens) != Some(true)
+        let slot = self.pane_outer(pane);
+        staged(slot, self.drawn_at(pane, slot, landed), screens)
+    }
+
+    /// Whether a pane is kept off stage by the selections it is in: its own
+    /// frame would be on stage, and the group shift carries it off.
+    ///
+    /// **A window on a workspace nobody is looking at, told from a column
+    /// scrolled off the screen**, which is the distinction a genuine activation
+    /// needs (#134's third review). A hidden workspace is parked, not moved: its
+    /// windows keep slots on a screen and `workspaces.lua` carries the desk away
+    /// with `sol.present_group`. A scrolled-off column is moved: the strip
+    /// places it off the screen, so its own frame is off stage before any
+    /// selection is asked -- and focusing it is how the strip brings it back.
+    /// `a_genuine_activation_of_a_window_on_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was`
+    /// and `a_genuine_activation_of_a_column_scrolled_off_screen_brings_it_back_with_the_keyboard`
+    /// are the two sides.
+    fn carried_off_stage(&self, pane: crate::pane::PaneId) -> bool {
+        let Some(pane) = self.panes.get(pane) else {
+            return false;
+        };
+        let landed = self.settling();
+        let screens = self.screens();
+        let slot = self.pane_outer(pane);
+        staged(slot, present::frame(pane, slot, landed), &screens)
+            && !staged(slot, self.drawn_at(pane, slot, landed), &screens)
     }
 
     /// [`Self::on_stage`] for one pane, asked by id at [`Self::settling`]: for
@@ -2630,6 +2738,15 @@ impl Solium {
             was = wrong.get(),
             "an application arrived in its window, by token"
         );
+        // **The window it arrived in may be one nobody can see**, and the
+        // window that moved into it may already have the keyboard: it opened on
+        // screen, as a window of its own, and was offered it there. The
+        // keyboard does not follow it onto a hidden workspace; `hand_off_keyboard`
+        // does nothing for a window that does not have it.
+        // `a_focused_window_claimed_into_a_pane_on_a_hidden_workspace_gives_the_keyboard_up`.
+        if !self.pane_on_stage(pane) {
+            self.hand_off_keyboard(&window);
+        }
         self.redraw = true;
         true
     }
@@ -3472,10 +3589,10 @@ impl Solium {
         // unanswerable question comes back as.
         let landed = self.settling();
         nothing_on_stage(
-            self.panes
-                .iter()
-                .filter(|pane| pane.managed())
-                .map(|pane| self.drawn_at(pane, self.pane_outer(pane), landed).rect),
+            self.panes.iter().filter(|pane| pane.managed()).map(|pane| {
+                let slot = self.pane_outer(pane);
+                (slot, self.drawn_at(pane, slot, landed).rect)
+            }),
             &screens,
         )
     }
@@ -3528,6 +3645,7 @@ impl Solium {
             return None;
         }
         let now = self.clock.now();
+        let screens = self.screens();
 
         // `rev` because `panes` is in stacking order, bottom-first, and the
         // rule is topmost-first -- which is now load-bearing in a way it was
@@ -3537,7 +3655,7 @@ impl Solium {
             self.panes
                 .iter()
                 .rev()
-                .map(|pane| self.pane_chrome(pane, location, now)),
+                .map(|pane| self.pane_chrome(pane, location, now, &screens)),
         )
     }
 
@@ -3585,8 +3703,18 @@ impl Solium {
         pane: &Pane,
         location: Point<f64, Logical>,
         now: std::time::Duration,
+        screens: &[Rectangle<i32, Logical>],
     ) -> PaneHit<Under> {
         let outer = self.pane_outer(pane);
+        // On a screen that does not draw the pane, it has nothing there to
+        // press and nothing to occlude with -- a `Miss`, as an invisible pane
+        // is below, and not a `Halo`, which would still win over bare desktop.
+        // See [`shown_at`];
+        // `on_two_monitors_a_press_on_the_right_monitor_reaches_what_it_draws`
+        // asks both.
+        if !shown_at(outer, location, screens) {
+            return PaneHit::Miss;
+        }
         let drawn = self.drawn_at(pane, outer, now);
         let in_outer = present::to_window_space(drawn, outer, location) - outer.loc.to_f64();
 
@@ -4311,6 +4439,7 @@ impl Solium {
         if self.lock.is_some() {
             return None;
         }
+        let screens = self.screens();
         for pane in self.panes.iter().rev() {
             let outer = self.pane_outer(pane);
             // `covers`, not `rect.contains`: a pane drawn at opacity zero is
@@ -4319,7 +4448,13 @@ impl Solium {
             // review finding 1 -- this walk ends in `focus_window` through
             // click-to-focus, so an invisible pane winning it took the
             // keyboard as well as the click.
-            if !self.drawn_at(pane, outer, now).covers(location) {
+            //
+            // And only on a screen that draws the pane, which is [`shown_at`]:
+            // a hidden workspace carried over the next monitor covers pixels
+            // that monitor never drew it on (#134's third review).
+            if !(shown_at(outer, location, &screens)
+                && self.drawn_at(pane, outer, now).covers(location))
+            {
                 continue;
             }
             // Covered. A pane whose application has not arrived has no window
@@ -4376,9 +4511,18 @@ impl Solium {
         }
 
         let now = self.clock.now();
+        let screens = self.screens();
 
         for pane in self.panes.iter().rev() {
             let outer = self.pane_outer(pane);
+            // Nothing of a pane -- its surface or its popups, which the
+            // renderer draws inside the same cull -- is at a point on a screen
+            // that does not draw it. [`shown_at`] says why, and
+            // `on_two_monitors_a_press_on_the_right_monitor_reaches_what_it_draws`
+            // is this walk.
+            if !shown_at(outer, location, &screens) {
+                continue;
+            }
             let frame = self.drawn_at(pane, outer, now);
             // Invisible is not covered. Same rule and same reason as
             // [`Self::window_under`]: this walk is what delivers motion,
@@ -6521,11 +6665,19 @@ impl Solium {
         location: Point<f64, Logical>,
     ) -> Option<(crate::pane::PaneId, Point<f64, Logical>)> {
         let now = self.clock.now();
+        let screens = self.screens();
         self.panes.iter().rev().find_map(|pane| {
             // Only a built frame is listening. There is no scene to tell about
             // the pointer until there is one.
             pane.decoration()?;
             let outer = self.pane_outer(pane);
+            // Nor one on a screen that does not draw it: [`shown_at`], whose
+            // test is `a_point_is_on_a_window_only_on_a_monitor_that_draws_it`.
+            // A pane with a built frame needs Qt, which this binary's tests
+            // cannot start, so this walk is not driven by one.
+            if !shown_at(outer, location, &screens) {
+                return None;
+            }
             let drawn = self.drawn_at(pane, outer, now);
             // An invisible frame has nothing to glow. This walk only forwards
             // the pointer to a decoration's scene, so the cost of getting it
@@ -6838,6 +6990,13 @@ impl Solium {
     /// workspace went on holding the machine awake. Found by hiding one and
     /// waiting.
     ///
+    /// **And drawn on a screen that draws it**, through `nothing_on_stage`:
+    /// with two monitors side by side the left one's hidden workspace is
+    /// carried onto the right one, which never draws it, and the video there
+    /// went on holding the machine awake from a screen it was not on (#134's
+    /// third review,
+    /// `on_two_monitors_a_window_on_the_left_monitors_hidden_workspace_is_not_on_stage`).
+    ///
     /// Being the drawn rect also settles the cases that have not arrived yet
     /// in the same breath: a thumbnail in overview is visible, and a window
     /// minimised to nothing (#30) will not be.
@@ -6854,12 +7013,9 @@ impl Solium {
                     .wl_surface()
                     .is_some_and(|owned| owned.as_ref() == surface)
                     && {
-                        let drawn = self.drawn_at(pane, self.pane_outer(pane), now).rect;
-                        self.space.outputs().any(|output| {
-                            self.space
-                                .output_geometry(output)
-                                .is_some_and(|geometry| geometry.to_f64().overlaps(drawn))
-                        })
+                        let slot = self.pane_outer(pane);
+                        let drawn = self.drawn_at(pane, slot, now).rect;
+                        nothing_on_stage([(slot, drawn)], &self.screens()) == Some(false)
                     }
             })
         })
@@ -7094,13 +7250,14 @@ impl Solium {
     /// window is not raised or activated either
     /// (`a_window_that_opens_while_locked_does_not_take_the_keyboard`).
     fn offer_keyboard(&mut self, window: &Window, pane: crate::pane::PaneId) {
-        let Some(kind) = ClientKind::of(window) else {
-            return;
-        };
         let landed = self.settling();
         let screens = self.screens();
         let offer = self.panes.get(pane).map_or(FirstFocus::Stay, |held| {
-            first_focus(kind, held.managed(), self.on_stage(held, &screens, landed))
+            first_focus(
+                ClientKind::of(window),
+                held.managed(),
+                self.on_stage(held, &screens, landed),
+            )
         });
         match offer {
             FirstFocus::Focus => self.focus_window(window, SERIAL_COUNTER.next_serial()),
@@ -8807,24 +8964,34 @@ impl XdgActivationHandler for Solium {
         }
 
         // Anyone else's: a window asking for focus, which is what the protocol
-        // is for. Honoured because the token is proof the request came from
-        // something the user was actually using -- a client cannot mint one for
-        // itself out of nothing, which is the difference between this and a
-        // window simply demanding focus.
+        // is for, and honoured whoever minted the token. **That is not focus-
+        // stealing prevention, and there is none.** This comment used to say a
+        // client could not mint a token for itself; it can. `token_created` is
+        // not overridden, and smithay's default keeps every token a client asks
+        // for -- with no input serial and no surface -- so any client can make
+        // one and bring itself forward:
+        // `a_client_can_mint_itself_an_activation_token_and_take_the_keyboard_with_it`
+        // pins that as it stands.
         //
-        // **And then asked where the window is headed**, which the
-        // compositor's own routes to the keyboard -- `offer_keyboard`,
-        // `settle_focus` -- ask first. After, because focusing is how a layout
-        // brings a window into view: the strip scrolls a focused column onto
-        // the screen, so asking before would refuse a column scrolled off the
-        // edge that the focus itself was about to bring back
+        // **A window on a workspace nobody is looking at is refused before it
+        // is focused**, and it is refused rather than focused and handed back.
+        // Focused first, as it was until #134's third review, it was raised,
+        // told it had the keyboard and the clipboard, and announced to the
+        // scripts as focused -- and then `hand_off_keyboard`'s `settle_focus`
+        // gave the keyboard to the window under the pointer or the topmost,
+        // which with two tiles on screen need not be the one that had it
+        // (`a_genuine_activation_of_a_window_on_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was`).
+        // `carried_off_stage` tells such a window from a column scrolled off
+        // the edge, which the focus itself brings back into view and so is
+        // still focused
         // (`a_genuine_activation_of_a_column_scrolled_off_screen_brings_it_back_with_the_keyboard`).
+        //
         // A window still headed nowhere the user can see once the layouts have
-        // had their say -- one on a workspace nobody is looking at -- gives the
-        // keyboard up again, to whatever is on screen
-        // (`a_genuine_activation_of_a_window_on_a_hidden_workspace_leaves_the_keyboard_on_screen`).
-        // Before #134's second review it kept it, and every key typed went to
-        // a desk nobody could see.
+        // had their say -- one being closed, say -- gives the keyboard up again,
+        // to whatever is on screen
+        // (`a_genuine_activation_of_a_window_being_closed_does_not_keep_the_keyboard`).
+        // Before #134's second review it kept it, and every key typed went
+        // somewhere nobody could see.
         //
         // Switching to that workspace is arguably what a click on its
         // notification should do. That is `workspaces.lua`'s decision rather
@@ -8833,18 +9000,22 @@ impl XdgActivationHandler for Solium {
         // click like that changes nothing on screen, as it never did, and the
         // typing no longer goes with it.
         if let Some(window) = self.window_for(&surface) {
-            tracing::debug!("a window asked to be brought forward");
-            self.focus_window(&window, SERIAL_COUNTER.next_serial());
-            let headed_on_stage = self
-                .panes
-                .id_of(&window)
-                .is_some_and(|pane| self.pane_on_stage(pane));
-            if !headed_on_stage {
+            let pane = self.panes.id_of(&window);
+            if pane.is_some_and(|pane| self.carried_off_stage(pane)) {
                 tracing::debug!(
-                    "a window asked to be brought forward where nobody can see it, and the \
-                     keyboard went back on screen"
+                    "a window on a workspace nobody is looking at asked to be brought forward, \
+                     and the keyboard stayed where it was"
                 );
-                self.hand_off_keyboard(&window);
+            } else {
+                tracing::debug!("a window asked to be brought forward");
+                self.focus_window(&window, SERIAL_COUNTER.next_serial());
+                if !pane.is_some_and(|pane| self.pane_on_stage(pane)) {
+                    tracing::debug!(
+                        "a window asked to be brought forward where nobody can see it, and the \
+                         keyboard went back on screen"
+                    );
+                    self.hand_off_keyboard(&window);
+                }
             }
         }
         self.activation_state.remove_token(&token);
@@ -9340,8 +9511,11 @@ mod tests {
     #[test]
     fn a_desktop_is_off_stage_only_when_there_is_a_desktop_and_it_is_off() {
         let screens = two_monitors().to_vec();
-        let on = at(100, 100, 800, 600).to_f64();
-        let off = at(-4000, 0, 1920, 1080).to_f64();
+        // Each a window's slot and where it is drawn: both living on the first
+        // monitor, one drawn there and one carried clear of every screen.
+        let slot = at(100, 100, 800, 600);
+        let on = (slot, slot.to_f64());
+        let off = (slot, at(-4000, 0, 1920, 1080).to_f64());
 
         assert_eq!(
             nothing_on_stage([off], &screens),
@@ -9375,6 +9549,85 @@ mod tests {
             None,
             "and neither is no screens, which is every window off every one of \
              them by arithmetic"
+        );
+    }
+
+    /// **#134's third review: a window is on stage only on a monitor that
+    /// draws it.**
+    ///
+    /// Two monitors side by side, and the left one's workspace 2 as the shipped
+    /// `workspaces.lua` parks it: the slot tiling gave it on the left monitor,
+    /// drawn 1.06 screens to the right -- squarely on the right monitor. The
+    /// renderer draws a pane only on the monitors its slot is on
+    /// (`render::drawn_on`), so none of it is on screen, and asked against
+    /// every screen, as this was, it was on stage.
+    #[test]
+    fn a_window_is_on_stage_only_on_a_monitor_that_draws_it() {
+        let screens = two_monitors().to_vec();
+        let slot = at(12, 12, 1896, 1056);
+        let carried = Rectangle::<f64, Logical>::new(
+            (12.0 + 1920.0 * 1.06, 12.0).into(),
+            (1896.0, 1056.0).into(),
+        );
+
+        assert_eq!(
+            nothing_on_stage([(slot, carried)], &screens),
+            Some(true),
+            "a window living on the left monitor, carried onto the right one, is on stage \
+             -- where the right monitor never draws it"
+        );
+        // Rules out asking only the slot.
+        assert_eq!(
+            nothing_on_stage([(slot, slot.to_f64())], &screens),
+            Some(false),
+            "the same window drawn where it lives is on stage"
+        );
+        let right = at(1932, 12, 1896, 1056);
+        assert_eq!(
+            nothing_on_stage([(right, right.to_f64())], &screens),
+            Some(false),
+            "and so is one living and drawn on the right monitor"
+        );
+        // A slot across the bezel is on both, so a transform may carry it
+        // around either: containment, not a single "its monitor".
+        let straddling = at(1800, 100, 400, 600);
+        let moved = Rectangle::<f64, Logical>::new((2000.0, 100.0).into(), (400.0, 600.0).into());
+        assert_eq!(
+            nothing_on_stage([(straddling, moved)], &screens),
+            Some(false),
+            "a window across the bezel moved onto the right monitor is still on stage"
+        );
+    }
+
+    /// **The hit tests' half of the same rule**: a point is on a window only
+    /// on a monitor that draws it. See [`shown_at`].
+    #[test]
+    fn a_point_is_on_a_window_only_on_a_monitor_that_draws_it() {
+        let screens = two_monitors();
+        let left = at(12, 12, 1896, 1056);
+        let on_left = Point::<f64, Logical>::from((500.0, 500.0));
+        let on_right = Point::<f64, Logical>::from((2500.0, 500.0));
+
+        assert!(
+            !shown_at(left, on_right, &screens),
+            "a window living on the left monitor is under a point on the right one -- \
+             which is where its hidden workspace is carried, and never drawn"
+        );
+        assert!(
+            shown_at(left, on_left, &screens),
+            "and it is under one on its own"
+        );
+        assert!(
+            shown_at(at(1800, 100, 400, 600), on_right, &screens),
+            "a window across the bezel is drawn on both monitors, so on either"
+        );
+        assert!(
+            !shown_at(left, (-10.0, 500.0).into(), &screens),
+            "a point on no monitor is on nothing, because nothing is drawn there"
+        );
+        assert!(
+            shown_at(left, on_right, &[]),
+            "with no monitors at all nothing is known, and nothing is refused"
         );
     }
 
@@ -9426,7 +9679,12 @@ mod tests {
             present::Curve::OutCubic,
         );
 
-        let where_it_is = |now| groups.on_window(7, None, now).apply(Frame::real(real)).rect;
+        let where_it_is = |now| {
+            (
+                real,
+                groups.on_window(7, None, now).apply(Frame::real(real)).rect,
+            )
+        };
 
         assert_eq!(
             nothing_on_stage([where_it_is(start)], &screens),
@@ -10490,7 +10748,9 @@ mod tests {
         use wayland_protocols::ext::session_lock::v1::client::{
             ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
         };
-        use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1;
+        use wayland_protocols::xdg::activation::v1::client::{
+            xdg_activation_token_v1, xdg_activation_v1,
+        };
         use wayland_protocols::xdg::dialog::v1::client::{xdg_dialog_v1, xdg_wm_dialog_v1};
         use wayland_protocols::xdg::shell::client::{
             xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
@@ -10667,6 +10927,25 @@ mod tests {
             /// tracking both events can answer, and it is exactly the question
             /// the user asks when they close a window and keep typing.
             typed: Vec<(Option<u32>, u32)>,
+            /// Every activation token this client asked for and was handed,
+            /// by `xdg_activation_token_v1.done`, oldest first.
+            tokens: Vec<String>,
+        }
+
+        /// See [`Client::tokens`].
+        impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for Client {
+            fn event(
+                state: &mut Self,
+                _token: &xdg_activation_token_v1::XdgActivationTokenV1,
+                event: xdg_activation_token_v1::Event,
+                (): &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+                if let xdg_activation_token_v1::Event::Done { token } = event {
+                    state.tokens.push(token);
+                }
+            }
         }
 
         impl Dispatch<wl_registry::WlRegistry, ()> for Client {
@@ -11358,6 +11637,23 @@ mod tests {
         fn one_screen(state: &mut Solium) -> Output {
             a_screen(state, "restore-test", (0, 0))
         }
+
+        /// Two 1920x1080 monitors side by side at 1x: `left` at the origin and
+        /// [`RIGHT_SCREEN`] beside it, top edges aligned.
+        ///
+        /// The arrangement nothing tested until #134's third review, and the
+        /// one where "a screen away" stops meaning "nowhere": with the shipped
+        /// `workspaces.spread` the left monitor's workspace 2 is parked 1.06
+        /// screens to the right of it, which is squarely on the right monitor.
+        fn side_by_side(state: &mut Solium, left: &str) -> (Output, Output) {
+            (
+                a_screen(state, left, (0, 0)),
+                a_screen(state, RIGHT_SCREEN, (1920, 0)),
+            )
+        }
+
+        /// The name [`side_by_side`] gives the right-hand monitor.
+        const RIGHT_SCREEN: &str = "right-test";
 
         /// The last size this toplevel was configured with, as the client saw it.
         fn last_configured(
@@ -17742,31 +18038,29 @@ end
 
             impl Desk {
                 fn new() -> Self {
+                    Self::on(|state| {
+                        a_screen(state, "reflow-test", (0, 0));
+                    })
+                }
+
+                /// [`Self::new`] with a second monitor to the right of the
+                /// first: see [`side_by_side`]. The left one keeps the name
+                /// every helper here asks `workspaces` about.
+                fn side_by_side() -> Self {
+                    Self::on(|state| {
+                        side_by_side(state, "reflow-test");
+                    })
+                }
+
+                /// The desk, on the monitors `screens` maps.
+                fn on(screens: impl FnOnce(&mut Solium)) -> Self {
                     let mut display =
                         Display::<Solium>::new().expect("creating a test wayland display");
                     let mut state = Solium::new(display.handle());
                     state
                         .decorations
                         .set_style(&mut state.panes, Some("none".to_string()));
-                    let output = Output::new(
-                        "reflow-test".to_string(),
-                        PhysicalProperties {
-                            size: (0, 0).into(),
-                            subpixel: Subpixel::Unknown,
-                            make: "solium".to_string(),
-                            model: "reflow".to_string(),
-                        },
-                    );
-                    output.change_current_state(
-                        Some(Mode {
-                            size: (1920, 1080).into(),
-                            refresh: 60_000,
-                        }),
-                        None,
-                        Some(Scale::Fractional(1.0)),
-                        None,
-                    );
-                    state.space.map_output(&output, (0, 0));
+                    screens(&mut state);
                     let (conn, queue, client) = connect(&mut display, &mut state);
                     let qh = queue.handle();
                     Self {
@@ -19341,9 +19635,30 @@ end)
                 /// it opened, once `scrolling.lua` stopped doing it by accident.
                 /// That an XWayland application really comes up focused, and
                 /// draws itself so, is for a person to check by hand.
+                ///
+                /// **And the two halves the rule does not see** (#134's third
+                /// review): which kind a window with only an X11 role is, through
+                /// the same [`ClientKind::from_roles`] that `ClientKind::of`
+                /// answers with; and that `offer_keyboard` has no early return
+                /// of its own. The second is asked of the source text, for the
+                /// reason `render.rs`'s drag-icon test gives: the behaviour
+                /// needs an X11 window, and restoring the old `return` passed
+                /// every other test. It pins only that `offer_keyboard` hands
+                /// the window's kind straight to this rule and returns nowhere
+                /// on the way.
                 #[test]
                 fn a_managed_x11_window_is_offered_the_keyboard_as_an_xdg_one_is() {
-                    for kind in [ClientKind::Xdg, ClientKind::X11] {
+                    assert_eq!(
+                        [
+                            ClientKind::from_roles(true, false),
+                            ClientKind::from_roles(false, true),
+                            ClientKind::from_roles(false, false),
+                        ],
+                        [Some(ClientKind::Xdg), Some(ClientKind::X11), None],
+                        "a window's roles name the wrong kind: an X11 window is one with only an \
+                         X11 surface"
+                    );
+                    for kind in [ClientKind::Xdg, ClientKind::X11].map(Some) {
                         assert_eq!(
                             first_focus(kind, true, true),
                             FirstFocus::Focus,
@@ -19360,6 +19675,29 @@ end)
                             "{kind:?}: a menu, a tooltip or a splash took the keyboard"
                         );
                     }
+                    assert_eq!(
+                        first_focus(None, true, true),
+                        FirstFocus::Stay,
+                        "a window of no kind anybody knows took the keyboard"
+                    );
+
+                    let source = include_str!("state.rs");
+                    let start = source
+                        .find("    fn offer_keyboard(&mut self, window: &Window, pane: crate::pane::PaneId) {")
+                        .expect("`offer_keyboard` is still here");
+                    let body = source[start..]
+                        .find("\n    }\n")
+                        .map(|end| &source[start..start + end])
+                        .expect("and still ends");
+                    assert!(
+                        body.contains("first_focus(")
+                            && body.contains("ClientKind::of(window)")
+                            && !body.contains("return")
+                            && !body.contains("toplevel()"),
+                        "`offer_keyboard` decides something before `first_focus` does -- an early \
+                         return, or a question about the toplevel -- so an X11 window can be \
+                         refused where no test can see it:\n{body}"
+                    );
                 }
 
                 /// When an application sends its activation token, against its
@@ -19553,6 +19891,95 @@ end)
                     typed_into(&mut desk, &asking, "a key typed after it did not reach it");
                 }
 
+                /// **A genuine activation of a window being closed does not
+                /// keep the keyboard.** Its own frame is fading to nothing, so no
+                /// selection is what keeps it off stage and it is focused like
+                /// any other window -- and then, headed nowhere the user can see,
+                /// gives the keyboard back to what is on screen. The check after
+                /// the focus in `request_activation`, which the check before it
+                /// does not replace.
+                #[test]
+                fn a_genuine_activation_of_a_window_being_closed_does_not_keep_the_keyboard() {
+                    let (mut desk, working) = working_in(SHIPPED_HEARING_FOCUS, None);
+                    let closing = desk.open_surface();
+                    desk.state
+                        .focus_window(&working, SERIAL_COUNTER.next_serial());
+                    typed_into(
+                        &mut desk,
+                        &working,
+                        "the premise: typing reaches the window before",
+                    );
+                    desk.state.close_pane(closing.pane);
+                    assert!(
+                        !headed_on_stage(&desk.state, closing.pane)
+                            && !desk.state.carried_off_stage(closing.pane),
+                        "the premise: the window being closed is headed off stage, and not by a \
+                         selection"
+                    );
+
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &closing.surface, &token);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(working.clone()),
+                        "a window being closed asked to be brought forward and kept the keyboard"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &working,
+                        "a key typed after it went somewhere else",
+                    );
+                }
+
+                /// **Any client can mint itself a token, and take the keyboard
+                /// with it.** Pinned as it stands, not as it ought to be: this
+                /// compositor does not override `token_created`, smithay's
+                /// default keeps every token a client asks for -- with no input
+                /// serial and no surface, as here -- and `request_activation`
+                /// honours whatever token comes back. There is no focus-stealing
+                /// prevention yet, and the comment there said a client could not
+                /// do this until #134's third review. When there is, this test
+                /// is the one that has to change.
+                #[test]
+                fn a_client_can_mint_itself_an_activation_token_and_take_the_keyboard_with_it() {
+                    let (mut desk, working) = working_in(SHIPPED_HEARING_FOCUS, None);
+                    let asking = desk.open_surface();
+                    desk.state
+                        .focus_window(&working, SERIAL_COUNTER.next_serial());
+                    typed_into(
+                        &mut desk,
+                        &working,
+                        "the premise: typing reaches the window before",
+                    );
+
+                    let activation = desk
+                        .client
+                        .activation
+                        .clone()
+                        .expect("xdg_activation_v1 bound");
+                    // Nothing set on it: no serial from any input event, and no
+                    // surface asking.
+                    activation.get_activation_token(&desk.qh, ()).commit();
+                    frame(&mut desk);
+                    let token = desk
+                        .client
+                        .tokens
+                        .last()
+                        .cloned()
+                        .expect("the compositor handed the client the token it asked for");
+                    activates(&mut desk, &asking.surface, &token);
+
+                    let asking = window_of(&desk, asking.pane);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(asking.clone()),
+                        "a token a client minted for itself was refused: focus-stealing \
+                         prevention exists now, and `request_activation`'s comment and this test \
+                         both say otherwise"
+                    );
+                    typed_into(&mut desk, &asking, "a key typed after it did not reach it");
+                }
+
                 /// **A genuine activation of a window on a workspace nobody is
                 /// looking at leaves the keyboard on screen.** Before #134's
                 /// second review `focus_window` gave it the keyboard there and
@@ -19688,6 +20115,568 @@ end)
                     let token = genuine_token(&mut desk);
                     activates(&mut desk, &opened.surface, &token);
                     still_working(&mut desk, &working, "a genuine activation");
+                }
+
+                /// **#134 third review, finding 2: a genuine activation of a
+                /// window on a hidden workspace focused it first, and then gave
+                /// the keyboard away** -- to whatever `settle_focus` picked,
+                /// which with two tiles on screen need not be the one that had
+                /// it.
+                ///
+                /// Two tiles side by side, at a minimum two fit and three do
+                /// not. The keyboard is on the left one; the pointer rests on
+                /// the right one, which is what `settle_focus` asks first. The
+                /// window asking to be brought forward overflowed to workspace
+                /// 2. Focused and then handed off, the keyboard ended on the
+                /// tile under the pointer; and the parked window had been told
+                /// it had the keyboard, and the scripts that it was focused, on
+                /// the way.
+                #[test]
+                fn a_genuine_activation_of_a_window_on_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was()
+                 {
+                    let (mut desk, _first) = working_in(
+                        &format!(
+                            "local config = require(\"config\")\n\
+                             config.tiling.minimum = {{ w = 900, h = 600 }}\n\
+                             config.tiling.follow_overflow = false\n\
+                             {SHIPPED_HEARING_FOCUS}"
+                        ),
+                        Some("super+t"),
+                    );
+                    let left = desk.focused();
+                    let right = desk.open_surface();
+                    desk.answer(&right);
+                    let left_window = window_of(&desk, left);
+                    let right_window = window_of(&desk, right.pane);
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    assert!(
+                        headed_on_stage(&desk.state, left)
+                            && headed_on_stage(&desk.state, right.pane),
+                        "the premise: two tiles on screen"
+                    );
+
+                    // The pointer on the right tile, the keyboard on the left.
+                    let over_right = desk.placed(right.pane);
+                    point_at(
+                        &mut desk.state,
+                        (
+                            f64::from(over_right.loc.x + over_right.size.w / 2),
+                            f64::from(over_right.loc.y + over_right.size.h / 2),
+                        ),
+                    );
+                    desk.state
+                        .focus_window(&left_window, SERIAL_COUNTER.next_serial());
+                    typed_into(
+                        &mut desk,
+                        &left_window,
+                        "the premise: typing reaches the left tile",
+                    );
+
+                    let parked = desk.open_surface();
+                    assert_eq!(
+                        workspace_of(&desk, parked.pane),
+                        "2",
+                        "the premise: the third window had no room and went to workspace 2"
+                    );
+                    assert!(
+                        !headed_on_stage(&desk.state, parked.pane),
+                        "the premise: it is parked a screen away"
+                    );
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(left_window.clone()),
+                        "the premise: it opened without the keyboard"
+                    );
+
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &parked.surface, &token);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(left_window.clone()),
+                        "an activation of a window nobody can see moved the keyboard off the \
+                         left tile -- to the right one (surface {}) if it went where the pointer is",
+                        surface_id(&right_window)
+                    );
+                    typed_into(
+                        &mut desk,
+                        &left_window,
+                        "a key typed after the activation went somewhere else",
+                    );
+                    let (heard, parked) = (heard(&desk), parked.pane.get().to_string());
+                    assert!(
+                        !heard.split(',').any(|id| id == parked),
+                        "the parked window was focused on the way, if only until the keyboard \
+                         was handed back. Heard: [{heard}]"
+                    );
+                }
+
+                /// **#134 third review, finding 3: a window claimed by its
+                /// launch's token into a pane parked on a hidden workspace kept
+                /// the keyboard it had.**
+                ///
+                /// A launcher that forks and exits breaks the pid chain, so its
+                /// application opens a window of its own -- on screen, and
+                /// given the keyboard there, as any new window is -- and then
+                /// activates with the token `sol.spawn` handed it.
+                /// `claim_into` moves it into the window that was opened for the
+                /// launch, and that one is on workspace 2. It moved, and the
+                /// keyboard went with it.
+                #[test]
+                fn a_focused_window_claimed_into_a_pane_on_a_hidden_workspace_gives_the_keyboard_up()
+                 {
+                    let mut desk = Desk::new();
+                    desk.install(&one_window_fills_a_workspace(false));
+                    assert!(desk.state.trigger("super+t"));
+                    let (_in_the_way, toplevel, _) = desk.open();
+                    desk.pump();
+                    desk.pump();
+                    assert!(
+                        desk.client.keyboard.is_some(),
+                        "the client bound a keyboard"
+                    );
+
+                    // No pid, so nothing adopts the application by its
+                    // process: only the token can.
+                    let source = crate::pane::loading_source(None);
+                    let launched = desk.state.open_loading("app", None, source, None);
+                    assert_eq!(
+                        workspace_of(&desk, launched),
+                        "2",
+                        "the premise: the launch had no room and went to workspace 2"
+                    );
+                    // And the window that filled workspace 1 goes, so there is
+                    // room there for the application's own window.
+                    toplevel.destroy();
+                    desk.pump();
+                    frame(&mut desk);
+
+                    let own = desk.open_surface();
+                    let window = window_of(&desk, own.pane);
+                    assert_ne!(
+                        own.pane, launched,
+                        "the premise: it opened a window of its own"
+                    );
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(window.clone()),
+                        "the premise: that window opened on screen and has the keyboard"
+                    );
+
+                    let token = desk.state.launch_token(launched);
+                    activates(&mut desk, &own.surface, &token);
+                    assert_eq!(
+                        desk.state.panes.id_of(&window),
+                        Some(launched),
+                        "the premise: the token moved it into the window opened for the launch"
+                    );
+                    assert!(
+                        !headed_on_stage(&desk.state, launched),
+                        "the premise: and that window is parked a screen away"
+                    );
+                    assert_ne!(
+                        desk.state.focused_window(),
+                        Some(window.clone()),
+                        "the keyboard went with the window to a workspace nobody is looking at"
+                    );
+                    let before = desk.client.typed.len();
+                    types(&mut desk.state, KEY_A);
+                    desk.pump();
+                    assert!(
+                        desk.client.typed[before..]
+                            .iter()
+                            .all(|(on, _)| *on != Some(surface_id(&window))),
+                        "a key typed after the token reached the window nobody can see"
+                    );
+                }
+
+                /// **Two monitors side by side, #134's third review, finding
+                /// 1.** Everything above uses one monitor, where a workspace
+                /// parked a screen away is parked on no screen at all. With the
+                /// shipped `per_monitor`, `horizontal` and `spread = 1.06`, the
+                /// left monitor's workspace 2 is carried 2035 pixels right --
+                /// onto the right monitor, which the renderer never draws it on,
+                /// because a pane is drawn only on the monitors its slot is on.
+                /// Every "is this on screen" question answered against every
+                /// screen instead, and said yes.
+                ///
+                /// The desk: tiling, one window fills a workspace, overflow does
+                /// not follow. `working` on the left monitor with the keyboard,
+                /// `right` on the right monitor, and `parked` opened after both
+                /// with no room on the left, so it is on the left monitor's
+                /// workspace 2 and drawn over `right`. Every client has answered
+                /// its tile, so each draws the whole of it, and the animations
+                /// have landed.
+                struct SideBySide {
+                    desk: Desk,
+                    working: Opened,
+                    right: Opened,
+                    parked: Opened,
+                }
+
+                /// The right monitor's rectangle.
+                fn right_screen() -> Rectangle<i32, Logical> {
+                    Rectangle::new((1920, 0).into(), (1920, 1080).into())
+                }
+
+                fn side_by_side_with_a_parked_window() -> SideBySide {
+                    let mut desk = Desk::side_by_side();
+                    desk.install(&one_window_fills_a_workspace(false));
+                    // Floating first, to put a window on the right monitor by
+                    // hand: every new window maps at the origin, which is the
+                    // left one, and tiling then adopts it where it is.
+                    let right = desk.open_surface();
+                    desk.state
+                        .map_stacked(window_of(&desk, right.pane), (2020, 100), false);
+                    frame(&mut desk);
+                    assert!(desk.state.trigger("super+t"), "super+t was not handled");
+                    let working = desk.open_surface();
+                    desk.pump();
+                    desk.pump();
+                    assert!(
+                        desk.client.keyboard.is_some(),
+                        "the client bound a keyboard"
+                    );
+                    desk.answer(&right);
+                    desk.answer(&working);
+                    let parked = desk.open_surface();
+                    desk.answer(&parked);
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    frame(&mut desk);
+
+                    let screen = right_screen();
+                    assert!(
+                        screen.contains_rect(desk.placed(right.pane))
+                            && !screen.overlaps(desk.placed(working.pane)),
+                        "the premise: `right` is tiled on the right monitor and `working` on \
+                         the left, at {:?} and {:?}",
+                        desk.placed(right.pane),
+                        desk.placed(working.pane)
+                    );
+                    assert_eq!(
+                        (
+                            workspace_of(&desk, parked.pane),
+                            showing(&desk),
+                            says(
+                                &desk,
+                                &format!(
+                                    "return tostring(require(\"workspaces\").on({RIGHT_SCREEN:?}))"
+                                )
+                            )
+                        ),
+                        ("2".to_owned(), "1".to_owned(), "1".to_owned()),
+                        "the premise: `parked` is on workspace 2 and both monitors show 1"
+                    );
+                    let drawn = drawn_now(&desk.state, parked.pane, desk.state.settling()).rect;
+                    assert!(
+                        !screen.overlaps(desk.placed(parked.pane))
+                            && screen.to_f64().overlaps(drawn),
+                        "the premise, and the situation under test: `parked` lives on the left \
+                         monitor at {:?} and is carried onto the right one, to {drawn:?}",
+                        desk.placed(parked.pane)
+                    );
+                    SideBySide {
+                        desk,
+                        working,
+                        right,
+                        parked,
+                    }
+                }
+
+                /// The pointer, moved to `at` as a device would move it.
+                fn point_at(state: &mut Solium, at: (f64, f64)) {
+                    let pointer = state.seat.get_pointer().expect(
+                        "the fixture's seat has a pointer; without one there is no pointer \
+                         arm to test",
+                    );
+                    pointer.motion(
+                        state,
+                        None,
+                        &smithay::input::pointer::MotionEvent {
+                            location: at.into(),
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: 0,
+                        },
+                    );
+                    pointer.frame(state);
+                }
+
+                /// The user goes to the left monitor's workspace 2, works in
+                /// the parked window there, and comes back to workspace 1 --
+                /// which leaves the parked window stacked above `right`, as the
+                /// window last raised on that monitor before the switch away.
+                /// What a walk topmost-first meets before the window the right
+                /// monitor draws.
+                fn visit_the_parked_window(side: &mut SideBySide) {
+                    let desk = &mut side.desk;
+                    for (key, showing_now) in [("super+2", "2"), ("super+1", "1")] {
+                        assert!(desk.state.trigger(key), "{key} was not handled");
+                        desk.state.clock.advance(Duration::from_secs(1));
+                        let now = desk.state.clock.now();
+                        desk.state.settle(now);
+                        frame(desk);
+                        assert_eq!(showing(desk), showing_now, "the premise: {key} switched");
+                    }
+                    let working = window_of(desk, side.working.pane);
+                    assert!(
+                        heard(desk)
+                            .split(',')
+                            .any(|id| id == side.parked.pane.get().to_string())
+                            && desk.state.focused_window() == Some(working),
+                        "the premise: the parked window was worked in on workspace 2, and the \
+                         keyboard came back to `working` with the view"
+                    );
+                    assert!(
+                        above(&mut desk.state, side.parked.pane, side.right.pane),
+                        "the premise: the parked window is stacked above the right one, so a \
+                         walk topmost-first meets it first"
+                    );
+                }
+
+                /// The first thing any question about visibility has to get
+                /// right: `parked` is not on stage, and the windows that are
+                /// drawn are. And idle inhibition, which asks the same question
+                /// of the present: a video on the left monitor's hidden
+                /// workspace does not hold the machine awake from the right.
+                #[test]
+                fn on_two_monitors_a_window_on_the_left_monitors_hidden_workspace_is_not_on_stage()
+                {
+                    let SideBySide {
+                        desk,
+                        working,
+                        right,
+                        parked,
+                    } = side_by_side_with_a_parked_window();
+                    let surface = |pane| {
+                        window_of(&desk, pane)
+                            .wl_surface()
+                            .map(std::borrow::Cow::into_owned)
+                            .expect("a mapped client has a surface")
+                    };
+                    // Every answer asked before any is asserted, so a failure
+                    // says which question is wrong rather than only the first.
+                    let on_stage = |pane| headed_on_stage(&desk.state, pane);
+                    let visible = |pane| desk.state.surface_is_visible(&surface(pane));
+                    assert_eq!(
+                        (
+                            on_stage(parked.pane),
+                            on_stage(working.pane),
+                            on_stage(right.pane),
+                            visible(parked.pane),
+                            visible(right.pane),
+                        ),
+                        (false, true, true, false, true),
+                        "(parked on stage, working on stage, right on stage, parked visible to \
+                         idle inhibition, right visible to it): a window on the left monitor's \
+                         hidden workspace counted as on screen because it is carried over the \
+                         right monitor, which never draws it -- or a window that is drawn did not"
+                    );
+                }
+
+                /// **`offer_keyboard`**: the window that opened onto the left
+                /// monitor's hidden workspace did not take the keyboard.
+                #[test]
+                fn on_two_monitors_a_window_opening_onto_the_left_monitors_hidden_workspace_does_not_take_the_keyboard()
+                 {
+                    let SideBySide {
+                        mut desk,
+                        working,
+                        parked,
+                        ..
+                    } = side_by_side_with_a_parked_window();
+                    let working = window_of(&desk, working.pane);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(working.clone()),
+                        "the window that opened onto the left monitor's hidden workspace took \
+                         the keyboard"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &working,
+                        "a key typed after it opened went somewhere else",
+                    );
+                    let (heard, parked) = (heard(&desk), parked.pane.get().to_string());
+                    assert!(
+                        !heard.split(',').any(|id| id == parked),
+                        "and the scripts heard it focused. Heard: [{heard}]"
+                    );
+                }
+
+                /// **`settle_focus`'s topmost arm**: the last window on the
+                /// left monitor closes, with the pointer over nothing, and the
+                /// keyboard goes to the window on the right monitor -- not to
+                /// the parked one, which is stacked above it. Live on `stage`
+                /// before #134, whenever the last window on a monitor closed.
+                #[test]
+                fn on_two_monitors_closing_the_last_window_on_the_left_hands_the_keyboard_to_the_right_monitor()
+                 {
+                    let mut side = side_by_side_with_a_parked_window();
+                    visit_the_parked_window(&mut side);
+                    let SideBySide {
+                        mut desk,
+                        working,
+                        right,
+                        parked,
+                    } = side;
+                    let right_window = window_of(&desk, right.pane);
+                    desk.state.close_pane(working.pane);
+                    desk.ask();
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(right_window.clone()),
+                        "closing the last window on the left monitor handed the keyboard to the \
+                         left monitor's hidden workspace (surface {}) rather than to the window \
+                         on the right monitor",
+                        surface_id(&window_of(&desk, parked.pane))
+                    );
+                    typed_into(
+                        &mut desk,
+                        &right_window,
+                        "a key typed after the close went somewhere else",
+                    );
+                }
+
+                /// **`settle_focus`'s pointer arm**: a pointer resting on the
+                /// right monitor, at a pixel the parked window is carried over,
+                /// hands the keyboard to the window the right monitor draws
+                /// there.
+                #[test]
+                fn on_two_monitors_a_pointer_on_the_right_monitor_does_not_settle_the_keyboard_on_the_left_monitors_hidden_workspace()
+                 {
+                    let mut side = side_by_side_with_a_parked_window();
+                    visit_the_parked_window(&mut side);
+                    let SideBySide {
+                        mut desk, right, ..
+                    } = side;
+                    let right_window = window_of(&desk, right.pane);
+                    point_at(&mut desk.state, (2500.0, 500.0));
+                    desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                    desk.state.settle_focus();
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(right_window.clone()),
+                        "a pointer resting on the right monitor handed the keyboard to the \
+                         window carried over it from the left monitor's hidden workspace"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &right_window,
+                        "a key typed afterwards went somewhere else",
+                    );
+                }
+
+                /// **The hit tests**: a press on the right monitor, at a pixel
+                /// the parked window is carried over, reaches the window the
+                /// right monitor draws there -- `window_under` for
+                /// click-to-focus, `surface_under` for the event itself, and
+                /// `chrome_under` for the parked window's edge, which is there
+                /// only in arithmetic. Otherwise it is an input black hole: a
+                /// press lands in a window nobody can see, and focus follows it.
+                #[test]
+                fn on_two_monitors_a_press_on_the_right_monitor_reaches_what_it_draws() {
+                    let mut side = side_by_side_with_a_parked_window();
+                    visit_the_parked_window(&mut side);
+                    let SideBySide {
+                        desk,
+                        right,
+                        parked,
+                        ..
+                    } = side;
+                    let right_window = window_of(&desk, right.pane);
+                    let now = desk.state.clock.now();
+                    let drawn = drawn_now(&desk.state, parked.pane, now).rect;
+                    let point = Point::<f64, Logical>::from((2500.0, 500.0));
+                    assert!(
+                        drawn.contains(point),
+                        "the premise: the parked window is carried over {point:?}, to {drawn:?}"
+                    );
+                    // The parked window's carried resize border, twice: just
+                    // inside its left edge, over the middle of the right window;
+                    // and just outside its top edge, over the bare gap above
+                    // both -- where a border that is only a claim, a `Halo`,
+                    // would win for want of anything drawn beneath it.
+                    let edge = Point::<f64, Logical>::from((drawn.loc.x + 2.0, 500.0));
+                    let halo = Point::<f64, Logical>::from((2500.0, drawn.loc.y - 4.0));
+
+                    // Everything asked before anything is asserted, so a
+                    // failure says which walk is wrong rather than only the
+                    // first.
+                    let clicked = desk.state.window_under(point).map(|(window, _)| window);
+                    let delivered = desk.state.surface_under(point).map(|(surface, _)| surface);
+                    let parked_edge = |at| {
+                        desk.state
+                            .chrome_under(at)
+                            .is_some_and(|under| under.pane == parked.pane)
+                    };
+                    assert_eq!(
+                        (
+                            clicked.as_ref().map(surface_id),
+                            delivered.map(|surface| surface.id().protocol_id()),
+                            parked_edge(edge),
+                            parked_edge(halo),
+                        ),
+                        (
+                            Some(surface_id(&right_window)),
+                            Some(surface_id(&right_window)),
+                            false,
+                            false
+                        ),
+                        "(click-to-focus, the pointer event, the parked window's edge over the \
+                         right window, and over bare desktop): a press on the right monitor \
+                         reached the window carried over it from the left monitor's hidden \
+                         workspace, surface {}",
+                        surface_id(&window_of(&desk, parked.pane))
+                    );
+                }
+
+                /// **An activation**: of the parked window, it leaves the
+                /// keyboard where it was; of the window on the right monitor, it
+                /// takes the keyboard, as it should.
+                #[test]
+                fn on_two_monitors_an_activation_of_the_left_monitors_hidden_workspace_leaves_the_keyboard_where_it_was()
+                 {
+                    let SideBySide {
+                        mut desk,
+                        working,
+                        right,
+                        parked,
+                    } = side_by_side_with_a_parked_window();
+                    let working = window_of(&desk, working.pane);
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &parked.surface, &token);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(working.clone()),
+                        "an activation took the keyboard to the left monitor's hidden workspace"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &working,
+                        "a key typed after the activation went somewhere else",
+                    );
+                    let (heard, id) = (heard(&desk), parked.pane.get().to_string());
+                    assert!(
+                        !heard.split(',').any(|each| each == id),
+                        "and the parked window was focused on the way. Heard: [{heard}]"
+                    );
+
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &right.surface, &token);
+                    let right_window = window_of(&desk, right.pane);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(right_window.clone()),
+                        "the window on the right monitor asked to be brought forward and was refused"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &right_window,
+                        "a key typed after it did not reach it",
+                    );
                 }
             }
         }
@@ -20750,7 +21739,7 @@ end)
                 .filter_map(|output| state.space.output_geometry(output))
                 .collect();
             assert_eq!(
-                nothing_on_stage([away.rect], &screens),
+                nothing_on_stage([(real, away.rect)], &screens),
                 Some(true),
                 "the parked window is drawn off every monitor, which is the \
                  one thing about it that is true"
@@ -20825,12 +21814,15 @@ end)
         /// measured the way the premises below need them measured.
         fn drawn_on_stage(state: &Solium, pane: crate::pane::PaneId, at: Duration) -> bool {
             let frame = drawn_now(state, pane, at);
+            let slot = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
             let screens: Vec<Rectangle<i32, Logical>> = state
                 .space
                 .outputs()
                 .filter_map(|output| state.space.output_geometry(output))
                 .collect();
-            frame.shows() && nothing_on_stage([frame.rect], &screens) == Some(false)
+            frame.shows() && nothing_on_stage([(slot, frame.rect)], &screens) == Some(false)
         }
 
         /// **#127 fourth review, NEW-1: a refused window came back with the
