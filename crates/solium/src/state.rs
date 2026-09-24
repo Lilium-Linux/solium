@@ -268,15 +268,25 @@ pub(crate) fn owns(
     shown_at(slot, point, screens) && frame.covers(point)
 }
 
-/// Whether a selection headed for `bound` puts away the desk on `screen`:
-/// the screen, carried as it is headed, is off stage on itself by [`staged`]
-/// -- carried clear of it, or faded to nothing.
+/// Whether a selection headed for `bound` puts away the desk it carries:
+/// carries it anywhere at all, or fades it to nothing as [`Frame::shows`]
+/// counts nothing.
+///
+/// **Measured against no screen.** `workspaces.lua` parks a desk by its
+/// monitor's work area times `spread`, not by the screen, and until #134's
+/// sixth review this asked whether the screen, carried as the desk is headed,
+/// was still on itself: at `spread = 1.0` a panel across the slide left every
+/// parked desk overlapping its screen by the panel's thickness, and on stage.
+/// `with_a_panel_across_a_horizontal_slide_a_genuine_activation_on_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was`,
+/// `with_a_bar_across_a_vertical_slide_a_genuine_activation_on_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was`.
+/// A selection that nudges a desk and leaves it on screen puts it away too.
 ///
 /// [`Solium::carried_by_a_selection`]'s rule, over plain values for the reason
 /// [`nothing_on_stage`] is one: `Solium` cannot be built in a unit test.
-/// `a_desk_is_put_away_only_when_its_selection_is_headed_off_its_screen`.
-fn put_away(screen: Rectangle<i32, Logical>, bound: crate::group::Shift) -> bool {
-    !staged(screen, bound.apply(Frame::real(screen)), &[screen])
+/// `a_desk_is_put_away_when_its_selection_is_headed_anywhere_or_to_nothing`.
+fn put_away(bound: crate::group::Shift) -> bool {
+    let (dx, dy) = bound.offset();
+    dx != 0.0 || dy != 0.0 || !bound.apply(Frame::real(Rectangle::default())).shows()
 }
 
 /// A rectangle grown outward by the frame drawn around it.
@@ -2343,22 +2353,19 @@ impl Solium {
     /// column scrolled off it is still focused and brought back by the strip.
     ///
     /// **Where the selections are headed, and not where they have got to.**
-    /// Until #134's fifth review this was the shift at [`Self::settling`], and
-    /// any displacement at all counted. A spring never lands exactly on
-    /// nothing before the travel is retired (`Groups::bound_for_window` says
-    /// why), so with `workspaces.motion.easing = "spring"` every window on the
-    /// desk being switched to was refused for the whole slide
-    /// (`on_a_spring_a_genuine_activation_mid_slide_on_the_desk_being_switched_to_takes_the_keyboard`);
-    /// and a selection nudging a desk a few pixels made it a hidden workspace
-    /// (`a_genuine_activation_of_a_window_a_selection_nudges_on_screen_takes_the_keyboard`).
+    /// Until #134's fifth review this was the shift at [`Self::settling`]. A
+    /// spring never lands exactly on nothing before the travel is retired
+    /// (`Groups::bound_for_window` says why), so with
+    /// `workspaces.motion.easing = "spring"` every window on the desk being
+    /// switched to was refused for the whole slide
+    /// (`on_a_spring_a_genuine_activation_mid_slide_on_the_desk_being_switched_to_takes_the_keyboard`).
     ///
-    /// **Put away is off its own screen, or faded to nothing**: the monitor
-    /// the pane lives on, carried as the selections are headed, is off stage
-    /// there by [`staged`] -- [`put_away`] is the rule. A selection that dims a
-    /// desk or turns it leaves it where the user can see it. One that fades it
-    /// to nothing is refused here, before it is focused, where until #134's
-    /// fifth review it was focused and then handed off to whatever
-    /// `settle_focus` picked
+    /// **Put away is carried anywhere, or faded to nothing**, and measured
+    /// against no screen: [`put_away`] is the rule, and says why. A selection
+    /// that dims a desk or turns it leaves it where the user can see it. One
+    /// that fades it to nothing is refused here, before it is focused, where
+    /// until #134's fifth review it was focused and then handed off to
+    /// whatever `settle_focus` picked
     /// (`a_genuine_activation_of_a_window_a_selection_fades_to_nothing_leaves_the_keyboard_exactly_where_it_was`).
     ///
     /// Until #134's fourth review this was inferred from where the frame
@@ -2369,9 +2376,6 @@ impl Solium {
     /// `a_genuine_activation_of_a_window_being_closed_on_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was`,
     /// and on the desk in view
     /// `a_genuine_activation_of_a_column_scrolled_off_screen_brings_it_back_with_the_keyboard`.
-    ///
-    /// No monitor to measure against is not "put away", for the reason
-    /// [`Self::on_stage`] gives for no screens.
     fn carried_by_a_selection(&self, pane: crate::pane::PaneId) -> bool {
         if self.groups.is_empty() {
             return false;
@@ -2382,16 +2386,13 @@ impl Solium {
         let Some(output) = self.output_of(self.pane_outer(pane)) else {
             return false;
         };
-        let Some(screen) = self.space.output_geometry(&output) else {
-            return false;
-        };
         // The monitor `carried_at` would name, so a selection of a monitor
         // holds the pane here exactly when it carries it there.
         let monitor = self.groups.names_monitors().then(|| output.name());
         let bound = self
             .groups
             .bound_for_window(pane.id().get(), monitor.as_deref());
-        put_away(screen, bound)
+        put_away(bound)
     }
 
     /// [`Self::on_stage`] for one pane, asked by id at [`Self::settling`]: for
@@ -9723,14 +9724,14 @@ mod tests {
         );
     }
 
-    /// **#134's fifth review: a desk is put away only when its selection is
-    /// headed off its screen, or to nothing.** See [`put_away`]. Until then
-    /// any displacement at all was a hidden workspace, a nudge and a spring's
-    /// last pixel with it, and a fade to nothing was not one.
+    /// **#134's sixth review: a desk is put away when its selection is headed
+    /// anywhere, or to nothing.** See [`put_away`]. Until then it was put away
+    /// only when its whole screen was carried clear of itself, so a desk
+    /// parked by a work area narrower than the screen was not, and before the
+    /// fifth review a fade to nothing was not either.
     #[test]
-    fn a_desk_is_put_away_only_when_its_selection_is_headed_off_its_screen() {
+    fn a_desk_is_put_away_when_its_selection_is_headed_anywhere_or_to_nothing() {
         use crate::group::Shift;
-        let [left, _] = two_monitors();
         let by = |dx: f64, dy: f64| Shift {
             dx,
             dy,
@@ -9738,48 +9739,44 @@ mod tests {
         };
 
         assert!(
-            put_away(left, by(1920.0 * 1.06, 0.0)),
+            put_away(by(1920.0 * 1.06, 0.0)),
             "a workspace parked a screen and a bit to the right, as the shipped `spread` parks \
-             one, is on stage -- where the monitor to the right never draws it"
+             one, is on stage"
         );
         assert!(
-            put_away(left, by(-1920.0, 0.0)) && put_away(left, by(0.0, 1080.0)),
+            put_away(by(-1920.0, 0.0)) && put_away(by(0.0, 1080.0)),
             "a workspace exactly a screen to the left, or a screen down, is on stage"
         );
         assert!(
-            put_away(
-                left,
-                Shift {
-                    opacity: 0.0,
-                    ..Shift::NONE
-                }
-            ),
+            put_away(by(-(1920.0 - 64.0), 0.0)) && put_away(by(0.0, 1080.0 - 64.0)),
+            "a workspace parked a work area away at `spread = 1.0`, with a 64-pixel panel across \
+             the slide, is on stage"
+        );
+        assert!(
+            put_away(by(100.0, 40.0)),
+            "a desk nudged and left on its screen is on stage"
+        );
+        assert!(
+            put_away(Shift {
+                opacity: 0.0,
+                ..Shift::NONE
+            }),
             "a desk faded to nothing where it is is on stage"
         );
 
-        assert!(!put_away(left, Shift::NONE), "the desk in view is put away");
+        assert!(!put_away(Shift::NONE), "the desk in view is put away");
         assert!(
-            !put_away(left, by(100.0, 40.0)) && !put_away(left, by(-1919.0, 0.0)),
-            "a desk nudged, or with a pixel of it still on its screen, is put away"
-        );
-        assert!(
-            !put_away(
-                left,
-                Shift {
-                    opacity: 0.4,
-                    ..Shift::NONE
-                }
-            ),
+            !put_away(Shift {
+                opacity: 0.4,
+                ..Shift::NONE
+            }),
             "a dimmed desk is put away"
         );
         assert!(
-            !put_away(
-                left,
-                Shift {
-                    matrix: crate::mat4::Mat4::rotate_z(0.3),
-                    ..Shift::NONE
-                }
-            ),
+            !put_away(Shift {
+                matrix: crate::mat4::Mat4::rotate_z(0.3),
+                ..Shift::NONE
+            }),
             "a turned desk is put away"
         );
     }
@@ -20912,43 +20909,6 @@ end)
                     );
                 }
 
-                /// **#134's fifth review, finding 2: a window a selection
-                /// nudges, and leaves on screen, is not on a hidden workspace.**
-                /// Any displacement at all was one, so a genuine activation of
-                /// it was refused and the keyboard stayed on `left`.
-                #[test]
-                fn a_genuine_activation_of_a_window_a_selection_nudges_on_screen_takes_the_keyboard()
-                 {
-                    let mut tiles = three_tiles();
-                    carry(
-                        &mut tiles.desk,
-                        tiles.third.pane,
-                        crate::group::Shift {
-                            dx: 100.0,
-                            dy: 40.0,
-                            ..crate::group::Shift::NONE
-                        },
-                    );
-                    assert!(
-                        headed_on_stage(&tiles.desk.state, tiles.third.pane),
-                        "the premise: `third` is nudged, and still on screen"
-                    );
-                    keyboard_left_pointer_right(&mut tiles);
-                    let ThreeTiles {
-                        mut desk, third, ..
-                    } = tiles;
-                    let token = genuine_token(&mut desk);
-                    activates(&mut desk, &third.surface, &token);
-                    let third = window_of(&desk, third.pane);
-                    assert_eq!(
-                        desk.state.focused_window(),
-                        Some(third.clone()),
-                        "a window a selection nudges on screen asked to be brought forward and was \
-                         refused"
-                    );
-                    typed_into(&mut desk, &third, "a key typed after it did not reach it");
-                }
-
                 /// **#134's fifth review, finding 2: on a spring, a genuine
                 /// activation mid-slide of a window on the desk being switched
                 /// to takes the keyboard.** The desk is cleared from a screen
@@ -21026,6 +20986,331 @@ end)
                          and was refused"
                     );
                     typed_into(&mut desk, &asking, "a key typed after it did not reach it");
+                }
+
+                /// How thick the panel across the slide is in
+                /// [`under_a_panel`]: more than the tiling gap, so a tile on
+                /// the desk carried towards it shows under it.
+                const PANEL: i32 = 64;
+
+                /// A panel [`PANEL`] deep across the slide -- along the right
+                /// edge of the monitor for a horizontal arrangement, the top
+                /// for a vertical one -- holding it as its exclusive zone, the
+                /// way [`bar`] makes a top bar.
+                fn a_panel_across(
+                    desk: &mut Desk,
+                    vertical: bool,
+                ) -> (
+                    wl_surface::WlSurface,
+                    zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+                ) {
+                    use zwlr_layer_surface_v1::Anchor;
+                    let compositor = desk.client.compositor.clone().expect("wl_compositor bound");
+                    let shell = desk
+                        .client
+                        .layer_shell
+                        .clone()
+                        .expect("zwlr_layer_shell_v1 bound");
+                    let surface = compositor.create_surface(&desk.qh, ());
+                    let layer = shell.get_layer_surface(
+                        &surface,
+                        None,
+                        zwlr_layer_shell_v1::Layer::Top,
+                        "activation-test-panel".to_string(),
+                        &desk.qh,
+                        (),
+                    );
+                    if vertical {
+                        layer.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+                        layer.set_size(0, PANEL.unsigned_abs());
+                    } else {
+                        layer.set_anchor(Anchor::Right | Anchor::Top | Anchor::Bottom);
+                        layer.set_size(PANEL.unsigned_abs(), 0);
+                    }
+                    layer.set_exclusive_zone(PANEL);
+                    surface.commit();
+                    desk.pump();
+                    (surface, layer)
+                }
+
+                /// Where a pane's selections are headed, as
+                /// `carried_by_a_selection` asks.
+                fn bound_for(desk: &Desk, pane: crate::pane::PaneId) -> (f64, f64) {
+                    let monitor = desk.state.groups.names_monitors().then_some("reflow-test");
+                    desk.state
+                        .groups
+                        .bound_for_window(pane.get(), monitor)
+                        .offset()
+                }
+
+                /// Tiling, one monitor, the shipped workspaces at `spread = 1.0`
+                /// in a row or a column of three, and a panel across the
+                /// slide. `before` is on workspace 1, carried left or up, with
+                /// the window the fixture started in; `after` and
+                /// `beside_after` are on workspace 3, carried right or down;
+                /// and workspace 2 is in view, with the keyboard on `left` and
+                /// the pointer resting on `right`, for the reason
+                /// [`a_strip_left_behind_on_workspace_1`] gives. Every animation
+                /// landed.
+                ///
+                /// Of the three windows beside, one at least shows under the
+                /// panel and one is off the screen, which are the two ways the
+                /// regression went.
+                struct UnderAPanel {
+                    desk: Desk,
+                    before: Opened,
+                    after: Opened,
+                    beside_after: Opened,
+                    left: Window,
+                    _panel: (
+                        wl_surface::WlSurface,
+                        zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+                    ),
+                }
+
+                fn under_a_panel(vertical: bool) -> UnderAPanel {
+                    let arrangement = if vertical { "vertical" } else { "horizontal" };
+                    let (mut desk, _working) = working_in(
+                        &format!(
+                            "local config = require(\"config\")\n\
+                             config.workspaces.arrangement = \"{arrangement}\"\n\
+                             config.workspaces.columns = 3\n\
+                             config.workspaces.rows = 3\n\
+                             config.workspaces.spread = 1.0\n\
+                             {SHIPPED_HEARING_FOCUS}"
+                        ),
+                        Some("super+t"),
+                    );
+                    let panel = a_panel_across(&mut desk, vertical);
+                    let output = desk
+                        .state
+                        .space
+                        .outputs()
+                        .next()
+                        .cloned()
+                        .expect("the fixture has a monitor");
+                    let wanted = if vertical {
+                        Rectangle::new((0, PANEL).into(), (1920, 1080 - PANEL).into())
+                    } else {
+                        Rectangle::new((0, 0).into(), (1920 - PANEL, 1080).into())
+                    };
+                    assert_eq!(
+                        desk.state.work_area_on(&output),
+                        Some(wanted),
+                        "{arrangement}: the premise: the panel takes its thickness off the work \
+                         area, across the slide"
+                    );
+
+                    let settle = |desk: &mut Desk| {
+                        desk.state.clock.advance(Duration::from_secs(1));
+                        let now = desk.state.clock.now();
+                        desk.state.settle(now);
+                        frame(desk);
+                    };
+                    let before = desk.open_surface();
+                    desk.answer(&before);
+                    settle(&mut desk);
+                    assert!(desk.state.trigger("super+3"), "super+3 was not handled");
+                    settle(&mut desk);
+                    let after = desk.open_surface();
+                    let beside_after = desk.open_surface();
+                    desk.answer(&after);
+                    desk.answer(&beside_after);
+                    settle(&mut desk);
+                    assert!(desk.state.trigger("super+2"), "super+2 was not handled");
+                    settle(&mut desk);
+                    let left = desk.open_surface();
+                    let right = desk.open_surface();
+                    desk.answer(&left);
+                    desk.answer(&right);
+                    settle(&mut desk);
+                    assert_eq!(
+                        (
+                            showing(&desk),
+                            workspace_of(&desk, before.pane),
+                            workspace_of(&desk, after.pane),
+                            workspace_of(&desk, beside_after.pane),
+                            workspace_of(&desk, left.pane),
+                            workspace_of(&desk, right.pane),
+                        ),
+                        (
+                            "2".to_owned(),
+                            "1".to_owned(),
+                            "3".to_owned(),
+                            "3".to_owned(),
+                            "2".to_owned(),
+                            "2".to_owned()
+                        ),
+                        "{arrangement}: the premise: the view on workspace 2, `before` on 1, \
+                         `after` and `beside_after` on 3"
+                    );
+
+                    // Parked by the work area, which is the situation under
+                    // test: the whole screen carried that far still overlaps
+                    // the screen by the panel's thickness.
+                    let across = if vertical {
+                        (0.0, f64::from(1080 - PANEL))
+                    } else {
+                        (f64::from(1920 - PANEL), 0.0)
+                    };
+                    assert_eq!(
+                        (bound_for(&desk, before.pane), bound_for(&desk, after.pane)),
+                        ((-across.0, -across.1), across),
+                        "{arrangement}: the premise: each desk beside is parked a work area away"
+                    );
+                    let shows = [&before, &after, &beside_after]
+                        .map(|beside| headed_on_stage(&desk.state, beside.pane));
+                    assert!(
+                        shows.contains(&true) && shows.contains(&false),
+                        "{arrangement}: the premise: of `before`, `after` and `beside_after`, one \
+                         shows under the panel and one is off the screen, and here they are \
+                         {shows:?}, living at {:?}",
+                        [&before, &after, &beside_after].map(|beside| desk.placed(beside.pane)),
+                    );
+                    assert!(
+                        headed_on_stage(&desk.state, left.pane)
+                            && headed_on_stage(&desk.state, right.pane),
+                        "{arrangement}: the premise: both of workspace 2's tiles are on screen"
+                    );
+
+                    let over_right = desk.placed(right.pane);
+                    point_at(
+                        &mut desk.state,
+                        (
+                            f64::from(over_right.loc.x + over_right.size.w / 2),
+                            f64::from(over_right.loc.y + over_right.size.h / 2),
+                        ),
+                    );
+                    let left = window_of(&desk, left.pane);
+                    desk.state.focus_window(&left, SERIAL_COUNTER.next_serial());
+                    typed_into(&mut desk, &left, "the premise: typing reaches `left`");
+                    UnderAPanel {
+                        desk,
+                        before,
+                        after,
+                        beside_after,
+                        left,
+                        _panel: panel,
+                    }
+                }
+
+                /// A genuine activation of each window beside in turn: each
+                /// refused, and the keyboard exactly where it was.
+                fn neither_desk_beside_takes_the_keyboard(vertical: bool) {
+                    let arrangement = if vertical { "vertical" } else { "horizontal" };
+                    let UnderAPanel {
+                        mut desk,
+                        before,
+                        after,
+                        beside_after,
+                        left,
+                        ..
+                    } = under_a_panel(vertical);
+                    for (asking, which) in [
+                        (&before, "workspace 1"),
+                        (&after, "workspace 3"),
+                        (&beside_after, "workspace 3"),
+                    ] {
+                        let heard_before = heard(&desk);
+                        let token = genuine_token(&mut desk);
+                        activates(&mut desk, &asking.surface, &token);
+                        still_on_the_left(
+                            &mut desk,
+                            &left,
+                            &heard_before,
+                            asking.pane.get(),
+                            &format!(
+                                "{arrangement}: a window on {which}, parked a work area away, \
+                                 asked to be brought forward"
+                            ),
+                        );
+                    }
+                }
+
+                /// **#134's sixth review: a desk parked a work area away is a
+                /// hidden workspace, whatever a panel across the slide leaves
+                /// of its screen.** Until then `put_away` measured the desk
+                /// against its whole screen, and at `spread = 1.0` that still
+                /// overlapped the screen by the panel: a window on the desk to
+                /// the right showed under the panel and kept the keyboard, and
+                /// one on the desk to the left was focused, found off screen,
+                /// and handed off to the tile under the pointer.
+                #[test]
+                fn with_a_panel_across_a_horizontal_slide_a_genuine_activation_on_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was()
+                 {
+                    neither_desk_beside_takes_the_keyboard(false);
+                }
+
+                /// **The same in a column of workspaces, under a top bar**: the
+                /// desk above shows under the bar, and the one below is off the
+                /// bottom of the screen.
+                #[test]
+                fn with_a_bar_across_a_vertical_slide_a_genuine_activation_on_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was()
+                 {
+                    neither_desk_beside_takes_the_keyboard(true);
+                }
+
+                /// **And under the same panel, a genuine activation mid-slide
+                /// on the desk being switched to takes the keyboard**, in a row
+                /// and in a column: that desk is headed for nothing, however
+                /// far away it still is.
+                #[test]
+                fn with_a_panel_across_the_slide_a_genuine_activation_mid_slide_on_the_desk_being_switched_to_takes_the_keyboard()
+                 {
+                    for vertical in [false, true] {
+                        let arrangement = if vertical { "vertical" } else { "horizontal" };
+                        let UnderAPanel {
+                            mut desk,
+                            after,
+                            beside_after,
+                            ..
+                        } = under_a_panel(vertical);
+                        assert!(desk.state.trigger("super+3"), "super+3 was not handled");
+                        desk.state.clock.advance(Duration::from_millis(100));
+                        frame(&mut desk);
+                        let had = desk.focused();
+                        assert_eq!(
+                            workspace_of(&desk, had),
+                            "3",
+                            "{arrangement}: the premise: the switch gave the keyboard to \
+                             workspace 3"
+                        );
+                        let asking = if had == after.pane {
+                            &beside_after
+                        } else {
+                            &after
+                        };
+                        let now = desk.state.clock.now();
+                        let mid = desk
+                            .state
+                            .panes
+                            .get(asking.pane)
+                            .map(|pane| {
+                                let slot = desk.state.pane_outer(pane);
+                                desk.state.carried_at(pane, slot, now).offset()
+                            })
+                            .unwrap_or_default();
+                        assert!(
+                            mid != (0.0, 0.0) && bound_for(&desk, asking.pane) == (0.0, 0.0),
+                            "{arrangement}: the premise: workspace 3 is mid-slide, {mid:?} away, \
+                             and headed for nothing"
+                        );
+
+                        let token = genuine_token(&mut desk);
+                        activates(&mut desk, &asking.surface, &token);
+                        let asking = window_of(&desk, asking.pane);
+                        assert_eq!(
+                            desk.state.focused_window(),
+                            Some(asking.clone()),
+                            "{arrangement}: a window on the desk being switched to asked to be \
+                             brought forward mid-slide and was refused"
+                        );
+                        typed_into(
+                            &mut desk,
+                            &asking,
+                            &format!("{arrangement}: a key typed after it did not reach it"),
+                        );
+                    }
                 }
 
                 /// **With `follow_overflow = false`, no route hands the keyboard
