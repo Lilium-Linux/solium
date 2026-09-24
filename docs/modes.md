@@ -158,7 +158,7 @@ sol.on("monitors", function() end)                 -- the screens are not the sc
 sol.on("restore",  function() end)                 -- you have replaced a running session
 ```
 
-Six of these are worth reading twice.
+Seven of these are worth reading twice.
 
 **`open` fires when the window opens, which is before its application exists.**
 A window's life begins when the user asks for the program. Your mode is told
@@ -212,6 +212,23 @@ keeps working unchanged, and keeps its slot for a closing window until the
 application has gone. To close up at once, handle `closing`, leave `leaving`
 windows out of any arrangement you build from `sol.windows()`, and put the
 window back on `refused`.
+
+**`focus` is heard for a new window too**, in every mode and for an X11
+window as much as a Wayland one. The compositor gives a window the keyboard at
+its first frame, once your `open` handler has placed it, and only if it is
+headed somewhere the user can see; it does that as `sol.focus` would, so you
+hear `focus` for it. If your `open` handler calls `sol.focus` itself, yours is
+the last word and the compositor does not give it again. A window launched with
+`sol.spawn` gets it the same way when its application arrives; a `sol.focus`
+for it during `open` finds no application yet to give it to.
+
+An application asking to be brought forward with a token from something you
+were using -- a notification you clicked -- is focused first and asked
+afterwards: you hear `focus`, and if your handler brings the window into view
+(the scroller scrolls its column onto the screen) it keeps the keyboard. If it
+is still somewhere nobody can see, a workspace nobody is looking at, the
+keyboard goes back to a window on screen. Nothing switches workspaces for it
+yet.
 
 **`resize` gives you where the dragged edge should go, not where the pointer
 is and not a delta.** `edge_x` and `edge_y` are in the same coordinates

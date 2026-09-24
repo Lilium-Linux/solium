@@ -880,6 +880,68 @@ struct Opened {
     focused: bool,
 }
 
+/// What kind of client a window is. Named for [`first_focus`], which gives
+/// both kinds the same answer, and on purpose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientKind {
+    /// An `xdg_toplevel`.
+    Xdg,
+    /// A managed XWayland window: Steam, a Wine game, anything X11.
+    X11,
+}
+
+impl ClientKind {
+    fn of(window: &Window) -> Option<Self> {
+        if window.toplevel().is_some() {
+            Some(Self::Xdg)
+        } else if window.x11_surface().is_some() {
+            Some(Self::X11)
+        } else {
+            None
+        }
+    }
+}
+
+/// How a window is given the keyboard as it is first shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirstFocus {
+    /// Through [`Solium::focus_window`], as a click or `sol.focus` would be:
+    /// raised, handed the keyboard through the gate, activated in X11's own
+    /// terms, and announced to the scripts as `focus`.
+    Focus,
+    /// Not at all: the keyboard stays where it was.
+    Stay,
+}
+
+/// The rule [`Solium::offer_keyboard`] applies, apart so that it can be asked
+/// about an X11 window, which a test cannot make: an `X11Surface` needs a live
+/// XWayland.
+///
+/// **Both kinds, and the same answer for both.** Until #134's review an X11
+/// window got the keyboard as it opened only because `scrolling.lua` focused
+/// every window but a dialog that opened, whether or not it was in charge.
+/// Nobody had decided that; `new_toplevel`, which gave an xdg window the
+/// keyboard, never sees an X11 one. When that stray call was stopped, Steam and
+/// every Wine game opened with the keyboard left on the window before. Both kinds are named in the match so
+/// that leaving one out again is an edit to this function and to
+/// `a_managed_x11_window_is_offered_the_keyboard_as_an_xdg_one_is`, rather than
+/// a line somewhere that forgets.
+///
+/// Only a managed window: an unmanaged one is a menu, a tooltip or a splash,
+/// placed by its client (`xwayland.rs`'s `places_itself`). And only one headed
+/// somewhere the user can see, which is [`Solium::on_stage`].
+const fn first_focus(kind: ClientKind, managed: bool, on_stage: bool) -> FirstFocus {
+    match kind {
+        ClientKind::Xdg | ClientKind::X11 => {
+            if managed && on_stage {
+                FirstFocus::Focus
+            } else {
+                FirstFocus::Stay
+            }
+        }
+    }
+}
+
 /// Which region of the compositor's own chrome a point is in.
 ///
 /// Carries no window and no pane on purpose: this is the part that is a
@@ -2122,6 +2184,17 @@ impl Solium {
         frame.shows() && nothing_on_stage([frame.rect], screens) != Some(true)
     }
 
+    /// [`Self::on_stage`] for one pane, asked by id at [`Self::settling`]: for
+    /// a caller with a single question rather than a walk to hoist the
+    /// screens out of. A pane that is not there is not on stage.
+    fn pane_on_stage(&self, pane: crate::pane::PaneId) -> bool {
+        let landed = self.settling();
+        let screens = self.screens();
+        self.panes
+            .get(pane)
+            .is_some_and(|held| self.on_stage(held, &screens, landed))
+    }
+
     /// The monitor a surface is on, for telling it what to draw itself like.
     ///
     /// A window's own monitor when it has one, and the active one otherwise —
@@ -2506,13 +2579,29 @@ impl Solium {
     /// this puts it where it belonged: the window it was already in is retired
     /// and its content moves to the one that has been waiting.
     ///
-    /// Returns whether it went anywhere, so an unrecognised token can fall
-    /// through to being an ordinary request for focus.
+    /// Returns whether the token was this window's own -- it is in the window
+    /// the token was minted for, now or already -- so that only a token that
+    /// is not falls through to being an ordinary request for focus.
+    ///
+    /// **Already** is the ordinary case, and it is asked first. An application
+    /// that is itself the process `sol.spawn` started was adopted by its pid
+    /// in `new_toplevel`, so by the time it activates with the token it was
+    /// handed -- GTK, Qt and winit all do, alacritty among them -- its window
+    /// is no longer loading. Asked after the loading test, as it was, this
+    /// answer was never reached for any such window: the token fell through,
+    /// `request_activation` focused the window wherever it was, and with
+    /// `follow_overflow = false` that was a workspace nobody is looking at
+    /// (#134 review). The keyboard for a launched window is
+    /// [`Self::offer_keyboard`]'s to decide, at its first frame, and a token
+    /// that only says "this is the window you opened for me" is not a second
+    /// opinion. Nor a brief one: `request_activation` now takes the keyboard
+    /// back off a window nobody can see, but a window focused on the way has
+    /// still been told it had the keyboard and the clipboard, and the scripts
+    /// that it was focused. `a_launched_window_parked_on_a_hidden_workspace_does_not_take_the_keyboard_by_its_own_token`
+    /// sends the token before the first frame, as winit does, and after, and
+    /// asserts both; `a_launched_window_on_screen_takes_the_keyboard_when_it_activates_with_its_own_token`
+    /// is the other half.
     fn claim_into(&mut self, pane: crate::pane::PaneId, surface: &WlSurface) -> bool {
-        // Still waiting, or already given up on.
-        if !self.panes.get(pane).is_some_and(Pane::is_loading) {
-            return false;
-        }
         let Some(window) = self.window_for(surface) else {
             return false;
         };
@@ -2521,6 +2610,10 @@ impl Solium {
         };
         if wrong == pane {
             return true;
+        }
+        // Still waiting, or already given up on.
+        if !self.panes.get(pane).is_some_and(Pane::is_loading) {
+            return false;
         }
 
         if let Some(held) = self.panes.get_mut(pane) {
@@ -4112,12 +4205,7 @@ impl Solium {
         // the chain from the client runs into init and stops. A token does not
         // care: we made it, we handed it over, and whatever comes back holding
         // it is the thing we launched.
-        let token = {
-            let data = XdgActivationTokenData::default();
-            data.user_data.insert_if_missing(|| LaunchedFor(pane));
-            let (token, _) = self.activation_state.create_external_token(data);
-            token.as_str().to_owned()
-        };
+        let token = self.launch_token(pane);
         process.env("XDG_ACTIVATION_TOKEN", &token);
         // The older spelling, for programs that only look for that one.
         process.env("DESKTOP_STARTUP_ID", &token);
@@ -4157,6 +4245,16 @@ impl Solium {
                 tracing::warn!(?err, program, "could not spawn");
             }
         }
+    }
+
+    /// An activation token naming the window opened for a launch, for the
+    /// launched program's environment. Apart from [`Self::spawn`] so that a
+    /// test can hand its own client the token a launch would have.
+    fn launch_token(&mut self, pane: crate::pane::PaneId) -> String {
+        let data = XdgActivationTokenData::default();
+        data.user_data.insert_if_missing(|| LaunchedFor(pane));
+        let (token, _) = self.activation_state.create_external_token(data);
+        token.as_str().to_owned()
     }
 
     /// The window a script means by an id.
@@ -6976,34 +7074,41 @@ impl Solium {
     /// a launched window that is on screen still takes it, in
     /// `a_launched_window_that_overflows_with_the_view_takes_the_keyboard_when_it_arrives`.
     ///
-    /// An xdg toplevel only. X11 windows come through `show_if_new` as well,
-    /// from their surface's commit, and `new_toplevel` -- xdg only -- never
-    /// gave one the keyboard at map; this keeps it that way.
+    /// **An xdg window and an X11 one alike, and through
+    /// [`Self::focus_window`]**: the rule is [`first_focus`], which says why
+    /// X11 windows are named in it. Through `focus_window` rather than a bare
+    /// [`Self::give_keyboard`], because the grant is only part of focus. The
+    /// scripts are told `focus`, as they are for every other way the keyboard
+    /// moves, and X11 is told in its own terms (`xwayland::activate`, whose
+    /// note says what an X11 window does when it is not). Before the second
+    /// round of #134's review a new xdg window in floating or tiling got the
+    /// bare grant and no `focus`, while in scrolling it got all of it through
+    /// the strip's own `sol.focus`; the three modes now take one path, which
+    /// `a_window_opening_while_floating_takes_the_keyboard_as_a_focus` and its
+    /// `tiling` and `scrolling` twins pin.
     ///
     /// Through the gate, which refuses it while locked: this is a client
     /// opening a window of its own accord, with nobody at the machine, and
     /// until the gate existed it was the shortest way to the password.
+    /// `focus_window` asks the gate before it does anything, so a refused
+    /// window is not raised or activated either
+    /// (`a_window_that_opens_while_locked_does_not_take_the_keyboard`).
     fn offer_keyboard(&mut self, window: &Window, pane: crate::pane::PaneId) {
-        if window.toplevel().is_none() {
+        let Some(kind) = ClientKind::of(window) else {
             return;
-        }
+        };
         let landed = self.settling();
         let screens = self.screens();
-        if !self
-            .panes
-            .get(pane)
-            .is_some_and(|held| self.on_stage(held, &screens, landed))
-        {
-            tracing::debug!(
+        let offer = self.panes.get(pane).map_or(FirstFocus::Stay, |held| {
+            first_focus(kind, held.managed(), self.on_stage(held, &screens, landed))
+        });
+        match offer {
+            FirstFocus::Focus => self.focus_window(window, SERIAL_COUNTER.next_serial()),
+            FirstFocus::Stay => tracing::debug!(
                 pane = pane.get(),
                 "a window opened where nobody can see it, and the keyboard stayed put"
-            );
-            return;
+            ),
         }
-        self.give_keyboard(
-            window.wl_surface().map(|surface| surface.into_owned()),
-            SERIAL_COUNTER.next_serial(),
-        );
     }
 
     /// Offer a newly shown window to whatever script wants to animate it in.
@@ -8706,9 +8811,41 @@ impl XdgActivationHandler for Solium {
         // something the user was actually using -- a client cannot mint one for
         // itself out of nothing, which is the difference between this and a
         // window simply demanding focus.
+        //
+        // **And then asked where the window is headed**, which the
+        // compositor's own routes to the keyboard -- `offer_keyboard`,
+        // `settle_focus` -- ask first. After, because focusing is how a layout
+        // brings a window into view: the strip scrolls a focused column onto
+        // the screen, so asking before would refuse a column scrolled off the
+        // edge that the focus itself was about to bring back
+        // (`a_genuine_activation_of_a_column_scrolled_off_screen_brings_it_back_with_the_keyboard`).
+        // A window still headed nowhere the user can see once the layouts have
+        // had their say -- one on a workspace nobody is looking at -- gives the
+        // keyboard up again, to whatever is on screen
+        // (`a_genuine_activation_of_a_window_on_a_hidden_workspace_leaves_the_keyboard_on_screen`).
+        // Before #134's second review it kept it, and every key typed went to
+        // a desk nobody could see.
+        //
+        // Switching to that workspace is arguably what a click on its
+        // notification should do. That is `workspaces.lua`'s decision rather
+        // than the compositor's, which does not know what a workspace is, and
+        // nothing tells it an activation happened yet. Until something does, a
+        // click like that changes nothing on screen, as it never did, and the
+        // typing no longer goes with it.
         if let Some(window) = self.window_for(&surface) {
             tracing::debug!("a window asked to be brought forward");
             self.focus_window(&window, SERIAL_COUNTER.next_serial());
+            let headed_on_stage = self
+                .panes
+                .id_of(&window)
+                .is_some_and(|pane| self.pane_on_stage(pane));
+            if !headed_on_stage {
+                tracing::debug!(
+                    "a window asked to be brought forward where nobody can see it, and the \
+                     keyboard went back on screen"
+                );
+                self.hand_off_keyboard(&window);
+            }
         }
         self.activation_state.remove_token(&token);
     }
@@ -10353,6 +10490,7 @@ mod tests {
         use wayland_protocols::ext::session_lock::v1::client::{
             ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
         };
+        use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1;
         use wayland_protocols::xdg::dialog::v1::client::{xdg_dialog_v1, xdg_wm_dialog_v1};
         use wayland_protocols::xdg::shell::client::{
             xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
@@ -10409,6 +10547,12 @@ mod tests {
             /// is not a thing the server side can say on a client's behalf --
             /// which is the whole reason this test is in this module.
             dialogs: Option<xdg_wm_dialog_v1::XdgWmDialogV1>,
+            /// For a window that asks to be brought forward with a token, as
+            /// an application launched with one does as it opens -- GTK, Qt
+            /// and winit all do. A raw client that never sends it cannot see
+            /// what the compositor does with the request (#134's second
+            /// review, finding 2), so `keyboard_at_open` sends it.
+            activation: Option<xdg_activation_v1::XdgActivationV1>,
             /// For [`bar`]: the one way to make a monitor's work area smaller
             /// than the monitor, which is what tells a maximised window from a
             /// fullscreen one.
@@ -10545,6 +10689,9 @@ mod tests {
                     "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
                     "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                     "xdg_wm_dialog_v1" => state.dialogs = Some(registry.bind(name, 1, qh, ())),
+                    "xdg_activation_v1" => {
+                        state.activation = Some(registry.bind(name, 1, qh, ()));
+                    }
                     // Version 5 rather than the newest: everything below needs
                     // `enter`, `leave` and `key`, which are version 1, and the
                     // lower the bind the fewer ways this fixture can stop
@@ -10663,6 +10810,7 @@ mod tests {
 
         wayland_client::delegate_noop!(Client: ignore xdg_wm_dialog_v1::XdgWmDialogV1);
         wayland_client::delegate_noop!(Client: ignore xdg_dialog_v1::XdgDialogV1);
+        wayland_client::delegate_noop!(Client: ignore xdg_activation_v1::XdgActivationV1);
         wayland_client::delegate_noop!(Client: ignore wl_compositor::WlCompositor);
         wayland_client::delegate_noop!(Client: ignore wl_surface::WlSurface);
         wayland_client::delegate_noop!(Client: ignore wl_shm::WlShm);
@@ -16478,6 +16626,85 @@ mod tests {
                 session.assert_unlocks(lock);
             }
 
+            /// **A window asking to be brought forward while locked.** A token
+            /// says the request came from something the user was using, not
+            /// that anyone is at the machine now. `request_activation` focuses
+            /// through `focus_window`, which asks the gate first, and #134's
+            /// second review added a step after that: a window off every screen
+            /// has the keyboard handed on from it. Asked of a window on screen
+            /// and of one off every screen, so that both branches run behind the
+            /// lock and neither leaves it.
+            #[test]
+            fn a_window_asking_to_be_brought_forward_while_locked_does_not_take_the_keyboard() {
+                let mut session = Session::new();
+                let (window, _, surface, _) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let pane = session
+                    .state
+                    .panes
+                    .id_of(&window)
+                    .expect("an open window has a pane");
+                let lock = session.lock();
+                let selections = session.app.client.selections;
+
+                for off_screen in [false, true] {
+                    if off_screen {
+                        // Placed as a layout places, so that where it is going
+                        // is off every screen and not only where it is.
+                        let now = session.state.clock.now();
+                        session.state.place(
+                            pane.get(),
+                            to_rect(Rectangle::new((5000, 5000).into(), (400, 300).into())),
+                            AnimationSpec::default(),
+                            now,
+                            Standing::Free,
+                        );
+                    }
+                    assert_eq!(
+                        session.state.pane_on_stage(pane),
+                        !off_screen,
+                        "the premise: the window is where this case needs it"
+                    );
+                    let token = {
+                        let (token, _) = session
+                            .state
+                            .activation_state
+                            .create_external_token(XdgActivationTokenData::default());
+                        token.as_str().to_owned()
+                    };
+                    session
+                        .app
+                        .client
+                        .activation
+                        .clone()
+                        .expect("xdg_activation_v1 bound")
+                        .activate(token, &surface);
+                    session.app.pump(&mut session.display, &mut session.state);
+                    session.assert_sealed(
+                        &format!(
+                            "a window {} asked to be brought forward while locked",
+                            if off_screen {
+                                "off every screen"
+                            } else {
+                                "on screen"
+                            }
+                        ),
+                        selections,
+                    );
+                }
+                // Back on screen, so that unlocking has a window to give the
+                // keyboard to.
+                let now = session.state.clock.now();
+                session.state.place(
+                    pane.get(),
+                    to_rect(Rectangle::new((100, 100).into(), (400, 300).into())),
+                    AnimationSpec::default(),
+                    now,
+                    Standing::Free,
+                );
+                session.assert_unlocks(lock);
+            }
+
             /// **A window closing while locked.** `sync_panes` calls
             /// `settle_focus`, which returns early only if a *window* has
             /// focus. A lock surface is not a window, so it went on to its
@@ -18696,34 +18923,45 @@ end)
             /// `scrolling.lua`, while not in charge, focused it again. Every
             /// key typed after that went to a window the user could not see,
             /// until they clicked. That is #127's fault by another door.
+            ///
+            /// **The second round: every way a new window gets the keyboard.**
+            /// Closing those two doors closed a third that nobody knew was one:
+            /// the strip's stray focus was the only way an X11 window ever got
+            /// the keyboard as it opened. And a fourth stayed open: a launched
+            /// application activating with the token `sol.spawn` gave it, which
+            /// the first round's client never sent. So the client here sends it,
+            /// and each way in is pinned in each mode it can happen in.
             mod keyboard_at_open {
                 use super::*;
 
                 /// The shipped layouts, as `init.lua` requires them, at a
                 /// minimum one window fills: the desk's one tile at the shipped
                 /// gap is 1896x1056, and neither half of it -- 942 across, 522
-                /// down -- is 1000x600.
+                /// down -- is 1000x600. With [`SHIPPED_HEARING_FOCUS`]'s
+                /// recorder, which is those same layouts.
                 fn one_window_fills_a_workspace(follow: bool) -> String {
                     format!(
                         "local config = require(\"config\")\n\
                          config.tiling.minimum = {{ w = 1000, h = 600 }}\n\
                          config.tiling.follow_overflow = {follow}\n\
-                         require(\"modes\")\n\
-                         require(\"workspaces\")\n\
-                         require(\"tiling\")\n\
-                         require(\"scrolling\")"
+                         {SHIPPED_HEARING_FOCUS}"
                     )
                 }
 
                 /// Tiling in charge and one window open, with the keyboard,
                 /// typing reaching it, and every animation landed.
                 fn working_in_one(follow: bool) -> (Desk, Window) {
+                    working_in(&one_window_fills_a_workspace(follow), Some("super+t"))
+                }
+
+                /// [`working_in_one`] for any scripts, in the mode `key`
+                /// switches on -- floating, the startup default, for `None`.
+                fn working_in(scripts: &str, key: Option<&str>) -> (Desk, Window) {
                     let mut desk = Desk::new();
-                    desk.install(&one_window_fills_a_workspace(follow));
-                    assert!(
-                        desk.state.trigger("super+t"),
-                        "the tiling key was not handled"
-                    );
+                    desk.install(scripts);
+                    if let Some(key) = key {
+                        assert!(desk.state.trigger(key), "{key} was not handled");
+                    }
                     let (working, _, _) = desk.open();
                     // Twice more, for the reason `typing_after_a_close...`
                     // gives: the keyboard is a request the client makes in
@@ -18761,12 +18999,7 @@ end)
                 /// Whether a pane is headed somewhere the user can see it, as
                 /// the focus rules ask.
                 fn headed_on_stage(state: &Solium, pane: crate::pane::PaneId) -> bool {
-                    let landed = state.settling();
-                    let screens = state.screens();
-                    state
-                        .panes
-                        .get(pane)
-                        .is_some_and(|held| state.on_stage(held, &screens, landed))
+                    state.pane_on_stage(pane)
                 }
 
                 /// What the scripts say, for a premise.
@@ -18987,6 +19220,474 @@ end)
                          took it away again"
                     );
                     typed_into(&mut desk, &first, "the key went to the new window");
+                }
+
+                /// The shipped layouts as `init.lua` requires them, with every
+                /// `focus` the scripts hear written down in `heard`.
+                const SHIPPED_HEARING_FOCUS: &str = "require(\"modes\")\n\
+                     require(\"workspaces\")\n\
+                     require(\"tiling\")\n\
+                     require(\"scrolling\")\n\
+                     heard = {}\n\
+                     sol.on(\"focus\", function(id) heard[#heard + 1] = id end)";
+
+                /// The `focus` events the scripts have heard, oldest first.
+                fn heard(desk: &Desk) -> String {
+                    says(desk, "return table.concat(heard, \",\")")
+                }
+
+                /// The window in a pane.
+                fn window_of(desk: &Desk, pane: crate::pane::PaneId) -> Window {
+                    desk.state
+                        .panes
+                        .get(pane)
+                        .and_then(Pane::client)
+                        .cloned()
+                        .expect("the pane has its client")
+                }
+
+                /// A second window opens in the mode `key` switches on, and
+                /// takes the keyboard as a focus: typing reaches it, and the
+                /// scripts hear `focus` for it. A bare grant gives the first two
+                /// and not the third.
+                fn opening_takes_the_keyboard_as_a_focus(key: Option<&str>, mode: &str) {
+                    let (mut desk, _working) = working_in(SHIPPED_HEARING_FOCUS, key);
+                    let (arrived, _, pane) = desk.open();
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(arrived.clone()),
+                        "{mode}: the new window was not given the keyboard"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &arrived,
+                        &format!("{mode}: a key typed after the window opened went somewhere else"),
+                    );
+                    let heard = heard(&desk);
+                    assert_eq!(
+                        heard.rsplit(',').next(),
+                        Some(pane.get().to_string().as_str()),
+                        "{mode}: the new window took the keyboard and the scripts never heard \
+                         `focus` for it -- a bare grant rather than a focus. Heard: [{heard}]"
+                    );
+                }
+
+                /// **Floating, the startup default.** Nothing in the scripts
+                /// focuses a new window here, so this is `offer_keyboard`'s own
+                /// path. Before #134's second review it was a bare
+                /// `give_keyboard`: the keyboard, and no `focus`.
+                #[test]
+                fn a_window_opening_while_floating_takes_the_keyboard_as_a_focus() {
+                    opening_takes_the_keyboard_as_a_focus(None, "floating");
+                }
+
+                /// **Tiling**, which focuses a new window only when the view
+                /// goes with it to another workspace -- otherwise the same path
+                /// as floating, and the same bare grant before.
+                #[test]
+                fn a_window_opening_while_tiling_takes_the_keyboard_as_a_focus() {
+                    opening_takes_the_keyboard_as_a_focus(Some("super+t"), "tiling");
+                }
+
+                /// **Scrolling**, whose strip focuses its new column itself, so
+                /// `offer_keyboard` stands aside (`Opened::focused`). This held
+                /// before as well; it is here so that the three modes are held
+                /// to the same answer.
+                #[test]
+                fn a_window_opening_while_scrolling_takes_the_keyboard_as_a_focus() {
+                    opening_takes_the_keyboard_as_a_focus(Some("super+s"), "scrolling");
+                }
+
+                /// **With `follow_overflow` on, a window its application opened
+                /// with no room here takes the keyboard on the workspace the view
+                /// went to.** `tiling.lua` focuses it by name; this is the half
+                /// of `follow_overflow` its launched twin,
+                /// `a_launched_window_that_overflows_with_the_view_takes_the_keyboard_when_it_arrives`,
+                /// does not cover.
+                #[test]
+                fn a_window_that_overflows_with_the_view_takes_the_keyboard() {
+                    let (mut desk, _working) = working_in_one(true);
+                    let (arrived, _, pane) = desk.open();
+                    assert_eq!(
+                        workspace_of(&desk, pane),
+                        "2",
+                        "the premise: the new window was sent to workspace 2"
+                    );
+                    assert_eq!(showing(&desk), "2", "the premise: the view went with it");
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(arrived.clone()),
+                        "the view went with the new window and the keyboard did not"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &arrived,
+                        "a key typed after the window opened did not reach it",
+                    );
+                }
+
+                /// **A managed X11 window reaching `offer_keyboard` is focused
+                /// exactly as an xdg one is.**
+                ///
+                /// At the rule, because an `X11Surface` needs a live XWayland and
+                /// this binary cannot start one. What the rule's `Focus` leads to
+                /// is one line of `offer_keyboard` for both kinds,
+                /// `focus_window`, and the xdg tests above are what see that line
+                /// taken: a bare grant would give the keyboard without the
+                /// `focus` they listen for. Before #134's second review
+                /// `offer_keyboard` returned early for any window without an
+                /// `xdg_toplevel` -- `ClientKind::X11 => Stay`, in this rule's
+                /// terms -- and nothing else gave an X11 window the keyboard as
+                /// it opened, once `scrolling.lua` stopped doing it by accident.
+                /// That an XWayland application really comes up focused, and
+                /// draws itself so, is for a person to check by hand.
+                #[test]
+                fn a_managed_x11_window_is_offered_the_keyboard_as_an_xdg_one_is() {
+                    for kind in [ClientKind::Xdg, ClientKind::X11] {
+                        assert_eq!(
+                            first_focus(kind, true, true),
+                            FirstFocus::Focus,
+                            "{kind:?}: a managed window headed on screen was not focused"
+                        );
+                        assert_eq!(
+                            first_focus(kind, true, false),
+                            FirstFocus::Stay,
+                            "{kind:?}: a window headed where nobody can see it took the keyboard"
+                        );
+                        assert_eq!(
+                            first_focus(kind, false, true),
+                            FirstFocus::Stay,
+                            "{kind:?}: a menu, a tooltip or a splash took the keyboard"
+                        );
+                    }
+                }
+
+                /// When an application sends its activation token, against its
+                /// first frame.
+                #[derive(Clone, Copy, Debug)]
+                enum Sends {
+                    /// With the toplevel, before it has drawn: what winit does,
+                    /// and so alacritty.
+                    BeforeItsFirstFrame,
+                    /// Once it has drawn.
+                    AfterItsFirstFrame,
+                }
+
+                const BOTH: [Sends; 2] = [Sends::BeforeItsFirstFrame, Sends::AfterItsFirstFrame];
+
+                /// Let a frame go by: the panes reconciled, and a round trip.
+                fn frame(desk: &mut Desk) {
+                    desk.state.sync_panes();
+                    desk.pump();
+                }
+
+                /// A window arrives, and asks to be brought forward with
+                /// `token` when `sends` says -- as an application launched with
+                /// one does as it opens.
+                fn arrives_activating(desk: &mut Desk, token: &str, sends: Sends) -> Window {
+                    let compositor = desk.client.compositor.clone().expect("wl_compositor bound");
+                    let wm_base = desk.client.wm_base.clone().expect("xdg_wm_base bound");
+                    let activation = desk
+                        .client
+                        .activation
+                        .clone()
+                        .expect("xdg_activation_v1 bound");
+                    let before: Vec<Window> = desk.state.space.elements().cloned().collect();
+                    let surface = compositor.create_surface(&desk.qh, ());
+                    let xdg = wm_base.get_xdg_surface(&surface, &desk.qh, ());
+                    let _toplevel = xdg.get_toplevel(&desk.qh, ());
+                    if matches!(sends, Sends::BeforeItsFirstFrame) {
+                        activation.activate(token.to_owned(), &surface);
+                    }
+                    commit_buffer(&desk.client, &desk.qh, &surface, 64, 64);
+                    desk.pump();
+                    let window = desk
+                        .state
+                        .space
+                        .elements()
+                        .find(|window| !before.contains(window))
+                        .cloned()
+                        .expect("new_toplevel mapped a window");
+                    frame(desk);
+                    if matches!(sends, Sends::AfterItsFirstFrame) {
+                        activation.activate(token.to_owned(), &surface);
+                        frame(desk);
+                    }
+                    window
+                }
+
+                /// A token nothing was launched with: what a notification, or
+                /// another application, hands a window it wants brought forward.
+                fn genuine_token(desk: &mut Desk) -> String {
+                    let (token, _) = desk
+                        .state
+                        .activation_state
+                        .create_external_token(XdgActivationTokenData::default());
+                    token.as_str().to_owned()
+                }
+
+                /// `surface` asks to be brought forward with `token`.
+                fn activates(desk: &mut Desk, surface: &wl_surface::WlSurface, token: &str) {
+                    desk.client
+                        .activation
+                        .clone()
+                        .expect("xdg_activation_v1 bound")
+                        .activate(token.to_owned(), surface);
+                    frame(desk);
+                }
+
+                /// **A launched window parked on a hidden workspace does not take
+                /// the keyboard by its own token**, sent before its first frame
+                /// or after.
+                ///
+                /// The application is the process `sol.spawn` started, so
+                /// `new_toplevel` adopts it by its pid and its window is no
+                /// longer loading by the time the token comes back.
+                /// `claim_into` asked "still loading?" first, said no, and
+                /// `request_activation` took the launch's own token for an
+                /// ordinary request and focused the window, on a desk nobody is
+                /// looking at. `a_launched_window_parked_on_a_hidden_workspace_does_not_take_the_keyboard_when_it_arrives`
+                /// could not see it: its client sends no token.
+                #[test]
+                fn a_launched_window_parked_on_a_hidden_workspace_does_not_take_the_keyboard_by_its_own_token()
+                 {
+                    for sends in BOTH {
+                        let (mut desk, working) = working_in_one(false);
+                        let pane = asked_for(&mut desk);
+                        let token = desk.state.launch_token(pane);
+                        assert!(
+                            !headed_on_stage(&desk.state, pane),
+                            "{sends:?}: the premise: it is parked a screen away"
+                        );
+                        let arrived = arrives_activating(&mut desk, &token, sends);
+                        assert_eq!(
+                            desk.state.panes.id_of(&arrived),
+                            Some(pane),
+                            "{sends:?}: the premise: the application arrived in the window \
+                             opened for it"
+                        );
+                        assert_eq!(
+                            desk.state.focused_window(),
+                            Some(working.clone()),
+                            "{sends:?}: the launch's own token took the keyboard to a workspace \
+                             nobody is looking at"
+                        );
+                        typed_into(
+                            &mut desk,
+                            &working,
+                            &format!("{sends:?}: a key typed after the token went somewhere else"),
+                        );
+                        // Not even for a moment. Focused and then handed back,
+                        // the window would have been told it had the keyboard
+                        // and the clipboard, and the scripts that it was
+                        // focused, over a token that asks for none of it.
+                        let (heard, parked) = (heard(&desk), pane.get().to_string());
+                        assert!(
+                            !heard.split(',').any(|id| id == parked),
+                            "{sends:?}: the launch's own token focused the parked window, if only \
+                             until something took the keyboard back. Heard: [{heard}]"
+                        );
+                    }
+                }
+
+                /// **The other half: a launched window on screen that activates
+                /// with its own token has the keyboard**, whichever side of its
+                /// first frame the token comes. The token decides nothing about
+                /// the keyboard any more; `offer_keyboard` does, at the first
+                /// frame, and this is it saying yes.
+                #[test]
+                fn a_launched_window_on_screen_takes_the_keyboard_when_it_activates_with_its_own_token()
+                 {
+                    for sends in BOTH {
+                        let (mut desk, _working) = working_in_one(true);
+                        let pane = asked_for(&mut desk);
+                        let token = desk.state.launch_token(pane);
+                        assert!(
+                            headed_on_stage(&desk.state, pane),
+                            "{sends:?}: the premise: the view went with it"
+                        );
+                        let arrived = arrives_activating(&mut desk, &token, sends);
+                        assert_eq!(desk.state.panes.id_of(&arrived), Some(pane));
+                        assert_eq!(
+                            desk.state.focused_window(),
+                            Some(arrived.clone()),
+                            "{sends:?}: the application arrived on screen and was not given the \
+                             keyboard"
+                        );
+                        let heard = heard(&desk);
+                        assert_eq!(
+                            heard.rsplit(',').next(),
+                            Some(pane.get().to_string().as_str()),
+                            "{sends:?}: the application took the keyboard and the scripts never \
+                             heard `focus` for it. Heard: [{heard}]"
+                        );
+                        typed_into(
+                            &mut desk,
+                            &arrived,
+                            &format!("{sends:?}: a key typed after it arrived did not reach it"),
+                        );
+                    }
+                }
+
+                /// **A genuine activation of a window on screen takes the
+                /// keyboard**, as the protocol is for: the check that follows it
+                /// in `request_activation` leaves it alone.
+                #[test]
+                fn a_genuine_activation_of_a_window_on_screen_takes_the_keyboard() {
+                    let (mut desk, _working) = working_in(SHIPPED_HEARING_FOCUS, None);
+                    let asking = desk.open_surface();
+                    let (other, _, _) = desk.open();
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(other),
+                        "the premise: the window opened last has the keyboard"
+                    );
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &asking.surface, &token);
+                    let asking = window_of(&desk, asking.pane);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(asking.clone()),
+                        "a window on screen asked to be brought forward and was refused"
+                    );
+                    typed_into(&mut desk, &asking, "a key typed after it did not reach it");
+                }
+
+                /// **A genuine activation of a window on a workspace nobody is
+                /// looking at leaves the keyboard on screen.** Before #134's
+                /// second review `focus_window` gave it the keyboard there and
+                /// nothing took it back; with `follow_overflow = false` that
+                /// window is an ordinary one.
+                #[test]
+                fn a_genuine_activation_of_a_window_on_a_hidden_workspace_leaves_the_keyboard_on_screen()
+                 {
+                    let (mut desk, working) = working_in_one(false);
+                    let parked = desk.open_surface();
+                    assert_eq!(
+                        workspace_of(&desk, parked.pane),
+                        "2",
+                        "the premise: the new window was sent to workspace 2"
+                    );
+                    assert!(
+                        !headed_on_stage(&desk.state, parked.pane),
+                        "the premise: it is parked a screen away"
+                    );
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &parked.surface, &token);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(working.clone()),
+                        "an activation took the keyboard to a workspace nobody is looking at"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &working,
+                        "a key typed after the activation went somewhere else",
+                    );
+                }
+
+                /// **A genuine activation of a column scrolled off the screen
+                /// brings it back, keyboard and all** -- which is why
+                /// `request_activation` asks whether the window is on screen
+                /// after focusing it and not before: the strip scrolls a focused
+                /// column into view, so the column is off screen only until the
+                /// focus it asked for. Asking first refused it.
+                #[test]
+                fn a_genuine_activation_of_a_column_scrolled_off_screen_brings_it_back_with_the_keyboard()
+                 {
+                    let (mut desk, _working) = working_in(SHIPPED_HEARING_FOCUS, Some("super+s"));
+                    let first = desk.open_surface();
+                    for _ in 0..4 {
+                        let _ = desk.open();
+                    }
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    assert!(
+                        !headed_on_stage(&desk.state, first.pane),
+                        "the premise: the strip scrolled the column off screen"
+                    );
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &first.surface, &token);
+                    let first_window = window_of(&desk, first.pane);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(first_window.clone()),
+                        "a column off the edge asked to be brought forward and was refused"
+                    );
+                    assert!(
+                        headed_on_stage(&desk.state, first.pane),
+                        "the strip did not bring the column it focused back into view"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &first_window,
+                        "a key typed after the activation did not reach the column",
+                    );
+                }
+
+                /// **With `follow_overflow = false`, no route hands the keyboard
+                /// to a window parked on a hidden workspace**: one opened by its
+                /// application, one launched that arrives with no token, with
+                /// its own token before its first frame and after, and a genuine
+                /// activation of the first of them. Each is parked on a
+                /// workspace of its own -- six of them, where the shipped four
+                /// would run out and let the fifth in beside the first -- and
+                /// the keyboard stays in the window the user is working in
+                /// throughout.
+                #[test]
+                fn with_follow_overflow_off_no_route_hands_the_keyboard_to_a_parked_window() {
+                    fn still_working(desk: &mut Desk, working: &Window, route: &str) {
+                        assert_eq!(
+                            desk.state.focused_window(),
+                            Some(working.clone()),
+                            "{route}: the keyboard went to a workspace nobody is looking at"
+                        );
+                        typed_into(
+                            desk,
+                            working,
+                            &format!("{route}: a key typed afterwards went somewhere else"),
+                        );
+                    }
+                    fn parked(desk: &Desk, pane: crate::pane::PaneId, route: &str) {
+                        assert!(
+                            !headed_on_stage(&desk.state, pane),
+                            "{route}: the premise: the window is parked a screen away, and it is \
+                             on workspace {} with the view on {}",
+                            workspace_of(desk, pane),
+                            showing(desk)
+                        );
+                    }
+
+                    let (mut desk, working) = working_in(
+                        &format!(
+                            "require(\"config\").workspaces.columns = 6\n{}",
+                            one_window_fills_a_workspace(false)
+                        ),
+                        Some("super+t"),
+                    );
+
+                    let opened = desk.open_surface();
+                    parked(&desk, opened.pane, "opened by its application");
+                    still_working(&mut desk, &working, "opened by its application");
+
+                    let pane = asked_for(&mut desk);
+                    parked(&desk, pane, "launched");
+                    let _ = arrives(&mut desk);
+                    still_working(&mut desk, &working, "launched, with no token");
+
+                    for sends in BOTH {
+                        let route = format!("launched, with its own token {sends:?}");
+                        let pane = asked_for(&mut desk);
+                        parked(&desk, pane, &route);
+                        let token = desk.state.launch_token(pane);
+                        let _ = arrives_activating(&mut desk, &token, sends);
+                        still_working(&mut desk, &working, &route);
+                    }
+
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &opened.surface, &token);
+                    still_working(&mut desk, &working, "a genuine activation");
                 }
             }
         }
