@@ -740,6 +740,19 @@ fn by_depth<T>(nodes: &mut [(T, f32)]) {
 /// and `on_two_monitors_a_press_on_the_right_monitor_reaches_what_it_draws`
 /// pin the two halves; `state::nothing_on_stage` and `state::shown_at` are
 /// where they ask.
+///
+/// **This is one of the renderer's two culls, and only this one is shared.**
+/// Within the monitors this allows, [`elements`] culls again by the pane's
+/// *bleed* -- the reach of its widest decoration layer -- and never culls a
+/// frame with a matrix or a deform, since nothing cheap bounds where those put
+/// pixels. `state::nothing_on_stage` asks neither: it measures the frame's own
+/// rectangle. So a glow reaching onto a screen from a window just off it, or a
+/// tilted window whose rectangle is off it, is drawn where `on_stage` says
+/// nothing is. Older than #134 and harmless so far -- a glow is nothing to hand
+/// the keyboard to -- but the two halves are not the same rule, and a question
+/// that needs the renderer's exact answer cannot borrow the focus one.
+/// `the_focus_half_counts_a_frame_by_its_rectangle_where_the_renderer_counts_its_bleed_and_every_transform`
+/// pins both as they stand.
 pub(crate) fn drawn_on(slot: Rectangle<i32, Logical>, screen: Rectangle<i32, Logical>) -> bool {
     slot.overlaps(screen)
 }

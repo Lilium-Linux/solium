@@ -998,7 +998,7 @@ mod desk {
                 w: 800.0,
                 h: 600.0,
             },
-            drawn: Rect::default(),
+            drawn: crate::script::Drawn::default(),
             title: format!("window {id}"),
             focused,
             monitor: "DP-1".to_owned(),
