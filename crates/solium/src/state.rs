@@ -251,6 +251,14 @@ fn shown_at(
 /// it from Rust, `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`
 /// and `sol_window_at_over_a_window_fading_out_answers_the_neighbour_in_its_place`
 /// from Lua.
+///
+/// **One question, asked over two lists, and the lists differ.** The Rust walk
+/// is every pane; the snapshot leaves out a pane that is not managed, one
+/// whose application has not arrived when `loading.reserves_a_slot` is off,
+/// and one scripts have been told has gone. Where the Rust walk stops at one
+/// of those, `sol.window_at` sees through it to the window behind. Older than
+/// #134 and left as it stands:
+/// `sol_window_at_sees_through_the_panes_the_snapshot_leaves_out`.
 pub(crate) fn owns(
     slot: Rectangle<i32, Logical>,
     frame: Frame,
@@ -258,6 +266,17 @@ pub(crate) fn owns(
     screens: &[Rectangle<i32, Logical>],
 ) -> bool {
     shown_at(slot, point, screens) && frame.covers(point)
+}
+
+/// Whether a selection headed for `bound` puts away the desk on `screen`:
+/// the screen, carried as it is headed, is off stage on itself by [`staged`]
+/// -- carried clear of it, or faded to nothing.
+///
+/// [`Solium::carried_by_a_selection`]'s rule, over plain values for the reason
+/// [`nothing_on_stage`] is one: `Solium` cannot be built in a unit test.
+/// `a_desk_is_put_away_only_when_its_selection_is_headed_off_its_screen`.
+fn put_away(screen: Rectangle<i32, Logical>, bound: crate::group::Shift) -> bool {
+    !staged(screen, bound.apply(Frame::real(screen)), &[screen])
 }
 
 /// A rectangle grown outward by the frame drawn around it.
@@ -1877,11 +1896,9 @@ impl Solium {
     /// pane's own frame -- which `Shift::apply` returns untouched when there
     /// is nothing to carry.
     ///
-    /// Apart so that the one question about a pane that is *only* about its
-    /// selections -- is it on a desk that is not the one in view --
-    /// [`Self::carried_by_a_selection`], is asked of the same shift the
-    /// renderer draws it with.
-    /// `a_genuine_activation_of_a_column_scrolled_off_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was`.
+    /// [`Self::carried_by_a_selection`] asks the same selections where they
+    /// are *headed*, `Groups::bound_for_window`, with the same monitor; see it
+    /// for why that is not this asked late.
     fn carried_at(
         &self,
         pane: &Pane,
@@ -2314,11 +2331,10 @@ impl Solium {
         staged(slot, self.drawn_at(pane, slot, landed), screens)
     }
 
-    /// Whether a selection carries this pane away from where it lives, once
-    /// every transform running now has landed: whether it is on a workspace
-    /// other than the one its monitor is showing.
+    /// Whether the selections this pane is in are putting its desk away: on a
+    /// workspace other than the one its monitor is showing.
     ///
-    /// **Asked of the group shift directly**, because that is what a hidden
+    /// **Asked of the selections directly**, because that is what a hidden
     /// workspace is. `workspaces.lua` parks a desk with `sol.present_group`
     /// and clears the shift of the desk in view, so the compositor -- which
     /// knows no workspaces -- can still tell a window on a desk nobody is
@@ -2326,28 +2342,56 @@ impl Solium {
     /// own frame is. A window on the desk in view is carried by nothing, and a
     /// column scrolled off it is still focused and brought back by the strip.
     ///
-    /// **Displaced, and not faded or turned**: a selection that dims a desk in
-    /// place leaves it where the user can see it, and one that fades it to
-    /// nothing is `on_stage`'s to notice after the focus, as a window being
-    /// closed on the desk in view is.
+    /// **Where the selections are headed, and not where they have got to.**
+    /// Until #134's fifth review this was the shift at [`Self::settling`], and
+    /// any displacement at all counted. A spring never lands exactly on
+    /// nothing before the travel is retired (`Groups::bound_for_window` says
+    /// why), so with `workspaces.motion.easing = "spring"` every window on the
+    /// desk being switched to was refused for the whole slide
+    /// (`on_a_spring_a_genuine_activation_mid_slide_on_the_desk_being_switched_to_takes_the_keyboard`);
+    /// and a selection nudging a desk a few pixels made it a hidden workspace
+    /// (`a_genuine_activation_of_a_window_a_selection_nudges_on_screen_takes_the_keyboard`).
+    ///
+    /// **Put away is off its own screen, or faded to nothing**: the monitor
+    /// the pane lives on, carried as the selections are headed, is off stage
+    /// there by [`staged`] -- [`put_away`] is the rule. A selection that dims a
+    /// desk or turns it leaves it where the user can see it. One that fades it
+    /// to nothing is refused here, before it is focused, where until #134's
+    /// fifth review it was focused and then handed off to whatever
+    /// `settle_focus` picked
+    /// (`a_genuine_activation_of_a_window_a_selection_fades_to_nothing_leaves_the_keyboard_exactly_where_it_was`).
     ///
     /// Until #134's fourth review this was inferred from where the frame
     /// lands -- the pane's own frame on stage and its carried one off -- which
     /// missed every window on a hidden desk whose own frame was already off
-    /// stage: a column scrolled off it, and a window being closed there. Each
-    /// was focused, and then handed the keyboard to whatever `settle_focus`
-    /// picked.
+    /// stage: a column scrolled off it, and a window being closed there.
     /// `a_genuine_activation_of_a_column_scrolled_off_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was`,
     /// `a_genuine_activation_of_a_window_being_closed_on_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was`,
     /// and on the desk in view
     /// `a_genuine_activation_of_a_column_scrolled_off_screen_brings_it_back_with_the_keyboard`.
+    ///
+    /// No monitor to measure against is not "put away", for the reason
+    /// [`Self::on_stage`] gives for no screens.
     fn carried_by_a_selection(&self, pane: crate::pane::PaneId) -> bool {
+        if self.groups.is_empty() {
+            return false;
+        }
         let Some(pane) = self.panes.get(pane) else {
             return false;
         };
-        let slot = self.pane_outer(pane);
-        let (dx, dy) = self.carried_at(pane, slot, self.settling()).offset();
-        dx != 0.0 || dy != 0.0
+        let Some(output) = self.output_of(self.pane_outer(pane)) else {
+            return false;
+        };
+        let Some(screen) = self.space.output_geometry(&output) else {
+            return false;
+        };
+        // The monitor `carried_at` would name, so a selection of a monitor
+        // holds the pane here exactly when it carries it there.
+        let monitor = self.groups.names_monitors().then(|| output.name());
+        let bound = self
+            .groups
+            .bound_for_window(pane.id().get(), monitor.as_deref());
+        put_away(screen, bound)
     }
 
     /// [`Self::on_stage`] for one pane, asked by id at [`Self::settling`]: for
@@ -9044,14 +9088,24 @@ impl XdgActivationHandler for Solium {
         // window being closed there are refused as well
         // (`a_genuine_activation_of_a_column_scrolled_off_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was`,
         // `a_genuine_activation_of_a_window_being_closed_on_a_hidden_workspace_leaves_the_keyboard_exactly_where_it_was`),
+        // and so is a desk faded to nothing
+        // (`a_genuine_activation_of_a_window_a_selection_fades_to_nothing_leaves_the_keyboard_exactly_where_it_was`);
         // while a column scrolled off the desk in view is still focused, which
         // is how the strip brings it back
         // (`a_genuine_activation_of_a_column_scrolled_off_screen_brings_it_back_with_the_keyboard`).
         //
-        // A window still headed nowhere the user can see once the layouts have
-        // had their say -- one being closed on the desk in view, say -- gives
-        // the keyboard up again, to whatever is on screen
-        // (`a_genuine_activation_of_a_window_being_closed_does_not_keep_the_keyboard`).
+        // **So is a window being closed, wherever it is**: `Pane::leaving`, on
+        // its way off the screen. Until #134's fifth review one on the desk in
+        // view was focused, found to be headed nowhere, and handed off -- and
+        // the keyboard went to the tile under the pointer
+        // (`a_genuine_activation_of_a_window_being_closed_on_the_desk_in_view_leaves_the_keyboard_exactly_where_it_was`,
+        // and on one tile `a_genuine_activation_of_a_window_being_closed_does_not_keep_the_keyboard`).
+        //
+        // A window still headed nowhere the user can see once it is focused
+        // and the layouts have had their say -- one a script holds invisible
+        // on the desk in view, say -- gives the keyboard up again, to whatever
+        // `settle_focus` picks
+        // (`a_genuine_activation_of_a_window_its_own_frame_hides_does_not_keep_the_keyboard`).
         // Before #134's second review it kept it, and every key typed went
         // somewhere nobody could see.
         //
@@ -9063,7 +9117,15 @@ impl XdgActivationHandler for Solium {
         // typing no longer goes with it.
         if let Some(window) = self.window_for(&surface) {
             let pane = self.panes.id_of(&window);
-            if pane.is_some_and(|pane| self.carried_by_a_selection(pane)) {
+            if pane
+                .and_then(|pane| self.panes.get(pane))
+                .is_some_and(Pane::leaving)
+            {
+                tracing::debug!(
+                    "a window being closed asked to be brought forward, and the keyboard stayed \
+                     where it was"
+                );
+            } else if pane.is_some_and(|pane| self.carried_by_a_selection(pane)) {
                 tracing::debug!(
                     "a window on a workspace nobody is looking at asked to be brought forward, \
                      and the keyboard stayed where it was"
@@ -9661,6 +9723,67 @@ mod tests {
         );
     }
 
+    /// **#134's fifth review: a desk is put away only when its selection is
+    /// headed off its screen, or to nothing.** See [`put_away`]. Until then
+    /// any displacement at all was a hidden workspace, a nudge and a spring's
+    /// last pixel with it, and a fade to nothing was not one.
+    #[test]
+    fn a_desk_is_put_away_only_when_its_selection_is_headed_off_its_screen() {
+        use crate::group::Shift;
+        let [left, _] = two_monitors();
+        let by = |dx: f64, dy: f64| Shift {
+            dx,
+            dy,
+            ..Shift::NONE
+        };
+
+        assert!(
+            put_away(left, by(1920.0 * 1.06, 0.0)),
+            "a workspace parked a screen and a bit to the right, as the shipped `spread` parks \
+             one, is on stage -- where the monitor to the right never draws it"
+        );
+        assert!(
+            put_away(left, by(-1920.0, 0.0)) && put_away(left, by(0.0, 1080.0)),
+            "a workspace exactly a screen to the left, or a screen down, is on stage"
+        );
+        assert!(
+            put_away(
+                left,
+                Shift {
+                    opacity: 0.0,
+                    ..Shift::NONE
+                }
+            ),
+            "a desk faded to nothing where it is is on stage"
+        );
+
+        assert!(!put_away(left, Shift::NONE), "the desk in view is put away");
+        assert!(
+            !put_away(left, by(100.0, 40.0)) && !put_away(left, by(-1919.0, 0.0)),
+            "a desk nudged, or with a pixel of it still on its screen, is put away"
+        );
+        assert!(
+            !put_away(
+                left,
+                Shift {
+                    opacity: 0.4,
+                    ..Shift::NONE
+                }
+            ),
+            "a dimmed desk is put away"
+        );
+        assert!(
+            !put_away(
+                left,
+                Shift {
+                    matrix: crate::mat4::Mat4::rotate_z(0.3),
+                    ..Shift::NONE
+                }
+            ),
+            "a turned desk is put away"
+        );
+    }
+
     /// **The hit tests' half of the same rule**: a point is on a window only
     /// on a monitor that draws it. See [`shown_at`].
     #[test]
@@ -9703,7 +9826,10 @@ mod tests {
     /// the rectangle, while `render::elements` skips its bleed cull for any
     /// frame with a matrix or a deform and so still draws it. The renderer
     /// needs a GPU the build container does not have, so its half is pinned by
-    /// the source text, as `render.rs`'s drag-icon test pins its ordering.
+    /// the source text, as `render.rs`'s drag-icon test pins its ordering --
+    /// by its tokens, with the whitespace squeezed out of both, so a rustfmt
+    /// reflow of that line moves nothing here and a change to the condition
+    /// does.
     #[test]
     fn the_focus_half_counts_a_frame_by_its_rectangle_where_the_renderer_counts_its_bleed_and_every_transform()
      {
@@ -9721,11 +9847,13 @@ mod tests {
              `render::drawn_on` is out of date"
         );
 
-        let source = include_str!("render.rs");
+        let tokens = |text: &str| text.split_whitespace().collect::<String>();
         assert!(
-            source.contains(
-                "if frame.matrix.is_identity() && frame.deform.is_none() && !reach.overlaps(screen.to_f64())"
-            ),
+            tokens(include_str!("render.rs")).contains(&tokens(
+                "if frame.matrix.is_identity()
+                     && frame.deform.is_none()
+                     && !reach.overlaps(screen.to_f64())"
+            )),
             "`render::elements` no longer culls by the bleed, or now culls a transformed frame: \
              the note beside `render::drawn_on` is out of date"
         );
@@ -19278,6 +19406,89 @@ end)
                 }
             }
 
+            /// **Pinned as it stands: `sol.window_at` sees through the panes
+            /// the snapshot leaves out, where the Rust walk stops at them.**
+            /// One rule, [`owns`], asked over two lists: `window_under_at`
+            /// walks every pane, and `sol.window_at` the snapshot, which
+            /// leaves out a pane that is not managed (a menu, a tooltip), a
+            /// pane whose application has not arrived when
+            /// `loading.reserves_a_slot` is off, and a pane scripts have been
+            /// told has gone. Over each, the Rust walk answers it -- or, for
+            /// a pane with no client, nothing -- and a script is answered with
+            /// the window behind. Older than #134, and a change of its own;
+            /// when one of the lists changes, this is the test that has to.
+            #[test]
+            fn sol_window_at_sees_through_the_panes_the_snapshot_leaves_out() {
+                /// A floating window at `loc`, drawing `size`.
+                fn floating(desk: &mut Desk, loc: (i32, i32), size: (i32, i32)) -> Opened {
+                    let opened = desk.open_surface();
+                    commit_buffer(&desk.client, &desk.qh, &opened.surface, size.0, size.1);
+                    desk.pump();
+                    let window = desk
+                        .state
+                        .panes
+                        .get(opened.pane)
+                        .and_then(Pane::client)
+                        .cloned()
+                        .expect("the pane has its client");
+                    desk.state.map_stacked(window, loc, false);
+                    desk.state.sync_panes();
+                    opened
+                }
+
+                let point = Point::<f64, Logical>::from((960.0, 540.0));
+                for kind in ["unmanaged", "a slot not reserved", "gone"] {
+                    let mut desk = Desk::new();
+                    desk.install("");
+                    let under = floating(&mut desk, (100, 100), (1600, 900));
+                    let over = if kind == "a slot not reserved" {
+                        desk.state.loading.reserves_a_slot = false;
+                        let source = crate::pane::loading_source(None);
+                        desk.state.open_loading("app", None, source, None)
+                    } else {
+                        floating(&mut desk, (200, 200), (1200, 700)).pane
+                    };
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    if let Some(pane) = desk.state.panes.get_mut(over) {
+                        match kind {
+                            "unmanaged" => pane.unmanage(),
+                            "gone" => pane.went(),
+                            _ => {}
+                        }
+                    }
+                    let client = desk
+                        .state
+                        .panes
+                        .get(over)
+                        .and_then(Pane::client)
+                        .map(|window| desk.state.window_id(window));
+
+                    assert_eq!(
+                        desk.state
+                            .window_under(point)
+                            .map(|(window, _)| desk.state.window_id(&window)),
+                        client,
+                        "{kind}: the Rust walk does not stop at the pane in front"
+                    );
+                    assert!(
+                        desk.state
+                            .snapshot()
+                            .windows
+                            .iter()
+                            .all(|row| row.id != over.get()),
+                        "{kind}: the snapshot lists the pane in front"
+                    );
+                    assert_eq!(
+                        window_at_from_lua(&desk, point),
+                        under.pane.get().to_string(),
+                        "{kind}: `sol.window_at` does not see through the pane in front to the \
+                         window behind -- the two lists agree now, and `owns`'s note is out of date"
+                    );
+                }
+            }
+
             /// **A window that has gone is not laid out again, or closed again,
             /// in the frame it went.**
             ///
@@ -20105,12 +20316,14 @@ end)
                 }
 
                 /// **A genuine activation of a window being closed does not
-                /// keep the keyboard.** Its own frame is fading to nothing, so no
-                /// selection is what keeps it off stage and it is focused like
-                /// any other window -- and then, headed nowhere the user can see,
-                /// gives the keyboard back to what is on screen. The check after
-                /// the focus in `request_activation`, which the check before it
-                /// does not replace.
+                /// keep the keyboard.** Its own frame is fading to nothing, and
+                /// no selection is what keeps it off stage. Until #134's fifth
+                /// review it was focused like any other window and then, headed
+                /// nowhere the user can see, gave the keyboard back to what is
+                /// on screen; it is refused before it is focused now, which
+                /// with one other window on screen ends in the same place --
+                /// `a_genuine_activation_of_a_window_being_closed_on_the_desk_in_view_leaves_the_keyboard_exactly_where_it_was`
+                /// is the one that tells the two apart.
                 #[test]
                 fn a_genuine_activation_of_a_window_being_closed_does_not_keep_the_keyboard() {
                     let (mut desk, working) = working_in(SHIPPED_HEARING_FOCUS, None);
@@ -20136,6 +20349,77 @@ end)
                         desk.state.focused_window(),
                         Some(working.clone()),
                         "a window being closed asked to be brought forward and kept the keyboard"
+                    );
+                    typed_into(
+                        &mut desk,
+                        &working,
+                        "a key typed after it went somewhere else",
+                    );
+                }
+
+                /// **A genuine activation of a window its own frame hides on the
+                /// desk in view is focused, and does not keep the keyboard.**
+                /// No selection hides it and it is not being closed, so nothing
+                /// refuses it first: focusing a window can bring it back, as
+                /// the strip brings back a column
+                /// (`a_genuine_activation_of_a_column_scrolled_off_screen_brings_it_back_with_the_keyboard`).
+                /// The check after the focus in `request_activation` is what
+                /// gives the keyboard back to what is on screen when nothing
+                /// did.
+                #[test]
+                fn a_genuine_activation_of_a_window_its_own_frame_hides_does_not_keep_the_keyboard()
+                {
+                    let (mut desk, working) = working_in(SHIPPED_HEARING_FOCUS, None);
+                    let hidden = desk.open_surface();
+                    desk.state
+                        .focus_window(&working, SERIAL_COUNTER.next_serial());
+                    typed_into(
+                        &mut desk,
+                        &working,
+                        "the premise: typing reaches the window before",
+                    );
+                    // Held at nothing where it is, as `sol.present(id, { opacity
+                    // = 0 })` holds a window.
+                    let now = desk.state.clock.now();
+                    if let Some(pane) = desk.state.panes.get(hidden.pane) {
+                        let outer = desk.state.pane_outer(pane);
+                        present::present(
+                            pane,
+                            outer,
+                            Frame {
+                                opacity: 0.0,
+                                ..Frame::real(outer)
+                            },
+                            now,
+                            Duration::ZERO,
+                            solium_animation::Curve::Linear,
+                        );
+                    }
+                    assert!(
+                        !headed_on_stage(&desk.state, hidden.pane)
+                            && !desk.state.carried_by_a_selection(hidden.pane)
+                            && !desk.state.panes.get(hidden.pane).is_some_and(Pane::leaving),
+                        "the premise: the window is held invisible by its own frame, and by \\
+                         nothing else"
+                    );
+
+                    let before = heard(&desk);
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &hidden.surface, &token);
+                    let after = heard(&desk);
+                    let since = after.get(before.len()..).unwrap_or_default();
+                    assert!(
+                        since
+                            .split(',')
+                            .any(|id| id == hidden.pane.get().to_string()),
+                        "the premise: it was focused, which is what the check after the focus is \\
+                         for. Heard since: [{since}]"
+                    );
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(working.clone()),
+                        "a window its own frame hides asked to be brought forward and kept the \\
+                         keyboard"
                     );
                     typed_into(
                         &mut desk,
@@ -20445,6 +20729,303 @@ end)
                         shut.pane.get(),
                         "a window being closed on workspace 1 asked to be brought forward",
                     );
+                }
+
+                /// Tiling, one monitor, the desk in view: `left` with the
+                /// keyboard, and `right` and `third` tiled beside it, every
+                /// animation landed. See [`keyboard_left_pointer_right`] for
+                /// where the pointer goes.
+                struct ThreeTiles {
+                    desk: Desk,
+                    left: Window,
+                    right: Opened,
+                    third: Opened,
+                }
+
+                fn three_tiles() -> ThreeTiles {
+                    let (mut desk, left) = working_in(SHIPPED_HEARING_FOCUS, Some("super+t"));
+                    let right = desk.open_surface();
+                    let third = desk.open_surface();
+                    desk.answer(&right);
+                    desk.answer(&third);
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    frame(&mut desk);
+                    let left_pane = desk
+                        .state
+                        .panes
+                        .id_of(&left)
+                        .expect("a client in the space has a pane");
+                    assert!(
+                        [left_pane, right.pane, third.pane]
+                            .iter()
+                            .all(|pane| headed_on_stage(&desk.state, *pane)
+                                && !desk.state.carried_by_a_selection(*pane)),
+                        "the premise: three tiles on the desk in view"
+                    );
+                    desk.state.focus_window(&left, SERIAL_COUNTER.next_serial());
+                    ThreeTiles {
+                        desk,
+                        left,
+                        right,
+                        third,
+                    }
+                }
+
+                /// The pointer comes to rest on `right`'s tile as the layout
+                /// has it now, and the keyboard goes back to `left`.
+                ///
+                /// On the other tile so that `settle_focus` -- which a window
+                /// focused and handed back ends in -- picks a window other than
+                /// the one that had the keyboard: asserted, since that is the
+                /// whole of what tells "handed off" from "stayed put" here.
+                fn keyboard_left_pointer_right(tiles: &mut ThreeTiles) {
+                    let ThreeTiles {
+                        desk, left, right, ..
+                    } = tiles;
+                    let over_right = desk.placed(right.pane);
+                    let at = Point::<f64, Logical>::from((
+                        f64::from(over_right.loc.x + over_right.size.w / 2),
+                        f64::from(over_right.loc.y + over_right.size.h / 2),
+                    ));
+                    point_at(&mut desk.state, (at.x, at.y));
+                    desk.state.focus_window(left, SERIAL_COUNTER.next_serial());
+                    typed_into(desk, left, "the premise: typing reaches `left`");
+                    let right = window_of(desk, right.pane);
+                    assert_eq!(
+                        desk.state
+                            .window_under_at(at, desk.state.settling())
+                            .map(|(window, _)| window),
+                        Some(right),
+                        "the premise: `settle_focus`'s pointer arm would pick `right`"
+                    );
+                }
+
+                /// **#134's fifth review, finding 1: a genuine activation of a
+                /// window being closed on the desk in view leaves the keyboard
+                /// exactly where it was.** Refused before it is focused, as one
+                /// on a hidden desk is. Until then it was focused, found to be
+                /// headed nowhere, and handed off -- and `settle_focus` gave the
+                /// keyboard to the tile under the pointer, which is not the one
+                /// that had it.
+                #[test]
+                fn a_genuine_activation_of_a_window_being_closed_on_the_desk_in_view_leaves_the_keyboard_exactly_where_it_was()
+                 {
+                    let mut tiles = three_tiles();
+                    tiles.desk.state.close_pane(tiles.third.pane);
+                    assert!(
+                        tiles
+                            .desk
+                            .state
+                            .panes
+                            .get(tiles.third.pane)
+                            .is_some_and(Pane::leaving)
+                            && !headed_on_stage(&tiles.desk.state, tiles.third.pane)
+                            && !tiles.desk.state.carried_by_a_selection(tiles.third.pane),
+                        "the premise: `third` is being closed on the desk in view"
+                    );
+                    keyboard_left_pointer_right(&mut tiles);
+                    let ThreeTiles {
+                        mut desk,
+                        left,
+                        third,
+                        ..
+                    } = tiles;
+                    let before = heard(&desk);
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &third.surface, &token);
+                    still_on_the_left(
+                        &mut desk,
+                        &left,
+                        &before,
+                        third.pane.get(),
+                        "a window being closed on the desk in view asked to be brought forward",
+                    );
+                }
+
+                /// A selection of `pane` alone, carried by `to` from now, at
+                /// once: what `sol.group` and `sol.present_group` hold for one.
+                fn carry(desk: &mut Desk, pane: crate::pane::PaneId, to: crate::group::Shift) {
+                    let now = desk.state.clock.now();
+                    let selection = crate::group::Selection {
+                        members: vec![crate::group::Member::Window(pane.get())],
+                        on: None,
+                    };
+                    let _ = desk.state.groups.declare("under-test", selection, now);
+                    assert!(
+                        desk.state.groups.present(
+                            "under-test",
+                            to,
+                            now,
+                            Duration::ZERO,
+                            solium_animation::Curve::Linear,
+                        ),
+                        "the selection was declared"
+                    );
+                    frame(desk);
+                }
+
+                /// **#134's fifth review: a window whose selection fades it to
+                /// nothing where it is -- moved nowhere -- is refused before it
+                /// is focused**, as a desk carried a screen away is. Until then
+                /// only a displacement counted: it was focused, found to be
+                /// headed nowhere, and handed off to the tile under the pointer.
+                #[test]
+                fn a_genuine_activation_of_a_window_a_selection_fades_to_nothing_leaves_the_keyboard_exactly_where_it_was()
+                 {
+                    let mut tiles = three_tiles();
+                    carry(
+                        &mut tiles.desk,
+                        tiles.third.pane,
+                        crate::group::Shift {
+                            opacity: 0.0,
+                            ..crate::group::Shift::NONE
+                        },
+                    );
+                    assert!(
+                        !headed_on_stage(&tiles.desk.state, tiles.third.pane)
+                            && !tiles
+                                .desk
+                                .state
+                                .panes
+                                .get(tiles.third.pane)
+                                .is_some_and(Pane::leaving),
+                        "the premise: `third` is faded to nothing, and not being closed"
+                    );
+                    keyboard_left_pointer_right(&mut tiles);
+                    let ThreeTiles {
+                        mut desk,
+                        left,
+                        third,
+                        ..
+                    } = tiles;
+                    let before = heard(&desk);
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &third.surface, &token);
+                    still_on_the_left(
+                        &mut desk,
+                        &left,
+                        &before,
+                        third.pane.get(),
+                        "a window a selection fades to nothing asked to be brought forward",
+                    );
+                }
+
+                /// **#134's fifth review, finding 2: a window a selection
+                /// nudges, and leaves on screen, is not on a hidden workspace.**
+                /// Any displacement at all was one, so a genuine activation of
+                /// it was refused and the keyboard stayed on `left`.
+                #[test]
+                fn a_genuine_activation_of_a_window_a_selection_nudges_on_screen_takes_the_keyboard()
+                 {
+                    let mut tiles = three_tiles();
+                    carry(
+                        &mut tiles.desk,
+                        tiles.third.pane,
+                        crate::group::Shift {
+                            dx: 100.0,
+                            dy: 40.0,
+                            ..crate::group::Shift::NONE
+                        },
+                    );
+                    assert!(
+                        headed_on_stage(&tiles.desk.state, tiles.third.pane),
+                        "the premise: `third` is nudged, and still on screen"
+                    );
+                    keyboard_left_pointer_right(&mut tiles);
+                    let ThreeTiles {
+                        mut desk, third, ..
+                    } = tiles;
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &third.surface, &token);
+                    let third = window_of(&desk, third.pane);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(third.clone()),
+                        "a window a selection nudges on screen asked to be brought forward and was \
+                         refused"
+                    );
+                    typed_into(&mut desk, &third, "a key typed after it did not reach it");
+                }
+
+                /// **#134's fifth review, finding 2: on a spring, a genuine
+                /// activation mid-slide of a window on the desk being switched
+                /// to takes the keyboard.** The desk is cleared from a screen
+                /// away, and a spring's progress at its end is within its
+                /// epsilon of 1 and not 1 -- so asked where the desk is at
+                /// `settling`, it was still a pixel or two off, a hidden
+                /// workspace, until the travel was retired: every window on the
+                /// desk being switched to was refused for the whole slide.
+                #[test]
+                fn on_a_spring_a_genuine_activation_mid_slide_on_the_desk_being_switched_to_takes_the_keyboard()
+                 {
+                    let (mut desk, _working) = working_in(
+                        &format!(
+                            "require(\"config\").workspaces.motion = \
+                             {{ duration = 300, easing = \"spring\" }}\n\
+                             {SHIPPED_HEARING_FOCUS}"
+                        ),
+                        Some("super+t"),
+                    );
+                    let switch = |desk: &mut Desk, key: &str, showing_now: &str| {
+                        assert!(desk.state.trigger(key), "{key} was not handled");
+                        desk.state.clock.advance(Duration::from_secs(1));
+                        let now = desk.state.clock.now();
+                        desk.state.settle(now);
+                        frame(desk);
+                        assert_eq!(showing(desk), showing_now, "the premise: {key} switched");
+                    };
+                    switch(&mut desk, "super+2", "2");
+                    let one = desk.open_surface();
+                    let two = desk.open_surface();
+                    desk.answer(&one);
+                    desk.answer(&two);
+                    switch(&mut desk, "super+1", "1");
+                    assert!(
+                        workspace_of(&desk, one.pane) == "2"
+                            && workspace_of(&desk, two.pane) == "2"
+                            && !headed_on_stage(&desk.state, one.pane),
+                        "the premise: two windows parked on workspace 2"
+                    );
+
+                    // And back to it, a tenth of a second into the slide.
+                    assert!(desk.state.trigger("super+2"), "super+2 was not handled");
+                    desk.state.clock.advance(Duration::from_millis(100));
+                    frame(&mut desk);
+                    let had = desk.focused();
+                    let asking = if had == one.pane { &two } else { &one };
+                    let late = desk
+                        .state
+                        .panes
+                        .get(asking.pane)
+                        .map(|pane| {
+                            let slot = desk.state.pane_outer(pane);
+                            desk.state
+                                .carried_at(pane, slot, desk.state.settling())
+                                .offset()
+                        })
+                        .unwrap_or_default();
+                    assert!(
+                        late != (0.0, 0.0) && late.0.abs() < 3.0 && late.1 == 0.0,
+                        "the premise, and the situation under test: the spring leaves workspace 2 \
+                         a pixel or two off at `settling`, and here it is {late:?}"
+                    );
+                    assert!(
+                        headed_on_stage(&desk.state, asking.pane),
+                        "the premise: the window asking is headed on stage"
+                    );
+
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &asking.surface, &token);
+                    let asking = window_of(&desk, asking.pane);
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(asking.clone()),
+                        "a window on the desk being switched to asked to be brought forward mid-slide \
+                         and was refused"
+                    );
+                    typed_into(&mut desk, &asking, "a key typed after it did not reach it");
                 }
 
                 /// **With `follow_overflow = false`, no route hands the keyboard

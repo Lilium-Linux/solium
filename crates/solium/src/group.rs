@@ -301,6 +301,12 @@ impl Group {
         self.travel
             .map_or(Shift::NONE, |transform| transform.at(now))
     }
+
+    /// Where it is being carried to: the shift [`Self::shift`] lands on.
+    fn bound(&self) -> Shift {
+        self.travel
+            .map_or(Shift::NONE, |transform| transform.target())
+    }
 }
 
 /// Every selection a script has named.
@@ -446,6 +452,26 @@ impl Groups {
     /// The same, for one monitor's instance of a scripted surface.
     pub(crate) fn on_surface(&self, id: SurfaceId, monitor: &str, now: Duration) -> Shift {
         self.fold(now, |group| group.selection.holds_surface(id, monitor))
+    }
+
+    /// Where a window's selections are carrying it: what [`Self::on_window`]
+    /// is headed for, rather than where it has got to.
+    ///
+    /// **Not `on_window` asked late.** An animation's progress at its end is
+    /// its curve's value at 1, which for a spring is `Spring::value_at` its
+    /// settling time -- within the spring's epsilon of 1, and not 1. So a desk
+    /// cleared with `easing = "spring"` is still a pixel or two away at any
+    /// instant, however late, until [`Self::settle`] retires the travel; the
+    /// target is exactly nothing from the frame the clear starts.
+    /// `a_selection_cleared_on_a_spring_is_bound_for_nothing_before_it_gets_there`.
+    pub(crate) fn bound_for_window(&self, id: u64, monitor: Option<&str>) -> Shift {
+        if self.groups.is_empty() {
+            return Shift::NONE;
+        }
+        self.groups
+            .iter()
+            .filter(|group| group.selection.holds_window(id, monitor))
+            .fold(Shift::NONE, |so_far, group| so_far.and(group.bound()))
     }
 
     fn fold(&self, now: Duration, wanted: impl Fn(&Group) -> bool) -> Shift {
@@ -828,6 +854,53 @@ mod tests {
         assert!(
             groups.on_window(1, None, at(900)).is_identity(),
             "a cleared selection is back to costing nothing"
+        );
+    }
+
+    /// **A selection cleared on a spring is bound for nothing before it gets
+    /// there**, and it does not get there exactly until it is retired.
+    ///
+    /// The desk a workspace switch goes to is cleared from a screen away. On
+    /// `outCubic` its progress at the end is exactly 1, so it is carried by
+    /// exactly nothing however late it is asked; on a spring it is the
+    /// spring's value at its settling time, which is within its epsilon of 1
+    /// and no closer -- so asked an hour later it is still a pixel or two off,
+    /// until `settle` drops the travel. Its target is nothing from the start.
+    #[test]
+    fn a_selection_cleared_on_a_spring_is_bound_for_nothing_before_it_gets_there() {
+        let spring = Curve::Spring(solium_animation::Spring::default());
+        let mut groups = Groups::default();
+        groups.declare("desk", desk(&[1], &[]), at(0));
+        groups.present("desk", by(2035.2, 0.0), at(0), at(0), Curve::Linear);
+        assert_eq!(
+            groups.bound_for_window(1, None).offset(),
+            (2035.2, 0.0),
+            "a selection presented a screen away is bound for a screen away"
+        );
+
+        groups.clear("desk", at(0), at(300), spring);
+        let an_hour_on = Duration::from_secs(60 * 60);
+        let (late, _) = groups.on_window(1, None, an_hour_on).offset();
+        assert!(
+            late != 0.0 && late.abs() < 3.0,
+            "the premise: a spring is still a pixel or two off at any instant before it is \
+             retired, and here it is {late}"
+        );
+        assert_eq!(
+            groups.bound_for_window(1, None),
+            Shift::NONE,
+            "a selection being cleared is not bound for nothing"
+        );
+        // And the control: on `outCubic` the two answers agree.
+        groups.present("desk", by(2035.2, 0.0), at(0), at(0), Curve::Linear);
+        groups.clear("desk", at(0), at(300), Curve::OutCubic);
+        assert_eq!(groups.on_window(1, None, an_hour_on).offset(), (0.0, 0.0));
+
+        assert!(!groups.settle(an_hour_on), "it has landed, and is retired");
+        assert_eq!(groups.bound_for_window(1, None), Shift::NONE);
+        assert!(
+            groups.bound_for_window(2, None).is_identity(),
+            "a window in no selection is bound for nothing"
         );
     }
 
