@@ -548,6 +548,11 @@ pub(crate) struct Solium {
     /// [`Self::parented`].
     closing: Option<crate::pane::PaneId>,
 
+    /// Whether `apply` is already inside the layout pass it runs to tell the
+    /// scripts that a window's `cramped` changed (#115), so that pass does not
+    /// run another. See `Solium::apply`.
+    retelling_cramped: bool,
+
     /// A resize asked for by an edge drag, not yet applied.
     ///
     /// Offered to layouts first: in a tiled or scrolling arrangement a window
@@ -927,6 +932,7 @@ impl Solium {
             closing: None,
             pending_drop: None,
             pending_resize: None,
+            retelling_cramped: false,
             resize_hold: None,
             resize_bridge: None,
             resize_gesture: None,

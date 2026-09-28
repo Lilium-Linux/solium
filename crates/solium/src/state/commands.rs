@@ -123,6 +123,9 @@ impl Solium {
         if !outcome.commands.is_empty() {
             self.redraw = true;
         }
+        // Whether a placement below changed what a window says about being
+        // cramped. See the end of this function.
+        let mut cramped_changed = false;
 
         if let Some(grab) = outcome.grab
             && grab != self.script_grab
@@ -265,6 +268,7 @@ impl Solium {
                     if let Some(pane) = self.panes.by_script_id(id).map(Pane::id)
                         && let Some(pane) = self.panes.get_mut(pane)
                     {
+                        cramped_changed |= pane.cramped() != (cramped && tile);
                         pane.set_cramped(cramped && tile);
                     }
                 }
@@ -273,6 +277,7 @@ impl Solium {
                         && let Some(pane) = self.panes.get_mut(pane)
                     {
                         pane.untile();
+                        cramped_changed |= pane.cramped();
                         pane.set_cramped(false);
                     }
                 }
@@ -419,6 +424,20 @@ impl Solium {
                     self.request = Some(Request::Quit);
                 }
             }
+        }
+        // **A window whose `cramped` changed is told again, once** (#115).
+        // `sol.windows()` is the snapshot taken before the handler that said
+        // it ran, so nothing reading the window list in that handler -- a bar
+        // redrawing on `layout` -- could see what the layout had just said,
+        // and on a quiet desktop no later event comes to show it. So the
+        // layouts run once more, as `Command::Monitors` has them do above, with
+        // a snapshot that has it. Once: a pass that changes it again is not
+        // told again, so a layout that cannot make up its mind cannot loop.
+        // `real_client::client_sizes::a_window_that_becomes_cramped_is_told_again_so_a_bar_can_see_it`.
+        if cramped_changed && !self.retelling_cramped {
+            self.retelling_cramped = true;
+            self.trigger_relayout();
+            self.retelling_cramped = false;
         }
     }
 

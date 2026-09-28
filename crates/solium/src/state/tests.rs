@@ -9101,6 +9101,55 @@ mod real_client {
             assert!(!desk.row(&window).cramped, "placed out of a tile");
         }
 
+        /// **A window that becomes cramped is told again, so a bar can see
+        /// it.** A layout says `cramped` on a `layout` pass, and a bar reading
+        /// `sol.windows()` in the same pass cannot see it -- the list is the
+        /// snapshot from before -- so the compositor runs the pass once more,
+        /// and the bar sees it there. A pass that changes nothing is not told
+        /// again; and a layout that changes its mind on every pass is told
+        /// once, not for ever.
+        #[test]
+        fn a_window_that_becomes_cramped_is_told_again_so_a_bar_can_see_it() {
+            let mut desk = Desk::new();
+            let (window, _toplevel, _surface) = desk.open();
+            let id = desk.state.window_id(&window);
+            desk.install(&format!(
+                "seen = {{}}\n\
+                 sol.on(\"layout\", function()\n\
+                     sol.place({id}, {{ x = 0, y = 0, w = 600, h = 400, cramped = true }})\n\
+                 end)\n\
+                 sol.on(\"layout\", function()\n\
+                     for _, window in ipairs(sol.windows()) do\n\
+                         if window.id == {id} then seen[#seen + 1] = tostring(window.cramped) end\n\
+                     end\n\
+                 end)"
+            ));
+            let seen = |desk: &Desk| desk.evaluate("return table.concat(seen, \",\")");
+            desk.state.trigger_relayout();
+            assert_eq!(
+                seen(&desk),
+                "false,true",
+                "the bar never saw the window cramped"
+            );
+            desk.state.trigger_relayout();
+            assert_eq!(
+                seen(&desk),
+                "false,true,true",
+                "told again with nothing changed"
+            );
+
+            desk.install(&format!(
+                "passes, flip = 0, true\n\
+                 sol.on(\"layout\", function()\n\
+                     passes = passes + 1\n\
+                     flip = not flip\n\
+                     sol.place({id}, {{ x = 0, y = 0, w = 600, h = 400, cramped = flip }})\n\
+                 end)"
+            ));
+            desk.state.trigger_relayout();
+            assert_eq!(desk.evaluate("return tostring(passes)"), "2");
+        }
+
         /// **A floating drag is held to what the client accepts**: the limits
         /// in the window's own terms, and the drag's rectangle held to them.
         #[test]
