@@ -467,6 +467,10 @@ impl Solium {
         self.trigger_monitors_changed();
         self.trigger_relayout();
         self.redraw = true;
+        // A lock waiting for its monitors may have been waiting for the one
+        // that went. See `Solium::confirm_lock`, and
+        // `a_monitor_unplugged_while_locking_does_not_hold_locked_back`.
+        self.confirm_lock();
     }
 
     /// Bring back any window that is no longer on any screen.

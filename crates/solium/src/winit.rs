@@ -604,6 +604,12 @@ pub(crate) fn run() -> Result<()> {
             crate::screencopy::settle(&mut state, backend.renderer(), &prepared);
         }
 
+        // The lock this frame is built under, and the monitors drawn into it:
+        // once it is submitted, each of them has shown the lock. See "When
+        // `locked` is sent" in `lock.rs`. No test reaches this loop.
+        let built_under = state.lock_frame();
+        let mut drawn: Vec<Output> = Vec::new();
+
         // Not `match backend.bind() { _ if !wanted => ... }`: the scrutinee runs
         // before the guard, so that acquired a buffer on every idle frame and
         // threw it away without ever submitting it. The host's EGL surface ends
@@ -646,6 +652,7 @@ pub(crate) fn run() -> Result<()> {
                             else {
                                 continue;
                             };
+                            drawn.extend(state.output_for(*screen));
                             // One monitor's picture built. Counted here rather
                             // than at the submit below, because the submit is
                             // one window however many monitors are inside it.
@@ -681,6 +688,7 @@ pub(crate) fn run() -> Result<()> {
                         let scale = state
                             .output_for(screen)
                             .map_or(1.0, |output| output.current_scale().fractional_scale());
+                        drawn.extend(state.output_for(screen));
                         pace.drew();
                         render::elements(
                             &mut state,
@@ -788,8 +796,15 @@ pub(crate) fn run() -> Result<()> {
         // page flip here and the host may or may not block us.
         if rendered && !captured {
             let _commit = crate::pacing::span(crate::pacing::Phase::Commit);
-            if let Err(err) = backend.submit(Some(&[damage])) {
-                tracing::warn!(?err, "submit failed");
+            match backend.submit(Some(&[damage])) {
+                // Handed to the host: as far as a nested compositor can see,
+                // on the screen.
+                Ok(()) => {
+                    for output in &drawn {
+                        state.frame_presented(output, built_under);
+                    }
+                }
+                Err(err) => tracing::warn!(?err, "submit failed"),
             }
         }
 

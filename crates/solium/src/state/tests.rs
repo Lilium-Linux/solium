@@ -7205,7 +7205,18 @@ mod real_client {
     /// fails against the merge of the two with its own fix taken out; the
     /// doc of each says where.
     ///
-    /// The X11 test at the end is the exception to all of them: see its doc.
+    /// The X11 test is the exception to all of them: see its doc.
+    ///
+    /// Then the tests of **when `locked` is sent**, from
+    /// `locked_is_not_sent_in_the_dispatch_that_asked_for_it` on: `lock.rs`
+    /// told the lock client `locked` in the dispatch that asked for the
+    /// lock, while every monitor was still showing the desktop. Each fails
+    /// against this branch with `lock` confirming at once again, as it did
+    /// before -- except the first half of
+    /// `with_no_monitor_locked_goes_out_at_once`, which is the one case where
+    /// "at once" was already right; the doc of each says where. Every lock
+    /// in this module now also has its frames shown (`Session::show`),
+    /// because without them `locked` does not come.
     mod lock_focus {
         use super::*;
         use smithay::backend::input::KeyState;
@@ -7391,6 +7402,12 @@ mod real_client {
             /// The lock client's surfaces from its last `lock`, one per
             /// monitor.
             lock_surfaces: Vec<LockSurfaceProxy>,
+            /// Every monitor with its `wl_output` global, so one can be
+            /// unplugged the way a backend unplugs it.
+            monitors: Vec<(
+                Output,
+                smithay::reexports::wayland_server::backend::GlobalId,
+            )>,
         }
 
         impl Session {
@@ -7409,31 +7426,13 @@ mod real_client {
                     .decorations
                     .set_style(&mut state.panes, Some("none".to_string()));
 
+                let mut monitors = Vec::new();
                 for index in 0..count {
-                    let output = Output::new(
-                        format!("lock-focus-test-{index}"),
-                        PhysicalProperties {
-                            size: (0, 0).into(),
-                            subpixel: Subpixel::Unknown,
-                            make: "solium".to_string(),
-                            model: "lock-focus".to_string(),
-                        },
-                    );
-                    output.change_current_state(
-                        Some(Mode {
-                            size: (1920, 1080).into(),
-                            refresh: 60_000,
-                        }),
-                        None,
-                        Some(Scale::Fractional(1.0)),
-                        None,
-                    );
                     // A global, which the other fixtures' monitors are
                     // not: a lock surface is asked for per `wl_output`, so
                     // the lock client has to be able to name one. Before
                     // either client connects, so it is in both registries.
-                    let _global = output.create_global::<Solium>(&display.handle());
-                    state.space.map_output(&output, (1920 * index, 0));
+                    monitors.push(Self::monitor(&display, &mut state, index));
                 }
 
                 let app = Side::connect(&mut display, &mut state);
@@ -7444,7 +7443,98 @@ mod real_client {
                     app,
                     locker,
                     lock_surfaces: Vec::new(),
+                    monitors,
                 }
+            }
+
+            /// The `index`th monitor, 1920x1080 and to the right of the
+            /// one before it, with its global.
+            fn monitor(
+                display: &Display<Solium>,
+                state: &mut Solium,
+                index: i32,
+            ) -> (
+                Output,
+                smithay::reexports::wayland_server::backend::GlobalId,
+            ) {
+                let output = Output::new(
+                    format!("lock-focus-test-{index}"),
+                    PhysicalProperties {
+                        size: (0, 0).into(),
+                        subpixel: Subpixel::Unknown,
+                        make: "solium".to_string(),
+                        model: "lock-focus".to_string(),
+                    },
+                );
+                output.change_current_state(
+                    Some(Mode {
+                        size: (1920, 1080).into(),
+                        refresh: 60_000,
+                    }),
+                    None,
+                    Some(Scale::Fractional(1.0)),
+                    None,
+                );
+                let global = output.create_global::<Solium>(&display.handle());
+                state.space.map_output(&output, (1920 * index, 0));
+                (output, global)
+            }
+
+            /// The `index`th monitor.
+            fn output(&self, index: usize) -> Output {
+                self.monitors
+                    .get(index)
+                    .map(|(output, _)| output.clone())
+                    .expect("a monitor this fixture made")
+            }
+
+            /// A monitor plugged in, the way both backends add one: a
+            /// global, mapped, and `settle_monitors`.
+            fn plug(&mut self) -> Output {
+                let index = i32::try_from(self.monitors.len()).expect("a handful of monitors");
+                let monitor = Self::monitor(&self.display, &mut self.state, index);
+                let output = monitor.0.clone();
+                self.monitors.push(monitor);
+                self.state.settle_monitors();
+                output
+            }
+
+            /// A monitor unplugged -- or switched off by the configuration,
+            /// which `tty.rs` drops the same way -- as `drop_screen` and then
+            /// `resync_screens` do it: the global removed, the layers closed,
+            /// the output unmapped, and `settle_monitors`.
+            fn unplug(&mut self, index: usize) {
+                let (output, global) = self.monitors.remove(index);
+                self.display.handle().remove_global::<Solium>(global);
+                crate::layer::close_all(&output);
+                self.state.space.unmap_output(&output);
+                self.state.settle_monitors();
+            }
+
+            /// `output` shows a frame built now: the backend's half of
+            /// "When `locked` is sent" in `lock.rs`, played the only way it
+            /// can be without a renderer -- `lock_frame` as the frame is
+            /// built, `frame_presented` when it is on the screen.
+            fn show(&mut self, output: &Output) {
+                let frame = self.state.lock_frame();
+                self.state.frame_presented(output, frame);
+            }
+
+            /// Every monitor shows a frame built now.
+            fn show_all(&mut self) {
+                for (output, _) in self.monitors.clone() {
+                    self.show(&output);
+                }
+            }
+
+            /// Whether the lock client has been told `locked` on `lock`,
+            /// after a round trip for it to hear anything that was sent.
+            fn told_locked(&mut self, lock: &ext_session_lock_v1::ExtSessionLockV1) -> bool {
+                self.locker.pump(&mut self.display, &mut self.state);
+                self.locker
+                    .client
+                    .locked
+                    .contains(&wayland_client::Proxy::id(lock))
             }
 
             /// Whether the server's keyboard is on one of the lock
@@ -7469,12 +7559,15 @@ mod real_client {
             }
 
             /// Lock the session the way a lock screen does: lock, then a
-            /// surface for the monitor.
+            /// surface for the monitor. Then every monitor shows the lock,
+            /// which is what `locked` waits for.
             fn lock(&mut self) -> ext_session_lock_v1::ExtSessionLockV1 {
                 let (lock, surfaces) =
                     self.locker
                         .ask_lock(&mut self.display, &mut self.state, true);
                 self.lock_surfaces = surfaces;
+                self.show_all();
+                self.locker.pump(&mut self.display, &mut self.state);
                 self.app.pump(&mut self.display, &mut self.state);
 
                 assert!(
@@ -8014,6 +8107,14 @@ mod real_client {
                 .locker
                 .pump(&mut session.display, &mut session.state);
             session.app.pump(&mut session.display, &mut session.state);
+            // And is on the monitor, so the lock client is told `locked`,
+            // without which its unlock below would be refused
+            // (`an_unlock_before_locked_unlocks_nothing`).
+            session.show_all();
+            assert!(
+                session.told_locked(&lock),
+                "the lock screen is on every monitor and was not told `locked`"
+            );
 
             let selections = session.app.client.selections;
             session.assert_sealed(
@@ -8691,6 +8792,456 @@ mod real_client {
                 "the premise: the window is fading out"
             );
             session.assert_sealed("a window that closed itself", selections);
+        }
+
+        /// **`locked` is not sent in the dispatch that asked for the lock**,
+        /// and everything else still is: `lock` set, the next frame built
+        /// under it, a frame asked for, the keyboard taken off the
+        /// application. Only the promise waits, because nothing has reached
+        /// a screen yet -- and `locked` used to go out right here, with the
+        /// monitor still scanning out the desktop.
+        ///
+        /// Against this branch with `lock` confirming at once, as it did
+        /// before, fails at "before any monitor had shown the lock".
+        #[test]
+        fn locked_is_not_sent_in_the_dispatch_that_asked_for_it() {
+            let mut session = Session::new();
+            session.app.open(&mut session.display, &mut session.state);
+            assert!(
+                session.app.client.keyboard_on.is_some(),
+                "the application has the keyboard before the lock, or taking \
+                 it away proves nothing"
+            );
+            session.state.redraw = false;
+
+            let (lock, surfaces) =
+                session
+                    .locker
+                    .ask_lock(&mut session.display, &mut session.state, true);
+            session.lock_surfaces = surfaces;
+            session.app.pump(&mut session.display, &mut session.state);
+
+            assert!(
+                session.state.lock.is_some(),
+                "the lock client asked and the session did not lock"
+            );
+            assert!(
+                session.state.lock_frame().is_some(),
+                "the next frame is not built under the lock: the blanking waits \
+                 as well"
+            );
+            assert!(
+                session.state.redraw,
+                "no frame was asked for, so nothing replaces the desktop"
+            );
+            assert!(
+                session.app.client.keyboard_on.is_none(),
+                "the application kept the keyboard while `locked` waits"
+            );
+            assert!(
+                !session
+                    .locker
+                    .client
+                    .locked
+                    .contains(&wayland_client::Proxy::id(&lock)),
+                "the lock client was told `locked` in the dispatch that asked \
+                 for it, before any monitor had shown the lock"
+            );
+        }
+
+        /// **`locked` waits for every monitor to show the lock.** One
+        /// monitor showing it, however many frames it shows, is one monitor:
+        /// the other is still scanning out whatever it had.
+        ///
+        /// Against the old confirmation, fails at "had shown nothing".
+        #[test]
+        fn locked_waits_for_every_monitor_to_show_the_lock() {
+            let mut session = Session::with_monitors(2);
+            let (left, right) = (session.output(0), session.output(1));
+            let (lock, surfaces) =
+                session
+                    .locker
+                    .ask_lock(&mut session.display, &mut session.state, true);
+            session.lock_surfaces = surfaces;
+
+            for _ in 0..3 {
+                session.show(&left);
+            }
+            assert!(
+                !session.told_locked(&lock),
+                "the lock client was told `locked` while the right-hand monitor \
+                 had shown nothing of the lock"
+            );
+            session.show(&right);
+            assert!(
+                session.told_locked(&lock),
+                "every monitor showed the lock and the lock client was not told \
+                 `locked`"
+            );
+        }
+
+        /// **A flip already in flight when the session locks does not
+        /// count**, and nor does a frame built under the lock this one took
+        /// over from. `tty.rs` skips a screen whose flip is pending, so the
+        /// first flip to complete after a lock can be a frame queued before
+        /// it: the desktop. Each is handed back here the way a vblank hands
+        /// it back, with the lock it was built under, before the lock's own
+        /// frame.
+        ///
+        /// What this plays is `Solium`'s half. The tty half -- that each
+        /// frame's own user data comes back out of `frame_submitted` -- needs
+        /// a GPU and is not reached here.
+        ///
+        /// Against the old confirmation, fails at "on the desktop's flip".
+        /// Against a fix that counted any frame presented after the lock,
+        /// fails at the same line.
+        #[test]
+        fn a_flip_already_in_flight_at_the_lock_does_not_count() {
+            let mut session = Session::new();
+            session.app.open(&mut session.display, &mut session.state);
+            let monitor = session.output(0);
+            // Built, and queued, before the lock.
+            let in_flight = session.state.lock_frame();
+            assert!(
+                in_flight.is_none(),
+                "the premise: a frame built before the lock carries no lock"
+            );
+
+            let (first, surfaces) =
+                session
+                    .locker
+                    .ask_lock(&mut session.display, &mut session.state, true);
+            session.lock_surfaces = surfaces;
+            session.state.frame_presented(&monitor, in_flight);
+            assert!(
+                !session.told_locked(&first),
+                "the lock client was told `locked` on the desktop's flip: the \
+                 frame that reached the screen was built before the lock"
+            );
+            session.show(&monitor);
+            assert!(
+                session.told_locked(&first),
+                "the lock's own frame reached the screen and the lock client \
+                 was not told `locked`"
+            );
+
+            // The lock client crashes with a frame of its lock in flight, and
+            // a new one takes over before that frame flips.
+            let in_flight = session.state.lock_frame();
+            let recovery = Side::connect(&mut session.display, &mut session.state);
+            let crashed = std::mem::replace(&mut session.locker, recovery);
+            session.lock_surfaces.clear();
+            drop(crashed);
+            session.app.pump(&mut session.display, &mut session.state);
+            let (second, surfaces) =
+                session
+                    .locker
+                    .ask_lock(&mut session.display, &mut session.state, true);
+            session.lock_surfaces = surfaces;
+            assert!(
+                session.state.lock_frame().is_some() && session.state.lock_frame() != in_flight,
+                "the premise: the new lock is not the one that frame was built under"
+            );
+            session.state.frame_presented(&monitor, in_flight);
+            assert!(
+                !session.told_locked(&second),
+                "the new lock client was told `locked` on a frame built under \
+                 the lock it took over from"
+            );
+            session.show(&monitor);
+            assert!(
+                session.told_locked(&second),
+                "the new lock's own frame reached the screen and its lock client \
+                 was not told `locked`"
+            );
+        }
+
+        /// **A monitor switched off does not hold `locked` back.** Solium
+        /// has no DPMS or idle power-off: the one way a monitor goes dark is
+        /// `enabled = false`, and `tty.rs` drops a monitor switched off that
+        /// way just as it drops one unplugged. A lock asked for after that
+        /// waits for the monitor that is still on, and for nothing else.
+        ///
+        /// Against the old confirmation, fails at "the one still on had
+        /// shown".
+        #[test]
+        fn a_switched_off_monitor_does_not_hold_locked_back() {
+            let mut session = Session::with_monitors(2);
+            let on = session.output(0);
+            session.unplug(1);
+            session
+                .locker
+                .pump(&mut session.display, &mut session.state);
+
+            let (lock, surfaces) =
+                session
+                    .locker
+                    .ask_lock(&mut session.display, &mut session.state, true);
+            session.lock_surfaces = surfaces;
+            assert!(
+                !session.told_locked(&lock),
+                "the lock client was told `locked` before the one still on had \
+                 shown the lock"
+            );
+            session.show(&on);
+            assert!(
+                session.told_locked(&lock),
+                "the monitor still on showed the lock, and `locked` waits for \
+                 the one switched off"
+            );
+        }
+
+        /// **A monitor unplugged while `locked` waits does not hold it back
+        /// for ever.** The left-hand one has shown the lock, the right-hand
+        /// one never will because it has gone, and `locked` goes out as it
+        /// goes, with no frame after.
+        ///
+        /// Against the old confirmation, fails at "had shown nothing".
+        #[test]
+        fn a_monitor_unplugged_while_locking_does_not_hold_locked_back() {
+            let mut session = Session::with_monitors(2);
+            let left = session.output(0);
+            let (lock, surfaces) =
+                session
+                    .locker
+                    .ask_lock(&mut session.display, &mut session.state, true);
+            session.lock_surfaces = surfaces;
+            session.show(&left);
+            assert!(
+                !session.told_locked(&lock),
+                "the lock client was told `locked` while the right-hand monitor \
+                 had shown nothing of the lock"
+            );
+
+            session.unplug(1);
+            assert!(
+                session.told_locked(&lock),
+                "the monitor `locked` was waiting for was unplugged, and the lock \
+                 client is waiting still"
+            );
+        }
+
+        /// **With no monitor, `locked` goes out at once**: there is no
+        /// screen for anything to be on. Both ways there can be none --
+        /// none when the lock is asked for, and the only one unplugged
+        /// before it showed the lock.
+        ///
+        /// The first half is what the old confirmation did as well, and
+        /// passes against it. The second fails against it at "the
+        /// premise".
+        #[test]
+        fn with_no_monitor_locked_goes_out_at_once() {
+            let mut session = Session::with_monitors(0);
+            let (lock, _) = session
+                .locker
+                .ask_lock(&mut session.display, &mut session.state, true);
+            assert!(
+                session
+                    .locker
+                    .client
+                    .locked
+                    .contains(&wayland_client::Proxy::id(&lock)),
+                "with no monitor to wait for, the lock client was not told \
+                 `locked` in the dispatch that asked for it"
+            );
+
+            let mut session = Session::new();
+            let (lock, surfaces) =
+                session
+                    .locker
+                    .ask_lock(&mut session.display, &mut session.state, true);
+            session.lock_surfaces = surfaces;
+            assert!(
+                !session.told_locked(&lock),
+                "the premise: with a monitor, `locked` waits for it"
+            );
+            session.unplug(0);
+            assert!(
+                session.told_locked(&lock),
+                "the only monitor was unplugged before it showed the lock, and \
+                 the lock client is waiting still"
+            );
+        }
+
+        /// **A monitor plugged in while `locked` waits must show the lock
+        /// too.** It is a screen like the others, and `locked` is a promise
+        /// about every screen there is.
+        ///
+        /// Against the old confirmation, fails at "had shown nothing".
+        #[test]
+        fn a_monitor_plugged_in_while_locking_must_show_the_lock_too() {
+            let mut session = Session::new();
+            let first = session.output(0);
+            let (lock, surfaces) =
+                session
+                    .locker
+                    .ask_lock(&mut session.display, &mut session.state, true);
+            session.lock_surfaces = surfaces;
+
+            let second = session.plug();
+            session.show(&first);
+            assert!(
+                !session.told_locked(&lock),
+                "the lock client was told `locked` while the monitor plugged in \
+                 had shown nothing of the lock"
+            );
+            session.show(&second);
+            assert!(
+                session.told_locked(&lock),
+                "both monitors showed the lock and the lock client was not told \
+                 `locked`"
+            );
+        }
+
+        /// **A lock client that goes before it is told `locked` leaves the
+        /// session locked**, and a new one can take over. Both ways it can
+        /// go: giving up with `destroy`, which the protocol allows before
+        /// `locked`, and crashing. Neither unlocks anything, the `locked` it
+        /// was owed is kept and never spent, and the lock client that takes
+        /// over is told `locked` for its own lock once that is on the monitor.
+        ///
+        /// What this cannot see is what the owed `locked` sends when it is
+        /// dropped at the takeover: nothing, but a client discards events on
+        /// an object it has destroyed and a crashed one reads nothing, so no
+        /// client here could tell. That half rests on `destroyed` in
+        /// `lock.rs`.
+        ///
+        /// Against the old confirmation, fails at "the premise". With
+        /// `confirm_lock` confirming a lock whose client has gone, fails at
+        /// "was spent".
+        #[test]
+        fn a_lock_client_that_goes_before_locked_leaves_the_session_locked() {
+            for crash in [false, true] {
+                let route = if crash { "crashed" } else { "gave up" };
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                let selections = session.app.client.selections;
+                let (lock, surfaces) =
+                    session
+                        .locker
+                        .ask_lock(&mut session.display, &mut session.state, true);
+                assert!(
+                    !session.told_locked(&lock),
+                    "{route}: the premise: the lock client has not been told \
+                     `locked`"
+                );
+
+                // Its replacement is connected first either way, the way one
+                // is started from another terminal. One that gave up stays
+                // connected throughout.
+                let recovery = Side::connect(&mut session.display, &mut session.state);
+                let mut going = std::mem::replace(&mut session.locker, recovery);
+                let _gave_up = if crash {
+                    drop(going);
+                    None
+                } else {
+                    for surface in &surfaces {
+                        surface.destroy();
+                    }
+                    lock.destroy();
+                    let error = going.pump_or_error(&mut session.display, &mut session.state);
+                    assert!(
+                        error.is_none(),
+                        "{route}: `destroy` before `locked` is legal, and the lock \
+                         client was disconnected for it: {error:?}"
+                    );
+                    Some(going)
+                };
+                session.app.pump(&mut session.display, &mut session.state);
+                // Frames go on reaching the screen, and there is nobody to
+                // tell.
+                session.show_all();
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session
+                        .state
+                        .lock
+                        .as_ref()
+                        .is_some_and(crate::lock::Lock::pending),
+                    "{route}: the `locked` owed to a lock client that has gone was \
+                     spent, on nobody"
+                );
+
+                assert!(
+                    session.state.lock.is_some(),
+                    "{route}: the lock client went before `locked` and the \
+                     session unlocked"
+                );
+                assert!(
+                    session.app.client.keyboard_on.is_none(),
+                    "{route}: and the application was given the keyboard"
+                );
+                let (app, _) = session.type_key();
+                assert!(!app, "{route}: and a key reached the application");
+
+                let lock = session.lock();
+                session.assert_sealed(&format!("{route}, then a new lock took over"), selections);
+                session.assert_unlocks(lock);
+            }
+        }
+
+        /// **An unlock before `locked` unlocks nothing**, from the lock's
+        /// own holder as from anyone. It is `invalid_unlock` -- the
+        /// protocol's error for unlocking a lock never told `locked` -- and
+        /// smithay posts it and then unlocks anyway, for the holder as for
+        /// the intruder in
+        /// `an_unlock_from_a_lock_that_was_never_granted_unlocks_nothing`.
+        /// While `locked` went out in the dispatch that granted the lock the
+        /// holder could not get here; now it can, and a lock client thrown
+        /// off for a protocol error leaves the session locked like one that
+        /// crashed.
+        ///
+        /// Against the old confirmation, fails at "the premise". With the
+        /// confirmation fixed and the holder's unlock passed to smithay
+        /// untouched, fails at "unlocked the session".
+        #[test]
+        fn an_unlock_before_locked_unlocks_nothing() {
+            let mut session = Session::new();
+            session.app.open(&mut session.display, &mut session.state);
+            let selections = session.app.client.selections;
+            let (lock, _surfaces) =
+                session
+                    .locker
+                    .ask_lock(&mut session.display, &mut session.state, true);
+            assert!(
+                !session
+                    .locker
+                    .client
+                    .locked
+                    .contains(&wayland_client::Proxy::id(&lock)),
+                "the premise: the lock client has not been told `locked`"
+            );
+
+            lock.unlock_and_destroy();
+            let error = session
+                .locker
+                .pump_or_error(&mut session.display, &mut session.state);
+            assert!(
+                session.state.lock.is_some(),
+                "the lock client unlocked the session before it was told `locked`"
+            );
+            let error = error.expect(
+                "the lock client was not disconnected: an unlock before `locked` \
+                 is `invalid_unlock`",
+            );
+            assert_eq!(
+                error.code,
+                ext_session_lock_v1::Error::InvalidUnlock as u32,
+                "disconnected, but not for `invalid_unlock`: {error:?}"
+            );
+
+            // Thrown off, it has gone the way a crashed one goes: a new lock
+            // client takes over.
+            session.locker = Side::connect(&mut session.display, &mut session.state);
+            session.app.pump(&mut session.display, &mut session.state);
+            assert!(
+                session.app.client.keyboard_on.is_none(),
+                "the lock client was thrown off and the application was given \
+                 the keyboard"
+            );
+            let lock = session.lock();
+            session.assert_sealed("an unlock before `locked`, then a new lock", selections);
+            session.assert_unlocks(lock);
         }
     }
 
