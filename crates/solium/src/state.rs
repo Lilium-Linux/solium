@@ -72,8 +72,8 @@ use smithay::{
                 WlrLayerShellHandler, WlrLayerShellState,
             },
             xdg::{
-                PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-                XdgToplevelSurfaceData,
+                PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface,
+                XdgShellHandler, XdgShellState, XdgToplevelSurfaceData,
                 decoration::{XdgDecorationHandler, XdgDecorationState},
                 dialog::{XdgDialogHandler, XdgDialogState},
             },
@@ -121,8 +121,10 @@ use monitors::anywhere_on;
 #[cfg(test)]
 use open::{ClientKind, FirstFocus, first_focus};
 pub(crate) use placement::Standing;
+use placement::outer_of;
 #[cfg(test)]
 use snapshot::to_rect;
+pub(crate) use snapshot::{Limits, limits_of};
 use workspaces::nothing_on_stage;
 #[cfg(test)]
 use workspaces::{SETTLED, put_away, staged};
@@ -726,6 +728,8 @@ struct Gesture {
 pub(crate) struct ResizeRequest {
     pub(crate) window: Window,
     /// Where a floating window would be put, for when no layout claims it.
+    /// Held to its client's own size limits since #115: see
+    /// [`crate::input::resize::limited`].
     pub(crate) wanted: Rectangle<i32, Logical>,
     /// Where the dragged edge should come to rest, per axis, in the layout's
     /// **outer** coordinate space.

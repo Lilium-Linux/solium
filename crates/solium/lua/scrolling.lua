@@ -18,6 +18,7 @@ local workspaces = require("workspaces")
 local modes = require("modes")
 local monitors = require("monitors")
 local dialogs = require("dialogs")
+local sizes = require("sizes")
 
 -- `views` is the arrangement, one strip per desk (see `view_for`), and
 -- `sol.keep` holds it so that it outlives `super+shift+r`: a reload is a change
@@ -88,6 +89,11 @@ local function options(monitor)
     -- keys to what it is handed.
     local out = { x = area.x, y = area.y, w = area.w, h = area.h }
     out.gap = config.gap
+    -- Each window's own minimum (#115), under the same two settings tiling
+    -- reads: a column is never laid out narrower than the widest in it. See
+    -- `sizes.lua`, and `a_scrolling_column_is_as_wide_as_its_windows_minimum`
+    -- in `script.rs`.
+    out.floors = sizes.floors()
     return out
 end
 

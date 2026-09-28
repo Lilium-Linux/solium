@@ -19,6 +19,7 @@ local workspaces = require("workspaces")
 local modes = require("modes")
 local monitors = require("monitors")
 local dialogs = require("dialogs")
+local sizes = require("sizes")
 
 -- `exiled` is the ids this layout has taken out of its trees because they are
 -- modal dialogs, and it is what makes `unset_modal` reversible: only a window
@@ -41,8 +42,12 @@ local dialogs = require("dialogs")
 -- `a_reload_leaves_a_tiled_desk_exactly_as_it_was` and
 -- `firefox_and_kitty_on_workspace_3_keep_their_places_through_a_reload` in
 -- `script.rs`.
+--
+-- `cramped` is the windows this layout has said are cramped -- laid out
+-- smaller than their own minimum (#115) -- and have been named in the log for,
+-- by id. See `say_cramped`.
 local kept = sol.keep("tiling", { trees = {} })
-local tiling = { active = false, trees = kept.trees, exiled = {}, leaving = {} }
+local tiling = { active = false, trees = kept.trees, exiled = {}, leaving = {}, cramped = {} }
 
 -- Whether the other windows close up the moment a close is asked for, rather
 -- than once the application has gone. Read when each event arrives rather than
@@ -169,6 +174,76 @@ local function options(monitor)
     -- In every options table, so the seams are held to it as well as the
     -- splits: `tree:drag_seam` and `tree:resize` read it from here.
     out.minimum = minimum()
+    -- Each window's own minimum (#115), under `tiling.client_minimum` and
+    -- `tiling.client_size_ignore`: what the tree lays each window out around,
+    -- splits and seams included. See `sizes.lua`.
+    out.floors = sizes.floors()
+    return out
+end
+
+-- Say once that a window is cramped, with the numbers, and forget it once it
+-- is not.
+--
+-- Once and not on every pass: `apply` runs once a frame for the length of a
+-- seam drag, and a window that stays cramped through one has been named
+-- already. A window that stops being cramped and then is again is named again,
+-- because that is news. See
+-- `a_window_that_cannot_have_its_minimum_is_cramped_and_said_once` in
+-- `script.rs`.
+local function say_cramped(slot, window)
+    if not slot.cramped then
+        tiling.cramped[slot.id] = nil
+        return
+    end
+    if tiling.cramped[slot.id] then
+        return
+    end
+    tiling.cramped[slot.id] = true
+    local floor = (window and sizes.floor(window)) or { w = 0, h = 0 }
+    local needs
+    if floor.w > 0 and floor.h > 0 then
+        needs = string.format("%.0fx%.0f", floor.w, floor.h)
+    elseif floor.w > 0 then
+        needs = string.format("%.0f wide", floor.w)
+    else
+        needs = string.format("%.0f high", floor.h)
+    end
+    sol.log(string.format(
+        "tiling: window %d needs at least %s, frame included, and its tile is %.0fx%.0f; "
+            .. "it is cramped, and its application's picture is cut to the tile",
+        slot.id,
+        needs,
+        slot.w,
+        slot.h
+    ))
+end
+
+-- Place one window the tree laid out, and hand back the rectangle it is at.
+--
+-- The tile itself, unless the window's own maximum is smaller than it and
+-- `tiling.client_maximum` is "center": then a pane of that size in the middle
+-- of the tile, with the tile handed over as `tile` so the compositor holds the
+-- client inside the tile and a dragged edge moves the tile's seam (#115). And
+-- `cramped`, which the tree put on the slot, goes with it either way.
+local function place(slot, window)
+    say_cramped(slot, window)
+    local pane = sizes.centred(window, slot)
+    if not pane then
+        sol.place(slot.id, slot)
+        return slot
+    end
+    pane.tile = { x = slot.x, y = slot.y, w = slot.w, h = slot.h }
+    pane.cramped = slot.cramped
+    sol.place(slot.id, pane)
+    return pane
+end
+
+-- The windows `sol.windows()` lists, by id.
+local function by_id(windows)
+    local out = {}
+    for _, window in ipairs(windows or sol.windows()) do
+        out[window.id] = window
+    end
     return out
 end
 
@@ -257,11 +332,11 @@ function tiling.apply(animation)
     -- snapshot says where that window *was*, and this pass is in the middle of
     -- moving it.
     local placed = {}
+    local windows = by_id()
     for _, each in ipairs(screens) do
         local tree = tree_for(each.monitor.name)
         for _, slot in ipairs(tree:layout(options(each.monitor.name))) do
-            sol.place(slot.id, slot)
-            placed[slot.id] = slot
+            placed[slot.id] = place(slot, windows[slot.id])
         end
     end
     -- A second pass rather than the tail of the first: a dialog on DP-1 may
@@ -500,8 +575,9 @@ sol.on("open", function(id)
         -- view. Placed here so it is already in its tile when the user goes
         -- there, and so that until then it is where its desk carries it.
         local key = monitors.key(elsewhere, monitor)
+        local windows = by_id()
         for _, slot in ipairs(tiling.trees[key]:layout(options(monitor))) do
-            sol.place(slot.id, slot)
+            place(slot, windows[slot.id])
         end
     end
 end)
@@ -619,6 +695,7 @@ sol.on("close", function(id)
     -- window back -- it would simply accumulate for the life of the session.
     tiling.exiled[id] = nil
     tiling.leaving[id] = nil
+    tiling.cramped[id] = nil
     dialogs.forget(id)
     tiling.apply()
 end)

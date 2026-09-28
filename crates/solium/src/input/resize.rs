@@ -21,7 +21,7 @@ use smithay::{
         wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
         wayland_server::protocol::wl_surface::WlSurface,
     },
-    utils::{Logical, Point, Rectangle},
+    utils::{Logical, Point, Rectangle, Size},
 };
 
 use crate::state::Solium;
@@ -468,6 +468,43 @@ fn resized(
     rect
 }
 
+/// `rect`, a drag's rectangle for a window, held to what its client accepts
+/// (#115): at least `least` and at most `most`, outer terms, 0 on a side being
+/// no limit there.
+///
+/// After [`resized`] and not inside it, which is what leaves #124's relative
+/// gesture exactly as it was: `resized` and [`dragged_edge`] are untouched, and
+/// the seam a tiled drag moves is still `dragged_edge`'s. This is the floating
+/// path's rectangle only -- what the frame is drawn at while the client
+/// catches up (#113) -- and a frame drawn at a size the client will refuse is
+/// the frame that jumps when the client answers. The edge the pointer does not
+/// hold stays put, as it does in `resized`, so a left or top drag that stops
+/// at a limit stops there and does not slide.
+///
+/// The minimum wins where a client's two cross, which neither protocol allows
+/// and a client can still send.
+pub(crate) fn limited(
+    rect: Rectangle<i32, Logical>,
+    edges: ResizeEdge,
+    least: Size<i32, Logical>,
+    most: Size<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    let held = |size: i32, least: i32, most: i32| {
+        let size = if most > 0 { size.min(most) } else { size };
+        if least > 0 { size.max(least) } else { size }
+    };
+    let mut out = rect;
+    out.size.w = held(rect.size.w, least.w, most.w);
+    out.size.h = held(rect.size.h, least.h, most.h);
+    if pulls_left(edges) {
+        out.loc.x = rect.loc.x + rect.size.w - out.size.w;
+    }
+    if pulls_top(edges) {
+        out.loc.y = rect.loc.y + rect.size.h - out.size.h;
+    }
+    out
+}
+
 impl PointerGrab<Solium> for ResizeGrab {
     fn motion(
         &mut self,
@@ -494,7 +531,11 @@ impl PointerGrab<Solium> for ResizeGrab {
         // which is in the client's space and already floored. The layout used
         // to be handed `event.location` here, which is the whole of #124. See
         // [`dragged_edge`].
-        let wanted = self.resized(event.location);
+        //
+        // `wanted` is held to what the client accepts before anything reads
+        // it (#115). See [`limited`].
+        let (least, most) = data.outer_limits(&self.window);
+        let wanted = limited(self.resized(event.location), self.edges, least, most);
         data.pending_resize = Some(crate::state::ResizeRequest {
             window: self.window.clone(),
             wanted,
@@ -638,6 +679,36 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
         Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    /// **#115: a drag held at a client's limit keeps the edge it does not
+    /// hold.** A top-left drag that asks for 50x40 of a window that cannot go
+    /// under 300x200 stops at 300x200 with its right and bottom edges where
+    /// they were, rather than growing out of them. And where a client's
+    /// minimum is over its maximum, the minimum wins.
+    #[test]
+    fn a_drag_held_at_a_limit_keeps_the_edge_it_does_not_hold() {
+        let least = Size::from((300, 200));
+        let held = limited(
+            rect(450, 460, 50, 40),
+            ResizeEdge::TopLeft,
+            least,
+            Size::default(),
+        );
+        assert_eq!(held, rect(200, 300, 300, 200));
+        assert_eq!(
+            (held.loc.x + held.size.w, held.loc.y + held.size.h),
+            (500, 500),
+            "the edges the pointer is not holding moved"
+        );
+
+        let crossed = limited(
+            rect(0, 0, 250, 250),
+            ResizeEdge::BottomRight,
+            least,
+            Size::from((100, 100)),
+        );
+        assert_eq!(crossed.size, least);
     }
 
     #[test]

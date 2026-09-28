@@ -26,6 +26,35 @@ pub(crate) enum Standing {
     /// back onto a screen. A tiled pane is still tiled, at the rectangle it was
     /// brought back to; a floating one is still floating.
     Kept,
+    /// A layout's tile, which is this outer rectangle, with the window placed
+    /// inside it smaller than it: `sol.place`'s `tile = { x, y, w, h }`, which
+    /// `tiling.lua` says for a window centred at its own maximum size (#115).
+    ///
+    /// The tile is what `Pane::placed` records, so the client is held inside
+    /// the tile rather than inside its smaller pane, and a tiled edge drag
+    /// begins from the tile's edges -- `Solium::pane_laid_out` reads that
+    /// field, and a seam is a tile's edge, not the window's. Begun from the
+    /// window's, the seam would jump inwards by the margin the centring left on
+    /// the first frame of the drag, which is #124 by another door.
+    /// `real_client::client_sizes::a_centred_window_is_dragged_from_its_tile`.
+    Within(Rectangle<i32, Logical>),
+}
+
+/// A script's rectangle as a pane's outer one: rounded to whole pixels, and
+/// never smaller than one.
+pub(super) fn outer_of(rect: Rect) -> Rectangle<i32, Logical> {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a rect from a script is screen-sized"
+    )]
+    Rectangle::new(
+        (rect.x.round() as i32, rect.y.round() as i32).into(),
+        (
+            (rect.w.round() as i32).max(1),
+            (rect.h.round() as i32).max(1),
+        )
+            .into(),
+    )
 }
 
 impl Solium {
@@ -193,18 +222,7 @@ impl Solium {
             return;
         };
 
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a rect from a script is screen-sized"
-        )]
-        let outer = Rectangle::new(
-            (rect.x.round() as i32, rect.y.round() as i32).into(),
-            (
-                (rect.w.round() as i32).max(1),
-                (rect.h.round() as i32).max(1),
-            )
-                .into(),
-        );
+        let outer = outer_of(rect);
 
         self.move_pane(pane, outer, was, animation, now, standing);
     }
@@ -344,6 +362,7 @@ impl Solium {
             // a tile must not hold anything. See `Standing`.
             match standing {
                 Standing::Tile => held.set_placed(outer),
+                Standing::Within(tile) => held.set_placed(tile),
                 Standing::Free => held.untile(),
                 // Moved and not set, so a let-go a leaving pane is waiting on
                 // is still owed after a rescue. See `Pane::move_tile`, and

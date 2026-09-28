@@ -250,15 +250,30 @@ impl Solium {
                     rect,
                     animation,
                     tile,
+                    inside,
+                    cramped,
                 } => {
-                    let standing = if tile { Standing::Tile } else { Standing::Free };
+                    let standing = match (tile, inside) {
+                        (false, _) => Standing::Free,
+                        (true, Some(inside)) => Standing::Within(outer_of(inside)),
+                        (true, None) => Standing::Tile,
+                    };
                     self.place(id, rect, animation, now, standing);
+                    // The layout's word for this placement, said afresh each
+                    // time; a window placed out of a tile is in no tile to be
+                    // cramped in.
+                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id)
+                        && let Some(pane) = self.panes.get_mut(pane)
+                    {
+                        pane.set_cramped(cramped && tile);
+                    }
                 }
                 Command::Unplace { id } => {
                     if let Some(pane) = self.panes.by_script_id(id).map(Pane::id)
                         && let Some(pane) = self.panes.get_mut(pane)
                     {
                         pane.untile();
+                        pane.set_cramped(false);
                     }
                 }
                 Command::Close { id } => {

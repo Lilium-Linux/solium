@@ -775,6 +775,14 @@ impl Solium {
 
     pub(super) fn trigger_open(&mut self, pane: crate::pane::PaneId) -> Opened {
         let id = pane.get();
+        // The size limits this open is about to tell the layouts, recorded as
+        // told, so the commit that brought them does not tell them again
+        // (#115). See `Solium::notice_limits`.
+        if let Some(held) = self.panes.get_mut(pane)
+            && let Some(limits) = held.client().map(crate::state::limits_of)
+        {
+            held.set_limits(limits);
+        }
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return Opened::default();

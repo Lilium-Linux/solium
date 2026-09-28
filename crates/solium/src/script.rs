@@ -28,7 +28,7 @@ use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use mlua::{IntoLua, Lua, Table, Value};
-use smithay::utils::{Logical, Point, Rectangle};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use crate::present::{Curve, Frame};
 
@@ -149,6 +149,24 @@ pub(crate) struct WindowInfo {
     /// for it is a slot kept for nothing. `tiling.adopt` and
     /// `scrolling.adopt` are the shipped readers.
     pub(crate) leaving: bool,
+    /// Which application this is, by the name it gives itself: its xdg
+    /// `app_id`, or an X11 window's `WM_CLASS` class. Empty for a window
+    /// whose application has not arrived, or said nothing. See
+    /// `Solium::script_app_id`.
+    pub(crate) app_id: String,
+    /// The smallest and the largest this window's own application says it
+    /// can be (#115), in the same terms as `rect` -- the frame's insets added
+    /// to what the client said of its own rectangle -- so a layout compares
+    /// them with a tile directly. `None` when the client limited neither side;
+    /// 0 on one side is no limit on that side. See `state::limits_of` for
+    /// where each protocol keeps them.
+    pub(crate) min: Option<Size<i32, Logical>>,
+    pub(crate) max: Option<Size<i32, Logical>>,
+    /// Whether the layout in charge said, when it last placed this window,
+    /// that its tile is smaller than the window's own minimum: `sol.place`'s
+    /// `cramped`. A layout's word, not the compositor's measure, because only
+    /// the layout knows whether it is respecting that minimum at all.
+    pub(crate) cramped: bool,
 }
 
 /// How a window is drawn this instant, as `Solium::window_under` reads it:
@@ -374,6 +392,16 @@ pub(crate) enum Command {
         /// unless the script said `tile = false`, which `dialogs.lua` does for
         /// a modal it centres over its parent. See `state::Standing`.
         tile: bool,
+        /// The tile `rect` sits inside, when the window is placed smaller than
+        /// the tile it has: `tile = { x, y, w, h }`, which `tiling.lua` says
+        /// for a window centred at its own maximum size (#115). The client is
+        /// held inside this, and an edge drag moves the seam from its edges,
+        /// since the tile and not the window is what a seam bounds. `None` is
+        /// `rect` itself. See `state::Standing::Within`.
+        inside: Option<Rect>,
+        /// Whether the layout says this tile is smaller than the window's own
+        /// minimum. See `WindowInfo::cramped`.
+        cramped: bool,
     },
     /// No layout holds this window in a tile any more: whatever it commits,
     /// it is drawn at. What `modes.use` sends for every window when the layout
@@ -1225,6 +1253,52 @@ fn minimum_from(options: &Table) -> solium_layout::Minimum {
     }
 }
 
+/// `options.floors`, each window's own floor (#115): `{ [id] = { w = ..., h =
+/// ... } }`, frame included. What `tiling.lua` and `scrolling.lua` build from
+/// `sol.windows()`'s `min` for every call they make.
+///
+/// Absent is no floors, which is every options table before #115. A side that
+/// is not a finite size of zero or more is no floor on that side, and an entry
+/// that is not a table under a window's id is no floor at all -- quietly, for
+/// `minimum_from`'s reason: this runs on every layout call.
+fn floors_from(options: &Table) -> solium_layout::Floors {
+    let Ok(Value::Table(floors)) = options.get::<Value>("floors") else {
+        return solium_layout::Floors::new();
+    };
+    floors
+        .pairs::<Value, Value>()
+        .filter_map(Result::ok)
+        .filter_map(|(id, floor)| {
+            let id = number(&id).filter(|id| id.is_finite() && *id >= 0.0)?;
+            let Value::Table(floor) = floor else {
+                return None;
+            };
+            let side = |name: &str| {
+                floor
+                    .get::<Value>(name)
+                    .ok()
+                    .as_ref()
+                    .and_then(number)
+                    .filter(|size| size.is_finite() && *size >= 0.0)
+                    .unwrap_or(0.0)
+            };
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a window id is a small whole number, and checked to be one above"
+            )]
+            let id = id as u64;
+            Some((
+                id,
+                solium_layout::Minimum {
+                    w: side("w"),
+                    h: side("h"),
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Which way a script means a seam to run.
 ///
 /// "width" is the seam that bounds a window's width, and that seam is cut
@@ -1618,6 +1692,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     //
     // `parent` is a number, `false`, or absent; see `Parentage::to_value` for
     // why the middle one exists.
+    //
+    // `min` and `max` are here for the same reason (#115): `{ w, h }` in the
+    // window's own terms, frame included, or absent when the application
+    // limited neither side. `cramped` is the layout's own word coming back,
+    // from `sol.place`. `app_id` is what `tiling.client_size_ignore` matches.
     sol.set(
         "windows",
         lua.create_function(|lua, ()| {
@@ -1636,6 +1715,10 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("modal", window.modal)?;
                 entry.set("parent", window.parent.to_value(lua)?)?;
                 entry.set("leaving", window.leaving)?;
+                entry.set("app_id", window.app_id.clone())?;
+                entry.set("min", size_table(lua, window.min)?)?;
+                entry.set("max", size_table(lua, window.max)?)?;
+                entry.set("cramped", window.cramped)?;
                 windows.set(index + 1, entry)?;
             }
             Ok(windows)
@@ -2524,13 +2607,35 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // layout's arrangement wants that and gets it by default; a window a
     // layout places without tiling it — a dialog centred on its parent — says
     // so, and is drawn at whatever it commits.
+    //
+    // `tile` may instead be the tile itself, `{ x, y, w, h }`, when the window
+    // is placed smaller than the tile it has -- `tiling.lua` centring a window
+    // at its own maximum (#115). The window lives at the rect; the tile is
+    // what holds its client and what an edge drag moves a seam from. See
+    // `Command::Place::inside`.
+    //
+    // `cramped = true` is the layout saying this tile is smaller than the
+    // window's own minimum, which `sol.windows()` reports back. Said afresh on
+    // every placement, so a placement that does not say it is not cramped.
     sol.set(
         "place",
         lua.create_function(|lua, (id, options): (u64, Table)| {
             let Some(rect) = rect_from(&options)? else {
                 return Err(mlua::Error::runtime("sol.place needs a rect"));
             };
-            let tile = options.get::<Option<bool>>("tile")?.unwrap_or(true);
+            let (tile, inside) = match options.get::<Value>("tile")? {
+                Value::Table(within) => match rect_from(&within)? {
+                    Some(within) => (true, Some(within)),
+                    None => {
+                        return Err(mlua::Error::runtime(
+                            "sol.place's tile is true, false, or the tile's { x, y, w, h }",
+                        ));
+                    }
+                },
+                Value::Boolean(false) => (false, None),
+                _ => (true, None),
+            };
+            let cramped = options.get::<Option<bool>>("cramped")?.unwrap_or(false);
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 pending.commands.push(Command::Place {
@@ -2538,6 +2643,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     rect,
                     animation,
                     tile,
+                    inside,
+                    cramped,
                 });
             })
         })?,
@@ -2770,6 +2877,17 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     Ok(sol)
 }
 
+/// A size as a script reads one, `{ w = ..., h = ... }`, or nil for none.
+fn size_table(lua: &Lua, size: Option<Size<i32, Logical>>) -> mlua::Result<Value> {
+    let Some(size) = size else {
+        return Ok(Value::Nil);
+    };
+    let table = lua.create_table()?;
+    table.set("w", size.w)?;
+    table.set("h", size.h)?;
+    Ok(Value::Table(table))
+}
+
 fn snapshot(lua: &Lua) -> mlua::Result<Snapshot> {
     Ok(lua
         .app_data_ref::<Snapshot>()
@@ -2925,7 +3043,12 @@ struct Scrolling(solium_layout::scroller::Scroller);
 
 impl mlua::UserData for Scrolling {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // Every call that is handed `options` takes `options.floors` from it
+        // first (#115), since each of them measures columns -- to lay them
+        // out, or to bring one into view -- and a column is as wide as its
+        // widest floor. See `Scroller::set_floors`.
         methods.add_method_mut("insert", |_, this, (id, options): (u64, Table)| {
+            this.0.set_floors(floors_from(&options));
             this.0.insert(id, area(&options)?, tuning(&options)?);
             Ok(())
         });
@@ -2933,6 +3056,7 @@ impl mlua::UserData for Scrolling {
         methods.add_method_mut(
             "insert_into_column",
             |_, this, (id, options): (u64, Table)| {
+                this.0.set_floors(floors_from(&options));
                 this.0
                     .insert_into_active(id, area(&options)?, tuning(&options)?);
                 Ok(())
@@ -2945,11 +3069,13 @@ impl mlua::UserData for Scrolling {
         });
 
         methods.add_method_mut("focus_window", |_, this, (id, options): (u64, Table)| {
+            this.0.set_floors(floors_from(&options));
             this.0.focus_window(id, area(&options)?, tuning(&options)?);
             Ok(())
         });
 
         methods.add_method_mut("focus_sideways", |_, this, (by, options): (i32, Table)| {
+            this.0.set_floors(floors_from(&options));
             this.0
                 .focus_sideways(by as isize, area(&options)?, tuning(&options)?);
             Ok(())
@@ -2961,6 +3087,7 @@ impl mlua::UserData for Scrolling {
         });
 
         methods.add_method_mut("move_column", |_, this, (by, options): (i32, Table)| {
+            this.0.set_floors(floors_from(&options));
             this.0
                 .move_column(by as isize, area(&options)?, tuning(&options)?);
             Ok(())
@@ -2972,6 +3099,7 @@ impl mlua::UserData for Scrolling {
         });
 
         methods.add_method_mut("expel", |_, this, options: Table| {
+            this.0.set_floors(floors_from(&options));
             this.0.expel(area(&options)?, tuning(&options)?);
             Ok(())
         });
@@ -2979,6 +3107,7 @@ impl mlua::UserData for Scrolling {
         methods.add_method_mut(
             "move_to_column_of",
             |_, this, (id, target, options): (u64, u64, Table)| {
+                this.0.set_floors(floors_from(&options));
                 this.0
                     .move_to_column_of(id, target, area(&options)?, tuning(&options)?);
                 Ok(())
@@ -2986,11 +3115,13 @@ impl mlua::UserData for Scrolling {
         );
 
         methods.add_method_mut("widen", |_, this, (id, by, options): (u64, f64, Table)| {
+            this.0.set_floors(floors_from(&options));
             this.0.widen(id, by, area(&options)?, tuning(&options)?);
             Ok(())
         });
 
         methods.add_method_mut("cycle_width", |_, this, options: Table| {
+            this.0.set_floors(floors_from(&options));
             this.0.cycle_width(area(&options)?, tuning(&options)?);
             Ok(())
         });
@@ -3032,7 +3163,8 @@ impl mlua::UserData for Scrolling {
             Ok(out)
         });
 
-        methods.add_method("layout", |lua, this, options: Table| {
+        methods.add_method_mut("layout", |lua, this, options: Table| {
+            this.0.set_floors(floors_from(&options));
             let out = lua.create_table()?;
             for (index, (id, rect)) in this
                 .0
@@ -3062,10 +3194,16 @@ impl mlua::UserData for TilingTree {
         // `target` is the window to split and `x`/`y` are where the pointer
         // was; both may be nil, and then the pointer alone decides — which is
         // how Hyprland picks what to divide.
+        //
+        // Every call that is handed `options` takes `options.floors` from it
+        // first (#115): each of them lays the tree out, to split a tile, move
+        // a seam or place the windows, and the tree is laid out around each
+        // window's own floor. See `Tiling::set_floors`.
         methods.add_method_mut(
             "insert",
             |_, this, (id, target, x, y, options): (u64, Option<u64>, Option<f64>, Option<f64>, Table)| {
                 let at = x.zip(y);
+                this.0.set_floors(floors_from(&options));
                 this.0
                     .insert(id, target, at, area(&options)?, tuning(&options)?);
                 Ok(())
@@ -3080,6 +3218,7 @@ impl mlua::UserData for TilingTree {
             "insert_fitting",
             |_, this, (id, target, x, y, options): (u64, Option<u64>, Option<f64>, Option<f64>, Table)| {
                 let at = x.zip(y);
+                this.0.set_floors(floors_from(&options));
                 Ok(this
                     .0
                     .insert_fitting(id, target, at, area(&options)?, tuning(&options)?))
@@ -3091,6 +3230,7 @@ impl mlua::UserData for TilingTree {
         // and leave the tree alone. No target and no pointer, because the tile
         // under the pointer is the one that has just been found to be full.
         methods.add_method_mut("insert_largest", |_, this, (id, options): (u64, Table)| {
+            this.0.set_floors(floors_from(&options));
             Ok(this
                 .0
                 .insert_largest(id, area(&options)?, tuning(&options)?))
@@ -3124,7 +3264,10 @@ impl mlua::UserData for TilingTree {
             "resize",
             |_, this, (id, axis, by, options): (u64, String, f64, Option<Table>)| {
                 let (area, settings) = match options {
-                    Some(options) => (area(&options)?, tuning(&options)?),
+                    Some(options) => {
+                        this.0.set_floors(floors_from(&options));
+                        (area(&options)?, tuning(&options)?)
+                    }
                     None => (Slot::default(), Settings::default()),
                 };
                 this.0.resize(id, axis_named(&axis), by, area, settings);
@@ -3155,6 +3298,7 @@ impl mlua::UserData for TilingTree {
                     );
                     return Ok(());
                 };
+                this.0.set_floors(floors_from(&options));
                 this.0.drag_seam(
                     id,
                     edge,
@@ -3177,8 +3321,12 @@ impl mlua::UserData for TilingTree {
         });
 
         // Rects come back tagged with the window they belong to, because tree
-        // order is not the order the script knows its windows in.
-        methods.add_method("layout", |lua, this, options: Table| {
+        // order is not the order the script knows its windows in -- and with
+        // `cramped = true` on a tile smaller than its window's own floor
+        // (#115), which the rect can be handed straight on to `sol.place` with.
+        // See `Tiling::cramped`.
+        methods.add_method_mut("layout", |lua, this, options: Table| {
+            this.0.set_floors(floors_from(&options));
             let out = lua.create_table()?;
             for (index, (id, rect)) in this
                 .0
@@ -3192,6 +3340,9 @@ impl mlua::UserData for TilingTree {
                 entry.set("y", rect.y)?;
                 entry.set("w", rect.w)?;
                 entry.set("h", rect.h)?;
+                if this.0.cramped(id, rect) {
+                    entry.set("cramped", true)?;
+                }
                 out.set(index + 1, entry)?;
             }
             Ok(out)
@@ -3680,6 +3831,10 @@ mod tests {
                 modal: false,
                 parent: Parentage::None,
                 leaving: false,
+                app_id: String::new(),
+                min: None,
+                max: None,
+                cramped: false,
             }],
             monitors: vec![MonitorInfo {
                 name: "test-1".to_owned(),
@@ -4527,6 +4682,10 @@ mod tests {
             modal,
             parent,
             leaving: false,
+            app_id: String::new(),
+            min: None,
+            max: None,
+            cramped: false,
         };
         snapshot.windows = vec![
             window(1, false, Parentage::None),
@@ -5012,6 +5171,10 @@ mod tests {
                     modal: false,
                     parent: Parentage::None,
                     leaving: false,
+                    app_id: String::new(),
+                    min: None,
+                    max: None,
+                    cramped: false,
                 })
                 .collect(),
             monitors: vec![MonitorInfo {
@@ -6351,6 +6514,10 @@ mod dialogs {
             modal: false,
             parent: Parentage::None,
             leaving: false,
+            app_id: String::new(),
+            min: None,
+            max: None,
+            cramped: false,
         }
     }
 
@@ -8527,6 +8694,439 @@ mod dialogs {
 
         fn open(scripts: &mut Scripts, id: u64, ids: &[u64]) -> Outcome {
             scripts.opened(id, desk_at(ids, (500.0, 500.0)))
+        }
+    }
+
+    /// **#115: what a window's own application says about its size**, and
+    /// what the shipped layouts do with it.
+    ///
+    /// Against the shipped `tiling.lua`, `scrolling.lua` and `sizes.lua`, as
+    /// `init.lua` loads them, on one 2560x1440 screen at the shipped 12px gap
+    /// and 160x96 minimum. Windows 1 and 2 side by side take 1262 each of the
+    /// 2536 inside the gap, which is the arrangement most of these start from.
+    /// The limits are what `sol.windows()` carries -- frame included, as the
+    /// compositor adds it -- so nothing here converts anything.
+    mod client_sizes {
+        use super::super::Outcome;
+        use super::*;
+        use smithay::utils::Size;
+
+        /// The shipped layouts with `before` run ahead of them, and every
+        /// `sol.log` line kept in `_G.logged`. A directory per call, for the
+        /// reason [`scripts`] gives.
+        fn layouts_with(before: &str) -> Scripts {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let directory = std::env::temp_dir().join(format!("solium-sizes-{serial}"));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    "package.path = {shipped:?} .. \"/?.lua\"\n\
+                     _G.logged = {{}}\n\
+                     local log = sol.log\n\
+                     sol.log = function(message)\n\
+                         _G.logged[#_G.logged + 1] = message\n\
+                         log(message)\n\
+                     end\n\
+                     {before}\n\
+                     require(\"modes\")\n\
+                     require(\"workspaces\")\n\
+                     require(\"tiling\")\n\
+                     require(\"scrolling\")\n",
+                    shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                ),
+            )
+            .expect("writing the entry point");
+            Scripts::load(&entry).expect("loading the shipped layouts")
+        }
+
+        fn logged(scripts: &Scripts) -> String {
+            scripts.evaluate("return table.concat(_G.logged or {}, \"\\n\")")
+        }
+
+        fn size(w: i32, h: i32) -> Option<Size<i32, Logical>> {
+            Some(Size::from((w, h)))
+        }
+
+        /// Window `id` with nothing to say about its size.
+        fn plain(id: u64) -> WindowInfo {
+            window(id, 800.0, 600.0)
+        }
+
+        /// Window `id`, whose application says it cannot go under `min`.
+        fn at_least(id: u64, w: i32, h: i32) -> WindowInfo {
+            WindowInfo {
+                min: size(w, h),
+                ..plain(id)
+            }
+        }
+
+        /// Window `id`, whose application says it cannot go over `max`.
+        fn at_most(id: u64, w: i32, h: i32) -> WindowInfo {
+            WindowInfo {
+                max: size(w, h),
+                ..plain(id)
+            }
+        }
+
+        fn with_app(app_id: &str, window: WindowInfo) -> WindowInfo {
+            WindowInfo {
+                app_id: app_id.to_owned(),
+                ..window
+            }
+        }
+
+        /// These windows, with the pointer at `cursor`.
+        fn desk(windows: Vec<WindowInfo>, cursor: (f64, f64)) -> Snapshot {
+            Snapshot {
+                cursor,
+                ..snapshot(windows)
+            }
+        }
+
+        /// A layout switched on over an empty desk, so every window after
+        /// this arrives through `open`.
+        fn switched_on(scripts: &mut Scripts, key: &str) {
+            assert!(
+                scripts.key(key, desk(Vec::new(), (0.0, 0.0))).handled,
+                "{key} was not handled"
+            );
+        }
+
+        /// Windows 1 and 2 side by side under tiling: 2 opened with the
+        /// pointer over the right half of 1, so it takes the right.
+        fn side_by_side(scripts: &mut Scripts) {
+            switched_on(scripts, "super+t");
+            let _ = scripts.opened(1, desk(vec![plain(1)], (2000.0, 700.0)));
+            let _ = scripts.opened(2, desk(vec![plain(1), plain(2)], (2000.0, 700.0)));
+        }
+
+        /// The last placement of window `id` in `commands`: the rect, the tile
+        /// it was placed inside when that is not the rect, and whether the
+        /// layout said it is cramped.
+        fn last_place(commands: &[Command], id: u64) -> Option<(Rect, Option<Rect>, bool)> {
+            commands.iter().rev().find_map(|command| match command {
+                Command::Place {
+                    id: placed,
+                    rect,
+                    inside,
+                    cramped,
+                    ..
+                } if *placed == id => Some((*rect, *inside, *cramped)),
+                _ => None,
+            })
+        }
+
+        fn width_of(outcome: &Outcome, id: u64) -> f64 {
+            last_place(&outcome.commands, id)
+                .map(|(rect, _, _)| rect.w)
+                .unwrap_or_else(|| panic!("window {id} was not placed: {:?}", outcome.commands))
+        }
+
+        /// **`sol.windows()` says how small and how large each window can
+        /// be**, which application it is, and whether the layout said it is
+        /// cramped -- the four as a layout reads them, in one pass. Absent is
+        /// `nil`, so `if window.min then` is the question to ask.
+        #[test]
+        fn sol_windows_says_how_small_and_how_large_each_window_can_be() {
+            let mut scripts = layouts_with(
+                "_G.seen = {}\n\
+                 sol.on(\"layout\", function()\n\
+                     for _, window in ipairs(sol.windows()) do\n\
+                         local function size(of)\n\
+                             return of and string.format(\"%dx%d\", of.w, of.h) or \"nil\"\n\
+                         end\n\
+                         _G.seen[#_G.seen + 1] = string.format(\"%d %s min=%s max=%s cramped=%s\",\n\
+                             window.id, window.app_id, size(window.min), size(window.max),\n\
+                             tostring(window.cramped))\n\
+                     end\n\
+                 end)",
+            );
+            let windows = vec![
+                WindowInfo {
+                    max: size(1200, 0),
+                    cramped: true,
+                    ..with_app("firefox", at_least(1, 820, 0))
+                },
+                with_app("kitty", plain(2)),
+            ];
+            let _ = scripts.relayout(desk(windows, (0.0, 0.0)));
+            assert_eq!(
+                scripts.evaluate("return table.concat(_G.seen, \", \")"),
+                "1 firefox min=820x0 max=1200x0 cramped=true, \
+                 2 kitty min=nil max=nil cramped=false"
+            );
+        }
+
+        /// **A window whose minimum is wider than its tile is given the room**,
+        /// taken from the window beside it -- which is the whole of #115: the
+        /// tile no longer lies about what the client will draw.
+        ///
+        /// Window 1 says 1600 wide; it had 1262. Window 2 gives up the
+        /// difference and is left 924, well over the minimum. Neither is
+        /// cramped: the room was there.
+        #[test]
+        fn a_window_with_a_minimum_wider_than_its_tile_is_given_the_room() {
+            let mut scripts = layouts_with("");
+            side_by_side(&mut scripts);
+            let told = scripts.relayout(desk(vec![at_least(1, 1600, 0), plain(2)], (0.0, 0.0)));
+            let (one, _, cramped) = last_place(&told.commands, 1).expect("window 1 placed");
+            let (two, _, _) = last_place(&told.commands, 2).expect("window 2 placed");
+            assert!(
+                about(one.w, 1600.0),
+                "window 1 was not given its minimum: {one:?}"
+            );
+            assert!(
+                about(two.w, 924.0) && about(two.x, 12.0 + 1600.0 + 12.0),
+                "{two:?}"
+            );
+            assert!(!cramped, "a window with the room it needs is not cramped");
+        }
+
+        /// **`"ignore"` and `client_size_ignore` are the arrangement before
+        /// #115**, for the minimum and the maximum alike: window 1 keeps its
+        /// 1262 however wide it says it must be, and a window no wider than
+        /// 800 fills its tile from the corner rather than being centred.
+        ///
+        /// `client_size_ignore` by the application's name, and only that
+        /// application: `firefox` is not believed, `kitty` beside it still is.
+        #[test]
+        fn ignore_and_client_size_ignore_lay_out_what_was_laid_out_before() {
+            let wide = |app: &str| with_app(app, at_least(1, 1600, 0));
+            for (before, app, says) in [
+                (
+                    "require(\"config\").tiling.client_minimum = \"ignore\"",
+                    "kitty",
+                    "ignore",
+                ),
+                (
+                    "require(\"config\").tiling.client_size_ignore = { \"firefox\" }",
+                    "firefox",
+                    "client_size_ignore",
+                ),
+            ] {
+                let mut scripts = layouts_with(before);
+                side_by_side(&mut scripts);
+                let told = scripts.relayout(desk(vec![wide(app), plain(2)], (0.0, 0.0)));
+                assert!(
+                    about(width_of(&told, 1), 1262.0),
+                    "{says}: the minimum was still heard: {:?}",
+                    told.commands
+                );
+            }
+            let mut scripts =
+                layouts_with("require(\"config\").tiling.client_size_ignore = { \"firefox\" }");
+            side_by_side(&mut scripts);
+            let told = scripts.relayout(desk(vec![wide("kitty"), plain(2)], (0.0, 0.0)));
+            assert!(
+                about(width_of(&told, 1), 1600.0),
+                "an application not on the list was not heard: {:?}",
+                told.commands
+            );
+
+            for before in [
+                "require(\"config\").tiling.client_maximum = \"ignore\"",
+                "require(\"config\").tiling.client_size_ignore = { \"firefox\" }",
+            ] {
+                let mut scripts = layouts_with(before);
+                switched_on(&mut scripts, "super+t");
+                let told = scripts.opened(
+                    1,
+                    desk(vec![with_app("firefox", at_most(1, 800, 600))], (0.0, 0.0)),
+                );
+                let (rect, inside, _) = last_place(&told.commands, 1).expect("placed");
+                assert!(
+                    about(rect.w, 2536.0) && inside.is_none(),
+                    "{before}: the maximum was still heard: {rect:?} in {inside:?}"
+                );
+            }
+        }
+
+        /// **A setting that is not one of its words is read as the default**,
+        /// and a `client_size_ignore` that is not a list believes every
+        /// application -- so a typo in either is the shipped behaviour and not
+        /// the old one.
+        #[test]
+        fn a_setting_that_is_not_one_of_its_words_is_read_as_the_default() {
+            for before in [
+                "require(\"config\").tiling.client_minimum = \"respekt\"",
+                "require(\"config\").tiling.client_size_ignore = \"firefox\"",
+            ] {
+                let mut scripts = layouts_with(before);
+                side_by_side(&mut scripts);
+                let told = scripts.relayout(desk(
+                    vec![with_app("firefox", at_least(1, 1600, 0)), plain(2)],
+                    (0.0, 0.0),
+                ));
+                assert!(
+                    about(width_of(&told, 1), 1600.0),
+                    "{before}: the minimum was not heard: {:?}",
+                    told.commands
+                );
+            }
+            let mut scripts =
+                layouts_with("require(\"config\").tiling.client_maximum = \"centre\"");
+            switched_on(&mut scripts, "super+t");
+            let told = scripts.opened(1, desk(vec![at_most(1, 800, 600)], (0.0, 0.0)));
+            let (rect, inside, _) = last_place(&told.commands, 1).expect("placed");
+            assert!(
+                about(rect.w, 800.0) && inside.is_some(),
+                "\"centre\" was not read as \"center\": {rect:?} in {inside:?}"
+            );
+        }
+
+        /// **`options.floors` takes sizes, and anything else is no floor**: a
+        /// side that is not a size is none on that side, an entry that is not
+        /// a table is none at all. The one real floor still moves the seam,
+        /// and one the tree cannot meet comes back `cramped`.
+        #[test]
+        fn floors_that_are_not_sizes_are_no_floors() {
+            let scripts = layouts_with("");
+            let lay_out = |floors: &str| {
+                scripts.evaluate(&format!(
+                    "local area = {{ x = 0, y = 0, w = 2000, h = 1000, gap = 0, split = 0.5,\n\
+                         floors = {floors} }}\n\
+                     local tree = sol.layout.tree()\n\
+                     tree:insert(1, nil, nil, nil, area)\n\
+                     tree:insert(2, 1, nil, nil, area)\n\
+                     local out = {{}}\n\
+                     for _, slot in ipairs(tree:layout(area)) do\n\
+                         out[#out + 1] = string.format(\"%d=%.0f%s\", slot.id, slot.w,\n\
+                             slot.cramped and \" cramped\" or \"\")\n\
+                     end\n\
+                     return table.concat(out, \",\")"
+                ))
+            };
+            assert_eq!(
+                lay_out("{ [1] = { w = 1500, h = \"tall\" }, [2] = \"wide\", [3] = { w = 0/0 } }"),
+                "1=1500,2=500"
+            );
+            assert_eq!(lay_out("{ [1] = { w = 2500 } }"), "1=1900 cramped,2=100");
+        }
+
+        /// **A window whose maximum is smaller than its tile is its maximum,
+        /// in the middle of the tile** -- and the tile goes with it as `tile`,
+        /// so the compositor holds the client inside the tile and a dragged
+        /// edge moves the tile's seam.
+        #[test]
+        fn a_window_whose_maximum_is_smaller_than_its_tile_is_centred_in_it() {
+            let mut scripts = layouts_with("");
+            switched_on(&mut scripts, "super+t");
+            let told = scripts.opened(1, desk(vec![at_most(1, 800, 600)], (0.0, 0.0)));
+            let (rect, inside, _) = last_place(&told.commands, 1).expect("window 1 placed");
+            let tile = inside.expect("the tile was not handed over with the window");
+            assert!(
+                about(tile.x, 12.0) && about(tile.w, 2536.0) && about(tile.h, 1416.0),
+                "{tile:?}"
+            );
+            assert!(about(rect.w, 800.0) && about(rect.h, 600.0), "{rect:?}");
+            assert!(
+                about(rect.x, 12.0 + (2536.0 - 800.0) / 2.0)
+                    && about(rect.y, 12.0 + (1416.0 - 600.0) / 2.0),
+                "not in the middle of its tile: {rect:?}"
+            );
+        }
+
+        /// **A window that would crowd a minimum goes where `overflow`
+        /// says.** Window 1 needs 2450x1350 of the 2536x1416 it has: beside it
+        /// is 74 wide and below it 54 high, both under the minimum, so window 2
+        /// has no room either way and the shipped chain sends it to workspace
+        /// 2. Before #115 it split window 1's tile, and window 1 drew over it.
+        #[test]
+        fn a_window_that_would_crowd_a_minimum_goes_where_overflow_says() {
+            let mut scripts = layouts_with("");
+            switched_on(&mut scripts, "super+t");
+            let _ = scripts.opened(1, desk(vec![at_least(1, 2450, 1350)], (2000.0, 700.0)));
+            let _ = scripts.opened(
+                2,
+                desk(vec![at_least(1, 2450, 1350), plain(2)], (2000.0, 700.0)),
+            );
+            assert_eq!(
+                scripts.evaluate("return tostring(require(\"workspaces\").at(2, \"DP-1\"))"),
+                "2",
+                "window 2 was squeezed in beside a window that has no room to give"
+            );
+        }
+
+        /// **A window that cannot have its minimum is cramped, and the log
+        /// says so once, with the numbers.** Window 1 says 2500 wide; the most
+        /// window 2 can give leaves it 2364, window 2 at the 160 minimum. The
+        /// layout says `cramped` on every placement and names it in the log on
+        /// the first; a window that has room again stops being cramped, and
+        /// one that loses it again is named again.
+        #[test]
+        fn a_window_that_cannot_have_its_minimum_is_cramped_and_said_once() {
+            let mut scripts = layouts_with("");
+            side_by_side(&mut scripts);
+            let crowded = || desk(vec![at_least(1, 2500, 0), plain(2)], (0.0, 0.0));
+
+            let told = scripts.relayout(crowded());
+            let (one, _, cramped) = last_place(&told.commands, 1).expect("window 1 placed");
+            assert!(about(one.w, 2364.0), "{one:?}");
+            assert!(cramped, "window 1 is under its minimum and not said to be");
+            assert!(
+                !last_place(&told.commands, 2).is_some_and(|(_, _, cramped)| cramped),
+                "window 2, at the minimum, is not cramped"
+            );
+            let said = logged(&scripts);
+            assert!(
+                said.contains("window 1 needs at least 2500 wide")
+                    && said.contains("its tile is 2364x1416"),
+                "{said}"
+            );
+
+            let told = scripts.relayout(crowded());
+            assert!(last_place(&told.commands, 1).is_some_and(|(_, _, cramped)| cramped));
+            assert_eq!(
+                logged(&scripts).matches("is cramped").count(),
+                1,
+                "said again for a window that was cramped already"
+            );
+
+            let told = scripts.relayout(desk(vec![plain(1), plain(2)], (0.0, 0.0)));
+            assert!(!last_place(&told.commands, 1).is_some_and(|(_, _, cramped)| cramped));
+            let _ = scripts.relayout(crowded());
+            assert_eq!(logged(&scripts).matches("is cramped").count(), 2);
+        }
+
+        /// **A seam dragged towards a window stops at its minimum.** Window 2
+        /// needs 1500, so window 1 has 1024; dragging window 1's right edge out
+        /// to 2000 leaves both where they are.
+        #[test]
+        fn a_seam_dragged_towards_a_window_stops_at_its_minimum() {
+            let mut scripts = layouts_with("");
+            side_by_side(&mut scripts);
+            let desk_now = || desk(vec![plain(1), at_least(2, 1500, 0)], (0.0, 0.0));
+            let told = scripts.relayout(desk_now());
+            assert!(
+                about(width_of(&told, 1), 1024.0),
+                "the premise: {:?}",
+                told.commands
+            );
+
+            let told = scripts.resized(1, (2000.0, 700.0), (Some("right"), None), desk_now());
+            assert!(
+                about(width_of(&told, 1), 1024.0) && about(width_of(&told, 2), 1500.0),
+                "the drag went past window 2's minimum: {:?}",
+                told.commands
+            );
+        }
+
+        /// **A scrolling column is never narrower than its window's
+        /// minimum.** A column opens at a third of the 2536 inside the gap,
+        /// 845; a window that needs 1500 has a 1500 column.
+        #[test]
+        fn a_scrolling_column_is_as_wide_as_its_windows_minimum() {
+            let mut scripts = layouts_with("");
+            switched_on(&mut scripts, "super+s");
+            let told = scripts.opened(1, desk(vec![at_least(1, 1500, 0)], (0.0, 0.0)));
+            assert!(
+                about(width_of(&told, 1), 1500.0),
+                "the column is narrower than its window: {:?}",
+                told.commands
+            );
         }
     }
 

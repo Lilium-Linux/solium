@@ -60,6 +60,10 @@ impl CompositorHandler for Solium {
             if let Some(window) = self.window_for(&root) {
                 window.on_commit();
                 self.show_if_new(&window);
+                // After the first show, which is the window's `open` for one
+                // that was not launched: that open already carried the
+                // limits, and `trigger_open` recorded them as told.
+                self.notice_limits(&window);
             }
         }
         self.popups.commit(surface);
