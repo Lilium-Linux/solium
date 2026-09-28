@@ -407,6 +407,20 @@ impl Scroller {
         self.focus_column(active, area, settings);
     }
 
+    /// Take the widths `like` was made with, and keep everything else.
+    ///
+    /// For a strip that outlives the configuration that made it, which is what
+    /// a reload does to one (#118). The columns, their widths, the focus and
+    /// the view are the arrangement, and a reload does not change the
+    /// arrangement. The list a column is cycled through and the width the next
+    /// one opens at are configuration, so they come from `like`, which is
+    /// made from the file as it reads now. See
+    /// `a_strip_configured_again_keeps_its_columns_and_takes_the_new_widths`.
+    pub fn configure_like(&mut self, like: &Self) {
+        self.widths.clone_from(&like.widths);
+        self.preset = like.preset;
+    }
+
     /// Scroll the view by a distance, without moving focus.
     pub fn scroll_by(&mut self, delta: f64) {
         self.view_offset += delta;
@@ -682,6 +696,35 @@ mod tests {
         assert!(
             (rect_of(&scroller, 1).w - 800.0).abs() < 1.0,
             "a lap of a two-entry list is two steps, not three"
+        );
+    }
+
+    /// **A strip configured again keeps its columns and takes the new
+    /// widths**: what a reload hands a strip it carried across (#118).
+    #[test]
+    fn a_strip_configured_again_keeps_its_columns_and_takes_the_new_widths() {
+        let mut scroller = with(3);
+        scroller.cycle_width(area(), settings());
+        scroller.focus_sideways(-2, area(), settings());
+        let before = scroller.layout(area(), settings());
+
+        scroller.configure_like(&Scroller::with_widths(&[0.25, 0.8], 1));
+        assert_eq!(
+            scroller.layout(area(), settings()),
+            before,
+            "the columns, their widths, the focus and the view are unchanged"
+        );
+        scroller.insert(4, area(), settings());
+        assert!(
+            (rect_of(&scroller, 4).w - 800.0).abs() < 1.0,
+            "a new column opens at the new `default_width`: {:?}",
+            rect_of(&scroller, 4)
+        );
+        scroller.cycle_width(area(), settings());
+        assert!(
+            (rect_of(&scroller, 4).w - 250.0).abs() < 1.0,
+            "and the cycle walks the new list: {:?}",
+            rect_of(&scroller, 4)
         );
     }
 

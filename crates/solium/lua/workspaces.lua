@@ -257,13 +257,18 @@ end
 
 -- Switch the monitor in front of you, or every monitor when workspaces are
 -- not per monitor.
-function workspaces.go(index)
+--
+-- `monitor` says which screen, and nil is the one in front of you, which is
+-- what the bindings mean. `tiling.lua` names the screen a window opened on
+-- when that window had no room and the view goes with it to another of that
+-- screen's workspaces.
+function workspaces.go(index, monitor)
     index = math.max(1, math.min(index, workspaces.count()))
-    local monitor = key(nil)
-    if index == workspaces.on(nil) then
+    local held = key(monitor)
+    if index == workspaces.on(monitor) then
         return
     end
-    workspaces.showing[monitor] = index
+    workspaces.showing[held] = index
     workspaces.apply()
     workspaces.announce()
 
@@ -273,7 +278,7 @@ function workspaces.go(index)
     -- Only among the windows on the screen that just changed: switching the
     -- left monitor must not take focus off the right one's window if there is
     -- nothing on the left to take it.
-    local switched = workspaces.settings.per_monitor and monitor or nil
+    local switched = workspaces.settings.per_monitor and held or nil
     for _, window in ipairs(sol.windows()) do
         if (not switched or window.monitor == switched)
             and workspaces.on_active(window.id, window.monitor)
@@ -282,6 +287,55 @@ function workspaces.go(index)
             return
         end
     end
+end
+
+-- The next workspace after the one `monitor` is showing that has no window on
+-- it, or nil when every one has. `except` is a window not to count: the one
+-- being found a place, which is already listed and already belongs to the
+-- workspace in view.
+--
+-- "Next" wraps round, so from the last workspace an empty one before it is
+-- still found. The set is fixed -- `count()` of them, from the arrangement --
+-- so there is never one to make; when all are taken the answer is nil and the
+-- caller does something else.
+--
+-- A window being closed is not counted unless `closing_counts` says so. It is
+-- fading out, and a layout that closes up at once has already given its space
+-- away (#128); one that keeps the tile until the application has gone -- tiling
+-- with `reflow_on_close = "when_gone"` -- has not, and passes true. See
+-- `with_reflow_when_gone_a_closing_window_still_takes_its_workspace`. With
+-- workspaces not per monitor a workspace is every screen at once, so a window on
+-- any screen takes it; per monitor, only this screen's windows count.
+--
+-- A window that belongs to no workspace in particular takes all of them. `at`
+-- answers for such a window with whatever its monitor is showing, so the view
+-- carries it along and it is on screen whichever workspace that is -- the
+-- workspace this would name included. Every window is one with
+-- `follow_new_windows` off, so then nothing is empty (#134 review; see
+-- `with_follow_new_windows_off_no_workspace_is_empty`).
+function workspaces.vacant(monitor, except, closing_counts)
+    local count = workspaces.count()
+    local showing = workspaces.on(monitor)
+    local taken = {}
+    for _, window in ipairs(sol.windows()) do
+        if window.id ~= except
+            and (closing_counts or not window.leaving)
+            and (not workspaces.settings.per_monitor or window.monitor == monitor)
+        then
+            local index = workspaces.of[window.id]
+            if index == nil then
+                return nil
+            end
+            taken[index] = true
+        end
+    end
+    for step = 1, count - 1 do
+        local index = (showing - 1 + step) % count + 1
+        if not taken[index] then
+            return index
+        end
+    end
+    return nil
 end
 
 -- Step through the arrangement. Directions that the arrangement has no room
