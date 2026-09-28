@@ -319,12 +319,17 @@ pub(crate) struct Hold {
     released: Option<Duration>,
     /// The last size this client was offered and did not take.
     ///
-    /// **One size, and it is not a `min_size`.** The compositor still does not
-    /// read the client's minimum (#115), so this cannot predict which sizes
-    /// will be refused; it only records that one of them was. Guessing a rule
-    /// from it — "anything narrower than this will be refused too" — is exactly
-    /// the sort of invention that ships a worse bug than the one being fixed,
-    /// so it is not attempted here. #115 is where that belongs.
+    /// **One size, and it is not a `min_size`.** The compositor reads a
+    /// client's minimum and maximum since #115 (`state::limits_of`), and the
+    /// layouts and a floating drag keep a window inside them where they can --
+    /// so a refusal that reaches this is one they could not avoid, a tile
+    /// laid out `cramped`, or a client refusing a size it never declared. This
+    /// hold is not handed those limits, so it cannot predict which sizes will
+    /// be refused; it only records that one of them was. Guessing a rule from
+    /// it — "anything narrower than this will be refused too" — is exactly the
+    /// sort of invention that ships a worse bug than the one being fixed, so it
+    /// is not attempted here. `real_client::client_sizes::an_xdg_window_says_how_small_and_how_large_it_can_be`
+    /// and `a_floating_drag_is_held_to_what_the_client_accepts`.
     ///
     /// Two different questions read it, which is why it is a size and not a
     /// flag:
@@ -332,7 +337,7 @@ pub(crate) struct Hold {
     /// * [`Self::settle`] asks whether it is *this* size that was declined,
     ///   which is the one case where the answer is already in and the gesture
     ///   need not wait out [`PATIENCE`] to learn it again. Anything else waits,
-    ///   because without a minimum to read there is no honest way to tell a
+    ///   because with no minimum to read here there is no honest way to tell a
     ///   size the client will refuse from one it is merely slow about. **Any
     ///   mismatch counts here**, however small: the end of a gesture is the
     ///   moment the client's own size wins, and it wins by a pixel as readily
@@ -1208,10 +1213,11 @@ mod tests {
     /// **The trap.** A client that answers with something other than what it
     /// was asked for has still answered, and the stretch has to end there.
     ///
-    /// Firefox has a minimum width and will not go under it (#115, open:
-    /// Solium never reads `min_size`). If the bridge waited for the size it
-    /// asked for it would wait for ever, and the window would be blurry until
-    /// something else resized it — a worse bug than the shake.
+    /// Firefox has a minimum width and will not go under it. The layouts
+    /// read it since #115, but a tile laid out `cramped` is still asked for
+    /// less, and the bridge is not handed it. If the bridge waited for the size
+    /// it asked for it would wait for ever, and the window would be blurry
+    /// until something else resized it — a worse bug than the shake.
     #[test]
     fn a_refused_size_stops_the_stretch_instead_of_stretching_for_ever() {
         let mut hold = dragging(ResizeEdge::Left, size(800, 600), want(300, 600), ms(0));

@@ -681,7 +681,7 @@ in `config.tiling` are yours:
 
 | setting | default | what it does |
 |---|---|---|
-| `client_minimum` | `"respect"` | lay each window out at least as large as the larger of its application's minimum and `minimum`, wherever there is room; `"ignore"` lays out as though no application had one, as before #115 |
+| `client_minimum` | `"respect"` | lay each window out at least as large as its application's minimum, wherever there is room, taking the room from the windows beside it down to their own minimums and `minimum`; `"ignore"` lays out as though no application had one, as before #115 |
 | `client_maximum` | `"center"` | a window whose tile is larger than its maximum is its maximum size, in the middle of the tile; `"ignore"` leaves it in the tile's corner at the size it chose, as before |
 | `client_size_ignore` | `{}` | applications, by `app_id`, whose sizes are not believed at all -- for one that claims a size it does not mean |
 
@@ -726,10 +726,10 @@ pass sees it. A bar that wants to show it reads it there:
 
 ```lua
 -- A strip across the top that names the windows short of room.
-sol.on("layout", function()
+local function show_cramped()
     local short = {}
     for _, window in ipairs(sol.windows()) do
-        if window.cramped then
+        if window.cramped and not window.leaving then
             short[#short + 1] = window.title
         end
     end
@@ -740,7 +740,10 @@ sol.on("layout", function()
         on = { x = screen.x, y = screen.y, w = screen.w, h = 24 },
         properties = { windows = table.concat(short, ", ") },
     })
-end)
+end
+sol.on("layout", show_cramped)
+-- A window going is not a `layout`, and `close` still lists it, as leaving.
+sol.on("close", show_cramped)
 ```
 
 Re-declaring a surface with the same properties changes nothing, so this costs

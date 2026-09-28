@@ -441,10 +441,15 @@ impl Scroller {
         // dragged all the way back before the column widened again. Only as
         // much of a floor as the view can hold; wider than that is
         // `width_of`'s. `floors::narrowing_a_column_stops_at_its_floor`.
+        //
+        // And from the share it is drawn at, which the floor may hold above
+        // the one it has: from the one it has, a press that did not reach
+        // past the floor changed nothing on screen.
+        // `floors::widening_a_column_its_floor_holds_widens_it_at_once`.
         let view = area.inset(settings.gap);
         let least = (self.floor_of(index) / view.w.max(1.0)).clamp(0.1, 1.0);
         let column = &mut self.columns[index];
-        column.width = (column.width + by).clamp(least, 1.0);
+        column.width = (column.width.max(least) + by).clamp(least, 1.0);
         self.focus_column(index, area, settings);
     }
 
@@ -1046,6 +1051,27 @@ mod floors {
         assert!(
             (one.w - 600.0).abs() < 1e-6,
             "the column did not widen from its floor: {one:?}"
+        );
+    }
+
+    /// Widening a column its floor holds wider than its share widens it by
+    /// the step from where it is drawn. A third of the view, held at 500 by
+    /// its floor: one press of a tenth is 600, and not the 433 the share
+    /// alone reaches, which the floor draws at the same 500 as before.
+    #[test]
+    fn widening_a_column_its_floor_holds_widens_it_at_once() {
+        let mut scroller = Scroller::new();
+        scroller.insert(1, area(), settings());
+        scroller.set_floors(wide(&[(1, 500.0)]));
+        assert!(
+            (rect_of(&scroller, 1).w - 500.0).abs() < 1e-6,
+            "the premise"
+        );
+        scroller.widen(1, 0.1, area(), settings());
+        let one = rect_of(&scroller, 1);
+        assert!(
+            (one.w - 600.0).abs() < 1e-6,
+            "the press was swallowed by the floor: {one:?}"
         );
     }
 }
