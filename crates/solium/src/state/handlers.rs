@@ -59,11 +59,17 @@ impl CompositorHandler for Solium {
             }
             if let Some(window) = self.window_for(&root) {
                 window.on_commit();
-                self.show_if_new(&window);
-                // After the first show, which is the window's `open` for one
-                // that was not launched: that open already carried the
-                // limits, and `trigger_open` recorded them as told.
+                // Ahead of the first show, so that a window launched with
+                // `sol.spawn` whose first limits come with its first frame is
+                // still one that has not been shown when the layouts hear of
+                // them -- which is when `tiling.lua` may place it again. For
+                // a window its application opened, the show is its `open`, and
+                // this records the limits for that `open` to carry rather than
+                // telling anyone. See `Solium::notice_limits`, and
+                // `real_client::client_sizes::a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says`
+                // and `a_window_that_opens_with_a_minimum_hears_it_once`.
                 self.notice_limits(&window);
+                self.show_if_new(&window);
             }
         }
         self.popups.commit(surface);

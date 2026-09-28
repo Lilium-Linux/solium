@@ -199,11 +199,6 @@ impl ResizeGrab {
             from,
         }
     }
-
-    /// The window's rectangle for a pointer at `now`.
-    fn resized(&self, now: Point<f64, Logical>) -> Rectangle<i32, Logical> {
-        resized(self.began, self.edges, self.from, now)
-    }
 }
 
 /// Whether a drag on these edges moves the window's left edge, and with it its
@@ -505,6 +500,27 @@ pub(crate) fn limited(
     out
 }
 
+/// Where a floating drag from `from` to `now` puts `window`, which started at
+/// `began`: [`resized`], held to what its client accepts by [`limited`] --
+/// `Solium::outer_limits`, which is nothing at all for an application the user
+/// has said not to believe.
+///
+/// What [`ResizeGrab::motion`] makes `wanted` of, as a function of its own so
+/// that the three are tested where they are put together:
+/// `real_client::client_sizes::a_floating_drag_is_held_to_what_the_client_accepts`
+/// and `a_floating_drag_of_an_application_not_believed_is_not_held`.
+pub(crate) fn drag_rect(
+    state: &Solium,
+    window: &Window,
+    began: Rectangle<i32, Logical>,
+    edges: ResizeEdge,
+    from: Point<f64, Logical>,
+    now: Point<f64, Logical>,
+) -> Rectangle<i32, Logical> {
+    let (least, most) = state.outer_limits(window);
+    limited(resized(began, edges, from, now), edges, least, most)
+}
+
 impl PointerGrab<Solium> for ResizeGrab {
     fn motion(
         &mut self,
@@ -533,9 +549,15 @@ impl PointerGrab<Solium> for ResizeGrab {
         // [`dragged_edge`].
         //
         // `wanted` is held to what the client accepts before anything reads
-        // it (#115). See [`limited`].
-        let (least, most) = data.outer_limits(&self.window);
-        let wanted = limited(self.resized(event.location), self.edges, least, most);
+        // it (#115). See [`drag_rect`].
+        let wanted = drag_rect(
+            data,
+            &self.window,
+            self.began,
+            self.edges,
+            self.from,
+            event.location,
+        );
         data.pending_resize = Some(crate::state::ResizeRequest {
             window: self.window.clone(),
             wanted,

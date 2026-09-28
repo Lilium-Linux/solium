@@ -548,6 +548,10 @@ pub(crate) struct Solium {
     /// [`Self::parented`].
     closing: Option<crate::pane::PaneId>,
 
+    /// Whose own size limits a floating drag is held to (#115). See
+    /// [`crate::script::ClientSizes`].
+    pub(crate) client_sizes: crate::script::ClientSizes,
+
     /// Whether `apply` is already inside the layout pass it runs to tell the
     /// scripts that a window's `cramped` changed (#115), so that pass does not
     /// run another. See `Solium::apply`.
@@ -733,8 +737,8 @@ struct Gesture {
 pub(crate) struct ResizeRequest {
     pub(crate) window: Window,
     /// Where a floating window would be put, for when no layout claims it.
-    /// Held to its client's own size limits since #115: see
-    /// [`crate::input::resize::limited`].
+    /// Held to its client's own size limits since #115, unless the user has
+    /// said not to believe them: see [`crate::input::resize::drag_rect`].
     pub(crate) wanted: Rectangle<i32, Logical>,
     /// Where the dragged edge should come to rest, per axis, in the layout's
     /// **outer** coordinate space.
@@ -933,6 +937,7 @@ impl Solium {
             pending_drop: None,
             pending_resize: None,
             retelling_cramped: false,
+            client_sizes: crate::script::ClientSizes::default(),
             resize_hold: None,
             resize_bridge: None,
             resize_gesture: None,

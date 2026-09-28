@@ -167,6 +167,13 @@ pub(crate) struct WindowInfo {
     /// `cramped`. A layout's word, not the compositor's measure, because only
     /// the layout knows whether it is respecting that minimum at all.
     pub(crate) cramped: bool,
+    /// Whether the window's client has been shown: its first frame taken
+    /// (`present::mark_shown`). False for a window launched with `sol.spawn`
+    /// from its `open` until then, which is how `tiling.lua` tells a window
+    /// whose first limits arrive in time to decide where it goes from one
+    /// already on screen whose limits changed (#115). See
+    /// `real_client::client_sizes::a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says`.
+    pub(crate) shown: bool,
 }
 
 /// How a window is drawn this instant, as `Solium::window_under` reads it:
@@ -421,6 +428,8 @@ pub(crate) enum Command {
     /// How a window behaves between being asked for and its application
     /// arriving. See `Loading`.
     Loading(Loading),
+    /// Whose own size limits a floating drag is held to. See [`ClientSizes`].
+    ClientSizes(ClientSizes),
     /// What fills a window between an edge drag asking for a size and the
     /// client painting it. See `crate::resizing::Settings`.
     Resize(crate::resizing::Settings),
@@ -474,6 +483,44 @@ impl Default for Loading {
             decorated: false,
             fade: std::time::Duration::from_millis(180),
         }
+    }
+}
+
+/// Whose own size limits the compositor believes where it applies them itself
+/// (#115): a floating window's edge drag, which no layout is asked about.
+///
+/// The layouts ask the same question of the same settings in `sizes.lua`,
+/// which is what hands them over, with `sol.client_sizes`, when it loads:
+/// `floating.client_limits`, and `tiling.client_size_ignore`. The default is
+/// the one a configuration that never says so gets -- every application
+/// believed. See `Solium::outer_limits`, and
+/// `real_client::client_sizes::a_floating_drag_of_an_application_not_believed_is_not_held`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClientSizes {
+    /// Whether a floating drag is held to a client's limits at all:
+    /// `floating.client_limits`, anything but `"ignore"`.
+    pub(crate) floating: bool,
+    /// Applications whose limits are not believed, by the name
+    /// `Solium::script_app_id` gives them.
+    pub(crate) ignored: Vec<String>,
+}
+
+impl Default for ClientSizes {
+    fn default() -> Self {
+        Self {
+            floating: true,
+            ignored: Vec::new(),
+        }
+    }
+}
+
+impl ClientSizes {
+    /// Whether the application named `app_id` gets a say in how large a
+    /// floating drag makes its window. A window with no name is never on the
+    /// list, as `sizes.lua` has it, even a list with an empty name on it.
+    /// `real_client::client_sizes::a_floating_drag_of_an_application_not_believed_is_not_held`.
+    pub(crate) fn believes(&self, app_id: &str) -> bool {
+        self.floating && (app_id.is_empty() || !self.ignored.iter().any(|app| app == app_id))
     }
 }
 
@@ -1697,6 +1744,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // window's own terms, frame included, or absent when the application
     // limited neither side. `cramped` is the layout's own word coming back,
     // from `sol.place`. `app_id` is what `tiling.client_size_ignore` matches.
+    // `shown` is whether the window's client has been shown yet; see
+    // `WindowInfo::shown`.
     sol.set(
         "windows",
         lua.create_function(|lua, ()| {
@@ -1719,6 +1768,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("min", size_table(lua, window.min)?)?;
                 entry.set("max", size_table(lua, window.max)?)?;
                 entry.set("cramped", window.cramped)?;
+                entry.set("shown", window.shown)?;
                 windows.set(index + 1, entry)?;
             }
             Ok(windows)
@@ -2333,6 +2383,42 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Loading(loading.clone()));
+            })
+        })?,
+    )?;
+
+    // Whose own size limits a floating drag is held to (#115), from
+    // `sizes.lua` as it loads: `{ floating = "respect" | "ignore", ignore = {
+    // app_id, ... } }`. A table so that adding a setting later does not change
+    // the call; anything left out is the default, which believes every
+    // application, and so is a `floating` that is not "ignore" and an `ignore`
+    // that is not a list -- the words `sizes.lua` reads the layouts' settings
+    // by. An entry of the list that is not a name is skipped. See
+    // `ClientSizes`, and
+    // `the_floating_setting_and_the_ignored_applications_reach_the_compositor`.
+    sol.set(
+        "client_sizes",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut sizes = ClientSizes::default();
+            if let Some(options) = options {
+                if let Ok(Value::String(floating)) = options.get::<Value>("floating")
+                    && floating.to_str().is_ok_and(|said| &*said == "ignore")
+                {
+                    sizes.floating = false;
+                }
+                if let Ok(Value::Table(list)) = options.get::<Value>("ignore") {
+                    sizes.ignored = list
+                        .sequence_values::<Value>()
+                        .filter_map(Result::ok)
+                        .filter_map(|app| match app {
+                            Value::String(app) => app.to_str().ok().map(|app| app.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::ClientSizes(sizes.clone()));
             })
         })?,
     )?;
@@ -3835,6 +3921,7 @@ mod tests {
                 min: None,
                 max: None,
                 cramped: false,
+                shown: true,
             }],
             monitors: vec![MonitorInfo {
                 name: "test-1".to_owned(),
@@ -4686,6 +4773,7 @@ mod tests {
             min: None,
             max: None,
             cramped: false,
+            shown: true,
         };
         snapshot.windows = vec![
             window(1, false, Parentage::None),
@@ -5175,6 +5263,7 @@ mod tests {
                     min: None,
                     max: None,
                     cramped: false,
+                    shown: true,
                 })
                 .collect(),
             monitors: vec![MonitorInfo {
@@ -6518,6 +6607,7 @@ mod dialogs {
             min: None,
             max: None,
             cramped: false,
+            shown: true,
         }
     }
 
@@ -8715,6 +8805,12 @@ mod dialogs {
         /// `sol.log` line kept in `_G.logged`. A directory per call, for the
         /// reason [`scripts`] gives.
         fn layouts_with(before: &str) -> Scripts {
+            Scripts::load(&entry_with(before)).expect("loading the shipped layouts")
+        }
+
+        /// The entry point [`layouts_with`] loads, for a test that loads it
+        /// again.
+        fn entry_with(before: &str) -> std::path::PathBuf {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let directory = std::env::temp_dir().join(format!("solium-sizes-{serial}"));
@@ -8739,7 +8835,7 @@ mod dialogs {
                 ),
             )
             .expect("writing the entry point");
-            Scripts::load(&entry).expect("loading the shipped layouts")
+            entry
         }
 
         fn logged(scripts: &Scripts) -> String {
@@ -9111,6 +9207,155 @@ mod dialogs {
                 about(width_of(&told, 1), 1024.0) && about(width_of(&told, 2), 1500.0),
                 "the drag went past window 2's minimum: {:?}",
                 told.commands
+            );
+        }
+
+        /// **A launched window whose minimum does not fit the tile it was
+        /// given is placed again, once, before it is shown -- and never
+        /// after.**
+        ///
+        /// Window 1 fills the screen and window 2 is launched beside it, with
+        /// nothing said yet. Its application then says 2450x1350 before its
+        /// first frame: beside window 1 there is no room either way, so it goes
+        /// where the shipped chain sends it, workspace 2, as it would have at
+        /// an `open` that knew. The same minimum arriving after the first
+        /// frame is a window already on screen, which is rebalanced and left
+        /// cramped where it is. And a window whose desk the user has switched
+        /// away from is left on it, in its own desk's tree and no other.
+        #[test]
+        fn a_launched_window_is_placed_again_by_its_minimum_only_before_it_is_shown() {
+            for (shown, away) in [(false, false), (true, false), (false, true)] {
+                let mut scripts = layouts_with("");
+                switched_on(&mut scripts, "super+t");
+                let _ = scripts.opened(1, desk(vec![plain(1)], (2000.0, 700.0)));
+                let launched = WindowInfo {
+                    shown: false,
+                    ..plain(2)
+                };
+                let _ = scripts.opened(2, desk(vec![plain(1), launched], (2000.0, 700.0)));
+                let workspace = |scripts: &Scripts| {
+                    scripts.evaluate("return tostring(require(\"workspaces\").of[2])")
+                };
+                assert_eq!(workspace(&scripts), "1", "the premise");
+
+                let arrived = WindowInfo {
+                    shown,
+                    ..at_least(2, 2450, 1350)
+                };
+                if away {
+                    assert!(
+                        scripts
+                            .key("super+2", desk(vec![plain(1), arrived.clone()], (0.0, 0.0)))
+                            .handled,
+                        "super+2 was not handled"
+                    );
+                }
+                let told = scripts.relayout(desk(vec![plain(1), arrived], (0.0, 0.0)));
+                if away {
+                    assert_eq!(
+                        workspace(&scripts),
+                        "1",
+                        "a window on a desk out of view was moved"
+                    );
+                    assert_eq!(
+                        scripts.evaluate(
+                            "local tree = require(\"tiling\").trees[require(\"monitors\").key(2, \"DP-1\")]\n\
+                             return tostring(tree ~= nil and tree:contains(2))"
+                        ),
+                        "false",
+                        "the window is in the tree of a desk it is not on"
+                    );
+                } else if shown {
+                    assert_eq!(workspace(&scripts), "1", "a window on screen was sent away");
+                    assert!(
+                        last_place(&told.commands, 2).is_some_and(|(_, _, cramped)| cramped),
+                        "{:?}",
+                        told.commands
+                    );
+                } else {
+                    assert_eq!(
+                        workspace(&scripts),
+                        "2",
+                        "the launched window stayed in a tile that cannot hold it"
+                    );
+                    let again = WindowInfo {
+                        shown: false,
+                        ..at_least(2, 2450, 1350)
+                    };
+                    let _ = scripts.relayout(desk(vec![plain(1), again], (0.0, 0.0)));
+                    assert_eq!(workspace(&scripts), "2", "placed a second time");
+                }
+            }
+        }
+
+        /// **What a floating drag believes reaches the compositor**:
+        /// `sizes.lua` hands `floating.client_limits` and
+        /// `tiling.client_size_ignore` over as it loads, and the shipped
+        /// settings are the compositor's own default.
+        #[test]
+        fn the_floating_setting_and_the_ignored_applications_reach_the_compositor() {
+            let handed = |before: &str| {
+                layouts_with(before)
+                    .startup()
+                    .commands
+                    .into_iter()
+                    .find_map(|command| match command {
+                        Command::ClientSizes(sizes) => Some(sizes),
+                        _ => None,
+                    })
+            };
+            assert_eq!(handed(""), Some(super::super::ClientSizes::default()));
+            for before in [
+                "require(\"config\").floating.client_limits = \"respekt\"",
+                "require(\"config\").tiling.client_size_ignore = \"firefox\"",
+            ] {
+                assert_eq!(
+                    handed(before),
+                    Some(super::super::ClientSizes::default()),
+                    "{before}: not read as the default"
+                );
+            }
+            assert_eq!(
+                handed(
+                    "local config = require(\"config\")\n\
+                     config.floating.client_limits = \"ignore\"\n\
+                     config.tiling.client_size_ignore = { \"firefox\", 7 }"
+                ),
+                Some(super::super::ClientSizes {
+                    floating: false,
+                    ignored: vec!["firefox".to_owned()],
+                })
+            );
+        }
+
+        /// **A reload does not name a cramped window again**: it is the same
+        /// window in the same tile, and the log said so once already.
+        #[test]
+        fn a_reload_does_not_name_a_cramped_window_again() {
+            let entry = entry_with("");
+            let mut scripts = Scripts::load(&entry).expect("loading the shipped layouts");
+            side_by_side(&mut scripts);
+            let crowded = || desk(vec![at_least(1, 2500, 0), plain(2)], (0.0, 0.0));
+            let _ = scripts.relayout(crowded());
+            assert_eq!(
+                logged(&scripts).matches("is cramped").count(),
+                1,
+                "the premise"
+            );
+
+            let mut fresh =
+                Scripts::load_carrying(&entry, scripts.kept()).expect("reloading the scripts");
+            let _ = fresh.restored(crowded());
+            let _ = fresh.monitors_changed(crowded());
+            let told = fresh.relayout(crowded());
+            assert!(
+                last_place(&told.commands, 1).is_some_and(|(_, _, cramped)| cramped),
+                "the premise: still cramped after the reload"
+            );
+            assert_eq!(
+                logged(&fresh).matches("is cramped").count(),
+                0,
+                "named again after a reload"
             );
         }
 

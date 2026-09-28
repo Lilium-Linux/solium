@@ -423,6 +423,23 @@ mod limits {
             }
         );
     }
+
+    /// **A limit past any screen is read as the most there is.** A client
+    /// may say `i32::MAX`, and a column laid out that wide put the next one
+    /// past the end of `i32`.
+    #[test]
+    fn a_limit_past_any_screen_is_read_as_the_most_there_is() {
+        assert_eq!(
+            Limits::from_hints(
+                Some(Size::from((i32::MAX, 0))),
+                Some(Size::from((i32::MAX, i32::MAX)))
+            ),
+            Limits {
+                min: Size::from((snapshot::MOST, 0)),
+                max: Size::from((snapshot::MOST, snapshot::MOST)),
+            }
+        );
+    }
 }
 
 #[test]
@@ -8746,23 +8763,6 @@ mod real_client {
         }
     }
 
-    /// **#128: the layout hears a close when it is asked for, and hears a
-    /// refusal when the window comes back.**
-    ///
-    /// The compositor's half of the contract, against the shipped layouts
-    /// and a real client: when `closing`, `refused` and `close` are sent,
-    /// in what order, over which routes, and what the window being closed
-    /// looks like meanwhile. What the layouts *do* with each event is
-    /// `script.rs`'s `reflow_on_close` module, which can drive them without
-    /// a display.
-    ///
-    /// Scripts are installed straight into `Solium::scripts` rather than
-    /// through `start_scripts`, and after the windows have opened. Both are
-    /// to keep the arrangement down to `adopt`'s, which is one call with a
-    /// known order, and to keep what the scripts asked for at load -- a
-    /// wallpaper, in the shipped `init.lua` -- from being built at all: a
-    /// Qt scene in a process holding a libwayland connection of its own
-    /// aborts the test binary (see the #99 test).
     /// **#115: what a client says about its own size**, read from the real
     /// protocol and told to the layouts.
     ///
@@ -8964,9 +8964,10 @@ mod real_client {
         }
 
         /// **A window that opens with a minimum hears it once, at `open`.**
-        /// The client says 640x480 before its first buffer: the layout's `open`
-        /// already has it in the window's row, and the commit it came with
-        /// does not re-run the layout to say it again.
+        /// The client says 640x480 in the bufferless commit xdg-shell starts a
+        /// window with, and draws in the next: the layout's `open` has the
+        /// minimum in the window's row, and no `layout` comes ahead of it --
+        /// a pass for a window no layout has heard of -- or after it.
         #[test]
         fn a_window_that_opens_with_a_minimum_hears_it_once() {
             let mut desk = Desk::new();
@@ -8988,12 +8989,123 @@ mod real_client {
             let xdg_surface = wm_base.get_xdg_surface(&surface, &desk.qh, ());
             let toplevel = xdg_surface.get_toplevel(&desk.qh, ());
             toplevel.set_min_size(640, 480);
+            surface.commit();
+            desk.pump();
             commit_buffer(&desk.client, &desk.qh, &surface, 64, 64);
             desk.pump();
             assert_eq!(
                 desk.evaluate("return table.concat(events, \",\")"),
                 "open 640x480"
             );
+        }
+
+        /// **A limit past any screen is read as the most there is**, from a
+        /// real client: `set_min_size(i32::MAX, 0)` is a column of 32767 in
+        /// the scrolling layout, not one whose neighbour starts past the end
+        /// of `i32`.
+        #[test]
+        fn an_xdg_limit_past_any_screen_is_read_as_the_most_there_is() {
+            let mut desk = Desk::new();
+            let (window, toplevel, surface) = desk.open();
+            toplevel.set_min_size(i32::MAX, 0);
+            toplevel.set_max_size(i32::MAX, i32::MAX);
+            surface.commit();
+            desk.pump();
+            let row = desk.row(&window);
+            assert_eq!(row.min, size(super::super::snapshot::MOST, 0));
+            assert_eq!(
+                row.max,
+                size(super::super::snapshot::MOST, super::super::snapshot::MOST)
+            );
+        }
+
+        /// **A window launched with `sol.spawn` whose minimum does not fit the
+        /// tile it was given goes where `overflow` says**, as a window whose
+        /// minimum was known at its `open` would.
+        ///
+        /// Window 1 fills the 1896x1056 inside the gap; window 2 is launched
+        /// and given half of it before its application exists. The
+        /// application then says 1800x1000 -- in its first, bufferless commit,
+        /// and again with its first frame in the same commit, which is the one
+        /// that needs the limits noticed before the frame is. Beside window 1,
+        /// held at the 160 minimum, the most it can have is 1724 across; below
+        /// it, 948 down. So there is no room either way, and the shipped chain
+        /// sends it to workspace 2 -- which a launched window used to miss,
+        /// being rebalanced in its half and left cramped. Once: a frame after
+        /// that moves nothing.
+        #[test]
+        fn a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says() {
+            for with_its_first_frame in [false, true] {
+                let mut desk = Desk::new();
+                desk.install(
+                    "require(\"modes\")\n\
+                     require(\"workspaces\")\n\
+                     require(\"tiling\")\n\
+                     require(\"scrolling\")",
+                );
+                assert!(desk.state.trigger("super+t"), "super+t was not handled");
+                let _working = desk.open();
+                let source = crate::pane::loading_source(None);
+                let launched =
+                    desk.state
+                        .open_loading("app", Some(std::process::id()), source, None);
+                let workspace = |desk: &Desk| {
+                    desk.evaluate(&format!(
+                        "return tostring(require(\"workspaces\").of[{}])",
+                        launched.get()
+                    ))
+                };
+                assert_eq!(
+                    workspace(&desk),
+                    "1",
+                    "the premise: launched beside window 1"
+                );
+
+                let compositor = desk.client.compositor.clone().expect("wl_compositor bound");
+                let wm_base = desk.client.wm_base.clone().expect("xdg_wm_base bound");
+                let surface = compositor.create_surface(&desk.qh, ());
+                let xdg_surface = wm_base.get_xdg_surface(&surface, &desk.qh, ());
+                let toplevel = xdg_surface.get_toplevel(&desk.qh, ());
+                toplevel.set_min_size(1800, 1000);
+                if with_its_first_frame {
+                    commit_buffer(&desk.client, &desk.qh, &surface, 64, 64);
+                } else {
+                    surface.commit();
+                }
+                desk.pump();
+                let says = if with_its_first_frame {
+                    "said with its first frame"
+                } else {
+                    "said before its first frame"
+                };
+                assert!(
+                    desk.state
+                        .panes
+                        .get(launched)
+                        .and_then(Pane::client)
+                        .is_some(),
+                    "{says}: the premise: the application arrived in the window it was \
+                     launched into"
+                );
+                assert_eq!(
+                    workspace(&desk),
+                    "2",
+                    "{says}: the launched window stayed in a tile that cannot hold it"
+                );
+                assert_eq!(
+                    desk.state.panes.get(launched).and_then(Pane::placed),
+                    Some(at(12, 12, 1896, 1056)),
+                    "{says}: it was not given workspace 2 whole"
+                );
+
+                commit_buffer(&desk.client, &desk.qh, &surface, 64, 64);
+                desk.pump();
+                assert_eq!(
+                    workspace(&desk),
+                    "2",
+                    "{says}: a frame after it moved it again"
+                );
+            }
         }
 
         /// **A window centred in its tile is dragged from its tile.** A layout
@@ -9150,38 +9262,127 @@ mod real_client {
             assert_eq!(desk.evaluate("return tostring(passes)"), "2");
         }
 
-        /// **A floating drag is held to what the client accepts**: the limits
-        /// in the window's own terms, and the drag's rectangle held to them.
-        #[test]
-        fn a_floating_drag_is_held_to_what_the_client_accepts() {
-            let mut desk = Desk::new();
+        /// A floating drag of `window` by its bottom-right corner, begun at
+        /// 400x300 from (100, 100), to the pointer at `to`: (300, 250) asks
+        /// for 200x150.
+        fn dragged(desk: &Desk, window: &Window, to: (f64, f64)) -> Rectangle<i32, Logical> {
+            crate::input::resize::drag_rect(
+                &desk.state,
+                window,
+                at(100, 100, 400, 300),
+                ResizeEdge::BottomRight,
+                (500.0, 400.0).into(),
+                to.into(),
+            )
+        }
+
+        /// A window whose application calls itself `app_id` and says it
+        /// cannot be under 300x200 or over 900x700.
+        fn limited_window(
+            desk: &mut Desk,
+            app_id: &str,
+        ) -> (Window, xdg_toplevel::XdgToplevel, wl_surface::WlSurface) {
             let (window, toplevel, surface) = desk.open();
+            toplevel.set_app_id(app_id.to_owned());
             toplevel.set_min_size(300, 200);
             toplevel.set_max_size(900, 700);
             surface.commit();
             desk.pump();
-            let (least, most) = desk.state.outer_limits(&window);
+            (window, toplevel, surface)
+        }
+
+        /// **A floating drag is held to what the client accepts**: the limits
+        /// in the window's own terms, and the rectangle the drag makes held
+        /// to them -- asked of `drag_rect`, which is what the grab makes its
+        /// rectangle with.
+        #[test]
+        fn a_floating_drag_is_held_to_what_the_client_accepts() {
+            let mut desk = Desk::new();
+            let (window, _toplevel, _surface) = limited_window(&mut desk, "sizes-test");
             assert_eq!(
-                (least, most),
+                desk.state.outer_limits(&window),
                 (Size::from((300, 200)), Size::from((900, 700)))
             );
-            let small = crate::input::resize::limited(
-                at(100, 100, 50, 40),
-                ResizeEdge::BottomRight,
-                least,
-                most,
+            assert_eq!(
+                dragged(&desk, &window, (300.0, 250.0)),
+                at(100, 100, 300, 200)
             );
-            assert_eq!(small, at(100, 100, 300, 200));
-            let large = crate::input::resize::limited(
-                at(100, 100, 2000, 1500),
-                ResizeEdge::BottomRight,
-                least,
-                most,
+            assert_eq!(
+                dragged(&desk, &window, (2100.0, 1600.0)),
+                at(100, 100, 900, 700)
             );
-            assert_eq!(large, at(100, 100, 900, 700));
+        }
+
+        /// **A floating drag of an application the user does not believe is
+        /// not held**: one named in `tiling.client_size_ignore`, or any at all
+        /// under `floating.client_limits = "ignore"` -- as `sizes.lua` hands
+        /// them over, in `Command::ClientSizes`. An application not on the list
+        /// is still held.
+        #[test]
+        fn a_floating_drag_of_an_application_not_believed_is_not_held() {
+            let mut desk = Desk::new();
+            let (window, _toplevel, _surface) = limited_window(&mut desk, "liar");
+            let small = |desk: &Desk| dragged(desk, &window, (300.0, 250.0));
+            for (sizes, says) in [
+                (
+                    crate::script::ClientSizes {
+                        floating: true,
+                        ignored: vec!["liar".to_owned()],
+                    },
+                    "an application in client_size_ignore",
+                ),
+                (
+                    crate::script::ClientSizes {
+                        floating: false,
+                        ignored: Vec::new(),
+                    },
+                    "floating.client_limits = \"ignore\"",
+                ),
+            ] {
+                desk.place(Command::ClientSizes(sizes));
+                assert_eq!(
+                    small(&desk),
+                    at(100, 100, 200, 150),
+                    "{says}: held all the same"
+                );
+            }
+            desk.place(Command::ClientSizes(crate::script::ClientSizes {
+                floating: true,
+                ignored: vec!["someone-else".to_owned()],
+            }));
+            assert_eq!(
+                small(&desk),
+                at(100, 100, 300, 200),
+                "an application not on the list was not held"
+            );
+            assert!(
+                crate::script::ClientSizes {
+                    floating: true,
+                    ignored: vec![String::new()],
+                }
+                .believes(""),
+                "a window with no name was taken for one on the list"
+            );
         }
     }
 
+    /// **#128: the layout hears a close when it is asked for, and hears a
+    /// refusal when the window comes back.**
+    ///
+    /// The compositor's half of the contract, against the shipped layouts
+    /// and a real client: when `closing`, `refused` and `close` are sent,
+    /// in what order, over which routes, and what the window being closed
+    /// looks like meanwhile. What the layouts *do* with each event is
+    /// `script.rs`'s `reflow_on_close` module, which can drive them without
+    /// a display.
+    ///
+    /// Scripts are installed straight into `Solium::scripts` rather than
+    /// through `start_scripts`, and after the windows have opened. Both are
+    /// to keep the arrangement down to `adopt`'s, which is one call with a
+    /// known order, and to keep what the scripts asked for at load -- a
+    /// wallpaper, in the shipped `init.lua` -- from being built at all: a
+    /// Qt scene in a process holding a libwayland connection of its own
+    /// aborts the test binary (see the #99 test).
     mod reflow_on_close {
         use super::*;
 

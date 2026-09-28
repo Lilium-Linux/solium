@@ -775,9 +775,13 @@ impl Solium {
 
     pub(super) fn trigger_open(&mut self, pane: crate::pane::PaneId) -> Opened {
         let id = pane.get();
-        // The size limits this open is about to tell the layouts, recorded as
-        // told, so the commit that brought them does not tell them again
-        // (#115). See `Solium::notice_limits`.
+        // The size limits this open is about to tell the layouts, in the
+        // window's row, recorded as told: a change after this is measured from
+        // what the open carried (#115). For a window its application opened,
+        // the commit that brought them has recorded them already, and the
+        // `open` is the only thing the layouts hear. See
+        // `Solium::notice_limits`, and
+        // `real_client::client_sizes::a_window_that_opens_with_a_minimum_hears_it_once`.
         if let Some(held) = self.panes.get_mut(pane)
             && let Some(limits) = held.client().map(crate::state::limits_of)
         {

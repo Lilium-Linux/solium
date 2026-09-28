@@ -437,6 +437,21 @@ local defaults = {
         fill = "stretch",
     },
 
+    floating = {
+        -- Whether a floating window's edge drag stops at its application's
+        -- own minimum and maximum size (#115). The layouts' say in the matter
+        -- is `tiling.client_minimum` and `tiling.client_maximum`; this one is
+        -- the compositor's, because no layout is asked about a floating drag.
+        --
+        -- "respect", the default: the frame you drag never shows a size the
+        -- application is about to refuse. "ignore": the drag goes wherever
+        -- the pointer does, as before #115, and an application that refuses
+        -- the size is treated as the end of `resize` above says. An
+        -- application in `tiling.client_size_ignore` is not believed here
+        -- either. Anything else is read as "respect".
+        client_limits = "respect",
+    },
+
     tiling = {
         -- Where a split falls, as a share of the window being divided.
         -- Hyprland calls this dwindle:default_split_ratio.
@@ -499,8 +514,9 @@ local defaults = {
         -- Wayland application's own, or an X11 one's WM_CLASS class.
         -- `sol.windows()` lists each window's. A window of one of these is
         -- laid out as though its application had said nothing, minimum and
-        -- maximum alike -- for an application that claims a size it does not
-        -- mean. For instance { "steam", "org.gnome.Nautilus" }.
+        -- maximum alike, and a floating drag of it is not held to them either
+        -- -- for an application that claims a size it does not mean. For
+        -- instance { "steam", "org.gnome.Nautilus" }.
         client_size_ignore = {},
 
         -- Where a new window goes when splitting the tile under the pointer

@@ -292,6 +292,12 @@ impl Solium {
                         self.loading = loading;
                     }
                 }
+                Command::ClientSizes(sizes) => {
+                    if self.client_sizes != sizes {
+                        tracing::debug!(?sizes, "whose own sizes a floating drag believes set");
+                        self.client_sizes = sizes;
+                    }
+                }
                 Command::Resize(resizing) => {
                     if self.resizing != resizing {
                         tracing::debug!(?resizing, "resize behaviour set");

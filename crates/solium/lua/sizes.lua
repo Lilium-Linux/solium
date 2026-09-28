@@ -11,12 +11,27 @@
 --   tiling.client_maximum      "center" (the default) or "ignore"
 --   tiling.client_size_ignore  applications, by app_id, whose sizes are not
 --                              believed at all
+--   floating.client_limits     "respect" (the default) or "ignore", for a
+--                              floating window's edge drag
 --
 -- See config.lua for what each does to an arrangement.
 
 local config = require("config")
 
 local sizes = {}
+
+-- A floating window's edge drag is held to its application's sizes by the
+-- compositor, since no layout is asked about one: so the two settings that
+-- say whether it may be are handed over, once, as this loads.
+-- `client_size_ignore` is the same list the layouts read,
+-- so an application not believed there is not believed here either. A
+-- configuration from before `floating` existed has no such table, and is the
+-- default. See `ClientSizes` in `script.rs`, and
+-- `the_floating_setting_and_the_ignored_applications_reach_the_compositor`.
+sol.client_sizes({
+    floating = type(config.floating) == "table" and config.floating.client_limits or nil,
+    ignore = config.tiling.client_size_ignore,
+})
 
 -- Whether this window's application is one the user has said not to believe.
 --

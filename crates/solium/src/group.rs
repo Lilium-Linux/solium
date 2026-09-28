@@ -1100,6 +1100,7 @@ mod desk {
             min: None,
             max: None,
             cramped: false,
+            shown: true,
         }
     }
 

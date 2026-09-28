@@ -351,7 +351,7 @@ issue #116, and both halves above are what it cost.
 ```lua
 sol.windows()          -- every window: id, rect, drawn, title, focused, monitor,
                        --                modal, parent, leaving, app_id, min, max,
-                       --                cramped
+                       --                cramped, shown
 sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale,
                        --                 transform, focused, primary
 sol.monitor()          -- the active monitor's work area
@@ -401,7 +401,11 @@ change to either re-runs `layout` once per change. `cramped` is the layout's own
 word coming back: `true` while the layout in charge last placed the window with
 `cramped = true`. `app_id` is the application's name for itself -- a Wayland
 application's `app_id`, an X11 one's `WM_CLASS` class -- and empty until the
-application has arrived.
+application has arrived. `shown` is whether the application has been shown
+yet: `false` for a window launched with `sol.spawn` from its `open` until its
+application's first frame, which is how a layout tells limits that arrive in
+time to decide where a window goes from limits that changed on a window
+already on screen.
 
 `skip` on `window_at` exists because of one specific bug: a new window is
 already mapped and under the pointer, so asking "what am I pointing at" without
@@ -694,8 +698,11 @@ Anything but `"ignore"` is read as the default. Respecting a minimum means:
   split that leaves either window under its minimum is refused like one that
   leaves a tile under `minimum`. A window launched with `sol.spawn` has no
   application yet when it is placed, so only the minimums of the windows it
-  would split are known then; its own arrives when its application first
-  commits, and is the case below;
+  would split are known then. Its own arrives with its application's first
+  commit, before its first frame: the tile it was given is rebalanced for it,
+  and if that still leaves it cramped it is taken out and placed again, once,
+  by the same rule -- the tile under the pointer where it was launched, then
+  `overflow`;
 - **a window whose minimum grows gets the arrangement rebalanced** around it,
   the moment the application commits it;
 - **a seam stops where a window beside it reaches its minimum**, by the drag
@@ -707,7 +714,14 @@ A centred window's edge still drags the seam, from the tile's edge: `tiling.lua`
 places it with its tile as `tile`. And a floating window's edge drag stops at
 its application's minimum and maximum, because the frame would otherwise show a
 size the application is about to refuse. That one is the compositor's, not a
-layout's, and these three settings do not change it.
+layout's, so it has a setting of its own, and `sizes.lua` hands it over as it
+loads, with `client_size_ignore`, through `sol.client_sizes`:
+
+| setting | default | what it does |
+|---|---|---|
+| `floating.client_limits` | `"respect"` | a floating window's edge drag stops at its application's minimum and maximum; `"ignore"` lets it go wherever the pointer does, as before #115 |
+
+An application in `tiling.client_size_ignore` is not believed there either.
 
 **Cramped.** When the room is not there -- two windows that each need more than
 half the screen, side by side -- the window is laid out smaller than its
