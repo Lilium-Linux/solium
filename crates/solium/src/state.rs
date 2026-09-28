@@ -8665,15 +8665,27 @@ impl CompositorHandler for Solium {
     /// (#126's review). Ids are recycled, so a subsurface's `wl_surface` can
     /// be older than the window's own, and then it is destroyed first -- and
     /// unlinked, and its pixels dropped, before the window's surface is heard
-    /// of, so the picture taken there had no page or video in it. A client
-    /// that has gone is told apart from one destroying a subsurface it no
-    /// longer wants by the client itself: `wayland-backend` has taken it out
-    /// of its store before it runs any destructor, so the surface has none.
+    /// of, so the picture taken there had no page or video in it.
     /// `a_client_that_disconnects_keeps_a_subsurface_older_than_its_window`.
+    ///
+    /// **A client that has gone is told apart from a live one by the
+    /// surface's parent, never by the surface going** (#126's second review).
+    /// Solium runs on libwayland (`use_system_lib`), where wayland-backend's
+    /// `resource_destructor` marks an object dead before smithay calls this,
+    /// and a dead object has no client: the surface going answers `None`
+    /// whether its client is alive or not, and asking it ended a live window
+    /// whose client destroyed a subsurface's `wl_surface` before its
+    /// `wl_subsurface`. The parent is still linked -- smithay orphans a
+    /// surface's children as it goes -- and it answers `None` exactly when
+    /// its client is going: `wl_client_destroy` fires the client's destroy
+    /// signal before it destroys any of the client's objects, and that
+    /// unhooks the listener wayland-backend finds a client by from any object
+    /// of it. `a_live_client_destroying_a_subsurfaces_surface_first_keeps_its_window`
+    /// and `a_client_that_disconnects_keeps_a_subsurface_older_than_its_window`.
     fn destroyed(&mut self, surface: &WlSurface) {
         self.lock_surface_destroyed(surface);
         let mut root = surface.clone();
-        if surface.client().is_none() {
+        if get_parent(surface).is_some_and(|parent| parent.client().is_none()) {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
@@ -21443,6 +21455,123 @@ end)
                     picture.dummy_sizes(),
                     vec![(64, 64)],
                     "the window's own surface, and nothing of the subsurface that went first"
+                );
+            }
+
+            /// **#126's second review: a live client that destroys a
+            /// subsurface's `wl_surface` before its `wl_subsurface` keeps its
+            /// window.** Legal, and no shipped toolkit is known to do it: the
+            /// subsurface simply goes inert. `CompositorHandler::destroyed`
+            /// told a disconnect from this by asking the dying surface for its
+            /// client, which libwayland answers `None` for every surface being
+            /// destroyed, alive client or not. So it walked up to the window
+            /// and ended it: `close` went out, the space let go of a live
+            /// toplevel, and nothing mapped it again while its application
+            /// went on running.
+            ///
+            /// And when that client does go, its window fades out as any
+            /// window of a client that disconnects does.
+            #[test]
+            fn a_live_client_destroying_a_subsurfaces_surface_first_keeps_its_window() {
+                let mut desk = Desk::new();
+                desk.install(RECORDER);
+                let (conn, mut queue, mut client) = another_client(&mut desk);
+                let qh = queue.handle();
+                let (window, toplevel, surface) =
+                    open_surface(&mut desk.display, &mut desk.state, &conn, &client, &qh);
+                desk.state.sync_panes();
+                let pane = desk.state.panes.id_of(&window).expect("a pane");
+                let compositor = client.compositor.clone().expect("wl_compositor bound");
+                let subcompositor = client
+                    .subcompositor
+                    .clone()
+                    .expect("wl_subcompositor bound");
+                let child = compositor.create_surface(&qh, ());
+                let sub = subcompositor.get_subsurface(&child, &surface, &qh, ());
+                sub.set_desync();
+                commit_buffer(&client, &qh, &child, 16, 16);
+                surface.commit();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                land(&mut desk);
+                let id = pane.get();
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id}"),
+                    "the premise: the window opened, and nothing else"
+                );
+
+                child.destroy();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                // And the window goes on drawing, as its application does.
+                commit_buffer(&client, &qh, &surface, 64, 64);
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                land(&mut desk);
+
+                let held = |desk: &Desk| desk.state.panes.get(pane).and_then(Pane::client).cloned();
+                assert_eq!(
+                    held(&desk),
+                    Some(window.clone()),
+                    "a live window left its pane"
+                );
+                assert!(
+                    desk.state.space.elements().any(|each| *each == window),
+                    "the space let go of a live window"
+                );
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id}"),
+                    "scripts were told a live window closed"
+                );
+
+                sub.destroy();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                land(&mut desk);
+                assert_eq!(
+                    held(&desk),
+                    Some(window.clone()),
+                    "the inert subsurface's own object going took the window with it"
+                );
+
+                drop((sub, child, surface, toplevel, qh, queue, client, conn));
+                desk.display
+                    .dispatch_clients(&mut desk.state)
+                    .expect("dispatching the disconnect");
+                assert!(
+                    desk.state.panes.get(pane).is_some_and(Pane::ghost),
+                    "when its client goes, the window fades out"
+                );
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id},close {id}*"),
+                    "and is told gone, once"
                 );
             }
 
