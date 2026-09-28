@@ -12915,7 +12915,7 @@ end)
                     "a window of no kind anybody knows took the keyboard"
                 );
 
-                let source = include_str!("../state.rs");
+                let source = include_str!("open.rs");
                 let start = source
                     .find("    fn offer_keyboard(&mut self, window: &Window, pane: crate::pane::PaneId) {")
                     .expect("`offer_keyboard` is still here");
