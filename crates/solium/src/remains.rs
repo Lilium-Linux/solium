@@ -71,14 +71,16 @@
 //! **As the tree is when the window goes**, which is not always all of it. A
 //! subsurface already unlinked is not in it: one a client takes down before
 //! its window on an orderly exit
-//! (`a_window_whose_subsurface_goes_first_fades_without_it`), and, on a
-//! disconnect, one whose `wl_subsurface` object has a lower id than the
-//! window's surface -- ids are recycled -- since that object's destructor
-//! unlinks it and tells the compositor nothing. One whose own `wl_surface` is
-//! the older is kept: the window is taken at that surface instead
-//! (`a_client_that_disconnects_keeps_a_subsurface_older_than_its_window`).
-//! Firefox 156, traced nested, is that case: its page is a subsurface whose
-//! `wl_surface` (#25) is older than the window's (#49) and whose
+//! (`a_window_whose_subsurface_goes_first_fades_without_it`). On a disconnect
+//! the window is taken at the first of its surfaces, or of their
+//! `wl_subsurface` objects, to go, while all of it is there. Ids are recycled,
+//! so that can be a subsurface's `wl_surface` older than the window's
+//! (`a_client_that_disconnects_keeps_a_subsurface_older_than_its_window`), or
+//! a `wl_subsurface` older still, whose destructor unlinks the subsurface and
+//! which Solium is asked about first (`Solium::goes_with`,
+//! `a_client_that_disconnects_keeps_a_subsurface_whose_wl_subsurface_is_older`).
+//! Firefox 156, traced nested, is the first case: its page is a subsurface
+//! whose `wl_surface` (#25) is older than the window's (#49) and whose
 //! `wl_subsurface` (#55) is younger, and closed, it destroyed `xdg_toplevel`
 //! before the subsurface. No client that takes a subsurface down first was
 //! found.

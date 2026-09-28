@@ -25,8 +25,8 @@ use smithay::wayland::xdg_activation::{
 
 use smithay::{
     backend::{allocator::dmabuf::Dmabuf, renderer::utils::on_commit_buffer_handler},
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_layer_shell,
-    delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_data_device, delegate_dmabuf, delegate_layer_shell, delegate_output, delegate_seat,
+    delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface, PopupGrab, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
         PopupUngrabStrategy, Space, Window, WindowSurfaceType, find_popup_root_surface,
@@ -8682,8 +8682,30 @@ impl CompositorHandler for Solium {
     /// unhooks the listener wayland-backend finds a client by from any object
     /// of it. `a_live_client_destroying_a_subsurfaces_surface_first_keeps_its_window`
     /// and `a_client_that_disconnects_keeps_a_subsurface_older_than_its_window`.
+    ///
+    /// A `wl_subsurface` going asks the same, of its surface: see
+    /// [`Solium::goes_with`].
     fn destroyed(&mut self, surface: &WlSurface) {
         self.lock_surface_destroyed(surface);
+        self.goes_with(surface);
+    }
+}
+
+impl Solium {
+    /// The window `surface` is part of goes now, if `surface` is that
+    /// window's own or its client is going: what
+    /// [`CompositorHandler::destroyed`] does for a surface, whose doc says
+    /// how a client going is told from a live one.
+    ///
+    /// **And what a `wl_subsurface` going does for its surface** (#126's
+    /// second review), since smithay's destructor for that object unlinks the
+    /// subsurface from its window and resets where it was, and tells the
+    /// compositor nothing. On a disconnect, one older than the window's
+    /// surface and than its own went first, so no surface of the window was
+    /// heard going until the page or the video had left it. The
+    /// `Dispatch<WlSubsurface, _>` below asks this before smithay's
+    /// destructor runs. `a_client_that_disconnects_keeps_a_subsurface_whose_wl_subsurface_is_older`.
+    fn goes_with(&mut self, surface: &WlSurface) {
         let mut root = surface.clone();
         if get_parent(surface).is_some_and(|parent| parent.client().is_none()) {
             while let Some(parent) = get_parent(&root) {
@@ -10069,7 +10091,64 @@ impl XdgDialogHandler for Solium {
     }
 }
 
-delegate_compositor!(Solium);
+/// `delegate_compositor!`, written out, for every object but `wl_subsurface`:
+/// Solium is asked about one going before smithay's destructor for it runs.
+/// See [`Solium::goes_with`].
+mod compositor_dispatch {
+    use super::Solium;
+    use smithay::reexports::wayland_server::{
+        Client, DataInit, Dispatch, DisplayHandle,
+        backend::ClientId,
+        delegate_dispatch, delegate_global_dispatch,
+        protocol::{
+            wl_callback::WlCallback,
+            wl_compositor::WlCompositor,
+            wl_region::WlRegion,
+            wl_subcompositor::WlSubcompositor,
+            wl_subsurface::{self, WlSubsurface},
+            wl_surface::WlSurface,
+        },
+    };
+    use smithay::wayland::compositor::{
+        CompositorState, RegionUserData, SubsurfaceUserData, SurfaceUserData,
+    };
+
+    delegate_global_dispatch!(Solium: [WlCompositor: ()] => CompositorState);
+    delegate_global_dispatch!(Solium: [WlSubcompositor: ()] => CompositorState);
+    delegate_dispatch!(Solium: [WlCompositor: ()] => CompositorState);
+    delegate_dispatch!(Solium: [WlSurface: SurfaceUserData] => CompositorState);
+    delegate_dispatch!(Solium: [WlRegion: RegionUserData] => CompositorState);
+    delegate_dispatch!(Solium: [WlCallback: ()] => CompositorState);
+    delegate_dispatch!(Solium: [WlSubcompositor: ()] => CompositorState);
+
+    impl Dispatch<WlSubsurface, SubsurfaceUserData> for Solium {
+        fn request(
+            state: &mut Self,
+            client: &Client,
+            resource: &WlSubsurface,
+            request: wl_subsurface::Request,
+            data: &SubsurfaceUserData,
+            dhandle: &DisplayHandle,
+            data_init: &mut DataInit<'_, Self>,
+        ) {
+            <CompositorState as Dispatch<WlSubsurface, SubsurfaceUserData, Self>>::request(
+                state, client, resource, request, data, dhandle, data_init,
+            );
+        }
+
+        fn destroyed(
+            state: &mut Self,
+            client: ClientId,
+            resource: &WlSubsurface,
+            data: &SubsurfaceUserData,
+        ) {
+            state.goes_with(data.surface());
+            <CompositorState as Dispatch<WlSubsurface, SubsurfaceUserData, Self>>::destroyed(
+                state, client, resource, data,
+            );
+        }
+    }
+}
 delegate_shm!(Solium);
 delegate_xdg_shell!(Solium);
 delegate_xdg_decoration!(Solium);
@@ -21318,9 +21397,8 @@ end)
             /// The subsurface's `wl_surface` is created before the window's, so
             /// its id is lower; its `wl_subsurface` after both, so that is
             /// destroyed after the window's surface and unlinks nothing first.
-            /// One whose `wl_subsurface` is the older is lost all the same --
-            /// that destructor tells the compositor nothing -- and this does
-            /// not reach it; see `crate::remains`.
+            /// One whose `wl_subsurface` is the older is
+            /// `a_client_that_disconnects_keeps_a_subsurface_whose_wl_subsurface_is_older`.
             #[test]
             fn a_client_that_disconnects_keeps_a_subsurface_older_than_its_window() {
                 use smithay::backend::renderer::element::surface::{
@@ -21388,6 +21466,108 @@ end)
                     picture.dummy_sizes(),
                     vec![(16, 16), (64, 64)],
                     "the subsurface that went first is not in the picture"
+                );
+            }
+
+            /// **#126's second review: and one whose `wl_subsurface` is older
+            /// than its window's surface, and than its own.** That object is
+            /// destroyed first, and smithay's destructor for it unlinks the
+            /// subsurface from its window and resets where it was, telling
+            /// the compositor nothing -- so by the time any surface of the
+            /// window was heard going, the page or the video was no longer in
+            /// it. The window is now taken at that destructor, for a client
+            /// that has gone, while all of it is there.
+            ///
+            /// The `wl_subsurface` is given an older id by recycling one: a
+            /// spare surface made first, before the subsurface's own surface
+            /// and the window's, and destroyed before the subsurface is made.
+            #[test]
+            fn a_client_that_disconnects_keeps_a_subsurface_whose_wl_subsurface_is_older() {
+                use smithay::backend::renderer::element::surface::{
+                    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+                };
+                use smithay::backend::renderer::{Renderer as _, test::DummyRenderer};
+
+                let mut desk = Desk::new();
+                desk.install(RECORDER);
+                desk.state.textures =
+                    Some(crate::remains::Textures::Dummy(DummyRenderer.context_id()));
+                let (conn, mut queue, mut client) = another_client(&mut desk);
+                let qh = queue.handle();
+                let compositor = client.compositor.clone().expect("wl_compositor bound");
+                let spare = compositor.create_surface(&qh, ());
+                let child = compositor.create_surface(&qh, ());
+                let (window, toplevel, surface) =
+                    open_surface(&mut desk.display, &mut desk.state, &conn, &client, &qh);
+                desk.state.sync_panes();
+                let pane = desk.state.panes.id_of(&window).expect("a pane");
+                spare.destroy();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                let subcompositor = client
+                    .subcompositor
+                    .clone()
+                    .expect("wl_subcompositor bound");
+                let sub = subcompositor.get_subsurface(&child, &surface, &qh, ());
+                sub.set_desync();
+                commit_buffer(&client, &qh, &child, 16, 16);
+                surface.commit();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                let sub_id = wayland_client::Proxy::id(&sub).protocol_id();
+                let child_id = wayland_client::Proxy::id(&child).protocol_id();
+                let root_id = wayland_client::Proxy::id(&surface).protocol_id();
+                assert!(
+                    sub_id < child_id && sub_id < root_id,
+                    "the premise: the wl_subsurface ({sub_id}) is older than the subsurface's \
+                     surface ({child_id}) and the window's ({root_id})"
+                );
+                let root = window
+                    .wl_surface()
+                    .map(std::borrow::Cow::into_owned)
+                    .expect("the window's surface");
+                let drawn: Vec<WaylandSurfaceRenderElement<DummyRenderer>> =
+                    render_elements_from_surface_tree(
+                        &mut DummyRenderer,
+                        &root,
+                        (0, 0),
+                        1.0,
+                        1.0,
+                        smithay::backend::renderer::element::Kind::Unspecified,
+                    );
+                assert_eq!(drawn.len(), 2, "the premise: two surfaces drawn");
+
+                drop((sub, child, surface, toplevel, qh, queue, client, conn));
+                desk.display
+                    .dispatch_clients(&mut desk.state)
+                    .expect("dispatching the disconnect");
+
+                let crate::pane::Remains::Picture(picture) = &left_of(&desk.state, pane).remains
+                else {
+                    panic!("a window with a picture fades out from it");
+                };
+                assert_eq!(
+                    picture.dummy_sizes(),
+                    vec![(16, 16), (64, 64)],
+                    "the subsurface whose wl_subsurface went first is not in the picture"
+                );
+                let id = pane.get();
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id},close {id}*"),
+                    "told gone once, at the wl_subsurface, and not again at its surfaces"
                 );
             }
 
