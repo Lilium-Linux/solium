@@ -42,7 +42,26 @@ sol.unplace(id)                                                   -- no longer t
 
 `tile = false` is for a window you place without tiling it; `dialogs.lua`
 centres a modal over its parent that way, because a dialog that grows after it
-is centred must not be cut to the size it was centred at. `sol.unplace` is for
+is centred must not be cut to the size it was centred at.
+
+Two more things a placement can say, both for a window whose application has
+an opinion about its size (#115):
+
+```lua
+sol.place(id, { x = 880, y = 420, w = 800, h = 600,            -- the window, smaller
+                tile = { x = 12, y = 12, w = 2536, h = 1416 } }) -- than the tile it has
+sol.place(id, { x = 12, y = 12, w = 1262, h = 1416, cramped = true })
+```
+
+`tile` as a rect is the tile a window sits inside when it is placed smaller
+than it -- `tiling.lua` does this for a window centred at its own maximum size.
+The window lives at the rect you place; the tile is what its client is held
+inside, and what a drag on the window's edge moves the seam from, because a
+seam is the tile's edge and not the window's. `cramped = true` says the tile is
+smaller than the window's own minimum, and comes back in `sol.windows()`; see
+[An application's own size](#an-applications-own-size). Each placement says it
+afresh, so one that does not say it is not cramped, and neither is a window
+placed with `tile = false` or let go with `sol.unplace`. `sol.unplace` is for
 a layout letting go, and `modes.use` sends it for every window whenever the
 layout in charge changes — so a mode registered through `modes` gets it for
 free, and one that is not must send it itself. Maximising and fullscreen take a
@@ -331,7 +350,8 @@ issue #116, and both halves above are what it cost.
 
 ```lua
 sol.windows()          -- every window: id, rect, drawn, title, focused, monitor,
-                       --                modal, parent, leaving
+                       --                modal, parent, leaving, app_id, min, max,
+                       --                cramped
 sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale,
                        --                 transform, focused, primary
 sol.monitor()          -- the active monitor's work area
@@ -371,6 +391,17 @@ is not on screen — not mapped yet, not ours, or closed while its dialog was
 still up — and absent when no parent was ever named. So `if window.parent then`
 is the right question for "have I got something to centre on", and
 `window.parent == false` is how you tell a lost parent from no parent at all.
+
+`min` and `max` are how small and how large the window's own application says
+it can be, `{ w = ..., h = ... }` -- in the same terms as `w` and `h`, frame
+included, so they compare with a tile directly -- and absent when it limited
+neither side. 0 on one side is no limit on that side. They are what the client
+has *committed*, never a size it has asked for and not yet drawn to, and a
+change to either re-runs `layout` once per change. `cramped` is the layout's own
+word coming back: `true` while the layout in charge last placed the window with
+`cramped = true`. `app_id` is the application's name for itself -- a Wayland
+application's `app_id`, an X11 one's `WM_CLASS` class -- and empty until the
+application has arrived.
 
 `skip` on `window_at` exists because of one specific bug: a new window is
 already mapped and under the pointer, so asking "what am I pointing at" without
@@ -520,7 +551,8 @@ tree:insert_largest(id, options)                -- the largest tile with room
 tree:remove(id)
 tree:contains(id)
 tree:windows()
-tree:layout(options)      -- the slots, to hand to sol.place
+tree:layout(options)      -- the slots, to hand to sol.place; cramped = true on a
+                          -- slot smaller than its window's own floor
 tree:resize(id, "width", share, options)               -- keyboard: an axis
 tree:drag_seam(id, "right", edge_x, edge_y, options)   -- pointer: a side
 ```
@@ -558,7 +590,21 @@ leaves, since it halves a tile too small to split. `resize` is bounded the
 same way when it is given `options`; without them, as a script written before
 #134 calls it, only `0.05..0.95` applies.
 
-`options` is a monitor's work area with `gap`, `split` and `minimum` added.
+`options.floors` is each window's own floor, `{ [id] = { w = ..., h = ... } }`,
+frame included: the smallest its application says it can be, or nothing for a
+window with no entry. Every call that takes `options` reads it. The tree lays
+each split out at the ratio it holds, then moves it just far enough for a
+window under its floor to reach it, taking the room from the other side down to
+*its* floors and `options.minimum`, and no further; the ratio it holds is left
+alone, so a window whose floor goes away hands the room back. `insert_fitting`
+and `insert_largest` refuse a split that would leave either window under its
+floor, and a seam stops at the floors beside it. A window the room is not there
+for is laid out short, and its slot says `cramped = true`. The scroller reads
+`options.floors` too, and never lays a column out narrower than the widest
+floor in it.
+
+`options` is a monitor's work area with `gap`, `split`, `minimum` and `floors`
+added.
 Passing the monitor in rather than the tree asking for it is what lets one tree
 per workspace *per monitor* exist without any of them knowing about either.
 Copy the rect before adding keys — the one from `sol.monitors()` belongs to the
@@ -620,8 +666,87 @@ scrolling is in charge, `tiling.lua` still keeps new windows in its trees for
 later, the same way, without sending any of them anywhere.
 
 The minimum is a tile's, not an application's: the tile is decided before any
-application exists to have an opinion. An application's own minimum size is
-#115.
+application exists to have an opinion. An application's own minimum is the next
+section.
+
+### An application's own size
+
+Some applications will not go under a size -- Firefox has a minimum width --
+and a few will not go over one, and they say so. Before #115 nobody listened:
+the tile was split as though the application had said nothing, the application
+drew itself at the size it insisted on, and that tile and every one beside it
+were wrong. `sol.windows()` has the two sizes now, and `tiling.lua` listens by
+default. You have the last word and not the application, so all three settings
+in `config.tiling` are yours:
+
+| setting | default | what it does |
+|---|---|---|
+| `client_minimum` | `"respect"` | lay each window out at least as large as the larger of its application's minimum and `minimum`, wherever there is room; `"ignore"` lays out as though no application had one, as before #115 |
+| `client_maximum` | `"center"` | a window whose tile is larger than its maximum is its maximum size, in the middle of the tile; `"ignore"` leaves it in the tile's corner at the size it chose, as before |
+| `client_size_ignore` | `{}` | applications, by `app_id`, whose sizes are not believed at all -- for one that claims a size it does not mean |
+
+Anything but `"ignore"` is read as the default. Respecting a minimum means:
+
+- **a window under it is given a larger share**, taken from the windows beside
+  it, down to their own minimums and `minimum` and no further; the share goes
+  back when the application's minimum does;
+- **a new window that would crowd one goes where `overflow` says**, since a
+  split that leaves either window under its minimum is refused like one that
+  leaves a tile under `minimum`. A window launched with `sol.spawn` has no
+  application yet when it is placed, so only the minimums of the windows it
+  would split are known then; its own arrives when its application first
+  commits, and is the case below;
+- **a window whose minimum grows gets the arrangement rebalanced** around it,
+  the moment the application commits it;
+- **a seam stops where a window beside it reaches its minimum**, by the drag
+  and by the keyboard;
+- and in the scrolling layout, **a column is never narrower than the widest
+  minimum in it**.
+
+A centred window's edge still drags the seam, from the tile's edge: `tiling.lua`
+places it with its tile as `tile`. And a floating window's edge drag stops at
+its application's minimum and maximum, because the frame would otherwise show a
+size the application is about to refuse. That one is the compositor's, not a
+layout's, and these three settings do not change it.
+
+**Cramped.** When the room is not there -- two windows that each need more than
+half the screen, side by side -- the window is laid out smaller than its
+minimum anyway. Its application draws itself at the size it insists on and the
+picture is cut to the tile (#133), so it still does not cover its neighbours.
+`tiling.lua` says so once in the log, with the numbers:
+
+```
+tiling: window 1 needs at least 2500 wide, frame included, and its tile is 2364x1416; it is cramped, and its application's picture is cut to the tile
+```
+
+and places the window with `cramped = true`, which `sol.windows()` then says
+until the window has room again. A layout that says it is also run once more
+by the compositor, so a handler reading `sol.windows()` in that same `layout`
+pass sees it. A bar that wants to show it reads it there:
+
+```lua
+-- A strip across the top that names the windows short of room.
+sol.on("layout", function()
+    local short = {}
+    for _, window in ipairs(sol.windows()) do
+        if window.cramped then
+            short[#short + 1] = window.title
+        end
+    end
+    local screen = sol.monitor()
+    sol.surface("cramped", {
+        scene = "cramped.qml",
+        layer = "top",
+        on = { x = screen.x, y = screen.y, w = screen.w, h = 24 },
+        properties = { windows = table.concat(short, ", ") },
+    })
+end)
+```
+
+Re-declaring a surface with the same properties changes nothing, so this costs
+a rebuild only when the list does; `cramped.qml` is any scene with a
+`required property string windows`. A window that is cramped and then has room
+again is named in the log again the next time it is short.
 
 ## A whole mode
 

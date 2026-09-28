@@ -37,7 +37,7 @@
 //! The splits and the seams are held to the same floors: `insert_fitting` and
 //! `insert_largest` refuse a split that would put a window under its own, and
 //! a seam stops at the floors on either side of it. Each of those sentences is
-//! a test in `floor_tests`, in that order.
+//! a test in `floor_tests`.
 
 use crate::{Floors, Minimum, Rect, Settings};
 
@@ -2801,6 +2801,20 @@ mod floor_tests {
         let mut tiling = pair();
         tiling.set_floors(floors(&[(1, 600.0, 0.0)]));
         tiling.drag_seam(1, Edge::Right, (100.0, 300.0), area(), free());
+        let one = rect_in(&tiling, 1, area(), free());
+        assert!((one.w - 600.0).abs() < 1e-6, "{one:?}");
+    }
+
+    /// **A press stops at a window's own floor**, as a drag does: window 1
+    /// needs 600, and five presses that would take it to 250 leave it there.
+    #[test]
+    fn a_press_stops_at_a_windows_own_floor() {
+        let mut tiling = pair();
+        tiling.set_floors(floors(&[(1, 600.0, 0.0)]));
+        for _ in 0..5 {
+            tiling.resize(1, Axis::Vertical, -0.05, area(), free());
+        }
+        tiling.set_floors(Floors::new());
         let one = rect_in(&tiling, 1, area(), free());
         assert!((one.w - 600.0).abs() < 1e-6, "{one:?}");
     }
