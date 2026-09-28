@@ -2069,6 +2069,10 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             // under it — ask without skipping and the answer is always the
             // window in your hand, which is why dropping one onto another
             // never swapped anything.
+            //
+            // `false`: no row of a snapshot is what is left of a window whose
+            // client has gone -- `Solium::snapshot` lists none, which
+            // `a_window_that_left_is_nobodys_to_find` asks.
             Ok(snapshot
                 .windows
                 .iter()
@@ -2076,6 +2080,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     Some(window.id) != skip
                         && crate::state::owns(
                             window.drawn.slot,
+                            false,
                             window.drawn.frame,
                             point,
                             &snapshot.screens,
@@ -3622,7 +3627,7 @@ mod tests {
             rect: drawn,
             ..Frame::real(slot)
         };
-        let covers = |x: f64, y: f64| crate::state::owns(slot, frame, (x, y).into(), &[]);
+        let covers = |x: f64, y: f64| crate::state::owns(slot, false, frame, (x, y).into(), &[]);
         assert!(covers(10.0, 20.0));
         assert!(covers(109.0, 69.0));
         // Exclusive, so adjacent thumbnails cannot both claim the same pixel.

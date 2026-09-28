@@ -449,6 +449,24 @@ impl Groups {
         self.fold(now, |group| group.selection.holds_window(id, monitor))
     }
 
+    /// The names of every selection a window is in this instant, in
+    /// declaration order: what a window whose client has gone keeps, so that
+    /// [`Self::on_named`] can go on carrying it with its desk however the desk
+    /// is redeclared after it. See `crate::pane::Left::groups`.
+    pub(crate) fn holding_window(&self, id: u64, monitor: Option<&str>) -> Vec<Box<str>> {
+        self.groups
+            .iter()
+            .filter(|group| group.selection.holds_window(id, monitor))
+            .map(|group| group.name.clone())
+            .collect()
+    }
+
+    /// How the selections with these names carry a node this instant, whoever
+    /// they hold now.
+    pub(crate) fn on_named(&self, names: &[Box<str>], now: Duration) -> Shift {
+        self.fold(now, |group| names.contains(&group.name))
+    }
+
     /// The same, for one monitor's instance of a scripted surface.
     pub(crate) fn on_surface(&self, id: SurfaceId, monitor: &str, now: Duration) -> Shift {
         self.fold(now, |group| group.selection.holds_surface(id, monitor))

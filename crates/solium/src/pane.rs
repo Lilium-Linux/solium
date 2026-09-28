@@ -55,15 +55,8 @@ impl PaneId {
 
 /// What is inside a pane.
 #[derive(Debug)]
-#[expect(
-    dead_code,
-    reason = "steps 4 and 5 of the window-provider migration bring the loading half \
-              into use: `Loading::source` is read by whatever draws a pane whose \
-              client has not arrived, and `Leaving` is constructed by whatever keeps \
-              one on screen while it goes. See the module docs."
-)]
 pub(crate) enum Content {
-    /// Asked for, not arrived. The compositor draws it, from `source`.
+    /// Asked for, not arrived. The compositor draws it, from `scene`.
     Loading {
         /// What was asked for, as the user would recognise it.
         program: String,
@@ -72,6 +65,12 @@ pub(crate) enum Content {
         pid: Option<u32>,
         /// Which QML draws it. Resolved once, so a reload changing the setting
         /// does not change what a pane already on screen looks like halfway.
+        #[expect(
+            dead_code,
+            reason = "written and never read: `Solium::begin_loading` builds the \
+                      scene from its own copy before the pane exists, and nothing \
+                      rebuilds a scene from this one"
+        )]
         source: PathBuf,
         /// The scene itself, hosted by us. `None` if it would not load: a
         /// window with nothing in it is worse than one with a scene, and much
@@ -98,8 +97,105 @@ pub(crate) enum Content {
         /// rather than a cut.
         faded: Option<Duration>,
     },
-    /// A client that has gone, still on screen while it leaves.
-    Leaving { since: Duration },
+    /// The remains of a window whose client has gone, on screen for the length
+    /// of its fade and not a moment longer (#126). Boxed: it carries two
+    /// rectangles, a title, two lists and a picture, and a window that is not
+    /// leaving should not pay for them. See [`Left`].
+    Leaving(Box<Left>),
+}
+
+/// How long a pane whose client has gone stays on screen.
+///
+/// Exactly the fade `present::close` plays, which is the one a compositor's own
+/// close plays too: the pane is at opacity zero from here on, so keeping it any
+/// longer keeps a picture of nothing. **Measured from when the fade began and
+/// not from when it was noticed**, so a client that goes part of the way
+/// through a close the compositor started leaves on that close's schedule
+/// (`a_client_that_quits_during_a_close_leaves_on_that_close`). Retired on this instant alone, and never on the animation finishing:
+/// `present::close` is written never to release, so "finished" is not a thing
+/// anyone can observe. `Solium::settle_leaving` and `Panes::sync` both retire
+/// on it; `a_window_that_closes_itself_fades_out_and_is_gone_on_time` pins the
+/// first and `syncing_retires_a_pane_that_has_finished_leaving` the second.
+pub(crate) const LEAVING: Duration = crate::present::CLOSING;
+
+/// What a pane whose client has gone shows while it fades.
+#[derive(Debug)]
+pub(crate) enum Remains {
+    /// The client's own surfaces, from the textures the renderer had imported
+    /// for them. See [`crate::remains`].
+    Picture(crate::remains::Picture),
+    /// The compositor's own scene: a window whose application never arrived,
+    /// or one that mapped and never painted, where the scene was what stood on
+    /// screen. It fades as it would have faded under a close.
+    Scene(Box<crate::surface::ShellSurface>),
+    /// A window that was on screen and left nothing to draw it from. Its
+    /// frame, if it has one, and [`crate::remains::FILL`] where its client was.
+    Lost,
+}
+
+/// Everything a pane keeps of a window whose client has gone.
+///
+/// **Taken before anything moves**, which is the whole reason this exists as
+/// a value rather than being asked of the pane each frame. `Solium::pane_outer`
+/// falls back to the pane's slot once there is no client to ask, and the
+/// `close` that follows the capture lets a layout move the pane's neighbours --
+/// so every fact about where and how the window was drawn is read while it
+/// still has a client, and kept. `Solium::depart` is the one writer.
+#[derive(Debug)]
+pub(crate) struct Left {
+    /// When its fade began. See [`LEAVING`].
+    pub(crate) since: Duration,
+    /// Its outer rectangle, frame included: what its transform is expressed
+    /// against, as `Solium::pane_outer` answered while there was a client.
+    pub(crate) outer: Rectangle<i32, Logical>,
+    /// The client's share of it, as `Solium::pane_geometry` answered.
+    pub(crate) geometry: Rectangle<i32, Logical>,
+    /// The selections it was in when its client went, by name, whose shift it
+    /// is drawn under for as long as it fades -- the shift they have *now*, so
+    /// a window that goes during a workspace slide, or just before one, goes on
+    /// moving with its desk rather than stopping where the slide had it.
+    ///
+    /// **The names and not the members**, because a group's members are a
+    /// script's to declare, and `workspaces.lua` rebuilds a desk's membership
+    /// from `sol.windows()` -- which this pane is no longer in -- so asking the
+    /// groups which ones hold it would lose the desk's shift on the next
+    /// `layout` event. `a_window_that_left_keeps_the_shift_its_desk_had` pins
+    /// the rebuild and `a_window_that_left_moves_with_its_desk` the desk moving
+    /// afterwards. A selection forgotten by name while it fades stops carrying
+    /// it, as it stops carrying every member -- read, not tested; the shipped
+    /// scripts forget a desk only when the number of desks goes down.
+    pub(crate) groups: Vec<Box<str>>,
+    /// The panes it is drawn over, which is where it stays in the stack while
+    /// it fades: [`Panes::sync`] puts it directly above whichever of them is
+    /// highest, wherever that one has been raised to since.
+    ///
+    /// Every pane stacked under it when its client went, and every one the
+    /// layout grew into its space at `close`. So a window that goes behind
+    /// another one fades behind it -- a terminal behind a browser does not
+    /// jump in front of it to fade
+    /// (`a_window_that_closes_itself_behind_another_fades_behind_it`); one that
+    /// goes from the top stays over the window the keyboard moves to, although
+    /// focusing that window raises it
+    /// (`a_window_that_goes_from_the_top_stays_over_the_window_the_keyboard_moves_to`);
+    /// and the neighbour a layout grows into its place grows in behind the
+    /// fade, as it does behind a close the compositor asks for (#128), which
+    /// raises the window at the press
+    /// (`a_window_that_closes_itself_hands_its_space_over_as_it_fades`).
+    ///
+    /// **What that costs**: the rule cannot tell a raise that is the keyboard
+    /// moving on from one that is a click, so a window it was over that is
+    /// clicked to the front inside those 190 ms takes the fade up with it, over
+    /// whatever was covering both. Read, not tested.
+    pub(crate) over: Vec<PaneId>,
+    /// What its frame said, and whether it was drawn focused, so a titlebar
+    /// fades out as it stood rather than losing its title on the way. Both
+    /// read back in `a_window_that_left_is_nobodys_to_find`.
+    pub(crate) title: String,
+    pub(crate) focused: bool,
+    /// What it is drawn from.
+    pub(crate) remains: Remains,
+    /// The fill's identity for the damage tracker, for [`Remains::Lost`].
+    pub(crate) fill: smithay::backend::renderer::element::Id,
 }
 
 /// What the compositor draws around this pane's client.
@@ -367,9 +463,10 @@ pub(crate) struct Pane {
     ///
     /// Set by `Solium::trigger_close`, and never cleared: nothing brings a
     /// window back once `close` has been sent. The pane itself outlives that
-    /// call by the rest of the frame -- it is retired in `sync_panes` -- and
-    /// this is what keeps it from being an ordinary window meanwhile. See
-    /// [`Self::leaving`] and `Solium::snapshot`.
+    /// call -- as [`Content::Leaving`] for the length of its fade when there is
+    /// anything to fade, and otherwise until `sync_panes` retires it at the end
+    /// of the frame -- and this is what keeps it from being an ordinary window
+    /// meanwhile. See [`Self::leaving`] and `Solium::snapshot`.
     gone: bool,
     opened: Duration,
     /// Whether a client mapped *into* this pane rather than creating it.
@@ -411,17 +508,6 @@ pub(crate) struct Pane {
     scratch: crate::offscreen::Scratch,
 }
 
-/// `dead_code` on the *block*, which is as narrow as this one can be: the lint
-/// reports every unused method of an impl in a single diagnostic at the impl's
-/// own span, so an `expect` on the method it names cannot match it. `content`
-/// and `leave` are the two, and they are the same window-provider migration the
-/// `Content` arms above are waiting for.
-#[expect(
-    dead_code,
-    reason = "steps 4 and 5 of the window-provider migration call `content` and \
-              `leave`: reading what a pane is showing, and keeping one on screen \
-              while its client goes. See the module docs."
-)]
 impl Pane {
     /// A pane for an application that has been asked for and has not arrived.
     pub(crate) fn loading(
@@ -657,10 +743,6 @@ impl Pane {
         self.restore.take()
     }
 
-    pub(crate) const fn content(&self) -> &Content {
-        &self.content
-    }
-
     /// What is drawn around this pane's client. See [`Frame`].
     pub(crate) const fn frame(&self) -> &Frame {
         &self.frame
@@ -800,34 +882,27 @@ impl Pane {
     ///    `a_window_that_has_gone_is_neither_placed_nor_closed_again` and
     ///    `a_layout_placing_a_closed_window_does_not_show_it_again`.
     /// 4. [`Content::Leaving`] — the client has gone and the pane is still
-    ///    being drawn. Nothing constructs this today; it is issue #126's state.
+    ///    being drawn, fading out: issue #126's state, which `Solium::depart`
+    ///    enters. `gone` is set on every route into it, so this arm answers
+    ///    nothing the third does not; it is here so that the predicate is total
+    ///    over `Content` and cannot answer "not leaving" for a variant whose
+    ///    name is `Leaving`.
     ///
-    /// **What the fourth arm is and is not.** It is here so that this predicate
-    /// is total over `Content` and cannot answer "not leaving" for a variant
-    /// whose name is `Leaving` — nothing more than that. It is *not* the
-    /// #126-shaped case being handled in advance, and the first draft of this
-    /// comment said it was: "the relayout #126 will put on a still-drawn pane
-    /// is already covered". That was the same promise-in-a-comment that kept
-    /// #126 itself unfiled behind a note about an animation nothing could play,
-    /// and it is worth less than nothing, because the next reader trusts it.
+    /// **Three places would keep a `Leaving` pane alive for ever, and this
+    /// comment used to say so while nothing constructed one.** Each is
+    /// answered now:
     ///
-    /// What is actually true is that **the first `Content::Leaving` pane anyone
-    /// constructs will never go away.** Three separate places keep it alive, and
-    /// #126 has to answer all three:
-    ///
-    /// * `Panes::sync` retains exactly the panes whose `client()` is `None`,
-    ///   which is how a still-loading pane survives a sweep — and a `Leaving`
-    ///   pane's `client()` is `None` too, so it is retained by the same line
-    ///   with nothing to ever drop it.
-    /// * [`Self::expired`] only answers for [`Self::is_loading`], so the
-    ///   patience timeout that retires an application that never arrived does
-    ///   not look at this state at all.
-    /// * `Solium::close_pane` declines any pane that is `leaving()` — this
-    ///   function — so it cannot be closed by hand either.
-    ///
-    /// So #126 owes this state a retirement: something that ends the animation
-    /// and drops the pane. Until then the arm is correct and unreachable, which
-    /// is the only combination worth writing down.
+    /// * `Panes::sync` retains the panes whose `client()` is `None`, which is
+    ///   how a loading pane survives a sweep; it drops one whose fade is over
+    ///   (`syncing_retires_a_pane_that_has_finished_leaving`).
+    /// * [`Self::expired`] answers for this state too, on [`LEAVING`], and
+    ///   `Solium::settle_leaving` retires every pane it answers for, once a
+    ///   frame, with nothing else having to happen
+    ///   (`a_pane_that_has_left_expires_when_its_fade_is_over`,
+    ///   `a_window_that_closes_itself_fades_out_and_is_gone_on_time`).
+    /// * `Solium::close_pane` still declines it, through this function, which
+    ///   is now the right answer rather than a trap: there is no client to ask
+    ///   and it goes on its own (`a_window_that_left_is_nobodys_to_find`).
     pub(crate) const fn leaving(&self) -> bool {
         self.closing_at.is_some()
             || self.asked_at.is_some()
@@ -844,6 +919,55 @@ impl Pane {
     }
     pub(crate) const fn is_loading(&self) -> bool {
         matches!(self.content, Content::Loading { .. })
+    }
+
+    /// What this pane kept of a window whose client has gone, while it fades.
+    /// `None` for every pane that is not [`Content::Leaving`].
+    pub(crate) fn left(&self) -> Option<&Left> {
+        match &self.content {
+            Content::Leaving(left) => Some(left),
+            _ => None,
+        }
+    }
+
+    /// Whether this pane is the remains of a window whose client has gone.
+    ///
+    /// Such a pane is drawn and nothing else: it is in no window list, takes no
+    /// input and no focus, and no layout places it. Every one of those is a
+    /// filter somewhere asking this, and `a_window_that_left_is_nobodys_to_find`
+    /// asks each of them.
+    pub(crate) const fn ghost(&self) -> bool {
+        matches!(self.content, Content::Leaving(_))
+    }
+
+    /// Take the scene that is standing on screen for this pane, if one is.
+    ///
+    /// A loading pane's scene, and a client's that has not painted yet -- the
+    /// two cases where the scene is what anyone is looking at. Not a scene
+    /// already dissolving off a client that has painted: there the client is
+    /// what is on screen, and its picture is what a fade is drawn from.
+    pub(crate) fn take_standing_scene(&mut self) -> Option<Box<crate::surface::ShellSurface>> {
+        match &mut self.content {
+            Content::Loading { scene, .. }
+            | Content::Client {
+                scene, faded: None, ..
+            } => scene.take(),
+            _ => None,
+        }
+    }
+
+    /// Whether a scene is standing on screen for this pane: what
+    /// [`Self::take_standing_scene`] would take.
+    pub(crate) const fn has_standing_scene(&self) -> bool {
+        matches!(
+            self.content,
+            Content::Loading { scene: Some(_), .. }
+                | Content::Client {
+                    scene: Some(_),
+                    faded: None,
+                    ..
+                }
+        )
     }
 
     /// Whether a client belonging to `family` — a process and its ancestors —
@@ -867,7 +991,7 @@ impl Pane {
         let scene = match &mut self.content {
             Content::Loading { scene, .. } => scene.take(),
             Content::Client { scene, .. } => scene.take(),
-            Content::Leaving { .. } => None,
+            Content::Leaving(_) => None,
         };
         self.content = Content::Client {
             window,
@@ -941,10 +1065,14 @@ impl Pane {
     }
 
     /// Whether anything of ours is drawing this pane.
+    ///
+    /// Including a pane whose client has gone and which kept the scene that
+    /// was standing in for it: that pane is drawn by the same walk that draws
+    /// a loading one, fading under its close.
     pub(crate) const fn has_scene(&self) -> bool {
         match &self.content {
             Content::Loading { scene, .. } | Content::Client { scene, .. } => scene.is_some(),
-            Content::Leaving { .. } => false,
+            Content::Leaving(left) => matches!(left.remains, Remains::Scene(_)),
         }
     }
 
@@ -961,24 +1089,44 @@ impl Pane {
         }
     }
 
-    /// The client has gone; keep the pane while it animates away.
-    pub(crate) fn leave(&mut self, now: Duration) {
-        self.content = Content::Leaving { since: now };
+    /// The client has gone; keep what it left for the length of its fade.
+    ///
+    /// Whatever the pane held before goes: a client's `Window` handle, a
+    /// loading pane's program. A scene worth keeping was taken out first, with
+    /// [`Self::take_standing_scene`], and is in `left`.
+    pub(crate) fn leave(&mut self, left: Left) {
+        self.content = Content::Leaving(Box::new(left));
     }
 
-    /// Whether an unarrived application has waited long enough to give up on.
+    /// Whether this pane has waited out what it was waiting for.
     ///
-    /// Only loading panes expire. A pane with a client is the client's problem
-    /// and a leaving one is measured by its animation, not by patience.
+    /// Two states wait. A loading pane waits for its application, and gives up
+    /// after `patience`. A pane whose client has gone waits for its fade, and
+    /// is done [`LEAVING`] after that fade began, whatever `patience` is -- it
+    /// is measured by the close it is playing, not by how long an application
+    /// may take to arrive. A pane with a client is the client's problem.
     pub(crate) fn expired(&self, now: Duration, patience: Duration) -> bool {
-        self.is_loading() && now.saturating_sub(self.opened) >= patience
+        match &self.content {
+            Content::Loading { .. } => now.saturating_sub(self.opened) >= patience,
+            Content::Leaving(left) => now.saturating_sub(left.since) >= LEAVING,
+            Content::Client { .. } => false,
+        }
+    }
+
+    /// Whether this pane's client has gone and its fade is over. What
+    /// `Panes::sync` and `Solium::settle_leaving` retire a pane on.
+    pub(crate) fn faded_out(&self, now: Duration) -> bool {
+        self.ghost() && self.expired(now, Duration::MAX)
     }
 
     /// The scene drawing this pane, while it has no client to draw itself.
     pub(crate) fn scene_mut(&mut self) -> Option<&mut crate::surface::ShellSurface> {
         match &mut self.content {
             Content::Loading { scene, .. } | Content::Client { scene, .. } => scene.as_deref_mut(),
-            Content::Leaving { .. } => None,
+            Content::Leaving(left) => match &mut left.remains {
+                Remains::Scene(scene) => Some(scene),
+                Remains::Picture(_) | Remains::Lost => None,
+            },
         }
     }
 
@@ -1080,6 +1228,17 @@ impl Panes {
         removed
     }
 
+    /// Say the window list changed, for a change `sync` cannot see by itself.
+    ///
+    /// A pane whose client has just gone stays in the list, where it was, as
+    /// what fades out -- so the ids `sync` compares are the ones it had, and it
+    /// would report nothing. The pane has stopped being a window all the same,
+    /// and a window going is what `sync_panes` settles the keyboard on:
+    /// `a_window_that_left_is_nobodys_to_find` has the keyboard move.
+    pub(crate) const fn changed(&mut self) {
+        self.changed = true;
+    }
+
     /// Take a pane for a client that arrived without being asked for, on top.
     ///
     /// Called where the window is mapped, so that nothing can observe a mapped
@@ -1151,25 +1310,46 @@ impl Panes {
         // A pane still waiting for a client stays, and rides on top, where a
         // window just asked for belongs.
         //
-        // **One whose client has gone is dropped here, and vanishes.** Nothing
-        // in the compositor constructs `Content::Leaving` -- `Pane::leave` has
-        // no production caller -- so there is no state in which a pane outlives
-        // its client, and the line below is where a window that closed itself
-        // stops being drawn: on the first `sync` after its surface went, with
-        // no animation. That is issue #126, and it is a design limit rather
-        // than an oversight: animating it means holding a texture for every
-        // window on the chance that it is the next to leave. This comment used
-        // to say step 5 was "where it lingers to animate out", in the present
-        // tense, describing an animation nothing could play -- which is how
-        // #126 went unfiled for as long as it did.
+        // **So does one whose client has gone and which is fading out**
+        // (`Content::Leaving`), until its fade is over, and then it is dropped
+        // here if `Solium::settle_leaving` has not dropped it first. That is
+        // step 5 of the window-provider migration: `Solium::depart` turns a
+        // pane whose client went into one of these, drawn from what its client
+        // left, and nothing else about it is a window any more. It does not
+        // ride on top: it goes back where it was in the stack, directly above
+        // the highest of the panes it is drawn over (`Left::over`, which says
+        // why), and above any other that is fading out from the same place --
+        // put there first, so below it before this sweep too.
         //
-        // The compositor's *own* closes do animate; they keep the client alive
-        // for the length of it and ask afterwards. See `Solium::close_pane`.
-        ordered.extend(
-            held.into_iter()
-                .flatten()
-                .filter(|pane| pane.client().is_none()),
-        );
+        // **A pane whose client went without `depart` hearing of it is still
+        // dropped here, and vanishes**: its client is `Some`, and not in the
+        // space. That is a client whose element smithay dropped in `refresh`
+        // with no handler of ours called -- read, and not reached by a test:
+        // every Wayland toplevel's destruction calls `toplevel_destroyed`, so
+        // it would take an X11 window whose Xwayland went away without an
+        // unmap. `syncing_retires_a_pane_that_has_finished_leaving` pins the
+        // ghost half.
+        for pane in held
+            .into_iter()
+            .flatten()
+            .filter(|pane| pane.client().is_none() && !pane.faded_out(now))
+        {
+            let Some(left) = pane.left() else {
+                ordered.push(pane);
+                continue;
+            };
+            let above = ordered
+                .iter()
+                .rposition(|each| left.over.contains(&each.id))
+                .map_or(0, |at| at + 1);
+            let at = above
+                + ordered
+                    .iter()
+                    .skip(above)
+                    .take_while(|each| each.ghost())
+                    .count();
+            ordered.insert(at, pane);
+        }
         self.panes = ordered;
 
         let after: Vec<PaneId> = self.panes.iter().map(|pane| pane.id).collect();
@@ -1236,6 +1416,22 @@ mod tests {
         Rectangle::new((10, 20).into(), (300, 200).into())
     }
 
+    /// What a pane keeps of a window that went at `since`, with nothing to
+    /// draw it from.
+    fn left(since: Duration) -> Left {
+        Left {
+            since,
+            outer: slot(),
+            geometry: slot(),
+            groups: Vec::new(),
+            over: Vec::new(),
+            title: String::new(),
+            focused: false,
+            remains: Remains::Lost,
+            fill: smithay::backend::renderer::element::Id::new(),
+        }
+    }
+
     #[test]
     fn identities_are_never_reused() {
         let first = Pane::loading("kitty", None, slot(), PathBuf::new(), None, Duration::ZERO);
@@ -1262,7 +1458,7 @@ mod tests {
         assert!(pane.is_loading());
         assert!(pane.awaits(&[7, 42, 1]));
 
-        pane.leave(Duration::from_millis(500));
+        pane.leave(left(Duration::from_millis(500)));
         assert_eq!(pane.id(), id);
         assert_eq!(pane.slot(), where_it_was);
         assert!(!pane.is_loading());
@@ -1316,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_loading_pane_gives_up() {
+    fn a_loading_pane_gives_up_after_its_patience() {
         let patience = Duration::from_secs(8);
         let pane = Pane::loading(
             "slow",
@@ -1328,8 +1524,19 @@ mod tests {
         );
         assert!(!pane.expired(Duration::from_secs(7), patience));
         assert!(pane.expired(Duration::from_secs(8), patience));
+    }
 
-        let mut left = Pane::loading(
+    /// **#126: a pane whose client has gone is done when its fade is, and
+    /// patience has nothing to do with it.**
+    ///
+    /// This asserted the opposite until #126 -- that a leaving pane never
+    /// expires at all -- which was one of the three things that would have
+    /// kept the first `Content::Leaving` pane on screen for good.
+    #[test]
+    fn a_pane_that_has_left_expires_when_its_fade_is_over() {
+        let patience = Duration::from_secs(8);
+        let went = Duration::from_secs(1);
+        let mut pane = Pane::loading(
             "slow",
             Some(9),
             slot(),
@@ -1337,10 +1544,114 @@ mod tests {
             None,
             Duration::ZERO,
         );
-        left.leave(Duration::from_secs(1));
+        pane.leave(left(went));
+        assert!(pane.ghost(), "the premise: its client has gone");
         assert!(
-            !left.expired(Duration::from_secs(60), patience),
-            "a pane that is leaving is measured by its animation, not by patience"
+            !pane.expired(went + LEAVING - Duration::from_millis(1), patience),
+            "a pane still fading is not done"
+        );
+        assert!(
+            pane.expired(went + LEAVING, Duration::MAX),
+            "done when the fade is, however long patience is"
+        );
+        assert!(pane.faded_out(went + LEAVING));
+        assert!(
+            !pane.expired(went + LEAVING - Duration::from_millis(1), Duration::ZERO),
+            "and not before it, however short patience is"
+        );
+    }
+
+    /// **#126's review: `sync` keeps a pane fading out where it was in the
+    /// stack**, directly above the highest pane it is drawn over, rather than
+    /// on top with the panes still waiting for an application.
+    ///
+    /// Loading panes stand in for the windows here, because a `Window` cannot
+    /// be made without a client; the rule is the same one for both, and
+    /// `a_window_that_closes_itself_behind_another_fades_behind_it` drives it
+    /// with real windows. Two panes fading out over the same one keep the order
+    /// they were in.
+    #[test]
+    fn syncing_keeps_a_pane_that_left_where_it_was_in_the_stack() {
+        let went = Duration::from_secs(3);
+        let loading = |pid| {
+            Pane::loading(
+                "kitty",
+                Some(pid),
+                slot(),
+                PathBuf::new(),
+                None,
+                Duration::ZERO,
+            )
+        };
+        // On top of the list, where `Panes::open` puts a pane -- and where
+        // #126 first put one whose client had gone, whatever it had been under.
+        let mut panes = Panes::default();
+        let bottom = panes.open(loading(1));
+        let top = panes.open(loading(2));
+        let first = panes.open(loading(3));
+        let second = panes.open(loading(4));
+        for going in [first, second] {
+            if let Some(pane) = panes.get_mut(going) {
+                pane.leave(Left {
+                    over: vec![bottom],
+                    ..left(went)
+                });
+            }
+        }
+        panes.sync(&[], went);
+        let order: Vec<PaneId> = panes.iter().map(Pane::id).collect();
+        assert_eq!(
+            order,
+            vec![bottom, first, second, top],
+            "two panes fading out over the bottom one stay directly above it, in the \
+             order they were in, and under the one that was over them"
+        );
+    }
+
+    /// **#126: `sync` keeps a pane fading out and drops it when it is done.**
+    ///
+    /// `sync` keeps every pane with no client, which is how a loading pane
+    /// survives a sweep, and a pane whose client has gone has none either --
+    /// so without the second half of its filter the first ghost would have
+    /// been kept for ever by the one function that reconciles the list.
+    #[test]
+    fn syncing_retires_a_pane_that_has_finished_leaving() {
+        let went = Duration::from_secs(3);
+        let mut panes = Panes::default();
+        let staying = panes.open(Pane::loading(
+            "kitty",
+            Some(1),
+            slot(),
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        ));
+        let going = panes.open(Pane::loading(
+            "kitty",
+            Some(2),
+            slot(),
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        ));
+        if let Some(pane) = panes.get_mut(going) {
+            pane.leave(left(went));
+        }
+        panes.sync(&[], went);
+
+        assert!(
+            !panes.sync(&[], went + LEAVING - Duration::from_millis(1)),
+            "a pane still fading is kept, and nothing changed"
+        );
+        assert!(panes.get(going).is_some());
+        assert!(
+            panes.sync(&[], went + LEAVING),
+            "dropping it is a change, and it is reported"
+        );
+        assert!(panes.get(going).is_none(), "done fading, and gone");
+        assert!(
+            panes.get(staying).is_some(),
+            "and the pane still waiting for its application is not touched"
         );
     }
 

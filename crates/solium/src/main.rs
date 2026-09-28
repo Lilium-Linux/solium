@@ -28,6 +28,7 @@ mod pane;
 mod pass;
 mod present;
 mod qml;
+mod remains;
 mod render;
 mod resizing;
 mod screencopy;

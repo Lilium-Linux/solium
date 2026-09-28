@@ -25,8 +25,8 @@ use smithay::wayland::xdg_activation::{
 
 use smithay::{
     backend::{allocator::dmabuf::Dmabuf, renderer::utils::on_commit_buffer_handler},
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_layer_shell,
-    delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_data_device, delegate_dmabuf, delegate_layer_shell, delegate_output, delegate_seat,
+    delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface, PopupGrab, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
         PopupUngrabStrategy, Space, Window, WindowSurfaceType, find_popup_root_surface,
@@ -223,15 +223,26 @@ fn staged(
 /// is under it. A point on no screen while there are some is on nothing,
 /// because nothing is drawn there -- and `input::confine` keeps the pointer
 /// from ever being there. `a_point_is_on_a_window_only_on_a_monitor_that_draws_it`.
+///
+/// **And never for `remains`: what is left of a window whose client has gone**
+/// (#126), `Pane::ghost`. It is drawn, fading where the window stood, but it is
+/// a picture of a window and not one: there is no client to hand a press, a
+/// key or a hover to, and what it is drawn over is the window the layout has
+/// grown into its place (`crate::pane::Left::over`). So every walk looks
+/// through it, and it is asked here, once, rather than by each walk beside
+/// this rule. `a_window_that_left_is_nobodys_to_find` asks the walks,
+/// `a_point_is_on_a_window_only_on_a_monitor_that_draws_it` this.
 fn shown_at(
     slot: Rectangle<i32, Logical>,
+    remains: bool,
     point: Point<f64, Logical>,
     screens: &[Rectangle<i32, Logical>],
 ) -> bool {
-    screens.is_empty()
-        || screens
-            .iter()
-            .any(|screen| screen.to_f64().contains(point) && crate::render::drawn_on(slot, *screen))
+    !remains
+        && (screens.is_empty()
+            || screens.iter().any(|screen| {
+                screen.to_f64().contains(point) && crate::render::drawn_on(slot, *screen)
+            }))
 }
 
 /// Whether a window living at `slot`, drawn as `frame`, owns the pixel at
@@ -258,14 +269,18 @@ fn shown_at(
 /// and one scripts have been told has gone. Where the Rust walk stops at one
 /// of those, `sol.window_at` sees through it to the window behind. Older than
 /// #134 and left as it stands:
-/// `sol_window_at_sees_through_the_panes_the_snapshot_leaves_out`.
+/// `sol_window_at_sees_through_the_panes_the_snapshot_leaves_out`. What is
+/// left of a window whose client has gone is seen through by both: the
+/// snapshot leaves it out, and `remains` has the Rust walk look past it
+/// (`a_window_that_left_is_nobodys_to_find`).
 pub(crate) fn owns(
     slot: Rectangle<i32, Logical>,
+    remains: bool,
     frame: Frame,
     point: Point<f64, Logical>,
     screens: &[Rectangle<i32, Logical>],
 ) -> bool {
-    shown_at(slot, point, screens) && frame.covers(point)
+    shown_at(slot, remains, point, screens) && frame.covers(point)
 }
 
 /// Whether a selection headed for `bound` puts away the desk it carries:
@@ -683,6 +698,15 @@ pub(crate) struct Solium {
     /// dropping it — which would withdraw the global — happens with the rest.
     pub(crate) dmabuf_state: DmabufState,
     pub(crate) dmabuf_global: Option<DmabufGlobal>,
+
+    /// The renderer context a departing window's picture is read under.
+    ///
+    /// `RendererSurfaceState` files each imported texture by the context it
+    /// was imported under, and the backend owns the renderer, so the backend
+    /// hands its context over when it has one. `None` until then, and in a
+    /// test with no renderer, where a window that goes leaves a picture with
+    /// no pixels in it. See `crate::remains`.
+    pub(crate) textures: Option<crate::remains::Textures>,
 
     /// The last window list handed to the shell, so it is only sent again
     /// when it differs.
@@ -1586,6 +1610,7 @@ impl Solium {
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
             programs: crate::pass::Programs::default(),
+            textures: None,
             published_windows: String::new(),
             focusing: false,
             closing: None,
@@ -1645,6 +1670,12 @@ impl Solium {
     /// answers `Option`, because *that* question — is there a pane with this id
     /// — really can be no.
     pub(crate) fn pane_geometry(&self, pane: &Pane) -> Rectangle<i32, Logical> {
+        // A pane whose client has gone answers where the client was, as this
+        // function answered it while there was one: the slot is the last thing
+        // `sync_panes` or a layout wrote, which is not where it was drawn.
+        if let Some(left) = pane.left() {
+            return left.geometry;
+        }
         let Some(window) = pane.client() else {
             return pane.slot();
         };
@@ -1766,6 +1797,12 @@ impl Solium {
     /// What it is, is the rectangle transforms are expressed against and hit
     /// tests are resolved in — the pane's real geometry grown by its frame.
     pub(crate) fn pane_outer(&self, pane: &Pane) -> Rectangle<i32, Logical> {
+        // Kept whole rather than grown again from the kept geometry, so a
+        // style change during the fade does not move the rectangle its
+        // transform is expressed against.
+        if let Some(left) = pane.left() {
+            return left.outer;
+        }
         grown(self.pane_geometry(pane), self.insets_of(pane.id()))
     }
 
@@ -1927,18 +1964,64 @@ impl Solium {
         real: Rectangle<i32, Logical>,
         now: std::time::Duration,
     ) -> crate::group::Shift {
+        // Carried by the selections it was in when its client went, as they
+        // move now, and whoever they hold. See `crate::pane::Left::groups`.
+        if let Some(left) = pane.left() {
+            return self.groups.on_named(&left.groups, now);
+        }
         if self.groups.is_empty() {
             return crate::group::Shift::NONE;
         }
-        // Only worked out when a selection has actually named a screen: this is
-        // a geometric search over the outputs, per pane, per frame.
-        let monitor = self
-            .groups
-            .names_monitors()
-            .then(|| self.output_of(real).map(|output| output.name()))
-            .flatten();
+        let monitor = self.named_monitor_of(real);
         self.groups
             .on_window(pane.id().get(), monitor.as_deref(), now)
+    }
+
+    /// The connector a pane is on, when a selection names a monitor.
+    ///
+    /// Only worked out when a selection has actually named a screen: this is
+    /// a geometric search over the outputs, per pane, per frame.
+    fn named_monitor_of(&self, real: Rectangle<i32, Logical>) -> Option<String> {
+        self.groups
+            .names_monitors()
+            .then(|| self.output_of(real).map(|output| output.name()))
+            .flatten()
+    }
+
+    /// The panes stacked under this one this instant, bottom to top: what a
+    /// pane whose client is going stays over while it fades. See
+    /// `crate::pane::Left::over`.
+    ///
+    /// From the space for a window in it, which is the authority on how
+    /// clients are stacked, and from the panes for one that is not -- a window
+    /// whose application never arrived, which the space has never held.
+    fn stacked_under(&self, pane: &Pane) -> Vec<crate::pane::PaneId> {
+        let in_space = pane.client().and_then(|window| {
+            self.space
+                .elements()
+                .position(|each| each == window)
+                .map(|at| {
+                    self.space
+                        .elements()
+                        .take(at)
+                        .filter_map(|each| self.panes.id_of(each))
+                        .collect()
+                })
+        });
+        in_space.unwrap_or_else(|| {
+            self.panes
+                .iter()
+                .take_while(|each| each.id() != pane.id())
+                .map(Pane::id)
+                .collect()
+        })
+    }
+
+    /// Where a layout has a pane: the tile it asked for, or where the pane is
+    /// when it is in none. What `Self::depart` compares across a `close` to
+    /// find the windows the layout grew into the space of one that went.
+    fn laid_out_at(&self, pane: &Pane) -> Rectangle<i32, Logical> {
+        pane.placed().unwrap_or_else(|| self.pane_outer(pane))
     }
 
     /// Where one monitor's instance of a scripted surface is actually drawn.
@@ -2046,6 +2129,15 @@ impl Solium {
             let Some(pane) = self.panes.by_script_id(*id) else {
                 continue;
             };
+            // Not a window whose client has gone: it is drawn under the
+            // selections it was in when it went, by name, which no membership
+            // change touches, so nothing moved it and there is nothing to put
+            // back. Rebased, it was displaced twice, and glided out from under
+            // its desk while it faded.
+            // `a_window_that_left_keeps_the_shift_its_desk_had`.
+            if pane.ghost() {
+                continue;
+            }
             let outer = self.pane_outer(pane);
             present::rebase(pane, outer, *by, now, animation.duration, animation.easing);
         }
@@ -2142,11 +2234,28 @@ impl Solium {
     /// What to write on a pane's frame.
     pub(crate) fn pane_title(&self, id: crate::pane::PaneId) -> String {
         self.panes.get(id).map_or_else(String::new, |pane| {
+            if let Some(left) = pane.left() {
+                return left.title.clone();
+            }
             pane.client().map_or_else(
                 || pane.program().unwrap_or_default().to_owned(),
                 |window| self.window_title(window),
             )
         })
+    }
+
+    /// Whether a pane's frame is drawn focused.
+    ///
+    /// The keyboard's answer for a window, and the answer a window had when
+    /// its client went for one fading out: the keyboard has moved on by then,
+    /// and a titlebar that greyed out while it faded would be drawing the
+    /// focus change on a window nobody can focus.
+    pub(crate) fn looks_focused(&self, id: crate::pane::PaneId) -> bool {
+        if let Some(left) = self.panes.get(id).and_then(Pane::left) {
+            return left.focused;
+        }
+        self.focused_window()
+            .is_some_and(|window| self.panes.id_of(&window) == Some(id))
     }
 
     /// Whether the pointer is over a pane, frame included.
@@ -2169,6 +2278,12 @@ impl Solium {
     /// cheaper question here and the exact one there is the split, not an
     /// oversight in this line.
     pub(crate) fn pointer_over(&self, id: crate::pane::PaneId) -> bool {
+        // Never over a window that has gone: a close button lighting up as
+        // the cursor crosses a pane fading out offers a press that nothing
+        // will take (`a_window_that_left_is_nobodys_to_find`).
+        if self.panes.get(id).is_some_and(Pane::ghost) {
+            return false;
+        }
         let Some(outer) = self.pane_outer_of(id) else {
             return false;
         };
@@ -2846,6 +2961,13 @@ impl Solium {
         // should have learned. Retired rather than left empty: `sync_panes`
         // would drop it anyway, and the layout is told now rather than a frame
         // late.
+        //
+        // **At once, with no fade, and removed before it is told** -- the one
+        // way a window leaves that does not go through `Self::depart` (#126).
+        // It is a merge, not a close: the client it held is still on screen,
+        // in the pane above, and a fade here would draw a second copy of it
+        // leaving. Removed first because for this one line both panes hold
+        // the same `Window`, and `close`'s snapshot would list it twice.
         self.panes.remove(wrong);
         self.trigger_close(wrong);
         tracing::debug!(
@@ -3016,6 +3138,20 @@ impl Solium {
             .iter()
             .rev()
             .filter_map(|pane| {
+                // The remains of a window whose client has gone, fading out.
+                // Never listed, in any event, and not under `reserves_a_slot`
+                // below: a layout handed one places it and `adopt` puts it
+                // into a tree -- an immortal invisible tile, since nothing
+                // sends a second `close`. Its `close` went out while it was
+                // still the window it had been (`Self::depart`).
+                //
+                // **Belt and braces, and said so.** Every such pane is also
+                // `gone`, which the filter further down already leaves out, so
+                // no test fails without this line; it holds for a pane that is
+                // `Leaving` by any later route that forgets to mark it.
+                if pane.ghost() {
+                    return None;
+                }
                 // A pane whose application has not arrived is in this list --
                 // that is what makes the layout reserve its place before there
                 // is anything to put in it. Unless it was asked not to: a
@@ -3824,8 +3960,9 @@ impl Solium {
         // is below, and not a `Halo`, which would still win over bare desktop.
         // See [`shown_at`];
         // `on_two_monitors_a_press_on_the_right_monitor_reaches_what_it_draws`
-        // asks both.
-        if !shown_at(outer, location, screens) {
+        // asks both. Nor has what is left of a window whose client has gone:
+        // `a_window_that_left_is_nobodys_to_find`.
+        if !shown_at(outer, pane.ghost(), location, screens) {
             return PaneHit::Miss;
         }
         let drawn = self.drawn_at(pane, outer, now);
@@ -3972,6 +4109,19 @@ impl Solium {
         now: Duration,
         standing: Standing,
     ) {
+        // **Nothing moves a window that has gone.** Scripts have been told
+        // `close`, or its client has left it fading where it stood: a
+        // stateless layout placing the rows of `close`'s own snapshot -- which
+        // lists the window closing -- would otherwise move the tile a fading
+        // picture is cut to, and a script holding the id can `sol.place` it.
+        // `a_window_that_left_is_nobodys_to_find` places one.
+        if self
+            .panes
+            .get(pane)
+            .is_some_and(|held| held.gone() || held.ghost())
+        {
+            return;
+        }
         // The frame's share comes off whichever sides it reserved; what is
         // left is the client's.
         let client = inner(outer, self.insets_of(pane));
@@ -4485,10 +4635,9 @@ impl Solium {
             Err(err) => {
                 // Nothing is coming, so the window goes now rather than
                 // sitting there for the whole of `patience` promising
-                // otherwise. The layout is told, and closes the gap.
-                if self.panes.remove(pane) {
-                    self.trigger_close(pane);
-                }
+                // otherwise. The layout is told, and closes the gap, while the
+                // window fades out of it. See `Self::depart`.
+                self.depart(pane);
                 self.redraw = true;
                 tracing::warn!(?err, program, "could not spawn");
             }
@@ -4576,7 +4725,14 @@ impl Solium {
             // Both through [`owns`], which is also what `sol.window_at` asks,
             // so a script and this walk put the same question to each window --
             // `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
-            if !owns(outer, self.drawn_at(pane, outer, now), location, &screens) {
+            // And never of what is left of a window whose client has gone.
+            if !owns(
+                outer,
+                pane.ghost(),
+                self.drawn_at(pane, outer, now),
+                location,
+                &screens,
+            ) {
                 continue;
             }
             // Covered. A pane whose application has not arrived has no window
@@ -4641,8 +4797,9 @@ impl Solium {
             // renderer draws inside the same cull -- is at a point on a screen
             // that does not draw it. [`shown_at`] says why, and
             // `on_two_monitors_a_press_on_the_right_monitor_reaches_what_it_draws`
-            // is this walk.
-            if !shown_at(outer, location, &screens) {
+            // is this walk. Nor anything of a window whose client has gone:
+            // `a_window_that_left_is_nobodys_to_find`.
+            if !shown_at(outer, pane.ghost(), location, &screens) {
                 continue;
             }
             let frame = self.drawn_at(pane, outer, now);
@@ -4767,10 +4924,10 @@ impl Solium {
     /// cleared in that case too, and the window comes back.
     ///
     /// This covers closes the compositor asks for -- a frame button, a
-    /// binding, a script. A client that exits on its own still vanishes
-    /// instantly: by the time we hear about it its surface is gone, and
-    /// animating it would mean holding a snapshot of every window on the
-    /// chance that it might be the next to leave. That is issue #126.
+    /// binding, a script. A client that exits on its own plays the same fade,
+    /// from the textures the renderer had already imported for its surfaces,
+    /// taken at the moment it goes rather than held for every window on the
+    /// chance: see [`Self::depart`] and `crate::remains` (#126).
     ///
     /// **Asked at most once per window.** See [`Pane::leaving`] for the four
     /// states that answer it, and why the narrower question this used to ask
@@ -4899,9 +5056,15 @@ impl Solium {
             let Some(window) = self.panes.get(id).and_then(Pane::client).cloned() else {
                 // Nothing to ask. A window whose application never arrived is
                 // gone when we say it is, which is the one case where closing
-                // is entirely ours to decide.
-                if self.panes.remove(id) {
+                // is entirely ours to decide. Its fade has just landed, so it
+                // is already invisible and there is nothing left to draw.
+                //
+                // Told first and removed after, as on every route (#126): the
+                // pane is still here for `close`'s own snapshot, as a window
+                // that is leaving.
+                if self.panes.get(id).is_some() {
                     self.trigger_close(id);
+                    self.panes.remove(id);
                 }
                 continue;
             };
@@ -5060,10 +5223,38 @@ impl Solium {
         animating |= self.settle_closing(now);
         // A window whose application never turned up gives up its slot.
         self.settle_loading(now);
+        // One whose client has gone and whose fade is over is dropped, and
+        // until then the frames keep coming: nothing else asks for one while
+        // it fades, since its client can no longer damage anything.
+        animating |= self.settle_leaving(now);
         // And one asked to close that is still here comes back.
         animating |= self.settle_refused(now);
         self.animating = animating;
         animating
+    }
+
+    /// Drop every pane whose client has gone and whose fade is over, and say
+    /// whether any is still fading.
+    ///
+    /// **On the clock alone** (`pane::LEAVING`), because that is the only
+    /// thing about a fade anyone can observe: `present::close` never releases
+    /// its transform, so "the animation finished" is not a state. Called from
+    /// every frame's `settle`, so a pane is gone within a frame of its
+    /// deadline with nothing else having to happen -- no client event, no
+    /// `sync_panes`, no layout. `a_window_that_closes_itself_fades_out_and_is_gone_on_time`.
+    pub(crate) fn settle_leaving(&mut self, now: std::time::Duration) -> bool {
+        let done: Vec<crate::pane::PaneId> = self
+            .panes
+            .iter()
+            .filter(|pane| pane.faded_out(now))
+            .map(Pane::id)
+            .collect();
+        for id in done {
+            if self.panes.remove(id) {
+                self.redraw = true;
+            }
+        }
+        self.panes.iter().any(Pane::ghost)
     }
 
     /// Act on a resize an edge drag asked for.
@@ -6809,11 +7000,12 @@ impl Solium {
             // the pointer until there is one.
             pane.decoration()?;
             let outer = self.pane_outer(pane);
-            // Nor one on a screen that does not draw it: [`shown_at`], whose
-            // test is `a_point_is_on_a_window_only_on_a_monitor_that_draws_it`.
-            // A pane with a built frame needs Qt, which this binary's tests
-            // cannot start, so this walk is not driven by one.
-            if !shown_at(outer, location, &screens) {
+            // Nor one on a screen that does not draw it, nor the frame of a
+            // window whose client has gone: [`shown_at`], whose test is
+            // `a_point_is_on_a_window_only_on_a_monitor_that_draws_it`. A pane
+            // with a built frame needs Qt, which this binary's tests cannot
+            // start, so this walk is not driven by one.
+            if !shown_at(outer, pane.ghost(), location, &screens) {
                 return None;
             }
             let drawn = self.drawn_at(pane, outer, now);
@@ -6955,7 +7147,11 @@ impl Solium {
         let gone: Vec<(crate::pane::PaneId, String)> = self
             .panes
             .iter()
-            .filter(|pane| pane.expired(now, patience))
+            // `is_loading` as well, because `expired` answers for a pane whose
+            // client has gone too, and that one is `settle_leaving`'s to drop.
+            // (`depart` would do nothing with it -- it has gone already -- but
+            // the log line below would call it an application that never came.)
+            .filter(|pane| pane.is_loading() && pane.expired(now, patience))
             .map(|pane| (pane.id(), pane.program().unwrap_or_default().to_owned()))
             .collect();
         if gone.is_empty() {
@@ -6963,13 +7159,15 @@ impl Solium {
         }
         for (id, program) in gone {
             tracing::info!(program, "gave up on an application that never arrived");
-            // Forgotten first, then reported: a layout hearing that a window
-            // closed will lay out immediately, and it should not be laying out
-            // around a window that is already gone. Its frame and its timers
-            // go here with it -- fields of the pane rather than entries in a
-            // table waiting for the next `sync_panes` to sweep them.
-            self.panes.remove(id);
-            self.trigger_close(id);
+            // The way every window goes: the layout is told while the pane is
+            // still here, and it fades out of its place as the layout closes
+            // up -- the scene that stood in for the application fading as a
+            // closed window does. This used to remove the pane first so that
+            // "a layout should not be laying out around a window that is
+            // already gone", which `close`'s own snapshot now answers for every
+            // route alike: the window is listed there as leaving, and in no
+            // event after it. See `Self::depart`.
+            self.depart(id);
         }
         self.redraw = true;
         true
@@ -7935,9 +8133,11 @@ impl Solium {
     pub(crate) fn trigger_close(&mut self, pane: crate::pane::PaneId) {
         let id = pane.get();
         // **The close is over, so nothing may bring this window back** (#128).
-        // The pane outlives this call by the rest of the frame: every frame runs
-        // the Wayland dispatch -- where a client destroying its toplevel lands
-        // here -- then `settle`, and only then `sync_panes`, which retires it.
+        // The pane outlives this call: `Self::depart`, which is where a client
+        // destroying its toplevel lands, turns it into what fades out for
+        // `pane::LEAVING` when there is anything to fade, and otherwise it
+        // lasts the rest of the frame -- every frame runs the Wayland dispatch,
+        // then `settle`, and only then `sync_panes`, which retires it.
         // A client that went near its grace deadline was still `asked_at` in
         // that `settle`, so `settle_refused` gave the dead window back and the
         // layout was told `refused` after `close`: a leaf kept for a window
@@ -7975,11 +8175,17 @@ impl Solium {
             pane.went();
         }
         // Only for the snapshot, and the snapshot is the whole of what a script
-        // sees. The pane is still here -- it is retired in `sync_panes`, a frame
-        // from now -- so a dialog waiting on this window would otherwise be
-        // re-centred on the rect of the window that is leaving, and this pass is
-        // the last one: nothing runs again to take it off the window that moves
-        // into that space. See [`Self::parented`].
+        // sees. The pane is still here on two of the three routes in -- since
+        // #126, `Self::depart` and `settle_closing`'s loading pane both call
+        // this before the pane goes, and the first is
+        // `a_client_that_disconnects_fades_out_and_is_told_gone_once`'s
+        // `close N*` -- so a dialog waiting on this window would otherwise be
+        // re-centred on the rect of the window that is leaving, and this pass
+        // is the last one: nothing runs again to take it off the window that
+        // moves into that space. See [`Self::parented`]. **Not on the third**:
+        // the token-adoption merge in [`Self::claim_into`] removes the pane
+        // first, because there both panes hold the same `Window` and this
+        // snapshot would list it twice. Read in its code; no test drives it.
         self.closing = Some(pane);
         let snapshot = self.snapshot();
         self.closing = None;
@@ -7987,6 +8193,243 @@ impl Solium {
             let outcome = scripts.closed(id, snapshot);
             self.scripts = Some(scripts);
             self.apply(outcome);
+        }
+    }
+
+    /// A window is going on its own: its client closed it, quit, crashed or was
+    /// killed, its X11 window unmapped, or its application never arrived.
+    /// Tell the scripts it has gone, and keep it on screen long enough to fade
+    /// out as a window the compositor closes does (#126).
+    ///
+    /// **Every way a window goes on its own comes here**: `toplevel_destroyed`,
+    /// `CompositorHandler::destroyed` for a window's own surface, an X11
+    /// unmap, `settle_loading` and a failed spawn. A close the compositor asked
+    /// for comes here too, when its client finally goes, and finds its fade
+    /// already landed and nothing left to fade (`asked_at` below). Two ways
+    /// out do not come here at all: a loading pane closed by hand, which
+    /// `settle_closing` removes once its own fade has landed, and the
+    /// token-adoption merge in [`Self::claim_into`], which is not a window
+    /// leaving.
+    ///
+    /// **What it leaves is decided before anyone is told**, because telling
+    /// is what moves things: `close` runs a layout, which grows the
+    /// neighbours into this window's space, and a stateless layout places
+    /// every row of `close`'s snapshot, this window's included. So the
+    /// rectangle it is drawn at, the selections carrying it, its title and its
+    /// picture are all read first, and its fade starts first, from where it
+    /// stands. `move_pane` then declines to move a pane that has gone.
+    ///
+    /// **Then `close`, once, with the pane still here and still the window it
+    /// was.** The same event a compositor's own close ends in and nothing
+    /// else: no `closing`, because nobody asked for this close and there is
+    /// no refusal to come back from. A layout reflows at `close`, and the
+    /// window fades where it stood while its neighbours grow in, which is the
+    /// picture #128 gives a close the compositor asked for. Its row in that
+    /// snapshot says `leaving`, and it is in no snapshot after.
+    /// `a_window_that_closes_itself_hands_its_space_over_as_it_fades`.
+    ///
+    /// **Then it becomes [`crate::pane::Content::Leaving`]** -- out of the
+    /// space, and in the stack where it was, over the panes it was over and
+    /// over the ones the layout grew into its space at `close`
+    /// ([`crate::pane::Left::over`]), drawn from what it left
+    /// ([`crate::pane::Remains`]) and from nothing else, and dropped by
+    /// [`Self::settle_leaving`] when its fade is over. Or, with nothing to
+    /// fade, it goes as it did before #126: a client's pane at the end of the
+    /// frame in `sync_panes`, a loading pane at once.
+    ///
+    /// Asked at most once per window: most windows are heard going twice --
+    /// a disconnecting client's surface and then its toplevel, an X11 window's
+    /// surface and its unmap -- and `close` means gone exactly once.
+    pub(crate) fn depart(&mut self, id: crate::pane::PaneId) {
+        use crate::pane::{Left, Remains};
+        enum Keep {
+            Scene,
+            Picture(crate::remains::Picture),
+            Lost,
+        }
+
+        let now = self.clock.now();
+        let Some(pane) = self.panes.get(id) else {
+            return;
+        };
+        if pane.gone() || pane.ghost() {
+            return;
+        }
+        let window = pane.client().cloned();
+        let outer = self.pane_outer(pane);
+        let geometry = self.pane_geometry(pane);
+        let groups = if self.groups.is_empty() {
+            Vec::new()
+        } else {
+            let monitor = self.named_monitor_of(outer);
+            self.groups.holding_window(id.get(), monitor.as_deref())
+        };
+        let title = self.pane_title(id);
+        let focused = self.looks_focused(id);
+        // **On the fade it is already on, if a close the compositor started is
+        // playing**: a client quitting inside those 190 ms leaves on that
+        // close's schedule and from that close's transform, rather than
+        // starting again from a window already half gone.
+        // `a_client_that_quits_during_a_close_leaves_on_that_close`.
+        let fading = pane.closing_at();
+        let since = fading.map_or(now, |due| due.saturating_sub(present::CLOSING));
+        // **Nothing left to fade** once that close has landed: the window has
+        // been held at opacity zero since, waiting for its client to answer.
+        let landed = pane.asked_at().is_some();
+        let keep = if !pane.managed() || landed {
+            // A menu, a tooltip or a drag icon goes the way a Wayland popup
+            // does, at once.
+            None
+        } else if pane.has_standing_scene() {
+            Some(Keep::Scene)
+        } else {
+            window.as_ref().and_then(|window| {
+                let picture = crate::remains::Picture::of(window, self.textures.as_ref());
+                if picture.drawable() {
+                    Some(Keep::Picture(picture))
+                } else if self.client_ready(window) {
+                    Some(Keep::Lost)
+                } else {
+                    // Never painted, or unmapped itself before it went: there
+                    // was nothing of it on screen to fade.
+                    None
+                }
+            })
+        };
+        // Where it is in the stack, read before `close` lets a layout restack
+        // anything. See `crate::pane::Left::over`.
+        let mut over = if keep.is_some() {
+            self.stacked_under(pane)
+        } else {
+            Vec::new()
+        };
+        if keep.is_some()
+            && fading.is_none()
+            && let Some(pane) = self.panes.get(id)
+        {
+            present::close(pane, outer, now);
+        }
+        // Where the layout has every other window, so what it grows into this
+        // one's space at `close` can be put under the fade. Only when there
+        // will be a fade.
+        let laid: Vec<(crate::pane::PaneId, Rectangle<i32, Logical>)> = if keep.is_some() {
+            self.panes
+                .iter()
+                .filter(|each| each.id() != id && !each.ghost())
+                .map(|each| (each.id(), self.laid_out_at(each)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        self.trigger_close(id);
+
+        for (other, was) in laid {
+            let grew_in = self
+                .panes
+                .get(other)
+                .map(|each| self.laid_out_at(each))
+                .is_some_and(|now| now != was && now.overlaps(outer));
+            if grew_in && !over.contains(&other) {
+                over.push(other);
+            }
+        }
+
+        let Some(keep) = keep else {
+            // A client's pane is retired by `sync_panes` once the space has
+            // let go of its window, as it always was. A pane that never had a
+            // client has no window for the space to let go of, and `sync_panes`
+            // keeps every such pane -- so it goes here.
+            if window.is_none() {
+                self.panes.remove(id);
+            }
+            self.redraw = true;
+            return;
+        };
+        // Out of the space now rather than at its next `refresh`: until then
+        // `sync_panes` would find the element with no pane holding it, and
+        // give it a new one.
+        if let Some(window) = window.as_ref() {
+            self.space.unmap_elem(window);
+        }
+        let Some(pane) = self.panes.get_mut(id) else {
+            return;
+        };
+        let remains = match keep {
+            Keep::Scene => pane
+                .take_standing_scene()
+                .map_or(Remains::Lost, Remains::Scene),
+            Keep::Picture(picture) => Remains::Picture(picture),
+            Keep::Lost => Remains::Lost,
+        };
+        tracing::debug!(
+            pane = id.get(),
+            remains = match &remains {
+                Remains::Picture(_) => "picture",
+                Remains::Scene(_) => "scene",
+                Remains::Lost => "nothing",
+            },
+            "a window went on its own and fades out"
+        );
+        pane.leave(Left {
+            since,
+            outer,
+            geometry,
+            groups,
+            over,
+            title,
+            focused,
+            remains,
+            fill: smithay::backend::renderer::element::Id::new(),
+        });
+        self.panes.changed();
+        self.redraw = true;
+    }
+
+    /// End the fade of every window that went and is drawn from `surface`,
+    /// if this commit gives `surface` a new buffer: its client kept the
+    /// surface and is using it again, and the texture the fade holds is the
+    /// one the new buffer will be uploaded into. See
+    /// `crate::remains::Picture::holds`.
+    ///
+    /// The fade ends rather than going on without that surface: this is a
+    /// window coming back -- a hide and a show -- and it is about to be drawn
+    /// by a pane of its own.
+    fn let_go_of_reused(&mut self, surface: &WlSurface) {
+        if !self.panes.iter().any(Pane::ghost) {
+            return;
+        }
+        let attached = with_states(surface, |states| {
+            matches!(
+                states
+                    .cached_state
+                    .get::<smithay::wayland::compositor::SurfaceAttributes>()
+                    .current()
+                    .buffer,
+                Some(smithay::wayland::compositor::BufferAssignment::NewBuffer(_))
+            )
+        });
+        if !attached {
+            return;
+        }
+        let id = surface.id();
+        let reused: Vec<crate::pane::PaneId> = self
+            .panes
+            .iter()
+            .filter(|pane| {
+                pane.left().is_some_and(|left| {
+                    matches!(&left.remains, crate::pane::Remains::Picture(picture) if picture.holds(&id))
+                })
+            })
+            .map(Pane::id)
+            .collect();
+        for pane in reused {
+            tracing::debug!(
+                pane = pane.get(),
+                "a surface a window that went is drawn from was given a new buffer"
+            );
+            self.panes.remove(pane);
+            self.redraw = true;
         }
     }
 
@@ -8158,6 +8601,9 @@ impl CompositorHandler for Solium {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        // Before the buffer is taken below: whether this commit gives a new
+        // one to a surface a window that went is still drawn from.
+        self.let_go_of_reused(surface);
         // Imports the client's attached buffer into renderer-visible state.
         // Without it every surface is silently empty: the window maps, the
         // client draws, and the compositor renders nothing.
@@ -8204,10 +8650,80 @@ impl CompositorHandler for Solium {
         self.configure_layer(surface);
     }
 
-    /// A surface is going. Only the lock screen's need anything doing: see
-    /// `Solium::lock_surface_destroyed`.
+    /// A surface is going.
+    ///
+    /// Two kinds need anything doing. The lock screen's: see
+    /// `Solium::lock_surface_destroyed`. And a window's own surface -- the root
+    /// of a pane's client -- which is how a client that crashed, was killed or
+    /// disconnected is first heard of: its objects are destroyed in id order,
+    /// and a `wl_surface` is usually older than the toplevel made from it.
+    /// smithay calls this before it unlinks the surface from its tree or runs
+    /// the hook that drops what the renderer imported for it, so the window's
+    /// picture is still here to take (#126). See `crate::remains`.
+    ///
+    /// **Or one of that window's subsurfaces, for a client that has gone**
+    /// (#126's review). Ids are recycled, so a subsurface's `wl_surface` can
+    /// be older than the window's own, and then it is destroyed first -- and
+    /// unlinked, and its pixels dropped, before the window's surface is heard
+    /// of, so the picture taken there had no page or video in it.
+    /// `a_client_that_disconnects_keeps_a_subsurface_older_than_its_window`.
+    ///
+    /// **A client that has gone is told apart from a live one by the
+    /// surface's parent, never by the surface going** (#126's second review).
+    /// Solium runs on libwayland (`use_system_lib`), where wayland-backend's
+    /// `resource_destructor` marks an object dead before smithay calls this,
+    /// and a dead object has no client: the surface going answers `None`
+    /// whether its client is alive or not, and asking it ended a live window
+    /// whose client destroyed a subsurface's `wl_surface` before its
+    /// `wl_subsurface`. The parent is still linked -- smithay orphans a
+    /// surface's children as it goes -- and it answers `None` exactly when
+    /// its client is going: `wl_client_destroy` fires the client's destroy
+    /// signal before it destroys any of the client's objects, and that
+    /// unhooks the listener wayland-backend finds a client by from any object
+    /// of it. `a_live_client_destroying_a_subsurfaces_surface_first_keeps_its_window`
+    /// and `a_client_that_disconnects_keeps_a_subsurface_older_than_its_window`.
+    ///
+    /// A `wl_subsurface` going asks the same, of its surface: see
+    /// [`Solium::goes_with`].
     fn destroyed(&mut self, surface: &WlSurface) {
         self.lock_surface_destroyed(surface);
+        self.goes_with(surface);
+    }
+}
+
+impl Solium {
+    /// The window `surface` is part of goes now, if `surface` is that
+    /// window's own or its client is going: what
+    /// [`CompositorHandler::destroyed`] does for a surface, whose doc says
+    /// how a client going is told from a live one.
+    ///
+    /// **And what a `wl_subsurface` going does for its surface** (#126's
+    /// second review), since smithay's destructor for that object unlinks the
+    /// subsurface from its window and resets where it was, and tells the
+    /// compositor nothing. On a disconnect, one older than the window's
+    /// surface and than its own went first, so no surface of the window was
+    /// heard going until the page or the video had left it. The
+    /// `Dispatch<WlSubsurface, _>` below asks this before smithay's
+    /// destructor runs. `a_client_that_disconnects_keeps_a_subsurface_whose_wl_subsurface_is_older`.
+    fn goes_with(&mut self, surface: &WlSurface) {
+        let mut root = surface.clone();
+        if get_parent(surface).is_some_and(|parent| parent.client().is_none()) {
+            while let Some(parent) = get_parent(&root) {
+                root = parent;
+            }
+        }
+        let going = self
+            .panes
+            .iter()
+            .find(|pane| {
+                pane.client()
+                    .and_then(Window::wl_surface)
+                    .is_some_and(|own| *own == root)
+            })
+            .map(Pane::id);
+        if let Some(pane) = going {
+            self.depart(pane);
+        }
     }
 }
 
@@ -8328,22 +8844,24 @@ impl XdgShellHandler for Solium {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        // Told before the window is forgotten, so a script can still ask which
-        // one it was. Bound before the call, so the borrow of `space` ends
-        // here rather than lasting across it.
+        // The orderly way out: `exit`, `Ctrl+D`, an application's own Quit.
+        // The client destroys its toplevel before its surface, so the surface
+        // tree and what the renderer imported for it are all still here, and
+        // the window fades out from its last picture (#126). See
+        // `Self::depart`, and `crate::remains` for why the picture is there.
+        //
+        // Bound before the call, so the borrow of `space` ends here rather
+        // than lasting across it. Not found for a window whose surface went
+        // first -- a client that disconnected -- because `destroyed` below has
+        // already taken it out of the space.
         let going = self
             .space
             .elements()
             .find(|window| window.toplevel().is_some_and(|top| *top == surface))
             .cloned();
         if let Some(pane) = going.as_ref().and_then(|window| self.panes.id_of(window)) {
-            self.trigger_close(pane);
+            self.depart(pane);
         }
-
-        // Nothing to tidy up here. The frame and the pending close belong to
-        // the pane, and the pane is retired in `sync_panes` -- which is also
-        // the only notice we get for a client that died without destroying
-        // anything, so the tidying has to live there or happen twice.
     }
 
     /// A menu has gone. If it was the last of the chain `popup_grab` holds,
@@ -9573,7 +10091,64 @@ impl XdgDialogHandler for Solium {
     }
 }
 
-delegate_compositor!(Solium);
+/// `delegate_compositor!`, written out, for every object but `wl_subsurface`:
+/// Solium is asked about one going before smithay's destructor for it runs.
+/// See [`Solium::goes_with`].
+mod compositor_dispatch {
+    use super::Solium;
+    use smithay::reexports::wayland_server::{
+        Client, DataInit, Dispatch, DisplayHandle,
+        backend::ClientId,
+        delegate_dispatch, delegate_global_dispatch,
+        protocol::{
+            wl_callback::WlCallback,
+            wl_compositor::WlCompositor,
+            wl_region::WlRegion,
+            wl_subcompositor::WlSubcompositor,
+            wl_subsurface::{self, WlSubsurface},
+            wl_surface::WlSurface,
+        },
+    };
+    use smithay::wayland::compositor::{
+        CompositorState, RegionUserData, SubsurfaceUserData, SurfaceUserData,
+    };
+
+    delegate_global_dispatch!(Solium: [WlCompositor: ()] => CompositorState);
+    delegate_global_dispatch!(Solium: [WlSubcompositor: ()] => CompositorState);
+    delegate_dispatch!(Solium: [WlCompositor: ()] => CompositorState);
+    delegate_dispatch!(Solium: [WlSurface: SurfaceUserData] => CompositorState);
+    delegate_dispatch!(Solium: [WlRegion: RegionUserData] => CompositorState);
+    delegate_dispatch!(Solium: [WlCallback: ()] => CompositorState);
+    delegate_dispatch!(Solium: [WlSubcompositor: ()] => CompositorState);
+
+    impl Dispatch<WlSubsurface, SubsurfaceUserData> for Solium {
+        fn request(
+            state: &mut Self,
+            client: &Client,
+            resource: &WlSubsurface,
+            request: wl_subsurface::Request,
+            data: &SubsurfaceUserData,
+            dhandle: &DisplayHandle,
+            data_init: &mut DataInit<'_, Self>,
+        ) {
+            <CompositorState as Dispatch<WlSubsurface, SubsurfaceUserData, Self>>::request(
+                state, client, resource, request, data, dhandle, data_init,
+            );
+        }
+
+        fn destroyed(
+            state: &mut Self,
+            client: ClientId,
+            resource: &WlSubsurface,
+            data: &SubsurfaceUserData,
+        ) {
+            state.goes_with(data.surface());
+            <CompositorState as Dispatch<WlSubsurface, SubsurfaceUserData, Self>>::destroyed(
+                state, client, resource, data,
+            );
+        }
+    }
+}
 delegate_shm!(Solium);
 delegate_xdg_shell!(Solium);
 delegate_xdg_decoration!(Solium);
@@ -9826,25 +10401,31 @@ mod tests {
         let on_right = Point::<f64, Logical>::from((2500.0, 500.0));
 
         assert!(
-            !shown_at(left, on_right, &screens),
+            !shown_at(left, false, on_right, &screens),
             "a window living on the left monitor is under a point on the right one -- \
              which is where its hidden workspace is carried, and never drawn"
         );
         assert!(
-            shown_at(left, on_left, &screens),
+            shown_at(left, false, on_left, &screens),
             "and it is under one on its own"
         );
         assert!(
-            shown_at(at(1800, 100, 400, 600), on_right, &screens),
+            shown_at(at(1800, 100, 400, 600), false, on_right, &screens),
             "a window across the bezel is drawn on both monitors, so on either"
         );
         assert!(
-            !shown_at(left, (-10.0, 500.0).into(), &screens),
+            !shown_at(left, false, (-10.0, 500.0).into(), &screens),
             "a point on no monitor is on nothing, because nothing is drawn there"
         );
         assert!(
-            shown_at(left, on_right, &[]),
+            shown_at(left, false, on_right, &[]),
             "with no monitors at all nothing is known, and nothing is refused"
+        );
+        // #126: what is left of a window whose client has gone, on the monitor
+        // that draws it, and with no monitors to go by.
+        assert!(
+            !shown_at(left, true, on_left, &screens) && !shown_at(left, true, on_right, &[]),
+            "a point is on what is left of a window whose client has gone"
         );
     }
 
@@ -11002,7 +11583,7 @@ mod tests {
         use wayland_client::protocol::{
             wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
             wl_data_offer, wl_keyboard, wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool,
-            wl_surface,
+            wl_subcompositor, wl_subsurface, wl_surface,
         };
         use wayland_client::{Connection, Dispatch, QueueHandle};
         use wayland_protocols::ext::session_lock::v1::client::{
@@ -11063,6 +11644,12 @@ mod tests {
             compositor: Option<wl_compositor::WlCompositor>,
             wm_base: Option<xdg_wm_base::XdgWmBase>,
             shm: Option<wl_shm::WlShm>,
+            /// For #126: a window whose picture is more than its root surface.
+            subcompositor: Option<wl_subcompositor::WlSubcompositor>,
+            /// Every `wl_buffer.release` this client has been sent, by buffer.
+            /// For #126, whose fade draws from a buffer the client must not be
+            /// told it may reuse until the fade is over.
+            released: Vec<wayland_client::backend::ObjectId>,
             /// The global #72 added. Bound here because "the client said modal"
             /// is not a thing the server side can say on a client's behalf --
             /// which is the whole reason this test is in this module.
@@ -11227,6 +11814,9 @@ mod tests {
                     "wl_compositor" => state.compositor = Some(registry.bind(name, 1, qh, ())),
                     "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
                     "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
+                    "wl_subcompositor" => {
+                        state.subcompositor = Some(registry.bind(name, 1, qh, ()));
+                    }
                     "xdg_wm_dialog_v1" => state.dialogs = Some(registry.bind(name, 1, qh, ())),
                     "xdg_activation_v1" => {
                         state.activation = Some(registry.bind(name, 1, qh, ()));
@@ -11354,8 +11944,25 @@ mod tests {
         wayland_client::delegate_noop!(Client: ignore wl_surface::WlSurface);
         wayland_client::delegate_noop!(Client: ignore wl_shm::WlShm);
         wayland_client::delegate_noop!(Client: ignore wl_shm_pool::WlShmPool);
-        wayland_client::delegate_noop!(Client: ignore wl_buffer::WlBuffer);
         wayland_client::delegate_noop!(Client: ignore xdg_wm_base::XdgWmBase);
+        wayland_client::delegate_noop!(Client: ignore wl_subcompositor::WlSubcompositor);
+        wayland_client::delegate_noop!(Client: ignore wl_subsurface::WlSubsurface);
+
+        /// See [`Client::released`].
+        impl Dispatch<wl_buffer::WlBuffer, ()> for Client {
+            fn event(
+                state: &mut Self,
+                buffer: &wl_buffer::WlBuffer,
+                event: wl_buffer::Event,
+                _data: &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+                if matches!(event, wl_buffer::Event::Release) {
+                    state.released.push(wayland_client::Proxy::id(buffer));
+                }
+            }
+        }
 
         /// See [`Client::surface_configures`].
         impl Dispatch<xdg_surface::XdgSurface, ()> for Client {
@@ -11664,7 +12271,7 @@ mod tests {
             surface: &wl_surface::WlSurface,
             width: i32,
             height: i32,
-        ) {
+        ) -> wl_buffer::WlBuffer {
             let shm = client.shm.clone().expect("wl_shm bound");
             let stride = width * 4;
             let bytes = stride * height;
@@ -11678,6 +12285,7 @@ mod tests {
             // the moment it counts.
             surface.damage(0, 0, width, height);
             surface.commit();
+            buffer
         }
 
         /// One full round trip: the client's requests to the server, the
@@ -18236,6 +18844,37 @@ mod tests {
                     "and unlocked again, it can"
                 );
             }
+
+            /// **#126 with #130: a window that closes itself behind the lock
+            /// hands the keyboard to nobody but the lock.**
+            ///
+            /// The window goes on fading as it would unlocked -- it is drawn
+            /// by nothing while the screen is locked, `render::elements`
+            /// returns before any window -- and what it leaves has no surface
+            /// to be given the keyboard. The window going is a change to the
+            /// window list, which is when `settle_focus` runs, and while locked
+            /// that is the lock's own settle and nothing else.
+            #[test]
+            fn a_window_closing_itself_behind_the_lock_leaves_the_keyboard_on_it() {
+                let mut session = Session::new();
+                let _below = session.app.open(&mut session.display, &mut session.state);
+                let (window, going, _, _) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let pane = session.state.panes.id_of(&window).expect("a pane");
+                let selections = session.app.client.selections;
+                let _lock = session.lock();
+
+                going.destroy();
+                session.app.pump(&mut session.display, &mut session.state);
+                session.state.space.refresh();
+                session.state.sync_panes();
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session.state.panes.get(pane).is_some_and(Pane::ghost),
+                    "the premise: the window is fading out"
+                );
+                session.assert_sealed("a window that closed itself", selections);
+            }
         }
 
         /// **#128: the layout hears a close when it is asked for, and hears a
@@ -20385,6 +21024,1626 @@ end)
                     Some(neighbour),
                     "once the window is invisible its menu has no pixel, and the neighbour \
                      has the press"
+                );
+            }
+
+            // #126: a window its own application closes.
+            //
+            // Every test above closes a window through `close_pane`, which
+            // animates a live client and asks it afterwards. The ones below
+            // close it from the client's side, which is what `exit`, `Ctrl+D`
+            // and an application's own Quit are -- and a disconnect, which is
+            // the same objects going in another order.
+
+            /// What a pane kept of a window whose client has gone.
+            fn left_of(state: &Solium, pane: crate::pane::PaneId) -> &crate::pane::Left {
+                state
+                    .panes
+                    .get(pane)
+                    .and_then(Pane::left)
+                    .expect("the pane survives its client, as what fades out")
+            }
+
+            /// Let every animation so far land, so what follows starts from a
+            /// window drawn where it lives.
+            fn land(desk: &mut Desk) {
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.state.space.refresh();
+                desk.state.sync_panes();
+            }
+
+            /// A second client of the desk's compositor, for a test that has
+            /// to disconnect one: `(connection, queue, client)`.
+            fn another_client(
+                desk: &mut Desk,
+            ) -> (Connection, wayland_client::EventQueue<Client>, Client) {
+                connect(&mut desk.display, &mut desk.state)
+            }
+
+            /// **#126: a window whose client destroys its own toplevel fades
+            /// out as one the compositor closes does, and is gone on time with
+            /// nothing else happening.**
+            ///
+            /// It used to get no frames at all: the pane was retired by the
+            /// first `sync_panes` after the client went, and the frame drawn
+            /// before that had nothing of the client left to draw. Here the
+            /// pane survives as `Content::Leaving`, pinned to where it stood,
+            /// under `present::close`'s transform -- and is dropped by the
+            /// frame's own `settle` within a frame of `pane::LEAVING`, with no
+            /// client event, no `sync_panes` and no layout behind it.
+            #[test]
+            fn a_window_that_closes_itself_fades_out_and_is_gone_on_time() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let pane = opened.pane;
+                land(&mut desk);
+                let stood = desk.state.pane_outer_of(pane).expect("a mapped pane");
+
+                opened.toplevel.destroy();
+                desk.pump();
+
+                let left = left_of(&desk.state, pane);
+                let since = left.since;
+                assert_eq!(left.outer, stood, "it fades from the rectangle it stood at");
+                assert!(
+                    matches!(left.remains, crate::pane::Remains::Lost),
+                    "no renderer here, so nothing was imported: it is drawn as its frame \
+                     and a fill, and never as nothing"
+                );
+                assert!(
+                    desk.state
+                        .on_screen()
+                        .iter()
+                        .any(|(each, window)| *each == pane && window.is_none()),
+                    "it is in the walk the renderer draws, and has no client"
+                );
+
+                let at =
+                    |state: &Solium, after: Duration| state.drawn_id_at(pane, stood, since + after);
+                let start = at(&desk.state, Duration::ZERO);
+                let half = at(&desk.state, present::CLOSING / 2);
+                let end = at(&desk.state, present::CLOSING);
+                assert!(
+                    (start.opacity - 1.0).abs() < 1e-3 && start.rect == stood.to_f64(),
+                    "it starts as it stood: {start:?}"
+                );
+                let centre = |rect: Rectangle<f64, Logical>| {
+                    (
+                        rect.loc.x + rect.size.w / 2.0,
+                        rect.loc.y + rect.size.h / 2.0,
+                    )
+                };
+                let (cx, cy) = centre(stood.to_f64());
+                let (hx, hy) = centre(half.rect);
+                assert!(
+                    half.opacity > 0.1
+                        && half.opacity < 0.9
+                        && half.rect.size.w < f64::from(stood.size.w)
+                        && half.rect.size.h < f64::from(stood.size.h)
+                        && (hx - cx).abs() < 1.0
+                        && (hy - cy).abs() < 1.0,
+                    "half way through it is shrinking and fading where it stood, as \
+                     `present::close` draws a close: {half:?}"
+                );
+                assert!(
+                    !end.shows(),
+                    "and at the end of the fade it is gone: {end:?}"
+                );
+
+                let frame = Duration::from_millis(16);
+                assert!(
+                    desk.state.settle(since + crate::pane::LEAVING - frame),
+                    "while it fades the frames keep coming: nothing else would ask for one"
+                );
+                assert!(desk.state.panes.get(pane).is_some(), "and it is still here");
+                desk.state.settle(since + crate::pane::LEAVING + frame);
+                assert!(
+                    desk.state.panes.get(pane).is_none(),
+                    "a frame after its fade it is gone, and only that frame's settle ran"
+                );
+            }
+
+            /// **#126: a client that disconnects -- a crash, a `kill` -- goes
+            /// the same way, and is told gone once.**
+            ///
+            /// Its objects are destroyed in id order, so its surface goes
+            /// before its toplevel: `CompositorHandler::destroyed` hears of it
+            /// first and takes it out of the space, and `toplevel_destroyed`
+            /// then has nothing to find. Two notices, one `close`.
+            #[test]
+            fn a_client_that_disconnects_fades_out_and_is_told_gone_once() {
+                let mut desk = Desk::new();
+                desk.install(RECORDER);
+                let (conn, queue, client) = another_client(&mut desk);
+                let qh = queue.handle();
+                let (window, toplevel) =
+                    open_window(&mut desk.display, &mut desk.state, &conn, &client, &qh);
+                desk.state.sync_panes();
+                let pane = desk.state.panes.id_of(&window).expect("a pane");
+                land(&mut desk);
+                let stood = desk.state.pane_outer_of(pane).expect("a mapped pane");
+
+                drop((toplevel, qh, queue, client, conn));
+                desk.display
+                    .dispatch_clients(&mut desk.state)
+                    .expect("dispatching the disconnect");
+                desk.display.flush_clients().expect("flushing");
+
+                let left = left_of(&desk.state, pane);
+                assert_eq!(left.outer, stood, "it fades from where it stood");
+                assert!(
+                    !desk.state.space.elements().any(|each| *each == window),
+                    "and the space has let go of it"
+                );
+                let since = left.since;
+                let half = desk
+                    .state
+                    .drawn_id_at(pane, stood, since + present::CLOSING / 2);
+                assert!(
+                    half.opacity > 0.1 && half.opacity < 0.9,
+                    "half way through its fade: {half:?}"
+                );
+                let id = pane.get();
+                assert_eq!(desk.events(), format!("open {id},close {id}*"));
+
+                desk.state.space.refresh();
+                desk.state.sync_panes();
+                desk.state
+                    .settle(since + crate::pane::LEAVING + Duration::from_millis(16));
+                assert!(desk.state.panes.get(pane).is_none(), "and gone on time");
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id},close {id}*"),
+                    "told once, however many ways it was heard going"
+                );
+            }
+
+            /// **#126: several windows of one application going at once each
+            /// fade, and each is told gone once.**
+            #[test]
+            fn every_window_of_a_client_that_disconnects_fades_out() {
+                let mut desk = Desk::new();
+                desk.install(RECORDER);
+                let (conn, queue, client) = another_client(&mut desk);
+                let qh = queue.handle();
+                let (first, one) =
+                    open_window(&mut desk.display, &mut desk.state, &conn, &client, &qh);
+                let (second, two) =
+                    open_window(&mut desk.display, &mut desk.state, &conn, &client, &qh);
+                desk.state.sync_panes();
+                let panes = [&first, &second].map(|window| {
+                    desk.state
+                        .panes
+                        .id_of(window)
+                        .expect("a pane for each window")
+                });
+                land(&mut desk);
+
+                drop((one, two, qh, queue, client, conn));
+                desk.display
+                    .dispatch_clients(&mut desk.state)
+                    .expect("dispatching the disconnect");
+
+                for pane in panes {
+                    assert!(
+                        desk.state.panes.get(pane).is_some_and(Pane::ghost),
+                        "each window is fading out"
+                    );
+                }
+                let [a, b] = panes.map(crate::pane::PaneId::get);
+                assert_eq!(
+                    desk.events(),
+                    format!("open {a},open {b},close {a}*,close {b}*"),
+                    "and each is told gone, once"
+                );
+            }
+
+            /// **#126: what the renderer imported is what a window leaves --
+            /// taken in `toplevel_destroyed`, every surface of its tree, and
+            /// still there after the surfaces are destroyed.**
+            ///
+            /// smithay's `DummyRenderer` stands in for the GPU: it imports
+            /// shared memory into a texture of the buffer's size and files it
+            /// by its context, as GLES does, with no GPU at all. The client
+            /// destroys the lot in the order an orderly exit does, in one flush,
+            /// so by the time anything could look the surfaces are gone -- and
+            /// smithay's own reset has dropped what it held for them.
+            #[test]
+            fn an_orderly_exit_leaves_the_picture_the_renderer_imported() {
+                use smithay::backend::renderer::element::surface::{
+                    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+                };
+                use smithay::backend::renderer::{Renderer as _, test::DummyRenderer};
+
+                let mut desk = Desk::new();
+                desk.state.textures =
+                    Some(crate::remains::Textures::Dummy(DummyRenderer.context_id()));
+                let opened = desk.open_surface();
+                let compositor = desk.client.compositor.clone().expect("wl_compositor bound");
+                let subcompositor = desk
+                    .client
+                    .subcompositor
+                    .clone()
+                    .expect("wl_subcompositor bound");
+                let child = compositor.create_surface(&desk.qh, ());
+                let sub = subcompositor.get_subsurface(&child, &opened.surface, &desk.qh, ());
+                sub.set_position(8, 8);
+                sub.set_desync();
+                commit_buffer(&desk.client, &desk.qh, &child, 16, 16);
+                opened.surface.commit();
+                desk.pump();
+
+                // What a frame does: import every surface of the tree.
+                let root = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .and_then(|window| window.wl_surface().map(std::borrow::Cow::into_owned))
+                    .expect("the window's surface");
+                let drawn: Vec<WaylandSurfaceRenderElement<DummyRenderer>> =
+                    render_elements_from_surface_tree(
+                        &mut DummyRenderer,
+                        &root,
+                        (0, 0),
+                        1.0,
+                        1.0,
+                        smithay::backend::renderer::element::Kind::Unspecified,
+                    );
+                assert_eq!(drawn.len(), 2, "the premise: two surfaces drawn");
+
+                opened.toplevel.destroy();
+                opened.xdg.destroy();
+                sub.destroy();
+                child.destroy();
+                opened.surface.destroy();
+                desk.pump();
+
+                assert!(
+                    smithay::backend::renderer::utils::with_renderer_surface_state(
+                        &root,
+                        |state| state.buffer().is_none()
+                    )
+                    .unwrap_or(true),
+                    "the premise: smithay has let go of the surface's state"
+                );
+                let crate::pane::Remains::Picture(picture) =
+                    &left_of(&desk.state, opened.pane).remains
+                else {
+                    panic!("a window with a picture fades out from it");
+                };
+                assert_eq!(
+                    picture.dummy_sizes(),
+                    vec![(16, 16), (64, 64)],
+                    "both surfaces, topmost first, from the textures imported before \
+                     the client went"
+                );
+            }
+
+            /// **#126: the same for a client that disconnects**, which is heard
+            /// of at its surface's destruction rather than its toplevel's --
+            /// before smithay unlinks the surface from its tree or runs the
+            /// hook that drops what the renderer imported for it.
+            #[test]
+            fn a_client_that_disconnects_leaves_the_picture_the_renderer_imported() {
+                use smithay::backend::renderer::element::surface::{
+                    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+                };
+                use smithay::backend::renderer::{Renderer as _, test::DummyRenderer};
+
+                let mut desk = Desk::new();
+                desk.state.textures =
+                    Some(crate::remains::Textures::Dummy(DummyRenderer.context_id()));
+                let (conn, mut queue, mut client) = another_client(&mut desk);
+                let qh = queue.handle();
+                let (window, toplevel, surface) =
+                    open_surface(&mut desk.display, &mut desk.state, &conn, &client, &qh);
+                desk.state.sync_panes();
+                let pane = desk.state.panes.id_of(&window).expect("a pane");
+                let compositor = client.compositor.clone().expect("wl_compositor bound");
+                let subcompositor = client
+                    .subcompositor
+                    .clone()
+                    .expect("wl_subcompositor bound");
+                let child = compositor.create_surface(&qh, ());
+                let sub = subcompositor.get_subsurface(&child, &surface, &qh, ());
+                sub.set_desync();
+                commit_buffer(&client, &qh, &child, 16, 16);
+                surface.commit();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                let root = window
+                    .wl_surface()
+                    .map(std::borrow::Cow::into_owned)
+                    .expect("the window's surface");
+                let drawn: Vec<WaylandSurfaceRenderElement<DummyRenderer>> =
+                    render_elements_from_surface_tree(
+                        &mut DummyRenderer,
+                        &root,
+                        (0, 0),
+                        1.0,
+                        1.0,
+                        smithay::backend::renderer::element::Kind::Unspecified,
+                    );
+                assert_eq!(drawn.len(), 2, "the premise: two surfaces drawn");
+
+                drop((sub, child, surface, toplevel, qh, queue, client, conn));
+                desk.display
+                    .dispatch_clients(&mut desk.state)
+                    .expect("dispatching the disconnect");
+
+                let crate::pane::Remains::Picture(picture) = &left_of(&desk.state, pane).remains
+                else {
+                    panic!("a window with a picture fades out from it");
+                };
+                assert_eq!(picture.dummy_sizes(), vec![(16, 16), (64, 64)]);
+            }
+
+            /// **#126's review: a client that disconnects keeps a subsurface
+            /// whose `wl_surface` is older than its window's.** Its objects go
+            /// in id order, and ids are recycled, so a video's or a page's
+            /// surface can be destroyed -- and unlinked, and its pixels dropped
+            /// -- before the window's own is. The picture is taken at the first
+            /// surface of the window's tree to go, while all of it is there.
+            ///
+            /// The subsurface's `wl_surface` is created before the window's, so
+            /// its id is lower; its `wl_subsurface` after both, so that is
+            /// destroyed after the window's surface and unlinks nothing first.
+            /// One whose `wl_subsurface` is the older is
+            /// `a_client_that_disconnects_keeps_a_subsurface_whose_wl_subsurface_is_older`.
+            #[test]
+            fn a_client_that_disconnects_keeps_a_subsurface_older_than_its_window() {
+                use smithay::backend::renderer::element::surface::{
+                    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+                };
+                use smithay::backend::renderer::{Renderer as _, test::DummyRenderer};
+
+                let mut desk = Desk::new();
+                desk.state.textures =
+                    Some(crate::remains::Textures::Dummy(DummyRenderer.context_id()));
+                let (conn, mut queue, mut client) = another_client(&mut desk);
+                let qh = queue.handle();
+                let compositor = client.compositor.clone().expect("wl_compositor bound");
+                let child = compositor.create_surface(&qh, ());
+                let (window, toplevel, surface) =
+                    open_surface(&mut desk.display, &mut desk.state, &conn, &client, &qh);
+                desk.state.sync_panes();
+                let pane = desk.state.panes.id_of(&window).expect("a pane");
+                let subcompositor = client
+                    .subcompositor
+                    .clone()
+                    .expect("wl_subcompositor bound");
+                let sub = subcompositor.get_subsurface(&child, &surface, &qh, ());
+                sub.set_desync();
+                commit_buffer(&client, &qh, &child, 16, 16);
+                surface.commit();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                assert!(
+                    wayland_client::Proxy::id(&child).protocol_id()
+                        < wayland_client::Proxy::id(&surface).protocol_id(),
+                    "the premise: the subsurface's surface is the older"
+                );
+                let root = window
+                    .wl_surface()
+                    .map(std::borrow::Cow::into_owned)
+                    .expect("the window's surface");
+                let drawn: Vec<WaylandSurfaceRenderElement<DummyRenderer>> =
+                    render_elements_from_surface_tree(
+                        &mut DummyRenderer,
+                        &root,
+                        (0, 0),
+                        1.0,
+                        1.0,
+                        smithay::backend::renderer::element::Kind::Unspecified,
+                    );
+                assert_eq!(drawn.len(), 2, "the premise: two surfaces drawn");
+
+                drop((sub, child, surface, toplevel, qh, queue, client, conn));
+                desk.display
+                    .dispatch_clients(&mut desk.state)
+                    .expect("dispatching the disconnect");
+
+                let crate::pane::Remains::Picture(picture) = &left_of(&desk.state, pane).remains
+                else {
+                    panic!("a window with a picture fades out from it");
+                };
+                assert_eq!(
+                    picture.dummy_sizes(),
+                    vec![(16, 16), (64, 64)],
+                    "the subsurface that went first is not in the picture"
+                );
+            }
+
+            /// **#126's second review: and one whose `wl_subsurface` is older
+            /// than its window's surface, and than its own.** That object is
+            /// destroyed first, and smithay's destructor for it unlinks the
+            /// subsurface from its window and resets where it was, telling
+            /// the compositor nothing -- so by the time any surface of the
+            /// window was heard going, the page or the video was no longer in
+            /// it. The window is now taken at that destructor, for a client
+            /// that has gone, while all of it is there.
+            ///
+            /// The `wl_subsurface` is given an older id by recycling one: a
+            /// spare surface made first, before the subsurface's own surface
+            /// and the window's, and destroyed before the subsurface is made.
+            #[test]
+            fn a_client_that_disconnects_keeps_a_subsurface_whose_wl_subsurface_is_older() {
+                use smithay::backend::renderer::element::surface::{
+                    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+                };
+                use smithay::backend::renderer::{Renderer as _, test::DummyRenderer};
+
+                let mut desk = Desk::new();
+                desk.install(RECORDER);
+                desk.state.textures =
+                    Some(crate::remains::Textures::Dummy(DummyRenderer.context_id()));
+                let (conn, mut queue, mut client) = another_client(&mut desk);
+                let qh = queue.handle();
+                let compositor = client.compositor.clone().expect("wl_compositor bound");
+                let spare = compositor.create_surface(&qh, ());
+                let child = compositor.create_surface(&qh, ());
+                let (window, toplevel, surface) =
+                    open_surface(&mut desk.display, &mut desk.state, &conn, &client, &qh);
+                desk.state.sync_panes();
+                let pane = desk.state.panes.id_of(&window).expect("a pane");
+                spare.destroy();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                let subcompositor = client
+                    .subcompositor
+                    .clone()
+                    .expect("wl_subcompositor bound");
+                let sub = subcompositor.get_subsurface(&child, &surface, &qh, ());
+                sub.set_desync();
+                commit_buffer(&client, &qh, &child, 16, 16);
+                surface.commit();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                let sub_id = wayland_client::Proxy::id(&sub).protocol_id();
+                let child_id = wayland_client::Proxy::id(&child).protocol_id();
+                let root_id = wayland_client::Proxy::id(&surface).protocol_id();
+                assert!(
+                    sub_id < child_id && sub_id < root_id,
+                    "the premise: the wl_subsurface ({sub_id}) is older than the subsurface's \
+                     surface ({child_id}) and the window's ({root_id})"
+                );
+                let root = window
+                    .wl_surface()
+                    .map(std::borrow::Cow::into_owned)
+                    .expect("the window's surface");
+                let drawn: Vec<WaylandSurfaceRenderElement<DummyRenderer>> =
+                    render_elements_from_surface_tree(
+                        &mut DummyRenderer,
+                        &root,
+                        (0, 0),
+                        1.0,
+                        1.0,
+                        smithay::backend::renderer::element::Kind::Unspecified,
+                    );
+                assert_eq!(drawn.len(), 2, "the premise: two surfaces drawn");
+
+                drop((sub, child, surface, toplevel, qh, queue, client, conn));
+                desk.display
+                    .dispatch_clients(&mut desk.state)
+                    .expect("dispatching the disconnect");
+
+                let crate::pane::Remains::Picture(picture) = &left_of(&desk.state, pane).remains
+                else {
+                    panic!("a window with a picture fades out from it");
+                };
+                assert_eq!(
+                    picture.dummy_sizes(),
+                    vec![(16, 16), (64, 64)],
+                    "the subsurface whose wl_subsurface went first is not in the picture"
+                );
+                let id = pane.get();
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id},close {id}*"),
+                    "told gone once, at the wl_subsurface, and not again at its surfaces"
+                );
+            }
+
+            /// **#126's review: a client that takes its subsurfaces down
+            /// before its window, and stays connected, fades from what is left
+            /// when the window goes.** Pinned rather than fixed: the
+            /// subsurface is destroyed while the window is still an ordinary
+            /// one, and keeping it would mean keeping a picture of every
+            /// subsurface any live window lets go of, on the chance that the
+            /// window follows. The window's own surface still fades, so what
+            /// is missing is the part the subsurface covered.
+            #[test]
+            fn a_window_whose_subsurface_goes_first_fades_without_it() {
+                use smithay::backend::renderer::element::surface::{
+                    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+                };
+                use smithay::backend::renderer::{Renderer as _, test::DummyRenderer};
+
+                let mut desk = Desk::new();
+                desk.state.textures =
+                    Some(crate::remains::Textures::Dummy(DummyRenderer.context_id()));
+                let opened = desk.open_surface();
+                let compositor = desk.client.compositor.clone().expect("wl_compositor bound");
+                let subcompositor = desk
+                    .client
+                    .subcompositor
+                    .clone()
+                    .expect("wl_subcompositor bound");
+                let child = compositor.create_surface(&desk.qh, ());
+                let sub = subcompositor.get_subsurface(&child, &opened.surface, &desk.qh, ());
+                sub.set_desync();
+                commit_buffer(&desk.client, &desk.qh, &child, 16, 16);
+                opened.surface.commit();
+                desk.pump();
+                let root = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .and_then(|window| window.wl_surface().map(std::borrow::Cow::into_owned))
+                    .expect("the window's surface");
+                drop(render_elements_from_surface_tree::<
+                    DummyRenderer,
+                    WaylandSurfaceRenderElement<DummyRenderer>,
+                >(
+                    &mut DummyRenderer,
+                    &root,
+                    (0, 0),
+                    1.0,
+                    1.0,
+                    smithay::backend::renderer::element::Kind::Unspecified,
+                ));
+
+                sub.destroy();
+                child.destroy();
+                opened.toplevel.destroy();
+                desk.pump();
+
+                let crate::pane::Remains::Picture(picture) =
+                    &left_of(&desk.state, opened.pane).remains
+                else {
+                    panic!("a window with a picture fades out from it");
+                };
+                assert_eq!(
+                    picture.dummy_sizes(),
+                    vec![(64, 64)],
+                    "the window's own surface, and nothing of the subsurface that went first"
+                );
+            }
+
+            /// **#126's second review: a live client that destroys a
+            /// subsurface's `wl_surface` before its `wl_subsurface` keeps its
+            /// window.** Legal, and no shipped toolkit is known to do it: the
+            /// subsurface simply goes inert. `CompositorHandler::destroyed`
+            /// told a disconnect from this by asking the dying surface for its
+            /// client, which libwayland answers `None` for every surface being
+            /// destroyed, alive client or not. So it walked up to the window
+            /// and ended it: `close` went out, the space let go of a live
+            /// toplevel, and nothing mapped it again while its application
+            /// went on running.
+            ///
+            /// And when that client does go, its window fades out as any
+            /// window of a client that disconnects does.
+            #[test]
+            fn a_live_client_destroying_a_subsurfaces_surface_first_keeps_its_window() {
+                let mut desk = Desk::new();
+                desk.install(RECORDER);
+                let (conn, mut queue, mut client) = another_client(&mut desk);
+                let qh = queue.handle();
+                let (window, toplevel, surface) =
+                    open_surface(&mut desk.display, &mut desk.state, &conn, &client, &qh);
+                desk.state.sync_panes();
+                let pane = desk.state.panes.id_of(&window).expect("a pane");
+                let compositor = client.compositor.clone().expect("wl_compositor bound");
+                let subcompositor = client
+                    .subcompositor
+                    .clone()
+                    .expect("wl_subcompositor bound");
+                let child = compositor.create_surface(&qh, ());
+                let sub = subcompositor.get_subsurface(&child, &surface, &qh, ());
+                sub.set_desync();
+                commit_buffer(&client, &qh, &child, 16, 16);
+                surface.commit();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                land(&mut desk);
+                let id = pane.get();
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id}"),
+                    "the premise: the window opened, and nothing else"
+                );
+
+                child.destroy();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                // And the window goes on drawing, as its application does.
+                commit_buffer(&client, &qh, &surface, 64, 64);
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                land(&mut desk);
+
+                let held = |desk: &Desk| desk.state.panes.get(pane).and_then(Pane::client).cloned();
+                assert_eq!(
+                    held(&desk),
+                    Some(window.clone()),
+                    "a live window left its pane"
+                );
+                assert!(
+                    desk.state.space.elements().any(|each| *each == window),
+                    "the space let go of a live window"
+                );
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id}"),
+                    "scripts were told a live window closed"
+                );
+
+                sub.destroy();
+                pump(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                land(&mut desk);
+                assert_eq!(
+                    held(&desk),
+                    Some(window.clone()),
+                    "the inert subsurface's own object going took the window with it"
+                );
+
+                drop((sub, child, surface, toplevel, qh, queue, client, conn));
+                desk.display
+                    .dispatch_clients(&mut desk.state)
+                    .expect("dispatching the disconnect");
+                assert!(
+                    desk.state.panes.get(pane).is_some_and(Pane::ghost),
+                    "when its client goes, the window fades out"
+                );
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id},close {id}*"),
+                    "and is told gone, once"
+                );
+            }
+
+            /// **#126: a window that closed itself keeps the buffer it is drawn
+            /// from until its fade is over**, and then the client that closed
+            /// it and stayed is told it may have it back.
+            ///
+            /// Drawn once through `DummyRenderer` first, so that there is a
+            /// picture to draw the fade from and so a buffer worth keeping.
+            #[test]
+            fn a_window_that_closed_itself_keeps_its_last_buffer_until_its_fade_is_over() {
+                use smithay::backend::renderer::element::surface::{
+                    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+                };
+                use smithay::backend::renderer::{Renderer as _, test::DummyRenderer};
+
+                let mut desk = Desk::new();
+                desk.state.textures =
+                    Some(crate::remains::Textures::Dummy(DummyRenderer.context_id()));
+                let opened = desk.open_surface();
+                let last = commit_buffer(&desk.client, &desk.qh, &opened.surface, 80, 80);
+                desk.pump();
+                land(&mut desk);
+                desk.pump();
+                let root = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .and_then(|window| window.wl_surface().map(std::borrow::Cow::into_owned))
+                    .expect("the window's surface");
+                // Dropped at once, as a frame's elements are: each holds the
+                // buffer it was built from, and one kept here would hold it
+                // for this test rather than for the fade.
+                drop(render_elements_from_surface_tree::<
+                    DummyRenderer,
+                    WaylandSurfaceRenderElement<DummyRenderer>,
+                >(
+                    &mut DummyRenderer,
+                    &root,
+                    (0, 0),
+                    1.0,
+                    1.0,
+                    smithay::backend::renderer::element::Kind::Unspecified,
+                ));
+                let last = wayland_client::Proxy::id(&last);
+                assert!(
+                    !desk.client.released.contains(&last),
+                    "the premise: the buffer on screen is not released"
+                );
+
+                opened.toplevel.destroy();
+                opened.xdg.destroy();
+                opened.surface.destroy();
+                desk.pump();
+                assert!(
+                    !desk.client.released.contains(&last),
+                    "a buffer the fade is drawn from was handed back while it was drawn"
+                );
+
+                let since = left_of(&desk.state, opened.pane).since;
+                desk.state
+                    .settle(since + crate::pane::LEAVING + Duration::from_millis(16));
+                desk.pump();
+                assert!(
+                    desk.client.released.contains(&last),
+                    "and handed back once the fade is over"
+                );
+            }
+
+            /// **#126: a window whose client has gone is drawn, and is nothing
+            /// else.**
+            ///
+            /// Two windows overlapping and no layout, the upper one closing
+            /// itself. While it fades:
+            ///
+            /// * it is in no window list a script sees;
+            /// * the pointer, a press and a resize border under it all reach
+            ///   the window underneath -- a pane with no client that answered
+            ///   "covered" would be the input black hole the loading pane is
+            ///   on purpose, and a titlebar or a border it offered would be a
+            ///   press nothing takes;
+            /// * the keyboard goes to the window underneath;
+            /// * `sol.place` does not move it, and `close_pane` does nothing,
+            ///   neither `closing` nor a second `close`.
+            #[test]
+            fn a_window_that_left_is_nobodys_to_find() {
+                let mut desk = Desk::new();
+                let lower = desk.open_surface();
+                let upper = desk.open_surface();
+                for (opened, at) in [(&lower, (100, 100)), (&upper, (200, 200))] {
+                    commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                    desk.pump();
+                    let window = desk
+                        .state
+                        .panes
+                        .get(opened.pane)
+                        .and_then(Pane::client)
+                        .cloned()
+                        .expect("a window");
+                    desk.state.map_stacked(window, at, false);
+                }
+                land(&mut desk);
+                let (ghost, below) = (upper.pane.get(), lower.pane.get());
+                desk.install(&format!(
+                    "{RECORDER}\nsol.bind(\"super+x\", function() \
+                     sol.place({ghost}, {{ x = 0, y = 0, w = 50, h = 50 }}) end)"
+                ));
+                let lower_window = desk
+                    .state
+                    .panes
+                    .get(lower.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("the lower window");
+                let lower_surface = lower_window
+                    .wl_surface()
+                    .map(std::borrow::Cow::into_owned)
+                    .expect("its surface");
+                // Inside both, and on the lower window's right-hand border.
+                let point: Point<f64, Logical> = (499.0, 300.0).into();
+                upper.toplevel.set_title("the window that went".to_owned());
+                desk.pump();
+                assert!(
+                    desk.state.looks_focused(upper.pane),
+                    "the premise: the window going is the focused one"
+                );
+
+                upper.toplevel.destroy();
+                desk.pump();
+                let stood = left_of(&desk.state, upper.pane).outer;
+                assert!(
+                    stood.to_f64().contains(point)
+                        && desk.state.drawn(upper.pane, stood).covers(point),
+                    "the premise: the window that went is drawn over the point"
+                );
+
+                assert!(
+                    desk.state
+                        .snapshot()
+                        .windows
+                        .iter()
+                        .all(|row| row.id != ghost),
+                    "a window that went is in a script's window list"
+                );
+                assert_eq!(
+                    desk.state.window_under(point).map(|(window, _)| window),
+                    Some(lower_window),
+                    "the pointer stopped at a window that went"
+                );
+                assert_eq!(
+                    desk.state.surface_under(point).map(|(surface, _)| surface),
+                    Some(lower_surface),
+                    "a press went to a window that went"
+                );
+                assert_eq!(
+                    desk.state
+                        .chrome_under(point)
+                        .map(|under| (under.pane, under.chrome)),
+                    Some((lower.pane, Chrome::Resize(ResizeEdge::Right))),
+                    "the border under a window that went is not the lower window's to drag"
+                );
+
+                desk.state.sync_panes();
+                assert_eq!(
+                    desk.state
+                        .focused_window()
+                        .and_then(|window| desk.state.panes.id_of(&window)),
+                    Some(lower.pane),
+                    "the keyboard goes to the window that is still here"
+                );
+                assert!(
+                    desk.state.looks_focused(upper.pane)
+                        && desk.state.pane_title(upper.pane) == "the window that went",
+                    "and the frame fading out is drawn as it stood: focused, and titled"
+                );
+                point_at(&mut desk.state, point);
+                assert!(
+                    desk.state.pointer_over(lower.pane) && !desk.state.pointer_over(upper.pane),
+                    "a frame fading out lights up for the pointer over it, as if a press there \
+                     would do something"
+                );
+
+                let tile = desk.state.panes.get(upper.pane).and_then(Pane::placed);
+                assert!(
+                    desk.state.trigger("super+x"),
+                    "the premise: the binding ran"
+                );
+                assert_eq!(
+                    desk.state.panes.get(upper.pane).and_then(Pane::placed),
+                    tile,
+                    "a script placing it moved the tile its picture is cut to"
+                );
+                assert_eq!(
+                    left_of(&desk.state, upper.pane).outer,
+                    stood,
+                    "a script placing it moved it"
+                );
+                assert_eq!(
+                    desk.state.pane_outer_of(upper.pane),
+                    Some(stood),
+                    "a script placing it moved where it is drawn"
+                );
+                desk.state.close_pane(upper.pane);
+                assert!(
+                    desk.state
+                        .panes
+                        .get(upper.pane)
+                        .is_some_and(|pane| pane.closing_at().is_none()),
+                    "closing it by hand started a close"
+                );
+                assert_eq!(
+                    desk.events(),
+                    format!("close {ghost}*"),
+                    "and nothing was told anything but `close`, once: {below} stayed"
+                );
+            }
+
+            /// **#126: a layout reflows at `close` and the window fades where it
+            /// stood while its neighbour grows in** -- the picture #128 gives a
+            /// close the compositor asks for, with no `closing`, because nobody
+            /// asked for this one. The window is in no arrangement afterwards:
+            /// an `adopt`, on a `monitors` event, finds nothing to put back.
+            ///
+            /// It fades in front of every window the layout moved, and
+            /// everywhere else keeps its place in the stack (#126's review): in
+            /// scrolling the column on the far side does not move, was over it,
+            /// and stays over it. See `crate::pane::Left::over`.
+            #[test]
+            fn a_window_that_closes_itself_hands_its_space_over_as_it_fades() {
+                for layout in LAYOUTS {
+                    let mut desk = Desk::new();
+                    let (closed, others) = closing_scene(&mut desk, layout);
+                    let before: Vec<Rectangle<i32, Logical>> =
+                        others.iter().map(|other| desk.placed(other.pane)).collect();
+                    let stood = desk
+                        .state
+                        .pane_outer_of(closed.pane)
+                        .expect("a mapped pane");
+                    let stacked_over: Vec<bool> = others
+                        .iter()
+                        .map(|other| above(&mut desk.state, closed.pane, other.pane))
+                        .collect();
+
+                    closed.toplevel.destroy();
+                    desk.pump();
+
+                    let id = closed.pane.get();
+                    assert_eq!(
+                        desk.events()
+                            .split(',')
+                            .filter(|event| !event.starts_with("open"))
+                            .collect::<Vec<_>>(),
+                        vec![format!("close {id}*")],
+                        "{layout}: `close`, once, and nothing else"
+                    );
+                    assert!(
+                        others
+                            .iter()
+                            .zip(&before)
+                            .any(|(other, was)| desk.placed(other.pane) != *was),
+                        "{layout}: the layout closed up at `close`"
+                    );
+                    let since = left_of(&desk.state, closed.pane).since;
+                    let half =
+                        desk.state
+                            .drawn_id_at(closed.pane, stood, since + present::CLOSING / 2);
+                    let (cx, cy) = (
+                        f64::from(stood.loc.x) + f64::from(stood.size.w) / 2.0,
+                        f64::from(stood.loc.y) + f64::from(stood.size.h) / 2.0,
+                    );
+                    assert!(
+                        half.shows()
+                            && (half.rect.loc.x + half.rect.size.w / 2.0 - cx).abs() < 1.0
+                            && (half.rect.loc.y + half.rect.size.h / 2.0 - cy).abs() < 1.0,
+                        "{layout}: half way through, it is fading where it stood: {half:?} \
+                         against {stood:?}"
+                    );
+                    let crate::pane::Left { outer, .. } = left_of(&desk.state, closed.pane);
+                    assert_eq!(*outer, stood, "{layout}: and the layout did not move it");
+                    for ((other, was), over) in others.iter().zip(&before).zip(&stacked_over) {
+                        let moved = desk.placed(other.pane) != *was;
+                        assert_eq!(
+                            above(&mut desk.state, closed.pane, other.pane),
+                            moved || *over,
+                            "{layout}: it fades in front of a window moving in, as a close \
+                             the compositor asked for does, and otherwise where it was in the \
+                             stack (moved: {moved}, over it before: {over})"
+                        );
+                    }
+
+                    // `adopt` puts back whatever an arrangement is missing,
+                    // from `sol.windows()`, and runs on `monitors`.
+                    let grown: Vec<Rectangle<i32, Logical>> =
+                        others.iter().map(|other| desk.placed(other.pane)).collect();
+                    desk.state.trigger_monitors_changed();
+                    desk.state.space.refresh();
+                    desk.state.sync_panes();
+                    assert!(
+                        desk.state.panes.get(closed.pane).is_some_and(Pane::ghost),
+                        "{layout}: the premise: it is still fading"
+                    );
+                    let now = since + crate::pane::LEAVING + Duration::from_millis(16);
+                    desk.state.settle(now);
+                    desk.state.trigger_relayout();
+                    assert_eq!(
+                        others
+                            .iter()
+                            .map(|other| desk.placed(other.pane))
+                            .collect::<Vec<_>>(),
+                        grown,
+                        "{layout}: adopted and laid out again, the arrangement made room \
+                         for the window that went"
+                    );
+                    assert_eq!(
+                        desk.events()
+                            .split(',')
+                            .filter(|event| !event.starts_with("open"))
+                            .count(),
+                        1,
+                        "{layout}: and it was never told of again"
+                    );
+                }
+            }
+
+            /// **#126: a client that quits part of the way through a close the
+            /// compositor asked for leaves on that close**: from its transform,
+            /// with nothing restarted, and gone when that close's fade is over.
+            /// A client that exits the moment it is asked -- inside `CLOSING`,
+            /// before the request even goes out, as one closing on a second
+            /// press of its own shortcut does -- is exactly this.
+            #[test]
+            fn a_client_that_quits_during_a_close_leaves_on_that_close() {
+                let mut desk = Desk::new();
+                desk.install(RECORDER);
+                let opened = desk.open_surface();
+                let pane = opened.pane;
+                land(&mut desk);
+                let stood = desk.state.pane_outer_of(pane).expect("a mapped pane");
+
+                desk.state.close_pane(pane);
+                let due = desk
+                    .state
+                    .panes
+                    .get(pane)
+                    .and_then(Pane::closing_at)
+                    .expect("the premise: a close is playing");
+                let began = due - present::CLOSING;
+                let fading = desk
+                    .state
+                    .drawn_id_at(pane, stood, began + present::CLOSING / 2);
+
+                desk.state.clock.advance(Duration::from_millis(60));
+                opened.toplevel.destroy();
+                desk.pump();
+
+                let left = left_of(&desk.state, pane);
+                assert_eq!(left.since, began, "its fade began at the press");
+                assert_eq!(
+                    desk.state
+                        .drawn_id_at(pane, stood, began + present::CLOSING / 2),
+                    fading,
+                    "and it goes on with that fade rather than starting another"
+                );
+                let id = pane.get();
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id},closing {id}*,close {id}*")
+                );
+                desk.state
+                    .settle(began + crate::pane::LEAVING + Duration::from_millis(1));
+                assert!(
+                    desk.state.panes.get(pane).is_none(),
+                    "gone when that close's fade is over"
+                );
+            }
+
+            /// **#126: a window that goes keeps the shift its selections had**,
+            /// however a script rebuilds them after it. `workspaces.lua`
+            /// rebuilds a desk's membership from `sol.windows()` on every
+            /// `layout` event, and a window that has gone is not in it -- so a
+            /// window on a desk carried a screen away would lose its desk's
+            /// shift on the next one and fade over the desk on screen.
+            #[test]
+            fn a_window_that_left_keeps_the_shift_its_desk_had() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let pane = opened.pane;
+                let id = pane.get();
+                desk.install(&format!(
+                    "sol.bind(\"super+g\", function() \
+                        sol.group(\"desk\", {{ windows = {{ {id} }} }}) \
+                        sol.present_group(\"desk\", {{ x = -500 }}, {{ duration = 1 }}) end)\n\
+                     sol.bind(\"super+h\", function() \
+                        sol.group(\"desk\", {{ windows = {{}} }}) end)"
+                ));
+                assert!(desk.state.trigger("super+g"), "the premise: the desk moved");
+                land(&mut desk);
+                let stood = desk.state.pane_outer_of(pane).expect("a mapped pane");
+                let carried = desk.state.drawn(pane, stood).rect;
+                assert!(
+                    (carried.loc.x - f64::from(stood.loc.x - 500)).abs() < 1.0,
+                    "the premise: the desk carries it 500 to the left: {carried:?}"
+                );
+
+                opened.toplevel.destroy();
+                desk.pump();
+                assert!(
+                    desk.state.trigger("super+h"),
+                    "the premise: the desk was rebuilt"
+                );
+                let since = left_of(&desk.state, pane).since;
+                let drawn = desk.state.drawn_id_at(pane, stood, since).rect;
+                assert!(
+                    (drawn.loc.x - carried.loc.x).abs() < 1.0,
+                    "a desk rebuilt without the window that went moved it back: \
+                     {drawn:?}, where the desk had it at {carried:?}"
+                );
+            }
+
+            /// **#126's review: a window that goes moves with its desk for as
+            /// long as it fades**, rather than stopping where the desk had it
+            /// when it went. The desk is rebuilt without it and carried back,
+            /// the way `workspaces.lua` switches desks: a window closed with
+            /// `Ctrl+D` just before a switch used to stay where it was and fade
+            /// over the desk sliding in, and one that went during a slide
+            /// stopped half way while the rest of its desk carried on.
+            ///
+            /// Measured against a window staying on the same desk, whose only
+            /// transform is the desk's, and at the centre, which a close
+            /// shrinks about.
+            #[test]
+            fn a_window_that_left_moves_with_its_desk() {
+                let mut desk = Desk::new();
+                let staying = desk.open_surface();
+                let going = desk.open_surface();
+                let (stays, goes) = (staying.pane.get(), going.pane.get());
+                desk.install(&format!(
+                    "sol.bind(\"super+g\", function() \
+                        sol.group(\"desk\", {{ windows = {{ {stays}, {goes} }} }}) \
+                        sol.present_group(\"desk\", {{ x = -500 }}, {{ duration = 1 }}) end)\n\
+                     sol.bind(\"super+h\", function() \
+                        sol.group(\"desk\", {{ windows = {{ {stays} }} }}) \
+                        sol.present_group(\"desk\", {{ x = 0 }}, {{ duration = 100 }}) end)"
+                ));
+                assert!(desk.state.trigger("super+g"), "the premise: the desk moved");
+                land(&mut desk);
+                let stood = desk.state.pane_outer_of(going.pane).expect("a mapped pane");
+                let beside = desk
+                    .state
+                    .pane_outer_of(staying.pane)
+                    .expect("a mapped pane");
+
+                going.toplevel.destroy();
+                desk.pump();
+                assert!(left_of(&desk.state, going.pane).since > Duration::ZERO);
+                let slid = desk.state.clock.now();
+                assert!(
+                    desk.state.trigger("super+h"),
+                    "the premise: the desk went back"
+                );
+                let centre = |rect: Rectangle<f64, Logical>| rect.loc.x + rect.size.w / 2.0;
+                let at = slid + Duration::from_millis(50);
+                let carried = desk.state.drawn_id_at(staying.pane, beside, at).rect.loc.x
+                    - f64::from(beside.loc.x);
+                assert!(
+                    carried < -1.0 && carried > -499.0,
+                    "the premise: half way through, the desk is on its way back: {carried}"
+                );
+                let ghost = centre(desk.state.drawn_id_at(going.pane, stood, at).rect)
+                    - centre(stood.to_f64());
+                assert!(
+                    (ghost - carried).abs() < 1.0,
+                    "the window that went is carried {ghost} while its desk is carried {carried}"
+                );
+            }
+
+            /// The fills `render::remains_elements` draws for a pane fading out,
+            /// as premultiplied colours, at the start of its fade.
+            fn fills(state: &Solium, pane: crate::pane::PaneId) -> Vec<[f32; 4]> {
+                let left = left_of(state, pane);
+                let frame = state.drawn_id_at(pane, left.outer, left.since);
+                crate::render::remains_elements(state, pane, &frame, left.outer.size, 1.0)
+                    .into_iter()
+                    .filter_map(|element| match element {
+                        crate::render::Element::Solid(solid) => Some(solid.color().components()),
+                        _ => None,
+                    })
+                    .collect()
+            }
+
+            /// **#126's review: a window that left no picture is filled with a
+            /// translucent grey, not an opaque white.**
+            ///
+            /// Common rather than rare: smithay clears a surface's textures on
+            /// every new buffer and imports only when it draws, so a client
+            /// that paints and exits inside a frame leaves nothing. The fill
+            /// was the shipped `Theme.surface`, white, at full opacity -- a
+            /// white rectangle flashed over a dark terminal as it went.
+            #[test]
+            fn a_window_that_left_no_picture_is_filled_with_a_translucent_grey() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                land(&mut desk);
+                opened.toplevel.destroy();
+                desk.pump();
+                assert!(
+                    matches!(
+                        left_of(&desk.state, opened.pane).remains,
+                        crate::pane::Remains::Lost
+                    ),
+                    "the premise: no renderer, so nothing was imported"
+                );
+                let fills = fills(&desk.state, opened.pane);
+                let [[r, g, b, a]] = fills.as_slice() else {
+                    panic!("one fill where the client was: {fills:?}");
+                };
+                assert!(
+                    *a <= 0.5 + f32::EPSILON,
+                    "the fill starts at full opacity, over whatever the client showed: {a}"
+                );
+                assert!(
+                    (r - g).abs() < f32::EPSILON
+                        && (g - b).abs() < f32::EPSILON
+                        && *r <= a / 2.0 + f32::EPSILON,
+                    "the fill is a light colour rather than a mid grey: {:?}",
+                    [r, g, b, a]
+                );
+            }
+
+            /// **#126's review: a surface that left no picture is filled where
+            /// it was**, so what did survive never stands in a hole. Asked of
+            /// the picture as a whole, one surface with pixels meant no fill at
+            /// all: a root that went unimported left its subsurface -- a page,
+            /// a video -- standing in the window's frame round a hole, and a
+            /// subsurface that went unimported left a hole in the root.
+            ///
+            /// Each case is one surface committing a last buffer after the last
+            /// frame that drew it, which is what empties smithay's textures for
+            /// it: Firefox, closed nested, committed its page subsurface 6 ms
+            /// before destroying its toplevel. `DummyRenderer` draws the frame
+            /// before that commit, and imports every surface of the tree.
+            #[test]
+            fn a_surface_that_left_no_picture_is_filled_where_it_was() {
+                use smithay::backend::renderer::element::surface::{
+                    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+                };
+                use smithay::backend::renderer::{Renderer as _, test::DummyRenderer};
+
+                for late in ["root", "subsurface"] {
+                    let mut desk = Desk::new();
+                    desk.state.textures =
+                        Some(crate::remains::Textures::Dummy(DummyRenderer.context_id()));
+                    let opened = desk.open_surface();
+                    let compositor = desk.client.compositor.clone().expect("wl_compositor bound");
+                    let subcompositor = desk
+                        .client
+                        .subcompositor
+                        .clone()
+                        .expect("wl_subcompositor bound");
+                    let child = compositor.create_surface(&desk.qh, ());
+                    let sub = subcompositor.get_subsurface(&child, &opened.surface, &desk.qh, ());
+                    sub.set_position(8, 8);
+                    sub.set_desync();
+                    commit_buffer(&desk.client, &desk.qh, &child, 16, 16);
+                    opened.surface.commit();
+                    desk.pump();
+                    let root = desk
+                        .state
+                        .panes
+                        .get(opened.pane)
+                        .and_then(Pane::client)
+                        .and_then(|window| window.wl_surface().map(std::borrow::Cow::into_owned))
+                        .expect("the window's surface");
+                    drop(render_elements_from_surface_tree::<
+                        DummyRenderer,
+                        WaylandSurfaceRenderElement<DummyRenderer>,
+                    >(
+                        &mut DummyRenderer,
+                        &root,
+                        (0, 0),
+                        1.0,
+                        1.0,
+                        smithay::backend::renderer::element::Kind::Unspecified,
+                    ));
+                    let (surface, side, hole) = if late == "root" {
+                        (
+                            &opened.surface,
+                            64,
+                            Rectangle::new((0, 0).into(), (64, 64).into()),
+                        )
+                    } else {
+                        (&child, 16, Rectangle::new((8, 8).into(), (16, 16).into()))
+                    };
+                    commit_buffer(&desk.client, &desk.qh, surface, side, side);
+                    desk.pump();
+
+                    opened.toplevel.destroy();
+                    desk.pump();
+                    let crate::pane::Remains::Picture(picture) =
+                        &left_of(&desk.state, opened.pane).remains
+                    else {
+                        panic!("{late}: a window with a picture fades out from it");
+                    };
+                    assert_eq!(
+                        picture.dummy_sizes().len(),
+                        1,
+                        "{late}: the premise: one surface has pixels and the other has none"
+                    );
+                    let fills: Vec<Rectangle<i32, smithay::utils::Physical>> = picture
+                        .elements((0, 0).into(), 1.0, 1.0)
+                        .filter(crate::remains::Surface::filled)
+                        .map(|surface| {
+                            smithay::backend::renderer::element::Element::geometry(
+                                &surface,
+                                smithay::utils::Scale::from(1.0),
+                            )
+                        })
+                        .collect();
+                    assert_eq!(
+                        fills,
+                        vec![hole],
+                        "{late}: the surface that left no pixels is a hole in what fades"
+                    );
+                }
+            }
+
+            /// **#126's review: a window whose client keeps its surface and
+            /// gives it a new buffer stops fading there and then.** smithay's
+            /// GLES renderer uploads a surface's next shared-memory buffer of
+            /// the same size into the texture it already has for that surface
+            /// -- the one the fade is drawn from -- so a client hiding a window
+            /// and showing it again inside the fade by mapping a new role on
+            /// the same `wl_surface` would have had the fade show the new
+            /// window's pixels. No client was seen to; see
+            /// `crate::remains::Picture::holds`. That upload needs a GPU and is
+            /// read, not driven; what is pinned here is that the fade has ended
+            /// by the time anything could draw the new buffer.
+            #[test]
+            fn a_window_that_went_ends_its_fade_when_its_surface_is_given_a_new_buffer() {
+                use smithay::backend::renderer::element::surface::{
+                    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+                };
+                use smithay::backend::renderer::{Renderer as _, test::DummyRenderer};
+
+                let mut desk = Desk::new();
+                desk.state.textures =
+                    Some(crate::remains::Textures::Dummy(DummyRenderer.context_id()));
+                let opened = desk.open_surface();
+                let root = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .and_then(|window| window.wl_surface().map(std::borrow::Cow::into_owned))
+                    .expect("the window's surface");
+                drop(render_elements_from_surface_tree::<
+                    DummyRenderer,
+                    WaylandSurfaceRenderElement<DummyRenderer>,
+                >(
+                    &mut DummyRenderer,
+                    &root,
+                    (0, 0),
+                    1.0,
+                    1.0,
+                    smithay::backend::renderer::element::Kind::Unspecified,
+                ));
+
+                opened.toplevel.destroy();
+                opened.xdg.destroy();
+                desk.pump();
+                assert!(
+                    matches!(
+                        left_of(&desk.state, opened.pane).remains,
+                        crate::pane::Remains::Picture(_)
+                    ),
+                    "the premise: the window is fading out from its picture"
+                );
+
+                // The same surface, a new window: what a hide and a show is.
+                let wm_base = desk.client.wm_base.clone().expect("xdg_wm_base bound");
+                let xdg = wm_base.get_xdg_surface(&opened.surface, &desk.qh, ());
+                let _toplevel = xdg.get_toplevel(&desk.qh, ());
+                opened.surface.commit();
+                desk.pump();
+                assert!(
+                    desk.state.panes.get(opened.pane).is_some_and(Pane::ghost),
+                    "a commit with no buffer in it touches no texture, and the fade goes on"
+                );
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 64, 64);
+                desk.pump();
+                assert!(
+                    desk.state.panes.get(opened.pane).is_none(),
+                    "the window that went is still fading from the texture its surface's new \
+                     buffer is about to be uploaded into"
+                );
+            }
+
+            /// Three windows of 400x300, mapped overlapping at `(100, 100)`,
+            /// `(200, 200)` and `(300, 300)`, bottom to top, with no layout.
+            fn overlapping(desk: &mut Desk) -> [Opened; 3] {
+                let opened = [
+                    desk.open_surface(),
+                    desk.open_surface(),
+                    desk.open_surface(),
+                ];
+                for (each, at) in opened.iter().zip([(100, 100), (200, 200), (300, 300)]) {
+                    commit_buffer(&desk.client, &desk.qh, &each.surface, 400, 300);
+                    desk.pump();
+                    let window = desk
+                        .state
+                        .panes
+                        .get(each.pane)
+                        .and_then(Pane::client)
+                        .cloned()
+                        .expect("a window");
+                    desk.state.map_stacked(window, at, false);
+                }
+                land(desk);
+                opened
+            }
+
+            /// Every pane, topmost first, after the frame's `sync_panes`.
+            fn stacked(state: &mut Solium) -> Vec<crate::pane::PaneId> {
+                state.space.refresh();
+                state.sync_panes();
+                state
+                    .on_screen()
+                    .into_iter()
+                    .map(|(pane, _)| pane)
+                    .collect()
+            }
+
+            /// **#126's review: a window that closes itself behind another one
+            /// fades behind it**, where it was in the stack, and not in front
+            /// of the window that was covering it.
+            ///
+            /// No layout, which is the default, so nothing grows into its
+            /// space: a terminal behind a browser whose shell exits, a dialog
+            /// behind its window finishing. #126 put every window that went on
+            /// top of the stack to fade, so its last picture jumped in front
+            /// of the window over it and faded there, where before it had
+            /// vanished unseen.
+            #[test]
+            fn a_window_that_closes_itself_behind_another_fades_behind_it() {
+                let mut desk = Desk::new();
+                let [bottom, middle, top] = overlapping(&mut desk);
+                assert_eq!(
+                    stacked(&mut desk.state),
+                    vec![top.pane, middle.pane, bottom.pane],
+                    "the premise: three windows, stacked as they were mapped"
+                );
+
+                middle.toplevel.destroy();
+                desk.pump();
+                assert!(
+                    desk.state.panes.get(middle.pane).is_some_and(Pane::ghost),
+                    "the premise: the middle window is fading out"
+                );
+                for sweep in 0..2 {
+                    assert_eq!(
+                        stacked(&mut desk.state),
+                        vec![top.pane, middle.pane, bottom.pane],
+                        "sweep {sweep}: the window that went fades where it was in the stack"
+                    );
+                }
+            }
+
+            /// **#126's review, the other half: a window that goes from the
+            /// top stays over the window the keyboard moves to.** Focusing that
+            /// window raises it, which is why a window fading out is kept over
+            /// the panes it was over rather than at a place in the list: kept
+            /// at a place, it would go behind the first window focused after
+            /// it, and a terminal closed with `Ctrl+D` over another window
+            /// would vanish where the two overlap, as it did before #126.
+            #[test]
+            fn a_window_that_goes_from_the_top_stays_over_the_window_the_keyboard_moves_to() {
+                let mut desk = Desk::new();
+                let [bottom, middle, top] = overlapping(&mut desk);
+                let window = desk
+                    .state
+                    .panes
+                    .get(top.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("a window");
+                desk.state
+                    .focus_window(&window, smithay::utils::SERIAL_COUNTER.next_serial());
+                // Somewhere the pointer is over the bottom window alone, so the
+                // keyboard goes to the one furthest down, and has the most to
+                // be raised past.
+                point_at(&mut desk.state, (150.0, 150.0).into());
+
+                top.toplevel.destroy();
+                desk.pump();
+                let order = stacked(&mut desk.state);
+                assert_eq!(
+                    desk.state
+                        .focused_window()
+                        .and_then(|window| desk.state.panes.id_of(&window)),
+                    Some(bottom.pane),
+                    "the premise: the keyboard went to the window under the pointer"
+                );
+                assert_eq!(
+                    stacked(&mut desk.state),
+                    vec![top.pane, bottom.pane, middle.pane],
+                    "the window focused is raised, and the window that went stays over it: \
+                     the sweep before this one had {order:?}"
+                );
+            }
+
+            /// **#126: nothing is kept of a window that is not leaving.**
+            ///
+            /// The picture is taken at the moment a client goes, and never
+            /// before: a window that stays holds nothing extra, however many
+            /// frames it draws. `remains::taken` counts pictures taken on this
+            /// thread, which is the test's own.
+            #[test]
+            fn nothing_is_kept_of_a_window_that_stays() {
+                use smithay::backend::renderer::{Renderer as _, test::DummyRenderer};
+
+                let mut desk = Desk::new();
+                desk.state.textures =
+                    Some(crate::remains::Textures::Dummy(DummyRenderer.context_id()));
+                let staying = desk.open_surface();
+                let going = desk.open_surface();
+                let taken = crate::remains::taken();
+                for size in 60..90 {
+                    for opened in [&staying, &going] {
+                        commit_buffer(&desk.client, &desk.qh, &opened.surface, size, size);
+                    }
+                    desk.pump();
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    desk.state.space.refresh();
+                    desk.state.sync_panes();
+                }
+                assert_eq!(
+                    crate::remains::taken(),
+                    taken,
+                    "a picture was taken of a window nobody closed"
+                );
+                assert!(desk.state.panes.iter().all(|pane| pane.left().is_none()));
+
+                going.toplevel.destroy();
+                desk.pump();
+                assert_eq!(
+                    crate::remains::taken(),
+                    taken + 1,
+                    "one, of the window that went"
+                );
+                assert!(
+                    desk.state.panes.get(going.pane).is_some_and(Pane::ghost)
+                        && desk
+                            .state
+                            .panes
+                            .get(staying.pane)
+                            .is_some_and(|pane| pane.left().is_none()),
+                    "and only the window that went keeps anything"
+                );
+            }
+
+            /// **#126: a window whose application never arrived is told gone
+            /// while its pane is still here**, as every window is: its row is
+            /// in `close`'s own snapshot, leaving. It used to be removed first,
+            /// so `close` was the one event about a window that was not in it.
+            ///
+            /// A pane with no scene -- building one needs Qt, which a test
+            /// holding a Wayland client cannot have -- so there is nothing of
+            /// it on screen to fade, and it goes at once.
+            #[test]
+            fn a_window_whose_application_never_came_is_told_gone_while_it_is_here() {
+                let mut desk = Desk::new();
+                desk.install(RECORDER);
+                let area = Rectangle::new((100, 100).into(), (400, 300).into());
+                let now = desk.state.clock.now();
+                let pane = desk.state.panes.open(Pane::loading(
+                    "never",
+                    None,
+                    area,
+                    std::path::PathBuf::new(),
+                    None,
+                    now,
+                ));
+                desk.state.trigger_open(pane);
+                let patience = desk.state.loading.patience;
+                desk.state.settle(now + patience);
+                let id = pane.get();
+                assert_eq!(desk.events(), format!("open {id},close {id}*"));
+                assert!(
+                    desk.state.panes.get(pane).is_none(),
+                    "with nothing on screen to fade, it goes at once"
                 );
             }
 

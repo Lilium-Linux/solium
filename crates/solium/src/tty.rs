@@ -1142,6 +1142,11 @@ impl State {
         }
 
         let formats = renderer.egl_context().dmabuf_render_formats().clone();
+        // Whose imports a departing window's picture is read from. See
+        // `crate::remains`.
+        self.solium.textures = Some(crate::remains::Textures::Gles(
+            smithay::backend::renderer::Renderer::context_id(&renderer),
+        ));
         self.renderer = Some(renderer);
         self.node = Some(node);
         self.gbm = Some(gbm);
