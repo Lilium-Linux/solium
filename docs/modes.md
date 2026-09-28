@@ -293,13 +293,21 @@ local state = sol.keep("my-mode", { showing = 1 })
 
 You get the table the last load left under that name, or the defaults the first
 time. Mutate it in place; the host takes a copy when the reload happens. It
-holds plain data only — numbers, strings, booleans and tables of those. A
-function in there cannot cross and is named in the log rather than dropped in
-silence.
+holds plain data — numbers, strings, booleans and tables of those — and the
+trees and strips `sol.layout.tree()` and `sol.layout.scroller()` make, which
+come back whole. A function in there cannot cross and is named in the log
+rather than dropped in silence.
 
 Keep as little as you can. Anything you can work out again from `sol.windows()`
 and `sol.monitors()` should be worked out again, because a keep is a claim about
 the past that nothing checks.
+
+An arrangement is the exception, because it cannot be worked out again: the
+window list says which windows there are, not where the user put them. The
+shipped layouts keep theirs. Before they did, a reload rebuilt each one from the
+window list, topmost first, and windows traded places (#118). A strip that
+comes back still has the widths the last file gave it, so `scrolling.lua` hands
+it the new ones with `view:configure(config.scrolling)`.
 
 **And the world, re-announced:** `restore`, then `monitors`, then `layout`.
 

@@ -474,10 +474,18 @@ struct Pending {
 
 /// What a script handed the host to hold while the Lua state is replaced.
 ///
-/// Plain data, because that is the only thing that can cross. A reload builds
-/// a whole new [`Lua`]; a table, a closure, an upvalue — every Lua value there
-/// is — dies with the old one. So what crosses is this, and it is rebuilt as a
-/// fresh table in the new state.
+/// Plain data and the layouts `sol.layout` makes, because those are the only
+/// things that can cross. A reload builds a whole new [`Lua`]; a table, a
+/// closure, an upvalue — every Lua value there is — dies with the old one. So
+/// what crosses is this, and it is rebuilt as a fresh value in the new state.
+///
+/// A tree or a strip is userdata and dies with the state like the rest, but
+/// what it holds is a Rust value, which the host can copy out of the old state
+/// and into the new one whole -- a closure it cannot. Both shipped layouts keep
+/// their arrangement in one, and before they could keep it a reload rebuilt
+/// the layouts in view from the window list, topmost first, and windows traded
+/// places (#118). See `a_reload_leaves_a_tiled_desk_exactly_as_it_was` and
+/// `a_reload_leaves_every_scrolling_strip_as_it_was`.
 ///
 /// Tables are a list of pairs rather than a map for two reasons. Lua has one
 /// table type that is both a list and a dictionary, and both shipped keeps are
@@ -485,7 +493,7 @@ struct Pending {
 /// window id, which is an integer, and `workspaces.showing` by connector name,
 /// which is a string. And a `Vec` of pairs needs no `Hash` or `Eq` on the key,
 /// which a float key could not honestly have.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) enum Kept {
     Bool(bool),
     /// Kept apart from `Number` so a window id survives as the integer it is.
@@ -496,6 +504,10 @@ pub(crate) enum Kept {
     Number(f64),
     Text(String),
     Table(Vec<(Kept, Kept)>),
+    /// A dwindle tree, split ratios and all: `sol.layout.tree()`.
+    Tree(solium_layout::tree::Tiling),
+    /// A scrolling strip, columns, widths, focus and view: `sol.layout.scroller()`.
+    Strip(solium_layout::scroller::Scroller),
 }
 
 /// Everything kept, under the names the scripts gave it.
@@ -546,6 +558,17 @@ impl Kept {
                 }
                 Some(Self::Table(pairs))
             }
+            // A copy, so the running scripts are left as they were: see
+            // `Scripts::kept` for why reading the keep must not damage them,
+            // and `a_reload_leaves_a_tiled_desk_exactly_as_it_was`.
+            Value::UserData(held) if held.is::<TilingTree>() => held
+                .borrow::<TilingTree>()
+                .ok()
+                .map(|tree| Self::Tree(tree.0.clone())),
+            Value::UserData(held) if held.is::<Scrolling>() => held
+                .borrow::<Scrolling>()
+                .ok()
+                .map(|strip| Self::Strip(strip.0.clone())),
             // `nil` is not a failure: a key that has been cleared is a key that
             // is not there, and Lua's own iteration never yields one.
             Value::Nil => None,
@@ -553,8 +576,9 @@ impl Kept {
                 tracing::warn!(
                     key = where_it_is,
                     kind = other.type_name(),
-                    "only plain data survives a reload, and this is not plain data; it will be \
-                     missing from the keep when the configuration is read again"
+                    "only plain data and the layouts sol.layout makes survive a reload, and this \
+                     is neither; it will be missing from the keep when the configuration is read \
+                     again"
                 );
                 None
             }
@@ -575,6 +599,8 @@ impl Kept {
                 }
                 Value::Table(table)
             }
+            Self::Tree(tree) => Value::UserData(lua.create_userdata(TilingTree(tree))?),
+            Self::Strip(strip) => Value::UserData(lua.create_userdata(Scrolling(strip))?),
         })
     }
 }
@@ -793,7 +819,8 @@ impl Scripts {
     ///  1. **Whatever it handed to `sol.keep`, and nothing else.** A reload
     ///     throws the whole Lua state away, so a script's own variables are
     ///     gone by construction. `sol.keep` is the one exception, it is opt-in,
-    ///     and it holds plain data only — see [`Kept`].
+    ///     and it holds plain data and the layouts `sol.layout` makes, nothing
+    ///     else — see [`Kept`].
     ///  2. **The world as it now is, re-announced.** `restore`, then
     ///     `monitors`, then `layout` — see [`crate::state::Solium::reload`].
     ///     A script that can rebuild itself from `sol.windows()` and
@@ -1532,7 +1559,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     //
     // Answers the table the last configuration had under this name, or the
     // defaults on the first load. Mutate it in place and the next reload gets
-    // what you left in it; see [`Kept`] for what may be in one.
+    // what you left in it; see [`Kept`] for what may be in one -- plain data,
+    // and the trees and strips `sol.layout` makes, which is how `tiling.lua`
+    // and `scrolling.lua` keep their arrangement (#118).
     //
     // **Why this is the host's job and not a script's.** Two shipped scripts
     // had already invented an answer to surviving a reload, and neither could
@@ -2958,6 +2987,18 @@ impl mlua::UserData for Scrolling {
 
         methods.add_method_mut("cycle_width", |_, this, options: Table| {
             this.0.cycle_width(area(&options)?, tuning(&options)?);
+            Ok(())
+        });
+
+        // The widths from `config.scrolling` as the file reads now -- the list
+        // a column cycles through and the width the next one opens at -- with
+        // the columns, the focus and the view left as they are. Takes what
+        // `sol.layout.scroller` takes, and reads it the same way. For a strip
+        // `sol.keep` carried across a reload, which is not made again and so
+        // would go on with the last file's widths (#118). See
+        // `a_reload_keeps_the_strip_and_takes_the_widths_the_file_now_names`.
+        methods.add_method_mut("configure", |_, this, options: Table| {
+            this.0.configure_like(&scroller_from(&options)?);
             Ok(())
         });
 
@@ -7251,8 +7292,8 @@ mod dialogs {
         /// Three cases. After `closing`, it stays out. With no `closing` at all
         /// -- an event some route failed to deliver -- `adopt` takes it out
         /// itself, which is the backstop `adopt` has always been for a missed
-        /// event. And after a reload, where the arrangement is built from
-        /// nothing, it is not built back in.
+        /// event. And after a reload, which carries the arrangement across
+        /// without it, it is not put back in.
         #[test]
         fn adopt_during_a_close_leaves_the_window_out() {
             for (layout, _) in LAYOUTS {
@@ -7281,8 +7322,8 @@ mod dialogs {
                 let restored = placed(&reloaded.restored(desk(&before, &[1, 2, 3], &[3])).commands);
                 assert!(
                     restored.contains_key(&1) && !restored.contains_key(&3),
-                    "{layout}: a reload during the close built the window being closed back \
-                     into a fresh arrangement: {restored:?}"
+                    "{layout}: a reload during the close put the window being closed back \
+                     into the arrangement: {restored:?}"
                 );
 
                 // `closing` never arrived.
@@ -8020,7 +8061,9 @@ mod dialogs {
         ///   * `adopt`, by switching tiling on;
         ///   * `adopt`, on a monitor change -- every window now on `DP-2`,
         ///     missing from that screen's tree;
-        ///   * `restore`, a reload, which builds every tree from nothing;
+        ///   * `restore`, a reload, with every window back on `DP-1` -- whose
+        ///     tree the monitor change emptied, so it is built again from
+        ///     nothing;
         ///   * `refused`, a close the application declined;
         ///   * a dialog that stops being modal and rejoins its tree.
         #[test]
@@ -8479,6 +8522,639 @@ mod dialogs {
 
         fn open(scripts: &mut Scripts, id: u64, ids: &[u64]) -> Outcome {
             scripts.opened(id, desk_at(ids, (500.0, 500.0)))
+        }
+    }
+
+    /// **#118 and #129: a reload is a change of configuration, not of
+    /// arrangement.**
+    ///
+    /// Every layout on every desk comes back from `super+shift+r` exactly as it
+    /// was: the same windows in the same tiles at the same split ratios, and the
+    /// same columns in the same order at the same widths with the view where it
+    /// was. Driven through the sequence `Solium::reload` runs -- the keep read
+    /// off the running scripts, the configuration read again, then `restore`,
+    /// `monitors` and `layout` -- against the shipped layouts, as the modules
+    /// above run them.
+    mod reload {
+        use super::*;
+        use std::collections::HashMap;
+        use std::path::{Path, PathBuf};
+
+        /// [`AREA`] less the shipped gap all round: the one tile a workspace
+        /// with one window has.
+        const FULL: Rect = Rect {
+            x: 12.0,
+            y: 12.0,
+            w: 2536.0,
+            h: 1416.0,
+        };
+
+        /// The shipped layouts in the order `init.lua` requires them, with
+        /// `before` run ahead of them. Written again between two loads, it is
+        /// a configuration edited between them -- which is what a reload is
+        /// for.
+        fn write(entry: &Path, before: &str) {
+            std::fs::write(
+                entry,
+                format!(
+                    "package.path = {shipped:?} .. \"/?.lua\"\n\
+                     {before}\n\
+                     require(\"modes\")\n\
+                     require(\"workspaces\")\n\
+                     require(\"tiling\")\n\
+                     require(\"scrolling\")\n",
+                    shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                ),
+            )
+            .expect("writing the entry point");
+        }
+
+        /// The session, and the entry point a reload reads again. A directory
+        /// per call, for the reason [`scripts`] gives.
+        fn session(before: &str) -> (Scripts, PathBuf) {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let directory =
+                std::env::temp_dir().join(format!("solium-reload-{}-{serial}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            write(&entry, before);
+            let scripts = Scripts::load(&entry).expect("loading the shipped layouts");
+            (scripts, entry)
+        }
+
+        /// Exactly what `Solium::reload` does, in its order, with the world
+        /// looking like `now` throughout. The new scripts, and every command
+        /// the three announcements produced.
+        fn reload(scripts: &Scripts, entry: &Path, now: &Snapshot) -> (Scripts, Vec<Command>) {
+            let mut fresh =
+                Scripts::load_carrying(entry, scripts.kept()).expect("reloading the scripts");
+            let mut commands = fresh.restored(now.clone()).commands;
+            commands.extend(fresh.monitors_changed(now.clone()).commands);
+            commands.extend(fresh.relayout(now.clone()).commands);
+            (fresh, commands)
+        }
+
+        /// The windows `ids` on `DP-1`, topmost first as the compositor lists
+        /// them, each where `rects` says it was placed, with the pointer at
+        /// `cursor`. A window `rects` has nothing for is one being mapped: the
+        /// size its client chose, at the origin.
+        fn desk(rects: &HashMap<u64, Rect>, ids: &[u64], cursor: (f64, f64)) -> Snapshot {
+            Snapshot {
+                cursor,
+                ..snapshot(ids.iter().map(|&id| at_rest(rects, id)).collect())
+            }
+        }
+
+        fn at_rest(rects: &HashMap<u64, Rect>, id: u64) -> WindowInfo {
+            match rects.get(&id) {
+                Some(rect) => WindowInfo {
+                    rect: *rect,
+                    ..window(id, rect.w, rect.h)
+                },
+                None => window(id, 800.0, 600.0),
+            }
+        }
+
+        /// Window `id` opens on top of `below` with the pointer at `cursor`,
+        /// and wherever that placed anything is recorded in `rects`.
+        fn open(
+            scripts: &mut Scripts,
+            rects: &mut HashMap<u64, Rect>,
+            id: u64,
+            below: &[u64],
+            cursor: (f64, f64),
+        ) {
+            let mut ids = vec![id];
+            ids.extend_from_slice(below);
+            let outcome = scripts.opened(id, desk(rects, &ids, cursor));
+            rects.extend(placed(&outcome.commands));
+        }
+
+        /// `combo`, pressed over the windows `ids`, with what it placed
+        /// recorded in `rects`.
+        fn press(
+            scripts: &mut Scripts,
+            rects: &mut HashMap<u64, Rect>,
+            ids: &[u64],
+            combo: &str,
+            cursor: (f64, f64),
+        ) {
+            let outcome = scripts.key(combo, desk(rects, ids, cursor));
+            assert!(outcome.handled, "{combo} was not handled");
+            rects.extend(placed(&outcome.commands));
+        }
+
+        /// One tree's or strip's arrangement of a 2560x1440 screen, as text:
+        /// every slot it lays out, in its own order, and for a strip the window
+        /// it has focused. The columns' order and widths and where the view sits
+        /// are all in the slots. `nil` when the layout holds nothing under
+        /// `key`, which is what a hidden desk's tree was after a reload before
+        /// #129.
+        fn arrangement(scripts: &Scripts, layout: &str, key: &str) -> String {
+            let (table, focus) = if layout == "tiling" {
+                ("trees", "")
+            } else {
+                (
+                    "views",
+                    "out[#out + 1] = \"focus=\" .. tostring(each:focused())",
+                )
+            };
+            scripts.evaluate(&format!(
+                "local each = require({layout:?}).{table}[{key:?}]\n\
+                 if not each then return \"nil\" end\n\
+                 local area = {{ x = 0, y = 0, w = 2560, h = 1440, gap = 12 }}\n\
+                 local out = {{}}\n\
+                 for _, slot in ipairs(each:layout(area)) do\n\
+                     out[#out + 1] = string.format(\"%d@%.2f,%.2f,%.2fx%.2f\",\n\
+                         slot.id, slot.x, slot.y, slot.w, slot.h)\n\
+                 end\n\
+                 {focus}\n\
+                 return table.concat(out, \" \")"
+            ))
+        }
+
+        /// The windows tiling holds under `key`, sorted, or `nil` for no tree.
+        fn held(scripts: &Scripts, key: &str) -> String {
+            scripts.evaluate(&format!(
+                "local tree = require(\"tiling\").trees[{key:?}]\n\
+                 if not tree then return \"nil\" end\n\
+                 local ids = tree:windows()\n\
+                 table.sort(ids)\n\
+                 return table.concat(ids, \",\")"
+            ))
+        }
+
+        fn same(left: Rect, right: Rect) -> bool {
+            about(left.x, right.x)
+                && about(left.y, right.y)
+                && about(left.w, right.w)
+                && about(left.h, right.h)
+        }
+
+        /// Every place `commands` sent, in order.
+        fn places(commands: &[Command]) -> Vec<(u64, Rect)> {
+            commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Place { id, rect, .. } => Some((*id, *rect)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Every place a reload sent is where that window already was, and
+        /// every window in `ids` was sent one: the reload re-stated the
+        /// arrangement rather than making another.
+        fn nothing_moved(commands: &[Command], rects: &HashMap<u64, Rect>, ids: &[u64]) {
+            let sent = places(commands);
+            for id in ids {
+                assert!(
+                    sent.iter().any(|(placed, _)| placed == id),
+                    "the reload did not lay out window {id}: {sent:?}"
+                );
+            }
+            for (id, rect) in sent {
+                let was = rects.get(&id).copied().unwrap_or_default();
+                assert!(
+                    same(rect, was),
+                    "the reload moved window {id} from {was:?} to {rect:?}"
+                );
+            }
+        }
+
+        /// **#118: a reload leaves a tiled desk exactly as it was, dragged
+        /// seam and all.**
+        ///
+        /// Three windows opened in order -- 2 beside 1 with the pointer on 1's
+        /// right half, 3 under 2 with it on 2's lower half -- and then the seam
+        /// between the two columns dragged left to x=900, a split nothing would
+        /// give a window by itself. The reload's snapshot lists the windows as
+        /// the compositor does, topmost first, and 1 is on top, having just
+        /// been dragged: not the order they were opened in.
+        ///
+        /// Before #118 the tree died with the Lua state and `adopt` built
+        /// another from that list: 1, then 3 beside it, then 2 under 1, every
+        /// split at the configured 0.5.
+        #[test]
+        fn a_reload_leaves_a_tiled_desk_exactly_as_it_was() {
+            let (mut scripts, entry) = session("");
+            let mut rects = HashMap::new();
+            press(&mut scripts, &mut rects, &[], "super+t", (1280.0, 720.0));
+            open(&mut scripts, &mut rects, 1, &[], (1280.0, 720.0));
+            open(&mut scripts, &mut rects, 2, &[1], (1900.0, 720.0));
+            open(&mut scripts, &mut rects, 3, &[2, 1], (1900.0, 1100.0));
+            let dragged = scripts.resized(
+                1,
+                (900.0, 720.0),
+                (Some("right"), None),
+                desk(&rects, &[1, 3, 2], (900.0, 720.0)),
+            );
+            rects.extend(placed(&dragged.commands));
+            assert!(
+                rects.get(&1).is_some_and(|rect| about(rect.w, 888.0))
+                    && rects
+                        .get(&2)
+                        .zip(rects.get(&3))
+                        .is_some_and(|(two, three)| about(two.x, 912.0) && three.y > two.y),
+                "the fixture is not the one described: {rects:?}"
+            );
+            let tree = arrangement(&scripts, "tiling", "1@DP-1");
+
+            let (reloaded, commands) =
+                reload(&scripts, &entry, &desk(&rects, &[1, 3, 2], (900.0, 720.0)));
+            assert_eq!(
+                arrangement(&reloaded, "tiling", "1@DP-1"),
+                tree,
+                "the reload came back with a different tree"
+            );
+            nothing_moved(&commands, &rects, &[1, 2, 3]);
+            // And the scripts it was read from still have theirs: a reload
+            // that fails goes on running them, so reading the keep copies.
+            assert_eq!(
+                arrangement(&scripts, "tiling", "1@DP-1"),
+                tree,
+                "reading the keep took the tree away from the running scripts"
+            );
+        }
+
+        /// **#118 as it was reported: on workspace 3, Firefox and then kitty,
+        /// a reload, and the two traded places.**
+        ///
+        /// Firefox takes the screen; kitty opens with the pointer on Firefox's
+        /// right half and takes that half. kitty is the window in use, so it is
+        /// topmost when the reload comes and the compositor lists it first.
+        /// Rebuilt from that list, kitty went in first and took the screen, and
+        /// Firefox split it with no pointer to go by -- onto the far side, the
+        /// right.
+        #[test]
+        fn firefox_and_kitty_on_workspace_3_keep_their_places_through_a_reload() {
+            let (firefox, kitty) = (1, 2);
+            let (mut scripts, entry) = session("");
+            let mut rects = HashMap::new();
+            press(&mut scripts, &mut rects, &[], "super+t", (1280.0, 720.0));
+            press(&mut scripts, &mut rects, &[], "super+3", (1280.0, 720.0));
+            open(&mut scripts, &mut rects, firefox, &[], (1280.0, 720.0));
+            open(&mut scripts, &mut rects, kitty, &[firefox], (1900.0, 720.0));
+            assert!(
+                rects
+                    .get(&firefox)
+                    .zip(rects.get(&kitty))
+                    .is_some_and(|(left, right)| left.x < right.x && about(left.w, right.w)),
+                "the fixture is Firefox on the left and kitty on the right: {rects:?}"
+            );
+
+            let (scripts, commands) = reload(
+                &scripts,
+                &entry,
+                &desk(&rects, &[kitty, firefox], (1900.0, 720.0)),
+            );
+            nothing_moved(&commands, &rects, &[firefox, kitty]);
+            let desks = scripts.evaluate(
+                "local workspaces = require(\"workspaces\")\n\
+                 return string.format(\"%d %d %d\", workspaces.at(1, \"DP-1\"),\n\
+                     workspaces.at(2, \"DP-1\"), workspaces.on(\"DP-1\"))",
+            );
+            assert_eq!(desks, "3 3 3", "Firefox, kitty, and the workspace in view");
+        }
+
+        /// **#129: a desk nobody is looking at keeps its arrangement through a
+        /// reload, and through a `monitors` event**, and a window opened there
+        /// afterwards splits it rather than covering the screen.
+        ///
+        /// Two windows side by side on workspace 1, and the view on workspace
+        /// 2 when it happens. `adopt` runs on both -- `restore` switches tiling
+        /// back on, and `monitors` follows on every reload as on every hotplug
+        /// -- and it measured every tree against the windows on the desks *in
+        /// view*. So workspace 1's tree lost both windows to a `monitors`
+        /// event, and after a reload did not exist at all. Back on workspace 1
+        /// the windows were still in their tiles, where the compositor had left
+        /// them, and the layout did not know they were there: the next window
+        /// took the whole screen, over the top of both.
+        #[test]
+        fn a_hidden_desk_keeps_its_arrangement_through_a_reload_and_a_monitors_event() {
+            for route in ["a reload", "a monitors event"] {
+                let (mut scripts, entry) = session("");
+                let mut rects = HashMap::new();
+                press(&mut scripts, &mut rects, &[], "super+t", (1280.0, 720.0));
+                open(&mut scripts, &mut rects, 1, &[], (1280.0, 720.0));
+                open(&mut scripts, &mut rects, 2, &[1], (1900.0, 720.0));
+                let tree = arrangement(&scripts, "tiling", "1@DP-1");
+                press(
+                    &mut scripts,
+                    &mut rects,
+                    &[2, 1],
+                    "super+2",
+                    (1280.0, 720.0),
+                );
+
+                let away = desk(&rects, &[2, 1], (1280.0, 720.0));
+                let mut scripts = if route == "a reload" {
+                    reload(&scripts, &entry, &away).0
+                } else {
+                    let _ = scripts.monitors_changed(away.clone());
+                    let _ = scripts.relayout(away);
+                    scripts
+                };
+                press(
+                    &mut scripts,
+                    &mut rects,
+                    &[2, 1],
+                    "super+1",
+                    (1900.0, 1100.0),
+                );
+                assert_eq!(
+                    arrangement(&scripts, "tiling", "1@DP-1"),
+                    tree,
+                    "after {route} on workspace 2, workspace 1's arrangement is not the one it had"
+                );
+
+                let (left, right) = (
+                    rects.get(&1).copied().unwrap_or_default(),
+                    rects.get(&2).copied().unwrap_or_default(),
+                );
+                open(&mut scripts, &mut rects, 3, &[2, 1], (1900.0, 1100.0));
+                let third = rects.get(&3).copied().unwrap_or_default();
+                assert!(
+                    !same(third, FULL),
+                    "after {route}, window 3 was given the whole screen, over windows 1 and 2"
+                );
+                let now: Vec<Rect> = [1, 2, 3]
+                    .iter()
+                    .filter_map(|id| rects.get(id).copied())
+                    .collect();
+                assert!(
+                    rects.get(&1).is_some_and(|rect| same(*rect, left))
+                        && [2, 3].iter().all(|id| {
+                            rects.get(id).is_some_and(|rect| {
+                                rect.x >= right.x - 1.0
+                                    && rect.x + rect.w <= right.x + right.w + 1.0
+                            })
+                        })
+                        && now.iter().enumerate().all(|(index, one)| {
+                            now.iter()
+                                .skip(index + 1)
+                                .all(|other| !overlap(*one, *other))
+                        }),
+                    "after {route}, window 3 did not split window 2's tile: {rects:?}"
+                );
+            }
+        }
+
+        /// **A reload leaves every scrolling strip as it was, in view or not**:
+        /// which windows share a column, the columns' order and widths, which
+        /// one is focused and where the view sits. And so does a `monitors`
+        /// event, which every reload also announces.
+        ///
+        /// Workspace 1: three columns, the third widened with `super+r` and
+        /// carried to the middle, then focus back on the first, which scrolls
+        /// the view. Workspace 2, in view throughout: two windows stacked in
+        /// one column, widened. Before, `monitors` emptied the strip out of
+        /// view (#129); and a reload rebuilt each strip in view from the
+        /// snapshot -- a column per window, in stacking order, at the width a
+        /// column opens at -- and a strip out of view not at all (#118).
+        #[test]
+        fn a_reload_leaves_every_scrolling_strip_as_it_was() {
+            let cursor = (1280.0, 720.0);
+            let (mut scripts, entry) = session("");
+            let mut rects = HashMap::new();
+            press(&mut scripts, &mut rects, &[], "super+s", cursor);
+            open(&mut scripts, &mut rects, 1, &[], cursor);
+            open(&mut scripts, &mut rects, 2, &[1], cursor);
+            open(&mut scripts, &mut rects, 3, &[2, 1], cursor);
+            let first = [3, 2, 1];
+            press(&mut scripts, &mut rects, &first, "super+r", cursor);
+            press(
+                &mut scripts,
+                &mut rects,
+                &first,
+                "super+ctrl+bracketleft",
+                cursor,
+            );
+            press(
+                &mut scripts,
+                &mut rects,
+                &first,
+                "super+bracketleft",
+                cursor,
+            );
+            let hidden = arrangement(&scripts, "scrolling", "1@DP-1");
+            assert!(
+                hidden.ends_with("focus=1")
+                    && rects
+                        .get(&3)
+                        .zip(rects.get(&2))
+                        .is_some_and(|(three, two)| three.x < two.x && three.w > two.w),
+                "the fixture is [1] [3, widened] [2] with 1 focused: {hidden}"
+            );
+
+            press(&mut scripts, &mut rects, &first, "super+2", cursor);
+            open(&mut scripts, &mut rects, 4, &[3, 2, 1], cursor);
+            open(&mut scripts, &mut rects, 5, &[4, 3, 2, 1], cursor);
+            let all = [5, 4, 3, 2, 1];
+            press(&mut scripts, &mut rects, &all, "super+bracketleft", cursor);
+            press(&mut scripts, &mut rects, &all, "super+comma", cursor);
+            press(&mut scripts, &mut rects, &all, "super+r", cursor);
+            let shown = arrangement(&scripts, "scrolling", "2@DP-1");
+            assert!(
+                rects
+                    .get(&4)
+                    .zip(rects.get(&5))
+                    .is_some_and(|(four, five)| about(four.x, five.x)
+                        && about(four.w, 1268.0)
+                        && five.y > four.y),
+                "the fixture is 4 over 5 in one column, half the view wide: {rects:?}"
+            );
+
+            let now = desk(&rects, &all, cursor);
+            let _ = scripts.monitors_changed(now.clone());
+            let _ = scripts.relayout(now.clone());
+            assert_eq!(
+                [
+                    arrangement(&scripts, "scrolling", "1@DP-1"),
+                    arrangement(&scripts, "scrolling", "2@DP-1")
+                ],
+                [hidden.clone(), shown.clone()],
+                "a monitors event changed a strip, out of view or in it"
+            );
+
+            let (scripts, commands) = reload(&scripts, &entry, &now);
+            assert_eq!(
+                arrangement(&scripts, "scrolling", "2@DP-1"),
+                shown,
+                "the strip in view came back different"
+            );
+            assert_eq!(
+                arrangement(&scripts, "scrolling", "1@DP-1"),
+                hidden,
+                "the strip out of view came back different"
+            );
+            nothing_moved(&commands, &rects, &[4, 5]);
+        }
+
+        /// **And a reload still changes the configuration**: a strip keeps its
+        /// columns, and takes the widths the file now names.
+        ///
+        /// `scrolling.widths` is read where a strip is made (#117), and a strip
+        /// that is carried across a reload is not made again. Left at that, it
+        /// would go on opening columns at, and cycling through, the widths the
+        /// *last* file named: an edited setting that nothing reads. So the
+        /// columns already there keep the widths they have, a new one opens at
+        /// the new list's first, and `super+r` walks the new list.
+        #[test]
+        fn a_reload_keeps_the_strip_and_takes_the_widths_the_file_now_names() {
+            let cursor = (1280.0, 720.0);
+            let (mut scripts, entry) = session("");
+            let mut rects = HashMap::new();
+            press(&mut scripts, &mut rects, &[], "super+s", cursor);
+            open(&mut scripts, &mut rects, 1, &[], cursor);
+            open(&mut scripts, &mut rects, 2, &[1], cursor);
+            press(&mut scripts, &mut rects, &[2, 1], "super+r", cursor);
+            let before = arrangement(&scripts, "scrolling", "1@DP-1");
+            assert!(
+                rects
+                    .get(&1)
+                    .is_some_and(|rect| about(rect.w, 2536.0 / 3.0))
+                    && rects.get(&2).is_some_and(|rect| about(rect.w, 1268.0)),
+                "the fixture is a third and a half: {rects:?}"
+            );
+
+            write(
+                &entry,
+                "require(\"config\").scrolling.widths = { 0.25, 0.75 }",
+            );
+            let (mut scripts, _) = reload(&scripts, &entry, &desk(&rects, &[2, 1], cursor));
+            assert_eq!(
+                arrangement(&scripts, "scrolling", "1@DP-1"),
+                before,
+                "the columns did not keep their widths through the reload"
+            );
+            open(&mut scripts, &mut rects, 3, &[2, 1], cursor);
+            assert!(
+                rects.get(&3).is_some_and(|rect| about(rect.w, 634.0)),
+                "a column opened after the reload is not the new first width, a quarter: {rects:?}"
+            );
+            press(&mut scripts, &mut rects, &[3, 2, 1], "super+r", cursor);
+            assert!(
+                rects.get(&3).is_some_and(|rect| about(rect.w, 1902.0)),
+                "super+r after the reload did not go to the new list's next width: {rects:?}"
+            );
+        }
+
+        /// **A monitor that goes away still hands its windows to the one that
+        /// is left** -- the job the `monitors` event was added for.
+        ///
+        /// `DP-2` holds 3 and 4 on the workspace it shows and 5 on its
+        /// workspace 2, out of view. It is unplugged: every window is on `DP-1`
+        /// now, and `monitors` is announced. 3 and 4 join workspace 1's tree
+        /// there beside 1 and 2, and are laid out on `DP-1`. 5 joins workspace
+        /// 2's -- the workspace it was on, on the screen it is on now -- where
+        /// before #129 it was taken out of `DP-2`'s tree and put into none,
+        /// because `adopt` only put back a window on a desk in view. No tree of
+        /// the screen that went holds anything.
+        #[test]
+        fn a_monitor_that_goes_away_still_hands_its_windows_on() {
+            let (mut scripts, _) = session("");
+            let both = || vec![monitor(), second_monitor()];
+            let two = |rects: &HashMap<u64, Rect>, ids: &[u64], cursor: (f64, f64)| Snapshot {
+                cursor,
+                ..snapshot_on(
+                    both(),
+                    ids.iter()
+                        .map(|&id| {
+                            let each = at_rest(rects, id);
+                            if id >= 3 && !rects.contains_key(&id) {
+                                on(&second_monitor(), each)
+                            } else if id >= 3 {
+                                WindowInfo {
+                                    monitor: "DP-2".to_owned(),
+                                    ..each
+                                }
+                            } else {
+                                each
+                            }
+                        })
+                        .collect(),
+                )
+            };
+            let mut rects: HashMap<u64, Rect> = HashMap::new();
+            let outcome = scripts.key("super+t", two(&rects, &[], (1280.0, 720.0)));
+            assert!(outcome.handled, "the tiling key was not handled");
+            let opening = |scripts: &mut Scripts,
+                           rects: &mut HashMap<u64, Rect>,
+                           id: u64,
+                           below: &[u64],
+                           cursor: (f64, f64)| {
+                let mut ids = vec![id];
+                ids.extend_from_slice(below);
+                let outcome = scripts.opened(id, two(rects, &ids, cursor));
+                rects.extend(placed(&outcome.commands));
+            };
+            opening(&mut scripts, &mut rects, 1, &[], (1280.0, 720.0));
+            opening(&mut scripts, &mut rects, 2, &[1], (1900.0, 720.0));
+            opening(&mut scripts, &mut rects, 3, &[2, 1], (3840.0, 720.0));
+            opening(&mut scripts, &mut rects, 4, &[3, 2, 1], (4460.0, 720.0));
+            let _ = scripts.evaluate_in(
+                two(&rects, &[4, 3, 2, 1], (4460.0, 720.0)),
+                "require(\"workspaces\").go(2, \"DP-2\") return \"\"",
+            );
+            opening(&mut scripts, &mut rects, 5, &[4, 3, 2, 1], (3840.0, 720.0));
+            let _ = scripts.evaluate_in(
+                two(&rects, &[5, 4, 3, 2, 1], (3840.0, 720.0)),
+                "require(\"workspaces\").go(1, \"DP-2\") return \"\"",
+            );
+            assert_eq!(
+                [
+                    held(&scripts, "1@DP-1"),
+                    held(&scripts, "1@DP-2"),
+                    held(&scripts, "2@DP-2")
+                ],
+                ["1,2", "3,4", "5"],
+                "the fixture is two screens, and 5 on DP-2's workspace 2"
+            );
+
+            // Unplugged: the compositor has already moved every window onto
+            // the screen that is left, by the width of the one that went.
+            let gone = snapshot(
+                [5, 4, 3, 2, 1]
+                    .iter()
+                    .map(|&id| {
+                        let mut each = at_rest(&rects, id);
+                        if id >= 3 {
+                            each.rect.x -= BESIDE.x;
+                        }
+                        each
+                    })
+                    .collect(),
+            );
+            let _ = scripts.monitors_changed(gone.clone());
+            let after = placed(&scripts.relayout(gone).commands);
+            let shown: Vec<Rect> = [1, 2, 3, 4]
+                .iter()
+                .filter_map(|id| after.get(id).copied())
+                .collect();
+            assert!(
+                shown.len() == 4
+                    && shown.iter().all(|rect| rect.x + rect.w <= AREA.w + 1.0)
+                    && shown.iter().enumerate().all(|(index, one)| {
+                        shown
+                            .iter()
+                            .skip(index + 1)
+                            .all(|other| !overlap(*one, *other))
+                    }),
+                "the windows on the workspace in view are not all laid out on DP-1: {after:?}"
+            );
+            assert_eq!(held(&scripts, "1@DP-1"), "1,2,3,4");
+            assert_eq!(
+                held(&scripts, "2@DP-1"),
+                "5",
+                "the window on DP-2's hidden workspace is in no tree of the screen it is on"
+            );
+            assert_eq!(
+                [held(&scripts, "1@DP-2"), held(&scripts, "2@DP-2")],
+                ["", ""],
+                "a tree of the screen that went still holds a window"
+            );
         }
     }
 }

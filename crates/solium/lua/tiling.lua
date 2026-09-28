@@ -29,7 +29,20 @@ local dialogs = require("dialogs")
 -- out of its tree, by id: the centre of its rectangle and the key of the tree
 -- it was in. It is what a refused close puts the window back by. See the
 -- `closing` and `refused` handlers.
-local tiling = { active = false, trees = {}, exiled = {}, leaving = {} }
+--
+-- `trees` is the arrangement, one tree per desk (see `tree_for`), and
+-- `sol.keep` holds it so that it outlives `super+shift+r`: a reload is a change
+-- of configuration, not of arrangement. A tree is userdata, and the host carries
+-- it across whole, split ratios included. Before it did, the trees died with
+-- the Lua state and `adopt` built new ones from `sol.windows()`, which lists the
+-- windows topmost first -- so the window in use went in first and took the
+-- screen, and windows not stacked in the order they were opened in traded
+-- places (#118). See
+-- `a_reload_leaves_a_tiled_desk_exactly_as_it_was` and
+-- `firefox_and_kitty_on_workspace_3_keep_their_places_through_a_reload` in
+-- `script.rs`.
+local kept = sol.keep("tiling", { trees = {} })
+local tiling = { active = false, trees = kept.trees, exiled = {}, leaving = {} }
 
 -- Whether the other windows close up the moment a close is asked for, rather
 -- than once the application has gone. Read when each event arrives rather than
@@ -264,16 +277,25 @@ function tiling.apply(animation)
     dialogs.place(visible, options, placed)
 end
 
--- Bring the tree in line with what is actually on screen. Used when tiling is
--- switched on, and as a backstop: events are the normal path, this is what
--- makes a missed one recoverable rather than permanent.
+-- Bring every desk's tree in line with the windows on that desk: a window
+-- missing from its own desk's tree goes in, and a tree lets go of a window that
+-- is not on its desk. Run when tiling is switched on, on `monitors`, and on
+-- `restore` through `modes.lua`.
+--
+-- **Every desk, not just the ones in view.** `monitors` is announced on every
+-- reload as well as on every hotplug, and this used to measure every tree
+-- against the windows on the desks in view -- so each hidden desk's tree was
+-- emptied while its windows stayed in their tiles, and back on that desk the
+-- next window opened took the whole screen, over the top of them (#129). See
+-- `a_hidden_desk_keeps_its_arrangement_through_a_reload_and_a_monitors_event`
+-- in `script.rs`.
 function tiling.adopt()
     -- Also how a window that moved between monitors settles: it is missing
     -- from its new screen's tree and still in its old one's, and both halves
-    -- are fixed here.
+    -- are fixed here. See `a_monitor_that_goes_away_still_hands_its_windows_on`.
     local present = {}
-    for _, each in ipairs(monitors.each(workspaces.visible())) do
-        local tree = tree_for(each.monitor.name)
+    for _, each in ipairs(monitors.each(sol.windows())) do
+        local name = each.monitor.name
         for _, window in ipairs(each.windows) do
             -- A window being closed is, to a layout that reflows at once,
             -- already gone: `closing` took it out of its tree, and putting it
@@ -290,12 +312,17 @@ function tiling.adopt()
             -- `present` too, so the sweep below does not go looking for it in
             -- a tree it was never in.
             elseif not dialogs.floats(window) then
-                present[window.id] = each.monitor.name
+                -- Its own workspace's tree on the screen it is on, which is
+                -- the tree of the desk in view only when that is where it is.
+                local key = monitors.key(workspaces.at(window.id, name), name)
+                present[window.id] = key
+                local tree = tiling.trees[key] or sol.layout.tree()
+                tiling.trees[key] = tree
                 if not tree:contains(window.id) then
                     -- `rejoin`, never `open_in`: these windows are open
                     -- already, and a reload must not scatter them across the
                     -- workspaces.
-                    rejoin(tree, window.id, nil, nil, nil, options(each.monitor.name))
+                    rejoin(tree, window.id, nil, nil, nil, options(name))
                 end
             end
         end
@@ -305,9 +332,7 @@ function tiling.adopt()
             -- Removed when the window is gone, and when it is on another
             -- monitor now: one window in two trees is one window given two
             -- slots, and it ends up in whichever was laid out last.
-            if not present[id]
-                or monitors.key(workspaces.on(present[id]), present[id]) ~= key
-            then
+            if present[id] ~= key then
                 tree:remove(id)
             end
         end

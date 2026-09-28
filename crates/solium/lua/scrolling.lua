@@ -19,31 +19,16 @@ local modes = require("modes")
 local monitors = require("monitors")
 local dialogs = require("dialogs")
 
--- **`views` does not survive a reload, and that is named here rather than
--- fixed.**
+-- `views` is the arrangement, one strip per desk (see `view_for`), and
+-- `sol.keep` holds it so that it outlives `super+shift+r`: a reload is a change
+-- of configuration, not of arrangement. A strip is userdata, and the host
+-- carries it across whole -- which windows share a column, the columns' order
+-- and widths, which one is focused and where the view sits. Before it did,
+-- `adopt` built each strip in view again from `sol.windows()`, a column per
+-- window in stacking order at the width a column opens at, and a strip out of
+-- view not at all (#118). See `a_reload_leaves_every_scrolling_strip_as_it_was`
+-- in `script.rs`.
 --
--- #116's commit message predicted that the next piece of script state to matter
--- would be a third one, after `workspaces` and `modes`. This is it, and it is
--- the one `sol.keep` cannot take: a strip is userdata owned by
--- `crates/layout`, `sol.keep` holds plain data by construction, and nothing on
--- `restore` rebuilds one from anything. So `super+shift+r` in a scrolling
--- session comes back with `modes.current` still saying "scrolling" -- correctly;
--- that half is kept -- and every strip built fresh underneath it.
---
--- What is lost is more than the widths. `scrolling.started` runs `adopt`, so
--- every visible window is inserted again in `sol.windows()` order and
--- membership does return. The *arrangement* does not: the order columns were
--- moved into, which windows were stacked together with `super+comma`, each
--- column's width, which column is active, and where the view sits. Every window
--- is there and the strip is not the one you built.
---
--- Deliberately out of scope for #116. Keeping it needs a strip that can be
--- written out as plain data and read back -- a save/restore pair in
--- `crates/layout` and a `sol.layout.scroller` that takes what it hands back --
--- which is a change to the layout crate and the host rather than a line of this
--- file. Until then the honest summary of a reload is that it keeps which layout
--- is in charge and not how that layout had arranged itself.
-
 -- `exiled` is the ids this layout has taken out of its strips because they are
 -- modal dialogs, and it is what makes `unset_modal` reversible: only a window
 -- that was taken out is ever put back. Same table, same reason, same name as
@@ -52,7 +37,16 @@ local dialogs = require("dialogs")
 -- `leaving` is, for each window being closed, which strip it was in and the
 -- windows either side of it there: what a refused close puts it back beside.
 -- See the `closing` and `refused` handlers.
-local scrolling = { active = false, views = {}, exiled = {}, leaving = {} }
+local kept = sol.keep("scrolling", { views = {} })
+local scrolling = { active = false, views = kept.views, exiled = {}, leaving = {} }
+
+-- A strip that came across a reload keeps its columns and takes this file's
+-- widths. `scrolling.widths` and `default_width` are configuration, read where
+-- a strip is made (#117), and a strip carried across is not made again. See
+-- `a_reload_keeps_the_strip_and_takes_the_widths_the_file_now_names`.
+for _, view in pairs(scrolling.views) do
+    view:configure(config.scrolling)
+end
 
 -- Whether the strip closes up the moment a close is asked for, rather than once
 -- the application has gone. Read when each event arrives, like `tiling.lua`'s.
@@ -189,12 +183,16 @@ local function settle(animation)
     end
 end
 
+-- Every desk's strip, not just the ones in view, for the reason `tiling.adopt`
+-- gives: measured against the desks in view, a hidden desk's strip lost every
+-- window on every `monitors` event, and so on every reload (#129). See
+-- `a_reload_leaves_every_scrolling_strip_as_it_was` in `script.rs`.
 function scrolling.adopt()
     -- Also how a window that moved between monitors settles: missing from its
     -- new screen's strip, still in its old one's, and both fixed here.
     local present = {}
-    for _, each in ipairs(monitors.each(workspaces.visible())) do
-        local view = view_for(each.monitor.name)
+    for _, each in ipairs(monitors.each(sol.windows())) do
+        local name = each.monitor.name
         for _, window in ipairs(each.windows) do
             -- A window being closed is already gone to a strip that closes up
             -- at once, and only `refused` puts it back: neither inserted nor
@@ -206,19 +204,20 @@ function scrolling.adopt()
             -- whose whole job is to put back whatever is missing -- has to be
             -- told that this one is missing on purpose.
             elseif not dialogs.floats(window) then
-                present[window.id] = each.monitor.name
+                -- Its own workspace's strip on the screen it is on.
+                local key = monitors.key(workspaces.at(window.id, name), name)
+                present[window.id] = key
+                local view = scrolling.views[key] or sol.layout.scroller(config.scrolling)
+                scrolling.views[key] = view
                 if not view:contains(window.id) then
-                    view:insert(window.id, options(each.monitor.name))
+                    view:insert(window.id, options(name))
                 end
             end
         end
     end
     for key, view in pairs(scrolling.views) do
         for _, window in ipairs(sol.windows()) do
-            local belongs = present[window.id]
-            if view:contains(window.id)
-                and (not belongs or monitors.key(workspaces.on(belongs), belongs) ~= key)
-            then
+            if view:contains(window.id) and present[window.id] ~= key then
                 view:remove(window.id)
             end
         end
