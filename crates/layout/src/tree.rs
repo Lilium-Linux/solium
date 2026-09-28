@@ -678,20 +678,21 @@ impl Tiling {
         // own box is the quantity this layout actually owns, and the box is not
         // the window.
         //
-        // Two bounds on that ratio, and [`Self::room`] works out both. One is
-        // 0.05..0.95, because a seam driven to either end of its box leaves a
-        // child of no width, and a window of no width cannot be grabbed again
-        // to undo it. The other, since #134, is `settings.minimum`: no tile on
-        // either side of the seam is taken under it, so a seam cannot be
-        // dragged to make a tile smaller than a new window is allowed to open
-        // in. A tile, not a window, so it is this layout's to hold -- and it
-        // bends for a side that is already under it rather than snapping that
-        // side up to it, which is what keeps the first frame of such a drag
-        // where it was. See `room`.
+        // Three bounds on that ratio, and [`Self::room`] works out all of
+        // them. One is 0.05..0.95, because a seam driven to either end of its
+        // box leaves a child of no width, and a window of no width cannot be
+        // grabbed again to undo it. Another, since #134, is
+        // `settings.minimum`: no tile on either side of the seam is taken
+        // under it, so a seam cannot be dragged to make a tile smaller than a
+        // new window is allowed to open in. A tile, not a window, so it is
+        // this layout's to hold -- and it bends for a side that is already
+        // under it rather than snapping that side up to it, which is what
+        // keeps the first frame of such a drag where it was. See `room`.
         //
-        // And since #115, each window's own floor: a seam stops where a window
-        // beyond it reaches the size its application says it cannot go under,
-        // measured on the tiles as the layout rebalances them. See `room`, and
+        // The third, since #115, is each window's own floor: a seam stops
+        // where a window beyond it reaches the size its application says it
+        // cannot go under, measured on the tiles as the layout rebalances
+        // them. See `room`, and
         // `floor_tests::a_seam_stops_at_a_neighbours_own_floor`.
         //
         // This is also the tighter of two clamps on a *floating* drag, where
