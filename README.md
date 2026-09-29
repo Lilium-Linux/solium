@@ -21,7 +21,7 @@ frame.
 
 Solium needs **Rust 1.88 or newer** (edition 2024), a C++17 compiler, **Qt 6.5
 or newer** (Qt Quick and Qml), and the development files for Wayland,
-libinput, libudev, libseat, xkbcommon, GBM, EGL, libdrm and libdisplay-info.
+libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm.
 Lua is compiled in and needs nothing installed.
 
 Rust is easiest from [rustup](https://rustup.rs); a distribution's own Rust
@@ -32,15 +32,14 @@ works too if it is new enough. The system packages:
 ```sh
 sudo dnf install gcc gcc-c++ pkgconf-pkg-config wayland-devel libinput-devel \
     systemd-devel libseat-devel libxkbcommon-devel mesa-libgbm-devel \
-    mesa-libEGL-devel libdrm-devel libdisplay-info-devel \
-    qt6-qtbase-devel qt6-qtdeclarative-devel
+    mesa-libEGL-devel libdrm-devel qt6-qtbase-devel qt6-qtdeclarative-devel
 ```
 
 **Arch Linux**
 
 ```sh
 sudo pacman -S --needed base-devel wayland libinput systemd-libs seatd \
-    libxkbcommon mesa libdrm libdisplay-info qt6-base qt6-declarative
+    libxkbcommon mesa libdrm qt6-base qt6-declarative
 ```
 
 **Debian 13 and Ubuntu 24.10 or newer** (older releases ship a Qt older than
@@ -49,7 +48,7 @@ sudo pacman -S --needed base-devel wayland libinput systemd-libs seatd \
 ```sh
 sudo apt install build-essential pkg-config libwayland-dev libinput-dev \
     libudev-dev libseat-dev libxkbcommon-dev libgbm-dev libegl-dev libdrm-dev \
-    libdisplay-info-dev qt6-base-dev qt6-declarative-dev
+    qt6-base-dev qt6-declarative-dev
 ```
 
 **openSUSE Tumbleweed**
@@ -58,7 +57,7 @@ sudo apt install build-essential pkg-config libwayland-dev libinput-dev \
 sudo zypper install gcc-c++ pkgconf qt6-base-devel qt6-declarative-devel \
     'pkgconfig(wayland-server)' 'pkgconfig(libinput)' 'pkgconfig(libudev)' \
     'pkgconfig(libseat)' 'pkgconfig(xkbcommon)' 'pkgconfig(gbm)' 'pkgconfig(egl)' \
-    'pkgconfig(libdrm)' 'pkgconfig(libdisplay-info)'
+    'pkgconfig(libdrm)'
 ```
 
 Then, from the checkout:

@@ -38,7 +38,7 @@ jobs:
             git gcc gcc-c++ make pkgconf-pkg-config \
             wayland-devel libinput-devel systemd-devel libseat-devel \
             libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
-            libdrm-devel libdisplay-info-devel \
+            libdrm-devel \
             qt6-qtbase-devel qt6-qtdeclarative-devel
 
       - uses: actions/checkout@v5
