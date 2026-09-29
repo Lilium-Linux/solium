@@ -72,8 +72,17 @@ const COLOR_FORMATS: [smithay::backend::allocator::Fourcc; 2] = [
     smithay::backend::allocator::Fourcc::Xrgb8888,
 ];
 
-type Compositor =
-    DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
+/// Each frame's user data is the lock it was built under, if any
+/// ([`Solium::lock_frame`]): `frame_submitted` hands back the user data of the
+/// frame whose flip has just completed, which is how the vblank knows whether
+/// what reached the screen was the lock. See "When `locked` is sent" in
+/// `lock.rs`.
+type Compositor = DrmCompositor<
+    GbmAllocator<DrmDeviceFd>,
+    GbmFramebufferExporter<DrmDeviceFd>,
+    Option<crate::lock::LockFrame>,
+    DrmDeviceFd,
+>;
 
 /// List the graphics devices and their outputs, and exit.
 ///
@@ -406,8 +415,23 @@ pub(crate) fn run() -> Result<()> {
                     // it, and nothing to be alarmed about either.
                     return;
                 };
-                if let Err(err) = screen.compositor.frame_submitted() {
-                    tracing::warn!(?err, "the frame that just flipped was not accepted");
+                match screen.compositor.frame_submitted() {
+                    // The frame that has just reached the screen, and the lock
+                    // it was built under. Not "a flip after the lock": a
+                    // frame queued before the lock can be the first to flip
+                    // after it, because `render` skips a screen whose flip is
+                    // pending, and that frame is the desktop.
+                    // `a_flip_already_in_flight_at_the_lock_does_not_count`
+                    // plays this sequence through `Solium`; this wiring needs
+                    // a GPU, and no test reaches it.
+                    Ok(frame) => {
+                        state
+                            .solium
+                            .frame_presented(&screen.output, frame.flatten());
+                    }
+                    Err(err) => {
+                        tracing::warn!(?err, "the frame that just flipped was not accepted");
+                    }
                 }
 
                 // The frame is on the screen, and *this* is the moment clients
@@ -1245,7 +1269,8 @@ impl State {
             // This monitor's scale, not a constant. Two screens in one frame
             // can want different ones.
             let scale = output.current_scale().fractional_scale();
-            let locked = self.solium.lock.is_some();
+            // Carried with the frame to its flip. See `Compositor`.
+            let built_under = self.solium.lock_frame();
             let elements = render::elements(
                 &mut self.solium,
                 renderer,
@@ -1265,7 +1290,7 @@ impl State {
             // buffer's contents can be relied on, so nothing of the desktop
             // can survive in the parts of a scanout buffer that damage
             // tracking would otherwise leave alone.
-            if locked {
+            if built_under.is_some() {
                 screen.compositor.reset_buffers();
             }
             // `render_frame` builds and finishes a `GlesFrame` inside itself,
@@ -1290,19 +1315,26 @@ impl State {
             // number covering both would name the wrong one half the time.
             let _commit = crate::pacing::span(crate::pacing::Phase::Commit);
             match rendered {
-                Ok(result) if !result.is_empty => match screen.compositor.queue_frame(()) {
-                    Ok(()) => {
-                        screen.pending = true;
-                        // Taken now, reported at *this* screen's flip. The
-                        // callbacks belong to the frame just queued here, and
-                        // neither a later frame's commits nor another
-                        // monitor's may be answered with this one's timestamp.
-                        screen.pending_feedback = Some(self.solium.presentation_feedback(&output));
+                Ok(result) if !result.is_empty => {
+                    match screen.compositor.queue_frame(built_under) {
+                        Ok(()) => {
+                            screen.pending = true;
+                            // Taken now, reported at *this* screen's flip. The
+                            // callbacks belong to the frame just queued here, and
+                            // neither a later frame's commits nor another
+                            // monitor's may be answered with this one's timestamp.
+                            screen.pending_feedback =
+                                Some(self.solium.presentation_feedback(&output));
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                ?err,
+                                monitor = output.name(),
+                                "could not queue a frame"
+                            );
+                        }
                     }
-                    Err(err) => {
-                        tracing::warn!(?err, monitor = output.name(), "could not queue a frame");
-                    }
-                },
+                }
                 Ok(_) => {}
                 Err(err) => tracing::warn!(?err, monitor = output.name(), "rendering failed"),
             }

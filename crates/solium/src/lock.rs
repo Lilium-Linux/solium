@@ -7,11 +7,73 @@
 //! > **A lock that fails leaves the session locked and blank, never exposed.**
 //!
 //! Everything below follows from that. The session is locked the instant a
-//! client asks, before any surface exists, so there is no window in which the
-//! desktop is still on screen. If the locking client then crashes, the session
-//! stays locked with nothing on it — inconvenient, and not dangerous. If it
-//! never manages to draw, the same. The only way out is the client asking, or
-//! the physical console.
+//! client asks, before any surface exists: input is taken away and the next
+//! frame built for every monitor is the lock's, both before the request
+//! returns (`locked_is_not_sent_in_the_dispatch_that_asked_for_it`). What a
+//! monitor is already showing stays there until that frame replaces it, so the
+//! client is told `locked` only then -- see "When `locked` is sent". If the
+//! locking client then crashes, the session stays locked with nothing on it —
+//! inconvenient, and not dangerous. If it never manages to draw, the same. The
+//! only way out is the client asking, or the physical console.
+//!
+//! ## When `locked` is sent
+//!
+//! Once every monitor has *shown* a frame built under this lock, and not
+//! before: "the locked event must not be sent until a new 'locked' frame has
+//! been presented on all outputs". It is a promise about the screen, and a
+//! client acts on it. `swaylock -f` returns once it has heard it, and
+//! `swayidle -w before-sleep` lets the machine suspend when it returns: heard
+//! early, the machine sleeps with the desktop still being scanned out, and
+//! shows it again on waking.
+//!
+//! A backend asks [`Solium::lock_frame`] which lock a frame is built under as
+//! it builds it, and hands the answer to [`Solium::frame_presented`] once that
+//! frame is on the monitor. What "on the monitor" means is the backend's:
+//!
+//! * **tty:** the page flip of *that* frame has completed. The answer rides
+//!   through the DRM compositor as the frame's user data and comes back out of
+//!   `frame_submitted` at the vblank, so the flip of a frame queued before the
+//!   lock -- the desktop -- hands back no lock and counts for nothing.
+//!   `a_flip_already_in_flight_at_the_lock_does_not_count` plays that
+//!   sequence; the DRM half needs a GPU, and no test reaches it.
+//! * **nested:** the frame was handed to the host with `submit`, which is as
+//!   far as a compositor inside another one can see.
+//! * **tests:** there is no renderer, so they play the backend through the
+//!   same two calls.
+//!
+//! The monitors waited for are the ones there are *now*. One unplugged while
+//! `locked` waits is waited for no longer
+//! (`a_monitor_unplugged_while_locking_does_not_hold_locked_back`), and nor is
+//! one switched off with `enabled = false`, which `tty.rs` drops the same way
+//! (`a_switched_off_monitor_does_not_hold_locked_back`). Solium has no DPMS
+//! and no idle power-off, so there is no other way for a monitor to be dark.
+//! One plugged in must show the lock as well
+//! (`a_monitor_plugged_in_while_locking_must_show_the_lock_too`), and with no
+//! monitor at all `locked` goes at once
+//! (`with_no_monitor_locked_goes_out_at_once`).
+//!
+//! **There is no time limit.** A monitor that has not shown the lock holds
+//! `locked` back (`locked_waits_for_every_monitor_to_show_the_lock`), for as
+//! long as it has not, and the session is locked and blank all the while. The
+//! protocol's "reasonable time limit" is on waiting for the client's
+//! surfaces, and even then `locked` may go only once the frames are on
+//! screen. The two compositors worth comparing:
+//!
+//! * [niri][niri-lock] keeps showing the desktop for up to a second while it
+//!   waits for the lock client's surfaces, then blanks. That timer never sends
+//!   `locked`: [the render loop][niri-render] sends it once every output has
+//!   rendered a locked frame -- *queued*, on a tty, not flipped -- or has its
+//!   monitors off. A locked frame that fails to render gives the lock up
+//!   (`finished`) and the session back.
+//! * [sway][sway-lock] sends `locked` in the handler for the lock request,
+//!   before any frame is drawn: no wait, and no timer.
+//!
+//! Solium blanks at once, waits for the flip rather than the queue, never
+//! sends `locked` early, and never gives a lock up.
+//!
+//! [niri-lock]: https://github.com/niri-wm/niri/blob/1f03391ea644c2a43597de7f637269e26d1e1b49/src/niri.rs#L6440-L6523
+//! [niri-render]: https://github.com/niri-wm/niri/blob/1f03391ea644c2a43597de7f637269e26d1e1b49/src/niri.rs#L4799-L4835
+//! [sway-lock]: https://github.com/swaywm/sway/blob/1652c54b73f67df17b7b4ab0b0f7048204aa8104/sway/lock.c#L261-L310
 //!
 //! ## What is deliberately still allowed
 //!
@@ -27,7 +89,8 @@
 //!
 //! ## Who holds the lock
 //!
-//! Exactly one `ext_session_lock_v1`: the one that was told `locked`. Every
+//! Exactly one `ext_session_lock_v1`: the one that was granted the session,
+//! which is told `locked` once the lock is on every monitor. Every
 //! other lock object is answered `finished` the moment it is made, and nothing
 //! it asks for afterwards is acted on. That is the whole of what a lock screen
 //! is worth, because the gate in `focus.rs` hands the keyboard to "a lock
@@ -61,8 +124,9 @@
 //! `ext_session_lock_v1` is not delegated to smithay wholesale: the
 //! `Dispatch` impl at the bottom of this file sees every request first,
 //! answers the two that only the holder may make, and passes everything else
-//! -- and the holder's own requests -- to smithay's implementation unchanged.
-//! No patch to smithay is needed.
+//! -- and the holder's own requests, but for an unlock before it has been told
+//! `locked` -- to smithay's implementation unchanged. No patch to smithay is
+//! needed.
 //!
 //! ### When the holder dies
 //!
@@ -70,7 +134,8 @@
 //! It does not. The session stays locked, the backdrop is drawn where its
 //! surfaces were, and the keyboard goes nowhere. What changes is that the lock
 //! is now *abandoned* -- its holder's lock object is gone, whether the client
-//! crashed, was killed, or was disconnected for a protocol error -- and a new
+//! crashed, was killed, was disconnected for a protocol error, or gave up
+//! before it was told `locked` -- and a new
 //! lock request is granted and takes over, which is the recovery the protocol
 //! allows ("compositors may allow a new client to create a
 //! ext_session_lock_v1 object and take responsibility for unlocking the
@@ -101,6 +166,8 @@ use smithay::{
     },
 };
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::state::Solium;
 
 /// What the compositor draws instead of the desktop while locked, when it has
@@ -112,6 +179,22 @@ use crate::state::Solium;
 /// the machine is locked and working.
 pub(crate) const BLANK: [f32; 4] = [0.06, 0.05, 0.11, 1.0];
 
+/// Which lock a frame was built under.
+///
+/// A backend asks for it as it builds a monitor's frame and hands it back when
+/// that frame is on the monitor. See "When `locked` is sent" in the module
+/// documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LockFrame(u64);
+
+/// Where each [`Lock`]'s [`LockFrame`] comes from.
+///
+/// One count for every lock this process grants, so a frame built under a lock
+/// whose client has gone is not mistaken for one built under the lock that
+/// took over from it (the second half of
+/// `a_flip_already_in_flight_at_the_lock_does_not_count`).
+static LOCKS: AtomicU64 = AtomicU64::new(0);
+
 /// The session lock, while there is one.
 #[derive(Debug)]
 pub(crate) struct Lock {
@@ -122,6 +205,22 @@ pub(crate) struct Lock {
     /// a dead holder is what [`Lock::abandoned`] reads, and it is what lets a
     /// new lock client take over rather than being refused as a second lock.
     holder: ExtSessionLockV1,
+    /// The `locked` event, until every monitor has shown this lock.
+    ///
+    /// `None` once it is sent. Kept, and never sent, if the holder goes
+    /// without it: see `destroyed` in the `Dispatch` for
+    /// `ext_session_lock_v1` below.
+    confirmation: Option<SessionLocker>,
+    /// What a frame built under this lock carries.
+    frame: LockFrame,
+    /// The monitors that have shown a frame built under this lock.
+    ///
+    /// Compared against the monitors there are *now*, each time, rather than
+    /// against a list taken when the lock was asked for: that is what lets a
+    /// monitor that went stop counting and makes one that arrived count
+    /// (`a_monitor_unplugged_while_locking_does_not_hold_locked_back`,
+    /// `a_monitor_plugged_in_while_locking_must_show_the_lock_too`).
+    shown: Vec<Output>,
     /// One surface per monitor, by the output it was given for.
     ///
     /// A monitor with no entry is drawn blank. That is the honest state: the
@@ -137,10 +236,14 @@ pub(crate) struct Lock {
 }
 
 impl Lock {
-    /// A lock held by `holder`, with nothing on any monitor yet.
-    fn new(holder: ExtSessionLockV1) -> Self {
+    /// A lock granted to `confirmation`'s lock object, with nothing on any
+    /// monitor yet and `locked` not sent.
+    fn new(confirmation: SessionLocker) -> Self {
         Self {
-            holder,
+            holder: confirmation.ext_session_lock().clone(),
+            confirmation: Some(confirmation),
+            frame: LockFrame(LOCKS.fetch_add(1, Ordering::Relaxed)),
+            shown: Vec::new(),
             surfaces: Vec::new(),
             blank: Id::new(),
         }
@@ -151,14 +254,22 @@ impl Lock {
         self.holder == *lock
     }
 
+    /// Whether `locked` is still owed: the holder has not been told it.
+    pub(crate) fn pending(&self) -> bool {
+        self.confirmation.is_some()
+    }
+
     /// Whether the holder has gone without unlocking.
     ///
-    /// Its lock object is destroyed, and a held lock object has only one way
-    /// to be destroyed that is not its client going: `unlock_and_destroy`,
-    /// which clears the lock before the object goes. (`destroy` while locked
-    /// is a protocol error, which disconnects the client.) So this is "the
-    /// lock client crashed, was killed, or was thrown off", and the session is
-    /// still locked -- see the module documentation for what follows.
+    /// Its lock object is destroyed. Told `locked`, a held lock object has
+    /// only one way to be destroyed that is not its client going:
+    /// `unlock_and_destroy`, which clears the lock before the object goes.
+    /// (`destroy` while locked is a protocol error, which disconnects the
+    /// client.) Before `locked`, `destroy` is legal, and is a lock client
+    /// giving up. So this is "the lock client crashed, was killed, was thrown
+    /// off, or gave up", and the session is still locked -- see the module
+    /// documentation for what follows, and
+    /// `a_lock_client_that_goes_before_locked_leaves_the_session_locked`.
     pub(crate) fn abandoned(&self) -> bool {
         !self.holder.is_alive()
     }
@@ -202,13 +313,22 @@ impl SessionLockHandler for Solium {
 
     /// A client has asked to lock the session.
     ///
-    /// Confirmed immediately, and that is the safe order rather than the
+    /// Locked immediately, and that is the safe order rather than the
     /// convenient one. The alternative — wait until every output has a surface
-    /// and confirm then — leaves the desktop on screen in the meantime, which
-    /// is exactly the window an attacker wants. Locking first and confirming
-    /// at once is truthful because `render::elements` stops drawing windows
-    /// the moment `lock` is set: by the time the client hears "locked", there
-    /// is nothing of anyone's data left on any screen.
+    /// and lock then — leaves the desktop on screen in the meantime, which is
+    /// exactly the window an attacker wants. So `lock` is set, input is taken
+    /// away and a frame is asked for, all before this returns, and every frame
+    /// built from here on is built under the lock.
+    ///
+    /// *Confirmed* only once those frames are on every screen. Setting `lock`
+    /// changes the next frame and not the one already being scanned out, and
+    /// until that one is replaced the desktop is on the monitor. So
+    /// `confirmation` is kept, and `locked` goes out from
+    /// [`Solium::confirm_lock`] -- here only when there is no monitor to wait
+    /// for (`with_no_monitor_locked_goes_out_at_once`). See "When `locked` is
+    /// sent" in the module documentation, and
+    /// `locked_is_not_sent_in_the_dispatch_that_asked_for_it`, which asserts
+    /// both halves.
     ///
     /// Unless the session is already locked by a client that is still here.
     /// Then the answer is `finished`, which is what dropping `confirmation`
@@ -221,7 +341,6 @@ impl SessionLockHandler for Solium {
     /// A lock whose holder has died is taken over instead. See the module
     /// documentation: it stays locked throughout, and this is the way back in.
     fn lock(&mut self, confirmation: SessionLocker) {
-        let asking = confirmation.ext_session_lock().clone();
         if let Some(held) = self.lock.as_ref() {
             if !held.abandoned() {
                 tracing::info!("refused a second session lock: the session is already locked");
@@ -230,7 +349,7 @@ impl SessionLockHandler for Solium {
             }
             tracing::warn!("a new lock client took over from one that went without unlocking");
         }
-        self.lock = Some(Lock::new(asking));
+        self.lock = Some(Lock::new(confirmation));
         // An unlock still waiting for its key to come up is moot now.
         self.refocus_on_release = false;
         // Input is pointed at whatever the user was doing a moment ago, and it
@@ -240,15 +359,16 @@ impl SessionLockHandler for Solium {
         // application. The first thing typed at a lock screen is a password.
         blind(self);
         self.redraw = true;
-        confirmation.lock();
-        tracing::info!("session locked");
+        tracing::info!("session locking: `locked` waits for every monitor to show the lock");
+        self.confirm_lock();
     }
 
     /// The holder has unlocked.
     ///
-    /// Only the holder reaches this. Smithay would call it for an unlock on
-    /// any lock object at all; the `Dispatch` below answers every other one
-    /// itself and never passes it on.
+    /// Only the holder reaches this, and only once it has been told `locked`
+    /// (`an_unlock_before_locked_unlocks_nothing`). Smithay would call it for
+    /// an unlock on any lock object at all; the `Dispatch` below answers every
+    /// other one itself and never passes it on.
     fn unlock(&mut self) {
         // First, and the order is load-bearing: `settle_focus` below asks the
         // gate in `focus.rs`, and the gate refuses every window for as long as
@@ -340,9 +460,13 @@ smithay::reexports::wayland_server::delegate_dispatch!(Solium: [
 /// request came in on and nothing after it is. See "How an unlock knows who
 /// asked" in the module documentation.
 ///
-/// The holder's requests go to smithay untouched. So does `destroy` from
-/// anyone: smithay refuses it for a lock that was told `locked`, which only the
-/// holder ever is. The two a non-holder may not make are answered here:
+/// The holder's requests go to smithay untouched, but for one: an
+/// `unlock_and_destroy` before it has been told `locked`. That is
+/// `invalid_unlock`, answered here for the reason the first bullet gives, and
+/// the session stays locked (`an_unlock_before_locked_unlocks_nothing`).
+/// `destroy` from anyone goes to smithay too: smithay refuses it for a lock
+/// that was told `locked`, which only the holder ever is. The two a non-holder
+/// may not make are answered here:
 ///
 /// * `unlock_and_destroy` is `invalid_unlock`, which is the protocol's own
 ///   error for exactly this -- unlocking on a lock that was never told
@@ -368,7 +492,19 @@ impl Dispatch<ExtSessionLockV1, SessionLockState> for Solium {
             .as_ref()
             .is_some_and(|held| held.is_held_by(lock));
         let request = if holds {
-            request
+            match request {
+                ext_session_lock_v1::Request::UnlockAndDestroy
+                    if state.lock.as_ref().is_some_and(Lock::pending) =>
+                {
+                    tracing::warn!("refused an unlock from a lock that has not been told `locked`");
+                    lock.post_error(
+                        ext_session_lock_v1::Error::InvalidUnlock,
+                        "the session is not locked yet: `locked` has not been sent",
+                    );
+                    return;
+                }
+                other => other,
+            }
         } else {
             match request {
                 ext_session_lock_v1::Request::UnlockAndDestroy => {
@@ -400,15 +536,26 @@ impl Dispatch<ExtSessionLockV1, SessionLockState> for Solium {
     ) {
         // The holder going while the session is still locked: `unlock` has
         // already cleared the lock by the time an unlocking holder's object is
-        // destroyed, so this is the lock client dying. Nothing is unlocked --
-        // see `Lock::abandoned` -- but it is worth a line, because from the
-        // other side of the screen it is a lock screen that vanished.
+        // destroyed, so this is the lock client dying, or giving up before it
+        // was told `locked`. Nothing is unlocked -- see `Lock::abandoned` --
+        // but it is worth a line, because from the other side of the screen
+        // it is a lock screen that vanished.
+        //
+        // A `locked` still owed is *not* dropped here, though dropping it is
+        // how smithay says "no": it sends `finished`, and this runs before the
+        // backend forgets the object, so a client that gave up with `destroy`
+        // would be sent `finished` on the object it has just destroyed. Kept,
+        // it is never sent -- `confirm_lock` confirms no lock whose holder has
+        // gone -- and it is dropped with the `Lock` when a new lock client
+        // takes over, by which time the object is gone and nothing is sent.
+        // `a_lock_client_that_goes_before_locked_leaves_the_session_locked`.
         if state
             .lock
             .as_ref()
             .is_some_and(|held| held.is_held_by(lock))
         {
             tracing::warn!(
+                owed_locked = state.lock.as_ref().is_some_and(Lock::pending),
                 "the lock client went without unlocking; the session stays locked \
                  until a new lock client takes over"
             );
@@ -442,6 +589,79 @@ impl Dispatch<ExtSessionLockSurfaceV1, Unheld> for Solium {
 }
 
 impl Solium {
+    /// Which lock a frame built now is built under, if the session is locked.
+    ///
+    /// Asked by a backend as it builds a monitor's frame, and handed back to
+    /// [`Solium::frame_presented`] once that frame is on the monitor. `Some`
+    /// exactly when `lock` is, which is the guard `render::elements` takes its
+    /// lock branch on (held to it by
+    /// `the_drag_icon_is_emitted_below_the_lock_screens_early_return`); and
+    /// `Some` from the dispatch that asked for the lock on
+    /// (`locked_is_not_sent_in_the_dispatch_that_asked_for_it`).
+    pub(crate) fn lock_frame(&self) -> Option<LockFrame> {
+        self.lock.as_ref().map(|lock| lock.frame)
+    }
+
+    /// A frame built under `frame` is on `output`'s screen.
+    ///
+    /// Counts only a frame built under the lock there is now: `None` is a
+    /// frame built before the session locked, and another lock's is one
+    /// built before this lock took over. Neither says anything about what
+    /// this lock has put on the screen. See
+    /// `a_flip_already_in_flight_at_the_lock_does_not_count`.
+    pub(crate) fn frame_presented(&mut self, output: &Output, frame: Option<LockFrame>) {
+        let Some(lock) = self.lock.as_mut() else {
+            return;
+        };
+        if !lock.pending() || frame != Some(lock.frame) {
+            return;
+        }
+        if !lock.shown.contains(output) {
+            lock.shown.push(output.clone());
+            tracing::info!(monitor = output.name(), "the lock is on this monitor");
+        }
+        self.confirm_lock();
+    }
+
+    /// Tell the holder `locked`, if every monitor there is has shown the lock.
+    ///
+    /// Asked whenever the answer can change: when the lock is taken (with no
+    /// monitor, it goes at once), when a frame reaches a screen, and when the
+    /// set of monitors changes (`settle_monitors`), because a monitor that has
+    /// gone is no longer waited for and one that has arrived now is. Never for
+    /// a holder that has gone: see `destroyed` in the `Dispatch` below.
+    ///
+    /// `locked_waits_for_every_monitor_to_show_the_lock`,
+    /// `with_no_monitor_locked_goes_out_at_once`,
+    /// `a_monitor_unplugged_while_locking_does_not_hold_locked_back` and
+    /// `a_monitor_plugged_in_while_locking_must_show_the_lock_too`.
+    pub(crate) fn confirm_lock(&mut self) {
+        let Some(lock) = self.lock.as_mut() else {
+            return;
+        };
+        if !lock.pending() || lock.abandoned() {
+            return;
+        }
+        let waiting: Vec<String> = self
+            .space
+            .outputs()
+            .filter(|output| !lock.shown.contains(output))
+            .map(Output::name)
+            .collect();
+        if !waiting.is_empty() {
+            tracing::debug!(
+                ?waiting,
+                "`locked` waits for these monitors to show the lock"
+            );
+            return;
+        }
+        if let Some(confirmation) = lock.confirmation.take() {
+            lock.shown.clear();
+            confirmation.lock();
+            tracing::info!("session locked: every monitor is showing the lock");
+        }
+    }
+
     /// A surface has been destroyed; if it was one of the lock screen's, the
     /// keyboard needs somewhere else to be.
     ///
