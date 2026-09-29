@@ -14,6 +14,8 @@ sol.loading(config.loading)
 -- table is not an error: a `config.lua` copied before this setting existed
 -- keeps the default rather than failing the whole configuration.
 sol.resize(config.resize)
+-- What a fullscreen window covers: the bars, or nothing. See `config.lua`.
+sol.fullscreen(config.fullscreen)
 -- Where the monitors go. Applied on reload too, so moving a screen in the
 -- configuration is `super+shift+r` rather than logging out.
 sol.keyboard(config.keyboard)

@@ -433,6 +433,9 @@ pub(crate) enum Command {
     /// What fills a window between an edge drag asking for a size and the
     /// client painting it. See `crate::resizing::Settings`.
     Resize(crate::resizing::Settings),
+    /// What a fullscreen window covers: `fullscreen.covers`. See
+    /// `crate::stack::Covers`.
+    Fullscreen(crate::stack::Covers),
     /// Which XCursor theme the pointer is drawn from, and how big it is.
     ///
     /// Carries what the *configuration* said and nothing else — `None` in a
@@ -2480,6 +2483,33 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Resize(resize));
+            })
+        })?,
+    )?;
+
+    // What a fullscreen window covers: `{ covers = "top" | "none" }`, from
+    // `init.lua` with `config.fullscreen`. An optional table for `sol.resize`'s
+    // reason, and a name that is neither is named in the log and the default
+    // kept, for `resize.fill`'s.
+    // `the_shipped_fullscreen_setting_reaches_the_compositor`.
+    sol.set(
+        "fullscreen",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut covers = crate::stack::Covers::default();
+            if let Some(options) = options
+                && let Ok(Value::String(name)) = options.get::<Value>("covers")
+                && let Ok(name) = name.to_str()
+            {
+                match crate::stack::Covers::named(&name) {
+                    Some(named) => covers = named,
+                    None => tracing::warn!(
+                        covers = %name,
+                        "fullscreen.covers is \"top\" or \"none\"; keeping the default"
+                    ),
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Fullscreen(covers));
             })
         })?,
     )?;
@@ -5599,6 +5629,41 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`fullscreen.covers` reaches the compositor from the shipped
+    /// `init.lua`**: the default when a `user.lua` says nothing, `"none"` when
+    /// it says that, and the default kept for a word that is neither.
+    #[test]
+    fn the_shipped_fullscreen_setting_reaches_the_compositor() {
+        for (user, wanted) in [
+            ("return {}", crate::stack::Covers::Top),
+            (
+                "return { fullscreen = { covers = \"none\" } }",
+                crate::stack::Covers::Nothing,
+            ),
+            (
+                "return { fullscreen = { covers = \"everything\" } }",
+                crate::stack::Covers::Top,
+            ),
+        ] {
+            let Some((directory, mut scripts)) =
+                shipped_init_with_user("solium-script-test-fullscreen", user)
+            else {
+                return;
+            };
+            let handed: Vec<crate::stack::Covers> = scripts
+                .startup()
+                .commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Fullscreen(covers) => Some(covers),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(handed, vec![wanted], "{user}");
+            let _ = std::fs::remove_dir_all(&directory);
+        }
     }
 
     /// Every key `config.lua`'s `open_sections` accepts for one section.

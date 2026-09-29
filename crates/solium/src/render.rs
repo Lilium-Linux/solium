@@ -24,14 +24,21 @@ use smithay::{
         gles::{GlesRenderer, GlesTexture},
         utils::CommitCounter,
     },
-    desktop::{PopupManager, Window, layer_map_for_output},
+    desktop::{LayerSurface, PopupManager, Window, layer_map_for_output},
     input::pointer::{CursorImageAttributes, CursorImageStatus},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Physical, Point, Rectangle, Scale, Size},
     wayland::compositor::with_states,
 };
 
-use crate::{layer, pane::Pane, present, state::Solium, style::Depth};
+use crate::{
+    layer,
+    pane::Pane,
+    present,
+    stack::{Band, Owner},
+    state::Solium,
+    style::Depth,
+};
 
 render_elements! {
     /// Everything Solium can draw.
@@ -797,9 +804,6 @@ pub(crate) fn elements(
         -f64::from(screen.loc.x),
         -f64::from(screen.loc.y),
     ));
-    let onto = |rect: smithay::utils::Rectangle<f64, smithay::utils::Logical>| {
-        smithay::utils::Rectangle::new(rect.loc + shift, rect.size)
-    };
 
     // The pointer, above everything — including anything a shell anchors on
     // top. Nothing else draws it, so leaving it out is not a missing detail:
@@ -886,53 +890,77 @@ pub(crate) fn elements(
         elements.extend(drag_icon(state, renderer, output_scale, scale, shift));
     }
 
-    // Scripted surfaces at the top layer: above the windows, and below the
-    // client surfaces on the same layer -- a real bar covers a scripted one,
-    // because the client was installed on purpose.
-    elements.extend(scripted(
-        state,
-        renderer,
-        crate::scripted::Layer::Top,
-        screen,
-        now,
-        scale,
-    ));
-
-    // Anchored surfaces above the windows: panels, notifications, an overlay.
-    // Collected first because the frame is built topmost-first.
-    //
-    // A layer map's geometry is already in its own output's coordinates, so
-    // these are the one thing on this list that must *not* be shifted.
+    // Everything else, in the one order there is: [`stacked`] lists it,
+    // topmost first, and this turns each entry into elements and nothing more.
     let output = state.output_for(screen);
-    if let Some(output) = output.as_ref() {
-        let map = layer_map_for_output(output);
-        for surface in map.layers().rev().filter(|layer| layer::is_above(layer)) {
-            let Some(geometry) = map.layer_geometry(surface) else {
-                continue;
-            };
-            let origin = geometry.loc.to_physical_precise_round(scale);
-            let layer_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                surface.render_elements(renderer, origin, output_scale, 1.0);
-            elements.extend(layer_elements.into_iter().map(|element| {
-                Element::Window(RescaleRenderElement::from_element(
-                    element,
-                    origin,
-                    Scale::from(1.0),
-                ))
-            }));
+    for each in stacked(state, screen, now) {
+        match each {
+            Stacked::Layer(surface, geometry) => {
+                // A layer map's geometry is already in its own output's
+                // coordinates, so these are the one thing on this list that
+                // must *not* be shifted.
+                let origin = geometry.loc.to_physical_precise_round(scale);
+                let layer_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                    surface.render_elements(renderer, origin, output_scale, 1.0);
+                elements.extend(layer_elements.into_iter().map(|element| {
+                    Element::Window(RescaleRenderElement::from_element(
+                        element,
+                        origin,
+                        Scale::from(1.0),
+                    ))
+                }));
+            }
+            Stacked::Surface(id, area, alpha) => {
+                if let Some(output) = output.as_ref() {
+                    elements.extend(scripted(
+                        state, renderer, output, id, area, alpha, screen, now, scale,
+                    ));
+                }
+            }
+            Stacked::Panes(nodes) => {
+                panes(
+                    state,
+                    renderer,
+                    prepared,
+                    &mut elements,
+                    nodes,
+                    screen,
+                    now,
+                    scale,
+                );
+            }
         }
     }
 
-    // Scripted surfaces at the overlay layer: above the client bars, below
-    // the pointer and the tweaks panel.
-    elements.extend(scripted(
-        state,
-        renderer,
-        crate::scripted::Layer::Overlay,
-        screen,
-        now,
-        scale,
-    ));
+    elements
+}
+
+/// One entry of a monitor's frame, before it is turned into elements.
+pub(crate) enum Stacked {
+    /// A client's layer surface, and where it is in its output's own
+    /// coordinates.
+    Layer(LayerSurface, Rectangle<i32, Logical>),
+    /// A script's surface: which one, where on the desktop its selection has
+    /// carried it, and how much of it the selection shows.
+    Surface(crate::scripted::SurfaceId, Rectangle<i32, Logical>, f32),
+    /// Panes, in the order they are drawn in.
+    Panes(Vec<(Node, f32)>),
+}
+
+/// Everything on one monitor below the drag icon, topmost first.
+///
+/// What [`elements`] draws there and all it draws, so a test can ask what is
+/// over what without a GPU. The bands are in `crate::stack`'s order, which the
+/// hit tests read as well; within a band, a client's layer surfaces are in
+/// `layer::on`'s order, the last mapped on top, a script's are first declared
+/// on top, and the panes are [`by_depth`]'s.
+/// `state::tests`' stacking tests ask it.
+pub(crate) fn stacked(
+    state: &Solium,
+    screen: Rectangle<i32, Logical>,
+    now: std::time::Duration,
+) -> Vec<Stacked> {
+    let output = state.output_for(screen);
 
     // **Depth orders this walk and nothing else.** `z` is a sort key over a
     // painter's-algorithm list, not a coordinate: it decides which window
@@ -940,7 +968,7 @@ pub(crate) fn elements(
     // above its neighbour is still clicked where the layout put it. See the
     // spec's *Hit-testing does not move*.
     //
-    // **The two cheap-path gates inside the loop below are right not to ask
+    // **The two cheap-path gates inside [`panes`]' loop are right not to ask
     // about `z`, and this sort is the reason.** The off-screen cull and the
     // warp test only `matrix` and `deform`, so a flat window carrying a depth
     // goes down the flat path — but the reordering has already happened by
@@ -951,10 +979,10 @@ pub(crate) fn elements(
     // surfaces**, which is the point: raising a window must not cost it an
     // offscreen render.
     //
-    // The third gate is *not* below and that argument does not cover it. It is
-    // in `prepare`, which walks `on_screen()` separately and earlier, and its
-    // panes never see this sort. It is safe for an unrelated reason:
-    // `Prepared::texture` and `Prepared::pass` find their answer *by
+    // The third gate is *not* in [`panes`] and that argument does not cover
+    // it. It is in `prepare`, which walks `on_screen()` separately and
+    // earlier, and its panes never see this sort. It is safe for an unrelated
+    // reason: `Prepared::texture` and `Prepared::pass` find their answer *by
     // `Window`*, so what `prepare` produces is content-addressed and the order
     // it produced it in cannot reach here. Left in stacking order deliberately
     // — sorting it would be a sort per frame buying nothing.
@@ -991,6 +1019,61 @@ pub(crate) fn elements(
         })
         .collect();
     by_depth(&mut order);
+
+    // The window lifted over the bars is taken out of the windows' band and
+    // drawn in its own, popups and all; see `crate::stack::lifted`.
+    let lifted = state.lifted_on(screen);
+    let (front, rest): (Vec<_>, Vec<_>) = order
+        .into_iter()
+        .partition(|((pane, ..), _)| Some(*pane) == lifted);
+    let (mut front, mut rest) = (Some(front), Some(rest));
+
+    let mut drawn = Vec::new();
+    for band in crate::stack::order(lifted.is_some()) {
+        match band {
+            Band::Layer(layer, Owner::Client) => {
+                if let Some(output) = output.as_ref() {
+                    let map = layer_map_for_output(output);
+                    drawn.extend(layer::on(&map, layer).filter_map(|surface| {
+                        Some(Stacked::Layer(
+                            surface.clone(),
+                            map.layer_geometry(surface)?,
+                        ))
+                    }));
+                }
+            }
+            Band::Layer(layer, Owner::Script) => drawn.extend(wanted(state, layer, screen)),
+            Band::Fullscreen => drawn.extend(front.take().map(Stacked::Panes)),
+            Band::Windows => drawn.extend(rest.take().map(Stacked::Panes)),
+        }
+    }
+    drawn
+}
+
+/// Draw panes, in the order given.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the frame's own state, handed down from `elements`"
+)]
+fn panes(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    prepared: &Prepared,
+    elements: &mut Vec<Element>,
+    order: Vec<(Node, f32)>,
+    screen: Rectangle<i32, Logical>,
+    now: std::time::Duration,
+    scale: f64,
+) {
+    let output_scale = Scale::from(scale);
+    // `elements`' offset from global coordinates into this output's own.
+    let shift = smithay::utils::Point::<f64, smithay::utils::Logical>::from((
+        -f64::from(screen.loc.x),
+        -f64::from(screen.loc.y),
+    ));
+    let onto = |rect: smithay::utils::Rectangle<f64, smithay::utils::Logical>| {
+        smithay::utils::Rectangle::new(rect.loc + shift, rect.size)
+    };
 
     for ((pane, window, global, mut frame), _) in order {
         let outer = smithay::utils::Rectangle::new(global.loc - screen.loc, global.size);
@@ -1105,7 +1188,7 @@ pub(crate) fn elements(
         // round what the client left. In `PANE_ORDER`, like a live client.
         if remains {
             let mut client = Some(remains_elements(state, pane, &frame, outer.size, scale));
-            pane_pieces(&mut elements, |elements, piece| match piece {
+            pane_pieces(elements, |elements, piece| match piece {
                 Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
                 Piece::Client => elements.extend(client.take().into_iter().flatten()),
             });
@@ -1123,7 +1206,7 @@ pub(crate) fn elements(
             // application is layered the same way it will be once it arrives:
             // an `above` layer covers the standing-in scene exactly as it will
             // cover the client, and the handover does not restack anything.
-            pane_pieces(&mut elements, |elements, piece| match piece {
+            pane_pieces(elements, |elements, piece| match piece {
                 Piece::Layers(depth) if state.loading.decorated => {
                     chrome(state, renderer, elements, pane, depth, drawing);
                 }
@@ -1142,7 +1225,7 @@ pub(crate) fn elements(
         // underneath is already the window, and this dissolves to reveal it
         // rather than being swapped for it.
         if state.pane_has_scene(pane) {
-            scene(state, renderer, &mut elements, pane, frame, now, scale);
+            scene(state, renderer, elements, pane, frame, now, scale);
         }
 
         let Some(real) = state.real_geometry(&window) else {
@@ -1309,7 +1392,7 @@ pub(crate) fn elements(
         // space: a frame that takes nothing and floats over the window -- a bar
         // that appears on hover, a border that does not push the client around
         // -- is a decoration too.
-        pane_pieces(&mut elements, |elements, piece| match piece {
+        pane_pieces(elements, |elements, piece| match piece {
             Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
             Piece::Client => {
                 // Popups are not here: they went in above the whole sandwich,
@@ -1409,67 +1492,19 @@ pub(crate) fn elements(
             }
         });
     }
-
-    // Scripted surfaces at the bottom layer: under the windows, over the
-    // client background surfaces and the wallpaper.
-    elements.extend(scripted(
-        state,
-        renderer,
-        crate::scripted::Layer::Bottom,
-        screen,
-        now,
-        scale,
-    ));
-
-    // And the ones below: a wallpaper, and anything else a shell puts behind
-    // the windows. This output's own, as above.
-    if let Some(output) = output.as_ref() {
-        let map = layer_map_for_output(output);
-        for surface in map.layers().rev().filter(|layer| !layer::is_above(layer)) {
-            let Some(geometry) = map.layer_geometry(surface) else {
-                continue;
-            };
-            let origin = geometry.loc.to_physical_precise_round(scale);
-            let layer_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                surface.render_elements(renderer, origin, output_scale, 1.0);
-            elements.extend(layer_elements.into_iter().map(|element| {
-                Element::Window(RescaleRenderElement::from_element(
-                    element,
-                    origin,
-                    Scale::from(1.0),
-                ))
-            }));
-        }
-    }
-
-    // The bottom of the frame: a wallpaper and anything else declared there.
-    // After the client background surfaces above, so a `swaybg` covers this
-    // rather than the other way round.
-    elements.extend(scripted(
-        state,
-        renderer,
-        crate::scripted::Layer::Background,
-        screen,
-        now,
-        scale,
-    ));
-
-    elements
 }
 
-/// Everything a script asked the compositor to draw, at one layer.
+/// Everything a script asked the compositor to draw at one layer on this
+/// screen, as [`stacked`] lists it.
 ///
 /// One function for the wallpaper, a bar, an overlay and whatever else gets
 /// declared — which is the whole point of `scripted.rs`. Nothing in here knows
 /// what any of them are for.
-fn scripted(
-    state: &mut Solium,
-    renderer: &mut GlesRenderer,
+fn wanted(
+    state: &Solium,
     layer: crate::scripted::Layer,
     screen: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
-    now: std::time::Duration,
-    scale: f64,
-) -> Vec<Element> {
+) -> Vec<Stacked> {
     let Some(output) = state.output_for(screen) else {
         return Vec::new();
     };
@@ -1488,11 +1523,7 @@ fn scripted(
     // a full-screen scene per desk, every frame, for pictures nobody can see —
     // and culling after `instance` would still build them. So the order here is
     // load-bearing: place, carry, cull, and only then ask for a rasterisation.
-    let wanted: Vec<(
-        crate::scripted::SurfaceId,
-        smithay::utils::Rectangle<i32, smithay::utils::Logical>,
-        f32,
-    )> = state
+    state
         .surfaces
         .iter()
         .filter(|surface| surface.layer() == layer)
@@ -1504,31 +1535,42 @@ fn scripted(
                 surface.area_on(&output, geometry, primary.as_ref())?,
             );
             area.overlaps(screen)
-                .then(|| (id, area, state.carried_alpha(id, &output)))
+                .then(|| Stacked::Surface(id, area, state.carried_alpha(id, &output)))
         })
-        .collect();
+        .collect()
+}
 
-    let mut drawn = Vec::new();
-    let mut animating = false;
-    for (id, area, alpha) in wanted {
-        let Some(surface) = state.surfaces.get_mut(id) else {
-            continue;
-        };
-        let Some(instance) = surface.instance(&output) else {
-            continue;
-        };
-        let painted = instance.element(
-            renderer,
-            smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
-            now,
-            alpha,
-            scale,
-        );
-        drawn.extend(painted.element);
-        animating |= painted.animating;
-    }
-    // Ask for another frame while any of them is still moving, exactly as
-    // `chrome` does for a window frame.
+/// One scripted surface [`wanted`] listed, rasterised.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the frame's own state, handed down from `elements`"
+)]
+fn scripted(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    output: &smithay::output::Output,
+    id: crate::scripted::SurfaceId,
+    area: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    alpha: f32,
+    screen: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    now: std::time::Duration,
+    scale: f64,
+) -> Vec<Element> {
+    let Some(surface) = state.surfaces.get_mut(id) else {
+        return Vec::new();
+    };
+    let Some(instance) = surface.instance(output) else {
+        return Vec::new();
+    };
+    let painted = instance.element(
+        renderer,
+        smithay::utils::Rectangle::new(area.loc - screen.loc, area.size),
+        now,
+        alpha,
+        scale,
+    );
+    // Ask for another frame while it is still moving, exactly as `chrome`
+    // does for a window frame.
     //
     // This did not used to be asked at all, which is the same defect one step
     // further on: a scripted surface got the next frame only when something
@@ -1537,10 +1579,10 @@ fn scripted(
     // even recover on the next tick, because `qml::tick` is what drains Qt's
     // event queue and it only runs on a frame that is being drawn. No frame,
     // no timer; no timer, no reason for a frame.
-    if animating {
+    if painted.animating {
         state.redraw = true;
     }
-    drawn
+    painted.element.into_iter().collect()
 }
 
 /// Where *in the image* the pointer actually points, as the client set it.

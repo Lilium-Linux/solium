@@ -304,6 +304,13 @@ impl Solium {
                         self.resizing = resizing;
                     }
                 }
+                Command::Fullscreen(covers) => {
+                    if self.fullscreen_covers != covers {
+                        tracing::debug!(?covers, "what a fullscreen window covers set");
+                        self.fullscreen_covers = covers;
+                        self.redraw = true;
+                    }
+                }
                 Command::Cursor(configured) => {
                     // The environment is re-read here rather than cached at
                     // startup, because this also runs on `super+shift+r` and a

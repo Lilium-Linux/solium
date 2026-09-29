@@ -437,6 +437,21 @@ local defaults = {
         fill = "stretch",
     },
 
+    -- What a fullscreen window covers, when it is the one in front on the
+    -- workspace its monitor is showing.
+    fullscreen = {
+        -- "top", the default: the top layer, so a bar -- a client's, like
+        -- Waybar, or one declared with `sol.surface` -- goes under a
+        -- fullscreen video or game, and the video takes the clicks where the
+        -- bar was. The overlay layer stays over it: notifications, an OSD, a
+        -- launcher.
+        --
+        -- "none": nothing, and the bars stay over fullscreen windows.
+        --
+        -- Anything else is named in the log, and the default kept.
+        covers = "top",
+    },
+
     floating = {
         -- Whether a floating window's edge drag stops at its application's
         -- own minimum and maximum size (#115). The layouts' say in the matter

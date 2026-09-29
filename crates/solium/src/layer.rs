@@ -32,7 +32,7 @@
 //! and can change at runtime. `Solium::work_area` reads it.
 
 use smithay::{
-    desktop::{LayerSurface, layer_map_for_output},
+    desktop::{LayerMap, LayerSurface, layer_map_for_output},
     output::Output,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point, Rectangle},
@@ -53,7 +53,31 @@ pub(crate) fn work_area(output: &Output) -> Rectangle<i32, Logical> {
     layer_map_for_output(output).non_exclusive_zone()
 }
 
-/// The layer surface drawn at a point, with its origin, searched top down.
+/// One layer's surfaces on a monitor, topmost first: the last one mapped is
+/// on top.
+///
+/// **The order within a layer, for the renderer and the hit test both**:
+/// `render::stacked` draws a layer's surfaces in this order and
+/// [`surface_under`] asks them in it. Which layer is over which is
+/// `crate::stack`'s. `an_overlay_mapped_before_a_bar_is_drawn_over_it_and_takes_the_press`.
+pub(crate) fn on(
+    map: &LayerMap,
+    layer: crate::scripted::Layer,
+) -> impl Iterator<Item = &LayerSurface> {
+    map.layers_on(wlr(layer)).rev()
+}
+
+/// The protocol's name for a layer.
+const fn wlr(layer: crate::scripted::Layer) -> Layer {
+    match layer {
+        crate::scripted::Layer::Background => Layer::Background,
+        crate::scripted::Layer::Bottom => Layer::Bottom,
+        crate::scripted::Layer::Top => Layer::Top,
+        crate::scripted::Layer::Overlay => Layer::Overlay,
+    }
+}
+
+/// The surface one layer has at a point, with its origin, topmost first.
 ///
 /// `point` is in the output's own coordinates and so is the origin that comes
 /// back; the caller adds the output's position to get either into the
@@ -61,28 +85,29 @@ pub(crate) fn work_area(output: &Output) -> Rectangle<i32, Logical> {
 /// `point - origin` is the point within the surface -- which is the only
 /// number the client is ever told.
 ///
-/// Only the layers above windows are considered: a click on the wallpaper
-/// belongs to whatever is above it, not to the wallpaper.
+/// One layer, and the caller walks them in `crate::stack`'s order: asking
+/// `overlay` and then `top` here was the hit test's own copy of it.
 pub(crate) fn surface_under(
     output: &Output,
+    layer: crate::scripted::Layer,
     point: Point<f64, Logical>,
 ) -> Option<(WlSurface, Point<f64, Logical>)> {
     let map = layer_map_for_output(output);
-    let layer = map
-        .layer_under(Layer::Overlay, point)
-        .or_else(|| map.layer_under(Layer::Top, point))?;
-    let geometry = map.layer_geometry(layer)?;
-    layer
-        .surface_under(
-            point - geometry.loc.to_f64(),
-            smithay::desktop::WindowSurfaceType::ALL,
-        )
-        // The subsurface's offset is within the layer surface, so the layer's
-        // own position has to be added back. Returning `point - offset` here
-        // instead -- the surface-local point in place of the origin -- told
-        // every bar and dock that the pointer was somewhere it was not, and
-        // told it a *different* wrong place for each position of the cursor.
-        .map(|(surface, offset)| (surface, (geometry.loc + offset).to_f64()))
+    on(&map, layer).find_map(|surface| {
+        let geometry = map.layer_geometry(surface)?;
+        surface
+            .surface_under(
+                point - geometry.loc.to_f64(),
+                smithay::desktop::WindowSurfaceType::ALL,
+            )
+            // The subsurface's offset is within the layer surface, so the
+            // layer's own position has to be added back. Returning `point -
+            // offset` here instead -- the surface-local point in place of the
+            // origin -- told every bar and dock that the pointer was somewhere
+            // it was not, and told it a *different* wrong place for each
+            // position of the cursor.
+            .map(|(surface, offset)| (surface, (geometry.loc + offset).to_f64()))
+    })
 }
 
 /// Tell every bar and dock on a monitor that it is going away.
@@ -100,9 +125,4 @@ pub(crate) fn close_all(output: &Output) {
     for layer in map.layers() {
         layer.layer_surface().send_close();
     }
-}
-
-/// Whether a layer wants to be drawn above windows.
-pub(crate) fn is_above(layer: &LayerSurface) -> bool {
-    matches!(layer.layer(), Layer::Top | Layer::Overlay)
 }

@@ -700,8 +700,16 @@ fn release_cursor(state: &mut Solium, unclaimed: bool, grabbed: bool) {
 /// Skipped while a grab is running: a window being dragged is under the
 /// cursor the whole time, and windows sliding past underneath it are not a
 /// request to focus each of them in turn.
-fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
-    if !state.profile.focus_follows_mouse || grabbed || state.script_grab {
+///
+/// And over a client's layer surface on top of a window, which is what the
+/// pointer is on there, as it is for a press (`pointer_button`'s
+/// `on_a_client`). `focus_follows_mouse_does_not_reach_through_a_bar`.
+pub(crate) fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
+    if !state.profile.focus_follows_mouse
+        || grabbed
+        || state.script_grab
+        || state.client_above(location)
+    {
         return;
     }
     let Some((window, _)) = state.window_under(location) else {
@@ -715,12 +723,20 @@ fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bo
 
 /// Let a window frame see the pointer, so its buttons light up on hover.
 ///
-/// The callers offer the pointer to the surfaces above the windows first, so
-/// nothing here has to know about panels.
+/// The callers offer the pointer to a script's surfaces above the windows
+/// first. A client's layer surface on top here is asked through
+/// `client_above`, the predicate `follow_pointer` asks and
+/// `focus_follows_mouse_does_not_reach_through_a_bar` drives: under one, no
+/// frame is hovered. A built frame needs Qt, which this binary's tests cannot
+/// start, so this call itself is not driven by a test.
 fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
     // The whole window, not just the frame band: a decoration that reacts to
     // the cursor wants to know where it is while it crosses the client too.
-    let under = state.decorated_under(location);
+    let under = if state.client_above(location) {
+        None
+    } else {
+        state.decorated_under(location)
+    };
 
     // Whatever we were over and are no longer has to be told, or it stays
     // hovered for as long as the window lives.
@@ -793,9 +809,11 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // left the pointer promising a resize over an overview thumbnail and over
     // the bottom edge of a bar.
     //
-    // Scripted surfaces above the windows see the press before clients do, and
-    // only when nothing is being dragged. A bar, a panel, an overlay: all the
-    // same path, and the compositor knows what none of them are for.
+    // A scripted surface above the windows sees the press first when it is on
+    // top there -- not under a client's surface, nor under a fullscreen
+    // window, in `crate::stack`'s order -- and only when nothing is being
+    // dragged. A bar, a panel, an overlay: all the same path, and the
+    // compositor knows what none of them are for.
     if !pointer.is_grabbed()
         && state.surface_pointer(true, location, Some(button_state == ButtonState::Pressed))
     {
@@ -810,6 +828,13 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         }
         return;
     }
+
+    // A client's layer surface on top here -- a bar, a launcher, a
+    // notification -- is over the windows and their chrome, in
+    // `crate::stack`'s order, so the press is the client's: none of the
+    // compositor's interpretations below, only the forward at the end. What
+    // `Solium::claim_under` tells the pointer, from the same answer.
+    let on_a_client = !pointer.is_grabbed() && state.client_above(location);
 
     // A press on the compositor's own chrome is the compositor's: a frame's
     // button, a move drag, or a resize from an edge. None of it reaches a
@@ -828,6 +853,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // before the drag modifier, as it always was, because the edge is the
     // narrower target and whoever is on it meant to be.
     if !pointer.is_grabbed()
+        && !on_a_client
         && let Some(under) = state.chrome_under(location)
     {
         match under.chrome {
@@ -924,7 +950,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         }
     }
 
-    if button_state == ButtonState::Pressed && !pointer.is_grabbed() {
+    if button_state == ButtonState::Pressed && !pointer.is_grabbed() && !on_a_client {
         let modifiers = state
             .seat
             .get_keyboard()
@@ -1020,6 +1046,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // desktop menu lives: they get the press only because nothing above
     // wanted it.
     if !pointer.is_grabbed()
+        && !on_a_client
         && state.surface_pointer(false, location, Some(button_state == ButtonState::Pressed))
     {
         return;
@@ -1125,6 +1152,7 @@ fn touch_down<B: InputBackend>(
     let serial = SERIAL_COUNTER.next_serial();
 
     if state.profile.touch_to_focus
+        && !state.client_above(location)
         && let Some((window, _)) = state.window_under(location)
     {
         state.focus_window(&window, serial);

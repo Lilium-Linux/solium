@@ -83,9 +83,11 @@ pub(crate) enum Layer {
     Background,
     /// Above the background, below windows.
     Bottom,
-    /// Above windows, below client top and overlay surfaces.
+    /// Above windows, below client top and overlay surfaces -- and below a
+    /// fullscreen window, which is lifted over the bars (`crate::stack`).
     Top,
-    /// Above client surfaces. Below the pointer, which is above everything.
+    /// Above client top surfaces, below client overlay ones. Below the
+    /// pointer, which is above everything.
     Overlay,
 }
 
