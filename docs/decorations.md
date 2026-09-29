@@ -146,9 +146,11 @@ Nothing in a frame should contain a hex code. `Solium.Theme` has them:
 `fontFamily`, `fontSize`, `quick`, `normal`.
 
 Copy `Solium/Theme.qml` into `~/.config/solium/qml/Solium/` and change it, and
-every frame, the pointer, the loading window and the shell follow — one file
-restyles the desktop rather than the titlebars. A frame that hardcodes a colour
-is a frame that stops matching the moment anyone changes anything.
+every scene the compositor draws follows — the frames, the pointer, the loading
+window, the wallpaper and `sol.surface` scenes. One file restyles all of it
+rather than the titlebars; a shell is a separate client and themes itself. A
+frame that hardcodes a colour is a frame that stops matching the moment anyone
+changes anything.
 
 ## Animation inside a frame
 

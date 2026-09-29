@@ -37,11 +37,11 @@ The original design put the shell's surfaces — bar, dock, launcher — in it
 too, importing the same `Solium.Theme` singleton, because there is only one of
 it.
 
-That gives, in order of how hard they would otherwise be:
+That design gave, in order of how hard they would otherwise be:
 
-- **One design system.** `qml/Solium/Theme.qml` is read by every surface the
-  desktop draws. Changing a colour there changes the titlebars and the dock
-  together, with no rebuild, because they are the same object and not two
+- **One design system.** `qml/Solium/Theme.qml` was read by every surface the
+  desktop drew. Changing a colour there changed the titlebars and the dock
+  together, with no rebuild, because they were the same object and not two
   copies.
 - **Objects that travel.** An item lifted from the dock into a titlebar is a
   reparent inside one scene graph. It keeps its colours because it never left
@@ -55,6 +55,10 @@ That gives, in order of how hard they would otherwise be:
 
 This is the arrangement Apple has, and it is unavailable to anyone configuring
 an existing compositor. It is the reason for writing one.
+
+All three held while the shell was hosted in the compositor, which it no longer
+is. Today `Solium.Theme` reaches the compositor's own scenes only, and a shell,
+being a client, brings its own.
 
 ## What is still a client
 
@@ -95,20 +99,23 @@ There is no in-process alternative. A shell that wants a bar per screen writes
 layer surfaces, one per output; a scene a script declares with `sol.surface`
 belongs to the configuration, not to a shell.
 
-## What this costs, honestly
+## What this cost, honestly
 
-The shell cannot crash independently of the compositor. A separate process can
-be restarted; a QML error in the dock takes the session with it unless the
-compositor is careful. So:
+This was the price of the in-process shell, which no longer exists. Hosted in
+the compositor, the shell could not crash independently of it. A separate
+process can be restarted; a QML error in the dock would have taken the session
+with it unless the compositor was careful. So, and still for every scene the
+compositor hosts:
 
 - Every scene is loaded defensively. A scene that fails to load is skipped and
   logged; it never stops the compositor starting.
-- Scene errors are contained per surface — a broken dock must not take the
+- Scene errors are contained per surface — a broken wallpaper must not take the
   window frames with it.
 
-That is the trade being made deliberately: robustness through care inside one
-process, in exchange for a desktop that can actually do what the design asks
-for.
+That was the trade made deliberately: robustness through care inside one
+process, in exchange for a desktop that could do what the design asked for. A
+shell is a separate process now, and gets a separate process's robustness; the
+window frames and the compositor's other scenes still depend on that care.
 
 ## Summary
 
