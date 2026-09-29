@@ -35,6 +35,7 @@ mod screencopy;
 mod script;
 mod scripted;
 mod single_pixel;
+mod stack;
 mod state;
 mod style;
 mod surface;

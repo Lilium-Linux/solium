@@ -3,6 +3,7 @@
 //! under it, whether the pointer is over a pane, and the cursor asserted over the chrome.
 
 use super::*;
+use crate::stack::{Band, Owner};
 
 /// Whether `point` is somewhere a window living at `slot` could be drawn: on a
 /// screen that draws it, by [`crate::render::drawn_on`].
@@ -81,6 +82,31 @@ pub(crate) fn owns(
     screens: &[Rectangle<i32, Logical>],
 ) -> bool {
     shown_at(slot, remains, point, screens) && frame.covers(point)
+}
+
+/// What is topmost above the windows at a point: [`Solium::topmost_above`].
+#[derive(Clone, Debug)]
+pub(crate) enum Above {
+    /// A client's layer surface: the surface under the point, and the origin
+    /// to measure it from, in the compositor's space.
+    Client(WlSurface, Point<f64, Logical>),
+    /// A script's interactive surface: the monitor, which surface, and where
+    /// it is.
+    Script(Output, crate::scripted::SurfaceId, Rectangle<i32, Logical>),
+    /// The window lifted over the bars, which has the point.
+    Lifted,
+}
+
+/// What one pane makes of a point, for the pointer.
+enum PaneSurface {
+    /// A surface of its client's, with the origin to measure it from.
+    Surface(WlSurface, Point<f64, Logical>),
+    /// It is drawn there with no surface to give the pointer -- a window
+    /// whose application has not arrived -- so nothing under it has the
+    /// point either.
+    Covered,
+    /// Not this pane's: ask the next.
+    Miss,
 }
 
 /// Which region of the compositor's own chrome a point is in.
@@ -520,14 +546,13 @@ impl Solium {
         let now = self.clock.now();
         let screens = self.screens();
 
-        // `rev` because `panes` is in stacking order, bottom-first, and the
-        // rule is topmost-first -- which is now load-bearing in a way it was
-        // not before, since the first pane to cover the point ends the walk,
-        // and a halo is only kept until a lower pane is found drawing under it.
+        // Topmost first, through `panes_front_first`: `panes` is in stacking
+        // order, bottom-first, and the rule is topmost-first -- which is now
+        // load-bearing in a way it was not before, since the first pane to
+        // cover the point ends the walk, and a halo is only kept until a lower
+        // pane is found drawing under it.
         topmost_chrome(
-            self.panes
-                .iter()
-                .rev()
+            self.panes_front_first(location)
                 .map(|pane| self.pane_chrome(pane, location, now, &screens)),
         )
     }
@@ -700,7 +725,7 @@ impl Solium {
             return None;
         }
         let screens = self.screens();
-        for pane in self.panes.iter().rev() {
+        for pane in self.panes_front_first(location) {
             let outer = self.pane_outer(pane);
             // `covers`, not `rect.contains`: a pane drawn at opacity zero is
             // not on screen and owns no pixel, however solid the rectangle it
@@ -745,13 +770,6 @@ impl Solium {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        // Anchored surfaces above windows are hit first: a click on a panel is
-        // the panel's, and it reserved that strip precisely so nothing of the
-        // client's would be under the cursor there.
-        //
-        // The monitor under the point, not the first one: a layer map's
-        // geometry is in its own output's coordinates, so asking the wrong
-        // output hit-tests the right strip on the wrong screen.
         // Locked: the only surface anyone may point at is the lock screen's,
         // and on a monitor it has not covered, none at all. Returning early
         // rather than filtering afterwards is deliberate -- a later `return`
@@ -769,140 +787,226 @@ impl Solium {
             .map(|(surface, offset)| (surface, (geometry.loc + offset).to_f64()));
         }
 
-        if let Some(output) = monitor::at(&self.space, location)
-            && let Some(geometry) = self.space.output_geometry(&output)
-            && let Some((surface, origin)) =
-                layer::surface_under(&output, location - geometry.loc.to_f64())
-        {
-            // `origin` came back in the output's coordinates; the pointer is
-            // measured in the compositor's.
-            return Some((surface, origin + geometry.loc.to_f64()));
+        // Over the windows first, in `crate::stack`'s order: a client's layer
+        // surface there is the one the pointer reaches -- a panel reserved its
+        // strip precisely so nothing of a window's would be under the cursor
+        // there -- unless the window lifted over the bars covers it. A
+        // script's surfaces are not asked: `surface_pointer` offers them the
+        // pointer beside this one, through the same order.
+        if let Some(Above::Client(surface, origin)) = self.topmost_above(location, false) {
+            return Some((surface, origin));
         }
 
         let now = self.clock.now();
         let screens = self.screens();
 
-        for pane in self.panes.iter().rev() {
-            let outer = self.pane_outer(pane);
-            // Nothing of a pane -- its surface or its popups, which the
-            // renderer draws inside the same cull -- is at a point on a screen
-            // that does not draw it. [`shown_at`] says why, and
-            // `on_two_monitors_a_press_on_the_right_monitor_reaches_what_it_draws`
-            // is this walk. Nor anything of a window whose client has gone:
-            // `a_window_that_left_is_nobodys_to_find`.
-            if !shown_at(outer, pane.ghost(), location, &screens) {
-                continue;
-            }
-            let frame = self.drawn_at(pane, outer, now);
-            // Invisible is not covered. Same rule and same reason as
-            // [`Self::window_under`]: this walk is what delivers motion,
-            // buttons and — through the focus a press sets — keystrokes, so a
-            // pane held at opacity zero across a close winning it is where the
-            // typing went. [`present::Frame::covers`] argues the predicate.
-            //
-            // **Except that a window's popups are not inside its rectangle.**
-            // `render::elements` draws them uncut, reaching past the parent's
-            // tile, so a point outside the parent's frame can still be on one
-            // of its menus -- and since #133 that includes the whole strip
-            // between a tiled window's tile and the edge its client committed,
-            // where a menu opened from an oversized Firefox lands. The point
-            // went to the neighbour instead, and a press on it -- when the
-            // neighbour is another application -- had smithay's popup grab
-            // dismiss the menu rather than choose the item under it
-            // (`PopupPointerGrab::button`). So a visible pane that does not
-            // cover the point is still asked about its popups, and only about
-            // those. `a_menu_past_its_parents_tile_takes_the_press` pins it.
-            let covered = frame.covers(location);
-            let (window, kind) = match pane.client() {
-                Some(window) if covered => (window, WindowSurfaceType::ALL),
-                // A popup and its own subsurfaces, and not the toplevel's tree.
-                Some(window) if frame.shows() => (
-                    window,
-                    WindowSurfaceType::POPUP | WindowSurfaceType::SUBSURFACE,
-                ),
-                // A window whose application has not arrived has no surface to
-                // give the pointer -- but it is on screen and it is under the
-                // cursor, so nothing behind it may have the click either.
-                // Falling through would type into whatever the window is
-                // covering.
-                None if covered => return None,
-                _ => continue,
-            };
-
-            // Into the client's own space through the very fit its picture is
-            // drawn with (#133): off the buffer's drawn corner, and divided by
-            // what the buffer was scaled by. A point in the titlebar lands
-            // above the client and finds no surface, which is what should
-            // happen: the frame is the compositor's, not the client's.
-            //
-            // It used to go through `to_window_space`, which reads the drawn
-            // rectangle as a scale of the pane's own, and take its inset from
-            // `frame_insets`. That is the picture's arithmetic for a decorated
-            // window at rest or in a thumbnail and for nothing else:
-            //
-            // * a tiled window on a frame of a glide is drawn 1:1 and cut, and
-            //   a press there landed as far from the pixel under it as the
-            //   glide was from its destination --
-            //   `a_press_on_a_gliding_window_lands_on_the_pixel_under_it`;
-            // * a window under a resize hold has its last buffer stretched
-            //   into the dragged rectangle, and a press was mapped 1:1 against
-            //   the rectangle instead --
-            //   `a_press_on_a_held_window_lands_on_the_pixel_its_picture_has`;
-            // * a pane still reserving a titlebar is drawn below it, and
-            //   `frame_insets` answers nothing for a pane that is not yet
-            //   decorated --
-            //   `a_press_on_a_window_reserving_a_titlebar_lands_on_the_pixel_under_it`.
-            //
-            // It is still the picture's arithmetic for the *frame*, which is
-            // stretched from the pane's outer size to the drawn rect, so
-            // `pane_chrome` keeps it.
-            let placed =
-                crate::render::place_client(self, pane, &frame, outer.size, window.geometry().size);
-            let undo = |drawn: f64, factor: f64| {
-                if factor.abs() > f64::EPSILON {
-                    drawn / factor
-                } else {
-                    drawn
-                }
-            };
-            let in_window: Point<f64, Logical> = (
-                undo(location.x - placed.origin.x, placed.fit.factor.x),
-                undo(location.y - placed.origin.y, placed.fit.factor.y),
-            )
-                .into();
-
-            // Into the *buffer's* coordinates, which is what `surface_under`
-            // wants and is not the same point.
-            //
-            // A client that draws its own decorations commits a surface bigger
-            // than its window: the invisible resize shadow is part of the
-            // buffer, and `xdg_surface.set_window_geometry` is how it says
-            // which sub-rectangle is the real window. `geometry().loc` is that
-            // offset -- around (26, 26) for a GTK application.
-            //
-            // `in_window` above is relative to the window the user can see.
-            // Smithay's `Window::surface_under` ends in
-            // `under_from_surface_tree(&surface, point, (0, 0), ..)` -- offset
-            // zero -- so the point it expects is relative to the surface tree
-            // root, the buffer origin. Its own `SpaceElement` wrapper puts that
-            // origin at `location - geometry().loc`
-            // (`desktop/space/mod.rs:510`), so the two differ by exactly
-            // `geometry().loc`, and dropping it is issue #101: every click in
-            // Firefox and in Qt applications landed a shadow's width up and
-            // left of where it was aimed, which for a row of buttons means the
-            // one next door.
-            //
-            // Zero for a client with no decorations of its own, so a terminal
-            // never noticed.
-            let in_buffer = in_window + window.geometry().loc.to_f64();
-
-            if let Some((surface, surface_offset)) = window.surface_under(in_buffer, kind) {
-                let in_surface = in_buffer - surface_offset.to_f64();
-                return Some((surface, location - in_surface));
+        // The lifted window first, which is where the bands above leave off.
+        for pane in self.panes_front_first(location) {
+            match self.pane_surface_at(pane, location, now, &screens) {
+                PaneSurface::Surface(surface, origin) => return Some((surface, origin)),
+                PaneSurface::Covered => return None,
+                PaneSurface::Miss => {}
             }
         }
 
         None
+    }
+
+    /// What one pane makes of a point, for the pointer: [`Self::surface_under`]'s
+    /// question, asked of each pane in its walk.
+    fn pane_surface_at(
+        &self,
+        pane: &Pane,
+        location: Point<f64, Logical>,
+        now: Duration,
+        screens: &[Rectangle<i32, Logical>],
+    ) -> PaneSurface {
+        let outer = self.pane_outer(pane);
+        // Nothing of a pane -- its surface or its popups, which the
+        // renderer draws inside the same cull -- is at a point on a screen
+        // that does not draw it. [`shown_at`] says why, and
+        // `on_two_monitors_a_press_on_the_right_monitor_reaches_what_it_draws`
+        // is this walk. Nor anything of a window whose client has gone:
+        // `a_window_that_left_is_nobodys_to_find`.
+        if !shown_at(outer, pane.ghost(), location, screens) {
+            return PaneSurface::Miss;
+        }
+        let frame = self.drawn_at(pane, outer, now);
+        // Invisible is not covered. Same rule and same reason as
+        // [`Self::window_under`]: this walk is what delivers motion,
+        // buttons and — through the focus a press sets — keystrokes, so a
+        // pane held at opacity zero across a close winning it is where the
+        // typing went. [`present::Frame::covers`] argues the predicate.
+        //
+        // **Except that a window's popups are not inside its rectangle.**
+        // `render::elements` draws them uncut, reaching past the parent's
+        // tile, so a point outside the parent's frame can still be on one
+        // of its menus -- and since #133 that includes the whole strip
+        // between a tiled window's tile and the edge its client committed,
+        // where a menu opened from an oversized Firefox lands. The point
+        // went to the neighbour instead, and a press on it -- when the
+        // neighbour is another application -- had smithay's popup grab
+        // dismiss the menu rather than choose the item under it
+        // (`PopupPointerGrab::button`). So a visible pane that does not
+        // cover the point is still asked about its popups, and only about
+        // those. `a_menu_past_its_parents_tile_takes_the_press` pins it.
+        let covered = frame.covers(location);
+        let (window, kind) = match pane.client() {
+            Some(window) if covered => (window, WindowSurfaceType::ALL),
+            // A popup and its own subsurfaces, and not the toplevel's tree.
+            Some(window) if frame.shows() => (
+                window,
+                WindowSurfaceType::POPUP | WindowSurfaceType::SUBSURFACE,
+            ),
+            // A window whose application has not arrived has no surface to
+            // give the pointer -- but it is on screen and it is under the
+            // cursor, so nothing behind it may have the click either.
+            // Falling through would type into whatever the window is
+            // covering.
+            None if covered => return PaneSurface::Covered,
+            _ => return PaneSurface::Miss,
+        };
+
+        // Into the client's own space through the very fit its picture is
+        // drawn with (#133): off the buffer's drawn corner, and divided by
+        // what the buffer was scaled by. A point in the titlebar lands
+        // above the client and finds no surface, which is what should
+        // happen: the frame is the compositor's, not the client's.
+        //
+        // It used to go through `to_window_space`, which reads the drawn
+        // rectangle as a scale of the pane's own, and take its inset from
+        // `frame_insets`. That is the picture's arithmetic for a decorated
+        // window at rest or in a thumbnail and for nothing else:
+        //
+        // * a tiled window on a frame of a glide is drawn 1:1 and cut, and
+        //   a press there landed as far from the pixel under it as the
+        //   glide was from its destination --
+        //   `a_press_on_a_gliding_window_lands_on_the_pixel_under_it`;
+        // * a window under a resize hold has its last buffer stretched
+        //   into the dragged rectangle, and a press was mapped 1:1 against
+        //   the rectangle instead --
+        //   `a_press_on_a_held_window_lands_on_the_pixel_its_picture_has`;
+        // * a pane still reserving a titlebar is drawn below it, and
+        //   `frame_insets` answers nothing for a pane that is not yet
+        //   decorated --
+        //   `a_press_on_a_window_reserving_a_titlebar_lands_on_the_pixel_under_it`.
+        //
+        // It is still the picture's arithmetic for the *frame*, which is
+        // stretched from the pane's outer size to the drawn rect, so
+        // `pane_chrome` keeps it.
+        let placed =
+            crate::render::place_client(self, pane, &frame, outer.size, window.geometry().size);
+        let undo = |drawn: f64, factor: f64| {
+            if factor.abs() > f64::EPSILON {
+                drawn / factor
+            } else {
+                drawn
+            }
+        };
+        let in_window: Point<f64, Logical> = (
+            undo(location.x - placed.origin.x, placed.fit.factor.x),
+            undo(location.y - placed.origin.y, placed.fit.factor.y),
+        )
+            .into();
+
+        // Into the *buffer's* coordinates, which is what `surface_under`
+        // wants and is not the same point.
+        //
+        // A client that draws its own decorations commits a surface bigger
+        // than its window: the invisible resize shadow is part of the
+        // buffer, and `xdg_surface.set_window_geometry` is how it says
+        // which sub-rectangle is the real window. `geometry().loc` is that
+        // offset -- around (26, 26) for a GTK application.
+        //
+        // `in_window` above is relative to the window the user can see.
+        // Smithay's `Window::surface_under` ends in
+        // `under_from_surface_tree(&surface, point, (0, 0), ..)` -- offset
+        // zero -- so the point it expects is relative to the surface tree
+        // root, the buffer origin. Its own `SpaceElement` wrapper puts that
+        // origin at `location - geometry().loc`
+        // (`desktop/space/mod.rs:510`), so the two differ by exactly
+        // `geometry().loc`, and dropping it is issue #101: every click in
+        // Firefox and in Qt applications landed a shadow's width up and
+        // left of where it was aimed, which for a row of buttons means the
+        // one next door.
+        //
+        // Zero for a client with no decorations of its own, so a terminal
+        // never noticed.
+        let in_buffer = in_window + window.geometry().loc.to_f64();
+
+        match window.surface_under(in_buffer, kind) {
+            Some((surface, surface_offset)) => {
+                let in_surface = in_buffer - surface_offset.to_f64();
+                PaneSurface::Surface(surface, location - in_surface)
+            }
+            None => PaneSurface::Miss,
+        }
+    }
+
+    /// What is topmost at a point among the bands above the windows:
+    /// [`crate::stack::above`], on the monitor under the point, asked band by
+    /// band until one has something there.
+    ///
+    /// **The hit tests' half of the one order**, which the renderer reads in
+    /// `render::stacked`. `scripts` is whether a script's surfaces are asked:
+    /// the press and the pointer's shape ask them, and the pointer's delivery
+    /// to a client does not, since `surface_pointer` offers a script's surface
+    /// the pointer beside it. The stacking tests in `state::tests` ask each.
+    pub(crate) fn topmost_above(
+        &self,
+        location: Point<f64, Logical>,
+        scripts: bool,
+    ) -> Option<Above> {
+        let output = monitor::at(&self.space, location)?;
+        let geometry = self.space.output_geometry(&output)?;
+        let lifted = self.lifted_on(geometry);
+        let now = self.clock.now();
+        let screens = self.screens();
+        crate::stack::above(lifted.is_some()).find_map(|band| match band {
+            Band::Layer(layer, Owner::Client) => {
+                // A layer map's geometry is in its own output's coordinates.
+                layer::surface_under(&output, layer, location - geometry.loc.to_f64())
+                    .map(|(surface, origin)| Above::Client(surface, origin + geometry.loc.to_f64()))
+            }
+            Band::Layer(layer, Owner::Script) if scripts => self
+                .script_at(&output, geometry, layer, location)
+                .map(|(id, area)| Above::Script(output.clone(), id, area)),
+            Band::Layer(_, Owner::Script) | Band::Windows => None,
+            Band::Fullscreen => lifted
+                .and_then(|id| self.panes.get(id))
+                .filter(|pane| {
+                    !matches!(
+                        self.pane_surface_at(pane, location, now, &screens),
+                        PaneSurface::Miss
+                    )
+                })
+                .map(|_| Above::Lifted),
+        })
+    }
+
+    /// Whether a client's layer surface is what is on top at `location`, over
+    /// the windows and their chrome: a press there is the client's.
+    pub(crate) fn client_above(&self, location: Point<f64, Logical>) -> bool {
+        matches!(self.topmost_above(location, true), Some(Above::Client(..)))
+    }
+
+    /// The panes in the order the hit tests walk them at `location`: the one
+    /// lifted over the bars on the monitor under it, and then the rest,
+    /// topmost first.
+    ///
+    /// The renderer draws the lifted one over every other window
+    /// (`crate::stack`'s `a_lifted_window_is_under_overlay_and_over_top`), so
+    /// the walks that ask a window whether it owns a point ask it first.
+    fn panes_front_first(&self, location: Point<f64, Logical>) -> impl Iterator<Item = &Pane> {
+        let lifted = monitor::at(&self.space, location)
+            .and_then(|output| self.space.output_geometry(&output))
+            .and_then(|screen| self.lifted_on(screen));
+        lifted.and_then(|id| self.panes.get(id)).into_iter().chain(
+            self.panes
+                .iter()
+                .rev()
+                .filter(move |pane| Some(pane.id()) != lifted),
+        )
     }
 
     /// Who a press at `location` would belong to.
@@ -910,11 +1014,22 @@ impl Solium {
     /// The three links of [`claim_of`], fetched in the order `pointer_button`
     /// fetches them. Read-only: the surface link is a geometric claim rather
     /// than a delivery, for the reasons [`Self::surface_claiming`] gives.
+    ///
+    /// No chrome under a client's surface: one over the windows is over their
+    /// chrome too, and the press is the client's, which is what
+    /// `pointer_button` does with it.
+    /// `an_overlay_mapped_before_a_bar_is_drawn_over_it_and_takes_the_press`.
     pub(crate) fn claim_under(&self, location: Point<f64, Logical>) -> Claim {
+        let above = self.topmost_above(location, true);
+        let chrome = if matches!(above, Some(Above::Client(..))) {
+            None
+        } else {
+            self.chrome_under(location).map(|under| under.chrome)
+        };
         claim_of(
-            self.surface_claiming(true, location).is_some(),
+            matches!(above, Some(Above::Script(..))),
             self.script_grab,
-            self.chrome_under(location).map(|under| under.chrome),
+            chrome,
         )
     }
 
@@ -998,7 +1113,7 @@ impl Solium {
     ) -> Option<(crate::pane::PaneId, Point<f64, Logical>)> {
         let now = self.clock.now();
         let screens = self.screens();
-        self.panes.iter().rev().find_map(|pane| {
+        self.panes_front_first(location).find_map(|pane| {
             // Only a built frame is listening. There is no scene to tell about
             // the pointer until there is one.
             pane.decoration()?;

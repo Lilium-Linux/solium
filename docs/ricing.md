@@ -551,6 +551,15 @@ compositor honours it, so a bar on every screen is one surface per screen, each
 reserving from *that* monitor's work area. One that names no output gets the
 primary monitor.
 
+A fullscreen window in front of the workspace its monitor is showing covers
+the top layer -- a client's bar, and one declared with `sol.surface` -- and
+takes the clicks where the bar was, while the overlay layer (notifications, an
+OSD, a launcher) stays over it. To keep the bars over fullscreen windows:
+
+```lua
+return { fullscreen = { covers = "none" } }
+```
+
 See **[shell-boundary.md](shell-boundary.md)** for why that is a client rather
 than something the compositor draws, and what was learned from it being the
 other way round.

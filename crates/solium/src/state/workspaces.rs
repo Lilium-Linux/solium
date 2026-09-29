@@ -113,6 +113,16 @@ pub(super) fn put_away(bound: crate::group::Shift) -> bool {
     dx != 0.0 || dy != 0.0 || !bound.apply(Frame::real(Rectangle::default())).shows()
 }
 
+/// Whether a window is fullscreen, as the compositor last told it: the
+/// state its next configure carries, which is set and unset in
+/// `fullscreen_request` and `unfullscreen_request`.
+/// `leaving_fullscreen_puts_the_bar_back_on_top`.
+fn fullscreen(window: &Window) -> bool {
+    window.toplevel().is_some_and(|toplevel| {
+        toplevel.with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen))
+    })
+}
+
 impl Solium {
     /// How the selections a pane is in carry it at `now`: the half of
     /// [`Self::drawn_at`] that is the groups', before it is composed onto the
@@ -303,6 +313,37 @@ impl Solium {
             .groups
             .bound_for_window(pane.id().get(), monitor.as_deref());
         put_away(bound)
+    }
+
+    /// The pane lifted over the bars on the monitor at `screen`, if any:
+    /// [`crate::stack::lifted`], asked of the panes front first.
+    ///
+    /// **On the monitor's shown workspace** is drawn on that monitor, by its
+    /// slot ([`crate::render::drawn_on`]); not what is left of a window whose
+    /// client has gone; and not on a desk a selection is putting away
+    /// ([`Self::carried_by_a_selection`]). So a fullscreen window on a
+    /// workspace that is not shown changes nothing, and neither does one
+    /// behind another window on its own.
+    /// `a_fullscreen_window_on_a_workspace_not_shown_leaves_the_bar_on_top`,
+    /// and `crate::stack`'s `only_the_front_pane_of_the_shown_workspace_is_lifted`.
+    ///
+    /// Read by the renderer (`render::stacked`) and by the hit tests
+    /// ([`Self::topmost_above`], `panes_front_first`), which is what makes the
+    /// window drawn over the bars the one that is clicked there.
+    pub(crate) fn lifted_on(&self, screen: Rectangle<i32, Logical>) -> Option<crate::pane::PaneId> {
+        crate::stack::lifted(
+            self.panes.iter().rev().map(|pane| {
+                let shown = !pane.ghost()
+                    && crate::render::drawn_on(self.pane_outer(pane), screen)
+                    && !self.carried_by_a_selection(pane.id());
+                let candidate = crate::stack::Candidate {
+                    shown,
+                    fullscreen: pane.client().is_some_and(fullscreen),
+                };
+                (pane.id(), candidate)
+            }),
+            self.fullscreen_covers,
+        )
     }
 
     /// [`Self::on_stage`] for one pane, asked by id at [`Self::settling`]: for

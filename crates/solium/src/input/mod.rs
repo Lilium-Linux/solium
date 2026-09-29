@@ -793,9 +793,11 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // left the pointer promising a resize over an overview thumbnail and over
     // the bottom edge of a bar.
     //
-    // Scripted surfaces above the windows see the press before clients do, and
-    // only when nothing is being dragged. A bar, a panel, an overlay: all the
-    // same path, and the compositor knows what none of them are for.
+    // A scripted surface above the windows sees the press first when it is on
+    // top there -- not under a client's surface, nor under a fullscreen
+    // window, in `crate::stack`'s order -- and only when nothing is being
+    // dragged. A bar, a panel, an overlay: all the same path, and the
+    // compositor knows what none of them are for.
     if !pointer.is_grabbed()
         && state.surface_pointer(true, location, Some(button_state == ButtonState::Pressed))
     {
@@ -810,6 +812,13 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         }
         return;
     }
+
+    // A client's layer surface on top here -- a bar, a launcher, a
+    // notification -- is over the windows and their chrome, in
+    // `crate::stack`'s order, so the press is the client's: none of the
+    // compositor's interpretations below, only the forward at the end. What
+    // `Solium::claim_under` tells the pointer, from the same answer.
+    let on_a_client = !pointer.is_grabbed() && state.client_above(location);
 
     // A press on the compositor's own chrome is the compositor's: a frame's
     // button, a move drag, or a resize from an edge. None of it reaches a
@@ -828,6 +837,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // before the drag modifier, as it always was, because the edge is the
     // narrower target and whoever is on it meant to be.
     if !pointer.is_grabbed()
+        && !on_a_client
         && let Some(under) = state.chrome_under(location)
     {
         match under.chrome {
@@ -924,7 +934,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         }
     }
 
-    if button_state == ButtonState::Pressed && !pointer.is_grabbed() {
+    if button_state == ButtonState::Pressed && !pointer.is_grabbed() && !on_a_client {
         let modifiers = state
             .seat
             .get_keyboard()
@@ -1020,6 +1030,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // desktop menu lives: they get the press only because nothing above
     // wanted it.
     if !pointer.is_grabbed()
+        && !on_a_client
         && state.surface_pointer(false, location, Some(button_state == ButtonState::Pressed))
     {
         return;

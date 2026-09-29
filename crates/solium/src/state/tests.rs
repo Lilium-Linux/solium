@@ -16324,6 +16324,512 @@ end)
                 );
             }
         }
+
+        /// **#141 and #142: what is drawn over what, above and below the
+        /// windows, and whether the one on top is the one the pointer
+        /// reaches.**
+        ///
+        /// The picture is asked of [`crate::render::stacked`], which is
+        /// everything `render::elements` draws below the drag icon, in its
+        /// order -- `elements` needs a GPU and only turns each entry into
+        /// elements. The pointer is asked of the hit tests themselves.
+        mod stacking {
+            use super::*;
+            use crate::render::Stacked;
+            use crate::scripted::Layer as Scripted;
+            use zwlr_layer_shell_v1::Layer as Client;
+
+            /// Something on the monitor, by a number both ends of the
+            /// fixture agree on.
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+            enum Seen {
+                /// A client's layer surface, by its `wl_surface`'s id.
+                Layer(u32),
+                /// A script's surface.
+                Script(crate::scripted::SurfaceId),
+                /// A pane.
+                Pane(crate::pane::PaneId),
+            }
+
+            /// The desk's monitor.
+            fn screen() -> Rectangle<i32, Logical> {
+                Rectangle::new((0, 0).into(), (1920, 1080).into())
+            }
+
+            /// What the desk's monitor draws, topmost first.
+            fn drawn(desk: &Desk) -> Vec<Seen> {
+                crate::render::stacked(&desk.state, screen(), desk.state.clock.now())
+                    .into_iter()
+                    .flat_map(|each| match each {
+                        Stacked::Layer(surface, _) => {
+                            vec![Seen::Layer(surface.wl_surface().id().protocol_id())]
+                        }
+                        Stacked::Surface(id, _, _) => vec![Seen::Script(id)],
+                        Stacked::Panes(nodes) => nodes
+                            .into_iter()
+                            .map(|((pane, ..), _)| Seen::Pane(pane))
+                            .collect(),
+                    })
+                    .collect()
+            }
+
+            /// Whether `top` is drawn over `bottom`, both being drawn.
+            fn drawn_over(desk: &Desk, top: Seen, bottom: Seen) -> bool {
+                let drawn = drawn(desk);
+                let at = |seen| drawn.iter().position(|each| *each == seen);
+                matches!((at(top), at(bottom)), (Some(top), Some(bottom)) if top < bottom)
+            }
+
+            /// A client's layer surface at `layer`, anchored to the top of
+            /// the monitor: across its whole width, or `width` wide from its
+            /// left edge. With a buffer of that size, so it is drawn and can
+            /// be pointed at.
+            fn layer_surface(
+                desk: &mut Desk,
+                layer: Client,
+                width: Option<i32>,
+                height: i32,
+                exclusive: i32,
+            ) -> (
+                wl_surface::WlSurface,
+                zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+            ) {
+                use zwlr_layer_surface_v1::Anchor;
+                let compositor = desk.client.compositor.clone().expect("wl_compositor bound");
+                let shell = desk
+                    .client
+                    .layer_shell
+                    .clone()
+                    .expect("zwlr_layer_shell_v1 bound");
+                let surface = compositor.create_surface(&desk.qh, ());
+                let layered = shell.get_layer_surface(
+                    &surface,
+                    None,
+                    layer,
+                    "stacking-test".to_string(),
+                    &desk.qh,
+                    (),
+                );
+                match width {
+                    Some(width) => {
+                        layered.set_anchor(Anchor::Top | Anchor::Left);
+                        layered.set_size(width.unsigned_abs(), height.unsigned_abs());
+                    }
+                    None => {
+                        layered.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+                        layered.set_size(0, height.unsigned_abs());
+                    }
+                }
+                layered.set_exclusive_zone(exclusive);
+                surface.commit();
+                desk.pump();
+                commit_buffer(
+                    &desk.client,
+                    &desk.qh,
+                    &surface,
+                    width.unwrap_or(screen().size.w),
+                    height,
+                );
+                desk.pump();
+                (surface, layered)
+            }
+
+            fn id(surface: &wl_surface::WlSurface) -> u32 {
+                wayland_client::Proxy::id(surface).protocol_id()
+            }
+
+            /// Where the pointer is delivered at a point: the surface, by id.
+            fn delivered(desk: &Desk, x: f64, y: f64) -> Option<u32> {
+                desk.state
+                    .surface_under((x, y).into())
+                    .map(|(surface, _)| surface.id().protocol_id())
+            }
+
+            /// A script's interactive surface at `layer`, over `rect`.
+            fn scripted(
+                desk: &mut Desk,
+                name: &str,
+                layer: Scripted,
+                rect: Rectangle<i32, Logical>,
+            ) -> crate::scripted::SurfaceId {
+                desk.state.declare_surface(crate::scripted::Declaration {
+                    name: name.to_owned(),
+                    scene: std::path::PathBuf::from("/nonexistent/stacking-test.qml"),
+                    layer,
+                    on: crate::scripted::On::Rect(rect),
+                    properties: "{}".to_owned(),
+                    interactive: true,
+                });
+                desk.state
+                    .surfaces
+                    .named(name)
+                    .expect("the surface was declared")
+            }
+
+            /// The script's surface a press at a point is offered to.
+            fn claimed(desk: &Desk, x: f64, y: f64) -> Option<crate::scripted::SurfaceId> {
+                desk.state
+                    .surface_claiming(true, (x, y).into())
+                    .map(|(_, id, _)| id)
+            }
+
+            fn window_of(desk: &Desk, pane: crate::pane::PaneId) -> Window {
+                desk.state
+                    .panes
+                    .get(pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("the pane has its client")
+            }
+
+            /// A window at `at`, sent fullscreen, answering with a buffer
+            /// the size of the monitor as a client does.
+            fn fullscreen(desk: &mut Desk, at: (i32, i32)) -> (Opened, Window) {
+                let opened = desk.open_surface();
+                let window = window_of(desk, opened.pane);
+                desk.state.space.map_element(window.clone(), at, false);
+                desk.state.space.refresh();
+                opened.toplevel.set_fullscreen(None);
+                desk.pump();
+                commit_buffer(
+                    &desk.client,
+                    &desk.qh,
+                    &opened.surface,
+                    screen().size.w,
+                    screen().size.h,
+                );
+                desk.pump();
+                landed(desk);
+                assert_eq!(
+                    desk.state.real_geometry(&window),
+                    Some(screen()),
+                    "the premise: the window covers the monitor, bar and all"
+                );
+                (opened, window)
+            }
+
+            /// Let every animation land: a window opening is drawn fading in,
+            /// and one drawn at nothing covers nothing.
+            fn landed(desk: &mut Desk) {
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.state.sync_panes();
+                desk.pump();
+            }
+
+            fn strip(x: i32, width: i32) -> Rectangle<i32, Logical> {
+                Rectangle::new((x, 0).into(), (width, 30).into())
+            }
+
+            /// **An overlay surface mapped before a bar is drawn over it,
+            /// and takes the press there -- before the edge of the window
+            /// under both.** The bar was drawn on top because it was mapped
+            /// last, while the press went to the overlay; and neither beat
+            /// the window's resize border, which `pointer_button` asked
+            /// before any client's surface.
+            #[test]
+            fn an_overlay_mapped_before_a_bar_is_drawn_over_it_and_takes_the_press() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state.space.map_element(window, (500, 10), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let edge = Point::<f64, Logical>::from((532.0, 12.0));
+                assert_eq!(
+                    desk.state.claim_under(edge),
+                    Claim::Chrome(Chrome::Resize(ResizeEdge::Top)),
+                    "the premise: with nothing over it, a press there drags the window's edge"
+                );
+
+                let (overlay, _overlay) = layer_surface(&mut desk, Client::Overlay, None, 30, -1);
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+
+                assert!(
+                    drawn_over(&desk, Seen::Layer(id(&overlay)), Seen::Layer(id(&bar)))
+                        && drawn_over(&desk, Seen::Layer(id(&bar)), Seen::Pane(opened.pane)),
+                    "the overlay, the bar, then the window: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    (
+                        delivered(&desk, edge.x, edge.y),
+                        desk.state.claim_under(edge)
+                    ),
+                    (Some(id(&overlay)), Claim::Nothing),
+                    "(the surface the pointer reaches, what the compositor makes of a press): \
+                     the overlay is on top and the press is its"
+                );
+            }
+
+            /// **The same, for a script's surfaces**: one declared at
+            /// `overlay` before one at `top` is drawn over it and is the one
+            /// offered the press.
+            #[test]
+            fn a_scripted_overlay_is_drawn_over_a_scripted_bar_and_takes_the_press() {
+                let mut desk = Desk::new();
+                let overlay = scripted(&mut desk, "overlay", Scripted::Overlay, strip(0, 1920));
+                let bar = scripted(&mut desk, "bar", Scripted::Top, strip(0, 1920));
+                assert!(
+                    drawn_over(&desk, Seen::Script(overlay), Seen::Script(bar)),
+                    "the scripted overlay over the scripted bar: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    (
+                        claimed(&desk, 100.0, 15.0),
+                        desk.state.claim_under((100.0, 15.0).into())
+                    ),
+                    (Some(overlay), Claim::Surface)
+                );
+            }
+
+            /// **Below the windows, by layer too**: a client's background
+            /// mapped after its bottom surface stays under it, and at each
+            /// layer the client's surface is over the script's.
+            #[test]
+            fn a_background_mapped_after_a_bottom_surface_stays_under_it() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let script_bottom = scripted(&mut desk, "dock", Scripted::Bottom, strip(0, 1920));
+                let script_background =
+                    scripted(&mut desk, "wallpaper", Scripted::Background, screen());
+                let (bottom, _bottom) = layer_surface(&mut desk, Client::Bottom, None, 30, 0);
+                let (background, _background) =
+                    layer_surface(&mut desk, Client::Background, None, 30, 0);
+                let below: Vec<Seen> = drawn(&desk)
+                    .into_iter()
+                    .skip_while(|seen| *seen != Seen::Pane(opened.pane))
+                    .skip(1)
+                    .collect();
+                assert_eq!(
+                    below,
+                    vec![
+                        Seen::Layer(id(&bottom)),
+                        Seen::Script(script_bottom),
+                        Seen::Layer(id(&background)),
+                        Seen::Script(script_background),
+                    ],
+                    "under the window: the client's bottom surface, the script's, the \
+                     client's background, the script's"
+                );
+                // And a client's surfaces below the windows are still offered
+                // no pointer, so the script's dock under one has the press.
+                assert_eq!(
+                    (
+                        delivered(&desk, 1000.0, 15.0),
+                        desk.state
+                            .surface_claiming(false, (1000.0, 15.0).into())
+                            .map(|(_, id, _)| id)
+                    ),
+                    (None, Some(script_bottom))
+                );
+            }
+
+            /// **Within one layer, the order each kind already had**: the
+            /// client's surface mapped last is on top and has the pointer,
+            /// and the script's declared first is on top and has the press.
+            #[test]
+            fn within_a_layer_the_order_is_the_one_each_kind_had() {
+                let mut desk = Desk::new();
+                let (first, _first) = layer_surface(&mut desk, Client::Top, None, 30, 0);
+                let (second, _second) = layer_surface(&mut desk, Client::Top, None, 30, 0);
+                let below_the_bars = Rectangle::new((0, 100).into(), (1920, 30).into());
+                let one = scripted(&mut desk, "one", Scripted::Top, below_the_bars);
+                let two = scripted(&mut desk, "two", Scripted::Top, below_the_bars);
+                assert!(
+                    drawn_over(&desk, Seen::Layer(id(&second)), Seen::Layer(id(&first)))
+                        && drawn_over(&desk, Seen::Script(one), Seen::Script(two)),
+                    "{:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    (delivered(&desk, 100.0, 15.0), claimed(&desk, 100.0, 115.0)),
+                    (Some(id(&second)), Some(one))
+                );
+            }
+
+            /// **A fullscreen window covers the bar, the client's and the
+            /// script's, and takes the press where the bar was.**
+            #[test]
+            fn a_fullscreen_window_covers_a_bar_and_takes_the_press_where_it_was() {
+                let mut desk = Desk::new();
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let shell = scripted(&mut desk, "shell", Scripted::Top, strip(0, 1920));
+                let (opened, window) = fullscreen(&mut desk, (10, 40));
+
+                assert!(
+                    drawn_over(&desk, Seen::Pane(opened.pane), Seen::Layer(id(&bar)))
+                        && drawn_over(&desk, Seen::Pane(opened.pane), Seen::Script(shell)),
+                    "the fullscreen window over both bars: {:?}",
+                    drawn(&desk)
+                );
+                let at = Point::<f64, Logical>::from((100.0, 15.0));
+                assert_eq!(
+                    (
+                        delivered(&desk, at.x, at.y),
+                        claimed(&desk, at.x, at.y),
+                        desk.state.window_under(at).map(|(under, _)| under),
+                    ),
+                    (Some(surface_id(&window)), None, Some(window.clone())),
+                    "(the surface the pointer reaches, the scripted bar being offered the \
+                     press, the window a press focuses)"
+                );
+            }
+
+            /// **An overlay surface stays over a fullscreen window and keeps
+            /// its presses**, the client's and the script's -- and the bar,
+            /// mapped after the client's overlay, stays under both.
+            #[test]
+            fn an_overlay_stays_over_a_fullscreen_window_and_keeps_its_presses() {
+                let mut desk = Desk::new();
+                let (overlay, _overlay) =
+                    layer_surface(&mut desk, Client::Overlay, Some(200), 30, -1);
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let osd = scripted(&mut desk, "osd", Scripted::Overlay, strip(300, 200));
+                let (opened, window) = fullscreen(&mut desk, (10, 40));
+
+                let pane = Seen::Pane(opened.pane);
+                assert!(
+                    drawn_over(&desk, Seen::Layer(id(&overlay)), pane)
+                        && drawn_over(&desk, Seen::Script(osd), pane)
+                        && drawn_over(&desk, pane, Seen::Layer(id(&bar))),
+                    "both overlays, the fullscreen window, the bar: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    (
+                        delivered(&desk, 100.0, 15.0),
+                        delivered(&desk, 1000.0, 15.0),
+                        claimed(&desk, 400.0, 15.0),
+                        desk.state.claim_under((400.0, 15.0).into()),
+                    ),
+                    (
+                        Some(id(&overlay)),
+                        Some(surface_id(&window)),
+                        Some(osd),
+                        Claim::Surface
+                    ),
+                    "(on the client's overlay, on the bar beside it, on the script's \
+                     overlay, what a press there is)"
+                );
+            }
+
+            /// **Leaving fullscreen puts the bar back on top.**
+            #[test]
+            fn leaving_fullscreen_puts_the_bar_back_on_top() {
+                let mut desk = Desk::new();
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let (opened, window) = fullscreen(&mut desk, (10, 5));
+                let pane = Seen::Pane(opened.pane);
+                assert!(
+                    drawn_over(&desk, pane, Seen::Layer(id(&bar)))
+                        && delivered(&desk, 20.0, 15.0) == Some(surface_id(&window)),
+                    "the premise: fullscreen, the window covers the bar"
+                );
+
+                opened.toplevel.unset_fullscreen();
+                desk.pump();
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 64, 64);
+                desk.pump();
+                landed(&mut desk);
+                assert_eq!(
+                    desk.state.real_geometry(&window),
+                    Some(Rectangle::new((10, 5).into(), (64, 64).into())),
+                    "the premise: back where it was, under the bar's strip"
+                );
+                assert!(
+                    drawn_over(&desk, Seen::Layer(id(&bar)), pane),
+                    "the bar is back over the window: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(delivered(&desk, 20.0, 15.0), Some(id(&bar)));
+            }
+
+            /// **A fullscreen window on a workspace that is not shown does
+            /// not hide the bar.**
+            #[test]
+            fn a_fullscreen_window_on_a_workspace_not_shown_leaves_the_bar_on_top() {
+                let mut desk = Desk::new();
+                desk.install(
+                    "require(\"modes\")\n\
+                     require(\"workspaces\")\n\
+                     require(\"tiling\")\n\
+                     require(\"scrolling\")",
+                );
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let (opened, window) = fullscreen(&mut desk, (10, 40));
+                let says = |desk: &Desk, chunk: &str| {
+                    desk.state
+                        .scripts
+                        .as_ref()
+                        .map(|scripts| scripts.evaluate(chunk))
+                        .unwrap_or_default()
+                };
+                let showing = "return tostring(require(\"workspaces\").on(\"reflow-test\"))";
+                let pane = Seen::Pane(opened.pane);
+                assert!(
+                    says(&desk, showing) == "1"
+                        && drawn_over(&desk, pane, Seen::Layer(id(&bar)))
+                        && delivered(&desk, 100.0, 15.0) == Some(surface_id(&window)),
+                    "the premise: on the workspace in view, the window covers the bar"
+                );
+
+                assert!(desk.state.trigger("super+2"), "super+2 was not handled");
+                landed(&mut desk);
+                assert_eq!(
+                    (
+                        says(&desk, showing),
+                        says(
+                            &desk,
+                            &format!(
+                                "return tostring(require(\"workspaces\").of[{}])",
+                                opened.pane.get()
+                            )
+                        )
+                    ),
+                    ("2".to_owned(), "1".to_owned()),
+                    "the premise: workspace 2 in view, the window on 1"
+                );
+                assert!(
+                    drawn_over(&desk, Seen::Layer(id(&bar)), pane),
+                    "the bar is over the window on the workspace not shown: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(delivered(&desk, 100.0, 15.0), Some(id(&bar)));
+            }
+
+            /// **`fullscreen.covers = "none"` keeps the bar over a
+            /// fullscreen window**, set the way `init.lua` sets it.
+            #[test]
+            fn with_fullscreen_covers_none_the_bar_stays_over_a_fullscreen_window() {
+                let mut desk = Desk::new();
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let (opened, window) = fullscreen(&mut desk, (10, 40));
+                let pane = Seen::Pane(opened.pane);
+                assert!(
+                    drawn_over(&desk, pane, Seen::Layer(id(&bar)))
+                        && delivered(&desk, 100.0, 15.0) == Some(surface_id(&window)),
+                    "the premise: by default the window covers the bar"
+                );
+
+                desk.install(
+                    "local config = require(\"config\")\n\
+                     config.fullscreen.covers = \"none\"\n\
+                     sol.fullscreen(config.fullscreen)",
+                );
+                let scripts = desk.state.scripts.take();
+                desk.state.start_scripts(scripts);
+                landed(&mut desk);
+                assert!(
+                    drawn_over(&desk, Seen::Layer(id(&bar)), pane),
+                    "the bar is over the fullscreen window: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(delivered(&desk, 100.0, 15.0), Some(id(&bar)));
+            }
+        }
     }
 
     /// A window opened, mapped at a known place, and known to the panes.

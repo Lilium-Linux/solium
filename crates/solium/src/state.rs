@@ -638,6 +638,10 @@ pub(crate) struct Solium {
     /// What `config.lua` said about resizing. See [`crate::resizing::Fill`].
     pub(crate) resizing: crate::resizing::Settings,
 
+    /// What a fullscreen window covers: `fullscreen.covers`. See
+    /// [`crate::stack::Covers`].
+    pub(crate) fullscreen_covers: crate::stack::Covers,
+
     /// A drag that has finished and not yet been reported to scripts.
     ///
     /// Recorded inside the pointer grab and acted on after it, for exactly the
@@ -943,6 +947,7 @@ impl Solium {
             resize_gesture: None,
             resize_ended: None,
             resizing: crate::resizing::Settings::default(),
+            fullscreen_covers: crate::stack::Covers::default(),
             redraw: true,
             animating: false,
             dmabuf_state: DmabufState::new(),
@@ -1792,40 +1797,56 @@ impl Solium {
         if self.surfaces.iter().all(|surface| !surface.interactive()) {
             return None;
         }
+
+        // Above the windows, a script's surface claims a point only where it
+        // is what is on top there, in `crate::stack`'s order: not under a
+        // client's surface at its own layer or above, nor under the window
+        // lifted over the bars.
+        if above_windows {
+            return match self.topmost_above(location, true)? {
+                hit_test::Above::Script(output, id, area) => Some((output, id, area)),
+                hit_test::Above::Client(..) | hit_test::Above::Lifted => None,
+            };
+        }
+
+        // Below them in the same order. A client's surfaces there are passed
+        // over: they are not offered the pointer, and never were.
+        // `a_background_mapped_after_a_bottom_surface_stays_under_it`.
         let output = monitor::at(&self.space, location)?;
         let geometry = self.space.output_geometry(&output)?;
+        crate::stack::below().find_map(|band| match band {
+            crate::stack::Band::Layer(layer, crate::stack::Owner::Script) => self
+                .script_at(&output, geometry, layer, location)
+                .map(|(id, area)| (output.clone(), id, area)),
+            _ => None,
+        })
+    }
+
+    /// The script's interactive surface at one layer that has `location`,
+    /// first declared first -- the order `render::stacked` draws them in.
+    ///
+    /// Where each of them is *drawn*, not merely where it was declared: a
+    /// surface carried off by a group is not under the pointer either, which
+    /// is the same rule a window follows. Without it, a wallpaper that slid
+    /// away with its workspace goes on eating clicks on the workspace that
+    /// replaced it.
+    /// `a_scripted_overlay_is_drawn_over_a_scripted_bar_and_takes_the_press`.
+    fn script_at(
+        &self,
+        output: &Output,
+        geometry: Rectangle<i32, Logical>,
+        layer: crate::scripted::Layer,
+        location: Point<f64, Logical>,
+    ) -> Option<(crate::scripted::SurfaceId, Rectangle<i32, Logical>)> {
         let primary = self.primary_output();
-
-        // Topmost first, so a surface drawn over another gets the press.
-        let order = if above_windows {
-            [crate::scripted::Layer::Overlay, crate::scripted::Layer::Top]
-        } else {
-            [
-                crate::scripted::Layer::Bottom,
-                crate::scripted::Layer::Background,
-            ]
-        };
-
-        for layer in order {
-            // Where each of them is *drawn*, not merely where it was declared:
-            // a surface carried off by a group is not under the pointer either,
-            // which is the same rule a window follows. Without it, a wallpaper
-            // that slid away with its workspace goes on eating clicks on the
-            // workspace that replaced it.
-            let claimed = self
-                .surfaces
-                .iter()
-                .filter(|surface| surface.interactive() && surface.layer() == layer)
-                .filter_map(|surface| {
-                    let area = surface.area_on(&output, geometry, primary.as_ref())?;
-                    Some((surface.id(), self.carried(surface.id(), &output, area)))
-                })
-                .find(|(_, area)| area.to_f64().contains(location));
-            if let Some((id, area)) = claimed {
-                return Some((output, id, area));
-            }
-        }
-        None
+        self.surfaces
+            .iter()
+            .filter(|surface| surface.interactive() && surface.layer() == layer)
+            .filter_map(|surface| {
+                let area = surface.area_on(output, geometry, primary.as_ref())?;
+                Some((surface.id(), self.carried(surface.id(), output, area)))
+            })
+            .find(|(_, area)| area.to_f64().contains(location))
     }
 
     /// Act on whatever a scripted surface asked for.
