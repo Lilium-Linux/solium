@@ -212,7 +212,7 @@ pub(crate) struct Left {
 /// much room it takes, whether there is one at all — or the live scene itself.
 /// `Decorations` is down to the style a script chose and the code that builds a
 /// [`crate::decoration::Decoration`] from it; what it builds it hands to the
-/// pane. See `docs/superpowers/plans/2026-09-12-pane-ownership.md`.
+/// pane. See "Pane ownership" in `docs/design/2026-09-08-pane-styles-design.md`.
 ///
 /// **There is no `large_enum_variant` suppression on this any more, and its
 /// absence is the measurement.** There was one, justified by

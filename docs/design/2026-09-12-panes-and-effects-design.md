@@ -313,8 +313,9 @@ alone.
 
 ### Phase 1 — the machine
 
-1. **Pane ownership.** `docs/superpowers/plans/2026-09-12-pane-ownership.md`.
-   One value answers "does this pane have a frame", and the illegal state stops
+1. **Pane ownership.** The "Pane ownership" section of
+   [2026-09-08-pane-styles-design.md](2026-09-08-pane-styles-design.md). One
+   value answers "does this pane have a frame", and the illegal state stops
    being representable. Everything below adds state to a pane; this is what
    stops that becoming five more tables.
 2. **`offscreen::capture` caching.** It allocates a texture per frame per

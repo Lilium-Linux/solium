@@ -19,9 +19,8 @@
 /dev/preview            export-ignore
 /dev/host-window-rule.md export-ignore
 
-# Decision records with their evidence, and design notes.
+# Decision records, with the evidence that settled them.
 /docs/spikes            export-ignore
-/docs/superpowers       export-ignore
 
 # Repository plumbing.
 /.github                export-ignore

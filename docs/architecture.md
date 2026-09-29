@@ -148,7 +148,7 @@ drawn, and a shader cannot tell it one.** So a vertex function stays CPU-side
 and parametric — a name and some numbers, never user code — while a *fragment*
 effect can be arbitrary GLSL, because a bad one is a wrong picture and a bad
 damage rect is a corrupt screen. See
-`docs/superpowers/specs/2026-09-12-panes-and-effects-design.md`.
+`docs/design/2026-09-12-panes-and-effects-design.md`.
 
 The split with the compositor is the anchor. A deformation morphs between two
 rectangles, and the far one is named rather than given: `deform = { effect =
