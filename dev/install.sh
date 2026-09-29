@@ -67,21 +67,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Both end up unquoted: the prefix in the session file's Exec line, where a
-# space or a `%` would need the escaping the Desktop Entry spec asks for, and
-# both in the sudo line printed for pasting. Refused rather than escaped;
-# dev/install-check.sh asserts the refusal.
+# All three end up unquoted: the prefix in the session file's Exec line, where
+# a space or a `%` would need the escaping the Desktop Entry spec asks for, and
+# all of them in the sudo and uninstall lines printed for pasting. Refused
+# rather than escaped; dev/install-check.sh asserts the refusal for a prefix and
+# for a DESTDIR.
 for name in prefix session_dir; do
     value="${!name}"
     [[ "$value" == /* ]] || die "--${name//_/-} must be an absolute path: $value"
     [[ "$value" =~ ^[A-Za-z0-9._/+@-]+$ ]] \
         || die "--${name//_/-} may only contain letters, digits and ._/+@-: $value"
 done
-prefix="${prefix%/}"
-session_dir="${session_dir%/}"
 destdir="${DESTDIR:-}"
-destdir="${destdir%/}"
 [[ -z "$destdir" || "$destdir" == /* ]] || die "DESTDIR must be an absolute path: $destdir"
+[[ -z "$destdir" || "$destdir" =~ ^[A-Za-z0-9._/+@-]+$ ]] \
+    || die "DESTDIR may only contain letters, digits and ._/+@-: $destdir"
+# Every trailing slash goes, so `/` and `//` come out empty and are refused
+# (as a prefix, they would put the binary at /bin/solium). dev/install-check.sh
+# asserts the refusal of `--prefix /` and of `--session-dir //`.
+prefix="${prefix%"${prefix##*[!/]}"}"
+session_dir="${session_dir%"${session_dir##*[!/]}"}"
+destdir="${destdir%"${destdir##*[!/]}"}"
+[[ -n "$prefix" ]] || die "/ is not a usable --prefix"
+[[ -n "$session_dir" ]] || die "/ is not a usable --session-dir"
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive number: $jobs"
 
 dest="$destdir$prefix"
@@ -89,6 +97,26 @@ bin="$dest/bin/solium"
 share="$dest/share/solium"
 staged_session="$share/solium.desktop"
 session_file="$session_dir/solium.desktop"
+
+# Install replaces $share/qml and $share/lua, and uninstall removes them, with
+# `rm -rf`. Through a link that deletes whatever the link leads to: a
+# share/solium left linked to a checkout would lose its QML and Lua, uncommitted
+# work included. So neither goes on while share or share/solium is a link, or
+# while share/solium resolves into this checkout by any other route.
+# dev/install-check.sh plants files behind each of the three and asserts that
+# install and uninstall both refuse and the files survive.
+for path in "$dest/share" "$share"; do
+    if [[ -L "$path" ]]; then
+        die "$path is a symlink (to $(readlink "$path")). This script deletes what \
+is under $share, so it will not go through a link: remove the link yourself first"
+    fi
+done
+resolved_share="$(realpath -m "$share")"
+case "$resolved_share/" in
+    "$(realpath "$root")"/*)
+        die "$share resolves to $resolved_share, inside this checkout. Installing or \
+uninstalling there would delete the checkout's own files: choose a --prefix outside it" ;;
+esac
 
 # Where the container sees this checkout. assets.rs looks in the build tree
 # (`CARGO_MANIFEST_DIR`) *before* `<binary>/../share/solium`, so a binary
@@ -199,6 +227,11 @@ if [[ $build -eq 1 ]]; then
 fi
 [[ -x "$built" ]] || die "no release build at $built; run without --no-build"
 
+# Again, now that the build is over: a session may have started from the old
+# install while it ran. dev/install-check.sh starts one from inside a stand-in
+# build and asserts that nothing is replaced or created.
+refuse_if_running
+
 mkdir -p "$dest/bin" "$share" 2>/dev/null \
     || die "cannot write to $dest. This script never uses sudo: choose a --prefix you own"
 
@@ -216,6 +249,18 @@ cp -RL "$root/crates/solium/qml" "$root/crates/solium/lua" "$share/"
 sed "s|^Exec=solium|Exec=$prefix/bin/solium|" "$source_session" > "$staged_session"
 chmod 644 "$staged_session"
 
+uninstall_cmd="dev/install.sh --uninstall"
+[[ "$prefix" == "$default_prefix" ]] || uninstall_cmd+=" --prefix $prefix"
+[[ "$session_dir" == "$default_session_dir" ]] || uninstall_cmd+=" --session-dir $session_dir"
+[[ -z "$destdir" ]] || uninstall_cmd="DESTDIR=$destdir $uninstall_cmd"
+
+# The new files are already in place when the check runs, and a session file
+# from an earlier install would start them at the next login, so a failure says
+# so. dev/install-check.sh fails the check on purpose and asserts the message.
+not_checked="The new files are already in place under $dest. Do not log into \
+Solium until this is fixed and dev/install.sh re-run, or take them out with:
+  $uninstall_cmd"
+
 # The gate's scripts check, run from the installed copy, with the asset root
 # read from the line assets.rs logs when it resolves one (`shipped assets`,
 # `root=`). A copy that passes by reading some other tree proves nothing.
@@ -225,13 +270,14 @@ check_log="$(mktemp -t solium-install-check-XXXXXX.log)"
 trap 'rm -f "$check_log"' EXIT
 if ! RUST_LOG="info,solium::assets=debug" "$bin" --check >"$check_log" 2>&1; then
     cat "$check_log" >&2
-    die "$bin --check failed"
+    die "$bin --check failed. $not_checked"
 fi
 chosen="$(sed -n 's/.*shipped assets root=\([^ ]*\).*/\1/p' "$check_log" | head -1)"
 expected="$(realpath "$share")"
 if [[ "$chosen" != "$expected" ]]; then
     cat "$check_log" >&2
-    die "the installed binary took its QML and Lua from '${chosen:-nowhere}', not $expected"
+    die "the installed binary took its QML and Lua from '${chosen:-nowhere}', not \
+$expected. $not_checked"
 fi
 checked="$(grep -m1 '^  ok:' "$check_log" || true)"
 
@@ -248,11 +294,6 @@ if [[ -z "$destdir" ]]; then
 else
     path_note="PATH not checked: DESTDIR is set, so nothing here is live yet."
 fi
-
-uninstall_cmd="dev/install.sh --uninstall"
-[[ "$prefix" == "$default_prefix" ]] || uninstall_cmd+=" --prefix $prefix"
-[[ "$session_dir" == "$default_session_dir" ]] || uninstall_cmd+=" --session-dir $session_dir"
-[[ -z "$destdir" ]] || uninstall_cmd="DESTDIR=$destdir $uninstall_cmd"
 
 cat <<EOF
 
@@ -273,6 +314,13 @@ script does not run it:
 Then log out and pick Solium from the session list. Plasma Login, Fedora 44
 KDE's display manager, reads /usr/local/share/wayland-sessions and
 /usr/share/wayland-sessions when its greeter starts.
+
+Getting back: Plasma Login remembers the last session, so it offers Solium
+first from then on; pick Plasma to return. Ctrl+Alt+Backspace ends a Solium
+session whatever the configuration says, unless the screen is locked
+(super+shift+q does too, in the shipped configuration), and Ctrl+Alt+F3
+switches to a text console to log in and read the log. Solium handles both
+chords itself, so neither helps if Solium itself hangs.
 
 The session logs to ${XDG_STATE_HOME:-$HOME/.local/state}/solium/session.log, appended
 to by every session. Plasma Login also writes the session's stderr, which carries

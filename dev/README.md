@@ -30,7 +30,7 @@ a demo into a regression test.
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
-| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file, the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs, and an uninstall that leaves nothing. See *Installing it* |
+| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file, the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, and an uninstall that leaves nothing. See *Installing it* |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
@@ -743,7 +743,7 @@ dev/install.sh --uninstall     # remove it again; prints `sudo rm -f …` for th
 | `--session-dir DIR` | where the display manager reads sessions, default `/usr/local/share/wayland-sessions`. Only the printed `sudo` line writes there |
 | `--no-build` | install the release binary already in `target/install` |
 | `--jobs N`, `--image IMAGE` | the build's cargo jobs (2) and container (`localhost/solium-build:fc44`) |
-| `--uninstall` | remove what an install with the same `--prefix` put there |
+| `--uninstall` | remove `bin/solium`, `share/solium/{qml,lua}` and the generated `solium.desktop` under the same `--prefix`. There is no manifest: it removes those paths whatever put them there |
 | `DESTDIR=` | stage the prefix under this directory instead; the session file's `Exec` still names the real prefix. `--session-dir` is used as given, so a test can point it at `/tmp` |
 | `SOLIUM_BUILD_LOCK=`, `SOLIUM_BUILD_MEMORY=` | the lock the build takes (`~/.cache/solium-build.lock`) and the container's memory cap (`6g`) |
 
@@ -778,11 +778,19 @@ works from any prefix, a `DESTDIR` staging area included.
 
 **Checked before it starts:** a Solium running from the binary it would
 replace (found through `/proc/<pid>/exe`, as `fuser` does; it refuses and
-stops nothing), and that the build image exists. **After:** the installed
+stops nothing), checked again once the build is over, since a session can
+start from the old install while it runs; that the build image exists; and
+that nothing it would delete is reached through a link. Install replaces
+`share/solium/{qml,lua}` and uninstall removes them with `rm -rf`, so a
+`share/solium` left linked to a checkout would lose the checkout's QML and
+Lua: both refuse while `share` or `share/solium` is a link, or while
+`share/solium` resolves into the checkout. A prefix that is itself a link
+(`~/.local` moved to another disk) is fine. **After:** the installed
 `solium --check` has to pass, the gate's scripts check, and the asset root it
 logs (`RUST_LOG=solium::assets=debug`, `shipped assets root=…`) has to be the
-installed `share/solium`. It also warns if the `solium` on `PATH` is not the one
-it installed.
+installed `share/solium`. If either fails, the new files are already in place,
+and it says so and prints the uninstall line. It also warns if the `solium` on
+`PATH` is not the one it installed.
 
 **Which display manager, and where it looks.** Fedora 44 KDE runs Plasma Login
 (`systemctl status display-manager` names `plasmalogin.service`), a fork of
@@ -795,6 +803,18 @@ lists sessions with
 package owns it. It only watches directories that existed when it started, and
 that one does not exist until `install -D` makes it, so log out after running
 the `sudo` line rather than expecting a greeter already on screen to notice.
+
+**Getting back.** Plasma Login remembers the last session
+(`#RememberLastSession=true` in `/etc/plasmalogin.conf`, commented out at its
+default), so after one Solium login it offers Solium first: pick **Plasma** (`/usr/share/wayland-sessions/plasma.desktop`)
+to return. Inside Solium, Ctrl+Alt+Backspace ends the session whatever the
+configuration says, unless the screen is locked, and super+shift+q does in the
+shipped `init.lua`. Ctrl+Alt+F3 switches to a text console, to log in and read
+`~/.local/state/solium/session.log`. Solium handles both chords itself
+(`escape` in `input/mod.rs`, with the tests `ctrl_alt_f3_asks_for_the_third_terminal`
+and `ctrl_alt_backspace_stops_the_compositor`), because the kernel stops acting
+on them once a graphical session owns the VT, so neither helps if Solium
+itself hangs.
 
 **The `Exec` is absolute** (`Exec=/home/you/.local/bin/solium --tty`): Plasma
 Login starts a session with `PATH=/usr/local/bin:/usr/bin:/bin` (`DefaultPath`

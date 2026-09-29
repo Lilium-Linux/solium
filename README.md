@@ -66,9 +66,18 @@ the installed copy's `--check`, and prints the `sudo` line above — the one ste
 that needs root, which it leaves to you. Then log out and pick **Solium** from
 the session list.
 
+**Getting back.** The login screen remembers the last session, so from then on
+it offers Solium first: pick **Plasma** to return. Inside Solium,
+Ctrl+Alt+Backspace ends the session whatever your configuration says (unless
+the screen is locked), and so does super+shift+q in the shipped configuration.
+Ctrl+Alt+F3 switches to a text console, where you can log in and read
+`~/.local/state/solium/session.log`. Solium handles both chords itself, so
+neither helps if Solium itself hangs.
+
 What it installs is a copy: rebuilding or checking out another branch does not
 change it, and running `dev/install.sh` again replaces it. It refuses while a
-Solium session is running from it.
+Solium session is running from it, and while `~/.local/share/solium` (or
+`share`) is a link, which it would otherwise delete through.
 
 To remove it, `dev/install.sh --uninstall`, then the
 `sudo rm -f /usr/local/share/wayland-sessions/solium.desktop` it prints. Your
