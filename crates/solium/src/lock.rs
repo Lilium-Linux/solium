@@ -45,8 +45,18 @@
 //! `locked` waits is waited for no longer
 //! (`a_monitor_unplugged_while_locking_does_not_hold_locked_back`), and nor is
 //! one switched off with `enabled = false`, which `tty.rs` drops the same way
-//! (`a_switched_off_monitor_does_not_hold_locked_back`). Solium has no DPMS
-//! and no idle power-off, so there is no other way for a monitor to be dark.
+//! (`a_switched_off_monitor_does_not_hold_locked_back`). Nor is one that is
+//! **dark** -- powered off through `power.rs`, and cleared by the backend --
+//! because it shows nothing, so there is nothing on it for the lock to cover
+//! (`a_dark_monitor_does_not_hold_locked_back`). Asked to be off is not
+//! enough: until the backend has cleared it, it is still showing whatever it
+//! had, and it is waited for like any other monitor
+//! (`a_monitor_asked_off_but_not_yet_dark_still_holds_locked_back`). Powering
+//! one off never makes `locked` wait longer, since it only takes a monitor
+//! out of the wait (`a_monitor_powered_off_while_locking_lets_locked_go`),
+//! and powering one on while locked puts it back in the wait, where it has
+//! to show the lock like any other
+//! (`a_monitor_powered_on_while_locking_must_show_the_lock_too`).
 //! One plugged in must show the lock as well
 //! (`a_monitor_plugged_in_while_locking_must_show_the_lock_too`), and with no
 //! monitor at all `locked` goes at once
@@ -631,10 +641,14 @@ impl Solium {
     /// gone is no longer waited for and one that has arrived now is. Never for
     /// a holder that has gone: see `destroyed` in the `Dispatch` below.
     ///
+    /// And when a monitor goes dark (`Solium::output_dark`): a dark monitor is
+    /// not waited for. See the module documentation.
+    ///
     /// `locked_waits_for_every_monitor_to_show_the_lock`,
     /// `with_no_monitor_locked_goes_out_at_once`,
-    /// `a_monitor_unplugged_while_locking_does_not_hold_locked_back` and
-    /// `a_monitor_plugged_in_while_locking_must_show_the_lock_too`.
+    /// `a_monitor_unplugged_while_locking_does_not_hold_locked_back`,
+    /// `a_monitor_plugged_in_while_locking_must_show_the_lock_too` and
+    /// `a_dark_monitor_does_not_hold_locked_back`.
     pub(crate) fn confirm_lock(&mut self) {
         let Some(lock) = self.lock.as_mut() else {
             return;
@@ -645,7 +659,7 @@ impl Solium {
         let waiting: Vec<String> = self
             .space
             .outputs()
-            .filter(|output| !lock.shown.contains(output))
+            .filter(|output| !lock.shown.contains(output) && !self.power.is_dark(output))
             .map(Output::name)
             .collect();
         if !waiting.is_empty() {

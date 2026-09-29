@@ -463,6 +463,10 @@ impl Solium {
     pub(crate) fn settle_monitors(&mut self) {
         self.place_outputs();
         self.prune_surfaces();
+        // A monitor that has gone is not off, it is gone, and its power
+        // controls are told so. See `power.rs`, and
+        // `the_power_protocol_is_advertised_answers_mode_on_bind_and_turns_a_monitor_off_and_on`.
+        self.settle_power();
         self.rescue_offscreen();
         self.trigger_monitors_changed();
         self.trigger_relayout();

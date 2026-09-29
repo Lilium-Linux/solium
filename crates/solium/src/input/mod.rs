@@ -78,6 +78,12 @@ pub(crate) fn handle<B: InputBackend>(
     // -removed events are deliberately included: plugging a mouse in is a
     // person at the machine.
     state.idle.stir(state.clock.now());
+    // And a screen that is off comes back on, before the event is delivered
+    // -- which it then is, as usual. See `Solium::wake_screens`, and
+    // `input_wakes_every_screen_the_idle_blank_turned_off`.
+    if wakes(&event) {
+        state.wake_screens();
+    }
 
     match event {
         InputEvent::Keyboard { event } => keyboard(state, event),
@@ -102,6 +108,37 @@ pub(crate) fn handle<B: InputBackend>(
     }
 }
 
+/// Whether an event is somebody reaching for the machine, which turns every
+/// screen that is off back on.
+///
+/// A press and never a release, as niri has it: a binding that turns the
+/// screens off is pressed, and waking on its release would turn them straight
+/// back on -- and the Enter that runs `wlopm --off` in a terminal the same.
+/// Motion of any kind, a scroll, a touch, a stylus. Not a device arriving or
+/// leaving, which is no reason to light a room. Keys are [`key`]'s, since that
+/// is where a test presses them.
+/// `input_wakes_every_screen_the_idle_blank_turned_off` plays a key, a
+/// motion and a button, each released first; nothing reachable from a test
+/// sends a touch or a tablet event.
+fn wakes<B: InputBackend>(event: &InputEvent<B>) -> bool {
+    match event {
+        InputEvent::PointerButton { event } => event.state() == ButtonState::Pressed,
+        InputEvent::PointerMotion { .. }
+        | InputEvent::PointerMotionAbsolute { .. }
+        | InputEvent::PointerAxis { .. }
+        | InputEvent::TouchDown { .. }
+        | InputEvent::TouchMotion { .. }
+        | InputEvent::GestureSwipeBegin { .. }
+        | InputEvent::GesturePinchBegin { .. }
+        | InputEvent::GestureHoldBegin { .. }
+        | InputEvent::TabletToolAxis { .. }
+        | InputEvent::TabletToolProximity { .. }
+        | InputEvent::TabletToolTip { .. }
+        | InputEvent::TabletToolButton { .. } => true,
+        _ => false,
+    }
+}
+
 fn keyboard<B: InputBackend>(state: &mut Solium, event: impl KeyboardKeyEvent<B>) {
     key(state, event.key_code(), event.state(), event.time_msec());
 }
@@ -117,6 +154,12 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
     };
 
     let pressed = key_state == KeyState::Pressed;
+    // Before the filter, so a binding that turns the screens off is pressed
+    // with them on and leaves them off. See [`wakes`], and
+    // `a_binding_that_turns_the_screens_off_leaves_them_off_when_it_is_let_go`.
+    if pressed {
+        state.wake_screens();
+    }
 
     let bound = keyboard.input(
         state,

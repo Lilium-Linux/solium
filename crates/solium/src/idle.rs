@@ -90,6 +90,43 @@ pub(crate) struct Notification {
     idle: bool,
 }
 
+/// What `config.lua`'s `idle` section says: the idle blank, and what a window
+/// on a screen that is off is told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Settings {
+    /// How long without input before every screen is turned off. Zero never
+    /// does. See [`Settings::default`] for the number and the reason for it.
+    /// `the_idle_blank_turns_every_screen_off_after_the_timeout`.
+    pub(crate) screens_off_after: Duration,
+    /// How often a window shown only on screens that are off is still told to
+    /// draw. Zero never does. See "Frame callbacks on a dark monitor" in
+    /// `power.rs`, and
+    /// `a_window_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`.
+    pub(crate) off_frame_interval: Duration,
+}
+
+impl Default for Settings {
+    /// **Ten minutes, and on.** The machine this was asked for kept its
+    /// screens lit all night, and a feature that only works for someone who
+    /// has found the setting is the same machine lit all night.
+    ///
+    /// Ten rather than GNOME's five, because GNOME dims the screen before it
+    /// blanks it, and Solium does not: here the first sign is the screen going
+    /// dark, so it should come later than a desktop that warns you first.
+    /// Long enough that reading a long page without touching anything does
+    /// not blank it; anything that plays -- a film, a call, a presentation --
+    /// holds an idle inhibitor, which holds this off
+    /// (`an_idle_inhibitor_holds_the_idle_blank_off`). Someone running
+    /// `swayidle` to do it their own way sets it to 0. `config.lua` says the
+    /// same number (`the_shipped_configuration_turns_the_screens_off_after_ten_minutes`).
+    fn default() -> Self {
+        Self {
+            screens_off_after: Duration::from_secs(600),
+            off_frame_interval: Duration::from_secs(1),
+        }
+    }
+}
+
 /// Everything the compositor knows about nobody being at the machine.
 #[derive(Debug, Default)]
 pub(crate) struct Idle {
@@ -104,6 +141,29 @@ pub(crate) struct Idle {
     /// compositor that has been up for a minute and never been touched should
     /// not report a minute of idleness to a client that has just connected.
     since: Option<Duration>,
+    /// The first frame, which is what the idle blank counts from until there
+    /// is any input: a machine started and never touched is a machine nobody
+    /// is at. `the_idle_blank_turns_every_screen_off_after_the_timeout`
+    /// touches nothing.
+    began: Option<Duration>,
+    /// The last frame something visible held the machine awake: an idle
+    /// inhibitor that counted. Letting go starts the count again from here
+    /// rather than from the last input, which is what smithay's own
+    /// `IdleNotifierState::set_is_inhibited` and wlroots do: a film that ends
+    /// an hour after anybody touched anything does not take the screens with
+    /// it, and the next one in a playlist, which takes the inhibitor again a
+    /// few seconds later, does not start in the dark
+    /// (`an_idle_inhibitor_holds_the_idle_blank_off`,
+    /// `an_idle_notification_counts_again_from_when_an_inhibitor_lets_go`).
+    held: Option<Duration>,
+    /// The idle blank has turned the screens off, and nothing has kept the
+    /// machine awake since: no input, and no inhibitor. So it does it once per
+    /// absence, and a screen a client turns back on meanwhile stays on
+    /// (`the_idle_blank_turns_every_screen_off_after_the_timeout`), while an
+    /// inhibitor taken and let go again is an absence of its own
+    /// (`an_idle_inhibitor_holds_the_idle_blank_off`).
+    blanked: bool,
+    settings: Settings,
 }
 
 impl Idle {
@@ -120,6 +180,19 @@ impl Idle {
     pub(crate) fn stir(&mut self, now: Duration) {
         self.since = Some(now);
     }
+
+    /// What the configuration says. See [`Settings`].
+    pub(crate) fn settings(&self) -> Settings {
+        self.settings
+    }
+
+    /// Take what the configuration says.
+    pub(crate) fn configure(&mut self, settings: Settings) {
+        if self.settings != settings {
+            tracing::debug!(?settings, "idle settings");
+            self.settings = settings;
+        }
+    }
 }
 
 /// Decide, once a frame, who is idle and who is not.
@@ -128,13 +201,23 @@ impl Idle {
 /// knows: whether an inhibiting window is still on screen, whether the session
 /// has been locked, whether a client has just asked its first question.
 pub(crate) fn settle(state: &mut Solium) {
+    let now = state.clock.now();
+    // Every frame, and not only once a timeout has passed: an inhibitor let go
+    // is only seen by looking, and the count starts again from the last frame
+    // it was seen held (see `Idle::held`, and
+    // `an_idle_inhibitor_holds_the_idle_blank_off`). With no inhibitor there
+    // is nothing to walk.
+    let inhibited = state.idle_inhibited();
+    if inhibited {
+        state.idle.held = Some(now);
+    }
+    blank(state, now);
     if state.idle.notifications.is_empty() {
         return;
     }
-    let now = state.clock.now();
     let since = *state.idle.since.get_or_insert(now);
     let elapsed = now.saturating_sub(since);
-    let inhibited = state.idle_inhibited();
+    let held = state.idle.held;
 
     // Dead notifications go here rather than at the top: a client that
     // disconnects mid-frame would otherwise be written to once more, and the
@@ -145,7 +228,11 @@ pub(crate) fn settle(state: &mut Solium) {
         .retain(|notification| notification.object.is_alive());
 
     for notification in &mut state.idle.notifications {
-        let held_off = inhibited && !notification.ignores_inhibitors;
+        let (held_off, elapsed) = if notification.ignores_inhibitors {
+            (false, elapsed)
+        } else {
+            (inhibited, quiet(now, since, held))
+        };
         let idle = !held_off && elapsed >= notification.timeout;
         if idle == notification.idle {
             continue;
@@ -157,6 +244,46 @@ pub(crate) fn settle(state: &mut Solium) {
             notification.object.resumed();
         }
     }
+}
+
+/// The idle blank: every screen off once nobody has touched anything for
+/// `idle.screens_off_after`, unless something visible is holding the machine
+/// awake. Input turns them back on: see `Solium::wake_screens`.
+///
+/// The same inhibitors, counted the same way, as the notifications above --
+/// so nothing holds it off while the session is locked, and a lock screen goes
+/// dark like anything else -- and counted from when the last one let go, as
+/// they are (see `Idle::held`).
+/// `the_idle_blank_turns_every_screen_off_after_the_timeout`,
+/// `an_idle_inhibitor_holds_the_idle_blank_off` and
+/// `input_wakes_every_screen_the_idle_blank_turned_off`.
+fn blank(state: &mut Solium, now: Duration) {
+    let after = state.idle.settings.screens_off_after;
+    if after.is_zero() {
+        return;
+    }
+    let began = *state.idle.began.get_or_insert(now);
+    let since = state.idle.since.unwrap_or(began);
+    if quiet(now, since, state.idle.held) < after {
+        state.idle.blanked = false;
+        return;
+    }
+    if state.idle.blanked {
+        return;
+    }
+    state.idle.blanked = true;
+    tracing::info!(
+        seconds = after.as_secs(),
+        "nobody is here: every screen off (idle.screens_off_after)"
+    );
+    state.power_all(false);
+}
+
+/// How long nothing has kept the machine awake: since the last input, or
+/// since the last frame an inhibitor held it, whichever was later. While one
+/// is held that is no time at all. See `Idle::held`.
+fn quiet(now: Duration, since: Duration, held: Option<Duration>) -> Duration {
+    now.saturating_sub(held.map_or(since, |held| held.max(since)))
 }
 
 impl GlobalDispatch<ExtIdleNotifierV1, ()> for Solium {

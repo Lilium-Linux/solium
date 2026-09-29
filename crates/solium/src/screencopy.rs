@@ -177,6 +177,14 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Solium {
             frame.failed();
             return;
         };
+        // A monitor that is off has no frame to copy, and will not have one
+        // until it is on again. Refused now rather than left waiting, which a
+        // screenshot tool would read as a hang. See `power.rs`, and
+        // `an_off_monitor_cannot_be_captured`.
+        if state.power.is_off(&output) {
+            frame.failed();
+            return;
+        }
 
         // The whole monitor unless a region was named, in its *own* logical
         // coordinates — the protocol's region is relative to the output, not
@@ -277,6 +285,13 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Solium {
         pending.used = true;
         let pending = pending.clone();
         drop(held);
+        // Asked for while the monitor was on, and copied after it went off.
+        // One already queued when it goes off is failed by `set_power`. Both
+        // are `an_off_monitor_cannot_be_captured`.
+        if state.power.is_off(&pending.output) {
+            frame.failed();
+            return;
+        }
 
         // Queued, not copied. Reading pixels needs a renderer, and the
         // renderer belongs to the backend's loop -- which is also the only

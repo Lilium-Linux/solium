@@ -61,6 +61,7 @@ use smithay::backend::allocator::format::FormatSet;
 use smithay::reexports::wayland_server::backend::GlobalId;
 
 use crate::{
+    power::{self, Lit, Step},
     render,
     script::Scripts,
     state::{ClientState, Request, Solium},
@@ -574,6 +575,8 @@ pub(crate) fn run() -> Result<()> {
                     }
                 }
                 state.active = true;
+                state.solium.idle.stir(state.solium.clock.now());
+                state.solium.wake_screens();
                 state.render();
             }
         })
@@ -660,6 +663,9 @@ pub(crate) fn run() -> Result<()> {
             // a notification that arrives up to one frame late is a notification
             // about somebody having left the room.
             crate::idle::settle(&mut state.solium);
+            // A screen that is off has no vblank to pace its windows, so they
+            // are told here instead, throttled. See `power.rs`.
+            state.solium.send_dark_frames(wall_clock());
             // A reload that turned a monitor off or on. The same path a cable
             // takes, deliberately: it is the one that gets exercised, because
             // editing a configuration is something people do at a desk and
@@ -721,6 +727,9 @@ struct Screen {
     /// This is the same shape of bug as an animation that only advances when
     /// something else asks for a frame.
     owed: bool,
+    /// What has been done to this display on its way off and back. See
+    /// `power.rs`: the monitor stays in the session whatever this says.
+    lit: Lit,
 }
 
 impl std::fmt::Debug for Screen {
@@ -925,6 +934,7 @@ impl State {
             pending: false,
             pending_feedback: None,
             owed: false,
+            lit: Lit::On,
         });
         true
     }
@@ -1211,6 +1221,22 @@ impl State {
         // are rendering has damaged the *next* frame, not this one.
         self.solium.redraw = false;
 
+        // What each screen does this frame, decided before anything is built:
+        // `None` for one whose flip is still pending, and otherwise its step
+        // on the way off and back (`power.rs`). A frame in which no screen
+        // draws a picture needs none of the work below, so a machine with
+        // every screen off does none of it.
+        let steps: Vec<Option<Step>> = self
+            .screens
+            .iter()
+            .map(|screen| {
+                (!screen.pending).then(|| self.solium.power_step(&screen.output, screen.lit))
+            })
+            .collect();
+        let pictures = steps
+            .iter()
+            .any(|step| matches!(step, Some(Step::Draw | Step::Wake)));
+
         // `SOLIUM_PACING`. Off, everything below is a thread-local load and a
         // branch; see `pacing.rs`, which argues that trade at 260 Hz.
         let pace = crate::pacing::frame();
@@ -1233,11 +1259,15 @@ impl State {
         // tick, the window list. See `render::prepare`. It also has to happen
         // before any output's buffer is bound, because it binds framebuffers
         // of its own.
-        let prepared = render::prepare(&mut self.solium, renderer);
+        let prepared = if pictures {
+            render::prepare(&mut self.solium, renderer)
+        } else {
+            render::Prepared::default()
+        };
 
         // Before any output's buffer is bound, for the reason `Prepared` gives:
         // a capture binds a framebuffer of its own.
-        {
+        if pictures {
             let _prep = crate::pacing::span(crate::pacing::Phase::Prep);
             crate::screencopy::settle(&mut self.solium, renderer, &prepared);
         }
@@ -1246,17 +1276,51 @@ impl State {
             // Indexed rather than iterated: building a screen's elements needs
             // `&mut self.solium` as well as `&mut` that screen, and they are
             // fields of the same struct.
-            let Some(screen) = self.screens.get(index) else {
+            let Some(step) = steps.get(index).copied() else {
                 continue;
             };
-            if screen.pending {
-                // Remembered, because the flag that asked for this frame is
-                // about to be cleared by the screens that could draw it.
+            let Some(step) = step else {
+                // Its flip is pending. Remembered, because the flag that asked
+                // for this frame is about to be cleared by the screens that
+                // could draw it.
                 if let Some(screen) = self.screens.get_mut(index) {
                     screen.owed = true;
                 }
                 continue;
+            };
+            match step {
+                Step::Draw => {}
+                Step::Rest => {
+                    if let Some(screen) = self.screens.get_mut(index) {
+                        screen.owed = false;
+                    }
+                    continue;
+                }
+                Step::Blank => {
+                    self.blank(index);
+                    continue;
+                }
+                Step::Darken => {
+                    self.darken(index);
+                    continue;
+                }
+                Step::Wake => {
+                    // Back on: `clear` left the surface's pending state holding
+                    // its mode and connectors, so the frame queued below is a
+                    // modeset back to the same mode. Drawn in full, trusting
+                    // nothing any buffer held before
+                    // (`powering_a_monitor_on_while_locked_draws_only_the_lock`
+                    // plays the step; the modeset needs a GPU).
+                    if let Some(screen) = self.screens.get_mut(index) {
+                        screen.compositor.reset_buffers();
+                        screen.lit = power::after(Step::Wake, true);
+                        tracing::info!(monitor = screen.output.name(), "display on");
+                    }
+                }
             }
+            let Some(screen) = self.screens.get(index) else {
+                continue;
+            };
             let output = screen.output.clone();
             let area = self
                 .solium
@@ -1347,6 +1411,92 @@ impl State {
         pace.finish(self.solium.panes.len());
     }
 
+    /// One frame of black on screen `index`, on its way off.
+    ///
+    /// Queued like any other frame, so the display is switched off only once
+    /// this has flipped -- see "What off is, per backend" in `power.rs` for
+    /// why black comes first. Carries the lock it was built under, like any
+    /// frame: black shows nothing of the session
+    /// (`a_monitor_powered_off_while_locking_lets_locked_go` plays it). The
+    /// DRM calls here need a GPU, and no test reaches them.
+    fn blank(&mut self, index: usize) {
+        let (Some(renderer), Some(screen)) = (self.renderer.as_mut(), self.screens.get_mut(index))
+        else {
+            return;
+        };
+        let built_under = self.solium.lock_frame();
+        screen.compositor.reset_buffers();
+        let nothing: [render::Element; 0] = [];
+        let frame = crate::qml::frame_in_flight();
+        let rendered = screen.compositor.render_frame(
+            renderer,
+            &nothing,
+            [0.0, 0.0, 0.0, 1.0],
+            FrameFlags::DEFAULT,
+        );
+        drop(frame);
+        // So the vblank of this frame asks for the next step, `Darken`.
+        screen.owed = true;
+        let queued = match rendered {
+            Ok(result) if !result.is_empty => match screen.compositor.queue_frame(built_under) {
+                Ok(()) => true,
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        monitor = screen.output.name(),
+                        "could not queue black"
+                    );
+                    false
+                }
+            },
+            Ok(_) => false,
+            Err(err) => {
+                tracing::warn!(?err, monitor = screen.output.name(), "could not draw black");
+                false
+            }
+        };
+        screen.pending = queued;
+        screen.lit = power::after(Step::Blank, queued);
+        if !queued {
+            // No flip is coming to ask for the next step, so the loop does:
+            // black again, since this one was never queued
+            // (`every_way_a_monitor_goes_off_and_on_is_one_step_at_a_time`).
+            self.solium.redraw = true;
+        }
+    }
+
+    /// Switch screen `index`'s display off: `DrmCompositor::clear`. See
+    /// "What off is, per backend" in `power.rs`.
+    ///
+    /// A driver that refuses is answered on the protocol with `failed`, and
+    /// the monitor is drawn again
+    /// (`a_display_that_will_not_switch_off_is_failed_and_stays_on` plays the
+    /// call; `clear` itself needs a GPU, and no test reaches it).
+    fn darken(&mut self, index: usize) {
+        let Some(screen) = self.screens.get_mut(index) else {
+            return;
+        };
+        screen.owed = false;
+        let output = screen.output.clone();
+        match screen.compositor.clear() {
+            Ok(()) => {
+                screen.lit = power::after(Step::Darken, true);
+                tracing::info!(monitor = output.name(), "display off");
+                self.solium.output_dark(&output);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    monitor = output.name(),
+                    "could not switch this display off; it stays on"
+                );
+                screen.lit = power::after(Step::Darken, false);
+                screen.compositor.reset_buffers();
+                self.solium.power_refused(&output);
+            }
+        }
+    }
+
     /// Tell clients the frame reached the screen and they may draw the next.
     ///
     /// Sent on the page flip rather than on every render, and throttled to the
@@ -1357,22 +1507,32 @@ impl State {
     /// paced by the display, which is the only thing that can actually show
     /// its work.
     fn send_frames(&mut self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
+        let now = wall_clock();
         // Every screen, each at its own refresh. A window on a 60 Hz monitor
         // paced by a 260 Hz one is a client asked to draw four times as often
         // as anything can show it; the other way round it misses every frame.
         // Smithay throttles per output, so a window straddling two monitors is
         // correctly paced by both rather than by whichever asked last.
+        //
+        // Not a screen that is off, and not a window only such a screen
+        // shows: those are `send_dark_frames`', once a second. See
+        // `power.rs`, and
+        // `a_window_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`.
         for screen in &self.screens {
-            let output = &screen.output;
-            let throttle = frame_interval(output);
-            for window in self.solium.space.elements() {
-                window.send_frame(output, now, Some(throttle), |_, _| Some(output.clone()));
+            if self.solium.power.is_off(&screen.output) {
+                continue;
             }
+            self.solium
+                .send_frames_on(&screen.output, now, frame_interval(&screen.output));
         }
     }
+}
+
+/// The time frame callbacks are stamped with.
+fn wall_clock() -> Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
 }
 
 /// Every connected connector with a mode, each given a CRTC of its own.

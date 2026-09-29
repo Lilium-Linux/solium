@@ -226,6 +226,9 @@ pub(crate) struct MonitorInfo {
     pub(crate) primary: bool,
     /// Its rotation, as the name a configuration would write.
     pub(crate) transform: String,
+    /// Whether it has been turned off, which leaves it here, where it was.
+    /// `sol.monitors()` says `power = "off"`. See `power.rs`.
+    pub(crate) off: bool,
 }
 
 /// What the compositor looked like when a handler was called.
@@ -436,6 +439,14 @@ pub(crate) enum Command {
     /// What a fullscreen window covers: `fullscreen.covers`. See
     /// `crate::stack::Covers`.
     Fullscreen(crate::stack::Covers),
+    /// The idle blank, and what a window on a screen that is off is told.
+    /// See `crate::idle::Settings`.
+    Idle(crate::idle::Settings),
+    /// Turn one monitor, by name, or every one, on or off. See `power.rs`.
+    Power {
+        monitor: Option<String>,
+        on: bool,
+    },
     /// Which XCursor theme the pointer is drawn from, and how big it is.
     ///
     /// Carries what the *configuration* said and nothing else — `None` in a
@@ -1970,6 +1981,10 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     entry.set("focused", monitor.focused)?;
                     entry.set("primary", monitor.primary)?;
                     entry.set("transform", monitor.transform.clone())?;
+                    // Read, never guessed at from anything else: an off
+                    // monitor is still here, the same size, in the same place.
+                    // `sol_monitor_power_turns_a_monitor_off_and_on_and_says_so`.
+                    entry.set("power", if monitor.off { "off" } else { "on" })?;
                     // The whole monitor as well as the usable part: a
                     // wallpaper and a fullscreen window want the one a bar has
                     // not taken a bite out of.
@@ -2143,6 +2158,83 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     )));
             })?;
             Ok(Value::Nil)
+        })?,
+    )?;
+
+    // Turn a monitor off or on: `sol.monitor_power("DP-1", "off")`, or `"all"`
+    // for every one. For a binding -- none ships, since which key turns the
+    // screens off is a matter of taste and of which keyboard. The monitor
+    // stays where it is and keeps its windows; `sol.monitors()` says which
+    // are off. Any key, click or motion turns them all back on. See
+    // `power.rs`.
+    //
+    // A mode that is not `"on"` or `"off"` is an error rather than a guess:
+    // this runs from a binding, and a binding that silently did nothing is
+    // one nobody can debug. A name no monitor has is a line in the log.
+    // `sol_monitor_power_turns_a_monitor_off_and_on_and_says_so`.
+    sol.set(
+        "monitor_power",
+        lua.create_function(|lua, (which, mode): (String, String)| {
+            let on = match mode.as_str() {
+                "on" => true,
+                "off" => false,
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "sol.monitor_power: the mode is \"on\" or \"off\", not {other:?}"
+                    )));
+                }
+            };
+            let monitor = (which != "all").then_some(which);
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Power { monitor, on });
+            })
+        })?,
+    )?;
+
+    // The idle blank and what a window on a dark screen is told:
+    // `config.idle`, handed over by `init.lua`. `screens_off_after` is in
+    // seconds and `off_frame_interval` in milliseconds; 0 is "never" for
+    // both. An absent table or key keeps the default, for the reason
+    // `sol.resize` gives, and a value that is not a number of zero or more is
+    // named in the log and the default kept.
+    // `the_idle_blank_turns_every_screen_off_after_the_timeout`.
+    sol.set(
+        "idle",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut idle = crate::idle::Settings::default();
+            if let Some(options) = options {
+                let read = |key: &str, unit: f64| -> Option<Duration> {
+                    let value = options.get::<Value>(key).ok()?;
+                    if matches!(value, Value::Nil) {
+                        return None;
+                    }
+                    // `try_`, because a number past what a `Duration` holds
+                    // would otherwise panic, and that is the session.
+                    match number(&value)
+                        .filter(|amount| *amount >= 0.0)
+                        .and_then(|amount| Duration::try_from_secs_f64(amount * unit).ok())
+                    {
+                        Some(duration) => Some(duration),
+                        None => {
+                            tracing::warn!(
+                                key,
+                                value = describe(&value),
+                                "idle: not a number of zero or more; keeping the default"
+                            );
+                            None
+                        }
+                    }
+                };
+                if let Some(after) = read("screens_off_after", 1.0) {
+                    idle.screens_off_after = after;
+                }
+                if let Some(interval) = read("off_frame_interval", 0.001) {
+                    idle.off_frame_interval = interval;
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Idle(idle));
+            })
         })?,
     )?;
 
@@ -3971,6 +4063,7 @@ mod tests {
                 focused: true,
                 primary: true,
                 transform: "normal".to_owned(),
+                off: false,
             }],
             work_area: Rect {
                 x: 0.0,
@@ -4522,6 +4615,48 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The shipped configuration turns the screens off after ten minutes**,
+    /// the same number the compositor holds for a configuration that says
+    /// nothing, and a `user.lua` can say 0. See `crate::idle::Settings`.
+    #[test]
+    fn the_shipped_configuration_turns_the_screens_off_after_ten_minutes() {
+        for (user, after) in [
+            ("return {}", Duration::from_secs(600)),
+            (
+                "return { idle = { screens_off_after = 0 } }",
+                Duration::ZERO,
+            ),
+        ] {
+            let Some((directory, mut scripts)) =
+                shipped_init_with_user("solium-script-test-idle-default", user)
+            else {
+                return;
+            };
+            let idle: Vec<crate::idle::Settings> = scripts
+                .startup()
+                .commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Idle(settings) => Some(settings),
+                    _ => None,
+                })
+                .collect();
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                idle,
+                [crate::idle::Settings {
+                    screens_off_after: after,
+                    ..crate::idle::Settings::default()
+                }],
+                "{user}: the shipped init.lua did not hand `config.idle` over as it says"
+            );
+            assert_eq!(
+                idle.first().map(|settings| settings.off_frame_interval),
+                Some(Duration::from_secs(1))
+            );
+        }
     }
 
     /// **The shipped `config.lua` says nothing about the cursor, and that is
@@ -5314,6 +5449,7 @@ mod tests {
                 focused: true,
                 primary: true,
                 transform: "normal".to_owned(),
+                off: false,
             }],
             work_area: Rect {
                 x: 0.0,
@@ -6613,6 +6749,7 @@ mod dialogs {
             focused: true,
             primary: true,
             transform: "normal".to_owned(),
+            off: false,
         }
     }
 
@@ -6633,6 +6770,7 @@ mod dialogs {
             focused: false,
             primary: false,
             transform: "normal".to_owned(),
+            off: false,
         }
     }
 

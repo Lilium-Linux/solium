@@ -20,7 +20,8 @@ protocol at all.
 `wl_data_device_manager` · `xdg_wm_base` · `zxdg_decoration_manager_v1` ·
 `zxdg_output_manager_v1` · `xdg_activation_v1` · `zwlr_layer_shell_v1` ·
 `zwlr_screencopy_manager_v1` · `ext_session_lock_manager_v1` ·
-`ext_idle_notifier_v1` · `zwp_idle_inhibit_manager_v1` · `wp_presentation` ·
+`ext_idle_notifier_v1` · `zwp_idle_inhibit_manager_v1` ·
+`zwlr_output_power_manager_v1` · `wp_presentation` ·
 `wp_viewporter` · `wp_fractional_scale_manager_v1` · `zwp_linux_dmabuf_v1` ·
 `xdg_wm_dialog_v1` · `wp_single_pixel_buffer_manager_v1` ·
 `zwp_relative_pointer_manager_v1` · `zwp_pointer_constraints_v1` ·
@@ -42,7 +43,7 @@ Each of these is a day where somebody stops using the compositor.
 | [#50](https://github.com/Lilium-Linux/solium/issues/50) `ext-foreign-toplevel-list` | a dock cannot list windows or switch to them, so Lilium's own shell cannot have a task switcher |
 | [#51](https://github.com/Lilium-Linux/solium/issues/51) `wlr-output-management` | monitors live in a file; nothing can move one at runtime and `kanshi` cannot work |
 | [#52](https://github.com/Lilium-Linux/solium/issues/52) data-control | no clipboard manager can work |
-| [#54](https://github.com/Lilium-Linux/solium/issues/54) `wlr-output-power-management` | nothing can turn a screen off. Solium now *reports* idleness and can be told to stay awake, and still cannot blank a backlight — which is the actual point of an idle timeout on a laptop |
+| ~~[#54](https://github.com/Lilium-Linux/solium/issues/54) `wlr-output-power-management`~~ | **done**: the protocol, `sol.monitor_power`, and the screens going dark on their own after `idle.screens_off_after`. An off monitor stays where it was. The DRM half -- black, then `DrmCompositor::clear`, then a modeset back -- has not been run on hardware yet; see `power.rs` |
 | [#55](https://github.com/Lilium-Linux/solium/issues/55) `zwp_virtual_keyboard_v1` | the other half of an on-screen keyboard. `input-method-v2` says what was typed; this is how anything types it |
 | [#56](https://github.com/Lilium-Linux/solium/issues/56) window rules | no way to say "this application starts on that workspace, floating, this size". Not a protocol — a gap in the scripting surface, and the first thing anyone configures |
 | [#57](https://github.com/Lilium-Linux/solium/issues/57) the drag icon | nothing draws the surface a client attaches to a drag, so a drag between windows is invisible while it is happening |

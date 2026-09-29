@@ -20,6 +20,9 @@ sol.fullscreen(config.fullscreen)
 -- configuration is `super+shift+r` rather than logging out.
 sol.keyboard(config.keyboard)
 sol.monitors(config.monitors)
+-- When the screens go dark on their own. An absent table keeps the default,
+-- for the reason `sol.resize` gives.
+sol.idle(config.idle)
 -- The pointer's theme and size. An empty table here is not "reset it": it
 -- means the configuration says nothing, and `XCURSOR_THEME`/`XCURSOR_SIZE`
 -- are what the pointer follows -- which is what the rest of the machine

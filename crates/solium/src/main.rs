@@ -26,6 +26,7 @@ mod offscreen;
 mod pacing;
 mod pane;
 mod pass;
+mod power;
 mod present;
 mod qml;
 mod remains;

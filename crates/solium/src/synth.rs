@@ -197,7 +197,8 @@ fn current(state: &Solium) -> Point<f64, Logical> {
         .unwrap_or_default()
 }
 
-fn send_motion(
+/// One relative motion, through the real input path.
+pub(crate) fn send_motion(
     state: &mut Solium,
     region: Rectangle<i32, Logical>,
     delta: Point<f64, Logical>,
@@ -212,7 +213,8 @@ fn send_motion(
     );
 }
 
-fn send_button(
+/// One button press or release, through the real input path.
+pub(crate) fn send_button(
     state: &mut Solium,
     region: Rectangle<i32, Logical>,
     button: u32,

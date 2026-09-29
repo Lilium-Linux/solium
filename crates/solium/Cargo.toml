@@ -82,7 +82,11 @@ pkg-config = "0.3"
 # unified in through smithay's own dependency on the crate; stating it means
 # they compile because they asked for it, not because smithay happens to.
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+#
+# `unstable` for `zwp_idle_inhibit_v1`, which the #54 tests hold a film
+# awake with. Already on for this crate through smithay's own dependency, so,
+# as with `staging`, the lockfile does not change.
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 # The client halves of two wlroots protocols, both for tests. `zwlr_screencopy_v1`
 # is for the test that a capture is refused while the session is locked.
 # `zwlr_layer_shell_v1` gives the #92 tests a bar: maximise fills the work area

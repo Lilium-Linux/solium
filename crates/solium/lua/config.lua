@@ -341,7 +341,51 @@ local defaults = {
     --                                     far likelier a typo than a request.
     --
     -- `super+shift+r` applies a change without ending the session.
+    --
+    -- A monitor can also be turned *off* without being taken out: it keeps
+    -- its place, its work area and its windows, and only the display goes
+    -- dark. Three things do it -- `idle` below, `sol.monitor_power` from a
+    -- binding, and any client speaking `wlr-output-power-management`, which is
+    -- `wlopm` and `swayidle` driving it. Any key, click, scroll, touch or
+    -- motion turns every screen back on, and is delivered as usual: the first
+    -- key typed at a lock screen that went dark is part of the password.
+    --
+    --     sol.bind("super+F12", function() sol.monitor_power("all", "off") end)
+    --
+    -- `sol.monitors()` says which are off, as `power = "on"` or `"off"`.
     monitors = {},
+
+    -- When nobody is at the machine.
+    --
+    -- Solium tells idle daemons how long it has been left alone
+    -- (`ext-idle-notify`) and lets a video player, a call or a game say "not
+    -- now" (`idle-inhibit`). This is the part it does itself, so that no
+    -- daemon is needed for the screens to go dark at night.
+    idle = {
+        -- Seconds without a key, a click, a touch or the pointer moving
+        -- before every screen is turned off. 0 never does.
+        --
+        -- Ten minutes: GNOME blanks at five, but dims the screen first and
+        -- Solium does not, so here the first sign is the screen going dark.
+        -- Anything that plays holds an idle inhibitor, and while one is on a
+        -- screen this waits -- a film does not go dark -- and starts again
+        -- from when it lets go, so the next film in a playlist does not
+        -- start in the dark. Nothing holds it off behind the lock screen,
+        -- which goes dark like anything else.
+        --
+        -- Running `swayidle` instead? Set this to 0 and give it the screens:
+        --
+        --     swayidle -w timeout 300 'swaylock -f' \
+        --                 timeout 600 'wlopm --off \*' resume 'wlopm --on \*' \
+        --                 before-sleep 'swaylock -f'
+        screens_off_after = 600,
+
+        -- How often, in milliseconds, a window on a screen that is off is
+        -- still told it may draw. Throttled rather than stopped: a program
+        -- that waits for that inside its swap would otherwise stop dead for
+        -- as long as the screen is dark. 0 stops it, which is what sway does.
+        off_frame_interval = 1000,
+    },
 
     -- How every window is framed.
     --
