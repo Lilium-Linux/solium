@@ -16358,7 +16358,12 @@ end)
 
             /// What the desk's monitor draws, topmost first.
             fn drawn(desk: &Desk) -> Vec<Seen> {
-                crate::render::stacked(&desk.state, screen(), desk.state.clock.now())
+                drawn_by(desk, screen())
+            }
+
+            /// What the monitor at `monitor` draws, topmost first.
+            fn drawn_by(desk: &Desk, monitor: Rectangle<i32, Logical>) -> Vec<Seen> {
+                crate::render::stacked(&desk.state, monitor, desk.state.clock.now())
                     .into_iter()
                     .flat_map(|each| match each {
                         Stacked::Layer(surface, _) => {
@@ -16375,7 +16380,17 @@ end)
 
             /// Whether `top` is drawn over `bottom`, both being drawn.
             fn drawn_over(desk: &Desk, top: Seen, bottom: Seen) -> bool {
-                let drawn = drawn(desk);
+                drawn_over_by(desk, screen(), top, bottom)
+            }
+
+            /// [`drawn_over`], on the monitor at `monitor`.
+            fn drawn_over_by(
+                desk: &Desk,
+                monitor: Rectangle<i32, Logical>,
+                top: Seen,
+                bottom: Seen,
+            ) -> bool {
+                let drawn = drawn_by(desk, monitor);
                 let at = |seen| drawn.iter().position(|each| *each == seen);
                 matches!((at(top), at(bottom)), (Some(top), Some(bottom)) if top < bottom)
             }
@@ -16485,6 +16500,16 @@ end)
             /// A window at `at`, sent fullscreen, answering with a buffer
             /// the size of the monitor as a client does.
             fn fullscreen(desk: &mut Desk, at: (i32, i32)) -> (Opened, Window) {
+                fullscreen_on(desk, at, screen())
+            }
+
+            /// [`fullscreen`], on the monitor at `monitor`, which `at` is
+            /// on.
+            fn fullscreen_on(
+                desk: &mut Desk,
+                at: (i32, i32),
+                monitor: Rectangle<i32, Logical>,
+            ) -> (Opened, Window) {
                 let opened = desk.open_surface();
                 let window = window_of(desk, opened.pane);
                 desk.state.space.map_element(window.clone(), at, false);
@@ -16495,14 +16520,14 @@ end)
                     &desk.client,
                     &desk.qh,
                     &opened.surface,
-                    screen().size.w,
-                    screen().size.h,
+                    monitor.size.w,
+                    monitor.size.h,
                 );
                 desk.pump();
                 landed(desk);
                 assert_eq!(
                     desk.state.real_geometry(&window),
-                    Some(screen()),
+                    Some(monitor),
                     "the premise: the window covers the monitor, bar and all"
                 );
                 (opened, window)
@@ -17009,6 +17034,82 @@ end)
                 );
             }
 
+            /// **A fullscreen window's menu is drawn over the bar with it,
+            /// and takes the press there.** Its popups are drawn in its own
+            /// walk, which is the band it was lifted into.
+            #[test]
+            fn a_fullscreen_windows_menu_over_the_bar_takes_the_press() {
+                let mut desk = Desk::new();
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let (video, _window) = fullscreen(&mut desk, (10, 40));
+                let menu = drawn_popup(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &desk.conn,
+                    &desk.qh,
+                    &mut desk.queue,
+                    &mut desk.client,
+                    &video.xdg,
+                    (100, 5),
+                    (120, 20),
+                );
+                assert!(
+                    drawn_over(&desk, Seen::Pane(video.pane), Seen::Layer(id(&bar))),
+                    "the fullscreen window and its menu over the bar: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(delivered(&desk, 150.0, 15.0), Some(id(&menu)));
+            }
+
+            /// **On two monitors, a fullscreen window covers its own
+            /// monitor's bar and no other.** Lifted per monitor: the bar on
+            /// the left one stays over the left one's windows and keeps its
+            /// presses.
+            #[test]
+            fn on_two_monitors_a_fullscreen_window_covers_only_its_own_monitors_bar() {
+                let mut desk = Desk::side_by_side();
+                let right = Rectangle::new((1920, 0).into(), (1920, 1080).into());
+                let bar = scripted(
+                    &mut desk,
+                    "shell",
+                    Scripted::Top,
+                    Rectangle::new((0, 0).into(), (3840, 30).into()),
+                );
+                let left = desk.open_surface();
+                let left_window = window_of(&desk, left.pane);
+                desk.state
+                    .space
+                    .map_element(left_window.clone(), (500, 10), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let (video, window) = fullscreen_on(&mut desk, (1930, 40), right);
+
+                let (bar_seen, video_seen, left_seen) = (
+                    Seen::Script(bar),
+                    Seen::Pane(video.pane),
+                    Seen::Pane(left.pane),
+                );
+                assert!(
+                    drawn_over_by(&desk, right, video_seen, bar_seen)
+                        && drawn_over_by(&desk, screen(), bar_seen, left_seen),
+                    "the right monitor: the fullscreen window over the bar {:?}; the left \
+                     monitor: the bar over the window {:?}",
+                    drawn_by(&desk, right),
+                    drawn_by(&desk, screen())
+                );
+                assert_eq!(
+                    (
+                        claimed(&desk, 2020.0, 15.0),
+                        delivered(&desk, 2020.0, 15.0),
+                        claimed(&desk, 532.0, 15.0),
+                        desk.state.claim_under((532.0, 15.0).into()),
+                    ),
+                    (None, Some(surface_id(&window)), Some(bar), Claim::Surface),
+                    "(on the right monitor's bar strip: the bar offered the press, the surface \
+                     the pointer reaches; on the left one's over its window: the bar offered \
+                     the press, what the press is)"
+                );
+            }
         }
     }
 
