@@ -2,7 +2,7 @@
 
 ## Checks
 
-- [ ] `dev/gate.sh` passes (fmt, clippy, tests, build, and the script check).
+- [ ] `dev/gate.sh` passes (fmt, clippy, tests, build, the script check and the QML GPU check; see CONTRIBUTING.md).
 - [ ] New behaviour has a test that fails without the change.
 - [ ] Documentation is updated where the change is visible to users.
 

@@ -24,7 +24,7 @@ a demo into a regression test.
 
 | Script | What it asserts |
 |---|---|
-| `dev/gate.sh` | fmt, clippy, tests, build, and that the Lua configuration loads |
+| `dev/gate.sh` | fmt, clippy, tests, build, that the Lua configuration loads, and the QML GPU path against a real driver (see *The gate*) |
 | `dev/app-check.sh <program>` | a client runs, draws, and provokes no protocol error |
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
@@ -459,12 +459,52 @@ podman rm lilium-add
 
 ## Building
 
+Natively, with the development packages the top-level README lists under
+*Building*:
+
+```sh
+cargo build
+```
+
+Or in the build image, which needs only podman and a rustup install on the
+host. The image has the C toolchain and the system libraries; Rust comes from
+your own `CARGO_HOME` and `RUSTUP_HOME`, mounted at the same paths:
+
 ```sh
 podman build -t solium-build:fc44 -f dev/Containerfile dev/
 podman run --rm --userns=keep-id --security-opt label=disable \
-    -v "$HOME:$HOME" -e CARGO_HOME="$HOME/.cargo" -e PATH="$HOME/.cargo/bin:/usr/bin:/bin" \
+    -v "$PWD:$PWD" -v "$HOME/.cargo:$HOME/.cargo" -v "$HOME/.rustup:$HOME/.rustup" \
+    -e CARGO_HOME="$HOME/.cargo" -e RUSTUP_HOME="$HOME/.rustup" \
+    -e PATH="$HOME/.cargo/bin:/usr/bin:/bin" \
     -w "$PWD" localhost/solium-build:fc44 cargo build
 ```
+
+### The gate
+
+`dev/gate.sh` runs `cargo fmt`, clippy with warnings denied, the tests and a
+build, then two checks on the built binaries that nothing else reaches:
+`solium --check`, which loads the Lua configuration, and `dev/wirecheck`, which
+drives the QML GPU path against the machine's own render node. It runs cargo
+natively unless told otherwise:
+
+| Variable | Effect |
+|---|---|
+| `SOLIUM_GATE_IMAGE=<image>` | Build in this podman image, e.g. `localhost/solium-build:fc44`. If it does not exist, the gate prints the `podman build` line that makes it. Only the checkout, `CARGO_HOME` and `RUSTUP_HOME` are mounted. The two checks above still run on the host. |
+| `SOLIUM_GATE_PODMAN_ARGS=<args>` | Extra `podman run` arguments, split on spaces — e.g. `"--memory=6g --memory-swap=6g"` to cap a build that would otherwise use all the memory there is. |
+| `SOLIUM_GATE_JOBS=<n>` | `cargo -j<n>`. Unset, cargo uses every CPU. |
+| `SOLIUM_GATE_CPUS=<list>` | Pin the build to these CPUs, as a `taskset` list such as `14,15`. |
+| `SOLIUM_GATE_NO_GPU=1` | Build the GPU check but do not run it. It is skipped anyway on a machine with no render node. |
+
+For example, capped and in the container:
+
+```sh
+SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 \
+SOLIUM_GATE_PODMAN_ARGS="--memory=6g --memory-swap=6g" SOLIUM_GATE_JOBS=2 \
+    dev/gate.sh
+```
+
+Every step runs under `nice -n 19` and, where it exists, `ionice -c 3`, so a
+gate in the background leaves the machine usable.
 
 **The build image matches the host's distribution on purpose.** Two things go
 wrong otherwise, and both were hit:
