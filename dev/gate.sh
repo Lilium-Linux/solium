@@ -15,6 +15,10 @@
 #                                  localhost/solium-build:fc44 from
 #                                  dev/Containerfile. Only the checkout,
 #                                  CARGO_HOME and RUSTUP_HOME are mounted.
+#                                  The script check runs in the image too;
+#                                  the GPU check runs here, and is skipped
+#                                  if this machine cannot load what the
+#                                  image built.
 #   SOLIUM_GATE_PODMAN_ARGS=<args> extra arguments for `podman run`, split on
 #                                  spaces, e.g. "--memory=6g --memory-swap=6g".
 #   SOLIUM_GATE_JOBS=<n>           cargo -j<n>. Unset, cargo uses every CPU.
@@ -28,10 +32,10 @@ image="${SOLIUM_GATE_IMAGE:-}"
 
 # Politeness first, so a gate running in the background does not make the
 # machine it runs on unusable. The pin comes last so it applies to cargo.
-polite="nice -n 19"
-if [[ -n "$image" ]] || command -v ionice >/dev/null 2>&1; then
-    polite="$polite ionice -c 3"
-fi
+# ionice is looked for by the shell that runs each step, so in the container it
+# is the image's ionice that has to exist, not this machine's.
+# shellcheck disable=SC2016
+polite='nice -n 19 $(command -v ionice >/dev/null 2>&1 && echo ionice -c 3)'
 if [[ -n "${SOLIUM_GATE_CPUS:-}" ]]; then
     polite="$polite taskset -c ${SOLIUM_GATE_CPUS}"
 fi
@@ -83,7 +87,8 @@ run() {
 }
 
 echo "fmt..."
-run "$polite cargo fmt --all"
+run "$polite cargo fmt --all" \
+    || { echo "GATE FAILED: fmt" >&2; exit 1; }
 echo "clippy..."
 run "$polite cargo clippy --all-targets $jobs -- -D warnings" \
     || { echo "GATE FAILED: clippy" >&2; exit 1; }
@@ -98,18 +103,19 @@ run "$polite cargo build $jobs" \
 # error in config.lua compiles, tests and clippies perfectly cleanly, and then
 # the compositor starts with no scripts at all -- no layouts, no bindings, no
 # decorations. That shipped past a green gate once; it is one line to stop.
-# Run here rather than in the container, because it is the built binary rather
-# than the build.
+# Run where it was built: a binary built in the image links the image's Qt and
+# system libraries, which this machine need not have. It needs no display and
+# no GPU, which is why CI can run it too.
 echo "scripts..."
-"$root/target/debug/solium" --check >/dev/null \
-    || { echo "GATE FAILED: scripts ($root/target/debug/solium --check)" >&2; exit 1; }
+run "./target/debug/solium --check >/dev/null" \
+    || { echo "GATE FAILED: scripts (target/debug/solium --check)" >&2; exit 1; }
 
 # The QML GPU path, against a real GLES renderer and the real host.cpp.
 #
 # Nothing above this line touches it: `cargo test` cannot, because it needs a
 # GPU and a Qt installation at run time, and a build container has neither a
 # render node nor a display. So it is built like everything else and *run*
-# here, the same split as the script check above.
+# here, on this machine's own driver.
 #
 # It earns a place in the gate because every defect this path has produced was
 # silent -- a frame drawn into the wrong context, a teardown deleting the
@@ -131,12 +137,24 @@ run "cd dev/wirecheck && $polite cargo build $jobs" \
 # forever.
 node="$(ls -1 /dev/dri/renderD* 2>/dev/null | head -1 || true)"
 log="$root/dev/wirecheck/target/wirecheck.log"
+wirecheck="$root/dev/wirecheck/target/debug/wirecheck"
+# Built in the image, it links the image's libraries, and a machine that is not
+# the distribution the image is made from may not have them. Then it cannot be
+# run here at all, which is not a failure of the change being checked. A native
+# build always loads here, so the question is only asked of an image build.
+unloadable=""
+if [[ -n "$image" ]]; then
+    unloadable="$(ldd "$wirecheck" 2>&1 | grep 'not found' || true)"
+fi
 if [[ -z "$node" ]]; then
     echo "  skipped: no render node on this machine"
 elif [[ -n "${SOLIUM_GATE_NO_GPU:-}" ]]; then
     echo "  skipped: SOLIUM_GATE_NO_GPU is set"
+elif [[ -n "$unloadable" ]]; then
+    echo "  skipped: the image's build cannot load on this machine:"
+    echo "$unloadable" | head -5 | sed 's/^[[:space:]]*/    /'
 else
-    "$root/dev/wirecheck/target/debug/wirecheck" "$node" >"$log" 2>&1 \
+    "$wirecheck" "$node" >"$log" 2>&1 \
         || { echo "GATE FAILED: wirecheck on $node (see $log)" >&2
              tail -25 "$log" >&2; exit 1; }
 fi

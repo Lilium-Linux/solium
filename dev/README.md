@@ -464,9 +464,12 @@ Natively, with the development packages the top-level README lists under
 cargo build
 ```
 
-Or in the build image, which needs only podman and a rustup install on the
-host. The image has the C toolchain and the system libraries; Rust comes from
-your own `CARGO_HOME` and `RUSTUP_HOME`, mounted at the same paths:
+Or, on a Fedora host without the development packages, in the build image,
+which needs only podman and a rustup install. The image has the C toolchain and
+the system libraries; Rust comes from your own `CARGO_HOME` and `RUSTUP_HOME`,
+mounted at the same paths. Build the image for the Fedora release you run
+(`--build-arg FEDORA_VERSION=<n>`, 44 by default), for the reasons below; on
+another distribution, install the packages natively:
 
 ```sh
 podman build -t solium-build:fc44 -f dev/Containerfile dev/
@@ -487,7 +490,7 @@ natively unless told otherwise:
 
 | Variable | Effect |
 |---|---|
-| `SOLIUM_GATE_IMAGE=<image>` | Build in this podman image, e.g. `localhost/solium-build:fc44`. If it does not exist, the gate prints the `podman build` line that makes it. Only the checkout, `CARGO_HOME` and `RUSTUP_HOME` are mounted. The two checks above still run on the host. |
+| `SOLIUM_GATE_IMAGE=<image>` | Build in this podman image, e.g. `localhost/solium-build:fc44`. If it does not exist, the gate prints the `podman build` line that makes it. Only the checkout, `CARGO_HOME` and `RUSTUP_HOME` are mounted. `solium --check` runs in the image too; `dev/wirecheck` runs on the host, on its render node, and is skipped with a message if the host cannot load what the image built. |
 | `SOLIUM_GATE_PODMAN_ARGS=<args>` | Extra `podman run` arguments, split on spaces — e.g. `"--memory=6g --memory-swap=6g"` to cap a build that would otherwise use all the memory there is. |
 | `SOLIUM_GATE_JOBS=<n>` | `cargo -j<n>`. Unset, cargo uses every CPU. |
 | `SOLIUM_GATE_CPUS=<list>` | Pin the build to these CPUs, as a `taskset` list such as `14,15`. |

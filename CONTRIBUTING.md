@@ -63,8 +63,9 @@ It runs `cargo fmt`, clippy with every warning denied, the tests, a build, then
 path against your machine's render node, skipped if there is none). It exits
 non-zero if anything fails, and a pull request is expected to pass it.
 
-It runs cargo natively. If your distribution cannot provide the packages, build
-in the container instead, which needs only podman and rustup:
+It runs cargo natively. On Fedora without the development packages, it can
+build in an image of your Fedora release instead (`FEDORA_VERSION` in
+`dev/Containerfile`, 44 by default), which needs only podman and rustup:
 
 ```sh
 podman build -t solium-build:fc44 -f dev/Containerfile dev/
@@ -73,7 +74,10 @@ SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 dev/gate.sh
 
 `SOLIUM_GATE_JOBS`, `SOLIUM_GATE_CPUS`, `SOLIUM_GATE_PODMAN_ARGS` and
 `SOLIUM_GATE_NO_GPU` limit what it uses; see [dev/README.md](dev/README.md#the-gate).
-CI runs the same checks except the GPU one, on Fedora.
+On another distribution, install the packages natively: what the image builds
+links Fedora's libraries and does not run elsewhere. CI runs the same checks
+except the GPU one, on Fedora, so a contributor whose distribution ships a Qt
+older than 6.5, which cannot run Solium at all, can rely on CI for them.
 
 **Lints are denied, not warned.** `unwrap_used`, `expect_used`, `panic` and
 `todo` are denied for the whole workspace, because a compositor crash takes the

@@ -67,10 +67,14 @@ Then, from the checkout:
 cargo build            # target/debug/solium; add --release for an optimised build
 ```
 
-**Or in a container**, if your distribution cannot provide the packages. This
-needs only podman and rustup on the host: the image has the C toolchain and the
-libraries, and your own Rust is mounted into it. The binary it builds is meant
-to run on a Fedora 44 host, since it links that image's libraries.
+**Or in a container, on Fedora without the development packages.** The image
+has the C toolchain and the libraries, and your own rustup install is mounted
+into it. It is an image of Fedora, and what it builds links that release's
+libraries, so build it for the release you run: `FEDORA_VERSION` (44 by
+default) is a build argument of `dev/Containerfile`. On any other distribution,
+install the packages above instead. A release whose Qt is older than 6.5 cannot
+run Solium at all; a pull request from one still gets every check except the
+GPU one from CI.
 
 ```sh
 podman build -t solium-build:fc44 -f dev/Containerfile dev/

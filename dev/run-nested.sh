@@ -5,9 +5,9 @@
 #   dev/run-nested.sh                       # just the compositor
 #   dev/run-nested.sh konsole --separate    # and a client inside it
 #
-# Solium runs on the host, on the host's GPU driver. It is built in a container
-# (dev/Containerfile) whose distribution matches the host's, and that match is
-# not incidental — see dev/README.md. Running it inside a container instead
+# Solium runs on the host, on the host's GPU driver. It is built natively, or
+# in dev/Containerfile's image of the host's own distribution, and that match
+# is not incidental — see dev/README.md. Running it inside a container instead
 # costs hardware acceleration and drops the compositor to ~55 fps.
 #
 # Two things this script is deliberately careful about:
