@@ -137,9 +137,9 @@ compositor and does not come back.
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) IME | no CJK, no compose key, no emoji picker. Unusable for most of the world's writers |
 | [#55](https://github.com/Lilium-Linux/solium/issues/55) virtual-keyboard | the other half of an on-screen keyboard, which is what a phone is |
 | [#56](https://github.com/Lilium-Linux/solium/issues/56) window rules | nothing matches on `app_id`. The first thing anybody configures |
-| [#54](https://github.com/Lilium-Linux/solium/issues/54) output power | nothing can turn a screen off, which is what an idle timeout is for on a laptop |
+| ~~[#54](https://github.com/Lilium-Linux/solium/issues/54) output power~~ | **done**: `wlr-output-power-management`, `sol.monitor_power`, and a built-in idle blank so no daemon is needed. Not yet run on hardware |
 | [#63](https://github.com/Lilium-Linux/solium/issues/63) multi-GPU | a monitor on the second card cannot be driven at all — which is docking an ordinary laptop |
-| ~~[#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit~~ | **done**, with `ext-idle-notify` beside it — the two are one feature. Blanking policy is still nobody's: see `wlr-output-power-management` |
+| ~~[#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit~~ | **done**, with `ext-idle-notify` beside it — the two are one feature. The screens going dark is #54's, and an inhibitor holds that off too |
 | [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | **done and closed.** A monitor plugged in mid-session is picked up and one unplugged is dropped, confirmed on the hardware rather than on paper |
 | [#24](https://github.com/Lilium-Linux/solium/issues/24) cursor-shape | clients fall back today, so it costs nothing — until one does not |
 | [#50](https://github.com/Lilium-Linux/solium/issues/50) foreign-toplevel | a dock cannot list windows or switch to them, so Lilium's own shell cannot have a task switcher |

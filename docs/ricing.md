@@ -527,6 +527,69 @@ Everything is applied at startup. A monitor plugged in while the session is
 running is not picked up yet —
 [#43](https://github.com/Lilium-Linux/solium/issues/43).
 
+### Turning screens off
+
+The screens go dark on their own after ten minutes with nobody at the machine,
+with no daemon to install. It is one number:
+
+```lua
+return { idle = { screens_off_after = 300 } }   -- seconds; 0 never does it
+```
+
+Ten minutes and not GNOME's five, because GNOME dims first and Solium does not:
+here the first you know of it is the screen going dark. Anything that plays --
+a film, a call, a presentation -- holds an idle inhibitor, and while that window
+is on screen the timer waits. Nothing holds it off behind the lock screen, which
+goes dark like anything else.
+
+**Any key, click, scroll, touch or pointer motion turns every screen back on**,
+however they went off, and that input is delivered as usual rather than
+swallowed. The case that decides it is typing a password at a lock screen that
+went dark: the first key is part of the password, and a compositor that ate it
+would fail the unlock for a reason nobody could see. A key *release* does not
+wake anything, so a binding that turns the screens off leaves them off when you
+let go of it.
+
+A monitor that is off is **not gone**. It keeps its place in the arrangement,
+its work area and its windows; nothing is moved, no client is told a screen
+went away, and `sol.monitors()` still lists it, with `power = "off"`. That is
+the difference from `enabled = false`, which takes a monitor out and frees its
+CRTC.
+
+From a binding -- none ships, since which key does this is a matter of taste:
+
+```lua
+sol.bind("super+F12", function() sol.monitor_power("all", "off") end)
+sol.bind("super+shift+F12", function() sol.monitor_power("DP-2", "off") end)
+```
+
+**Or leave it to `swayidle`.** Solium speaks `wlr-output-power-management`, so
+`wlopm` works, and `swayidle` drives it without needing `swaymsg`. Turn the
+built-in one off so the two do not both do it:
+
+```lua
+return { idle = { screens_off_after = 0 } }
+```
+
+```sh
+swayidle -w \
+    timeout 300 'swaylock -f' \
+    timeout 600 'wlopm --off \*' resume 'wlopm --on \*' \
+    before-sleep 'swaylock -f'
+```
+
+`wlopm` on its own lists the monitors and whether each is on.
+
+A window on a screen that is off is still told it may draw, once a second
+(`idle.off_frame_interval`, in milliseconds). Stopping altogether is what sway
+does, and it freezes any program that waits for that inside its swap for as
+long as the screen is dark, which with the idle blank is all night; `0` asks for
+it anyway. A screenshot of a screen that is off is refused rather than left
+waiting.
+
+Nested, there is no display to power off: a monitor that is "off" is drawn
+black and then not drawn at all, so all of the above can be tried in a window.
+
 ### One workspace per screen, or one for the desk
 
 Each monitor has its own workspace in view by default: `super+2` switches the

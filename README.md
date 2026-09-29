@@ -62,7 +62,8 @@ one global coordinate space, arranged from the configuration or guessed left to
 right. Every layout runs per screen, and the pointer crosses between them.
 
 Protocols: `xdg-shell`, `wlr-layer-shell`, `wlr-screencopy`, `ext-session-lock`,
-`ext-idle-notify`, `idle-inhibit`, `xdg-decoration`, `xdg-output`,
+`ext-idle-notify`, `idle-inhibit`, `wlr-output-power-management`,
+`xdg-decoration`, `xdg-output`,
 `xdg-activation`, `wp-viewporter`, `wp-fractional-scale`, `wp-presentation`,
 `wp-single-pixel-buffer`, `linux-dmabuf`, `relative-pointer`,
 `pointer-constraints`, `primary-selection`, `xwayland-shell`.
@@ -95,9 +96,16 @@ counts only while its window is actually drawn, so one on a workspace you are
 not looking at stops holding the machine awake, and nothing at all holds it
 awake behind a lock screen.
 
-Solium does not blank or dim a screen itself; it reports idleness and leaves
-the policy to whatever you run. Turning a monitor off wants
-`wlr-output-power-management`, which is not here yet.
+The screens go dark on their own after ten minutes with nobody at the machine
+(`idle.screens_off_after` in `config.lua`; 0 turns it off), unless something on
+screen is holding an inhibitor — a film does not go dark, and nothing holds a
+lock screen lit. Any key, click or motion turns every screen back on and is
+delivered as usual, so the first key typed at a lock screen that went dark is
+part of the password rather than lost. A monitor that is off keeps its place,
+its work area and its windows; nothing moves and no client is told it went.
+`wlr-output-power-management` is there too, so `wlopm` and `swayidle` driving it
+can do the same, and `sol.monitor_power` does it from a binding. The recipe is
+in [docs/ricing.md](docs/ricing.md#turning-screens-off).
 
 Menus behave. An X11 client that says what kind of window it is gets it: a menu
 or a tooltip is placed by the application rather than tiled like a window, a Wayland popup is grabbed so clicking outside dismisses
@@ -185,8 +193,9 @@ that does not exist yet.
 
 ### And the parts that are deliberately not ours
 
-Solium does not blank screens, manage sessions, draw a bar or own a
-notification. It reports idleness and lets a policy daemon act; it exposes
+Solium does not manage sessions, draw a bar or own a notification. It blanks
+its screens after ten minutes alone and no other idle policy is its own: it
+reports idleness and lets a policy daemon act on the rest; it exposes
 `wlr-screencopy` and lets a portal record; it hosts layer surfaces and lets a
 shell be a shell. [docs/shell-boundary.md](docs/shell-boundary.md) is where that
 line is drawn and defended.
