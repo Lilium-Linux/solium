@@ -275,3 +275,12 @@ of it.
   compositor rather than beside it, which is a different answer to the same
   question, and it is a different answer because Quickshell had already shown
   what the question was.
+
+## License
+
+Solium is free software under the [GNU General Public License, version 3
+only](LICENSE) (`GPL-3.0-only`).
+
+Contributions are welcome. Each contributor agrees once to the
+[Contributor License Agreement](CLA.md); the pull request template carries
+the one sentence that does it.
