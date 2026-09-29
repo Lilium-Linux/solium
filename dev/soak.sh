@@ -27,8 +27,8 @@ minutes="${1:-48}"
 #
 #   dev/soak.sh 60 --attach wayland-1
 #
-# This exists because a nested soak cannot run unattended on this machine. The
-# winit backend blocks inside eglSwapBuffers waiting on the host compositor,
+# This exists because a nested soak cannot run unattended on a desktop whose
+# display goes to sleep. The winit backend blocks inside eglSwapBuffers waiting on the host compositor,
 # and a host whose display has gone to sleep stops servicing the surface --
 # so the compositor sits there consuming no CPU, and an hour of sampling
 # measures nothing at all. A session on a TTY has no host to wait for. Start
@@ -167,6 +167,10 @@ done
 echo "soak: ${minutes} minutes${tty_flag:+ on the hardware}, socket=$socket, x11=${x_display:-none}"
 echo "samples: $csv"
 
+# The host compositor is sampled too, when it is KWin, because a nested soak
+# that looks flat may be one whose host is the thing growing. Optional: on any
+# other host, or on a TTY, the two kwin columns stay empty and nothing else
+# changes.
 kwin="$(pgrep -x kwin_wayland | head -1)"
 echo "elapsed_s,rss_kb,threads,fds,cpu_s,clients,kwin_rss_kb,kwin_cpu_s" >"$csv"
 

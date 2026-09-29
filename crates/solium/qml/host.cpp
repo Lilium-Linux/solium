@@ -12,8 +12,9 @@
  *
  *   Qt can only be handed an existing GL context through
  *   QNativeInterface::QEGLContext::fromNative, and that call is implemented by
- *   the QPA platform plugin, not by Qt Gui. Measured on this machine, Qt 6.11:
- *   `offscreen` and `eglfs` both return null, so there is no plugin available
+ *   the QPA platform plugin, not by Qt Gui. Measured on the reference machine
+ *   (NVIDIA RTX 3070, driver 610.57.04, Qt 6.11, Fedora 44): `offscreen` and
+ *   `eglfs` both return null, so there is no plugin available
  *   that will adopt a foreign EGL context. Without adoption, Qt renders on a
  *   context of its own and the texture it produces is not one the compositor
  *   can sample — the two contexts share nothing.
@@ -487,7 +488,8 @@ extern "C" int solium_qml_start_gpu(const char *import_path)
     // below asks for. QQuickRenderControl::initialize() then refuses with
     // "QRhi is only compatible with default adaptation", which names neither
     // the platform nor the adaptation and reads like an RHI bug. Measured on
-    // this machine, Qt 6.11, NVIDIA 610.57.04: offscreen never gets an RHI;
+    // the reference machine (NVIDIA RTX 3070, driver 610.57.04, Qt 6.11):
+    // offscreen never gets an RHI;
     // eglfs does, and the whole import/render/fence round trip works on it.
     //
     // eglfs loads its eglfs_kms integration, which opens /dev/dri/card1 and
@@ -968,7 +970,8 @@ static bool scene_context_is_current(const SoliumQmlScene *scene)
  * empty, because the FBO and texture names Qt drew through mean something else
  * — or nothing — in the compositor's context.
  *
- * Measured on this machine, and it is not subtle once you know where to look:
+ * Measured on the reference machine (NVIDIA RTX 3070, driver 610.57.04), and
+ * it is not subtle once you know where to look:
  * with the compositor's context current across a render the buffer reads back
  * as 16384 zero bytes and with Qt's it reads back as the frame, byte for byte
  * identical to the software path. The first frame after a scene is built works
@@ -1806,8 +1809,9 @@ static int fence_after_render()
 
     QOpenGLFunctions *gl = context->functions();
     if (create_sync == nullptr || destroy_sync == nullptr || dup_fence == nullptr) {
-        // EGL_ANDROID_native_fence_sync is present on this machine (the probe
-        // checked), so this branch is for the machines where it is not. A
+        // EGL_ANDROID_native_fence_sync is present on the reference machine's
+        // NVIDIA driver (dev/qtprobe checked), so this branch is for the
+        // machines where it is not. A
         // glFinish is correct, just expensive: it blocks until the GPU is idle,
         // which is a superset of "this frame has landed".
         gl->glFinish();

@@ -13,11 +13,11 @@ appeared on the first list, and none of it was found by the test suite.
 
 ## Where it stands
 
-Four days old, 111 commits, ~21k lines across Rust, Lua, QML and the Qt host.
-E1 to E6 have landed: it boots on hardware, transforms and animates every
-window through one engine, is scripted in Lua, has floating, tiling and
-scrolling layouts, draws its own decorations from QML, and expresses every mode
-as a script over the transform.
+When this was first written it was four days old: 111 commits, ~21k lines
+across Rust, Lua, QML and the Qt host. E1 to E6 have landed: it boots on
+hardware, transforms and animates every window through one engine, is scripted
+in Lua, has floating, tiling and scrolling layouts, draws its own decorations
+from QML, and expresses every mode as a script over the transform.
 
 That last one was the bet. If overview had needed new Rust the architecture was
 wrong and everything after would have been fighting it. It didn't — overview is

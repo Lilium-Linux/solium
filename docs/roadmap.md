@@ -20,8 +20,9 @@ meant at the time is the more useful record.
 
 ## E1 — Boots and shows a window
 
-Smithay skeleton with a Vulkan renderer. Winit backend for development, DRM for
-real hardware. One xdg-shell client rendered on screen, keyboard and pointer
+Smithay skeleton with a Vulkan renderer — the plan at the time; it shipped on
+GLES instead, for the reasons in `docs/spikes/2026-08-27-vulkan-on-smithay.md`.
+Winit backend for development, DRM for real hardware. One xdg-shell client rendered on screen, keyboard and pointer
 input working, clean shutdown.
 
 Done when: a terminal opens in Solium under a nested session and accepts typing.
