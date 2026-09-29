@@ -80,11 +80,11 @@ in it that undermines the claim.
 **This is the one to fix first.** "Edit a file, press a key, watch it change"
 is the sentence a preview is sold on, and today that key can eat the desktop.
 
-### Still blocking, and unchanged
+### Still blocking
 
 | | why |
 |---|---|
-| [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | there is none. A preview nobody can install is a preview nobody tries. **Deliberately last**: a preview people can install and then hit the reload bug is worse than one they cannot install yet. The asset half is done -- an installed binary finds its own QML and Lua -- so what remains is recipes |
+| [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | A preview nobody can install is a preview nobody tries. **Deliberately last**: a preview people can install and then hit the reload bug is worse than one they cannot install yet. **Done:** an installed binary finds its own QML and Lua, and `dev/install.sh` installs from a checkout into `~/.local` on Fedora 44 and prints the one `sudo` line that puts the session file where Plasma Login reads it, so Solium can be picked at the login screen (`dev/install-check.sh` checks it). **Left:** packages -- a Fedora `.spec` and COPR, an Arch `PKGBUILD` -- plus `--config` ([#106](https://github.com/Lilium-Linux/solium/issues/106)) and the configuration directory's name ([#107](https://github.com/Lilium-Linux/solium/issues/107)), which is worth settling before the recipes are written |
 
 ### Done since this was written
 
@@ -92,7 +92,6 @@ is the sentence a preview is sold on, and today that key can eat the desktop.
 
 | | why |
 |---|---|
-| [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | there is none. A preview nobody can install is a preview nobody tries |
 | ~~[#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout~~ | **done.** In `config.keyboard`, with the repeat rate — which was the part that genuinely could not be changed. The layout could always be set through `XKB_DEFAULT_LAYOUT`; this entry said otherwise and was wrong |
 | ~~[#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor~~ | **done.** A pipeline per monitor, one global space, layouts and workspaces per screen |
 | ~~[#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI~~ | **done.** Scale per monitor, chrome rasterised at it, chosen from the panel's dpi |

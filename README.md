@@ -49,6 +49,44 @@ On the hardware, anything that goes wrong is also written to
 `~/.local/state/solium/session.log`, synchronously — that log exists for the
 case where the screen is gone and the power button is the only way out.
 
+## Install
+
+There is no package yet. From a checkout, on Fedora 44 (or a Fedora with the
+same Qt), so the login screen offers Solium:
+
+```sh
+podman build -t solium-build:fc44 -f dev/Containerfile dev/   # once
+dev/install.sh
+sudo install -Dm644 ~/.local/share/solium/solium.desktop /usr/local/share/wayland-sessions/solium.desktop
+```
+
+`dev/install.sh` builds a release binary in the build container, copies it and
+the shipped QML and Lua into `~/.local` (`--prefix` picks another place), runs
+the installed copy's `--check`, and prints the `sudo` line above — the one step
+that needs root, which it leaves to you. Then log out and pick **Solium** from
+the session list.
+
+**Getting back.** The login screen remembers the last session, so from then on
+it offers Solium first: pick **Plasma** to return. Inside Solium,
+Ctrl+Alt+Backspace ends the session whatever your configuration says (unless
+the screen is locked), and so does super+shift+q in the shipped configuration.
+Ctrl+Alt+F3 switches to a text console, where you can log in and read
+`~/.local/state/solium/session.log`. Solium handles both chords itself, so
+neither helps if Solium itself hangs.
+
+What it installs is a copy: rebuilding or checking out another branch does not
+change it, and running `dev/install.sh` again replaces it. It refuses while a
+Solium session is running from it, and while `~/.local/share/solium` is a
+link, which it would otherwise delete through.
+
+To remove it, `dev/install.sh --uninstall`, then the
+`sudo rm -f /usr/local/share/wayland-sessions/solium.desktop` it prints. Your
+`~/.config/solium` and the session log stay.
+
+Still to come ([#66](https://github.com/Lilium-Linux/solium/issues/66)): a
+Fedora `.spec` and COPR, and an Arch `PKGBUILD`.
+[dev/README.md](dev/README.md#installing-it) has the details.
+
 ## What works
 
 Windows open, tile, scroll, float and animate. Server-side decorations are QML
