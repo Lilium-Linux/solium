@@ -49,17 +49,22 @@ use std::{io::IsTerminal, path::PathBuf};
 use anyhow::Result;
 use tracing_subscriber::fmt::writer::MakeWriterExt as _;
 
-/// Where a hardware session writes its log.
-///
-/// Returns `None` rather than failing: not being able to write a log is a
-/// reason to run without one, never a reason not to start.
-fn open_log() -> Option<std::sync::Arc<std::fs::File>> {
+/// `$XDG_STATE_HOME/solium`, or `~/.local/state/solium`.
+fn state_directory() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
         })?;
-    let directory = base.join("solium");
+    Some(base.join("solium"))
+}
+
+/// Where a hardware session writes its log.
+///
+/// Returns `None` rather than failing: not being able to write a log is a
+/// reason to run without one, never a reason not to start.
+fn open_log() -> Option<std::sync::Arc<std::fs::File>> {
+    let directory = state_directory()?;
     std::fs::create_dir_all(&directory).ok()?;
     let path = directory.join("session.log");
 

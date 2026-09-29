@@ -213,7 +213,9 @@ local defaults = {
     --
     --   renderer        "auto" renders on the GPU when a trial render in a
     --                   separate process passes, and in software when it
-    --                   fails or times out; nested, it is software. "gpu"
+    --                   fails or times out, or when this build's last GPU
+    --                   start in the compositor did not work (see
+    --                   dev/README.md); nested, it is software. "gpu"
     --                   skips the trial and "software" never uses the GPU.
     --                   Anything else warns and means "auto". `--qml <mode>`,
     --                   then SOLIUM_QML, then SOLIUM_QML_GPU override this.
@@ -221,8 +223,8 @@ local defaults = {
     --                   it is killed and QML renders in software.
     --
     -- Read when the compositor starts; a reload does not change it, because
-    -- Qt cannot change scene graph once started. The log line that begins
-    -- "QML renderer:" says which one this session got, and why. Tests:
+    -- Qt cannot change scene graph once started. The last log line that
+    -- begins "QML renderer:" says which one this session got, and why. Tests:
     -- `qml/renderer.rs` and `the_shipped_configuration_asks_for_auto`.
     qml = {
         renderer = "auto",

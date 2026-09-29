@@ -146,7 +146,7 @@ On the hardware, QML renders on the GPU: Qt draws into a buffer the compositor
 allocated, once a trial render in a short-lived child process has shown that
 works on this machine. Where it does not, QML renders in software and the log
 says why. `solium --tty --qml gpu` or `--qml software` (or `SOLIUM_QML=`) forces
-one, and the startup line beginning `QML renderer:` says which a session got —
+one, and the last log line beginning `QML renderer:` says which a session got —
 see [dev/README.md](dev/README.md#qml-on-the-gpu).
 
 ### A pane owns a window and its chrome

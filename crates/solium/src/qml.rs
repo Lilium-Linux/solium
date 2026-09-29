@@ -481,8 +481,12 @@ enum Bringup {
 /// out immediately and say so, once, at startup. That is the pre-flight: real
 /// QML, a real buffer from `target::allocate`, the real import and the real
 /// fence, before anything on screen depends on any of it.
+///
+/// `committing` runs just before Qt is committed, which is the last moment
+/// anything can be written down before a start that aborts; see
+/// `renderer::gpu_starting`.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
-fn bring_up_gpu(import_path: &CStr) -> Bringup {
+fn bring_up_gpu(import_path: &CStr, committing: impl FnOnce()) -> Bringup {
     let Some(node) = render_node() else {
         return Bringup::Declined(anyhow!("no DRM render node could be found"));
     };
@@ -521,6 +525,7 @@ fn bring_up_gpu(import_path: &CStr) -> Bringup {
         }
     };
 
+    committing();
     // SAFETY: `import_path` outlives the call. This is the point of no return:
     // it either sets the scene graph backend for the process or aborts it.
     if unsafe { ffi::solium_qml_start_gpu(import_path.as_ptr()) } != 1 {
@@ -543,17 +548,25 @@ fn bring_up_gpu(import_path: &CStr) -> Bringup {
 /// Start Qt on the GPU in this process, and say how it went.
 ///
 /// `false` is always a decision taken while the software path was still
-/// reachable; see [`Bringup::Declined`].
+/// reachable; see [`Bringup::Declined`]. Anything but a pass ends in a line
+/// beginning `QML renderer:`, which stands over the one `renderer::choose`
+/// logged before it. Under `auto`, how it went is recorded for the next start;
+/// see `renderer::Markers` and
+/// `renderer::a_failed_gpu_start_is_recorded_for_this_build_only`.
 fn start_on_gpu(import_path: &CStr) -> bool {
-    match bring_up_gpu(import_path) {
+    match bring_up_gpu(import_path, renderer::gpu_starting) {
         Bringup::Declined(err) => {
-            tracing::warn!("QML could not start on the GPU: {err:#}; using software");
+            renderer::gpu_started(None);
+            tracing::warn!(
+                "QML renderer: software, because the GPU start in this process declined: {err:#}"
+            );
             false
         }
         Bringup::Committed {
             node,
             preflight: Ok(fenced),
         } => {
+            renderer::gpu_started(None);
             tracing::info!(
                 node = %node.display(),
                 fenced,
@@ -565,15 +578,25 @@ fn start_on_gpu(import_path: &CStr) -> bool {
         // fall back — but a compositor that quit here would take the session
         // with it, and the reason this line exists is so the failure is read
         // here rather than guessed at from a blank screen ten seconds later.
+        // Under `auto` the next start of this build takes software instead:
+        // see `renderer::a_failed_gpu_start_is_recorded_for_this_build_only`.
         Bringup::Committed {
             preflight: Err(err),
             ..
         } => {
-            tracing::error!(
-                ?err,
-                "the GPU path came up and does not work; scenes will not draw. \
-                 start with `--qml software` or SOLIUM_QML=software to render QML in software"
-            );
+            let reason = format!("{err:#}");
+            match renderer::gpu_started(Some(&reason)) {
+                Some(file) => tracing::error!(
+                    "QML renderer: gpu, and it does not work: {reason}. Scenes will not draw \
+                     in this session. The next start of this build renders QML in software, \
+                     as recorded in {}",
+                    file.display()
+                ),
+                None => tracing::error!(
+                    "QML renderer: gpu, and it does not work: {reason}. Scenes will not draw; \
+                     start with `--qml software` or SOLIUM_QML=software to render QML in software"
+                ),
+            }
             true
         }
     }
@@ -585,7 +608,7 @@ fn start_on_gpu(import_path: &CStr) -> bool {
 /// print when it passes, the reason when it does not.
 pub(crate) fn probe_gpu() -> Result<String> {
     let path = import_path_for_qt()?;
-    match bring_up_gpu(&path) {
+    match bring_up_gpu(&path, || ()) {
         Bringup::Declined(err) => Err(err),
         Bringup::Committed { node, preflight } => {
             let fenced = preflight?;

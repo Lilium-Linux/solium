@@ -510,8 +510,10 @@ checked out.
 QML renders on the GPU by default. Qt comes up on its OpenGL scene graph and
 renders each scene into a dmabuf the compositor allocated through GBM, rather
 than rasterising it on the CPU into a `QImage` the compositor then uploads.
-Software is the fallback, and a machine where the GPU path fails still gets a
-desktop.
+Software is the fallback. A machine where the probe below fails still gets a
+desktop; one where the probe passes and the GPU then fails inside the
+compositor gets one from its next start — see *When the compositor's own start
+fails*.
 
 | Mode | What it does |
 |---|---|
@@ -541,8 +543,27 @@ failure left no software path to fall back to. Run in a child, a failure costs
 the child. Once it passes, the compositor runs the same pre-flight again in
 its own process, as it always did.
 
-**Which one is running.** One line at startup begins `QML renderer:` and says
-which, and why:
+**When the compositor's own start fails.** A passing probe is not proof. The
+compositor's own pre-flight runs later, inside the compositor and once Qt is
+committed, and the probe did not share its conditions: the child holds none of
+the compositor's seat, card or display. If it fails there, the session cannot
+fall back: scenes do not draw, Solium's own QML arrow for the pointer
+included. If Qt aborts, the compositor goes with it. So under `auto` the
+compositor writes `$XDG_STATE_HOME/solium/qml-gpu-pending`
+(`~/.local/state/solium/`) just before committing Qt, and removes it once the
+pre-flight passes. A failure replaces it with `qml-gpu-failed`, holding the
+reason, and a pending file still there at the next start — the compositor
+stopped inside the start — counts as a failure too. The next start of the same
+build then renders in software without probing, and says so once, naming the
+file. Delete the file to let `auto` try again, or force the GPU with `--qml
+gpu`. A rebuild tries again by itself, because each file begins with the build
+that wrote it: its version, its binary and when that was written. A machine
+where this happens loses one start, not every login. `gpu` and `software`
+neither read nor write these files.
+
+**Which one is running.** A line at startup begins `QML renderer:` and says
+which, and why. When the compositor's own GPU start then goes wrong it logs
+another, and the last one is the one that stands:
 
 ```
 INFO solium::qml::renderer: QML renderer: gpu, the probe passed from="qml.renderer" probe_ms=160 said="gpu: Qt rendered QML into a buffer allocated on /dev/dri/renderD128, fenced"
@@ -553,6 +574,13 @@ A fallback is a single warning with the reason and both ways out:
 
 ```
 WARN solium::qml::renderer: QML renderer: software, because the GPU probe failed: no DRM render node could be found (exit status 1). `--qml gpu` or SOLIUM_QML=gpu forces the GPU; `--qml software` or SOLIUM_QML=software skips the probe
+```
+
+A compositor start that fails after the probe passed, and the start after it:
+
+```
+ERROR solium::qml: QML renderer: gpu, and it does not work: <reason>. Scenes will not draw in this session. The next start of this build renders QML in software, as recorded in ~/.local/state/solium/qml-gpu-failed
+WARN solium::qml::renderer: QML renderer: software, because this build's last GPU start in the compositor did not work: <reason>. Delete ~/.local/state/solium/qml-gpu-failed to let auto try the GPU again, or force it with `--qml gpu` or SOLIUM_QML=gpu
 ```
 
 **The probe on its own.** It needs only a render node, not DRM master, so it is

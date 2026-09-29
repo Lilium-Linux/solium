@@ -6,11 +6,16 @@
 //! pre-flight that fails inside the compositor leaves no software path to go
 //! back to, and one that fails in a child costs only the child. See
 //! `a_failed_probe_means_software` and `a_probe_that_hangs_is_killed_and_timed_out`.
+//!
+//! A passing probe is not the compositor's own start passing, and that start
+//! cannot fall back when it fails. So `auto` records how it went, and the next
+//! start of the same build takes software rather than repeat it. See
+//! [`Markers`] and `a_gpu_start_that_never_finished_means_software_next_time`.
 
 use std::{
     io::Write as _,
-    path::Path,
-    process::{Command, ExitStatus, Stdio},
+    path::{Path, PathBuf},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{OnceLock, mpsc},
     time::{Duration, Instant},
 };
@@ -168,19 +173,34 @@ pub(crate) enum Probed {
     TimedOut(Duration),
 }
 
-/// The renderer for `entry` given the mode asked for, running `probe` only for
-/// `auto` on the hardware.
+/// A GPU start in the compositor, by this build, that did not work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Previous {
+    /// The file that says so. Deleting it lets `auto` try the GPU again.
+    pub(crate) file: PathBuf,
+    /// Why, as it was recorded.
+    pub(crate) reason: String,
+}
+
+/// The renderer for `entry` given the mode asked for, asking `previous` and
+/// running `probe` only for `auto` on the hardware.
 ///
 /// `--check-qml` is software in every mode and never probes: it answers whether
 /// a file parses, and that must not depend on the machine. Nested `auto` is
 /// software, because winit hands the compositor no GBM device to allocate
-/// scene buffers from. Says what it chose in one line starting `QML renderer:`.
-/// See `check_qml_is_software_in_every_mode`, `auto_is_software_nested`,
-/// `a_passing_probe_means_gpu`, `a_failed_probe_means_software` and
-/// `a_timed_out_probe_means_software`.
+/// scene buffers from. `auto` on the hardware is software without a probe when
+/// this build's last GPU start in the compositor did not work, and `gpu` never
+/// asks. Says what it chose in one line starting `QML renderer:`; a GPU start
+/// in the compositor that then fails says so in another. See
+/// `check_qml_is_software_in_every_mode`, `auto_is_software_nested`,
+/// `a_passing_probe_means_gpu`, `a_failed_probe_means_software`,
+/// `a_timed_out_probe_means_software`,
+/// `a_gpu_start_that_never_finished_means_software_next_time` and
+/// `a_forced_mode_is_taken_without_a_probe`.
 pub(crate) fn choose(
     entry: Entry,
     (mode, source): (Mode, Source),
+    previous: impl FnOnce() -> Option<Previous>,
     probe: impl FnOnce() -> Probed,
 ) -> Renderer {
     let from = source.describe();
@@ -210,6 +230,17 @@ pub(crate) fn choose(
             Renderer::Software
         }
         (Entry::Tty, Mode::Auto) => {
+            if let Some(Previous { file, reason }) = previous() {
+                tracing::warn!(
+                    from,
+                    file = %file.display(),
+                    "QML renderer: software, because this build's last GPU start in the \
+                     compositor did not work: {reason}. Delete {} to let auto try the GPU \
+                     again, or force it with `--qml gpu` or SOLIUM_QML=gpu",
+                    file.display()
+                );
+                return Renderer::Software;
+            }
             let started = Instant::now();
             let probed = probe();
             let probe_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -254,9 +285,187 @@ pub(crate) fn decide(entry: Entry, configured: &Configured) -> Renderer {
             alias: crate::dev::qml_gpu(),
             config: configured.renderer.clone(),
         };
+        let (mode, source) = resolve(&asked);
+        let markers = Markers::for_this_build();
         let timeout = configured.probe_timeout.unwrap_or(PROBE_TIMEOUT);
-        choose(entry, resolve(&asked), || probe(timeout))
+        let renderer = choose(
+            entry,
+            (mode, source),
+            || markers.as_ref().and_then(Markers::previous),
+            || probe(timeout),
+        );
+        if watched(entry, mode, renderer)
+            && let Some(markers) = markers
+        {
+            let _ = WATCHED.set(markers);
+        }
+        renderer
     })
+}
+
+/// Whether the compositor's own GPU start is recorded for the next start: only
+/// when `auto` chose the GPU on the hardware, because that is the only decision
+/// a record changes. See `only_a_gpu_start_auto_chose_is_watched`.
+fn watched(entry: Entry, mode: Mode, renderer: Renderer) -> bool {
+    matches!(
+        (entry, mode, renderer),
+        (Entry::Tty, Mode::Auto, Renderer::Gpu)
+    )
+}
+
+/// Where this process records its GPU start, when [`watched`] said to.
+static WATCHED: OnceLock<Markers> = OnceLock::new();
+
+/// Qt is about to be committed to the GPU in this process. Records it when
+/// `auto` chose the GPU, and does nothing otherwise — in the probe's child
+/// most of all, which decides nothing. See [`Markers::starting`] and
+/// `only_a_gpu_start_auto_chose_is_watched`.
+pub(crate) fn gpu_starting() {
+    if let Some(markers) = WATCHED.get() {
+        markers.starting();
+    }
+}
+
+/// The GPU start in this process is over: `failure` is why it did not work, or
+/// `None`. The file a failure was recorded in, when one was. See
+/// [`Markers::finished`].
+pub(crate) fn gpu_started(failure: Option<&str>) -> Option<PathBuf> {
+    WATCHED.get()?.finished(failure)
+}
+
+/// Written just before Qt is committed to the GPU, removed once it works.
+const PENDING: &str = "qml-gpu-pending";
+
+/// Why this build's last GPU start did not work.
+const FAILED: &str = "qml-gpu-failed";
+
+/// What a pending start left behind means.
+const NEVER_FINISHED: &str = "it never finished: the compositor stopped during it";
+
+/// How the compositor's own GPU start went, kept for its next start.
+///
+/// The probe passing does not prove it: that start runs later, in-process,
+/// once Qt is committed, and a failure there has no software path left in the
+/// session it happens in. So `auto` writes `qml-gpu-pending` in the state
+/// directory just before committing Qt, removes it when the pre-flight passes,
+/// and replaces it with `qml-gpu-failed`, holding the reason, when it does not.
+/// A pending file still there at the next start is a start that never finished
+/// — Qt aborted, or the machine hung — and counts as a failure too.
+///
+/// Each file's first line is the build that wrote it. Another build's is
+/// removed rather than believed, so a rebuild tries the GPU again. See
+/// `a_gpu_start_that_never_finished_means_software_next_time`,
+/// `a_failed_gpu_start_is_recorded_for_this_build_only` and
+/// `a_gpu_start_that_worked_leaves_nothing_behind`.
+#[derive(Clone, Debug)]
+pub(crate) struct Markers {
+    directory: PathBuf,
+    build: String,
+}
+
+impl Markers {
+    /// In `$XDG_STATE_HOME/solium`, for the binary that is running.
+    fn for_this_build() -> Option<Self> {
+        Some(Self {
+            directory: crate::state_directory()?,
+            build: this_build(),
+        })
+    }
+
+    fn pending(&self) -> PathBuf {
+        self.directory.join(PENDING)
+    }
+
+    fn failed(&self) -> PathBuf {
+        self.directory.join(FAILED)
+    }
+
+    /// What the marker at `path` says after its first line, if this build wrote
+    /// it. One another build wrote is removed.
+    fn read(&self, path: &Path) -> Option<String> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let (build, said) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+        if build == self.build {
+            return Some(said.trim().to_owned());
+        }
+        let _ = std::fs::remove_file(path);
+        None
+    }
+
+    /// The last GPU start by this build that did not work, if it did not.
+    pub(crate) fn previous(&self) -> Option<Previous> {
+        if self.read(&self.pending()).is_some() {
+            self.fail(NEVER_FINISHED);
+        }
+        let reason = self.read(&self.failed())?;
+        Some(Previous {
+            file: self.failed(),
+            reason,
+        })
+    }
+
+    /// Say a GPU start has begun. Synced, because what ends a start that never
+    /// finishes can be a hung machine and a hard reset, and a record lost with
+    /// the page cache is the same start again at the next login. See
+    /// `a_gpu_start_that_never_finished_means_software_next_time`.
+    fn starting(&self) {
+        if let Err(err) = write_synced(&self.pending(), &format!("{}\n", self.build)) {
+            tracing::warn!(
+                ?err,
+                file = %self.pending().display(),
+                "could not record the GPU start: if it never finishes, the next start tries again"
+            );
+        }
+    }
+
+    /// Say the GPU start is over, and how.
+    fn finished(&self, failure: Option<&str>) -> Option<PathBuf> {
+        match failure {
+            None => {
+                let _ = std::fs::remove_file(self.pending());
+                None
+            }
+            Some(reason) => self.fail(reason),
+        }
+    }
+
+    fn fail(&self, reason: &str) -> Option<PathBuf> {
+        let failed = self.failed();
+        let written = write_synced(
+            &failed,
+            &format!("{}\n{}\n", self.build, reason.replace('\n', " ")),
+        );
+        let _ = std::fs::remove_file(self.pending());
+        match written {
+            Ok(()) => Some(failed),
+            Err(err) => {
+                tracing::warn!(?err, file = %failed.display(), "could not record the failed GPU start");
+                None
+            }
+        }
+    }
+}
+
+fn write_synced(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory)?;
+    }
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()
+}
+
+/// The running build: its version, its binary and when that was written.
+fn this_build() -> String {
+    let binary = std::env::current_exe().ok();
+    let written = binary
+        .as_ref()
+        .and_then(|binary| std::fs::metadata(binary).ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or_else(|| "?".to_owned(), |since| since.as_nanos().to_string());
+    let binary = binary.map_or_else(|| "?".to_owned(), |binary| format!("{binary:?}"));
+    format!("solium {} {binary} {written}", env!("CARGO_PKG_VERSION"))
 }
 
 fn decide_in(cell: &OnceLock<Renderer>, deciding: impl FnOnce() -> Renderer) -> Renderer {
@@ -287,7 +496,8 @@ fn probe(timeout: Duration) -> Probed {
 /// `timeout`.
 ///
 /// Killed by its PID — [`std::process::Child::kill`] signals that one process
-/// and nothing else — and reaped. Its last non-empty line is the answer: stdout
+/// and nothing else — and reaped on a thread of its own rather than waited for
+/// here; see [`reap_elsewhere`]. Its last non-empty line is the answer: stdout
 /// on success, stderr otherwise. `RUST_LOG` is not passed on, so that line is
 /// the child's own and not the end of a log. See
 /// `a_probe_that_passes_says_what_it_printed`,
@@ -316,13 +526,13 @@ fn run(program: &Path, arguments: &[&str], timeout: Duration) -> Probed {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
-                let _ = child.wait();
+                reap_elsewhere(child);
                 return Probed::TimedOut(timeout);
             }
             Ok(None) => std::thread::sleep(POLL),
             Err(err) => {
                 let _ = child.kill();
-                let _ = child.wait();
+                reap_elsewhere(child);
                 return Probed::Failed(format!("could not wait for the probe: {err}"));
             }
         }
@@ -337,6 +547,16 @@ fn run(program: &Path, arguments: &[&str], timeout: Duration) -> Probed {
         Some(line) => format!("{line} ({exited})"),
         None => exited,
     })
+}
+
+/// Wait for `child` on a thread of its own, so it is still reaped but the
+/// caller does not wait: a child asleep inside a GPU driver, which is what a
+/// wedged GPU looks like, cannot die of `SIGKILL` until the driver lets it. See
+/// `reaping_elsewhere_does_not_wait`.
+fn reap_elsewhere(mut child: Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 /// Read a pipe to its end on a thread of its own, so a child that writes more
@@ -373,8 +593,11 @@ fn describe(status: ExitStatus) -> String {
 ///
 /// Exit 0 with one line on stdout when it passes; non-zero with one line on
 /// stderr when it does not. Logs at `error` unless `RUST_LOG` says otherwise,
-/// so Qt's own fatal messages still reach stderr.
+/// so Qt's own fatal messages still reach stderr. Its core limit is 0, so a
+/// probe that aborts — how Qt fails — writes no core; see
+/// `the_probe_writes_no_core`.
 pub(crate) fn probe_child() -> ! {
+    no_core();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error"));
     let _ = tracing_subscriber::fmt()
@@ -397,18 +620,32 @@ pub(crate) fn probe_child() -> ! {
     }
 }
 
+/// Set this process's soft core limit to 0.
+fn no_core() {
+    use smithay::reexports::rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let _ = setrlimit(
+        Resource::Core,
+        Rlimit {
+            current: Some(0),
+            maximum: getrlimit(Resource::Core).maximum,
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         cell::Cell,
-        path::Path,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
         sync::OnceLock,
         time::{Duration, Instant},
     };
 
     use super::{
-        Asked, Entry, Mode, Probed, Renderer, Source, choose, decide_in, decided_in, flag, resolve,
-        run,
+        Asked, Entry, FAILED, Markers, Mode, NEVER_FINISHED, PENDING, Previous, Probed, Renderer,
+        Source, choose, decide_in, decided_in, flag, no_core, reap_elsewhere, resolve, run,
+        watched,
     };
 
     fn asked(
@@ -428,6 +665,30 @@ mod tests {
     /// A probe that must not be run.
     fn never() -> Probed {
         panic!("the probe ran where it must not")
+    }
+
+    /// A record of an earlier start that must not be asked for.
+    fn unasked() -> Option<Previous> {
+        panic!("an earlier GPU start was consulted where it must not be")
+    }
+
+    /// No earlier start went wrong.
+    fn clean() -> Option<Previous> {
+        None
+    }
+
+    /// A directory of its own for one test's markers, empty.
+    fn markers(name: &str, build: &str) -> (Markers, PathBuf) {
+        let directory =
+            std::env::temp_dir().join(format!("solium-qml-markers-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        (
+            Markers {
+                directory: directory.clone(),
+                build: build.to_owned(),
+            },
+            directory,
+        )
     }
 
     #[test]
@@ -513,7 +774,7 @@ mod tests {
     fn check_qml_is_software_in_every_mode() {
         for mode in [Mode::Auto, Mode::Gpu, Mode::Software] {
             assert_eq!(
-                choose(Entry::CheckQml, (mode, Source::Flag), never),
+                choose(Entry::CheckQml, (mode, Source::Flag), unasked, never),
                 Renderer::Software,
                 "--check-qml came up on {mode:?}"
             );
@@ -523,22 +784,22 @@ mod tests {
     #[test]
     fn auto_is_software_nested() {
         assert_eq!(
-            choose(Entry::Nested, (Mode::Auto, Source::Default), never),
+            choose(Entry::Nested, (Mode::Auto, Source::Default), unasked, never),
             Renderer::Software
         );
     }
 
-    /// `gpu` and `software` are taken as asked, on either backend, and neither
-    /// runs the probe.
+    /// `gpu` and `software` are taken as asked, on either backend: neither
+    /// runs the probe, and neither asks how an earlier GPU start went.
     #[test]
     fn a_forced_mode_is_taken_without_a_probe() {
         for entry in [Entry::Tty, Entry::Nested] {
             assert_eq!(
-                choose(entry, (Mode::Gpu, Source::Flag), never),
+                choose(entry, (Mode::Gpu, Source::Flag), unasked, never),
                 Renderer::Gpu
             );
             assert_eq!(
-                choose(entry, (Mode::Software, Source::Environment), never),
+                choose(entry, (Mode::Software, Source::Environment), unasked, never),
                 Renderer::Software
             );
         }
@@ -547,7 +808,7 @@ mod tests {
     #[test]
     fn a_passing_probe_means_gpu() {
         let ran = Cell::new(false);
-        let renderer = choose(Entry::Tty, (Mode::Auto, Source::Default), || {
+        let renderer = choose(Entry::Tty, (Mode::Auto, Source::Default), clean, || {
             ran.set(true);
             Probed::Passed("gpu".to_owned())
         });
@@ -557,18 +818,102 @@ mod tests {
 
     #[test]
     fn a_failed_probe_means_software() {
-        let renderer = choose(Entry::Tty, (Mode::Auto, Source::Config), || {
+        let ran = Cell::new(false);
+        let renderer = choose(Entry::Tty, (Mode::Auto, Source::Config), clean, || {
+            ran.set(true);
             Probed::Failed("no DRM render node could be found".to_owned())
         });
+        assert!(ran.get(), "auto on the hardware did not run the probe");
         assert_eq!(renderer, Renderer::Software);
     }
 
     #[test]
     fn a_timed_out_probe_means_software() {
-        let renderer = choose(Entry::Tty, (Mode::Auto, Source::Default), || {
+        let ran = Cell::new(false);
+        let renderer = choose(Entry::Tty, (Mode::Auto, Source::Default), clean, || {
+            ran.set(true);
             Probed::TimedOut(Duration::from_secs(5))
         });
+        assert!(ran.get(), "auto on the hardware did not run the probe");
         assert_eq!(renderer, Renderer::Software);
+    }
+
+    /// The compositor stopped inside its GPU start — Qt aborted, or the
+    /// machine hung — so the pending marker was never cleared. The next start
+    /// of the same build reads that as a failure and takes software without
+    /// probing, because a probe passing is what led to the stop.
+    #[test]
+    fn a_gpu_start_that_never_finished_means_software_next_time() {
+        let (markers, directory) = markers("never-finished", "build 1");
+        markers.starting();
+        assert!(directory.join(PENDING).is_file());
+
+        let previous = markers.previous();
+        assert_eq!(
+            previous,
+            Some(Previous {
+                file: directory.join(FAILED),
+                reason: NEVER_FINISHED.to_owned(),
+            })
+        );
+        assert!(
+            !directory.join(PENDING).exists(),
+            "the pending marker was not turned into a failed one"
+        );
+        let renderer = choose(
+            Entry::Tty,
+            (Mode::Auto, Source::Default),
+            || previous,
+            never,
+        );
+        assert_eq!(renderer, Renderer::Software);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A pre-flight that failed in the compositor is recorded with its reason
+    /// and holds for this build; another build removes it and tries again.
+    #[test]
+    fn a_failed_gpu_start_is_recorded_for_this_build_only() {
+        let (markers, directory) = markers("failed", "build 1");
+        markers.starting();
+        let recorded = markers.finished(Some("the fence\nfailed"));
+        assert_eq!(recorded, Some(directory.join(FAILED)));
+        assert!(!directory.join(PENDING).exists());
+        assert_eq!(
+            markers.previous().map(|previous| previous.reason),
+            Some("the fence failed".to_owned())
+        );
+
+        let rebuilt = Markers {
+            directory: directory.clone(),
+            build: "build 2".to_owned(),
+        };
+        assert_eq!(rebuilt.previous(), None);
+        assert!(
+            !directory.join(FAILED).exists(),
+            "another build's record was left in place"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_gpu_start_that_worked_leaves_nothing_behind() {
+        let (markers, directory) = markers("worked", "build 1");
+        markers.starting();
+        assert_eq!(markers.finished(None), None);
+        assert_eq!(markers.previous(), None);
+        assert!(!directory.join(PENDING).exists());
+        assert!(!directory.join(FAILED).exists());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn only_a_gpu_start_auto_chose_is_watched() {
+        assert!(watched(Entry::Tty, Mode::Auto, Renderer::Gpu));
+        assert!(!watched(Entry::Tty, Mode::Auto, Renderer::Software));
+        assert!(!watched(Entry::Tty, Mode::Gpu, Renderer::Gpu));
+        assert!(!watched(Entry::Nested, Mode::Auto, Renderer::Gpu));
+        assert!(!watched(Entry::CheckQml, Mode::Auto, Renderer::Gpu));
     }
 
     /// The first decision stands: Qt cannot change scene graph once started.
@@ -637,5 +982,45 @@ mod tests {
             "waited {:?} for a child that should have been killed at {timeout:?}",
             started.elapsed()
         );
+    }
+
+    /// The caller gets its answer at once, even from a child that has not
+    /// exited, and the child is still waited for.
+    #[test]
+    fn reaping_elsewhere_does_not_wait() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "sleep 2"])
+            .stdin(Stdio::null())
+            .spawn();
+        let Ok(child) = child else {
+            panic!("could not start /bin/sh");
+        };
+        let started = Instant::now();
+        reap_elsewhere(child);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "waited {:?} for a child that is reaped elsewhere",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_probe_writes_no_core() {
+        use smithay::reexports::rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+        let before = getrlimit(Resource::Core);
+        // As high as it goes first, so a soft limit that was 0 already does
+        // not pass this for nothing.
+        let _ = setrlimit(
+            Resource::Core,
+            Rlimit {
+                current: before.maximum,
+                maximum: before.maximum,
+            },
+        );
+        no_core();
+        let after = getrlimit(Resource::Core);
+        let _ = setrlimit(Resource::Core, before);
+        assert_eq!(after.current, Some(0));
+        assert_eq!(after.maximum, before.maximum, "the hard limit was changed");
     }
 }
