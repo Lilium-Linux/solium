@@ -1,8 +1,11 @@
 //! Scrolling, as niri does it: columns, and a view anchored to one of them.
 //!
-//! Reimplemented from niri's `src/layout/scrolling.rs` (GPL-3.0-or-later,
-//! compatible with this project) — the behaviour is the specification; the
-//! code there is written against niri's own tile and animation types.
+//! `fit` is adapted from niri's `compute_new_view_offset`
+//! (`src/layout/scrolling.rs`, niri-wm/niri@97c96a1, GPL-3.0-or-later,
+//! © the niri contributors), which this project's GPL-3.0-only can use. The
+//! rest is behaviour modelled on niri's scrolling layout: the behaviour is the
+//! specification, and niri's code is written against its own tile and
+//! animation types.
 //!
 //! Two ideas carry the whole design, and a strip of evenly-spaced windows has
 //! neither of them.

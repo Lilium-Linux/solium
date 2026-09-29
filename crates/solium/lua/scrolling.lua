@@ -1,7 +1,9 @@
 -- Scrolling: columns and a moving view, as niri does it.
 --
--- Reimplemented from niri's src/layout/scrolling.rs (GPL-3.0-or-later, which
--- this project's GPL-3.0-only can use); the behaviour is the specification.
+-- Behaviour modelled on niri's scrolling layout, with no niri code. The
+-- algorithm itself -- columns, the view offset and how the view follows focus
+-- -- lives in `crates/layout/src/scroller.rs`, reached here through
+-- `sol.layout.scroller`; this file is the glue between it and the compositor.
 --
 -- The unit is a column, not a window. A column holds a stack sharing its
 -- width, and that width is a share of the *view* — so opening a tenth window
