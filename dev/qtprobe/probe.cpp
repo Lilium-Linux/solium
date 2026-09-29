@@ -89,7 +89,7 @@ static bool try_import(const char *label, EGLDisplay display, int fd, int stride
 // Solium's own EGLDisplay is not eglGetDisplay(EGL_DEFAULT_DISPLAY). See
 // tty.rs's open_gpu: `EGLDisplay::new(gbm.clone())` builds a GBM-platform
 // display on the exact GBM device object the render buffers come from. That
-// pairing — buffer and display on the same device — is what the plan
+// pairing — buffer and display on the same device — is what the GPU path
 // depends on, so this reproduces it: a platform display obtained from
 // `gbm`, the same device the buffer above was allocated on, and the import
 // attempted against that display instead of the default one.
@@ -191,13 +191,13 @@ static bool probe_dmabuf(EGLDisplay display)
 
     // Attempt 1: whatever device eglGetDisplay(EGL_DEFAULT_DISPLAY) happened
     // to hand back. This is what the first version of this probe measured —
-    // kept so the contrast is visible, not because it answers the plan's
+    // kept so the contrast is visible, not because it answers the GPU path's
     // question by itself. `display` already has a context current on it,
     // made current by main() before calling this function.
     const bool default_ok = try_import("default display", display, fd, stride, modifier,
                                         eglCreateImageKHR_, glEGLImageTargetTexture2DOES_);
 
-    // Attempt 2: the pairing the plan actually depends on — a display built
+    // Attempt 2: the pairing the GPU path actually depends on — a display built
     // from the same gbm device the buffer was allocated on, matching
     // tty.rs's open_gpu.
     const bool gbm_ok = try_gbm_paired_import(gbm, fd, stride, modifier,
@@ -206,7 +206,7 @@ static bool probe_dmabuf(EGLDisplay display)
     printf("dmabuf: summary  default-display=%s  gbm-paired-display=%s\n",
            default_ok ? "ok" : "failed", gbm_ok ? "ok" : "failed");
 
-    // The GBM-paired result is the one the plan depends on; the default-
+    // The GBM-paired result is the one the GPU path depends on; the default-
     // display result is context, not the answer, so it does not factor into
     // what this function reports as success.
     return gbm_ok;

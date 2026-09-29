@@ -1985,13 +1985,13 @@ fn main() -> Result<()> {
     // ------------------------------------------------------------------
     // Every scene the compositor builds, on a GPU host.
     //
-    // Before Task 7 the cursor and the window frames went down
-    // `solium_qml_scene_new_with`, which a GPU host refuses outright -- one
-    // scene graph per process, and Qt picked the other one. So `SOLIUM_QML_GPU=1`
-    // produced a desktop with a wallpaper on it and no window frames and no
-    // pointer, each refusal logged by its own caller as its own unrelated
-    // failure and nothing anywhere saying that a whole class of scene was
-    // missing.
+    // Before they moved to the GPU path, the cursor and the window frames went
+    // down `solium_qml_scene_new_with`, which a GPU host refuses outright --
+    // one scene graph per process, and Qt picked the other one. So
+    // `SOLIUM_QML_GPU=1` produced a desktop with a wallpaper on it and no
+    // window frames and no pointer, each refusal logged by its own caller as
+    // its own unrelated failure and nothing anywhere saying that a whole class
+    // of scene was missing.
     //
     // The compositor's *real* QML, not a stand-in: what this is checking is
     // that these particular files come up under the RHI scene graph, and a
@@ -2005,8 +2005,8 @@ fn main() -> Result<()> {
     // failure in it would surface as a refusal or a Qt warning rather than as a
     // smaller number.
     //
-    // **A pane layer has to be dressed before it draws anything.** Since Task 7
-    // the insets live in the style's `Pane.qml` and are *written* onto each
+    // **A pane layer has to be dressed before it draws anything.** The insets
+    // live in the style's `Pane.qml` and are *written* onto each
     // layer, so a `Frame.qml` built standalone has `insetTop` at its default of
     // 0: a bar of height zero, the hairline inside it, and the title centred in
     // it. Measured, that left 544 of 1228800 bytes non-zero — two 13x13 button

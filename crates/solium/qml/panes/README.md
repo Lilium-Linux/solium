@@ -199,7 +199,7 @@ A style can also be a single `.qml` file with an `Item` at its root, under
 `insetLeft` rather than being told them -- a single file has no manifest, so it
 is the only place those numbers can live.
 
-Nothing ships as one any more: the eight above were single files until Task 7
-of the pane-styles work and are folders now. The path stays because those files
+Nothing ships as one any more: the eight above were single files until the
+pane-styles work moved them into folders. The path stays because those files
 exist on people's machines, and because a style needing neither layers nor
 bleed should not have to become a folder to say so.

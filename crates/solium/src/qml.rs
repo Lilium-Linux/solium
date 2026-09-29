@@ -415,10 +415,10 @@ impl std::fmt::Debug for FrameInFlight {
 ///
 /// It holds today, and only by convention: every render path collects its
 /// elements before it binds anything (`offscreen.rs`, `tty.rs`, `render.rs`),
-/// and neither `RenderElement::draw` in `warp.rs` touches a scene. Task 7 is
-/// where that stops being enough — a decoration that builds or renders its
-/// scene lazily from inside `draw` is exactly this, and would look like a
-/// rendering bug rather than an ordering one.
+/// and neither `RenderElement::draw` in `warp.rs` touches a scene. Decorations
+/// on the GPU path are where that is easiest to break — a decoration that
+/// builds or renders its scene lazily from inside `draw` is exactly this, and
+/// would look like a rendering bug rather than an ordering one.
 ///
 /// Loud in every build rather than only in a debug one. The counter costs a
 /// `Cell` increment per frame, and the alternative in a release build is the

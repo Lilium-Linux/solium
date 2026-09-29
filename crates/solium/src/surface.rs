@@ -379,10 +379,10 @@ impl ShellSurface {
 
 /// One scene of the given pixel size, on whichever path Qt came up on.
 ///
-/// Delegates, and stays here only to carry the shell's properties: the choice
+/// Delegates, and stays here only to carry the scene's properties: the choice
 /// itself belongs to [`qml::Scene::for_host`], because it is the same choice
 /// the window frames and the pointer have to make and three modules each making
-/// it for themselves is the bug that task fixed.
+/// it for themselves is the bug that sharing it fixed.
 fn build(source: &Path, properties: &str, width: i32, height: i32) -> Result<qml::Scene> {
     qml::Scene::for_host(source, width, height, Some(properties))
 }

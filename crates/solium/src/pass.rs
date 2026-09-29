@@ -333,7 +333,8 @@ fn every_corner_is_finite(radii: Corners) -> bool {
 /// to the element" -- and the damage tracker adds the element's own location
 /// back on (`damage/mod.rs:530,580`). A claim built from the drawn rect whole
 /// is therefore offset twice and lands at `2 * dst.loc`: a patch of desktop
-/// with no window on it, left unpainted. That is this task's own failure
+/// with no window on it, left unpainted. That is the failure the corner inset
+/// exists to prevent -- claiming opacity where nothing opaque is drawn --
 /// pointed somewhere arbitrary, so the origin is dropped here rather than at
 /// the call site.
 ///
@@ -642,7 +643,7 @@ impl Pass {
 /// and is tested against the shader's own distance field. The other is the
 /// order `draw` packs the four radii in, which lives in [`packed_radii`] for
 /// the same reason. The rest -- `src`, `geometry`, `alpha`, and the rest of
-/// `draw` -- is seen for the first time by Task 6, on a screen.
+/// `draw` -- is not checked here at all: it is first seen on a screen.
 #[derive(Clone, Debug)]
 pub(crate) struct Rounded {
     id: Id,
@@ -1015,7 +1016,7 @@ mod tests {
         let opaque = opaque_inside(rect, (40.0, 40.0, 40.0, 40.0));
         assert_eq!(opaque.size.w, 0);
         assert_eq!(opaque.size.h, 0);
-        // The location as well as the size, because the brief's two assertions
+        // The location as well as the size, because the two assertions above
         // leave it free: an empty rect is harmless wherever it is, but nothing
         // else here pins the `loc` arithmetic on the degenerate path, and a
         // rect that is empty only by its size is one `max(0)` away from being
@@ -1092,7 +1093,7 @@ mod tests {
     /// claim built from `self.dst` whole is offset twice: it lands at
     /// `2 * dst.loc`, somewhere else on the screen entirely, and tells the
     /// renderer to stop painting a patch of desktop that has no window on it.
-    /// That is the failure this task exists to prevent, aimed at a random
+    /// That is the failure `opaque_of` exists to prevent, aimed at a random
     /// rectangle instead of at four corners.
     ///
     /// Pinned by moving the window and asserting nothing changes. A version
@@ -1184,11 +1185,11 @@ mod tests {
 
     /// **Four radii land on four sides, in the right places.**
     ///
-    /// The whole of this task between `Corners` and a rectangle, and the only
-    /// test in the module where a transposition can show. Every other
-    /// `opaque_of` case here is `Corners::all`, under which all six possible
-    /// swaps of the four fields, and both possible orderings of the tuple, give
-    /// the identical answer.
+    /// Everything four separate radii add between `Corners` and a rectangle,
+    /// and the only test in the module where a transposition can show. Every
+    /// other `opaque_of` case here is `Corners::all`, under which all six
+    /// possible swaps of the four fields, and both possible orderings of the
+    /// tuple, give the identical answer.
     ///
     /// The numbers are chosen so each side takes a *different* corner, which is
     /// what makes `max_of_side` visible rather than assumed: the left side is
@@ -1555,7 +1556,7 @@ mod tests {
     /// the shader cut a different shape from the one this file insets against
     /// -- and the failure would be invisible until a screen. `fragment.rs` has
     /// its own copy of this idea and pins every line below somewhere in its
-    /// own tests too -- the five that were here before Task 1, plus the three
+    /// own tests too -- the five from when there was one radius, plus the three
     /// that pick `corner_radius`'s quadrant, which is a second opinion by a
     /// different mechanism (whole-line `has_line`, a whitelist walk) rather
     /// than a reason to trust this one less.

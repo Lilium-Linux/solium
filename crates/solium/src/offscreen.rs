@@ -181,9 +181,10 @@ fn pixels(outer: Size<i32, Logical>, scale: f64) -> Size<i32, Physical> {
 /// both — 1149 logical at 1.25 is 1437 against 1436 — and that last column is a
 /// column no surface ever claims and no surface ever draws into. `covers` then
 /// answers false, `opaque_of` answers `None`, and **every rounded window on
-/// that output silently gives up its opaque region for good**: Task 5's
-/// behaviour reverts to Task 4's on exactly the machines a fractional scale is
-/// ordinary on, with nothing on screen to say so.
+/// that output silently gives up its opaque region for good**: it claims no
+/// opacity at all, as rounded windows did before they claimed everything but
+/// their corners, on exactly the machines a fractional scale is ordinary on,
+/// with nothing on screen to say so.
 ///
 /// Rounding here makes all three `round(logical * scale)` — the same function
 /// of the same numbers, so they agree by construction rather than by luck. It
@@ -864,8 +865,8 @@ mod tests {
     /// pixel wider than that has a column no surface claims and no surface
     /// draws into, so `covers` is false, `opaque_of` is `None`, and every
     /// rounded window on a fractional-scale output gives up its opaque region
-    /// permanently -- Task 5 reverting to Task 4 with nothing on screen to say
-    /// so.
+    /// permanently -- back to claiming none of it, with nothing on screen to
+    /// say so.
     ///
     /// 1149 at 1.25 is the case `render::elements` records: 1436.25, which
     /// ceils to 1437 and rounds to 1436. Both are asserted, in one test,

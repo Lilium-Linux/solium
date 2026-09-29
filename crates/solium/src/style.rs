@@ -249,9 +249,9 @@ pub(crate) fn directories() -> Vec<PathBuf> {
 /// style means dropping in a folder rather than copying everything else.
 ///
 /// It **does** consult the filesystem, and cannot do otherwise: shadowing is a
-/// question about which directories exist. The brief said this was testable
-/// without one and it is not — a test asserting the user's copy wins has to
-/// create the user's copy. See the plan's amendment of 2026-09-13.
+/// question about which directories exist. It can look as if this were
+/// testable without one, and it is not — a test asserting the user's copy
+/// wins has to create the user's copy.
 ///
 /// A bare name wants a bundle and not merely a folder; a path is taken as
 /// given. Both halves are argued for at the branches below.
@@ -278,8 +278,8 @@ fn resolve(name: &str, user: Option<&Path>) -> Option<PathBuf> {
     // bare name is a *search across several directories*, and a folder that is
     // not a bundle is not an answer to it — stopping there would mean an empty
     // `~/.config/solium/qml/panes/top/` silently replaces the shipped `top`
-    // with a window that has no frame at all. Since Task 7 every style the
-    // compositor ships is a bundle, so that is not a corner case any more: it
+    // with a window that has no frame at all. Every style the compositor ships
+    // is a bundle, so that is not a corner case any more: it
     // is one `mkdir` in the wrong place costing someone their titlebars, with
     // nothing on screen to say which directory did it. Falling through, the
     // shipped one still draws; and a name in no place at all is still `None`,
@@ -339,7 +339,7 @@ fn requirements(manifest: &Path, required: &[String]) -> Result<()> {
 /// reachable.
 ///
 /// Deliberately *not* the same move as making `resolve` take existence as a
-/// parameter, which the brief asked for and this task did not do. A directory
+/// parameter, which was considered and not done. A directory
 /// is a fact a test can make, so faking one would swap a real check for a
 /// pretend one. A scene graph is not.
 ///
@@ -543,8 +543,8 @@ mod tests {
     /// layer where decorations already are, not make the whole style fail to
     /// load and leave the window with no frame at all.
     ///
-    /// `load` warns when it takes this path, which is the half of the answer
-    /// the brief left out — see `depth_from`.
+    /// `load` warns when it takes this path, which is the other half of the
+    /// answer — see `depth_from`.
     #[test]
     fn an_unknown_depth_falls_back_to_frame() {
         assert_eq!(parse_depth("beneath"), Depth::Frame);
@@ -632,11 +632,11 @@ mod tests {
     /// `parse_depth` and `parse_bleed` are string functions and pass whether or
     /// not anything in Rust can read a QML scene at all. This reads a *grouped*
     /// property back out of a genuinely loaded one, which is the call that
-    /// silently returned 0 before this task: `QObject::property("insets.top")`
-    /// looks the whole dotted string up in the metaobject, finds nothing, and
+    /// silently returned 0 at first: `QObject::property("insets.top")` looks
+    /// the whole dotted string up in the metaobject, finds nothing, and
     /// `toInt()` makes it a perfectly plausible zero — a style reserving space
-    /// at the top, read back as reserving none, with the client then drawn over
-    /// its own titlebar and five green tests.
+    /// at the top, read back as reserving none, with the client then drawn
+    /// over its own titlebar and five green tests.
     ///
     /// So the four sides carry four *different* non-zero values, which also
     /// catches the version of this where the sides are read in the wrong order.
@@ -1205,13 +1205,13 @@ mod tests {
     /// The user's directory shadows the shipped one, name by name, so replacing
     /// a style means dropping in a folder rather than copying everything else.
     ///
-    /// Two things this test does that the brief's version could not:
+    /// Two things this test does that a version with made-up paths could not:
     ///
     /// * **It creates the directory.** `resolve` asks `is_dir()`, so a user
-    ///   path nobody made falls straight through to the shipped tree — the
-    ///   brief's `/home/someone/…` returns `None`, and the claim that the
+    ///   path nobody made falls straight through to the shipped tree — a
+    ///   made-up `/home/someone/…` returns `None`, and the claim that the
     ///   lookup is testable without a filesystem is not true of a lookup that
-    ///   consults one. See the plan's amendment of 2026-09-13.
+    ///   consults one.
     /// * **It uses a name that also ships.** `example` exists in both places, so
     ///   this pins the *order*. A name only the user has would be found first
     ///   either way and would pass against a reversed lookup.

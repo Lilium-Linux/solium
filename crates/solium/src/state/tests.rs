@@ -503,11 +503,11 @@ fn a_frame_reserves_what_it_always_reserved() {
 ///
 /// | control | measured |
 /// |---|---|
-/// | `canvas` returning `outer` — the state before Task 5 | fails on the first assertion, but so do `decoration::tests::a_canvas_is_the_pane_grown_by_its_bleed` and `no_bleed_means_the_canvas_is_the_pane`, which pin it already |
+/// | `canvas` returning `outer` — the state before bleed existed | fails on the first assertion, but so do `decoration::tests::a_canvas_is_the_pane_grown_by_its_bleed` and `no_bleed_means_the_canvas_is_the_pane`, which pin it already |
 /// | the frame band **and** `decorated_under` switched to the canvas, through `decoration::spread` | the whole suite still passes, 201 of 201 |
 ///
-/// The regression is instead caught with a real pointer, which is what the
-/// task's step 4 is for: two panes side by side under `bleedy`, a press
+/// The regression is instead caught with a real pointer, by hand: two panes
+/// side by side under `bleedy`, a press
 /// 60px into the first one's bleed and 20px inside the second, and the
 /// second takes focus. Run against the canvas-hit-test build above, the
 /// *first* window takes it and the second is left unfocused — a neighbour

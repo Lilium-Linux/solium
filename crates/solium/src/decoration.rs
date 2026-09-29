@@ -527,7 +527,7 @@ impl Decoration {
         //
         // It used to be held in check by the eight decorations that shipped,
         // every one of which declared `insetTop`/`Right`/`Bottom`/`Left` and
-        // `overlay` as literals. Task 7 moved them into bundles, so the files
+        // `overlay` as literals. They are bundles now, so the files
         // this reads are now only ever somebody else's and nothing in this tree
         // holds the line any more. A bundle has no such hazard — its insets are
         // read from a manifest built at 1x1 on both paths — which is one more
@@ -572,8 +572,8 @@ impl Decoration {
             layers: vec![LayerScene {
                 // One QML file is one layer, where decorations already are.
                 // There is no second path for it: a `frame` layer is what a
-                // decoration has always been, and Task 7 moves the eight
-                // shipped ones into bundles without changing a pixel.
+                // decoration has always been, and the eight shipped ones
+                // moved into bundles without changing a pixel.
                 depth: Depth::Frame,
                 name: String::new(),
                 scene,
@@ -1214,7 +1214,7 @@ impl LayerScene {
             let Self { scene, backing, .. } = this;
             match backing {
                 // A window resize is a *rebind* here and not a rebuild, which
-                // is the whole of Task 6: a decoration is sized from an
+                // is the whole point of `Gpu`: a decoration is sized from an
                 // animating rectangle for the length of every window
                 // animation, and a scene rebuilt once per frame is a scene
                 // whose own animations restart once per frame and therefore
@@ -1546,7 +1546,7 @@ impl Decorations {
 /// under `panes/` is a style with layers and is loaded as one; anything else is
 /// the one file decorations have always been. That order is what made the
 /// conversion of the shipped eight a move of files rather than a change of
-/// setting: `pane = "top"` drew `decorations/top.qml` before Task 7 and draws
+/// setting: `pane = "top"` drew `decorations/top.qml` before the move and draws
 /// `panes/top/` after it, and nothing in `config.lua` changed on either side.
 ///
 /// The two are the same thing at different sizes, which is why there is one
@@ -1558,7 +1558,7 @@ fn build(style: Option<&str>, width: i32, height: i32) -> Result<Decoration> {
     // `shipped_decoration("top")`: that file is a folder now, so the default has
     // to be a *name* looked up where bundles are, or a session whose scripts did
     // not load would put a missing-file error against every window it opened,
-    // naming a path that has not existed since Task 7.
+    // naming a path that no longer exists.
     let style = Some(style.unwrap_or(DEFAULT_STYLE));
     let Some(dir) = bundle(style) else {
         // Not a bundle, so a single QML file -- and if it is not one of those
@@ -1567,7 +1567,7 @@ fn build(style: Option<&str>, width: i32, height: i32) -> Result<Decoration> {
         //
         // `qml_path` used to answer this by fabricating
         // `<shipped>/decorations/<name>.qml` and letting Qt fail on it, which
-        // after Task 7 names a file in a directory that is not in the tree and
+        // now names a file in a directory that is not in the tree and
         // says nothing about `panes/`. `style::resolve` answers the same
         // question the other way -- "a name in no place at all is `None`, which
         // names the name that was typed" -- and two answers to one question is
@@ -1661,7 +1661,7 @@ pub(crate) enum StyleKind {
     Bundle,
     /// One file under `decorations/`: a single layer at [`Depth::Frame`].
     ///
-    /// Nothing ships as one any more — Task 7 made every shipped style a
+    /// Nothing ships as one any more — every shipped style is a
     /// bundle — so this kind is now only ever the user's own files. The kind
     /// stays because those files do.
     File,
@@ -1912,7 +1912,7 @@ fn display_all(places: &[PathBuf]) -> String {
 ///
 /// A file of the same name in the user's own directory shadows the one that
 /// ships, so `pane = "top"` can mean the user's idea of a top bar -- and since
-/// Task 7 ships nothing here, that is the only way a name resolves to a file at
+/// nothing ships here, that is the only way a name resolves to a file at
 /// all. The same shape as [`crate::style::directories`] and for the same
 /// reason: the lookup above and the listing in [`catalogue`] walk one list, so
 /// what the panel offers is what a press resolves.
@@ -1961,7 +1961,7 @@ fn bare(style: Option<&str>) -> bool {
 
 /// Where a single-file decoration would ship, if one did.
 ///
-/// **Empty since Task 7, and not present in the tree.** The eight that lived
+/// **Empty, and not present in the tree.** The eight that lived
 /// here are bundles under `panes/` now. Kept as the bottom of the file lookup
 /// for the reason [`decoration_directories`] gives.
 pub(crate) fn shipped_decorations() -> PathBuf {
@@ -2057,7 +2057,7 @@ mod tests {
     /// It separates the two ways `PaneStyle.showOneLayer` can be wrong, and both
     /// have been run as controls against this test:
     ///
-    /// * **Hidden but never parented** — the shape the plan's `visible:` binding
+    /// * **Hidden but never parented** — the shape a plain `visible:` binding
     ///   would have left, since items in a `list<Item>` are not in the scene
     ///   graph at all. Measured: `[(0,0,0,0), (0,0,0,0), (0,0,0,0)]`, three
     ///   transparent pictures.
@@ -2207,8 +2207,8 @@ mod tests {
     /// **A layer paints outside its pane, and stops exactly where it said.**
     ///
     /// The claim the whole project was started for, read as pixels. The
-    /// compositor cannot be started here — there is no free VT — so the
-    /// screenshot the brief asks for is not available; what stands in its place
+    /// compositor cannot be started here — there is no free VT — so a
+    /// screenshot is not available; what stands in its place
     /// is the layer's own buffer, which is the thing a screenshot would be a
     /// photograph of. Everything up to the upload is real: the manifest, the
     /// bleed parsed out of it, `Decoration::from_style`, the canvas the scene
@@ -2233,7 +2233,7 @@ mod tests {
     ///
     /// | control | measured |
     /// |---|---|
-    /// | `canvas` returning `outer` — the state before this task | 120 rows against 160: no strip at all |
+    /// | `canvas` returning `outer` — the state before bleed existed | 120 rows against 160: no strip at all |
     /// | the canvas grown by twice the declared bleed, with QML still told 40 | 200 rows against 160 |
     /// | the green band moved onto the canvas, at `y: 0` | 60 green rows then 100 blue: the run list does see green |
     ///
@@ -2688,9 +2688,9 @@ mod tests {
 
     /// **The old spelling of the per-run override still names a style.**
     ///
-    /// `SOLIUM_DECORATION` was the knob until Task 7 renamed it, and it is in
-    /// people's shell history and in this repository's own older plan
-    /// documents. An alias that silently stopped working would put the
+    /// `SOLIUM_DECORATION` was the knob until the pane-styles work renamed it,
+    /// and it is in people's shell history and in this repository's own
+    /// history. An alias that silently stopped working would put the
     /// *configured* style on screen instead of the one that was asked for,
     /// which looks exactly like the variable being ignored -- and is.
     ///
@@ -3114,11 +3114,11 @@ mod tests {
     /// **A name that is nowhere names the name, not a path nobody asked for.**
     ///
     /// `qml_path` used to fabricate `<shipped>/decorations/<name>.qml` for a
-    /// name it could not find and let Qt fail on opening it. After Task 7 that
-    /// is a file in a directory that is not in the tree, so `pane = "topp"`
-    /// reported a missing `topp.qml` under `qml/decorations` -- a guess, wrong
-    /// in both directions, and with no mention of the `qml/panes` the answer is
-    /// actually in.
+    /// name it could not find and let Qt fail on opening it. With the shipped
+    /// styles in folders that is a file in a directory that is not in the tree,
+    /// so `pane = "topp"` reported a missing `topp.qml` under `qml/decorations`
+    /// -- a guess, wrong in both directions, and with no mention of the
+    /// `qml/panes` the answer is actually in.
     ///
     /// `style::resolve` had already answered the same question the other way in
     /// this same commit, and two answers to one question is what the rest of it
@@ -3190,7 +3190,7 @@ mod tests {
             // Nothing named at all is the same style. Reached through `build`
             // rather than asserted about `DEFAULT_STYLE`, because what is worth
             // pinning is that the default resolves to something that *exists*:
-            // it used to name `decorations/top.qml`, which this task deleted.
+            // it used to name `decorations/top.qml`, which no longer exists.
             let fallback = build(None, 300, 200).expect("the default builds");
             assert_eq!(fallback.insets().top, TITLEBAR_HEIGHT);
 
@@ -4021,7 +4021,7 @@ mod tests {
     /// or short, looking exactly like a working panel, with no press to prove
     /// otherwise. Every other case in this section would still pass.
     ///
-    /// It checked for a `StyleKind::File` too until Task 7, because the eight
+    /// It checked for a `StyleKind::File` too at first, because the eight
     /// were single files and finding none meant the walk had missed a whole
     /// kind. They are folders now and **nothing ships as a file**, so that
     /// assertion could only ever pass by accident -- a stray `.qml` in the
@@ -4091,7 +4091,7 @@ mod tests {
     /// `qml/panes/top/` used to make it fail with "`top` is offered as a single
     /// file, but `style::find` resolves it to ...", because `find` took any
     /// *directory* for a bare name while [`offered_by`] required a `Pane.qml`.
-    /// Task 7 closed that: a bare name needs the manifest too, and skips a
+    /// That is closed now: a bare name needs the manifest too, and skips a
     /// folder without one rather than answering with it. So the disagreement
     /// this test was written to catch can no longer be produced from an empty
     /// folder -- which is the outcome wanted, not a reason to stop checking.

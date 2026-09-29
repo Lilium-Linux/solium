@@ -18,11 +18,12 @@
 //!    queue as [`Command`]s.
 //! 3. Rust drains the queue and applies it.
 //!
-//! Which is the "commands are not state" rule from `AGENTS.md` made structural:
-//! a script cannot mutate the compositor directly, so there is no way for its
-//! idea of a window's geometry to drift from the compositor's. It also means no
-//! borrow of `Solium` is alive while Lua runs, which is what stops a script
-//! calling back into the compositor mid-dispatch and deadlocking on the seat.
+//! Which is the "commands are not state" rule (see CONTRIBUTING.md) made
+//! structural: a script cannot mutate the compositor directly, so there is no
+//! way for its idea of a window's geometry to drift from the compositor's. It
+//! also means no borrow of `Solium` is alive while Lua runs, which is what
+//! stops a script calling back into the compositor mid-dispatch and deadlocking
+//! on the seat.
 
 use std::{path::Path, time::Duration};
 
@@ -6107,11 +6108,11 @@ mod shipped {
     /// the name here, which is this module's own rule -- "resolves each name
     /// through the same function the compositor uses at run time" -- and which
     /// this test was the one exception to. It matters rather than being a
-    /// tidy-up, and Task 7 is where it would have bitten: the eight names
-    /// `config.lua` has always carried stopped being files under
-    /// `qml/decorations` and became folders under `qml/panes` on one commit,
-    /// and a hand-joined `<name>.qml` would have gone red for all eight while
-    /// the compositor drew them perfectly. Through the resolver there was
+    /// tidy-up, and the move to style folders is where it would have bitten:
+    /// the eight names `config.lua` has always carried stopped being files
+    /// under `qml/decorations` and became folders under `qml/panes` on one
+    /// commit, and a hand-joined `<name>.qml` would have gone red for all eight
+    /// while the compositor drew them perfectly. Through the resolver there was
     /// nothing to remember.
     ///
     /// Both markers, because the setting is `pane` and `decoration` is still
