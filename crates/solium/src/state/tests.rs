@@ -16909,6 +16909,66 @@ end)
                 assert_eq!(delivered(&desk, 100.0, 15.0), Some(id(&bar)));
             }
 
+            /// **A window closing in front of a fullscreen one fades out
+            /// over it, and the fullscreen window covers the bar only once
+            /// it is gone.** It was lifted the moment the client left, so the
+            /// fade played hidden behind it and the bar vanished with it.
+            #[test]
+            fn a_window_closing_in_front_of_a_fullscreen_one_fades_out_over_it() {
+                let mut desk = Desk::new();
+                let (bar_surface, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let (video, video_window) = fullscreen(&mut desk, (10, 40));
+                let front = desk.open_surface();
+                let front_window = window_of(&desk, front.pane);
+                desk.state
+                    .space
+                    .map_element(front_window, (300, 300), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let (bar, video, front_pane) = (
+                    Seen::Layer(id(&bar_surface)),
+                    Seen::Pane(video.pane),
+                    Seen::Pane(front.pane),
+                );
+                assert!(
+                    drawn_over(&desk, bar, front_pane) && drawn_over(&desk, front_pane, video),
+                    "the premise: a window in front of the fullscreen one, so nothing is \
+                     lifted: {:?}",
+                    drawn(&desk)
+                );
+
+                front.toplevel.destroy();
+                desk.pump();
+                let since = left_of(&desk.state, front.pane).since;
+                assert!(
+                    drawn_over(&desk, bar, front_pane) && drawn_over(&desk, front_pane, video),
+                    "what is left of the window fades over the fullscreen one, under the bar, \
+                     as it stood: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    delivered(&desk, 100.0, 15.0),
+                    Some(id(&bar_surface)),
+                    "and the bar keeps its clicks while it does"
+                );
+
+                desk.state
+                    .settle(since + crate::pane::LEAVING + Duration::from_millis(16));
+                assert!(
+                    desk.state.panes.get(front.pane).is_none(),
+                    "the premise: the fade is over"
+                );
+                assert!(
+                    drawn_over(&desk, video, bar),
+                    "and the fullscreen window covers the bar: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    delivered(&desk, 100.0, 15.0),
+                    Some(surface_id(&video_window))
+                );
+            }
+
         }
     }
 

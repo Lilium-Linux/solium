@@ -108,9 +108,10 @@ impl Covers {
 /// What [`lifted`] asks of one pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Candidate {
-    /// On the monitor's shown workspace: drawn on that monitor, not what is
-    /// left of a window whose client has gone, and not on a workspace a
-    /// selection is putting away. See `Solium::lifted_on`.
+    /// On the monitor's shown workspace: drawn on that monitor, and not on a
+    /// workspace a selection is putting away -- what is left of a window
+    /// whose client has gone included, for as long as it is drawn. See
+    /// `Solium::lifted_on`.
     pub(crate) shown: bool,
     /// Its client is fullscreen.
     pub(crate) fullscreen: bool,

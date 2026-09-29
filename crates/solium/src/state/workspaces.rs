@@ -319,13 +319,19 @@ impl Solium {
     /// [`crate::stack::lifted`], asked of the panes front first.
     ///
     /// **On the monitor's shown workspace** is drawn on that monitor, by its
-    /// slot ([`crate::render::drawn_on`]); not what is left of a window whose
-    /// client has gone; and not on a desk a selection is putting away
-    /// ([`Self::carried_by_a_selection`]). So a fullscreen window on a
-    /// workspace that is not shown changes nothing, and neither does one
+    /// slot ([`crate::render::drawn_on`]), and not on a desk a selection is
+    /// putting away ([`Self::carried_by_a_selection`]). So a fullscreen window
+    /// on a workspace that is not shown changes nothing, and neither does one
     /// behind another window on its own.
     /// `a_fullscreen_window_on_a_workspace_not_shown_leaves_the_bar_on_top`,
     /// and `crate::stack`'s `only_the_front_pane_of_the_shown_workspace_is_lifted`.
+    ///
+    /// **What is left of a window whose client has gone counts**, for as
+    /// long as it is drawn. It has no client to be fullscreen, so a
+    /// fullscreen window behind it is lifted once it is gone rather than the
+    /// moment its client leaves, and it fades out over the fullscreen window,
+    /// as it stood.
+    /// `a_window_closing_in_front_of_a_fullscreen_one_fades_out_over_it`.
     ///
     /// Read by the renderer (`render::stacked`) and by the hit tests
     /// ([`Self::topmost_above`], `panes_front_first`), which is what makes the
@@ -333,8 +339,7 @@ impl Solium {
     pub(crate) fn lifted_on(&self, screen: Rectangle<i32, Logical>) -> Option<crate::pane::PaneId> {
         crate::stack::lifted(
             self.panes.iter().rev().map(|pane| {
-                let shown = !pane.ghost()
-                    && crate::render::drawn_on(self.pane_outer(pane), screen)
+                let shown = crate::render::drawn_on(self.pane_outer(pane), screen)
                     && !self.carried_by_a_selection(pane.id());
                 let candidate = crate::stack::Candidate {
                     shown,
