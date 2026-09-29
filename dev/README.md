@@ -15,7 +15,8 @@ a demo into a regression test.
 | `SOLIUM_OUTPUTS=<n>` | Give the nested backend `n` monitors, side by side in its one window (1–4). Each gets its own layer map, work area and render pass, drawn into a texture of its own exactly as it would be into its own buffer. One is the default and takes the ordinary path unchanged. |
 | `SOLIUM_LUA_INIT=<path>` | Load this configuration instead of `~/.config/solium/init.lua` or the bundled one. |
 | `SOLIUM_QML_TOPBAR=`, `SOLIUM_QML_TITLEBAR=` | Load chrome from elsewhere, so it can be restyled without a rebuild. |
-| `SOLIUM_QML_GPU=1` | Bring Qt up on the OpenGL scene graph and render QML into a dmabuf the compositor allocated, rather than rasterising it on the CPU. **Not yet usable for a session** — see *QML on the GPU*. |
+| `SOLIUM_QML=<mode>` | Which scene graph QML renders on: `auto` (the default), `gpu` or `software`. Below `--qml <mode>`, above `SOLIUM_QML_GPU` and the configuration's `qml.renderer` — see *QML on the GPU*. |
+| `SOLIUM_QML_GPU=1` | The older spelling of `SOLIUM_QML=gpu`. Set to anything, it means `gpu`. |
 | `SOLIUM_DEV_IMAGE=` | The container `dev/run-nested.sh` runs in. |
 | `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
 | `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |
@@ -506,33 +507,76 @@ checked out.
 
 ## QML on the GPU
 
-```sh
-SOLIUM_QML_GPU=1 ./target/debug/solium
+QML renders on the GPU by default. Qt comes up on its OpenGL scene graph and
+renders each scene into a dmabuf the compositor allocated through GBM, rather
+than rasterising it on the CPU into a `QImage` the compositor then uploads.
+Software is the fallback, and a machine where the GPU path fails still gets a
+desktop.
+
+| Mode | What it does |
+|---|---|
+| `auto` | The default. On the hardware, the GPU pre-flight runs first in a short-lived child process — this binary, as `--probe-qml-gpu` — and QML renders on the GPU if it passes, in software if it fails or takes longer than `qml.probe_timeout` (5000 ms, after which the child is killed). Nested, software: winit hands the compositor no GBM device. |
+| `gpu` | The GPU, with no child probe. Nested this draws no QML at all, for the same reason. |
+| `software` | Qt's software rasteriser. |
+
+Asked for in this order, and the first that says anything decides:
+
+1. `--qml <mode>` or `--qml=<mode>`, after the backend: `solium --tty --qml software`
+2. `SOLIUM_QML=<mode>`
+3. `SOLIUM_QML_GPU` set to anything, the older spelling of `gpu`
+4. `qml = { renderer = "<mode>" }` in the configuration (`config.lua` or `user.lua`)
+5. `auto`
+
+A value that is not a mode warns and means `auto`, at the level it was written:
+`SOLIUM_QML=sofware` does not fall through to the configuration. The
+configuration can hold this because it is read before the first scene starts
+Qt. It is read once, though: Qt fixes its scene graph for the life of the
+process, so a reload does not change it and a restart does.
+
+**Why a child process.** Qt picks its scene graph inside `QGuiApplication` and
+there is no way back. The pre-flight — a render node, the KMS config that keeps
+Qt off the card, a real allocation, a real QML render, the import and the fence
+— used to run only inside the compositor, after that choice was made, so a
+failure left no software path to fall back to. Run in a child, a failure costs
+the child. Once it passes, the compositor runs the same pre-flight again in
+its own process, as it always did.
+
+**Which one is running.** One line at startup begins `QML renderer:` and says
+which, and why:
+
+```
+INFO solium::qml::renderer: QML renderer: gpu, the probe passed from="qml.renderer" probe_ms=160 said="gpu: Qt rendered QML into a buffer allocated on /dev/dri/renderD128, fenced"
+INFO solium::qml: QML on the GPU: Qt rendered into a buffer we allocated node=/dev/dri/renderD128 fenced=true
 ```
 
-Qt comes up on its OpenGL scene graph instead of the software rasteriser, and
-renders each scene into a dmabuf the compositor allocated through GBM rather
-than into a `QImage` it then has to upload. Off by default.
-
-**It cannot run a session yet.** Qt picks one scene graph per process and there
-is no way back, so the moment this succeeds every *software* scene stops
-loading — the wallpaper, the window frames and the cursor all fail with `a
-software scene cannot render on it`, and the desktop comes up empty. What the
-knob does today is answer, in the real compositor process, whether the path
-works on this machine:
+A fallback is a single warning with the reason and both ways out:
 
 ```
-INFO solium::qml: QML on the GPU: Qt rendered into a buffer we allocated
-                  node=/dev/dri/renderD128 fenced=true
+WARN solium::qml::renderer: QML renderer: software, because the GPU probe failed: no DRM render node could be found (exit status 1). `--qml gpu` or SOLIUM_QML=gpu forces the GPU; `--qml software` or SOLIUM_QML=software skips the probe
 ```
 
-That line means a buffer was allocated, imported into Qt's context as a
-texture, drawn into by real QML, and fenced with a `sync_file` the driver
-exported. `fenced=false` is also a pass — it means the driver declined to
+**The probe on its own.** It needs only a render node, not DRM master, so it is
+safe to run from inside another desktop session:
+
+```
+$ ./target/debug/solium --probe-qml-gpu; echo $?
+gpu: Qt rendered QML into a buffer allocated on /dev/dri/renderD128, fenced
+0
+```
+
+Exit 0 and one line on stdout when the GPU path works here; non-zero and one
+line on stderr saying why when it does not. `RUST_LOG=info` shows its steps. On
+the RTX 3070 it takes 155–180 ms, once 456 ms on a cold first run, and that is
+what `auto` adds to a hardware session's startup.
+
+`QML on the GPU: Qt rendered into a buffer we allocated`, and the probe's
+`fenced`, mean a buffer was allocated, imported into Qt's context as a texture,
+drawn into by real QML, and fenced with a `sync_file` the driver exported.
+`fenced=false` — the probe's `unfenced` — is also a pass: the driver declined to
 export a fence and the host waited with `glFinish` instead, which costs a stall
 and nothing else.
 
-Three things worth knowing before running it on a TTY:
+Three things worth knowing about the GPU path on a TTY:
 
 * **Qt must be kept off the card node.** Solium writes
   `$XDG_RUNTIME_DIR/solium-eglfs-kms.json` naming the *render* node and
@@ -693,7 +737,7 @@ can talk to; and from another VT, `pkill -x solium` always works.
 
 That second one is worth one sentence of qualification, because it is a
 last-resort escape and you are reading it before taking a VT. It holds for an
-ordinary session, and it holds with `SOLIUM_QML_GPU=1` only because Solium sets
+ordinary session, and it holds with QML on the GPU only because Solium sets
 `QT_QPA_NO_SIGNAL_HANDLER` before starting Qt — without it eglfs installs its
 own `SIGTERM` handler, and the process then neither dies nor cleanly survives.
 See *QML on the GPU*. On a build that predates that, or one where

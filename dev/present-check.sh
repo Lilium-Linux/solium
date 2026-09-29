@@ -39,11 +39,13 @@
 #
 # Nested, on the host. Only *builds* need the container.
 #
-# `SOLIUM_QML_GPU` is deliberately never set: nested there is no GBM device, so
-# the wallpaper, the cursor and every decoration silently fail to load. The
-# configurations here turn QML off on purpose instead -- `sol.pane("none")` and
-# no wallpaper -- so a window is exactly its outer rect against the backdrop
-# and its corner can be measured rather than guessed at.
+# QML is pinned with `SOLIUM_QML=software`. Nested, `auto` is software already,
+# because there is no GBM device (`auto_is_software_nested`); the pin is so an
+# exported `SOLIUM_QML=gpu` or `SOLIUM_QML_GPU`, under which nested loads no QML
+# at all, cannot change what is measured (`the_old_knob_is_an_alias_for_gpu`).
+# The configurations here turn QML off on purpose as well -- `sol.pane("none")`
+# and no wallpaper -- so a window is exactly its outer rect against the
+# backdrop and its corner can be measured rather than guessed at.
 #
 # Each check's frames come from *one* run, with `SOLIUM_TRIGGER_AT` firing
 # between captures. Separate runs would place the client differently each time,
@@ -129,6 +131,7 @@ shoot() {
 
     local -a environment=(
         "SOLIUM_LUA_INIT=$lua"
+        "SOLIUM_QML=software"
         "SOLIUM_CAPTURE=$dir/f"
         "SOLIUM_CAPTURE_AT=$at"
         "SOLIUM_CAPTURE_FRAMES=$frames"

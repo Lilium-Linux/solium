@@ -639,7 +639,8 @@ and the two mistakes everyone makes first.
 
 ## Worth knowing
 
-A decoration is rasterised in software, over the window's whole outer rect.
+A decoration is rasterised over the window's whole outer rect — on the GPU by
+default, and on the CPU where the GPU path is not available.
 Bars and borders are cheap because most of that rect is untouched, but a frame
 that paints across the entire window every frame will cost you — the animation
 only runs while the scene is actually changing, so favour transitions that

@@ -157,9 +157,9 @@ survives the pause.
 
 Two things to know before you animate:
 
-**A frame that never stops animating never stops costing anything.** It is
-rasterised on the CPU: a full-width gradient moving at 260 Hz is about a tenth
-of a core. `pulse.qml` does that deliberately while focused. Making that trade
+**A frame that never stops animating never stops costing anything.** On the
+software renderer it is rasterised on the CPU: a full-width gradient moving at
+260 Hz is about a tenth of a core. `pulse.qml` does that deliberately while focused. Making that trade
 knowingly is fine; making it by accident is not.
 
 **Stay inside your own bands if you can.** A frame that paints only where it

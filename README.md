@@ -142,6 +142,13 @@ are. It is also why Qt is a hard dependency and why the render loop has to drive
 Qt's animations by hand: a `Timer` in a settled QML scene never fires, because
 nothing advances it but a frame the compositor decided to draw.
 
+On the hardware, QML renders on the GPU: Qt draws into a buffer the compositor
+allocated, once a trial render in a short-lived child process has shown that
+works on this machine. Where it does not, QML renders in software and the log
+says why. `solium --tty --qml gpu` or `--qml software` (or `SOLIUM_QML=`) forces
+one, and the startup line beginning `QML renderer:` says which a session got —
+see [dev/README.md](dev/README.md#qml-on-the-gpu).
+
 ### A pane owns a window and its chrome
 
 A *pane* is a window plus the layers drawn around it. Layers have a `depth` —
