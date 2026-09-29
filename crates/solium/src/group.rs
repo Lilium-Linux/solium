@@ -1077,6 +1077,7 @@ mod desk {
             focused: true,
             primary: true,
             transform: "normal".to_owned(),
+            off: false,
         }
     }
 

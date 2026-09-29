@@ -235,6 +235,11 @@ pub(crate) struct Solium {
     /// Who is waiting to be told nobody is here, and who is stopping us
     /// deciding that.
     pub(crate) idle: crate::idle::Idle,
+    /// Registers `zwlr_output_power_manager_v1`. See `power.rs`.
+    #[expect(dead_code, reason = "holds the global; dropping it would remove it")]
+    pub(crate) power_state: crate::power::PowerState,
+    /// Which monitors are off, and which of those are dark. See `power.rs`.
+    pub(crate) power: crate::power::Power,
 
     /// Everything a script has asked the compositor to draw in QML.
     ///
@@ -903,6 +908,8 @@ impl Solium {
             idle_state: crate::idle::IdleState::new::<Self>(&display_handle),
             idle_inhibit_state: crate::idle::inhibit_state(&display_handle),
             idle: crate::idle::Idle::default(),
+            power_state: crate::power::PowerState::new::<Self>(&display_handle),
+            power: crate::power::Power::default(),
             surfaces: crate::scripted::Surfaces::default(),
             groups: crate::group::Groups::default(),
             keymap: None,

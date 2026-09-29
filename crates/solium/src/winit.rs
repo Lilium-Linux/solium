@@ -31,7 +31,9 @@ use smithay::{
 };
 
 use crate::{
-    capture, dev, render,
+    capture, dev,
+    power::{Lit, Step},
+    render,
     script::Scripts,
     state::{ClientState, Solium},
     synth,
@@ -296,6 +298,12 @@ pub(crate) fn run() -> Result<()> {
     // than held, because `super+shift+r` can rearrange them.
     let mut screens: Vec<Rectangle<i32, smithay::utils::Logical>> = Vec::new();
     let mut monitors = crate::offscreen::Screens::new();
+    // The monitors that are off, and have been drawn black. Nested there is
+    // no display to switch off, so off is black and then not drawn at all:
+    // see "What off is, per backend" in `power.rs`. No test reaches this
+    // loop; `every_way_a_monitor_goes_off_and_on_is_one_step_at_a_time` is
+    // the sequence it follows.
+    let mut dark: Vec<Output> = Vec::new();
 
     // Frames are captured a few ticks in, not on the first one: a client that
     // has just been configured has not drawn yet, and a capture of an empty
@@ -451,6 +459,7 @@ pub(crate) fn run() -> Result<()> {
                         break;
                     };
                     tracing::info!(monitor = output.name(), "monitor gone");
+                    dark.retain(|each| each != &output);
                     state.display_handle.remove_global::<Solium>(global);
                     crate::layer::close_all(&output);
                     state.space.unmap_output(&output);
@@ -512,6 +521,34 @@ pub(crate) fn run() -> Result<()> {
         let size = backend.window_size();
         let damage = Rectangle::from_size(size);
 
+        // What each monitor does this frame, in `screens` order. Nested, a
+        // monitor never reports `Blanked`: the black frame is the whole of
+        // going off, so it goes from `Blank` straight to `Dark`.
+        let steps: Vec<(Option<Output>, Step)> = screens
+            .iter()
+            .map(|screen| {
+                let output = state.output_for(*screen);
+                let step = output.as_ref().map_or(Step::Draw, |output| {
+                    let lit = if dark.contains(output) {
+                        Lit::Dark
+                    } else {
+                        Lit::On
+                    };
+                    state.power_step(output, lit)
+                });
+                (output, step)
+            })
+            .collect();
+        // A monitor going black or coming back needs a frame whatever else
+        // does, and one drawn in full; every one resting needs none at all.
+        let changing = steps
+            .iter()
+            .any(|(_, step)| matches!(step, Step::Blank | Step::Wake));
+        let resting = !steps.is_empty() && steps.iter().all(|(_, step)| *step == Step::Rest);
+        let pictures = steps
+            .iter()
+            .any(|(_, step)| matches!(step, Step::Draw | Step::Wake));
+
         // How many frames ago this buffer was last drawn, which is what lets
         // the damage tracker work out what is stale in it. Passing 0 means
         // "contents unknown", and the tracker then redraws everything every
@@ -527,7 +564,7 @@ pub(crate) fn run() -> Result<()> {
         // damage, which is the one thing a lock screen may never do. A locked
         // screen is static, so the whole cost of this is a full redraw on the
         // handful of frames a lock screen ever draws.
-        let age = if state.lock.is_some() {
+        let age = if state.lock.is_some() || changing {
             0
         } else {
             backend.buffer_age().unwrap_or(0)
@@ -555,7 +592,7 @@ pub(crate) fn run() -> Result<()> {
         // verified against a compositor that redrew whatever happened. A
         // missing damage signal is invisible here and obvious on the hardware,
         // which is the worst possible way round.
-        let wanted = state.redraw || state.animating;
+        let wanted = (state.redraw || state.animating || changing) && !resting;
         // Cleared before drawing, not after: a client that commits while we are
         // rendering has damaged the *next* frame, not this one.
         state.redraw = false;
@@ -590,7 +627,7 @@ pub(crate) fn run() -> Result<()> {
         // Before the output buffer is bound: this pass binds framebuffers of
         // its own, and doing that underneath a bound output redirects the
         // whole frame into a texture. See `render::Prepared`.
-        let prepared = if wanted {
+        let prepared = if wanted && pictures {
             render::prepare(&mut state, backend.renderer())
         } else {
             render::Prepared::default()
@@ -647,6 +684,29 @@ pub(crate) fn run() -> Result<()> {
                             let scale = state
                                 .output_for(*screen)
                                 .map_or(1.0, |output| output.current_scale().fractional_scale());
+                            // Off: its share of the window is black, and its
+                            // picture is not built.
+                            if steps
+                                .get(index)
+                                .is_some_and(|(_, step)| matches!(step, Step::Blank | Step::Rest))
+                            {
+                                let pixels: smithay::utils::Size<i32, smithay::utils::Physical> = (
+                                    ((f64::from(screen.size.w) * scale).ceil() as i32).max(1),
+                                    ((f64::from(screen.size.h) * scale).ceil() as i32).max(1),
+                                )
+                                    .into();
+                                whole.push(render::Element::Solid(
+                                    smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
+                                        Id::new(),
+                                        Rectangle::new(((at as i32), 0).into(), pixels),
+                                        smithay::backend::renderer::utils::CommitCounter::default(),
+                                        [0.0, 0.0, 0.0, 1.0],
+                                        Kind::Unspecified,
+                                    ),
+                                ));
+                                at += f64::from(pixels.w);
+                                continue;
+                            }
                             let Some((texture, pixels)) = monitors
                                 .draw(&mut state, renderer, &prepared, index, *screen, scale)
                             else {
@@ -683,6 +743,12 @@ pub(crate) fn run() -> Result<()> {
                             at += f64::from(pixels.w);
                         }
                         whole
+                    } else if steps
+                        .first()
+                        .is_some_and(|(_, step)| matches!(step, Step::Blank | Step::Rest))
+                    {
+                        // Off: nothing, over the black cleared below.
+                        Vec::new()
                     } else {
                         let screen = screens.first().copied().unwrap_or_default();
                         let scale = state
@@ -697,6 +763,15 @@ pub(crate) fn run() -> Result<()> {
                             render::Picture::screen(screen, scale),
                         )
                     };
+                    // Black when the one monitor there is is going off, and
+                    // the usual grey behind everything otherwise.
+                    let clear = if screens.len() <= 1
+                        && steps.first().is_some_and(|(_, step)| *step == Step::Blank)
+                    {
+                        [0.0, 0.0, 0.0, 1.0]
+                    } else {
+                        [0.05, 0.05, 0.06, 1.0]
+                    };
 
                     // As on the hardware backend: the frame is built and
                     // finished inside this call, so the mark brackets it and is
@@ -709,7 +784,7 @@ pub(crate) fn run() -> Result<()> {
                         &mut framebuffer,
                         age,
                         &elements,
-                        [0.05, 0.05, 0.06, 1.0],
+                        clear,
                     );
                     drop(gles);
                     drop(frame);
@@ -803,24 +878,45 @@ pub(crate) fn run() -> Result<()> {
                     for output in &drawn {
                         state.frame_presented(output, built_under);
                     }
+                    // A monitor drawn black is dark now, and one woken is lit.
+                    for (output, step) in &steps {
+                        let Some(output) = output else {
+                            continue;
+                        };
+                        match step {
+                            Step::Blank => {
+                                tracing::info!(
+                                    monitor = output.name(),
+                                    "blanked: a nested monitor has no display to power off"
+                                );
+                                dark.push(output.clone());
+                                state.output_dark(output);
+                            }
+                            Step::Wake => dark.retain(|each| each != output),
+                            Step::Draw | Step::Darken | Step::Rest => {}
+                        }
+                    }
                 }
                 Err(err) => tracing::warn!(?err, "submit failed"),
             }
         }
 
-        state.space.elements().for_each(|window| {
-            window.send_frame(
-                &output,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default(),
-                // Throttled to the output's refresh, not to nothing: see the
-                // note on `send_frames` in tty.rs. Zero here means every client
-                // redraws as fast as it can for as long as it is open.
-                Some(frame_interval(&output)),
-                |_, _| Some(output.clone()),
-            );
-        });
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        // Throttled to a lit monitor's refresh, not to nothing: see the note
+        // on `send_frames` in tty.rs. Zero here means every client redraws as
+        // fast as it can for as long as it is open. A window only a monitor
+        // that is off shows is `send_dark_frames`', as on the hardware.
+        if let Some(lit) = state
+            .space
+            .outputs()
+            .find(|each| !state.power.is_off(each))
+            .cloned()
+        {
+            state.send_frames_on(&lit, wall, frame_interval(&lit));
+        }
+        state.send_dark_frames(wall);
 
         settled = if state.space.elements().next().is_some() {
             settled.saturating_add(1)

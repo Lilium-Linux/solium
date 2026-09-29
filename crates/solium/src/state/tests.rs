@@ -1489,6 +1489,9 @@ mod real_client {
     use wayland_protocols::ext::session_lock::v1::client::{
         ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
     };
+    use wayland_protocols::wp::idle_inhibit::zv1::client::{
+        zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1,
+    };
     use wayland_protocols::xdg::activation::v1::client::{
         xdg_activation_token_v1, xdg_activation_v1,
     };
@@ -1498,6 +1501,9 @@ mod real_client {
     };
     use wayland_protocols_wlr::layer_shell::v1::client::{
         zwlr_layer_shell_v1, zwlr_layer_surface_v1,
+    };
+    use wayland_protocols_wlr::output_power_management::v1::client::{
+        zwlr_output_power_manager_v1, zwlr_output_power_v1,
     };
     use wayland_protocols_wlr::screencopy::v1::client::{
         zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
@@ -1677,7 +1683,72 @@ mod real_client {
         /// Every activation token this client asked for and was handed,
         /// by `xdg_activation_token_v1.done`, oldest first.
         tokens: Vec<String>,
+        /// For `power`: the manager `wlopm` binds, every `mode` its
+        /// controls were told -- the control, and whether it said on -- and
+        /// the controls told `failed`.
+        output_power: Option<zwlr_output_power_manager_v1::ZwlrOutputPowerManagerV1>,
+        power_modes: Vec<(wayland_client::backend::ObjectId, bool)>,
+        power_failed: Vec<wayland_client::backend::ObjectId>,
+        /// For `power`: what a video player holds the machine awake with.
+        inhibit: Option<zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1>,
+        /// How many frame callbacks -- [`FrameDone`], not the `sync` every
+        /// round trip makes -- have come back done.
+        frames_done: usize,
+        /// Every global the registry has taken away, by name. A monitor
+        /// that is only off must never be one.
+        globals_removed: Vec<u32>,
     }
+
+    /// A `wl_surface.frame` callback, told apart from a round trip's
+    /// `wl_display.sync` by its data. See [`Client::frames_done`].
+    struct FrameDone;
+
+    impl Dispatch<wl_callback::WlCallback, FrameDone> for Client {
+        fn event(
+            state: &mut Self,
+            _callback: &wl_callback::WlCallback,
+            event: wl_callback::Event,
+            _data: &FrameDone,
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            if let wl_callback::Event::Done { .. } = event {
+                state.frames_done += 1;
+            }
+        }
+    }
+
+    /// See [`Client::power_modes`].
+    impl Dispatch<zwlr_output_power_v1::ZwlrOutputPowerV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            control: &zwlr_output_power_v1::ZwlrOutputPowerV1,
+            event: zwlr_output_power_v1::Event,
+            _data: &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            let id = wayland_client::Proxy::id(control);
+            match event {
+                zwlr_output_power_v1::Event::Mode { mode } => state.power_modes.push((
+                    id,
+                    matches!(
+                        mode,
+                        wayland_client::WEnum::Value(zwlr_output_power_v1::Mode::On)
+                    ),
+                )),
+                zwlr_output_power_v1::Event::Failed => state.power_failed.push(id),
+                _ => {}
+            }
+        }
+    }
+    wayland_client::delegate_noop!(
+        Client: ignore zwlr_output_power_manager_v1::ZwlrOutputPowerManagerV1
+    );
+    wayland_client::delegate_noop!(
+        Client: ignore zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1
+    );
+    wayland_client::delegate_noop!(Client: ignore zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1);
 
     /// See [`Client::tokens`].
     impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for Client {
@@ -1704,13 +1775,23 @@ mod real_client {
             _conn: &Connection,
             qh: &QueueHandle<Self>,
         ) {
-            let wl_registry::Event::Global {
-                name, interface, ..
-            } = event
-            else {
-                return;
+            let (name, interface) = match event {
+                wl_registry::Event::Global {
+                    name, interface, ..
+                } => (name, interface),
+                wl_registry::Event::GlobalRemove { name } => {
+                    state.globals_removed.push(name);
+                    return;
+                }
+                _ => return,
             };
             match interface.as_str() {
+                "zwlr_output_power_manager_v1" => {
+                    state.output_power = Some(registry.bind(name, 1, qh, ()));
+                }
+                "zwp_idle_inhibit_manager_v1" => {
+                    state.inhibit = Some(registry.bind(name, 1, qh, ()));
+                }
                 "wl_compositor" => state.compositor = Some(registry.bind(name, 1, qh, ())),
                 "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
                 "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
@@ -9025,11 +9106,12 @@ mod real_client {
             );
         }
 
-        /// **A monitor switched off does not hold `locked` back.** Solium
-        /// has no DPMS or idle power-off: the one way a monitor goes dark is
-        /// `enabled = false`, and `tty.rs` drops a monitor switched off that
-        /// way just as it drops one unplugged. A lock asked for after that
-        /// waits for the monitor that is still on, and for nothing else.
+        /// **A monitor switched off does not hold `locked` back.** Switched
+        /// off with `enabled = false`, that is, which `tty.rs` drops just as
+        /// it drops one unplugged. A lock asked for after that waits for the
+        /// monitor that is still on, and for nothing else. A monitor powered
+        /// off is not dropped -- it stays, dark -- and is
+        /// `power::a_dark_monitor_does_not_hold_locked_back`'s.
         ///
         /// Against the old confirmation, fails at "the one still on had
         /// shown".
@@ -9311,6 +9393,1090 @@ mod real_client {
             let lock = session.lock();
             session.assert_sealed("an unlock before `locked`, then a new lock", selections);
             session.assert_unlocks(lock);
+        }
+
+        /// **#54: turning a monitor off** -- over `wlr-output-power-management`,
+        /// from a script, and on its own when nobody is there -- and what the
+        /// lock does with a monitor that is dark.
+        ///
+        /// Here, beside the lock's tests, for their fixture: the lock halves
+        /// need the lock client, and the rest need no more than the
+        /// application's client with a window.
+        mod power {
+            use super::*;
+            use crate::lock::LockFrame;
+            use crate::power::{Lit, Step};
+
+            /// The tty's half, played the way `tty.rs` plays it: what each
+            /// monitor's display has been through, and the frame in flight on
+            /// it with the lock it was built under.
+            #[derive(Default)]
+            struct Tty {
+                lit: Vec<(Output, Lit)>,
+                in_flight: Vec<(Output, Option<LockFrame>)>,
+            }
+
+            impl Tty {
+                fn lit(&self, output: &Output) -> Lit {
+                    self.lit
+                        .iter()
+                        .find(|(each, _)| each == output)
+                        .map_or(Lit::On, |(_, lit)| *lit)
+                }
+
+                fn set(&mut self, output: &Output, lit: Lit) {
+                    self.lit.retain(|(each, _)| each != output);
+                    self.lit.push((output.clone(), lit));
+                }
+
+                /// Build and queue this monitor's next frame as `render` does:
+                /// its picture, a frame of black, the display switched off, or
+                /// nothing.
+                fn queue(&mut self, state: &mut Solium, output: &Output) -> Step {
+                    assert!(
+                        !self.in_flight.iter().any(|(each, _)| each == output),
+                        "the fixture queued over a pending flip, which `render` never does"
+                    );
+                    let step = state.power_step(output, self.lit(output));
+                    match step {
+                        Step::Draw | Step::Wake => {
+                            self.in_flight.push((output.clone(), state.lock_frame()));
+                            self.set(output, Lit::On);
+                        }
+                        Step::Blank => {
+                            self.in_flight.push((output.clone(), state.lock_frame()));
+                            self.set(output, Lit::Blanked);
+                        }
+                        Step::Darken => {
+                            self.set(output, Lit::Dark);
+                            state.output_dark(output);
+                        }
+                        Step::Rest => {}
+                    }
+                    step
+                }
+
+                /// The flip of whatever is in flight on this monitor lands.
+                fn flip(&mut self, state: &mut Solium, output: &Output) {
+                    if let Some(index) = self.in_flight.iter().position(|(each, _)| each == output)
+                    {
+                        let (_, frame) = self.in_flight.remove(index);
+                        state.frame_presented(output, frame);
+                    }
+                }
+
+                /// One frame, queued and on the screen.
+                fn frame(&mut self, state: &mut Solium, output: &Output) -> Step {
+                    let step = self.queue(state, output);
+                    self.flip(state, output);
+                    step
+                }
+
+                /// Frames until this monitor is doing what it will go on
+                /// doing, and what each one was.
+                fn settle(&mut self, state: &mut Solium, output: &Output) -> Vec<Step> {
+                    let mut steps = Vec::new();
+                    for _ in 0..6 {
+                        let step = self.frame(state, output);
+                        steps.push(step);
+                        if matches!(step, Step::Draw | Step::Rest) {
+                            break;
+                        }
+                    }
+                    steps
+                }
+            }
+
+            impl Session {
+                /// A power control for the `index`th monitor, asked for by the
+                /// application's client the way `wlopm` asks for one.
+                fn control(&mut self, index: usize) -> zwlr_output_power_v1::ZwlrOutputPowerV1 {
+                    let manager = self
+                        .app
+                        .client
+                        .output_power
+                        .clone()
+                        .expect("zwlr_output_power_manager_v1 is not advertised");
+                    let output = self
+                        .app
+                        .client
+                        .outputs
+                        .get(index)
+                        .cloned()
+                        .expect("a wl_output for that monitor");
+                    let control = manager.get_output_power(&output, &self.app.qh, ());
+                    self.app.pump(&mut self.display, &mut self.state);
+                    control
+                }
+
+                /// Every mode `control` has been told, oldest first: true is on.
+                fn modes(
+                    &mut self,
+                    control: &zwlr_output_power_v1::ZwlrOutputPowerV1,
+                ) -> Vec<bool> {
+                    self.app.pump(&mut self.display, &mut self.state);
+                    let id = wayland_client::Proxy::id(control);
+                    self.app
+                        .client
+                        .power_modes
+                        .iter()
+                        .filter(|(each, _)| *each == id)
+                        .map(|(_, on)| *on)
+                        .collect()
+                }
+
+                /// `wlopm --on` or `--off`.
+                fn power(&mut self, control: &zwlr_output_power_v1::ZwlrOutputPowerV1, on: bool) {
+                    control.set_mode(if on {
+                        zwlr_output_power_v1::Mode::On
+                    } else {
+                        zwlr_output_power_v1::Mode::Off
+                    });
+                    self.app.pump(&mut self.display, &mut self.state);
+                }
+
+                /// Time passes with nobody touching anything, and a frame runs.
+                fn wait(&mut self, by: Duration) {
+                    self.state.clock.advance(by);
+                    crate::idle::settle(&mut self.state);
+                    self.app.pump(&mut self.display, &mut self.state);
+                }
+
+                /// Whether every one of these monitors is off.
+                fn all_off(&self, outputs: &[&Output]) -> bool {
+                    outputs.iter().all(|output| self.state.power.is_off(output))
+                }
+
+                /// Whether none of them is.
+                fn none_off(&self, outputs: &[&Output]) -> bool {
+                    outputs
+                        .iter()
+                        .all(|output| !self.state.power.is_off(output))
+                }
+            }
+
+            /// **The protocol is there, says the mode on bind, and turns a
+            /// monitor off and on** -- telling every control of that monitor
+            /// each time, and nobody when nothing changed. A monitor that goes
+            /// away is `failed` to its controls, and so is a control asked for
+            /// on one that has gone.
+            ///
+            /// The old code advertises no such global, so fails at "not
+            /// advertised". With `settle_monitors` not forgetting a monitor
+            /// that went, fails at "was unplugged".
+            #[test]
+            fn the_power_protocol_is_advertised_answers_mode_on_bind_and_turns_a_monitor_off_and_on()
+             {
+                let mut session = Session::with_monitors(2);
+                let (left, right) = (session.output(0), session.output(1));
+                let control = session.control(0);
+                assert_eq!(
+                    session.modes(&control),
+                    [true],
+                    "a control is told its monitor's mode the moment it is made"
+                );
+
+                session.power(&control, false);
+                assert_eq!(
+                    session.modes(&control),
+                    [true, false],
+                    "set_mode(off) was not answered with `mode off`"
+                );
+                assert!(
+                    session.state.power.is_off(&left),
+                    "told off, and the monitor is on"
+                );
+                assert!(
+                    !session.state.power.is_off(&right),
+                    "the other monitor went off with it"
+                );
+
+                // A second control for the same monitor, as a panel would
+                // hold: not refused, and told what the monitor is now.
+                let second = session.control(0);
+                assert_eq!(session.modes(&second), [false], "made while it is off");
+                session.power(&control, false);
+                assert_eq!(
+                    session.modes(&control),
+                    [true, false],
+                    "asked for what it already was, and told it again"
+                );
+
+                session.power(&second, true);
+                assert_eq!(
+                    session.modes(&control),
+                    [true, false, true],
+                    "turned on through one control, and the other was not told"
+                );
+                assert_eq!(session.modes(&second), [false, true]);
+                assert!(!session.state.power.is_off(&left));
+
+                // The right-hand monitor is unplugged with a control on it.
+                let on_right = session.control(1);
+                let right_output = session
+                    .app
+                    .client
+                    .outputs
+                    .get(1)
+                    .cloned()
+                    .expect("a wl_output for the right-hand monitor");
+                session.unplug(1);
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session
+                        .app
+                        .client
+                        .power_failed
+                        .contains(&wayland_client::Proxy::id(&on_right)),
+                    "a control on a monitor that was unplugged was not told `failed`"
+                );
+                let late = session
+                    .app
+                    .client
+                    .output_power
+                    .clone()
+                    .expect("the manager")
+                    .get_output_power(&right_output, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session
+                        .app
+                        .client
+                        .power_failed
+                        .contains(&wayland_client::Proxy::id(&late)),
+                    "a control for a monitor that has gone was not told `failed`"
+                );
+            }
+
+            /// **A monitor that is off is not drawn, and nothing about the
+            /// layout changes.** It goes black and then dark and is left alone
+            /// for as long as it is off; its place, its work area, the window
+            /// on it and its `wl_output` all stay exactly where they were, and a
+            /// script still sees it, marked off. Back on, it is one frame drawn
+            /// in full, and then frames as ever.
+            ///
+            /// With going off switching the display off before any black,
+            /// fails at "a frame of black"; with a wake not drawn in full, at
+            /// "one frame drawn in full"; with the snapshot not saying so, at
+            /// "does not say it is off".
+            #[test]
+            fn an_off_monitor_is_not_drawn_and_nothing_about_the_layout_changes() {
+                let mut session = Session::with_monitors(2);
+                let (window, ..) = session.app.open(&mut session.display, &mut session.state);
+                let left = session.output(0);
+                let mut tty = Tty::default();
+                let layout = |state: &Solium| {
+                    (
+                        state.space.outputs().count(),
+                        state.space.output_geometry(&left),
+                        state.work_area_on(&left),
+                        state.real_geometry(&window),
+                    )
+                };
+                let before = layout(&session.state);
+                assert_eq!(tty.frame(&mut session.state, &left), Step::Draw);
+
+                let control = session.control(0);
+                session.power(&control, false);
+                assert_eq!(
+                    tty.settle(&mut session.state, &left),
+                    [Step::Blank, Step::Darken, Step::Rest],
+                    "going off is a frame of black, the display switched off, and then nothing"
+                );
+                for _ in 0..3 {
+                    assert_eq!(
+                        tty.frame(&mut session.state, &left),
+                        Step::Rest,
+                        "a monitor that is off was drawn"
+                    );
+                }
+                assert!(session.state.power.is_dark(&left));
+
+                assert_eq!(
+                    layout(&session.state),
+                    before,
+                    "turning a monitor off moved a monitor, a work area or a window"
+                );
+                let snapshot = session.state.snapshot();
+                let row = snapshot
+                    .monitors
+                    .iter()
+                    .find(|monitor| monitor.name == left.name())
+                    .expect("a monitor that is off is not in the list a script is handed");
+                assert!(row.off, "and the list does not say it is off");
+                assert!(
+                    session.app.client.globals_removed.is_empty(),
+                    "a client was told a global went away: {:?}",
+                    session.app.client.globals_removed
+                );
+
+                session.power(&control, true);
+                assert_eq!(
+                    tty.settle(&mut session.state, &left),
+                    [Step::Wake, Step::Draw],
+                    "back on is one frame drawn in full, and then frames as ever"
+                );
+                assert_eq!(layout(&session.state), before);
+            }
+
+            /// **The idle blank turns every screen off after the timeout** --
+            /// ten minutes when nothing says otherwise -- telling every
+            /// control, once per absence: a screen a client turns back on with
+            /// nobody there stays on. Zero never does it.
+            ///
+            /// With the blank left out of `idle::settle`, fails at "still on";
+            /// with it not remembering that it has run, at "turned it off
+            /// again".
+            #[test]
+            fn the_idle_blank_turns_every_screen_off_after_the_timeout() {
+                let mut session = Session::with_monitors(2);
+                let (left, right) = (session.output(0), session.output(1));
+                let controls = [session.control(0), session.control(1)];
+                assert_eq!(
+                    session.state.idle.settings().screens_off_after,
+                    Duration::from_secs(600),
+                    "the default is not the ten minutes `idle::Settings` argues for"
+                );
+
+                // The first frame, which is where nobody-has-touched-it starts.
+                session.wait(Duration::ZERO);
+                session.wait(Duration::from_secs(599));
+                assert!(
+                    session.none_off(&[&left, &right]),
+                    "a screen went off before the timeout"
+                );
+                session.wait(Duration::from_secs(2));
+                assert!(
+                    session.all_off(&[&left, &right]),
+                    "ten minutes with nobody at the machine, and a screen is still on"
+                );
+                for control in &controls {
+                    assert_eq!(
+                        session.modes(control),
+                        [true, false],
+                        "and its control was not told"
+                    );
+                }
+
+                session.power(&controls[0], true);
+                session.wait(Duration::from_secs(700));
+                assert!(
+                    !session.state.power.is_off(&left),
+                    "a client turned a screen back on, and the idle blank turned it off \
+                     again with nobody having touched anything"
+                );
+
+                session.state.idle.configure(crate::idle::Settings {
+                    screens_off_after: Duration::ZERO,
+                    ..crate::idle::Settings::default()
+                });
+                session.state.power_all(true);
+                crate::input::key(&mut session.state, Keycode::new(38), KeyState::Pressed, 1);
+                crate::input::key(&mut session.state, Keycode::new(38), KeyState::Released, 2);
+                session.wait(Duration::from_secs(10_000));
+                assert!(
+                    session.none_off(&[&left, &right]),
+                    "idle.screens_off_after = 0 turned a screen off"
+                );
+            }
+
+            /// **An idle inhibitor holds the idle blank off**, for as long as
+            /// it is held on a window that is on screen: a film does not go
+            /// dark. Let go, and the screen goes.
+            ///
+            /// With `idle_inhibited` not asked, fails at "went dark".
+            #[test]
+            fn an_idle_inhibitor_holds_the_idle_blank_off() {
+                let mut session = Session::new();
+                let (_window, _toplevel, surface, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let monitor = session.output(0);
+                let _control = session.control(0);
+                let inhibitor = session
+                    .app
+                    .client
+                    .inhibit
+                    .clone()
+                    .expect("zwp_idle_inhibit_manager_v1 bound")
+                    .create_inhibitor(&surface, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+
+                session.wait(Duration::ZERO);
+                session.wait(Duration::from_secs(3_600));
+                assert!(
+                    !session.state.power.is_off(&monitor),
+                    "a film holding an idle inhibitor went dark: an hour with nobody \
+                     touching anything is what watching one is"
+                );
+
+                inhibitor.destroy();
+                session.app.pump(&mut session.display, &mut session.state);
+                session.wait(Duration::ZERO);
+                assert!(
+                    session.state.power.is_off(&monitor),
+                    "the film ended an hour in and the screen is still lit, so it was \
+                     not the inhibitor holding it"
+                );
+            }
+
+            /// **Input wakes every screen**, and the input that wakes them is
+            /// delivered: a key press, a motion, a button. A release does not
+            /// wake them, because a binding that turns them off is let go
+            /// straight after.
+            ///
+            /// Without the wake in `input::key`, fails at "a key press did not
+            /// wake"; waking on a release as well, at "a key let go"; without
+            /// the one in `input::handle`, at "the pointer moving".
+            #[test]
+            fn input_wakes_every_screen_the_idle_blank_turned_off() {
+                let mut session = Session::with_monitors(2);
+                session.app.open(&mut session.display, &mut session.state);
+                let (left, right) = (session.output(0), session.output(1));
+                let both = [&left, &right];
+
+                // `a` goes down with the screens on -- a binding being pressed
+                // -- and they go off while it is held.
+                crate::input::key(&mut session.state, Keycode::new(38), KeyState::Pressed, 1);
+                session.wait(Duration::ZERO);
+                session.wait(Duration::from_secs(601));
+                assert!(session.all_off(&both), "the premise: the idle blank ran");
+
+                crate::input::key(&mut session.state, Keycode::new(38), KeyState::Released, 2);
+                assert!(
+                    session.all_off(&both),
+                    "a key let go woke the screens, so a binding that turns them off \
+                     turns them straight back on"
+                );
+
+                session.app.client.key_events.clear();
+                crate::input::key(&mut session.state, Keycode::new(38), KeyState::Pressed, 3);
+                crate::input::key(&mut session.state, Keycode::new(38), KeyState::Released, 4);
+                assert!(
+                    session.none_off(&both),
+                    "a key press did not wake the screens"
+                );
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session.app.client.key_events.contains(&(30, true)),
+                    "the key that woke the screens was not delivered: {:?}",
+                    session.app.client.key_events
+                );
+
+                let region = crate::monitor::union(&session.state.space).expect("two monitors");
+                session.state.power_all(false);
+                crate::synth::send_motion(&mut session.state, region, (4.0, 4.0).into(), 1_000);
+                assert!(
+                    session.none_off(&both),
+                    "the pointer moving did not wake the screens"
+                );
+
+                session.state.power_all(false);
+                crate::synth::send_button(
+                    &mut session.state,
+                    region,
+                    0x110,
+                    smithay::backend::input::ButtonState::Released,
+                    2_000,
+                );
+                assert!(session.all_off(&both), "a button let go woke the screens");
+                crate::synth::send_button(
+                    &mut session.state,
+                    region,
+                    0x110,
+                    smithay::backend::input::ButtonState::Pressed,
+                    3_000,
+                );
+                assert!(
+                    session.none_off(&both),
+                    "a button pressed did not wake the screens"
+                );
+            }
+
+            /// **A key that wakes a dark lock screen is typed into the lock
+            /// screen**: delivered, and to the lock client. The screen went dark
+            /// behind the lock with a film's inhibitor still held behind it,
+            /// because nothing holds it off while locked.
+            ///
+            /// With the waking key swallowed, fails at "was swallowed"; with the
+            /// inhibitor counted while locked, at "stayed lit".
+            ///
+            /// The press is what is asked about, not the key: a release goes
+            /// to whoever had the press, and `type_key` sends both.
+            #[test]
+            fn a_key_that_wakes_a_dark_lock_screen_is_typed_into_the_lock_screen() {
+                let mut session = Session::new();
+                let (_window, _toplevel, surface, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let _film = session
+                    .app
+                    .client
+                    .inhibit
+                    .clone()
+                    .expect("zwp_idle_inhibit_manager_v1 bound")
+                    .create_inhibitor(&surface, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+                let monitor = session.output(0);
+                let lock = session.lock();
+                let mut tty = Tty::default();
+
+                session.wait(Duration::ZERO);
+                session.wait(Duration::from_secs(601));
+                assert!(
+                    session.state.power.is_off(&monitor),
+                    "behind the lock the film's inhibitor holds nothing, and the lock \
+                     screen stayed lit"
+                );
+                assert_eq!(
+                    tty.settle(&mut session.state, &monitor),
+                    [Step::Blank, Step::Darken, Step::Rest]
+                );
+
+                session.locker.client.key_events.clear();
+                let (app, _) = session.type_key();
+                assert!(
+                    !app,
+                    "the key that woke the lock screen reached the application behind it"
+                );
+                assert!(
+                    session.locker.client.key_events.contains(&(30, true)),
+                    "the key that woke the lock screen was swallowed: the first key of a \
+                     password typed at a dark screen is lost ({:?})",
+                    session.locker.client.key_events
+                );
+                assert!(
+                    !session.state.power.is_off(&monitor),
+                    "a key typed at a dark lock screen did not light it"
+                );
+                assert_eq!(tty.frame(&mut session.state, &monitor), Step::Wake);
+                session.assert_unlocks(lock);
+            }
+
+            /// **A dark monitor does not hold `locked` back**: it shows
+            /// nothing, so there is nothing on it to cover. `locked` still
+            /// waits for the monitor that is on.
+            ///
+            /// With a dark monitor waited for like any other, fails at "waits
+            /// for the dark one".
+            #[test]
+            fn a_dark_monitor_does_not_hold_locked_back() {
+                let mut session = Session::with_monitors(2);
+                let (left, right) = (session.output(0), session.output(1));
+                let mut tty = Tty::default();
+                let control = session.control(1);
+                session.power(&control, false);
+                assert_eq!(
+                    tty.settle(&mut session.state, &right),
+                    [Step::Blank, Step::Darken, Step::Rest]
+                );
+
+                let (lock, surfaces) =
+                    session
+                        .locker
+                        .ask_lock(&mut session.display, &mut session.state, true);
+                session.lock_surfaces = surfaces;
+                assert!(
+                    !session.told_locked(&lock),
+                    "the lock client was told `locked` before the monitor that is on \
+                     had shown the lock"
+                );
+                tty.frame(&mut session.state, &left);
+                assert!(
+                    session.told_locked(&lock),
+                    "the monitor that is on showed the lock, and `locked` waits for the \
+                     dark one"
+                );
+            }
+
+            /// **A monitor asked off but not yet dark still holds `locked`
+            /// back.** Its black frame was queued before the lock and has not
+            /// flipped, so it is still showing what it had -- the desktop --
+            /// and the flip of a frame built before the lock counts for
+            /// nothing. Only once it is dark is it not waited for.
+            ///
+            /// With `confirm_lock` counting a monitor asked off rather than one
+            /// that is dark, fails at "still showing".
+            #[test]
+            fn a_monitor_asked_off_but_not_yet_dark_still_holds_locked_back() {
+                let mut session = Session::with_monitors(2);
+                let (left, right) = (session.output(0), session.output(1));
+                let mut tty = Tty::default();
+                let control = session.control(1);
+                session.power(&control, false);
+                assert_eq!(tty.queue(&mut session.state, &right), Step::Blank);
+
+                let (lock, surfaces) =
+                    session
+                        .locker
+                        .ask_lock(&mut session.display, &mut session.state, true);
+                session.lock_surfaces = surfaces;
+                tty.frame(&mut session.state, &left);
+                assert!(
+                    !session.told_locked(&lock),
+                    "the lock client was told `locked` while the right-hand monitor was \
+                     still showing the desktop, its black frame not yet flipped"
+                );
+                tty.flip(&mut session.state, &right);
+                assert!(
+                    !session.told_locked(&lock),
+                    "the flip of a black frame queued before the lock counted as the lock"
+                );
+                assert_eq!(tty.frame(&mut session.state, &right), Step::Darken);
+                assert!(
+                    session.told_locked(&lock),
+                    "the right-hand monitor is dark and `locked` waits for it"
+                );
+            }
+
+            /// **A monitor powered off while `locked` waits lets it go**, and
+            /// no later than it would have gone: `swayidle` turning the screens
+            /// off while the locker is still starting must not delay the lock.
+            ///
+            /// Two ways, either of which is enough: its black frame is built
+            /// under the lock, as `tty.rs`'s `blank` builds it, so that flip
+            /// already counts; and once dark it is not waited for. With both
+            /// taken away -- a dark monitor waited for, and a black frame
+            /// counting for nothing -- fails at "is still waiting".
+            #[test]
+            fn a_monitor_powered_off_while_locking_lets_locked_go() {
+                let mut session = Session::with_monitors(2);
+                let (left, right) = (session.output(0), session.output(1));
+                let mut tty = Tty::default();
+                let control = session.control(1);
+                let (lock, surfaces) =
+                    session
+                        .locker
+                        .ask_lock(&mut session.display, &mut session.state, true);
+                session.lock_surfaces = surfaces;
+                tty.frame(&mut session.state, &left);
+                assert!(!session.told_locked(&lock), "the premise");
+
+                session.power(&control, false);
+                tty.settle(&mut session.state, &right);
+                assert!(
+                    session.told_locked(&lock),
+                    "the right-hand monitor went dark and the lock client is still waiting"
+                );
+            }
+
+            /// **A monitor powered on while `locked` waits must show the lock
+            /// too**: dark, it was not waited for; on, it is a screen like the
+            /// others. Its first frame is built under the lock.
+            ///
+            /// With a monitor that was dark still counted once it is on, fails at
+            /// "had shown nothing".
+            #[test]
+            fn a_monitor_powered_on_while_locking_must_show_the_lock_too() {
+                let mut session = Session::with_monitors(2);
+                let (left, right) = (session.output(0), session.output(1));
+                let mut tty = Tty::default();
+                let control = session.control(1);
+                session.power(&control, false);
+                tty.settle(&mut session.state, &right);
+
+                let (lock, surfaces) =
+                    session
+                        .locker
+                        .ask_lock(&mut session.display, &mut session.state, true);
+                session.lock_surfaces = surfaces;
+                session.power(&control, true);
+                tty.frame(&mut session.state, &left);
+                assert!(
+                    !session.told_locked(&lock),
+                    "the lock client was told `locked` while the monitor powered on had \
+                     shown nothing of the lock"
+                );
+                assert_eq!(tty.frame(&mut session.state, &right), Step::Wake);
+                assert!(
+                    session.told_locked(&lock),
+                    "both monitors showed the lock and the lock client was not told"
+                );
+            }
+
+            /// **Powering a monitor on while locked draws only the lock.** The
+            /// monitor went dark before the lock, and what its display was left
+            /// holding is the black frame, never the desktop. Powered on behind
+            /// the lock -- `swayidle`'s `resume` -- its first frame is built
+            /// under the lock, which `render::elements` draws as the lock and
+            /// its backdrop and nothing else
+            /// (`the_drag_icon_is_emitted_below_the_lock_screens_early_return`),
+            /// and drawn in full, so no part of it comes from a buffer drawn
+            /// before the lock.
+            ///
+            /// With going off switching the display off first and drawing black
+            /// after, fails at "left holding"; with a wake not drawn in full, at
+            /// "in full".
+            #[test]
+            fn powering_a_monitor_on_while_locked_draws_only_the_lock() {
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                let selections = session.app.client.selections;
+                let monitor = session.output(0);
+                let mut tty = Tty::default();
+                let control = session.control(0);
+                session.power(&control, false);
+                assert_eq!(
+                    tty.settle(&mut session.state, &monitor),
+                    [Step::Blank, Step::Darken, Step::Rest],
+                    "what the display was left holding is not the black frame"
+                );
+
+                let (lock, surfaces) =
+                    session
+                        .locker
+                        .ask_lock(&mut session.display, &mut session.state, true);
+                session.lock_surfaces = surfaces;
+                assert!(
+                    session.told_locked(&lock),
+                    "the only monitor is dark, so there is nothing for `locked` to wait \
+                     for, and it waited"
+                );
+
+                session.power(&control, true);
+                let built_under = session.state.lock_frame();
+                assert!(
+                    built_under.is_some(),
+                    "the first frame back is not built under the lock: it is the desktop"
+                );
+                assert_eq!(
+                    tty.frame(&mut session.state, &monitor),
+                    Step::Wake,
+                    "the first frame back is not drawn in full"
+                );
+                assert_eq!(tty.frame(&mut session.state, &monitor), Step::Draw);
+                session.assert_sealed("a monitor powered on while locked", selections);
+                session.assert_unlocks(lock);
+            }
+
+            /// **A monitor that is off cannot be captured**: a capture asked
+            /// for is refused, and so is one asked for while it was on and
+            /// copied after, and one already waiting for its next frame. A
+            /// screenshot tool is told no rather than left waiting.
+            ///
+            /// Without the checks in `screencopy.rs`, fails at "was offered".
+            #[test]
+            fn an_off_monitor_cannot_be_captured() {
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                let manager = session
+                    .app
+                    .client
+                    .screencopy
+                    .clone()
+                    .expect("zwlr_screencopy_manager_v1 bound");
+                let output = session.app.client.output.clone().expect("wl_output bound");
+                let buffer = |session: &mut Session| {
+                    let shm = session.app.client.shm.clone().expect("wl_shm bound");
+                    let fd = anon_file(64 * 64 * 4);
+                    let pool = shm.create_pool(fd.as_fd(), 64 * 64 * 4, &session.app.qh, ());
+                    pool.create_buffer(
+                        0,
+                        64,
+                        64,
+                        64 * 4,
+                        wl_shm::Format::Xrgb8888,
+                        &session.app.qh,
+                        (),
+                    )
+                };
+                let before = manager.capture_output(0, &output, &session.app.qh, ());
+                let waiting = manager.capture_output(0, &output, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+                let waiting_buffer = buffer(&mut session);
+                waiting.copy(&waiting_buffer);
+                session.app.pump(&mut session.display, &mut session.state);
+                assert_eq!(
+                    session.app.client.captures_offered, 2,
+                    "with the monitor on, a capture was not offered a buffer, so refusing \
+                     one proves nothing"
+                );
+                assert_eq!(session.state.pending_captures.len(), 1, "the premise");
+
+                let control = session.control(0);
+                session.power(&control, false);
+                assert_eq!(
+                    session.app.client.captures_failed, 1,
+                    "a capture waiting for the next frame of a monitor that went off was \
+                     left waiting"
+                );
+
+                let _during = manager.capture_output(0, &output, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+                assert_eq!(
+                    session.app.client.captures_offered, 2,
+                    "a monitor that is off was offered for capture"
+                );
+                assert_eq!(
+                    session.app.client.captures_failed, 2,
+                    "and nobody was told no"
+                );
+
+                let before_buffer = buffer(&mut session);
+                before.copy(&before_buffer);
+                session.app.pump(&mut session.display, &mut session.state);
+                assert_eq!(
+                    session.app.client.captures_failed, 3,
+                    "a capture asked for while it was on and copied after was not refused"
+                );
+            }
+
+            /// **A window on a dark monitor is told to draw once a second, and
+            /// not every frame.** A lit monitor's refresh tells it nothing any
+            /// more; the dark pass tells it at most once per
+            /// `idle.off_frame_interval`; and 0 tells it nothing at all, as sway
+            /// does. See "Frame callbacks on a dark monitor" in `power.rs`.
+            ///
+            /// With a lit monitor's refresh still telling every window, fails
+            /// at "the right-hand monitor's refresh"; with the dark pass not
+            /// throttled, at "more than once a second".
+            #[test]
+            fn a_window_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame() {
+                let mut session = Session::with_monitors(2);
+                let (_window, _toplevel, surface, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let (left, right) = (session.output(0), session.output(1));
+                session.state.space.refresh();
+                let ask = |session: &mut Session| {
+                    surface.frame(&session.app.qh, FrameDone);
+                    surface.commit();
+                    session.app.pump(&mut session.display, &mut session.state);
+                };
+                let at = Duration::from_millis;
+                let refresh = Duration::from_millis(16);
+                let done = |session: &mut Session| {
+                    session.app.pump(&mut session.display, &mut session.state);
+                    session.app.client.frames_done
+                };
+
+                ask(&mut session);
+                session.state.send_frames_on(&left, at(0), refresh);
+                assert_eq!(
+                    done(&mut session),
+                    1,
+                    "lit, its monitor's refresh told it to draw"
+                );
+
+                let control = session.control(0);
+                session.power(&control, false);
+                ask(&mut session);
+                session.state.send_frames_on(&right, at(1_100), refresh);
+                assert_eq!(
+                    done(&mut session),
+                    1,
+                    "the right-hand monitor's refresh told a window only the dark \
+                     left-hand one shows to draw"
+                );
+                session.state.send_dark_frames(at(1_100));
+                assert_eq!(
+                    done(&mut session),
+                    2,
+                    "a second on, the dark pass did not tell it"
+                );
+
+                ask(&mut session);
+                for step in 1..60 {
+                    session.state.send_dark_frames(at(1_100 + step * 16));
+                }
+                assert_eq!(
+                    done(&mut session),
+                    2,
+                    "told to draw more than once a second on a monitor that is off"
+                );
+                session.state.send_dark_frames(at(2_150));
+                assert_eq!(done(&mut session), 3, "and not at all a second later");
+
+                session.state.idle.configure(crate::idle::Settings {
+                    off_frame_interval: Duration::ZERO,
+                    ..crate::idle::Settings::default()
+                });
+                ask(&mut session);
+                session.state.send_dark_frames(at(60_000));
+                assert_eq!(
+                    done(&mut session),
+                    3,
+                    "idle.off_frame_interval = 0 still told it to draw"
+                );
+            }
+
+            /// **`sol.monitor_power` turns a monitor off and on, and
+            /// `sol.monitors()` says which are off**: every one, or one by
+            /// name. A mode that is neither `"on"` nor `"off"` is an error and
+            /// changes nothing, and so does a name no monitor has. `sol.idle`
+            /// reaches the compositor.
+            ///
+            /// Without `power` in `sol.monitors()`, fails at "whether a monitor
+            /// is on"; with the snapshot not saying so, at "does not say they
+            /// are off".
+            #[test]
+            fn sol_monitor_power_turns_a_monitor_off_and_on_and_says_so() {
+                let mut session = Session::with_monitors(2);
+                let (left, right) = (session.output(0), session.output(1));
+                let control = session.control(1);
+
+                let directory = std::env::temp_dir()
+                    .join(format!("solium-monitor-power-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&directory);
+                let entry = directory.join("init.lua");
+                std::fs::write(
+                    &entry,
+                    format!(
+                        r#"
+                        sol.idle{{ screens_off_after = 90, off_frame_interval = 250 }}
+                        sol.bind("super+o", function() sol.monitor_power("all", "off") end)
+                        sol.bind("super+p", function() sol.monitor_power({left:?}, "on") end)
+                        sol.bind("super+i", function() sol.monitor_power("all", "dim") end)
+                        sol.bind("super+u", function() sol.monitor_power("nowhere", "on") end)
+                        "#,
+                        left = left.name(),
+                    ),
+                )
+                .expect("writing the test script");
+                session.state.start_scripts(Some(
+                    Scripts::load(&entry).expect("loading the test script"),
+                ));
+                let _ = std::fs::remove_dir_all(&directory);
+
+                assert_eq!(
+                    session.state.idle.settings(),
+                    crate::idle::Settings {
+                        screens_off_after: Duration::from_secs(90),
+                        off_frame_interval: Duration::from_millis(250),
+                    },
+                    "sol.idle did not reach the compositor"
+                );
+                let said = |session: &Session| {
+                    session
+                        .state
+                        .scripts
+                        .as_ref()
+                        .map(|scripts| {
+                            scripts.evaluate_in(
+                                session.state.snapshot(),
+                                "local m = sol.monitors() return m[1].power .. ' ' .. m[2].power",
+                            )
+                        })
+                        .unwrap_or_default()
+                };
+                assert_eq!(
+                    said(&session),
+                    "on on",
+                    "sol.monitors() does not say whether a monitor is on"
+                );
+
+                assert!(session.state.trigger("super+o"), "the binding did not run");
+                assert!(
+                    session.all_off(&[&left, &right]),
+                    "\"all\", \"off\" left a monitor on"
+                );
+                assert_eq!(
+                    session.modes(&control),
+                    [true, false],
+                    "a client watching the right-hand monitor was not told it went off"
+                );
+                assert_eq!(
+                    said(&session),
+                    "off off",
+                    "sol.monitors() does not say they are off"
+                );
+
+                session.state.trigger("super+p");
+                assert_eq!(said(&session), "on off", "one monitor, by name");
+
+                session.state.trigger("super+i");
+                session.state.trigger("super+u");
+                assert_eq!(
+                    said(&session),
+                    "on off",
+                    "a mode that is not on or off, or a monitor that is not there, changed \
+                     something"
+                );
+                assert!(!session.state.power.is_off(&left) && session.state.power.is_off(&right));
+            }
+
+            /// **A binding that turns the screens off leaves them off when it
+            /// is let go.** The press wakes nothing -- they are on -- and then
+            /// runs the binding; the release is not a wake. So pressing it in
+            /// the dark does the same: the press wakes them, and the binding
+            /// turns them straight off again.
+            ///
+            /// With the wake after the filter rather than before it, fails at
+            /// "the key that ran it"; waking on a release, at "was let go".
+            #[test]
+            fn a_binding_that_turns_the_screens_off_leaves_them_off_when_it_is_let_go() {
+                let mut session = Session::new();
+                let monitor = session.output(0);
+                let directory = std::env::temp_dir()
+                    .join(format!("solium-power-binding-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&directory);
+                let entry = directory.join("init.lua");
+                std::fs::write(
+                    &entry,
+                    r#"sol.bind("a", function() sol.monitor_power("all", "off") end)"#,
+                )
+                .expect("writing the test script");
+                session.state.start_scripts(Some(
+                    Scripts::load(&entry).expect("loading the test script"),
+                ));
+                let _ = std::fs::remove_dir_all(&directory);
+
+                crate::input::key(&mut session.state, Keycode::new(38), KeyState::Pressed, 1);
+                assert!(
+                    session.state.power.is_off(&monitor),
+                    "the binding ran and the screen is on: the key that ran it woke it again"
+                );
+                crate::input::key(&mut session.state, Keycode::new(38), KeyState::Released, 2);
+                assert!(
+                    session.state.power.is_off(&monitor),
+                    "the screen came back on when the binding that turned it off was let go"
+                );
+
+                crate::input::key(&mut session.state, Keycode::new(38), KeyState::Pressed, 3);
+                crate::input::key(&mut session.state, Keycode::new(38), KeyState::Released, 4);
+                assert!(
+                    session.state.power.is_off(&monitor),
+                    "pressed in the dark, and the binding did not turn the screen back off"
+                );
+            }
+
+            /// **A display that will not switch off is `failed`, and stays
+            /// on**: what `tty.rs`'s `darken` does when `DrmCompositor::clear`
+            /// errs, played through the call it makes. The control is told
+            /// `failed`, stops being one, and asks for nothing afterwards; and
+            /// a backend saying a monitor that is on is dark is not believed.
+            /// The DRM half needs a GPU, and no test reaches it.
+            #[test]
+            fn a_display_that_will_not_switch_off_is_failed_and_stays_on() {
+                let mut session = Session::new();
+                let monitor = session.output(0);
+                let control = session.control(0);
+                session.power(&control, false);
+                session.state.power_refused(&monitor);
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session
+                        .app
+                        .client
+                        .power_failed
+                        .contains(&wayland_client::Proxy::id(&control)),
+                    "a monitor that could not be switched off was not answered `failed`"
+                );
+                assert!(
+                    !session.state.power.is_off(&monitor),
+                    "and it is not on again"
+                );
+
+                session.power(&control, false);
+                assert!(
+                    !session.state.power.is_off(&monitor),
+                    "a control told `failed` still turned its monitor off"
+                );
+
+                session.state.output_dark(&monitor);
+                assert!(
+                    !session.state.power.is_dark(&monitor),
+                    "a monitor that is on was counted dark, which would let a lock go \
+                     past it"
+                );
+            }
         }
     }
 

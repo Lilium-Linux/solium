@@ -298,6 +298,27 @@ impl Solium {
                         self.client_sizes = sizes;
                     }
                 }
+                Command::Idle(settings) => self.idle.configure(settings),
+                Command::Power { monitor, on } => match monitor {
+                    None => self.power_all(on),
+                    Some(name) => {
+                        let found = self
+                            .space
+                            .outputs()
+                            .find(|output| output.name() == name)
+                            .cloned();
+                        match found {
+                            Some(output) => {
+                                self.set_power(&output, on);
+                            }
+                            None => tracing::warn!(
+                                monitor = name,
+                                "sol.monitor_power: no monitor by that name -- `sol.monitors()` \
+                                 lists the ones there are"
+                            ),
+                        }
+                    }
+                },
                 Command::Resize(resizing) => {
                     if self.resizing != resizing {
                         tracing::debug!(?resizing, "resize behaviour set");

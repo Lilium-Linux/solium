@@ -396,6 +396,7 @@ impl Solium {
                 focused: active.as_ref() == Some(output),
                 primary: primary.as_ref() == Some(output),
                 transform: format!("{:?}", output.current_transform()).to_lowercase(),
+                off: self.power.is_off(output),
             })
             .collect();
 
