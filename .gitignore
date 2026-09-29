@@ -22,7 +22,6 @@ crates/effects/preview/preview.html
 # Local build and tool state.
 build/
 .split-baseline/
-.claude/
 
 # Environment files and machine-local overrides, which may hold secrets or
 # one machine's paths.
