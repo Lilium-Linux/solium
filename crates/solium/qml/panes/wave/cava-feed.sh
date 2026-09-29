@@ -16,7 +16,10 @@
 # style never reads a half-written line.
 set -u
 
-out="${SOLIUM_AUDIO_FILE:-/tmp/solium-audio}"
+# $XDG_RUNTIME_DIR/solium-audio is where the style reads. SOLIUM_AUDIO_FILE
+# writes somewhere else instead -- to look at the numbers, say -- and the style
+# does not follow it: QML cannot read the environment.
+out="${SOLIUM_AUDIO_FILE:-${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/solium-audio}"
 bars="${SOLIUM_AUDIO_BARS:-56}"
 
 command -v cava >/dev/null 2>&1 || {

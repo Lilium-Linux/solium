@@ -12,6 +12,7 @@
 // Filled solid and sitting *behind* the client, so the middle never has to be
 // cut out -- the window covers it. That is what a `behind` layer is for.
 
+import QtCore
 import QtQuick
 import QtQuick.Shapes
 import Solium
@@ -52,12 +53,18 @@ Item {
     property var levels: []
 
     // Where to look for them. A plain file, rewritten whole by whatever is
-    // producing the numbers -- see cava-feed.sh beside this file.
+    // producing the numbers -- see cava-feed.sh beside this file, which
+    // writes it to the same place by default.
+    //
+    // In the user's runtime directory ($XDG_RUNTIME_DIR), which only they can
+    // write to, rather than in /tmp, where anyone on the machine could put
+    // numbers in front of this style.
     //
     // A *file* and not the FIFO cava writes directly, because reading a FIFO
     // means blocking until a writer shows up, and the thread that would block
     // is the one the compositor draws every window on.
-    readonly property string feedPath: "file:///tmp/solium-audio"
+    readonly property string feedPath:
+        StandardPaths.writableLocation(StandardPaths.RuntimeLocation) + "/solium-audio"
 
     // --- the heartbeat ----------------------------------------------------
     // **This is not what makes the waves move.** With audio feeding them the
