@@ -405,6 +405,9 @@ of it.
 Solium is free software under the [GNU General Public License, version 3
 only](LICENSE) (`GPL-3.0-only`).
 
+The logo, logotype and default wallpaper are © 2026 Illia Kotomin, licensed
+[CC BY-SA 4.0](LICENSES/CC-BY-SA-4.0.txt); see [docs/brand](docs/brand/README.md).
+
 Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Each
 contributor agrees once to the [Contributor License Agreement](CLA.md); the
 pull request template carries the one sentence that does it. What came from
