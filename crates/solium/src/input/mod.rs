@@ -700,8 +700,16 @@ fn release_cursor(state: &mut Solium, unclaimed: bool, grabbed: bool) {
 /// Skipped while a grab is running: a window being dragged is under the
 /// cursor the whole time, and windows sliding past underneath it are not a
 /// request to focus each of them in turn.
-fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
-    if !state.profile.focus_follows_mouse || grabbed || state.script_grab {
+///
+/// And over a client's layer surface on top of a window, which is what the
+/// pointer is on there, as it is for a press (`pointer_button`'s
+/// `on_a_client`). `focus_follows_mouse_does_not_reach_through_a_bar`.
+pub(crate) fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
+    if !state.profile.focus_follows_mouse
+        || grabbed
+        || state.script_grab
+        || state.client_above(location)
+    {
         return;
     }
     let Some((window, _)) = state.window_under(location) else {
@@ -715,12 +723,20 @@ fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bo
 
 /// Let a window frame see the pointer, so its buttons light up on hover.
 ///
-/// The callers offer the pointer to the surfaces above the windows first, so
-/// nothing here has to know about panels.
+/// The callers offer the pointer to a script's surfaces above the windows
+/// first. A client's layer surface on top here is asked through
+/// `client_above`, the predicate `follow_pointer` asks and
+/// `focus_follows_mouse_does_not_reach_through_a_bar` drives: under one, no
+/// frame is hovered. A built frame needs Qt, which this binary's tests cannot
+/// start, so this call itself is not driven by a test.
 fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
     // The whole window, not just the frame band: a decoration that reacts to
     // the cursor wants to know where it is while it crosses the client too.
-    let under = state.decorated_under(location);
+    let under = if state.client_above(location) {
+        None
+    } else {
+        state.decorated_under(location)
+    };
 
     // Whatever we were over and are no longer has to be told, or it stays
     // hovered for as long as the window lives.
@@ -1136,6 +1152,7 @@ fn touch_down<B: InputBackend>(
     let serial = SERIAL_COUNTER.next_serial();
 
     if state.profile.touch_to_focus
+        && !state.client_above(location)
         && let Some((window, _)) = state.window_under(location)
     {
         state.focus_window(&window, serial);

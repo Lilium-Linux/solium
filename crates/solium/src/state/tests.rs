@@ -16969,6 +16969,46 @@ end)
                 );
             }
 
+            /// **Focus follows the pointer to what is on top**: over a
+            /// client's bar, the window under the bar is not what the
+            /// pointer is on, and does not take the keyboard.
+            #[test]
+            fn focus_follows_mouse_does_not_reach_through_a_bar() {
+                let mut desk = Desk::new();
+                let under = desk.open_surface();
+                let under_window = window_of(&desk, under.pane);
+                desk.state.space.map_element(under_window, (500, 10), false);
+                let other = desk.open_surface();
+                let other_window = window_of(&desk, other.pane);
+                desk.state
+                    .space
+                    .map_element(other_window.clone(), (800, 300), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let (_bar, _layered) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                desk.state
+                    .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                desk.state.profile.focus_follows_mouse = true;
+                let on_the_bar = Point::<f64, Logical>::from((532.0, 15.0));
+                assert!(
+                    desk.focused() == other.pane
+                        && desk.state.client_above(on_the_bar)
+                        && desk.state.window_under(on_the_bar).is_some(),
+                    "the premise: the other window has the keyboard, and the bar is over the \
+                     window under it"
+                );
+
+                crate::input::follow_pointer(&mut desk.state, on_the_bar, false);
+                let over_the_bar = desk.focused();
+                crate::input::follow_pointer(&mut desk.state, (532.0, 50.0).into(), false);
+                assert_eq!(
+                    (over_the_bar, desk.focused()),
+                    (other.pane, under.pane),
+                    "(the window with the keyboard with the pointer on the bar, and on the \
+                     window below it)"
+                );
+            }
+
         }
     }
 
