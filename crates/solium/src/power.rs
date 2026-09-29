@@ -233,6 +233,28 @@ pub(crate) fn step(off: bool, lit: Lit) -> Step {
     }
 }
 
+/// What a monitor is once a backend has done `step` to it, given whether the
+/// call it makes for that step -- queuing the frame, or switching the display
+/// off -- went through.
+///
+/// The one rule here that is not obvious is black that was never queued: the
+/// monitor is still showing its picture, so it is still lit, and the next
+/// frame is black again rather than the display switched off with that
+/// picture on it. On a legacy driver the picture left on the CRTC is
+/// what the monitor scans out for a refresh when it comes back on, and it may
+/// be a desktop that has since been locked. A display that would not switch
+/// off is lit as well (see `Solium::power_refused`).
+/// `every_way_a_monitor_goes_off_and_on_is_one_step_at_a_time`.
+pub(crate) fn after(step: Step, done: bool) -> Lit {
+    match step {
+        Step::Draw | Step::Wake => Lit::On,
+        Step::Blank if done => Lit::Blanked,
+        Step::Darken if done => Lit::Dark,
+        Step::Blank | Step::Darken => Lit::On,
+        Step::Rest => Lit::Dark,
+    }
+}
+
 /// Whether a window is shown only on screens that are off.
 ///
 /// `off` is one entry per monitor the window is on, true for each that is
@@ -525,16 +547,21 @@ impl Dispatch<ZwlrOutputPowerV1, ()> for Solium {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lit, Step, step, unlit};
+    use super::{Lit, Step, after, step, unlit};
 
     /// **Every way a monitor goes off and comes back is one step at a
     /// time.** Off is a frame of black and then the display switched off,
     /// never the display switched off with whatever was on it; back on from
     /// anywhere on that way is a frame drawn in full.
     ///
-    /// The whole of the tty's sequence, played the way `tty.rs` plays it:
-    /// `Blank` leaves the monitor `Blanked`, `Darken` leaves it `Dark`, and
-    /// `Wake` leaves it `On`.
+    /// The whole of the tty's sequence, through [`after`], which `tty.rs`
+    /// and the `power` tests' fixture both call: `Blank` leaves the monitor
+    /// `Blanked`, `Darken` leaves it `Dark`, and `Wake` leaves it `On` --
+    /// and black that was never queued leaves it `On`, so the next frame is
+    /// black again and never the display switched off over its picture.
+    ///
+    /// With black leaving it `Blanked` whether or not it was queued, as
+    /// `tty.rs` first did, fails at "never queued".
     #[test]
     fn every_way_a_monitor_goes_off_and_on_is_one_step_at_a_time() {
         assert_eq!(step(false, Lit::On), Step::Draw);
@@ -556,6 +583,37 @@ mod tests {
             step(false, Lit::Blanked),
             Step::Wake,
             "and so is back on before it was ever switched off"
+        );
+
+        // Played through, off and back.
+        let mut lit = Lit::On;
+        let mut seen = Vec::new();
+        for off in [true, true, true, false, false] {
+            let now = step(off, lit);
+            seen.push(now);
+            lit = after(now, true);
+        }
+        assert_eq!(
+            seen,
+            [
+                Step::Blank,
+                Step::Darken,
+                Step::Rest,
+                Step::Wake,
+                Step::Draw
+            ]
+        );
+
+        assert_eq!(
+            step(true, after(Step::Blank, false)),
+            Step::Blank,
+            "black that was never queued was followed by the display switched \
+             off over whatever it was showing"
+        );
+        assert_eq!(
+            after(Step::Darken, false),
+            Lit::On,
+            "a display that would not switch off is not dark"
         );
     }
 

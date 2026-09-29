@@ -61,7 +61,7 @@ use smithay::backend::allocator::format::FormatSet;
 use smithay::reexports::wayland_server::backend::GlobalId;
 
 use crate::{
-    power::{Lit, Step},
+    power::{self, Lit, Step},
     render,
     script::Scripts,
     state::{ClientState, Request, Solium},
@@ -575,6 +575,8 @@ pub(crate) fn run() -> Result<()> {
                     }
                 }
                 state.active = true;
+                state.solium.idle.stir(state.solium.clock.now());
+                state.solium.wake_screens();
                 state.render();
             }
         })
@@ -1311,7 +1313,7 @@ impl State {
                     // plays the step; the modeset needs a GPU).
                     if let Some(screen) = self.screens.get_mut(index) {
                         screen.compositor.reset_buffers();
-                        screen.lit = Lit::On;
+                        screen.lit = power::after(Step::Wake, true);
                         tracing::info!(monitor = screen.output.name(), "display on");
                     }
                 }
@@ -1433,7 +1435,6 @@ impl State {
             FrameFlags::DEFAULT,
         );
         drop(frame);
-        screen.lit = Lit::Blanked;
         // So the vblank of this frame asks for the next step, `Darken`.
         screen.owed = true;
         let queued = match rendered {
@@ -1455,8 +1456,11 @@ impl State {
             }
         };
         screen.pending = queued;
+        screen.lit = power::after(Step::Blank, queued);
         if !queued {
-            // No flip is coming to ask for `Darken`, so the loop does.
+            // No flip is coming to ask for the next step, so the loop does:
+            // black again, since this one was never queued
+            // (`every_way_a_monitor_goes_off_and_on_is_one_step_at_a_time`).
             self.solium.redraw = true;
         }
     }
@@ -1476,7 +1480,7 @@ impl State {
         let output = screen.output.clone();
         match screen.compositor.clear() {
             Ok(()) => {
-                screen.lit = Lit::Dark;
+                screen.lit = power::after(Step::Darken, true);
                 tracing::info!(monitor = output.name(), "display off");
                 self.solium.output_dark(&output);
             }
@@ -1486,7 +1490,7 @@ impl State {
                     monitor = output.name(),
                     "could not switch this display off; it stays on"
                 );
-                screen.lit = Lit::On;
+                screen.lit = power::after(Step::Darken, false);
                 screen.compositor.reset_buffers();
                 self.solium.power_refused(&output);
             }

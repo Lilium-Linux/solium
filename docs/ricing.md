@@ -583,11 +583,11 @@ swayidle -w \
 `wlopm` on its own lists the monitors and whether each is on.
 
 A window on a screen that is off is still told it may draw, once a second
-(`idle.off_frame_interval`, in milliseconds). Stopping altogether is what sway
-does, and it freezes any program that waits for that inside its swap for as
-long as the screen is dark, which with the idle blank is all night; `0` asks for
-it anyway. A screenshot of a screen that is off is refused rather than left
-waiting.
+(`idle.off_frame_interval`, in milliseconds). Not telling it at all would freeze
+any program that waits for that inside its swap for as long as the screen is
+dark, which with the idle blank is all night. `0` stops them altogether, which
+is what sway does. A screenshot of a screen that is off is refused rather than
+left waiting.
 
 Nested, there is no display to power off: a monitor that is "off" is drawn
 black and then not drawn at all, so all of the above can be tried in a window.

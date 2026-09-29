@@ -9439,8 +9439,12 @@ mod real_client {
             use crate::power::{Lit, Step};
 
             /// The tty's half, played the way `tty.rs` plays it: what each
-            /// monitor's display has been through, and the frame in flight on
-            /// it with the lock it was built under.
+            /// monitor's display has been through, moved on by the same
+            /// `power::after` `tty.rs` calls, and the frame in flight on it
+            /// with the lock it was built under. Every call here goes
+            /// through, so the one the fixture cannot play is a failed one:
+            /// `every_way_a_monitor_goes_off_and_on_is_one_step_at_a_time`
+            /// has that.
             #[derive(Default)]
             struct Tty {
                 lit: Vec<(Output, Lit)>,
@@ -9470,20 +9474,13 @@ mod real_client {
                     );
                     let step = state.power_step(output, self.lit(output));
                     match step {
-                        Step::Draw | Step::Wake => {
+                        Step::Draw | Step::Wake | Step::Blank => {
                             self.in_flight.push((output.clone(), state.lock_frame()));
-                            self.set(output, Lit::On);
                         }
-                        Step::Blank => {
-                            self.in_flight.push((output.clone(), state.lock_frame()));
-                            self.set(output, Lit::Blanked);
-                        }
-                        Step::Darken => {
-                            self.set(output, Lit::Dark);
-                            state.output_dark(output);
-                        }
+                        Step::Darken => state.output_dark(output),
                         Step::Rest => {}
                     }
+                    self.set(output, crate::power::after(step, true));
                     step
                 }
 
