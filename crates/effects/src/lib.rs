@@ -11,7 +11,7 @@
 //! ## Why this is a crate and not a shader
 //!
 //! Two reasons, both hard, both in
-//! `docs/superpowers/specs/2026-09-12-panes-and-effects-design.md`:
+//! `docs/design/2026-09-12-panes-and-effects-design.md`:
 //!
 //! * The damage tracker needs the deformed bounding box **before** anything is
 //!   drawn, and a shader cannot tell it one. A wrong damage rect is a corrupt

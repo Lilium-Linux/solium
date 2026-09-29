@@ -642,8 +642,8 @@ mod tests {
         // itself.
 
         // The two lines that decide where the corner circle sits and how wide
-        // the antialiased band is. Neither was pinned here until Task 5's
-        // re-review found it: a transcription of this field in
+        // the antialiased band is. Neither was pinned here until a review of
+        // the corner opacity work found it: a transcription of this field in
         // `solium::pass` was the ONLY thing in the workspace that noticed
         // `tex_size * 0.5` becoming `* 0.4`, and it lives in another crate.
         // A shader's own crate should be the thing that catches an edit to it.

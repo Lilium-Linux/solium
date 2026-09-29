@@ -12,7 +12,7 @@ on:
       level:
         description: "Version bump"
         required: false
-        default: patch
+        default: minor
         type: choice
         options: [patch, minor, major]
 
@@ -33,6 +33,10 @@ jobs:
   # trusted a green run on some ancestor commit would be trusting a merge
   # nobody tested. It costs a few minutes.
   verify:
+    # A manual run can be started from any branch, and the draft job pushes the
+    # bump to `release`: from anywhere else that would fast-forward `release`
+    # past the merge that is supposed to be the only way in.
+    if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
     # Fedora, not the runner's Ubuntu: this needs Qt 6 Quick >= 6.5 and Ubuntu
     # ships 6.4.2. Keep in step with dev/Containerfile's FEDORA_VERSION and
@@ -47,7 +51,7 @@ jobs:
             git gcc gcc-c++ make pkgconf-pkg-config \
             wayland-devel libinput-devel systemd-devel libseat-devel \
             libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
-            libdrm-devel libdisplay-info-devel \
+            libdrm-devel \
             qt6-qtbase-devel qt6-qtdeclarative-devel
 
       - uses: actions/checkout@v5
@@ -78,6 +82,7 @@ jobs:
 
   draft:
     needs: verify
+    if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -93,13 +98,18 @@ jobs:
       # report nobody can act on.
       #
       # Bumped here rather than by hand, so merging stage into release is the
-      # whole of making a release. **Patch by default**, because most releases
-      # are a handful of fixes and a patch number never promises more than
-      # happened. A release that deserves more says so: put `[minor]` or
-      # `[major]` in the merge commit's message, or run the workflow by hand
-      # and choose. Over-claiming is the failure that matters -- a user who
-      # upgrades 0.1.4 -> 0.1.5 and finds a breaking change was misled, and one
-      # who upgrades to 0.2.0 for three bug fixes was not.
+      # whole of making a release. **Patch by default on a merge**, because
+      # most releases are a handful of fixes and a patch number never promises
+      # more than happened. A release that deserves more says so: put `[minor]`
+      # or `[major]` in the merge commit's message. Run by hand, the workflow
+      # offers the choice and defaults to minor, because a release somebody
+      # starts deliberately is usually one with something in it. Over-claiming
+      # is the failure that matters -- a user who upgrades 0.1.4 -> 0.1.5 and
+      # finds a breaking change was misled, and one who upgrades to 0.2.0 for
+      # three bug fixes was not.
+      #
+      # The first release is 0.1.0 whatever the level says: 0.0.x would claim
+      # less than a first release is, and 1.0.0 more.
       - name: Bump the version
         id: version
         run: |
@@ -129,6 +139,10 @@ jobs:
             *) echo "unknown bump level: $level" >&2; exit 1 ;;
           esac
           version="$major.$minor.$patch"
+          if [ "$current" = "0.0.0" ]; then
+            version="0.1.0"
+            level="first release"
+          fi
 
           echo "$current -> $version ($level)"
           # Only the workspace's own version, which is the first `version =`
@@ -142,19 +156,10 @@ jobs:
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "level=$level" >> "$GITHUB_OUTPUT"
 
-      # Committed back, so `release` always carries the version it published
-      # and the next bump counts from it rather than from whatever stage had.
-      - name: Commit the bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock 2>/dev/null || git add Cargo.toml
-          git commit -m "release ${{ steps.version.outputs.tag }} (${{ steps.version.outputs.level }})"
-          git push origin HEAD:release
-
-      # Refuse rather than overwrite. The bump above makes a collision unlikely
-      # rather than impossible: a tag made by hand, or a run against a release
-      # branch whose bump commit did not land, would both arrive here. Silently
+      # Refuse rather than overwrite, and before anything is pushed. The bump
+      # above makes a collision unlikely rather than impossible: a tag made by
+      # hand, or a run against a release branch whose bump commit did not land,
+      # would both arrive here. Silently
       # replacing the artifact of an existing tag would make one version name
       # two different trees, which is the one thing a version may never do.
       - name: Refuse a version that already exists
@@ -164,6 +169,32 @@ jobs:
             echo "$tag already exists -- release is out of step with its tags" >&2
             exit 1
           fi
+
+      # The lock file names every workspace crate with its version, so it has to
+      # be told about the bump. Without this it still says the old version,
+      # and the `cargo build --locked` a distribution's package runs fails on
+      # the tarball. `--workspace` touches only the workspace's own entries.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Refresh Cargo.lock
+        run: |
+          cargo update --workspace
+          cargo metadata --locked --format-version 1 >/dev/null
+          grep -A1 '^name = "solium"$' Cargo.lock \
+            | grep -q "^version = \"${{ steps.version.outputs.version }}\"$" || {
+              echo "Cargo.lock does not carry ${{ steps.version.outputs.version }}" >&2; exit 1; }
+
+      # Committed back, so `release` always carries the version it published
+      # and the next bump counts from it rather than from whatever stage had.
+      # Everything after this step builds, tags and describes this commit, not
+      # the one the run started from.
+      - name: Commit the bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "release ${{ steps.version.outputs.tag }} (${{ steps.version.outputs.level }})"
+          git push origin HEAD:release
 
       # The source tarball is the real artifact, and for a compositor that is
       # not a compromise. A vendored C dependency compiles against whatever
@@ -193,17 +224,25 @@ jobs:
         run: |
           version="${{ steps.version.outputs.version }}"
           tag="${{ steps.version.outputs.tag }}"
+          # The bump commit: the one the tarball was archived from and the one
+          # whose Cargo.toml says $version. $GITHUB_SHA is its parent, the
+          # merge the verify job tested.
+          head="$(git rev-parse HEAD)"
           gh release create "$tag" \
             --draft \
-            --target "$GITHUB_SHA" \
+            --target "$head" \
             --title "$tag" \
             --notes "Source release of Solium $version.
 
-          Built and verified from \`$GITHUB_SHA\`.
+          Built from \`$head\`, the version bump on top of \`$GITHUB_SHA\`,
+          which is the tree the checks ran on.
 
-          **Installing:** build from source — see the README. Per-distro
-          packaging recipes are tracked in #66; until that lands, an installed
-          copy cannot find its QML and Lua assets outside the build tree.
+          **Installing:** build from source — see the README's Building
+          section. An installed copy finds its QML and Lua wherever
+          \`SOLIUM_DATADIR\` pointed when it was built, under
+          \`share/solium\` beside its \`bin\` directory, or in
+          \`/usr/share/solium\`. Per-distro packaging recipes are tracked in
+          #66.
 
           \`\`\`sh
           tar --zstd -xf solium-$version.tar.zst

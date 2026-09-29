@@ -4,6 +4,10 @@ Environment variables Solium reads. All of them exist so the compositor can be
 exercised and photographed without a human at the keyboard — that is what turns
 a demo into a regression test.
 
+Where this file, or a comment in the source, quotes a measurement without
+saying where it was taken, it comes from the reference machine: an NVIDIA RTX
+3070 on the proprietary driver (610.x), Qt 6.11, Fedora 44.
+
 | Variable | Effect |
 |---|---|
 | `SOLIUM_CAPTURE=<path>` | Write one rendered frame to `<path>` as a binary PPM. |
@@ -25,7 +29,7 @@ a demo into a regression test.
 
 | Script | What it asserts |
 |---|---|
-| `dev/gate.sh` | fmt, clippy, tests, build, and that the Lua configuration loads |
+| `dev/gate.sh` | fmt, clippy, tests, build, that the Lua configuration loads, and the QML GPU path against a real driver (see *The gate*) |
 | `dev/app-check.sh <program>` | a client runs, draws, and provokes no protocol error |
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
@@ -84,7 +88,7 @@ claim from "a client that uses it gets the right answers", and the gap between
 those two has been where every protocol bug this week actually lived. Real
 applications make fine oracles — Firefox's `WAYLAND_DEBUG` log is excellent —
 right up until nothing installed happens to use the protocol you just added.
-Firefox never binds `wp_presentation`, so nothing on this machine could say
+Firefox never binds `wp_presentation`, so nothing installed could say
 whether presentation feedback worked at all.
 
     ./target/debug/solium &
@@ -154,8 +158,8 @@ locks the screen of whoever ran the gate. Two knobs:
     WL_PROBE_LOCK_ABANDON=1   leave without unlocking, as a crashed lock
                               program would. The session must stay locked.
 
-There is no lock client installed on this machine, so without this there is no
-way to exercise the protocol at all: a compositor cannot lock itself, and every
+Without a lock client installed there is otherwise no way to exercise the
+protocol at all: a compositor cannot lock itself, and every
 question worth asking about a lock screen is a question about what a *second*
 process can see. Point `SOLIUM_CAPTURE` at a directory while it runs and the
 answer is in the frames — the desktop, then one frame of the compositor's own
@@ -227,7 +231,7 @@ screen to see.
 
 Monitors arriving and leaving ([#43](https://github.com/Lilium-Linux/solium/issues/43)) cannot be exercised here. The
 nested backend has no connectors, and a virtual one (`vkms`) needs a kernel
-module this machine will not load without a password. So the resync path is
+module loaded as root. So the resync path is
 covered by unit tests on the part with reasoning in it -- `tty::gone`, which
 decides which screens went -- and the rest has never run.
 
@@ -276,8 +280,8 @@ Testing the Developer Tweaks panel with `SOLIUM_CLICK_AT` showed nothing
 happening and looked exactly like the panel being broken, when the panel was
 fine and the instrument was measuring something else.
 
-`clipboard-check.sh` runs its X11 half in a container, because the host has no
-`xclip` and cannot install one. **Run it more than once.** The bug it was
+`clipboard-check.sh` runs its X11 half in a container, so the host needs no
+`xclip`. **Run it more than once.** The bug it was
 written for failed about one time in three, so a single green run proves
 nothing — which is exactly how it nearly shipped.
 
@@ -426,9 +430,8 @@ Programs start as clients of *this* compositor — `sol.spawn` overrides
 `WAYLAND_DISPLAY` in the child, or it would inherit the host's and open its
 window next to the nested compositor rather than inside it.
 
-Because Solium runs in the build container, anything `sol.spawn` starts runs
-there too, and only what is installed there can be started that way — which is
-`foot` and not much else.
+Solium runs on the host, so `sol.spawn` can start anything installed there —
+with one family of exceptions:
 
 **Do not test with KDE's own applications.** They are launched through DBus
 activation, so the process that actually opens the window inherits the
@@ -450,23 +453,62 @@ launcher prints its name:
 WAYLAND_DISPLAY=wayland-1 <program>
 ```
 
-To add programs to the container instead, install and commit — a `--rm`
-container throws the installation away with itself:
-
-```sh
-podman run --name lilium-add localhost/lilium-base:v1 pacman -Sy --noconfirm weston
-podman commit lilium-add localhost/lilium-base:v1
-podman rm lilium-add
-```
+To run something else from the build image the way `dev/foot` runs foot, add
+its package to the `dnf install` line in `dev/Containerfile` and rebuild the
+image — a `--rm` container throws anything installed into it by hand away with
+itself.
 
 ## Building
+
+Natively, with the development packages the top-level README lists under
+*Building*:
+
+```sh
+cargo build
+```
+
+Or, on a Fedora host without the development packages, in the build image,
+which needs only podman and a rustup install. The image has the C toolchain and
+the system libraries; Rust comes from your own `CARGO_HOME` and `RUSTUP_HOME`,
+mounted at the same paths. Build the image for the Fedora release you run
+(`--build-arg FEDORA_VERSION=<n>`, 44 by default), for the reasons below; on
+another distribution, install the packages natively:
 
 ```sh
 podman build -t solium-build:fc44 -f dev/Containerfile dev/
 podman run --rm --userns=keep-id --security-opt label=disable \
-    -v "$HOME:$HOME" -e CARGO_HOME="$HOME/.cargo" -e PATH="$HOME/.cargo/bin:/usr/bin:/bin" \
+    -v "$PWD:$PWD" -v "$HOME/.cargo:$HOME/.cargo" -v "$HOME/.rustup:$HOME/.rustup" \
+    -e CARGO_HOME="$HOME/.cargo" -e RUSTUP_HOME="$HOME/.rustup" \
+    -e PATH="$HOME/.cargo/bin:/usr/bin:/bin" \
     -w "$PWD" localhost/solium-build:fc44 cargo build
 ```
+
+### The gate
+
+`dev/gate.sh` runs `cargo fmt`, clippy with warnings denied, the tests and a
+build, then two checks on the built binaries that nothing else reaches:
+`solium --check`, which loads the Lua configuration, and `dev/wirecheck`, which
+drives the QML GPU path against the machine's own render node. It runs cargo
+natively unless told otherwise:
+
+| Variable | Effect |
+|---|---|
+| `SOLIUM_GATE_IMAGE=<image>` | Build in this podman image, e.g. `localhost/solium-build:fc44`. If it does not exist, the gate prints the `podman build` line that makes it. Only the checkout, `CARGO_HOME` and `RUSTUP_HOME` are mounted. `solium --check` runs in the image too; `dev/wirecheck` runs on the host, on its render node, and is skipped with a message if the host cannot load what the image built. |
+| `SOLIUM_GATE_PODMAN_ARGS=<args>` | Extra `podman run` arguments, split on spaces — e.g. `"--memory=6g --memory-swap=6g"` to cap a build that would otherwise use all the memory there is. |
+| `SOLIUM_GATE_JOBS=<n>` | `cargo -j<n>`. Unset, cargo uses every CPU. |
+| `SOLIUM_GATE_CPUS=<list>` | Pin the build to these CPUs, as a `taskset` list such as `14,15`. |
+| `SOLIUM_GATE_NO_GPU=1` | Build the GPU check but do not run it. It is skipped anyway on a machine with no render node. |
+
+For example, capped and in the container:
+
+```sh
+SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 \
+SOLIUM_GATE_PODMAN_ARGS="--memory=6g --memory-swap=6g" SOLIUM_GATE_JOBS=2 \
+    dev/gate.sh
+```
+
+Every step runs under `nice -n 19` and, where it exists, `ionice -c 3`, so a
+gate in the background leaves the machine usable.
 
 **The build image matches the host's distribution on purpose.** Two things go
 wrong otherwise, and both were hit:
@@ -743,7 +785,7 @@ while another compositor holds the display.
 **Then, on a free TTY.** `Ctrl`+`Alt`+`F3` (or any free one), log in, and:
 
 ```sh
-cd ~/personal_projects/solium
+cd path/to/solium
 SOLIUM_TERMINAL=konsole ./target/debug/solium --tty
 ```
 
@@ -792,10 +834,9 @@ session services that are not running here and wait for them to time out.
 not the compositor failing to map it. konsole stays on the list as a fallback
 for a machine that has nothing else, never as a preference.
 
-**What is not there yet.** One output: it drives the first connected connector
-and ignores the rest. Several places take the first output rather than the right
-one — `work_area`, the snapshot handed to scripts, the layer map — and those are
-the lines multi-output has to fix.
+**What is not there yet.** Monitors arriving and leaving have never been
+exercised on the hardware (see *Hotplug* above), and Solium cannot turn a
+monitor off itself: that wants `wlr-output-power-management`.
 
 ## Installing it
 
@@ -922,12 +963,10 @@ login (`O_TRUNC` in its `src/helper/UserSession.cpp`).
 
 ## Where it runs
 
-`dev/run-nested.sh` runs Solium **in the build container**, not on the host. It
-is built there, and the container's C library is newer than the host's — once a
-vendored C dependency (Lua) was compiled in, the resulting binary would not
-start on the host at all. Building and running in one place removes the skew
-rather than papering over it. `/tmp` is shared so captures land where you can
-read them.
+`dev/run-nested.sh` runs Solium **on the host**, on the host's own GPU driver,
+whether it was built natively or in the build image. The image only builds it,
+and it matches the host's distribution so that what it builds starts there: see
+*Building* for what goes wrong when the two differ.
 
 ## Driving input without a mouse
 

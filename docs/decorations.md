@@ -1,7 +1,9 @@
 # Decorations, and other things the compositor draws
 
 Everything the compositor draws that is not a client's window is QML, hosted
-in-process. Window frames, the pointer, the loading window, the shell itself.
+in-process. Window frames, the pointer, the loading window, the wallpaper,
+and any other scene a script declares. A shell is not among them: it is a
+separate client, drawn by itself (see [shell-boundary.md](shell-boundary.md)).
 There is nothing to compile and no Rust to touch: write a file, name it, press
 `super+shift+r`.
 
@@ -31,7 +33,7 @@ other application on the machine follows.
 | window frames | `qml/panes/<name>/` | `pane = "top"` |
 | the loading window | `qml/loading/*.qml` | `loading = { scene = "window" }` |
 | the pointer | `qml/cursor.qml` | `SOLIUM_QML_CURSOR` |
-| a shell (bar, dock) | anywhere | `SOLIUM_SHELL_SCENE` |
+| any other scene | anywhere | `sol.surface(name, { scene = ... })` |
 
 Your own directory is `~/.config/solium/qml/`, and it is searched first in
 every case. A file you write shadows the shipped one of the same name, and
@@ -144,9 +146,11 @@ Nothing in a frame should contain a hex code. `Solium.Theme` has them:
 `fontFamily`, `fontSize`, `quick`, `normal`.
 
 Copy `Solium/Theme.qml` into `~/.config/solium/qml/Solium/` and change it, and
-every frame, the pointer, the loading window and the shell follow — one file
-restyles the desktop rather than the titlebars. A frame that hardcodes a colour
-is a frame that stops matching the moment anyone changes anything.
+every scene the compositor draws follows — the frames, the pointer, the loading
+window, the wallpaper and `sol.surface` scenes. One file restyles all of it
+rather than the titlebars; a shell is a separate client and themes itself. A
+frame that hardcodes a colour is a frame that stops matching the moment anyone
+changes anything.
 
 ## Animation inside a frame
 

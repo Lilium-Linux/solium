@@ -148,7 +148,7 @@ drawn, and a shader cannot tell it one.** So a vertex function stays CPU-side
 and parametric — a name and some numbers, never user code — while a *fragment*
 effect can be arbitrary GLSL, because a bad one is a wrong picture and a bad
 damage rect is a corrupt screen. See
-`docs/superpowers/specs/2026-09-12-panes-and-effects-design.md`.
+`docs/design/2026-09-12-panes-and-effects-design.md`.
 
 The split with the compositor is the anchor. A deformation morphs between two
 rectangles, and the far one is named rather than given: `deform = { effect =
@@ -254,6 +254,12 @@ The requirement that forces this is not "consistent styling" — it is that an
 object must be able to *move* from the dock into a titlebar. Two processes
 painting their own pixels cannot do that; the best available would be a fake.
 One engine makes it a reparent. See `docs/shell-boundary.md`.
+
+**Since reversed for the shell.** The bar, dock and launcher are layer-shell
+clients in the shell's own process, and the compositor hosts no shell at all.
+The engine is still one engine for everything the compositor itself draws —
+frames, the pointer, the wallpaper, scripted surfaces — and
+`docs/shell-boundary.md` says what reopening the dock question would take.
 
 ### Chrome is QML, hosted in-process
 

@@ -40,7 +40,6 @@ sol.cursor_theme(config.cursor)
 -- The wallpaper is a script like any other mode: `sol.surface` and a QML
 -- file, and nothing in the compositor knows what a wallpaper is.
 require("wallpaper")
-require("shell")
 
 require("tweaks")
 

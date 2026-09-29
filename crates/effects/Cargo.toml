@@ -2,6 +2,7 @@
 name = "solium-effects"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Solium's vertex deformations: named functions over a window's unit square, with no compositor attached."

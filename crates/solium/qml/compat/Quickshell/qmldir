@@ -1,5 +1,0 @@
-module Quickshell
-Singleton 1.0 Singleton.qml
-Scope 1.0 Scope.qml
-Variants 1.0 Variants.qml
-SystemClock 1.0 SystemClock.qml

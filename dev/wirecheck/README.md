@@ -74,10 +74,11 @@ is printed in that control's own failure message.
 
 **Every scene the compositor builds, on a GPU host.** The compositor's real
 `qml/cursor.qml` and `qml/panes/top/Frame.qml`, built through
-`solium_qml_scene_new_gpu` and rendered. Before Task 7 those two went down the
-*software* constructor, which a GPU host refuses outright — so `SOLIUM_QML_GPU=1`
-gave a desktop with a wallpaper on it and no window frames and no pointer, each
-refusal logged by its own caller as its own unrelated failure.
+`solium_qml_scene_new_gpu` and rendered. Before they moved to the GPU path,
+those two went down the *software* constructor, which a GPU host refuses
+outright — so `SOLIUM_QML_GPU=1` gave a desktop with a wallpaper on it and no
+window frames and no pointer, each refusal logged by its own caller as its own
+unrelated failure.
 
 The files themselves and not a stand-in, because what is in question is whether
 *these* come up under the RHI scene graph: `cursor.qml` draws through
@@ -87,8 +88,8 @@ through a text atlas, neither of which the four flat rectangles in
 inside an opaque band — so what it measures is the band, and the glyph path is
 exercised rather than asserted.
 
-A pane layer has to be **dressed** before it draws at all. Since Task 7 a
-style's insets live in its `Pane.qml` and are written onto each layer, so a
+A pane layer has to be **dressed** before it draws at all. A style's insets
+live in its `Pane.qml` and are written onto each layer, so a
 `Frame.qml` built standalone has `insetTop` at 0 — a bar of no height, with the
 title centred in it and the hairline on top of it. Measured, that left 544 of
 1228800 bytes non-zero against 81920 before the conversion, so the check went on

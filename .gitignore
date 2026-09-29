@@ -14,8 +14,23 @@ dev/qtprobe/probe
 crates/animation/preview/preview.html
 crates/effects/preview/preview.html
 
-# The agent guide stays local. It is instructions for whoever or whatever is
-# editing this repository, not part of the compositor, and publishing it says
-# nothing to anyone reading the code.
-AGENTS.md
-CLAUDE.md
+# Frames and logs a run writes: `SOLIUM_CAPTURE` writes PPMs, and the checks
+# in dev/ write logs. They belong wherever the run was pointed, not in a commit.
+*.ppm
+*.log
+
+# Local build and tool state.
+build/
+.split-baseline/
+
+# Environment files and machine-local overrides, which may hold secrets or
+# one machine's paths.
+.env
+.env.*
+*.local.*
+
+# Editors and operating systems.
+.idea/
+.vscode/
+*.swp
+.DS_Store

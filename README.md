@@ -17,6 +17,73 @@ wallpaper is drawn by the compositor too, and is a QML file you can replace.
 [docs/modes.md](docs/modes.md) has the same picture for every mode, frame by
 frame.
 
+## Building
+
+Solium needs **Rust 1.88 or newer** (edition 2024), a C++17 compiler, **Qt 6.5
+or newer** (Qt Quick and Qml), and the development files for Wayland,
+libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm.
+Lua is compiled in and needs nothing installed.
+
+Rust is easiest from [rustup](https://rustup.rs); a distribution's own Rust
+works too if it is new enough. The system packages:
+
+**Fedora**
+
+```sh
+sudo dnf install gcc gcc-c++ pkgconf-pkg-config wayland-devel libinput-devel \
+    systemd-devel libseat-devel libxkbcommon-devel mesa-libgbm-devel \
+    mesa-libEGL-devel libdrm-devel qt6-qtbase-devel qt6-qtdeclarative-devel
+```
+
+**Arch Linux**
+
+```sh
+sudo pacman -S --needed base-devel wayland libinput systemd-libs seatd \
+    libxkbcommon mesa libdrm qt6-base qt6-declarative
+```
+
+**Debian 13 and Ubuntu 24.10 or newer** (older releases ship a Qt older than
+6.5)
+
+```sh
+sudo apt install build-essential pkg-config libwayland-dev libinput-dev \
+    libudev-dev libseat-dev libxkbcommon-dev libgbm-dev libegl-dev libdrm-dev \
+    qt6-base-dev qt6-declarative-dev
+```
+
+**openSUSE Tumbleweed**
+
+```sh
+sudo zypper install gcc-c++ pkgconf qt6-base-devel qt6-declarative-devel \
+    'pkgconfig(wayland-server)' 'pkgconfig(libinput)' 'pkgconfig(libudev)' \
+    'pkgconfig(libseat)' 'pkgconfig(xkbcommon)' 'pkgconfig(gbm)' 'pkgconfig(egl)' \
+    'pkgconfig(libdrm)'
+```
+
+Then, from the checkout:
+
+```sh
+cargo build            # target/debug/solium; add --release for an optimised build
+```
+
+**Or in a container, on Fedora without the development packages.** The image
+has the C toolchain and the libraries, and your own rustup install is mounted
+into it. It is an image of Fedora, and what it builds links that release's
+libraries, so build it for the release you run: `FEDORA_VERSION` (44 by
+default) is a build argument of `dev/Containerfile`. On any other distribution,
+install the packages above instead. A release whose Qt is older than 6.5 cannot
+run Solium at all; a pull request from one still gets every check except the
+GPU one from CI.
+
+```sh
+podman build -t solium-build:fc44 -f dev/Containerfile dev/
+SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 dev/gate.sh
+```
+
+`dev/gate.sh` builds and runs every check; [dev/README.md](dev/README.md#building)
+has the plain `podman run` for a build on its own, and
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rest of what a change needs.
+
 ## Running it
 
 From a free TTY (`Ctrl+Alt+F3`), and not from inside a running desktop session —
@@ -250,7 +317,7 @@ line is drawn and defended.
 **Smithay** is a Wayland compositor library, not a compositor. It hands over
 protocol plumbing, input and backends while leaving layout, rendering and
 policy to us — which is where a desktop environment's character actually lives.
-[niri](https://github.com/YaLTeR/niri) is Rust-on-Smithay with working touch and
+[niri](https://github.com/niri-wm/niri) is Rust-on-Smithay with working touch and
 gesture support, so the multi-form-factor path has a reference implementation
 rather than being a bet.
 
@@ -304,6 +371,9 @@ of it.
 | [docs/beta.md](docs/beta.md) | what has to be true before a public preview |
 | [docs/gaps.md](docs/gaps.md) | everything not built yet, exhaustively |
 | [dev/README.md](dev/README.md) | the knobs and checks it is tested with |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | how to send a change, and the design rules it is judged by |
+| [SECURITY.md](SECURITY.md) | reporting a vulnerability privately |
+| [THIRD_PARTY.md](THIRD_PARTY.md) | what came from other projects, and every dependency's licence |
 | `docs/spikes/` | decisions, with the evidence that settled them |
 
 ## Thanks to
@@ -313,7 +383,7 @@ of it.
   than this project's: DRM, GBM, libinput, the seat, the protocol
   implementations. Its example compositor is also the first place to look when
   something here does not make sense.
-- **[niri](https://github.com/YaLTeR/niri)** — the reference for how a serious
+- **[niri](https://github.com/niri-wm/niri)** — the reference for how a serious
   Smithay compositor is actually put together, and the answer to more than one
   "surely this cannot be the way" while reading DRM code. Its scrolling layout
   is why `lua/scrolling.lua` exists to be compared against.
@@ -329,3 +399,13 @@ of it.
   compositor rather than beside it, which is a different answer to the same
   question, and it is a different answer because Quickshell had already shown
   what the question was.
+
+## License
+
+Solium is free software under the [GNU General Public License, version 3
+only](LICENSE) (`GPL-3.0-only`).
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Each
+contributor agrees once to the [Contributor License Agreement](CLA.md); the
+pull request template carries the one sentence that does it. What came from
+other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).

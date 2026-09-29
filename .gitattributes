@@ -1,0 +1,28 @@
+# What `git archive` leaves out, and so what the release tarball does not
+# ship: material for developing Solium rather than building, testing or
+# installing it. Everything `cargo build`, `cargo test` and an install need
+# stays in, including crates/*/preview (the preview binaries embed it) and
+# dev/session (the login-screen session file).
+
+# Hardware harnesses and probes, run by hand or by dev/gate.sh.
+/dev/wirecheck          export-ignore
+/dev/qtprobe            export-ignore
+/dev/present-check      export-ignore
+/dev/present-check.sh   export-ignore
+/dev/app-check.sh       export-ignore
+/dev/clipboard-check.sh export-ignore
+/dev/cursor-check.sh    export-ignore
+/dev/bench.sh           export-ignore
+/dev/soak.sh            export-ignore
+/dev/leak.sh            export-ignore
+/dev/foot               export-ignore
+/dev/preview            export-ignore
+/dev/host-window-rule.md export-ignore
+
+# Decision records, with the evidence that settled them.
+/docs/spikes            export-ignore
+
+# Repository plumbing.
+/.github                export-ignore
+/.gitattributes         export-ignore
+/.mailmap               export-ignore

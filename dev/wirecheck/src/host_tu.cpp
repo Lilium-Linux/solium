@@ -17,9 +17,10 @@
 //
 //   * Qt's thread-local names this scene's own context. A belief is what makes
 //     QRhiGles2::ensureContext() skip the makeCurrent it needs. A null belief
-//     is safe with or without the fix -- and so, once Task 7 puts several
-//     scenes on this path, is a belief naming some *other* live scene, which
-//     ensureContext() compares against its own ctx and corrects.
+//     is safe with or without the fix -- and so, with the cursor and the
+//     window frames putting several scenes on this path, is a belief naming
+//     some *other* live scene, which ensureContext() compares against its own
+//     ctx and corrects.
 //
 //   * EGL disagrees. If Qt's context really is current then the belief is true
 //     rather than stale, and the teardown is fine either way.

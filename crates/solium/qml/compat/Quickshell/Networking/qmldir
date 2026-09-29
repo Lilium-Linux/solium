@@ -1,2 +1,0 @@
-module Quickshell.Networking
-singleton Network 1.0 Network.qml

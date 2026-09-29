@@ -2,6 +2,9 @@
 name    = "wirecheck"
 version = "0.0.0"
 edition = "2024"
+license = "GPL-3.0-only"
+# A hardware harness for dev/gate.sh, never a crate anyone else depends on.
+publish = false
 
 [[bin]]
 name = "wirecheck"

@@ -1,9 +1,10 @@
 //! Qt Quick scenes, hosted in this process.
 //!
-//! The compositor's shell surfaces — the bar now, window decorations next —
-//! are authored in QML and rendered by Qt's scene graph inside this process.
-//! See `qml/host.cpp` for why in-process: a shell painting frames over a
-//! protocol was tried and measured at ~15 fps, 39% CPU.
+//! The compositor's own surfaces — window decorations, the pointer, the
+//! wallpaper and every other scene a script declares — are authored in QML and
+//! rendered by Qt's scene graph inside this process. See `qml/host.cpp` for
+//! why in-process: a shell painting frames over a protocol was tried and
+//! measured at ~15 fps, 39% CPU.
 //!
 //! Two paths, and only ever one of them per process, because Qt fixes its
 //! scene graph backend inside `QGuiApplication`. The software rasteriser draws
@@ -92,7 +93,6 @@ mod ffi {
             height: c_int,
             scale: f64,
         ) -> bool;
-        pub(super) fn solium_qml_set_windows(json: *const c_char);
         pub(super) fn solium_qml_clear_cache();
         pub(super) fn solium_qml_scene_new_with(
             qml_path: *const c_char,
@@ -400,10 +400,10 @@ impl std::fmt::Debug for FrameInFlight {
 ///
 /// It holds today, and only by convention: every render path collects its
 /// elements before it binds anything (`offscreen.rs`, `tty.rs`, `render.rs`),
-/// and neither `RenderElement::draw` in `warp.rs` touches a scene. Task 7 is
-/// where that stops being enough — a decoration that builds or renders its
-/// scene lazily from inside `draw` is exactly this, and would look like a
-/// rendering bug rather than an ordering one.
+/// and neither `RenderElement::draw` in `warp.rs` touches a scene. Decorations
+/// on the GPU path are where that is easiest to break — a decoration that
+/// builds or renders its scene lazily from inside `draw` is exactly this, and
+/// would look like a rendering bug rather than an ordering one.
 ///
 /// Loud in every build rather than only in a debug one. The counter costs a
 /// `Cell` increment per frame, and the alternative in a release build is the
@@ -788,26 +788,11 @@ pub(crate) fn clear_cache() {
     unsafe { ffi::solium_qml_clear_cache() }
 }
 
-/// Hand the shell the compositor's window list.
-///
-/// The shell reads `ToplevelManager.toplevels` and `Hyprland.activeToplevel`;
-/// both are answered from this. JSON because the boundary is a C string, and a
-/// window list is small enough that its cost is not worth a bespoke encoding.
-#[expect(unsafe_code, reason = "calling into the Qt host")]
-pub(crate) fn set_windows(json: &str) {
-    let Ok(json) = CString::new(json) else {
-        return;
-    };
-    // SAFETY: the string outlives the call, which copies what it needs.
-    unsafe { ffi::solium_qml_set_windows(json.as_ptr()) }
-}
-
 /// Where QML modules are found, `Solium` among them.
 ///
-/// Colon-separated, like a `PATH`, because shell code brought in from
-/// elsewhere needs its own modules and a compatibility layer on the search
-/// path beside the compositor's. Overridable so a whole design system can be
-/// swapped without rebuilding, which is most of the point of it being QML.
+/// Colon-separated, like a `PATH`, because there are two roots: the user's
+/// own directory and the shipped one. Overridable so a whole design system can
+/// be swapped without rebuilding, which is most of the point of it being QML.
 fn import_path() -> std::ffi::OsString {
     // Still the first word, and deliberately the *whole* answer rather than a
     // prefix: someone who names a path is replacing the search, not adding to
@@ -838,10 +823,7 @@ fn search_path(user: Option<&Path>, shipped: &Path) -> std::ffi::OsString {
     for part in user
         .map(Path::to_path_buf)
         .into_iter()
-        // The compositor's own modules, then the compatibility shim under
-        // them: shell code brought in from elsewhere imports `Quickshell.*`,
-        // and it must not be able to shadow `Solium.*` by doing so.
-        .chain([shipped.to_path_buf(), shipped.join("compat")])
+        .chain([shipped.to_path_buf()])
     {
         if !path.is_empty() {
             path.push(":");
@@ -1721,10 +1703,9 @@ mod search_path_tests {
         );
     }
 
-    /// And the compatibility shim is under both, so foreign shell code
-    /// importing `Quickshell.*` cannot shadow the compositor's own modules.
+    /// And nothing else: the two roots are the whole search path.
     #[test]
-    fn the_compat_shim_is_last() {
+    fn the_search_path_is_the_two_roots() {
         let shipped = Path::new("/usr/share/solium/qml");
         let parts = parts(&search_path(
             Some(Path::new("/home/someone/.config/solium/qml")),
@@ -1735,7 +1716,6 @@ mod search_path_tests {
             vec![
                 PathBuf::from("/home/someone/.config/solium/qml"),
                 shipped.to_path_buf(),
-                shipped.join("compat"),
             ]
         );
     }
@@ -1746,10 +1726,7 @@ mod search_path_tests {
     fn no_user_directory_leaves_no_empty_entry() {
         let shipped = Path::new("/usr/share/solium/qml");
         let path = search_path(None, shipped);
-        assert_eq!(
-            parts(&path),
-            vec![shipped.to_path_buf(), shipped.join("compat")]
-        );
+        assert_eq!(parts(&path), vec![shipped.to_path_buf()]);
         assert!(
             !path.to_string_lossy().starts_with(':'),
             "an empty first entry would put the working directory on the path"
@@ -1784,7 +1761,7 @@ mod search_path_tests {
         let shipped = crate::assets::qml();
         assert_eq!(
             parts(&search_path(Some(user), &shipped)),
-            vec![user.to_path_buf(), shipped.clone(), shipped.join("compat")]
+            vec![user.to_path_buf(), shipped]
         );
     }
 }

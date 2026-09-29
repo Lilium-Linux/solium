@@ -1,11 +1,12 @@
 # The build environment for Solium.
 #
-# Fedora, matching the host, and that is the entire point of the choice. A
-# vendored C dependency (Lua) is compiled by whatever toolchain builds the
-# project, so a container with a *newer* C library produces a binary the host
-# cannot start. Worse, working around that by running the compositor inside the
-# container costs hardware acceleration: the container has Mesa but no GPU
-# driver, so everything falls back to llvmpipe and renders at ~55 fps.
+# Fedora, matching the host it was written for, and that is the entire point of
+# the choice: build in an image of the distribution you run. A vendored C
+# dependency (Lua) is compiled by whatever toolchain builds the project, so a
+# container with a *newer* C library produces a binary the host cannot start.
+# Worse, working around that by running the compositor inside the container
+# costs hardware acceleration: the container has Mesa but no GPU driver, so
+# everything falls back to llvmpipe and renders at ~55 fps.
 #
 # Matching the host means the binary runs on the host, on the real driver.
 #
@@ -17,10 +18,11 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         gcc gcc-c++ make pkgconf-pkg-config \
         wayland-devel libinput-devel systemd-devel libseat-devel \
         libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
-        libdrm-devel libdisplay-info-devel \
+        libdrm-devel \
         qt6-qtbase-devel qt6-qtdeclarative-devel \
         foot \
     && dnf clean all
 
-# Rust comes from the user's own rustup install, mounted in with $HOME.
-ENV PATH=/root/.cargo/bin:$PATH
+# No Rust in the image. It comes from the user's own rustup install: dev/gate.sh
+# mounts CARGO_HOME and RUSTUP_HOME at the same paths and puts CARGO_HOME/bin on
+# PATH, so the container builds with exactly the toolchain the host has.

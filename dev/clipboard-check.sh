@@ -10,8 +10,8 @@
 # heard that the compositor owned the selection depended on whether anything
 # else happened to be talking to X. A single green run proved nothing.
 #
-# The X11 half runs in a container because the host has no xclip and cannot
-# install one. Built on first use.
+# The X11 half runs in a container, so the host needs no xclip installed.
+# Built on first use.
 set -uo pipefail
 
 [[ -n "${WAYLAND_DISPLAY:-}" ]] || { echo "refusing to start: WAYLAND_DISPLAY is empty." >&2; exit 1; }

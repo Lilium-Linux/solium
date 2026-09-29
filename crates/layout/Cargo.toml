@@ -2,6 +2,7 @@
 name = "solium-layout"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Solium's window arrangements: master-stack, scrolling strip, grid. No compositor attached."

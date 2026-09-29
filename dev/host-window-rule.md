@@ -17,14 +17,15 @@ Description=Solium nested — opens on one monitor, movable, no focus steal
 wmclass=solium-nested
 wmclassmatch=2
 wmclasscomplete=false
-position=80,1560
+position=<x>,<y>
 positionrule=3
 fsplevel=4
 fsplevelrule=2
 ```
 
-`position` is in the global layout, so the coordinates select the monitor: pick
-a point inside the target output's geometry as reported by `kscreen-doctor -o`.
+`position` is in the global layout, so the coordinates select the monitor:
+replace `<x>,<y>` with a point inside the target output's geometry, as reported
+by `kscreen-doctor -o`.
 Apply without logging out:
 
 ```sh
@@ -50,7 +51,7 @@ Solium logs which host monitor it landed on, so the rule can be checked rather
 than assumed:
 
 ```
-INFO solium::winit: nested window is on this host monitor monitor="DP-2" x=0 y=0
+INFO solium::winit: nested window is on this host monitor monitor="<connector>" x=0 y=0
 ```
 
 The monitor is reported a few frames in, not at startup — a Wayland client

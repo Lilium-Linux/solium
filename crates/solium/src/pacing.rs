@@ -96,9 +96,9 @@ pub(crate) enum Phase {
     /// `qml::tick`: every animation in the process advanced by one step, and
     /// Qt's event queue drained. Once per frame, never once per output.
     Tick,
-    /// The rest of `render::prepare`, plus `screencopy::settle`: the window
-    /// list published to the shell, and one offscreen render pass for every
-    /// window whose transform is not a rectangle.
+    /// The rest of `render::prepare`, plus `screencopy::settle`: one
+    /// offscreen render pass for every window whose transform is not a
+    /// rectangle.
     Prep,
     /// `Painted::animation_in_flight` — the walk of a scene's QML object tree
     /// looking for a running animation, asked once per scene per output per

@@ -4,6 +4,16 @@ Solium is the compositor. Lilium is the desktop — its bar, its dock, its
 launcher. This is the line between them, and the line is not where a Wayland
 tutorial would put it.
 
+**Where it is today:** a shell is a separate program, a client of the
+compositor, and its bar, dock and launcher are `wlr-layer-shell` surfaces.
+Solium hosts no shell in its own process: there is no way to load a shell's
+QML into the compositor, and no compatibility layer for any shell toolkit. The
+QML engine inside the compositor draws the compositor's own scenes only —
+window frames, the pointer, the wallpaper, loading windows, pane styles, the
+tweaks panel, and whatever a script declares with `sol.surface`. The rest of
+this file is the argument that got it here, including the part that argues the
+other way.
+
 ## The requirement that decides the architecture
 
 > An object should be able to move from the dock into a window's titlebar.
@@ -23,14 +33,15 @@ object, and a synchronisation problem forever when there are two.
 ## So: one engine
 
 The compositor hosts **one QML engine**. Window decorations are scenes in it.
-The shell's surfaces — bar, dock, launcher — are scenes in it. They import the
-same `Solium.Theme` singleton, because there is only one of it.
+The original design put the shell's surfaces — bar, dock, launcher — in it
+too, importing the same `Solium.Theme` singleton, because there is only one of
+it.
 
-That gives, in order of how hard they would otherwise be:
+That design gave, in order of how hard they would otherwise be:
 
-- **One design system.** `qml/Solium/Theme.qml` is read by every surface the
-  desktop draws. Changing a colour there changes the titlebars and the dock
-  together, with no rebuild, because they are the same object and not two
+- **One design system.** `qml/Solium/Theme.qml` was read by every surface the
+  desktop drew. Changing a colour there changed the titlebars and the dock
+  together, with no rebuild, because they were the same object and not two
   copies.
 - **Objects that travel.** An item lifted from the dock into a titlebar is a
   reparent inside one scene graph. It keeps its colours because it never left
@@ -44,6 +55,10 @@ That gives, in order of how hard they would otherwise be:
 
 This is the arrangement Apple has, and it is unavailable to anyone configuring
 an existing compositor. It is the reason for writing one.
+
+All three held while the shell was hosted in the compositor, which it no longer
+is. Today `Solium.Theme` reaches the compositor's own scenes only, and a shell,
+being a client, brings its own.
 
 ## What is still a client
 
@@ -80,24 +95,27 @@ left. That looks like the compositor placing it at random, because it is.
 `sol.monitors()` gives a script the list, with `primary` and `focused` flags,
 so a shell written in Lua can decide for itself which screens get a bar.
 
-`SOLIUM_SHELL_SCENE` still hosts one QML scene in-process, on the primary
-monitor. It is a development affordance for exercising the QML host, not the
-shell — a shell that wants a bar per screen writes layer surfaces.
+There is no in-process alternative. A shell that wants a bar per screen writes
+layer surfaces, one per output; a scene a script declares with `sol.surface`
+belongs to the configuration, not to a shell.
 
-## What this costs, honestly
+## What this cost, honestly
 
-The shell cannot crash independently of the compositor. A separate process can
-be restarted; a QML error in the dock takes the session with it unless the
-compositor is careful. So:
+This was the price of the in-process shell, which no longer exists. Hosted in
+the compositor, the shell could not crash independently of it. A separate
+process can be restarted; a QML error in the dock would have taken the session
+with it unless the compositor was careful. So, and still for every scene the
+compositor hosts:
 
 - Every scene is loaded defensively. A scene that fails to load is skipped and
   logged; it never stops the compositor starting.
-- Scene errors are contained per surface — a broken dock must not take the
+- Scene errors are contained per surface — a broken wallpaper must not take the
   window frames with it.
 
-That is the trade being made deliberately: robustness through care inside one
-process, in exchange for a desktop that can actually do what the design asks
-for.
+That was the trade made deliberately: robustness through care inside one
+process, in exchange for a desktop that could do what the design asked for. A
+shell is a separate process now, and gets a separate process's robustness; the
+window frames and the compositor's other scenes still depend on that care.
 
 ## Summary
 
@@ -106,7 +124,9 @@ for.
 | Applications | Clients | `xdg-shell` |
 | Window frames | Compositor's QML engine | directly |
 | Loading windows, the pointer | The same QML engine | directly |
-| Bar, dock, launcher, wallpaper | Clients | `wlr-layer-shell` |
+| Bar, dock, launcher | The shell, a separate client | `wlr-layer-shell` |
+| The default wallpaper, other scripted scenes | The compositor's QML engine | `sol.surface` from Lua |
+| A wallpaper program (`swaybg` and the like) | Clients | `wlr-layer-shell` |
 | Which monitor a bar is on | The client names an output | `zwlr_layer_surface_v1` |
 | Colours and metrics | `Solium.Theme`, one singleton | imported by every scene |
 | What an animation *does* | Lua script | `sol.present_from`, `sol.on("open")` |

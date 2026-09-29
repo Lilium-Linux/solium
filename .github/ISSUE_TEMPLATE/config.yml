@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Lilium-Linux/solium/security/advisories/new
+    about: Privately, so it can be fixed before it is public. See SECURITY.md.

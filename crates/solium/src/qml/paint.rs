@@ -341,8 +341,7 @@ pub(crate) struct Gpu {
     /// that fails leaves the scene on the buffer it already had, and this is
     /// what [`Gpu::element`] then draws stretched into the geometry the scene
     /// should have had; on a scene's very first frame it is `None` and nothing
-    /// is drawn, which is the narrower half of that guarantee and is stated in
-    /// the plan. Everything that is *not* a failure is served from `kept`.
+    /// is drawn, which is the narrower half of that guarantee. Everything that is *not* a failure is served from `kept`.
     ///
     /// Normally this is a second handle on a picture `kept` is also holding, so
     /// it costs a refcount and no memory. It outlives eviction deliberately —
@@ -739,7 +738,7 @@ impl Gpu {
             // drawing into, `shown` keeps the size of the one it was imported
             // from, and `element` draws that stretched into the new geometry.
             //
-            // The alternative was in place until this task and it was chosen by
+            // The alternative was in place before this, and it was chosen by
             // omission rather than on purpose: propagate, draw nothing, and the
             // surface *disappears* — not for a frame, but for good, since
             // nothing about the retry changes and it fails identically every
@@ -862,12 +861,11 @@ mod tests {
 
     /// An ordinary 1150x850 window, as the two monitors under it see it.
     ///
-    /// The numbers from the plan's Task 8 Step 5, which is the desktop this
-    /// cache exists for: one window, one `Gpu`, two outputs at scale 1 and
-    /// scale 2, and `Decoration::frame` computing `round(logical * scale)` for
-    /// each of them. They are not the same size and they are not meant to be —
-    /// the whole point of the GPU path is that a 2x monitor gets twice the
-    /// pixels rather than a stretched copy of the 1x one's.
+    /// The desktop this cache exists for: one window, one `Gpu`, two outputs at
+    /// scale 1 and scale 2, and `Decoration::frame` computing `round(logical *
+    /// scale)` for each of them. They are not the same size and they are not
+    /// meant to be — the whole point of the GPU path is that a 2x monitor gets
+    /// twice the pixels rather than a stretched copy of the 1x one's.
     const ON_THE_1X: Drawn = Drawn {
         pixels: (1150, 850),
         scale: 1.0,

@@ -58,7 +58,6 @@ from a second, Qt-owned context on the same device, and fencing the hand-off
 to the compositor's context — the harder half the spike named ("NVIDIA's
 driver is where dmabuf round-trips and cross-context fences are least
 forgiving"). This result is the allocate/import/bind step only, and it
-works; the render-and-fence pipeline is what the tasks that depend on this
-one build and prove. Full probe output, both rounds, and the full trail from
-the wrong first answer to this one:
-`.superpowers/sdd/2026-09-08-qml-gpu-render-target/task-1-report.md`.
+works; the render-and-fence pipeline built on it is exercised end to end by
+`dev/wirecheck` (see its README). The lines quoted above are the probe's own
+output; re-running the commands at the top reproduces them.

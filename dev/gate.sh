@@ -1,49 +1,121 @@
 #!/usr/bin/env bash
 #
-# fmt, clippy, tests. Exits non-zero if any of them complains.
+# fmt, clippy, tests, build, the Lua check and the QML GPU check. Exits
+# non-zero if any of them complains.
 #
-# This exists because I committed over a clippy failure three times in one
-# session, each time by reading the test line and not the one above it. A gate
-# whose output has to be read is not a gate.
+# It exists because a clippy failure went into a commit three times in a row,
+# each time because the test line was read and the one above it was not. A
+# gate whose output has to be read is not a gate.
+#
+# Runs cargo on this machine by default, which needs Rust and the development
+# packages listed in the README's "Building" section. Everything else is
+# opt-in, through the environment:
+#
+#   SOLIUM_GATE_IMAGE=<image>      build in this podman image instead, e.g.
+#                                  localhost/solium-build:fc44 from
+#                                  dev/Containerfile. Only the checkout,
+#                                  CARGO_HOME and RUSTUP_HOME are mounted.
+#                                  The script check runs in the image too;
+#                                  the GPU check runs here, and is skipped
+#                                  if this machine cannot load what the
+#                                  image built.
+#   SOLIUM_GATE_PODMAN_ARGS=<args> extra arguments for `podman run`, split on
+#                                  spaces, e.g. "--memory=6g --memory-swap=6g".
+#   SOLIUM_GATE_JOBS=<n>           cargo -j<n>. Unset, cargo uses every CPU.
+#   SOLIUM_GATE_CPUS=<list>        pin the build to these CPUs (a taskset
+#                                  list, e.g. 14,15).
+#   SOLIUM_GATE_NO_GPU=1           skip running the QML GPU check.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+image="${SOLIUM_GATE_IMAGE:-}"
+
+# Politeness first, so a gate running in the background does not make the
+# machine it runs on unusable. The pin comes last so it applies to cargo.
+# ionice is looked for by the shell that runs each step, so in the container it
+# is the image's ionice that has to exist, not this machine's.
+# shellcheck disable=SC2016
+polite='nice -n 19 $(command -v ionice >/dev/null 2>&1 && echo ionice -c 3)'
+if [[ -n "${SOLIUM_GATE_CPUS:-}" ]]; then
+    polite="$polite taskset -c ${SOLIUM_GATE_CPUS}"
+fi
+jobs=""
+if [[ -n "${SOLIUM_GATE_JOBS:-}" ]]; then
+    jobs="-j${SOLIUM_GATE_JOBS}"
+fi
+
+if [[ -n "$image" ]]; then
+    if ! podman image exists "$image"; then
+        echo "GATE FAILED: no image $image. Build it with:" >&2
+        echo "  podman build -t ${image#localhost/} -f $root/dev/Containerfile $root/dev/" >&2
+        exit 1
+    fi
+    # Rust comes from the user's rustup install: the proxies in CARGO_HOME/bin
+    # and the toolchains under RUSTUP_HOME. The image supplies only the C
+    # toolchain and the system libraries.
+    cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+    rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+    mounts=(-v "$root:$root" -v "$cargo_home:$cargo_home")
+    if [[ -d "$rustup_home" ]]; then
+        mounts+=(-v "$rustup_home:$rustup_home")
+    fi
+    # Word-split on purpose: this is a list of arguments.
+    # shellcheck disable=SC2206
+    extra=(${SOLIUM_GATE_PODMAN_ARGS:-})
+fi
+
+# One step, in the container or here. `$1` is a shell command line.
 run() {
-    podman run --rm --userns=keep-id --security-opt label=disable \
-        -v "$HOME:$HOME" \
-        -e CARGO_HOME="$HOME/.cargo" -e CARGO_BUILD_JOBS=2 \
-        -e PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
-        -w "$root" localhost/solium-build:fc44 \
-        sh -c "$1"
+    if [[ -n "$image" ]]; then
+        # keep-id so what is built belongs to whoever ran the gate; label=disable
+        # because relabelling CARGO_HOME and the checkout for SELinux would
+        # change them for everything else that uses them. HOME is the
+        # container's own /tmp, so what the tests' QML caches, and any
+        # configuration they might look for, stays inside the container
+        # instead of landing in the checkout (podman's HOME for an unmounted
+        # home directory is the working directory).
+        podman run --rm --userns=keep-id --security-opt label=disable \
+            "${extra[@]}" "${mounts[@]}" \
+            -e HOME=/tmp \
+            -e CARGO_HOME="$cargo_home" -e RUSTUP_HOME="$rustup_home" \
+            -e PATH="$cargo_home/bin:/usr/local/bin:/usr/bin:/bin" \
+            -w "$root" "$image" \
+            sh -c "$1"
+    else
+        (cd "$root" && sh -c "$1")
+    fi
 }
 
 echo "fmt..."
-run 'nice -n 19 cargo fmt --all'
+run "$polite cargo fmt --all" \
+    || { echo "GATE FAILED: fmt" >&2; exit 1; }
 echo "clippy..."
-run 'nice -n 19 ionice -c 3 taskset -c 14,15 cargo clippy --all-targets -j2 -- -D warnings' \
+run "$polite cargo clippy --all-targets $jobs -- -D warnings" \
     || { echo "GATE FAILED: clippy" >&2; exit 1; }
 echo "tests..."
-run 'nice -n 19 ionice -c 3 taskset -c 14,15 cargo test -j2' \
+run "$polite cargo test $jobs" \
     || { echo "GATE FAILED: tests" >&2; exit 1; }
 echo "build..."
-run 'nice -n 19 ionice -c 3 taskset -c 14,15 cargo build -j2' \
+run "$polite cargo build $jobs" \
     || { echo "GATE FAILED: build" >&2; exit 1; }
 
 # The configuration is Lua, and nothing above this line reads Lua. A syntax
 # error in config.lua compiles, tests and clippies perfectly cleanly, and then
 # the compositor starts with no scripts at all -- no layouts, no bindings, no
 # decorations. That shipped past a green gate once; it is one line to stop.
-# Run on the host, because it is the built binary rather than the build.
+# Run where it was built: a binary built in the image links the image's Qt and
+# system libraries, which this machine need not have. It needs no display and
+# no GPU, which is why CI can run it too.
 echo "scripts..."
-"$root/target/debug/solium" --check >/dev/null \
-    || { echo "GATE FAILED: scripts ($root/target/debug/solium --check)" >&2; exit 1; }
+run "./target/debug/solium --check >/dev/null" \
+    || { echo "GATE FAILED: scripts (target/debug/solium --check)" >&2; exit 1; }
 
 # The QML GPU path, against a real GLES renderer and the real host.cpp.
 #
-# Nothing above this line touches it: `cargo test` cannot: it needs a GPU and a
-# Qt installation at run time, and the container this gate builds in has neither
-# a render node nor a display. So it is built in the container like everything
-# else and *run* on the host, the same split as the script check above.
+# Nothing above this line touches it: `cargo test` cannot, because it needs a
+# GPU and a Qt installation at run time, and a build container has neither a
+# render node nor a display. So it is built like everything else and *run*
+# here, on this machine's own driver.
 #
 # It earns a place in the gate because every defect this path has produced was
 # silent -- a frame drawn into the wrong context, a teardown deleting the
@@ -51,19 +123,40 @@ echo "scripts..."
 # returned success from every call involved. There is nothing to notice by
 # looking. See dev/wirecheck/README.md.
 echo "wirecheck..."
-run 'nice -n 19 ionice -c 3 taskset -c 14,15 sh -c "cd dev/wirecheck && cargo build -j2"' \
+# A source tarball leaves the harness out; the checks above are the whole gate
+# there.
+if [[ ! -d "$root/dev/wirecheck" ]]; then
+    echo "  skipped: dev/wirecheck is not in this tree"
+    echo "gate passed"
+    exit 0
+fi
+run "cd dev/wirecheck && $polite cargo build $jobs" \
     || { echo "GATE FAILED: wirecheck did not build" >&2; exit 1; }
-# Whichever render node this box has, rather than renderD128 by name: a machine
-# that enumerates differently would otherwise skip this silently forever.
+# Whichever render node this machine has, rather than renderD128 by name: a
+# machine that enumerates differently would otherwise skip this silently
+# forever.
 node="$(ls -1 /dev/dri/renderD* 2>/dev/null | head -1 || true)"
+log="$root/dev/wirecheck/target/wirecheck.log"
+wirecheck="$root/dev/wirecheck/target/debug/wirecheck"
+# Built in the image, it links the image's libraries, and a machine that is not
+# the distribution the image is made from may not have them. Then it cannot be
+# run here at all, which is not a failure of the change being checked. A native
+# build always loads here, so the question is only asked of an image build.
+unloadable=""
+if [[ -n "$image" ]]; then
+    unloadable="$(ldd "$wirecheck" 2>&1 | grep 'not found' || true)"
+fi
 if [[ -z "$node" ]]; then
     echo "  skipped: no render node on this machine"
 elif [[ -n "${SOLIUM_GATE_NO_GPU:-}" ]]; then
     echo "  skipped: SOLIUM_GATE_NO_GPU is set"
+elif [[ -n "$unloadable" ]]; then
+    echo "  skipped: the image's build cannot load on this machine:"
+    echo "$unloadable" | head -5 | sed 's/^[[:space:]]*/    /'
 else
-    "$root/dev/wirecheck/target/debug/wirecheck" "$node" >/tmp/solium-wirecheck.log 2>&1 \
-        || { echo "GATE FAILED: wirecheck on $node (see /tmp/solium-wirecheck.log)" >&2
-             tail -25 /tmp/solium-wirecheck.log >&2; exit 1; }
+    "$wirecheck" "$node" >"$log" 2>&1 \
+        || { echo "GATE FAILED: wirecheck on $node (see $log)" >&2
+             tail -25 "$log" >&2; exit 1; }
 fi
 
 echo "gate passed"
