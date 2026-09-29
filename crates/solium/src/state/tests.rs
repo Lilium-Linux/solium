@@ -1486,6 +1486,9 @@ mod real_client {
         wl_subcompositor, wl_subsurface, wl_surface,
     };
     use wayland_client::{Connection, Dispatch, QueueHandle};
+    use wayland_protocols::ext::idle_notify::v1::client::{
+        ext_idle_notification_v1, ext_idle_notifier_v1,
+    };
     use wayland_protocols::ext::session_lock::v1::client::{
         ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
     };
@@ -1691,6 +1694,10 @@ mod real_client {
         power_failed: Vec<wayland_client::backend::ObjectId>,
         /// For `power`: what a video player holds the machine awake with.
         inhibit: Option<zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1>,
+        /// For `power`: what `swayidle` asks with, and every `idled` (true)
+        /// and `resumed` (false) its notifications have been told.
+        idle_notifier: Option<ext_idle_notifier_v1::ExtIdleNotifierV1>,
+        idle_events: Vec<(wayland_client::backend::ObjectId, bool)>,
         /// How many frame callbacks -- [`FrameDone`], not the `sync` every
         /// round trip makes -- have come back done.
         frames_done: usize,
@@ -1750,6 +1757,26 @@ mod real_client {
     );
     wayland_client::delegate_noop!(Client: ignore zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1);
 
+    /// See [`Client::idle_events`].
+    impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            notification: &ext_idle_notification_v1::ExtIdleNotificationV1,
+            event: ext_idle_notification_v1::Event,
+            _data: &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            let id = wayland_client::Proxy::id(notification);
+            match event {
+                ext_idle_notification_v1::Event::Idled => state.idle_events.push((id, true)),
+                ext_idle_notification_v1::Event::Resumed => state.idle_events.push((id, false)),
+                _ => {}
+            }
+        }
+    }
+    wayland_client::delegate_noop!(Client: ignore ext_idle_notifier_v1::ExtIdleNotifierV1);
+
     /// See [`Client::tokens`].
     impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for Client {
         fn event(
@@ -1791,6 +1818,10 @@ mod real_client {
                 }
                 "zwp_idle_inhibit_manager_v1" => {
                     state.inhibit = Some(registry.bind(name, 1, qh, ()));
+                }
+                // Version 2, for `get_input_idle_notification`.
+                "ext_idle_notifier_v1" => {
+                    state.idle_notifier = Some(registry.bind(name, 2, qh, ()));
                 }
                 "wl_compositor" => state.compositor = Some(registry.bind(name, 1, qh, ())),
                 "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
@@ -9782,25 +9813,43 @@ mod real_client {
 
             /// **An idle inhibitor holds the idle blank off**, for as long as
             /// it is held on a window that is on screen: a film does not go
-            /// dark. Let go, and the screen goes.
+            /// dark. Let go, and the count starts again from then, as smithay's
+            /// and wlroots' do -- so the next film in a playlist, which takes
+            /// it again a few seconds later, does not start in the dark. Let go
+            /// for good, and the screen goes `screens_off_after` later. An
+            /// inhibitor taken and let go while the screen is off is an
+            /// absence of its own, and turns it off again at the end.
             ///
-            /// With `idle_inhibited` not asked, fails at "went dark".
+            /// With `idle_inhibited` not asked, fails at "went dark"; counting
+            /// from the last input rather than from when it let go, at "the
+            /// moment the film ended"; with only input ending an absence, at
+            /// "an absence of its own".
             #[test]
             fn an_idle_inhibitor_holds_the_idle_blank_off() {
                 let mut session = Session::new();
                 let (_window, _toplevel, surface, _xdg) =
                     session.app.open(&mut session.display, &mut session.state);
                 let monitor = session.output(0);
-                let _control = session.control(0);
-                let inhibitor = session
+                let control = session.control(0);
+                let manager = session
                     .app
                     .client
                     .inhibit
                     .clone()
-                    .expect("zwp_idle_inhibit_manager_v1 bound")
-                    .create_inhibitor(&surface, &session.app.qh, ());
-                session.app.pump(&mut session.display, &mut session.state);
+                    .expect("zwp_idle_inhibit_manager_v1 bound");
+                let inhibit = |session: &mut Session| {
+                    let inhibitor = manager.create_inhibitor(&surface, &session.app.qh, ());
+                    session.app.pump(&mut session.display, &mut session.state);
+                    inhibitor
+                };
+                let release =
+                    |session: &mut Session,
+                     inhibitor: zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1| {
+                        inhibitor.destroy();
+                        session.app.pump(&mut session.display, &mut session.state);
+                    };
 
+                let film = inhibit(&mut session);
                 session.wait(Duration::ZERO);
                 session.wait(Duration::from_secs(3_600));
                 assert!(
@@ -9809,13 +9858,120 @@ mod real_client {
                      touching anything is what watching one is"
                 );
 
-                inhibitor.destroy();
-                session.app.pump(&mut session.display, &mut session.state);
-                session.wait(Duration::ZERO);
+                release(&mut session, film);
+                session.wait(Duration::from_secs(5));
+                assert!(
+                    !session.state.power.is_off(&monitor),
+                    "the screen went dark the moment the film ended, an hour after \
+                     anybody touched anything"
+                );
+                let next = inhibit(&mut session);
+                session.wait(Duration::from_secs(3_600));
+                assert!(
+                    !session.state.power.is_off(&monitor),
+                    "the next film in the playlist went dark"
+                );
+
+                release(&mut session, next);
+                session.wait(Duration::from_secs(599));
+                assert!(
+                    !session.state.power.is_off(&monitor),
+                    "the screen went dark before ten minutes after the moment the film ended"
+                );
+                session.wait(Duration::from_secs(2));
                 assert!(
                     session.state.power.is_off(&monitor),
-                    "the film ended an hour in and the screen is still lit, so it was \
-                     not the inhibitor holding it"
+                    "ten minutes after the last film ended and the screen is still lit, \
+                     so it was not the inhibitor holding it"
+                );
+
+                // A client turns it back on with nobody there, and something
+                // holds the machine awake a while and lets go.
+                session.power(&control, true);
+                let call = inhibit(&mut session);
+                session.wait(Duration::from_secs(60));
+                release(&mut session, call);
+                session.wait(Duration::from_secs(601));
+                assert!(
+                    session.state.power.is_off(&monitor),
+                    "an inhibitor taken and let go was not an absence of its own: the \
+                     screen it was held on stayed lit"
+                );
+            }
+
+            /// **An idle notification counts again from when an inhibitor
+            /// lets go**, as smithay's `IdleNotifierState::set_is_inhibited`
+            /// and wlroots do: `swayidle`'s `timeout 600 'wlopm --off \*'`
+            /// does not fire the moment a film an hour long ends. One that
+            /// ignores inhibitors -- `get_input_idle_notification`, a locker's
+            /// -- counts from the last input, whatever was held.
+            ///
+            /// Counting from the last input, as before, fails at "the moment
+            /// the film ended".
+            #[test]
+            fn an_idle_notification_counts_again_from_when_an_inhibitor_lets_go() {
+                let mut session = Session::new();
+                let (_window, _toplevel, surface, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let notifier = session
+                    .app
+                    .client
+                    .idle_notifier
+                    .clone()
+                    .expect("ext_idle_notifier_v1 bound");
+                let seat = session.app.client.seat.clone().expect("wl_seat bound");
+                let film = session
+                    .app
+                    .client
+                    .inhibit
+                    .clone()
+                    .expect("zwp_idle_inhibit_manager_v1 bound")
+                    .create_inhibitor(&surface, &session.app.qh, ());
+                let dims = notifier.get_idle_notification(600_000, &seat, &session.app.qh, ());
+                let locks =
+                    notifier.get_input_idle_notification(1_800_000, &seat, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+                let told = |session: &mut Session,
+                            notification: &ext_idle_notification_v1::ExtIdleNotificationV1| {
+                    session.app.pump(&mut session.display, &mut session.state);
+                    let id = wayland_client::Proxy::id(notification);
+                    session
+                        .app
+                        .client
+                        .idle_events
+                        .iter()
+                        .filter(|(each, _)| *each == id)
+                        .map(|(_, idled)| *idled)
+                        .collect::<Vec<_>>()
+                };
+
+                session.wait(Duration::ZERO);
+                session.wait(Duration::from_secs(3_600));
+                assert_eq!(
+                    told(&mut session, &dims),
+                    [false; 0],
+                    "held off by a film, and told it was idle"
+                );
+                assert_eq!(
+                    told(&mut session, &locks),
+                    [true],
+                    "a locker's notification was held off by a film"
+                );
+
+                film.destroy();
+                session.app.pump(&mut session.display, &mut session.state);
+                session.wait(Duration::from_secs(599));
+                assert_eq!(
+                    told(&mut session, &dims),
+                    [false; 0],
+                    "told it was idle the moment the film ended, an hour after anybody \
+                     touched anything"
+                );
+                session.wait(Duration::from_secs(2));
+                assert_eq!(
+                    told(&mut session, &dims),
+                    [true],
+                    "ten minutes after the film ended, and not told it was idle"
                 );
             }
 

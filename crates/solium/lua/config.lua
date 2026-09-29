@@ -368,8 +368,10 @@ local defaults = {
         -- Ten minutes: GNOME blanks at five, but dims the screen first and
         -- Solium does not, so here the first sign is the screen going dark.
         -- Anything that plays holds an idle inhibitor, and while one is on a
-        -- screen this waits -- a film does not go dark. Nothing holds it off
-        -- behind the lock screen, which goes dark like anything else.
+        -- screen this waits -- a film does not go dark -- and starts again
+        -- from when it lets go, so the next film in a playlist does not
+        -- start in the dark. Nothing holds it off behind the lock screen,
+        -- which goes dark like anything else.
         --
         -- Running `swayidle` instead? Set this to 0 and give it the screens:
         --

@@ -146,10 +146,22 @@ pub(crate) struct Idle {
     /// is at. `the_idle_blank_turns_every_screen_off_after_the_timeout`
     /// touches nothing.
     began: Option<Duration>,
-    /// The idle blank has turned the screens off, and there has been no input
-    /// since. So it does it once per absence, and a screen a client turns back
-    /// on meanwhile stays on
-    /// (`the_idle_blank_turns_every_screen_off_after_the_timeout`).
+    /// The last frame something visible held the machine awake: an idle
+    /// inhibitor that counted. Letting go starts the count again from here
+    /// rather than from the last input, which is what smithay's own
+    /// `IdleNotifierState::set_is_inhibited` and wlroots do: a film that ends
+    /// an hour after anybody touched anything does not take the screens with
+    /// it, and the next one in a playlist, which takes the inhibitor again a
+    /// few seconds later, does not start in the dark
+    /// (`an_idle_inhibitor_holds_the_idle_blank_off`,
+    /// `an_idle_notification_counts_again_from_when_an_inhibitor_lets_go`).
+    held: Option<Duration>,
+    /// The idle blank has turned the screens off, and nothing has kept the
+    /// machine awake since: no input, and no inhibitor. So it does it once per
+    /// absence, and a screen a client turns back on meanwhile stays on
+    /// (`the_idle_blank_turns_every_screen_off_after_the_timeout`), while an
+    /// inhibitor taken and let go again is an absence of its own
+    /// (`an_idle_inhibitor_holds_the_idle_blank_off`).
     blanked: bool,
     settings: Settings,
 }
@@ -190,13 +202,22 @@ impl Idle {
 /// has been locked, whether a client has just asked its first question.
 pub(crate) fn settle(state: &mut Solium) {
     let now = state.clock.now();
+    // Every frame, and not only once a timeout has passed: an inhibitor let go
+    // is only seen by looking, and the count starts again from the last frame
+    // it was seen held (see `Idle::held`, and
+    // `an_idle_inhibitor_holds_the_idle_blank_off`). With no inhibitor there
+    // is nothing to walk.
+    let inhibited = state.idle_inhibited();
+    if inhibited {
+        state.idle.held = Some(now);
+    }
     blank(state, now);
     if state.idle.notifications.is_empty() {
         return;
     }
     let since = *state.idle.since.get_or_insert(now);
     let elapsed = now.saturating_sub(since);
-    let inhibited = state.idle_inhibited();
+    let held = state.idle.held;
 
     // Dead notifications go here rather than at the top: a client that
     // disconnects mid-frame would otherwise be written to once more, and the
@@ -207,7 +228,11 @@ pub(crate) fn settle(state: &mut Solium) {
         .retain(|notification| notification.object.is_alive());
 
     for notification in &mut state.idle.notifications {
-        let held_off = inhibited && !notification.ignores_inhibitors;
+        let (held_off, elapsed) = if notification.ignores_inhibitors {
+            (false, elapsed)
+        } else {
+            (inhibited, quiet(now, since, held))
+        };
         let idle = !held_off && elapsed >= notification.timeout;
         if idle == notification.idle {
             continue;
@@ -227,7 +252,8 @@ pub(crate) fn settle(state: &mut Solium) {
 ///
 /// The same inhibitors, counted the same way, as the notifications above --
 /// so nothing holds it off while the session is locked, and a lock screen goes
-/// dark like anything else.
+/// dark like anything else -- and counted from when the last one let go, as
+/// they are (see `Idle::held`).
 /// `the_idle_blank_turns_every_screen_off_after_the_timeout`,
 /// `an_idle_inhibitor_holds_the_idle_blank_off` and
 /// `input_wakes_every_screen_the_idle_blank_turned_off`.
@@ -237,14 +263,12 @@ fn blank(state: &mut Solium, now: Duration) {
         return;
     }
     let began = *state.idle.began.get_or_insert(now);
-    let elapsed = now.saturating_sub(state.idle.since.unwrap_or(began));
-    if elapsed < after {
+    let since = state.idle.since.unwrap_or(began);
+    if quiet(now, since, state.idle.held) < after {
         state.idle.blanked = false;
         return;
     }
-    // In this order so the inhibitor walk, which visits every pane, is only
-    // paid for once the timeout has passed and not on every frame.
-    if state.idle.blanked || state.idle_inhibited() {
+    if state.idle.blanked {
         return;
     }
     state.idle.blanked = true;
@@ -253,6 +277,13 @@ fn blank(state: &mut Solium, now: Duration) {
         "nobody is here: every screen off (idle.screens_off_after)"
     );
     state.power_all(false);
+}
+
+/// How long nothing has kept the machine awake: since the last input, or
+/// since the last frame an inhibitor held it, whichever was later. While one
+/// is held that is no time at all. See `Idle::held`.
+fn quiet(now: Duration, since: Duration, held: Option<Duration>) -> Duration {
+    now.saturating_sub(held.map_or(since, |held| held.max(since)))
 }
 
 impl GlobalDispatch<ExtIdleNotifierV1, ()> for Solium {

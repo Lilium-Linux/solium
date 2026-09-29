@@ -539,8 +539,10 @@ return { idle = { screens_off_after = 300 } }   -- seconds; 0 never does it
 Ten minutes and not GNOME's five, because GNOME dims first and Solium does not:
 here the first you know of it is the screen going dark. Anything that plays --
 a film, a call, a presentation -- holds an idle inhibitor, and while that window
-is on screen the timer waits. Nothing holds it off behind the lock screen, which
-goes dark like anything else.
+is on screen the timer waits. When it lets go the ten minutes start again from
+then, so a film ending an hour in does not take the screen with it, and the
+next one in a playlist does not start in the dark. Nothing holds it off behind
+the lock screen, which goes dark like anything else.
 
 **Any key, click, scroll, touch or pointer motion turns every screen back on**,
 however they went off, and that input is delivered as usual rather than
