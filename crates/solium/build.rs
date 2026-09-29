@@ -39,7 +39,8 @@ fn main() {
             eprintln!("error: Qt 6 Quick (6.5 or newer) development files not found: {err}");
             eprintln!("       Fedora:        qt6-qtbase-devel qt6-qtdeclarative-devel");
             eprintln!("       Arch:          qt6-base qt6-declarative");
-            eprintln!("       Debian/Ubuntu: qt6-base-dev qt6-declarative-dev (Debian 13, Ubuntu 24.10 or newer)");
+            eprintln!("       Debian/Ubuntu: qt6-base-dev qt6-declarative-dev");
+            eprintln!("                      (Debian 13, Ubuntu 24.10 or newer)");
             eprintln!("       openSUSE:      qt6-base-devel qt6-declarative-devel");
             std::process::exit(1);
         }
