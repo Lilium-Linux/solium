@@ -209,19 +209,18 @@ fn check_qml(path: Option<String>) -> Result<()> {
     let Some(path) = path else {
         anyhow::bail!("usage: solium --check-qml <file.qml>");
     };
-    // `start_software` and not `start`, so this is a software scene by
-    // construction rather than by preference — the one caller in the compositor
-    // that is right not to go through `qml::Scene::for_host`. It loads one file
-    // to say whether it parses and then exits; nothing here is ever drawn, and
-    // asking for a dmabuf would make the answer depend on whether the machine
-    // has a render node rather than on the QML being checked.
-    //
-    // It used to call `start`, which honours `SOLIUM_QML_GPU` — so run from a
-    // shell with that exported, this started a *GPU* host and `Scene::software`
-    // below was refused by `host.cpp`'s software constructor. A perfectly valid
-    // QML file came back reported as broken, and which answer you got depended
-    // on your environment rather than on your file.
-    qml::start_software()?;
+    // Software in every mode, so this is a software scene by construction
+    // rather than by preference — the one caller in the compositor that is
+    // right not to go through `qml::Scene::for_host`. It loads one file to say
+    // whether it parses and then exits; nothing here is ever drawn, and asking
+    // for a dmabuf would make the answer depend on whether the machine has a
+    // render node rather than on the QML being checked. See
+    // `renderer::check_qml_is_software_in_every_mode`.
+    qml::renderer::decide(
+        qml::renderer::Entry::CheckQml,
+        &qml::renderer::Configured::default(),
+    );
+    qml::start()?;
     match qml::Scene::software(std::path::Path::new(&path), 400, 200) {
         Ok(_) => {
             println!("ok");
@@ -244,6 +243,10 @@ fn check_qml(path: Option<String>) -> Result<()> {
 
 fn main() -> Result<()> {
     let backend = std::env::args().nth(1);
+    // Before logging starts: the probe's child answers in one line.
+    if backend.as_deref() == Some(qml::renderer::PROBE) {
+        qml::renderer::probe_child();
+    }
     // On the hardware the screen belongs to the compositor, so anything printed
     // to the terminal is printed underneath itself and lost. Whatever went
     // wrong there is exactly what needs reading afterwards, so it also goes to

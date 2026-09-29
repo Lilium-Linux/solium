@@ -202,19 +202,26 @@ fn parse_list_with<T>(
     parsed
 }
 
-/// Render QML on the GPU rather than the CPU.
+/// Which scene graph QML renders on: `auto`, `gpu` or `software`.
+///
+/// ```sh
+/// SOLIUM_QML=software ./target/debug/solium --tty
+/// ```
+///
+/// Below `--qml` and above `SOLIUM_QML_GPU` and the configuration's
+/// `qml.renderer`. Read once, by `qml::renderer::decide`, before Qt starts. See
+/// `qml::renderer::the_flag_beats_the_environment_beats_the_config`.
+pub(crate) fn qml() -> Option<String> {
+    std::env::var_os("SOLIUM_QML").map(|value| value.to_string_lossy().into_owned())
+}
+
+/// The older spelling of `SOLIUM_QML=gpu`, set to anything.
 ///
 /// ```sh
 /// SOLIUM_QML_GPU=1 ./target/debug/solium --tty
 /// ```
 ///
-/// Off by default while the dmabuf path proves itself. The software path is
-/// the fallback and must keep working: a machine where this fails still has
-/// to run a desktop.
-///
-/// Read once, in `qml::start`, and acted on once. Qt fixes its scene graph
-/// backend for the life of the process, so this cannot be a per-scene choice
-/// and re-reading it could only ever disagree with itself.
+/// See `qml::renderer::the_old_knob_is_an_alias_for_gpu`.
 pub(crate) fn qml_gpu() -> bool {
     std::env::var_os("SOLIUM_QML_GPU").is_some()
 }

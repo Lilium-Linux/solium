@@ -209,6 +209,26 @@ local defaults = {
     -- different function that answers with where the pointer is.
     cursor = {},
 
+    -- How QML -- the frames, the pointer, the wallpaper -- is rendered.
+    --
+    --   renderer        "auto" renders on the GPU when a trial render in a
+    --                   separate process passes, and in software when it
+    --                   fails or times out; nested, it is software. "gpu"
+    --                   skips the trial and "software" never uses the GPU.
+    --                   Anything else warns and means "auto". `--qml <mode>`,
+    --                   then SOLIUM_QML, then SOLIUM_QML_GPU override this.
+    --   probe_timeout   how long the trial may take, in milliseconds, before
+    --                   it is killed and QML renders in software.
+    --
+    -- Read when the compositor starts; a reload does not change it, because
+    -- Qt cannot change scene graph once started. The log line that begins
+    -- "QML renderer:" says which one this session got, and why. Tests:
+    -- `qml/renderer.rs` and `the_shipped_configuration_asks_for_auto`.
+    qml = {
+        renderer = "auto",
+        probe_timeout = 5000,
+    },
+
     -- The monitors.
     --
     -- Empty means "work it out": every connected screen is driven, left to

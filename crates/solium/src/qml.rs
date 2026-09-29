@@ -6,18 +6,24 @@
 //! protocol was tried and measured at ~15 fps, 39% CPU.
 //!
 //! Two paths, and only ever one of them per process, because Qt fixes its
-//! scene graph backend inside `QGuiApplication`. The software rasteriser is the
-//! default and draws into a `QImage` the compositor uploads — no QPA plugin
-//! here will adopt a foreign EGL context, so a GL scene graph cannot simply be
-//! handed Solium's own. The GPU path, behind `SOLIUM_QML_GPU`, works around
-//! that from the other end: the compositor allocates the buffer through GBM and
-//! Qt imports its dmabuf as a texture to draw into. See `start_on_gpu`.
+//! scene graph backend inside `QGuiApplication`. The software rasteriser draws
+//! into a `QImage` the compositor uploads — no QPA plugin here will adopt a
+//! foreign EGL context, so a GL scene graph cannot simply be handed Solium's
+//! own. The GPU path works around that from the other end: the compositor
+//! allocates the buffer through GBM and Qt imports its dmabuf as a texture to
+//! draw into. See `start_on_gpu`. Which of the two a process gets is
+//! [`renderer`]'s decision, made before Qt starts: by default, the GPU on the
+//! hardware when its pre-flight passes in a child process, and software
+//! otherwise. See `renderer::a_passing_probe_means_gpu`,
+//! `renderer::a_failed_probe_means_software` and
+//! `renderer::auto_is_software_nested`.
 //!
 //! This module is the only unsafe surface in the compositor, and it is kept
 //! deliberately narrow: a handle, a render call, some setters. Everything Qt is
 //! behind the C ABI.
 
 pub(crate) mod paint;
+pub(crate) mod renderer;
 mod target;
 
 /// The largest a scene may be, per side.
@@ -265,44 +271,23 @@ extern "C" fn solium_qml_log_from_qt(
 /// design system a single object rather than a copy per surface — see
 /// `qml/Solium/Theme.qml`.
 ///
-/// Honours `SOLIUM_QML_GPU`, which is what every caller that is going to *draw*
-/// wants. [`start_software`] is for the one that is not.
+/// On the scene graph [`renderer::decide`] chose for this process, and on
+/// software when nothing has decided. See
+/// `renderer::an_undecided_process_is_software`.
 pub(crate) fn start() -> Result<()> {
-    start_with(crate::dev::qml_gpu())
+    start_with(renderer::decided() == renderer::Renderer::Gpu)
 }
 
-/// Start Qt on the **software** scene graph, whatever the knob says.
-///
-/// For `--check-qml`, which loads one QML file to say whether it parses and then
-/// exits. Nothing it builds is ever drawn, so asking for a dmabuf would make the
-/// answer depend on whether the machine has a render node rather than on the QML
-/// being checked.
-///
-/// It exists because [`start`] reads the environment, and a validation entry
-/// point that reads the environment answers a different question depending on
-/// whose shell it is run from. With `SOLIUM_QML_GPU` exported — which is exactly
-/// the state the shell is in during the hardware session that would want this —
-/// `start` brought up a GPU host, and `Scene::software` was then refused by
-/// `host.cpp`'s software constructor: a perfectly good QML file reported as
-/// broken, by the thing whose whole job is to say so accurately.
-///
-/// Not "start with a preference": it *takes* the decision. Qt fixes its scene
-/// graph for the life of the process, so `GPU` is set here and [`on_gpu`] and
-/// any later [`start`] read the same answer.
-pub(crate) fn start_software() -> Result<()> {
-    // If a GPU host is somehow already up this changes nothing and the host
-    // refuses below, loudly — `solium_qml_start` returns 0 rather than handing
-    // back a host that will not do what the caller is about to assume.
-    let _ = GPU.set(false);
-    start_with(false)
+/// The import path, as Qt takes it.
+fn import_path_for_qt() -> Result<CString> {
+    let path = PathBuf::from(import_path());
+    CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| anyhow!("the QML import path contains a NUL byte"))
 }
 
 #[expect(unsafe_code, reason = "calling into the Qt host")]
 fn start_with(gpu: bool) -> Result<()> {
-    let path = import_path();
-    let path = PathBuf::from(path);
-    let path = CString::new(path.as_os_str().as_encoded_bytes())
-        .map_err(|_| anyhow!("the QML import path contains a NUL byte"))?;
+    let path = import_path_for_qt()?;
 
     // Which scene graph this process came up on, decided once. Qt fixes that
     // for the life of the process — there is no second chance and no way back
@@ -456,6 +441,18 @@ pub(crate) fn no_frame_in_flight(what: &str) {
 /// drawn into and fenced, and none of that gets more true at a larger size.
 const PREFLIGHT_SIDE: i32 = 64;
 
+/// What bringing Qt up on the GPU came to.
+enum Bringup {
+    /// Refused before Qt was committed, so software is still reachable.
+    Declined(anyhow::Error),
+    /// Qt is committed to the GPU for this process, and what the pre-flight
+    /// said. `Ok(false)` is a pass without a fence; see [`preflight`].
+    Committed {
+        node: PathBuf,
+        preflight: Result<bool>,
+    },
+}
+
 /// Bring Qt up on the GPU, and prove the round trip before trusting it.
 ///
 /// Two hard constraints shape this, both measured rather than assumed.
@@ -465,8 +462,9 @@ const PREFLIGHT_SIDE: i32 = 64;
 /// constructor, and Qt calls `qFatal` on a plugin it cannot bring up — SIGABRT,
 /// exit 134, no return value to inspect. So everything that can be decided
 /// before it is decided before it — the render node, the KMS config, the GBM
-/// device *and the buffer itself* — and a `false` from this function is always
-/// a decision taken while the software path was still reachable.
+/// device *and the buffer itself* — and a [`Bringup::Declined`] from this
+/// function is always a decision taken while the software path was still
+/// reachable.
 ///
 /// The buffer belongs in that list and was not in it at first. Allocating it
 /// inside the pre-flight reads naturally, and it put the one remaining
@@ -484,16 +482,12 @@ const PREFLIGHT_SIDE: i32 = 64;
 /// QML, a real buffer from `target::allocate`, the real import and the real
 /// fence, before anything on screen depends on any of it.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
-fn start_on_gpu(import_path: &CStr) -> bool {
+fn bring_up_gpu(import_path: &CStr) -> Bringup {
     let Some(node) = render_node() else {
-        tracing::warn!(
-            "SOLIUM_QML_GPU is set and no DRM render node could be found; using software"
-        );
-        return false;
+        return Bringup::Declined(anyhow!("no DRM render node could be found"));
     };
     if let Err(err) = keep_qt_off_the_hardware(&node) {
-        tracing::warn!(?err, "could not fence Qt off the card node; using software");
-        return false;
+        return Bringup::Declined(err.context("could not fence Qt off the card node"));
     }
     // Said out loud because Smithay logs `unable to become drm master` from
     // inside the next call — `DrmDeviceFd` asks for it on any node it is handed
@@ -510,8 +504,7 @@ fn start_on_gpu(import_path: &CStr) -> bool {
     let gbm = match open_render_node(&node) {
         Ok(gbm) => gbm,
         Err(err) => {
-            tracing::warn!(?err, node = %node.display(), "no GBM device; using software");
-            return false;
+            return Bringup::Declined(err.context(format!("no GBM device on {}", node.display())));
         }
     };
     // And the buffer with it, for exactly the same reason. Opening the device
@@ -524,8 +517,7 @@ fn start_on_gpu(import_path: &CStr) -> bool {
     let target = match target::allocate(&gbm, PREFLIGHT_SIDE, PREFLIGHT_SIDE) {
         Ok(target) => target,
         Err(err) => {
-            tracing::warn!(?err, "no buffer to render a scene into; using software");
-            return false;
+            return Bringup::Declined(err.context("no buffer to render a scene into"));
         }
     };
 
@@ -535,43 +527,79 @@ fn start_on_gpu(import_path: &CStr) -> bool {
         // Reachable only when Qt was already up on the software backend, since
         // everything else inside is either infallible or fatal. Nothing has
         // changed in that case, so the software path is still the right answer.
-        tracing::warn!("Qt is already up on the software scene graph; staying there");
-        return false;
+        return Bringup::Declined(anyhow!("Qt is already up on the software scene graph"));
     }
 
     // The device is finished with: the buffer above is the only thing this
     // needed it for, and a `Dmabuf` outlives the `GbmDevice` it came from.
     drop(gbm);
 
-    match preflight(target) {
-        Ok(fenced) => {
+    Bringup::Committed {
+        node,
+        preflight: preflight(target),
+    }
+}
+
+/// Start Qt on the GPU in this process, and say how it went.
+///
+/// `false` is always a decision taken while the software path was still
+/// reachable; see [`Bringup::Declined`].
+fn start_on_gpu(import_path: &CStr) -> bool {
+    match bring_up_gpu(import_path) {
+        Bringup::Declined(err) => {
+            tracing::warn!("QML could not start on the GPU: {err:#}; using software");
+            false
+        }
+        Bringup::Committed {
+            node,
+            preflight: Ok(fenced),
+        } => {
             tracing::info!(
                 node = %node.display(),
                 fenced,
                 "QML on the GPU: Qt rendered into a buffer we allocated"
             );
-            // The other half of that sentence, and the reason this knob is off
-            // by default. A GPU host cannot build software scenes — it is one
-            // scene graph per process, and Qt picked this one — so every
-            // surface that has not been moved onto `Scene::gpu` now fails to
-            // load and draws nothing. The session runs; it is bare.
-            tracing::warn!(
-                "SOLIUM_QML_GPU: scenes that are not GPU scenes will not load, so anything \
-                 still on the software path draws nothing until it is converted"
-            );
+            true
         }
         // Loud, and not fatal. Qt's backend is fixed by now, so this cannot
         // fall back — but a compositor that quit here would take the session
-        // with it for the sake of a knob that is off by default, and the reason
-        // this line exists is so the failure is read here rather than guessed
-        // at from a blank screen ten seconds later.
-        Err(err) => tracing::error!(
-            ?err,
-            "the GPU path came up and does not work; scenes will not draw. \
-             unset SOLIUM_QML_GPU to go back to software rendering"
-        ),
+        // with it, and the reason this line exists is so the failure is read
+        // here rather than guessed at from a blank screen ten seconds later.
+        Bringup::Committed {
+            preflight: Err(err),
+            ..
+        } => {
+            tracing::error!(
+                ?err,
+                "the GPU path came up and does not work; scenes will not draw. \
+                 start with `--qml software` or SOLIUM_QML=software to render QML in software"
+            );
+            true
+        }
     }
-    true
+}
+
+/// The GPU pre-flight on its own, for `solium --probe-qml-gpu`.
+///
+/// Exactly what [`start_on_gpu`] runs, answered rather than logged: the line to
+/// print when it passes, the reason when it does not.
+pub(crate) fn probe_gpu() -> Result<String> {
+    let path = import_path_for_qt()?;
+    match bring_up_gpu(&path) {
+        Bringup::Declined(err) => Err(err),
+        Bringup::Committed { node, preflight } => {
+            let fenced = preflight?;
+            Ok(format!(
+                "gpu: Qt rendered QML into a buffer allocated on {}, {}",
+                node.display(),
+                if fenced {
+                    "fenced"
+                } else {
+                    "unfenced (the host waited with glFinish)"
+                }
+            ))
+        }
+    }
 }
 
 /// Render one frame of real QML into a real dmabuf, and say whether it fenced.
@@ -875,8 +903,9 @@ impl Scene {
     /// fourth caller answering this question for itself is the same bug again.
     ///
     /// `main.rs`'s `--check-qml` is the one deliberate exception and says so
-    /// where it sits: it starts its host through [`start_software`], so its
-    /// scene is software by construction and not by preference.
+    /// where it sits: its host is software in every mode, so its scene is
+    /// software by construction and not by preference. See
+    /// `renderer::check_qml_is_software_in_every_mode`.
     pub(crate) fn for_host(
         qml_path: &Path,
         width: i32,
@@ -913,10 +942,11 @@ impl Scene {
     /// GPU host this scene would be refused at construction — see `host.cpp`'s
     /// software constructor.
     ///
-    /// Which is why its one caller pairs it with [`start_software`] rather than
-    /// [`start`]. The pairing is the contract: this constructor is only sound in
-    /// a process whose host was brought up software on purpose, and nothing here
-    /// can check that from the inside.
+    /// Which is why its one caller decides `renderer::Entry::CheckQml` before
+    /// [`start`], which is software in every mode. The pairing is the contract:
+    /// this constructor is only sound in a process whose host was brought up
+    /// software on purpose, and nothing here can check that from the inside.
+    /// See `renderer::check_qml_is_software_in_every_mode`.
     pub(crate) fn software(qml_path: &Path, width: i32, height: i32) -> Result<Self> {
         Self::with_properties(qml_path, width, height, None)
     }

@@ -834,6 +834,14 @@ impl Scripts {
         found
     }
 
+    /// What the configuration said through `sol.qml`, if anything.
+    pub(crate) fn qml(&self) -> crate::qml::renderer::Configured {
+        self.lua
+            .app_data_ref::<crate::qml::renderer::Configured>()
+            .map(|configured| configured.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn config_path() -> std::path::PathBuf {
         if let Some(path) = std::env::var_os("SOLIUM_LUA_INIT") {
             return std::path::PathBuf::from(path);
@@ -2567,6 +2575,49 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Cursor(configured.clone()));
             })
+        })?,
+    )?;
+
+    // Which scene graph QML renders on, and how long the GPU probe may take.
+    //
+    // Kept aside rather than queued, so `Scripts::qml` can read it as soon as
+    // the configuration has loaded, before anything it asked for is applied
+    // and before any scene starts Qt. An absent table or key means the
+    // configuration said nothing. See
+    // `a_configured_qml_renderer_is_read_before_qt_starts`.
+    sol.set(
+        "qml",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut configured = crate::qml::renderer::Configured::default();
+            let Some(options) = options else {
+                lua.set_app_data(configured);
+                return Ok(());
+            };
+            match options.get::<Value>("renderer") {
+                Ok(Value::String(name)) => {
+                    configured.renderer = Some(name.to_string_lossy());
+                }
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(other) => tracing::warn!(
+                    renderer = ?other,
+                    "qml.renderer is one of auto, gpu or software; using auto"
+                ),
+            }
+            match options.get::<Value>("probe_timeout") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => match value.as_u64().filter(|&millis| millis > 0) {
+                    Some(millis) => {
+                        configured.probe_timeout = Some(Duration::from_millis(millis));
+                    }
+                    None => tracing::warn!(
+                        probe_timeout = ?value,
+                        "qml.probe_timeout is a whole number of milliseconds above 0; \
+                         keeping the default"
+                    ),
+                },
+            }
+            lua.set_app_data(configured);
+            Ok(())
         })?,
     )?;
 
@@ -4490,6 +4541,86 @@ mod tests {
             }
             other => panic!("expected one cursor command, got {other:?}"),
         }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// `sol.qml` is answered straight after the configuration is read, before
+    /// `startup` hands anything it asked for to the compositor.
+    #[test]
+    fn a_configured_qml_renderer_is_read_before_qt_starts() {
+        let directory = std::env::temp_dir().join("solium-script-test-qml");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            Scripts::load(&config)
+                .expect("loading the test script")
+                .qml()
+        };
+
+        assert_eq!(
+            configured(r#"sol.qml({ renderer = "software", probe_timeout = 1500 })"#),
+            crate::qml::renderer::Configured {
+                renderer: Some("software".to_owned()),
+                probe_timeout: Some(Duration::from_millis(1500)),
+            }
+        );
+        // Said nothing, three ways.
+        for source in ["", "sol.qml(nil)", "sol.qml({})"] {
+            assert_eq!(
+                configured(source),
+                crate::qml::renderer::Configured::default(),
+                "{source:?}"
+            );
+        }
+        // Not a string and not a timeout: warned about, and left unsaid.
+        assert_eq!(
+            configured(r#"sol.qml({ renderer = true, probe_timeout = 0 })"#),
+            crate::qml::renderer::Configured::default()
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The shipped `config.lua` asks for `auto` and a five second probe, through
+    /// the shipped `init.lua`'s own call.
+    #[test]
+    fn the_shipped_configuration_asks_for_auto() {
+        let Some(own) = Scripts::user_config_dir() else {
+            return;
+        };
+        if own.join("user.lua").exists() || own.join("config.lua").exists() {
+            return;
+        }
+        let directory = std::env::temp_dir().join("solium-script-test-qml-default");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            local config = require("config")
+            sol.qml(config.qml)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let scripts = Scripts::load(&config).expect("loading the test script");
+        assert_eq!(
+            scripts.qml(),
+            crate::qml::renderer::Configured {
+                renderer: Some("auto".to_owned()),
+                probe_timeout: Some(crate::qml::renderer::PROBE_TIMEOUT),
+            }
+        );
+        let shipped = std::fs::read_to_string(crate::assets::lua().join("init.lua"))
+            .expect("the shipped init.lua");
+        assert!(
+            shipped.contains("sol.qml(config.qml)"),
+            "the shipped init.lua does not hand qml to the compositor"
+        );
 
         let _ = std::fs::remove_dir_all(&directory);
     }

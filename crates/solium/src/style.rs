@@ -322,10 +322,10 @@ fn provides(term: &str, gpu: bool) -> Option<bool> {
 
 /// Refuse a style this process cannot run.
 ///
-/// [`crate::qml::on_gpu`] and not `dev::qml_gpu()`: what Qt *did* with the
-/// knob, not what it was asked for. It can refuse, and the answer is only known
+/// [`crate::qml::on_gpu`] and not the renderer that was asked for: what Qt
+/// *did*, not what it was asked to do. It can refuse, and the answer is only known
 /// once `start` has run — which by this point it has, because the scene being
-/// read exists.
+/// read exists. See `a_style_the_path_cannot_run_is_refused`.
 fn requirements(manifest: &Path, required: &[String]) -> Result<()> {
     requirements_on(manifest, required, crate::qml::on_gpu())
 }
