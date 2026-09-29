@@ -19,6 +19,7 @@ local workspaces = require("workspaces")
 local modes = require("modes")
 local monitors = require("monitors")
 local dialogs = require("dialogs")
+local sizes = require("sizes")
 
 -- `exiled` is the ids this layout has taken out of its trees because they are
 -- modal dialogs, and it is what makes `unset_modal` reversible: only a window
@@ -41,8 +42,28 @@ local dialogs = require("dialogs")
 -- `a_reload_leaves_a_tiled_desk_exactly_as_it_was` and
 -- `firefox_and_kitty_on_workspace_3_keep_their_places_through_a_reload` in
 -- `script.rs`.
-local kept = sol.keep("tiling", { trees = {} })
-local tiling = { active = false, trees = kept.trees, exiled = {}, leaving = {} }
+--
+-- `cramped` is the windows this layout has said are cramped -- laid out
+-- smaller than their own minimum (#115) -- and have been named in the log for,
+-- by id. See `say_cramped`. Kept beside the trees, so a reload does not name
+-- them again: they are the same windows in the same tiles, and the log has
+-- said so already. See `a_reload_does_not_name_a_cramped_window_again` in
+-- `script.rs`.
+--
+-- `unsized` is the windows `open` placed before their application had said
+-- anything -- every window launched with `sol.spawn`, whose `open` comes at
+-- the launch, before its application exists -- by id, with the split target
+-- and the pointer that `open` decided from. See `reconsider`.
+local kept = sol.keep("tiling", { trees = {}, cramped = {} })
+kept.cramped = kept.cramped or {}
+local tiling = {
+    active = false,
+    trees = kept.trees,
+    exiled = {},
+    leaving = {},
+    cramped = kept.cramped,
+    unsized = {},
+}
 
 -- Whether the other windows close up the moment a close is asked for, rather
 -- than once the application has gone. Read when each event arrives rather than
@@ -169,6 +190,76 @@ local function options(monitor)
     -- In every options table, so the seams are held to it as well as the
     -- splits: `tree:drag_seam` and `tree:resize` read it from here.
     out.minimum = minimum()
+    -- Each window's own minimum (#115), under `tiling.client_minimum` and
+    -- `tiling.client_size_ignore`: what the tree lays each window out around,
+    -- splits and seams included. See `sizes.lua`.
+    out.floors = sizes.floors()
+    return out
+end
+
+-- Say once that a window is cramped, with the numbers, and forget it once it
+-- is not.
+--
+-- Once and not on every pass: `apply` runs once a frame for the length of a
+-- seam drag, and a window that stays cramped through one has been named
+-- already. A window that stops being cramped and then is again is named again,
+-- because that is news. See
+-- `a_window_that_cannot_have_its_minimum_is_cramped_and_said_once` in
+-- `script.rs`.
+local function say_cramped(slot, window)
+    if not slot.cramped then
+        tiling.cramped[slot.id] = nil
+        return
+    end
+    if tiling.cramped[slot.id] then
+        return
+    end
+    tiling.cramped[slot.id] = true
+    local floor = (window and sizes.floor(window)) or { w = 0, h = 0 }
+    local needs
+    if floor.w > 0 and floor.h > 0 then
+        needs = string.format("%.0fx%.0f", floor.w, floor.h)
+    elseif floor.w > 0 then
+        needs = string.format("%.0f wide", floor.w)
+    else
+        needs = string.format("%.0f high", floor.h)
+    end
+    sol.log(string.format(
+        "tiling: window %d needs at least %s, frame included, and its tile is %.0fx%.0f; "
+            .. "it is cramped, and its application's picture is cut to the tile",
+        slot.id,
+        needs,
+        slot.w,
+        slot.h
+    ))
+end
+
+-- Place one window the tree laid out, and hand back the rectangle it is at.
+--
+-- The tile itself, unless the window's own maximum is smaller than it and
+-- `tiling.client_maximum` is "center": then a pane of that size in the middle
+-- of the tile, with the tile handed over as `tile` so the compositor holds the
+-- client inside the tile and a dragged edge moves the tile's seam (#115). And
+-- `cramped`, which the tree put on the slot, goes with it either way.
+local function place(slot, window)
+    say_cramped(slot, window)
+    local pane = sizes.centred(window, slot)
+    if not pane then
+        sol.place(slot.id, slot)
+        return slot
+    end
+    pane.tile = { x = slot.x, y = slot.y, w = slot.w, h = slot.h }
+    pane.cramped = slot.cramped
+    sol.place(slot.id, pane)
+    return pane
+end
+
+-- The windows `sol.windows()` lists, by id.
+local function by_id(windows)
+    local out = {}
+    for _, window in ipairs(windows or sol.windows()) do
+        out[window.id] = window
+    end
     return out
 end
 
@@ -257,11 +348,11 @@ function tiling.apply(animation)
     -- snapshot says where that window *was*, and this pass is in the middle of
     -- moving it.
     local placed = {}
+    local windows = by_id()
     for _, each in ipairs(screens) do
         local tree = tree_for(each.monitor.name)
         for _, slot in ipairs(tree:layout(options(each.monitor.name))) do
-            sol.place(slot.id, slot)
-            placed[slot.id] = slot
+            placed[slot.id] = place(slot, windows[slot.id])
         end
     end
     -- A second pass rather than the tail of the first: a dialog on DP-1 may
@@ -366,10 +457,6 @@ sol.on("monitors", function()
     tiling.adopt()
 end)
 
-sol.on("layout", function()
-    tiling.apply()
-end)
-
 -- Where a window being opened goes (#134): the tile under the pointer, either
 -- way, and when that has no room, `config.tiling.overflow` one step at a time.
 -- Returns the workspace it was sent to, or nil when it went into the tree of
@@ -379,7 +466,10 @@ end)
 -- moment it is asked for, before its application has connected
 -- (`Solium::begin_loading`), so a window that goes to another workspace is
 -- placed there in the same dispatch that opens it -- the one tile it is ever
--- given -- rather than in this workspace's first and moved later.
+-- given -- rather than in this workspace's first and moved later. A launched
+-- window left in this workspace is decided here once more, if its
+-- application's own minimum turns out not to fit the tile it was given: see
+-- `reconsider`.
 local function open_in(id, monitor, target, cursor)
     local tree = tree_for(monitor)
     local area = options(monitor)
@@ -436,6 +526,55 @@ local function open_in(id, monitor, target, cursor)
     return nil
 end
 
+-- Open window `id` where `open_in` says, and see to what goes with it: the
+-- view going with a window sent to another workspace, or, where it does not,
+-- the window placed on that workspace's desk. `open`'s, and `reconsider`'s for
+-- a window placed again.
+local function settle_open(id, monitor, target, cursor)
+    local elsewhere = open_in(id, monitor, target, cursor)
+    local follows = follows_overflow()
+    if elsewhere and follows then
+        -- The view goes with it, as `super+<n>` would take it. Focused by name
+        -- afterwards as well: `go` hands the keyboard to the first window it
+        -- finds on the workspace, which can be one still fading out there
+        -- (`a_window_being_closed_is_room_for_the_next_one`).
+        --
+        -- At the `open` of a window launched with `sol.spawn` the compositor
+        -- drops that request, because that `open` comes before the
+        -- application exists and there is nothing yet to give the keyboard
+        -- to. The keyboard goes to this window with the application's first
+        -- frame; until then it is not on it, and it can be on the window the
+        -- view has just left, as `super+<n>` onto an empty workspace leaves
+        -- it. Both halves are
+        -- `a_launched_window_that_overflows_with_the_view_takes_the_keyboard_when_it_arrives`
+        -- in `state.rs`.
+        workspaces.go(elsewhere, monitor)
+        sol.focus(id)
+    elseif elsewhere then
+        -- Regrouped now, so the window joins its own desk's selection -- the
+        -- one carried a screen away -- in the same dispatch that places it,
+        -- rather than whenever something next regroups.
+        --
+        -- The keyboard is not this file's to move, and stays where it was:
+        -- the compositor gives a new window the keyboard only if it is headed
+        -- somewhere the user can see (`Solium::offer_keyboard`). See
+        -- `a_window_that_overflows_to_a_hidden_workspace_does_not_take_the_keyboard`
+        -- and its launched twin in `state.rs`.
+        workspaces.apply()
+    end
+    tiling.apply()
+    if elsewhere and not follows then
+        -- Its tree is not one `apply` walks, since that workspace is not in
+        -- view. Placed here so it is already in its tile when the user goes
+        -- there, and so that until then it is where its desk carries it.
+        local key = monitors.key(elsewhere, monitor)
+        local windows = by_id()
+        for _, slot in ipairs(tiling.trees[key]:layout(options(monitor))) do
+            place(slot, windows[slot.id])
+        end
+    end
+end
+
 sol.on("open", function(id)
     -- A dialog joins no tree. `apply` places it over its parent and records it
     -- as exiled, so there is nothing to do here but let that happen.
@@ -464,45 +603,81 @@ sol.on("open", function(id)
         return
     end
 
-    local elsewhere = open_in(id, monitor, target, cursor)
-    local follows = follows_overflow()
-    if elsewhere and follows then
-        -- The view goes with it, as `super+<n>` would take it. Focused by name
-        -- afterwards as well: `go` hands the keyboard to the first window it
-        -- finds on the workspace, which can be one still fading out there
-        -- (`a_window_being_closed_is_room_for_the_next_one`).
-        --
-        -- For a window launched with `sol.spawn` the compositor drops that
-        -- request, because `open` comes before the application exists and
-        -- there is nothing yet to give the keyboard to. The keyboard goes to
-        -- this window with the application's first frame; until then it is
-        -- not on it, and it can be on the window the view has just left, as
-        -- `super+<n>` onto an empty workspace leaves it. Both halves are
-        -- `a_launched_window_that_overflows_with_the_view_takes_the_keyboard_when_it_arrives`
-        -- in `state.rs`.
-        workspaces.go(elsewhere, monitor)
-        sol.focus(id)
-    elseif elsewhere then
-        -- Regrouped now, so the window joins its own desk's selection -- the
-        -- one carried a screen away -- in the same dispatch that places it,
-        -- rather than whenever something next regroups.
-        --
-        -- The keyboard is not this file's to move, and stays where it was:
-        -- the compositor gives a new window the keyboard only if it is headed
-        -- somewhere the user can see (`Solium::offer_keyboard`). See
-        -- `a_window_that_overflows_to_a_hidden_workspace_does_not_take_the_keyboard`
-        -- and its launched twin in `state.rs`.
-        workspaces.apply()
+    local window = dialogs.by_id(id)
+    if window and not window.shown then
+        tiling.unsized[id] = { target = target, cursor = { x = cursor.x, y = cursor.y } }
     end
-    tiling.apply()
-    if elsewhere and not follows then
-        -- Its tree is not one `apply` walks, since that workspace is not in
-        -- view. Placed here so it is already in its tile when the user goes
-        -- there, and so that until then it is where its desk carries it.
-        local key = monitors.key(elsewhere, monitor)
-        for _, slot in ipairs(tiling.trees[key]:layout(options(monitor))) do
-            sol.place(slot.id, slot)
+    settle_open(id, monitor, target, cursor)
+end)
+
+-- Whether window `id`'s slot in `tree`, laid out on `monitor`, is smaller
+-- than the window's own floor. See `Tiling::cramped`.
+local function cramped_in(tree, id, monitor)
+    for _, slot in ipairs(tree:layout(options(monitor))) do
+        if slot.id == id then
+            return slot.cramped == true
         end
+    end
+    return false
+end
+
+-- A window `open` placed before its application had said how small it can
+-- be, placed again now that it has -- once, and only if it has not been shown
+-- yet and the tile it was given cannot hold it (#115). Returns whether it
+-- placed anything, which it has then applied.
+--
+-- The tile was decided at the launch, with nothing to decide it by. The
+-- application's minimum comes with its first commit and is told as a
+-- `layout` (`Solium::notice_limits`), and the tree gives the window what the
+-- windows beside it can spare; where that is not enough its slot comes back
+-- cramped. Such a window is taken out of its tree and opened again by
+-- `open`'s own rule -- the tile under the pointer, then
+-- `config.tiling.overflow` -- from the target and the pointer `open` had, so a
+-- window that is opening goes through the overflow chain whichever way it was
+-- opened. See
+-- `a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says` in
+-- `state/tests.rs`.
+--
+-- A window that has been shown is never moved by this: its minimum growing
+-- is a rebalance and nothing more. Nor is one that is not in the tree of the
+-- desk in view -- left on its own desk by the user switching away, say --
+-- since the chain decides for the desk in view, and the window would end up
+-- in two trees. Each of the three is a case of
+-- `a_launched_window_is_placed_again_by_its_minimum_only_before_it_is_shown`
+-- in `script.rs`.
+local function reconsider()
+    if not tiling.active or next(tiling.unsized) == nil then
+        return false
+    end
+    local windows = by_id()
+    local ids = {}
+    for id in pairs(tiling.unsized) do
+        ids[#ids + 1] = id
+    end
+    table.sort(ids)
+    local placed = false
+    for _, id in ipairs(ids) do
+        local opened = tiling.unsized[id]
+        local window = windows[id]
+        if not window or window.leaving or window.shown then
+            tiling.unsized[id] = nil
+        elseif sizes.floor(window) then
+            tiling.unsized[id] = nil
+            local monitor = monitors.of(id)
+            local tree = tree_for(monitor)
+            if tree:contains(id) and cramped_in(tree, id, monitor) then
+                tree:remove(id)
+                settle_open(id, monitor, opened.target, opened.cursor)
+                placed = true
+            end
+        end
+    end
+    return placed
+end
+
+sol.on("layout", function()
+    if not reconsider() then
+        tiling.apply()
     end
 end)
 
@@ -619,6 +794,8 @@ sol.on("close", function(id)
     -- window back -- it would simply accumulate for the life of the session.
     tiling.exiled[id] = nil
     tiling.leaving[id] = nil
+    tiling.cramped[id] = nil
+    tiling.unsized[id] = nil
     dialogs.forget(id)
     tiling.apply()
 end)

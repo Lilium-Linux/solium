@@ -506,6 +506,15 @@ pub(crate) struct Pane {
     /// desktop: `render::prepare` hands it back on the first frame a pane is
     /// not captured on.
     scratch: crate::offscreen::Scratch,
+    /// The size limits of this pane's client that the layouts were last told
+    /// about (#115). Not what the snapshot reads -- that asks the client, so it
+    /// is never behind -- but what `Solium::notice_limits` compares with, so
+    /// that the layouts are told once for each change and not once for each
+    /// commit.
+    limits: crate::state::Limits,
+    /// Whether the layout that last placed this pane said its tile is smaller
+    /// than the window's own minimum. See `WindowInfo::cramped`.
+    cramped: bool,
 }
 
 impl Pane {
@@ -541,6 +550,8 @@ impl Pane {
             drawn: crate::present::Slot::default(),
             managed: true,
             scratch: crate::offscreen::Scratch::default(),
+            limits: crate::state::Limits::default(),
+            cramped: false,
         }
     }
 
@@ -569,7 +580,30 @@ impl Pane {
             drawn: crate::present::Slot::default(),
             managed: true,
             scratch: crate::offscreen::Scratch::default(),
+            limits: crate::state::Limits::default(),
+            cramped: false,
         }
+    }
+
+    /// The client size limits the layouts were last told about. See the
+    /// field.
+    pub(crate) const fn limits(&self) -> crate::state::Limits {
+        self.limits
+    }
+
+    /// Record that the layouts have been told these.
+    pub(crate) const fn set_limits(&mut self, limits: crate::state::Limits) {
+        self.limits = limits;
+    }
+
+    /// Whether the layout that last placed this pane said it is cramped.
+    pub(crate) const fn cramped(&self) -> bool {
+        self.cramped
+    }
+
+    /// What the layout placing this pane says about its tile.
+    pub(crate) const fn set_cramped(&mut self, cramped: bool) {
+        self.cramped = cramped;
     }
 
     /// Whether a layout may place this pane and count it as a window.

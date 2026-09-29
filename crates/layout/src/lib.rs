@@ -121,6 +121,17 @@ pub struct Minimum {
     pub h: f64,
 }
 
+/// Each window's own floor, by id: the smallest its tile can be for its client
+/// to fit, frame included (#115).
+///
+/// Not [`Minimum`], which is one floor for every tile and a rule about
+/// splitting. This is what an application says it cannot go under, one window
+/// at a time. [`tree::Tiling`] gives a window under its floor a larger share,
+/// taken from its siblings, and [`scroller::Scroller`] never lays a column out
+/// narrower than the widest floor in it. A window with no entry has no floor
+/// of its own, and an empty map is exactly the arithmetic before #115.
+pub type Floors = std::collections::HashMap<u64, Minimum>;
+
 /// A column of the scrolling strip: how wide, and how many windows share it.
 #[derive(Clone, Copy, Debug)]
 pub struct Column {

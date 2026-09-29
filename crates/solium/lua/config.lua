@@ -437,6 +437,21 @@ local defaults = {
         fill = "stretch",
     },
 
+    floating = {
+        -- Whether a floating window's edge drag stops at its application's
+        -- own minimum and maximum size (#115). The layouts' say in the matter
+        -- is `tiling.client_minimum` and `tiling.client_maximum`; this one is
+        -- the compositor's, because no layout is asked about a floating drag.
+        --
+        -- "respect", the default: the frame you drag never shows a size the
+        -- application is about to refuse. "ignore": the drag goes wherever
+        -- the pointer does, as before #115, and an application that refuses
+        -- the size is treated as the end of `resize` above says. An
+        -- application in `tiling.client_size_ignore` is not believed here
+        -- either. Anything else is read as "respect".
+        client_limits = "respect",
+    },
+
     tiling = {
         -- Where a split falls, as a share of the window being divided.
         -- Hyprland calls this dwindle:default_split_ratio.
@@ -456,10 +471,53 @@ local defaults = {
         -- A tile and not an application's own minimum size: a window you
         -- launch from here is given its tile the moment you ask for it,
         -- before its application has started, so there is no application yet
-        -- to ask.
+        -- to ask. An application's own minimum is `client_minimum` below.
         --
         -- 0 on a side is no minimum on that side.
         minimum = { w = 160, h = 96 },
+
+        -- Whether an application's own minimum size gets a say (#115). Some
+        -- applications will not go under a size -- Firefox has a minimum
+        -- width -- and say so. You have the last word, not the application:
+        -- this is where you give it.
+        --
+        -- "respect", the default: a window is laid out at least as large as
+        -- its application's minimum wherever the arrangement has the room. It
+        -- is given a larger share, taken from the windows beside it down to
+        -- their own minimums and `minimum` above, and the share goes back when
+        -- the application's minimum does. A new window that would crowd one
+        -- goes where `overflow` says. A seam stops where a window beside it
+        -- reaches its minimum. And in the scrolling layout, a column is never
+        -- narrower than the widest minimum in it.
+        --
+        -- Where the room is not there, the window is laid out smaller anyway
+        -- and its application's picture is cut to the tile. One line in the
+        -- log says so, with the numbers, and the window is `cramped = true` in
+        -- `sol.windows()` until it has room: docs/modes.md has a bar that shows
+        -- it.
+        --
+        -- "ignore": laid out as though no application had a minimum, which is
+        -- how tiling behaved before #115. Anything else is read as "respect".
+        client_minimum = "respect",
+
+        -- What a window whose tile is larger than its application's maximum
+        -- size does with the rest of the tile.
+        --
+        -- "center", the default: it is its maximum size, in the middle of the
+        -- tile. Dragging its edge still moves the seam, from the tile's edge.
+        -- "ignore": it sits in the tile's top-left corner at the size its
+        -- application chose, as before #115. Anything else is read as
+        -- "center".
+        client_maximum = "center",
+
+        -- Applications whose sizes are not believed at all, by app_id: a
+        -- Wayland application's own, or an X11 one's WM_CLASS class.
+        -- `sol.windows()` lists each window's. A window of one of these is
+        -- laid out as though its application had said nothing, minimum and
+        -- maximum alike, and a floating drag of it is not held to them either
+        -- -- for an application that claims a size it does not mean. For
+        -- instance { "steam", "org.gnome.Nautilus" }.
+        client_size_ignore = {},
 
         -- Where a new window goes when splitting the tile under the pointer
         -- would make a tile smaller than `minimum` -- side by side and one

@@ -357,11 +357,13 @@ impl XwmHandler for Solium {
 
     /// A property changed on a window we already know about.
     ///
-    /// Two are read. `TransientFor` is a client saying whose dialog this is,
-    /// which is the evidence `Solium::refused_with_a_dialog` acts on; it is
-    /// taken here for the client that maps a window first and names its parent
-    /// afterwards, `map_window_request` having already covered the ordinary
-    /// order. The rest of this note is about the other one.
+    /// Three are read. `NormalHints` is how small and how large the window can
+    /// be, and the note on it is in the body. `TransientFor` is a client saying
+    /// whose dialog this is, which is the evidence
+    /// `Solium::refused_with_a_dialog` acts on; it is taken here for the client
+    /// that maps a window first and names its parent afterwards,
+    /// `map_window_request` having already covered the ordinary order. The
+    /// rest of this note is about the third, the window type.
     ///
     /// The window type changes nothing, and is read only to say so in the log.
     /// **A late type change does not re-classify.**
@@ -393,6 +395,21 @@ impl XwmHandler for Solium {
     /// last time a window type went unread, the only symptom was a menu in the
     /// wrong place and nothing in the log at all.
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
+        // A third, since #115: `WM_NORMAL_HINTS` is where an X11 client says
+        // how small and how large it can be, and it says so with a property
+        // rather than a commit. Told to the layouts as an xdg client's commit
+        // is, once per change: see `Solium::notice_limits`.
+        if property == WmWindowProperty::NormalHints {
+            let element = self
+                .space
+                .elements()
+                .find(|element| element.x11_surface() == Some(&window))
+                .cloned();
+            if let Some(element) = element {
+                self.notice_limits(&element);
+            }
+            return;
+        }
         if property == WmWindowProperty::TransientFor {
             // Cloned out of the space before the call, which needs `self`
             // mutably. Not in the space means not mapped, and a window that has

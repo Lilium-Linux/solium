@@ -13,6 +13,100 @@ pub(super) fn to_rect(rectangle: Rectangle<i32, Logical>) -> Rect {
     }
 }
 
+/// What a client says about its own size (#115): the least and the most it
+/// will be, in the logical pixels of its window geometry -- the client's own
+/// rectangle, with no frame round it. Zero on a side is no limit on that side,
+/// as both protocols have it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Limits {
+    pub(crate) min: Size<i32, Logical>,
+    pub(crate) max: Size<i32, Logical>,
+}
+
+/// The most a client's limit is read as, on either side, in logical pixels.
+///
+/// Neither protocol bounds what a client may say, and what it says goes
+/// straight into geometry: a scrolling column as wide as a minimum of
+/// `i32::MAX` put the next column past the end of `i32`, and the frame's
+/// insets added to that overflowed. No screen is anywhere near this, and the
+/// largest sum a layout makes of a few of them is nowhere near the end of
+/// `i32`. `limits::a_limit_past_any_screen_is_read_as_the_most_there_is` and
+/// `real_client::client_sizes::an_xdg_limit_past_any_screen_is_read_as_the_most_there_is`.
+pub(crate) const MOST: i32 = 32_767;
+
+impl Limits {
+    /// What a client said, each side over [`MOST`] read as `MOST`.
+    fn said(min: Size<i32, Logical>, max: Size<i32, Logical>) -> Self {
+        let side = |size: i32| size.min(MOST);
+        Self {
+            min: Size::from((side(min.w), side(min.h))),
+            max: Size::from((side(max.w), side(max.h))),
+        }
+    }
+
+    /// An X11 window's, from `WM_NORMAL_HINTS` as smithay 0.7 reads it:
+    /// `X11Surface::min_size` and `max_size` (`xwayland/xwm/surface.rs:402`
+    /// and `:418`), each `None` where the client left that flag unset, and
+    /// converted to logical pixels by the client's scale.
+    /// `limits::x11_hints_that_say_nothing_are_no_limit` in `state/tests.rs`.
+    pub(crate) fn from_hints(
+        min: Option<Size<i32, Logical>>,
+        max: Option<Size<i32, Logical>>,
+    ) -> Self {
+        Self::said(min.unwrap_or_default(), max.unwrap_or_default())
+    }
+}
+
+/// A client's own size limits, read where each protocol keeps them, and held
+/// to [`MOST`].
+///
+/// **xdg: the surface's committed [`SurfaceCachedState`]**, which is the
+/// struct #115 cites (`wayland/shell/xdg/mod.rs:1070` and `:1077` are its
+/// `min_size` and `max_size`), and its `current` half is what is read:
+/// `xdg_toplevel.set_min_size` and `set_max_size` write the *pending* half of
+/// that double-buffered state (smithay 0.7,
+/// `wayland/shell/xdg/handlers/surface/toplevel.rs:119-128`), and a commit
+/// makes it `current`. So this reads what the client has committed, which is
+/// what its buffers are drawn to -- never a size it has asked for and not yet
+/// committed to.
+/// `real_client::client_sizes::an_xdg_window_says_how_small_and_how_large_it_can_be`.
+///
+/// **X11: `WM_NORMAL_HINTS`**, through [`Limits::from_hints`].
+pub(crate) fn limits_of(window: &Window) -> Limits {
+    if let Some(toplevel) = window.toplevel() {
+        return with_states(toplevel.wl_surface(), |states| {
+            let mut cached = states.cached_state.get::<SurfaceCachedState>();
+            let current = cached.current();
+            Limits::said(current.min_size, current.max_size)
+        });
+    }
+    window
+        .x11_surface()
+        .map_or_else(Limits::default, |surface| {
+            Limits::from_hints(surface.min_size(), surface.max_size())
+        })
+}
+
+/// A limit as a layout reads it: in the same terms as the window's own `w`
+/// and `h`, the frame's insets added to each side the client limited, and
+/// `None` when it limited neither.
+pub(crate) fn in_pane(size: Size<i32, Logical>, insets: Insets) -> Option<Size<i32, Logical>> {
+    if size.w <= 0 && size.h <= 0 {
+        return None;
+    }
+    let side = |own: i32, frame: i32| {
+        if own > 0 {
+            own.saturating_add(frame)
+        } else {
+            0
+        }
+    };
+    Some(Size::from((
+        side(size.w, insets.horizontal()),
+        side(size.h, insets.vertical()),
+    )))
+}
+
 impl Solium {
     /// A window's application id, as the client set it.
     ///
@@ -32,6 +126,103 @@ impl Solium {
                 })
             })
             .unwrap_or_default()
+    }
+
+    /// What a script calls a window's application: its xdg `app_id`, or an
+    /// X11 window's `WM_CLASS` class, which is what X11 has instead.
+    ///
+    /// Not [`Self::window_app_id`], which answers the shell and answers
+    /// nothing for an X11 window on purpose. A script matching an application
+    /// by name -- `tiling.client_size_ignore` -- has to be able to name an
+    /// XWayland one too.
+    pub(crate) fn script_app_id(&self, window: &Window) -> String {
+        if window.toplevel().is_some() {
+            return self.window_app_id(window);
+        }
+        window
+            .x11_surface()
+            .map(smithay::xwayland::X11Surface::class)
+            .unwrap_or_default()
+    }
+
+    /// A client's own size limits in its pane's outer terms, the frame's
+    /// insets added: what a floating drag of it is held to (#115). See
+    /// `input::resize::drag_rect`, and
+    /// `real_client::client_sizes::a_floating_drag_is_held_to_what_the_client_accepts`.
+    ///
+    /// None at all, both ways, where the user has said not to believe it:
+    /// `floating.client_limits = "ignore"`, or its application named in
+    /// `tiling.client_size_ignore`, which `sizes.lua` hands over with
+    /// `sol.client_sizes`. See [`crate::script::ClientSizes`], and
+    /// `real_client::client_sizes::a_floating_drag_of_an_application_not_believed_is_not_held`.
+    pub(crate) fn outer_limits(&self, window: &Window) -> (Size<i32, Logical>, Size<i32, Logical>) {
+        if !self.client_sizes.believes(&self.script_app_id(window)) {
+            return (Size::default(), Size::default());
+        }
+        let limits = limits_of(window);
+        let insets = self
+            .panes
+            .id_of(window)
+            .map_or(Insets::NONE, |pane| self.insets_of(pane));
+        (
+            in_pane(limits.min, insets).unwrap_or_default(),
+            in_pane(limits.max, insets).unwrap_or_default(),
+        )
+    }
+
+    /// Tell the layouts that a client's own size limits changed (#115), if
+    /// they did.
+    ///
+    /// Through `trigger_relayout`, which is how a change to what a layout
+    /// decides with is told everywhere else -- `modal_changed`,
+    /// `parent_changed` -- so the layout re-runs from a snapshot that already
+    /// has the new limits in it and nothing else is new to learn.
+    ///
+    /// **Once for each change, not once for each commit.** A client commits
+    /// every frame it draws, and the limits are in every commit's state
+    /// whether they changed or not: re-laying out the desktop on each of those
+    /// is sixty relayouts a second for a video playing. So the pane keeps what
+    /// the layouts were last told and this compares with it.
+    /// `real_client::client_sizes::a_change_of_minimum_is_told_once`.
+    ///
+    /// **Recorded and not told for a window whose `open` is still to come**:
+    /// one its application opened, before that application's first frame. The
+    /// `open` carries the limits in the window's row, and a `layout` ahead of
+    /// it would be a pass for a window no layout has heard of. A window
+    /// launched with `sol.spawn` had its `open` at the launch, so its first
+    /// limits are told like any change -- and that is the `layout` in which
+    /// `tiling.lua` places it again if the tile it was given cannot hold it.
+    /// `real_client::client_sizes::a_window_that_opens_with_a_minimum_hears_it_once`
+    /// and `a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says`.
+    ///
+    /// Called on every commit of a window's root surface, and on X11's
+    /// `WM_NORMAL_HINTS` changing, since an X11 client says it with a property
+    /// rather than a commit.
+    pub(crate) fn notice_limits(&mut self, window: &Window) {
+        let Some(pane) = self.panes.id_of(window) else {
+            return;
+        };
+        let limits = limits_of(window);
+        let Some(held) = self.panes.get_mut(pane) else {
+            return;
+        };
+        if held.limits() == limits {
+            return;
+        }
+        held.set_limits(limits);
+        // Launched and adopted, or shown -- which for a window its
+        // application opened is the moment `show_if_new` sends its `open`.
+        // See `Pane::adopted`.
+        if !held.adopted() && !crate::present::was_shown(held) {
+            return;
+        }
+        tracing::debug!(
+            pane = pane.get(),
+            min = ?limits.min,
+            max = ?limits.max,
+            "a client changed how small or large it can be"
+        );
+        self.trigger_relayout();
     }
 
     /// A window's title, as the client set it.
@@ -166,6 +357,24 @@ impl Solium {
                     // `WindowInfo::leaving` and
                     // `the_window_list_says_which_windows_are_leaving`.
                     leaving: pane.leaving(),
+                    app_id: pane
+                        .client()
+                        .map(|window| self.script_app_id(window))
+                        .unwrap_or_default(),
+                    // Read live rather than from what the layouts were last
+                    // told, so the `open` of a window whose client said so
+                    // before its first buffer -- every X11 window, and an xdg
+                    // one launched outside `sol.spawn` -- is decided with its
+                    // limits in hand. A pane with no client has said nothing.
+                    // `real_client::client_sizes::a_window_that_opens_with_a_minimum_hears_it_once`.
+                    min: pane.client().and_then(|window| {
+                        in_pane(limits_of(window).min, self.insets_of(pane.id()))
+                    }),
+                    max: pane.client().and_then(|window| {
+                        in_pane(limits_of(window).max, self.insets_of(pane.id()))
+                    }),
+                    cramped: pane.cramped(),
+                    shown: crate::present::was_shown(pane),
                 })
             })
             .collect();

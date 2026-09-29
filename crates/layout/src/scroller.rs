@@ -21,7 +21,7 @@
 //! "fake". An absolute scroll position would drift away from focus the moment
 //! a column ahead of it changed width.
 
-use crate::{Rect, Settings};
+use crate::{Floors, Rect, Settings};
 
 /// A column of the strip.
 #[derive(Clone, Debug)]
@@ -74,6 +74,9 @@ pub struct Scroller {
     /// are the only things that fill it.
     widths: Vec<f64>,
     preset: usize,
+    /// Each window's own floor, as the caller last handed them in (#115). See
+    /// [`Self::set_floors`].
+    floors: Floors,
 }
 
 impl Default for Scroller {
@@ -87,6 +90,7 @@ impl Default for Scroller {
             // screen and everything else off the edge, which for a terminal is
             // far wider than anyone reads at.
             preset: 0,
+            floors: Floors::new(),
         }
     }
 }
@@ -168,6 +172,46 @@ impl Scroller {
         self.columns
             .iter()
             .any(|column| column.windows.contains(&id))
+    }
+
+    /// Each window's own floor, by id, for every call after this one (#115).
+    ///
+    /// Replaced whole, as `Tiling::set_floors` replaces its own: what every
+    /// window says now, and a window missing from it has no floor. Only the
+    /// width is read: a column is never laid out narrower than the widest
+    /// floor in it -- see [`Self::width_of`]. Its height is the view's, which
+    /// the strip does not scroll, so a stack too tall for it has nowhere else
+    /// to go.
+    pub fn set_floors(&mut self, floors: Floors) {
+        self.floors = floors;
+    }
+
+    /// The widest floor among the windows of the column at `index`, or zero.
+    fn floor_of(&self, index: usize) -> f64 {
+        self.columns.get(index).map_or(0.0, |column| {
+            column
+                .windows
+                .iter()
+                .filter_map(|id| self.floors.get(id))
+                .map(|floor| floor.w)
+                .filter(|width| width.is_finite())
+                .fold(0.0, f64::max)
+        })
+    }
+
+    /// How wide the column at `index` is laid out, in `view`: its share of
+    /// the view, or the widest floor among its windows where that is wider.
+    ///
+    /// Everything that measures a column asks this, so where a column is drawn,
+    /// where the next one starts and what the view scrolls to agree about its
+    /// width. `floors::a_column_is_never_narrower_than_its_widest_floor` and
+    /// `floors::the_next_column_starts_after_a_widened_one`.
+    fn width_of(&self, index: usize, view: Rect) -> f64 {
+        let share = self
+            .columns
+            .get(index)
+            .map_or(0.0, |column| (view.w * column.width).max(1.0));
+        share.max(self.floor_of(index))
     }
 
     /// Open a window in a new column, to the right of the active one.
@@ -391,8 +435,21 @@ impl Scroller {
         else {
             return;
         };
+        // Never below the share its widest floor already takes (#115): a
+        // column a floor holds wider than its share does not narrow on
+        // screen, and a share dragged on down under it would have to be
+        // dragged all the way back before the column widened again. Only as
+        // much of a floor as the view can hold; wider than that is
+        // `width_of`'s. `floors::narrowing_a_column_stops_at_its_floor`.
+        //
+        // And from the share it is drawn at, which the floor may hold above
+        // the one it has: from the one it has, a press that did not reach
+        // past the floor changed nothing on screen.
+        // `floors::widening_a_column_its_floor_holds_widens_it_at_once`.
+        let view = area.inset(settings.gap);
+        let least = (self.floor_of(index) / view.w.max(1.0)).clamp(0.1, 1.0);
         let column = &mut self.columns[index];
-        column.width = (column.width + by).clamp(0.1, 1.0);
+        column.width = (column.width.max(least) + by).clamp(least, 1.0);
         self.focus_column(index, area, settings);
     }
 
@@ -435,7 +492,7 @@ impl Scroller {
 
         for (index, column) in self.columns.iter().enumerate() {
             let x = view.x + self.column_x(index, view, settings) - origin;
-            let width = (view.w * column.width).max(1.0);
+            let width = self.width_of(index, view);
             let count = column.windows.len().max(1);
             #[expect(clippy::cast_precision_loss, reason = "a column holds a handful")]
             let rows = count as f64;
@@ -460,10 +517,8 @@ impl Scroller {
 
     /// Where a column starts along the strip.
     fn column_x(&self, index: usize, view: Rect, settings: Settings) -> f64 {
-        self.columns
-            .iter()
-            .take(index)
-            .map(|column| (view.w * column.width).max(1.0) + settings.gap)
+        (0..index.min(self.columns.len()))
+            .map(|each| self.width_of(each, view) + settings.gap)
             .sum()
     }
 
@@ -485,7 +540,7 @@ impl Scroller {
         self.view_offset += old_x - new_x;
         self.active = index;
 
-        let width = (view.w * self.columns[index].width).max(1.0);
+        let width = self.width_of(index, view);
         let current = new_x + self.view_offset;
         self.view_offset = fit(current, view.w, new_x, width, settings.gap);
     }
@@ -916,5 +971,107 @@ mod moving {
         scroller.insert(2, area(), settings());
         scroller.move_to_column_of(1, 1, area(), settings());
         assert_eq!(scroller.columns().len(), 2);
+    }
+}
+
+/// **#115: a column is never narrower than its window's floor.** A 1000-wide
+/// view at no gap, columns opening at a third.
+#[cfg(test)]
+mod floors {
+    use super::Scroller;
+    use crate::{Floors, Minimum, Rect, Settings};
+
+    fn area() -> Rect {
+        Rect::new(0.0, 0.0, 1000.0, 600.0)
+    }
+    fn settings() -> Settings {
+        Settings {
+            gap: 0.0,
+            ..Settings::default()
+        }
+    }
+    fn rect_of(scroller: &Scroller, id: u64) -> Rect {
+        scroller
+            .layout(area(), settings())
+            .into_iter()
+            .find(|(other, _)| *other == id)
+            .expect("window is in the strip")
+            .1
+    }
+    fn wide(of: &[(u64, f64)]) -> Floors {
+        of.iter()
+            .map(|&(id, w)| (id, Minimum { w, h: 0.0 }))
+            .collect()
+    }
+
+    /// A column holding a window that cannot go under 600 is 600 wide, and
+    /// so is everything stacked in it; the column beside it keeps its third.
+    #[test]
+    fn a_column_is_never_narrower_than_its_widest_floor() {
+        let mut scroller = Scroller::new();
+        scroller.insert(1, area(), settings());
+        scroller.insert(2, area(), settings());
+        scroller.insert_into_active(3, area(), settings());
+        scroller.set_floors(wide(&[(3, 600.0)]));
+        for id in [2, 3] {
+            let rect = rect_of(&scroller, id);
+            assert!((rect.w - 600.0).abs() < 1e-6, "window {id}: {rect:?}");
+        }
+        assert!((rect_of(&scroller, 1).w - 1000.0 / 3.0).abs() < 1e-6);
+    }
+
+    /// The strip agrees with itself about a widened column: the next one
+    /// starts where it ends, rather than under it.
+    #[test]
+    fn the_next_column_starts_after_a_widened_one() {
+        let mut scroller = Scroller::new();
+        for id in 1..=3 {
+            scroller.insert(id, area(), settings());
+        }
+        scroller.set_floors(wide(&[(1, 600.0)]));
+        let (one, two) = (rect_of(&scroller, 1), rect_of(&scroller, 2));
+        assert!(
+            (two.x - (one.x + 600.0)).abs() < 1e-6,
+            "column 2 starts inside column 1: {one:?} {two:?}"
+        );
+    }
+
+    /// Narrowing a column a floor holds wide stops at the floor's share, so
+    /// widening it again widens it at once. Without the stop the share went on
+    /// down out of sight, and the drag back had to pay it all back first.
+    #[test]
+    fn narrowing_a_column_stops_at_its_floor() {
+        let mut scroller = Scroller::new();
+        scroller.insert(1, area(), settings());
+        scroller.set_floors(wide(&[(1, 500.0)]));
+        scroller.widen(1, -0.1, area(), settings());
+        assert!((rect_of(&scroller, 1).w - 500.0).abs() < 1e-6);
+        scroller.widen(1, 0.1, area(), settings());
+        let one = rect_of(&scroller, 1);
+        assert!(
+            (one.w - 600.0).abs() < 1e-6,
+            "the column did not widen from its floor: {one:?}"
+        );
+    }
+
+    /// Widening a column its floor holds wider than its share widens it by
+    /// the step from where it is drawn. A third of the view, held at 500 by
+    /// its floor: one press of a tenth is 600, and not the 433 the share
+    /// alone reaches, which the floor draws at the same 500 as before.
+    #[test]
+    fn widening_a_column_its_floor_holds_widens_it_at_once() {
+        let mut scroller = Scroller::new();
+        scroller.insert(1, area(), settings());
+        scroller.set_floors(wide(&[(1, 500.0)]));
+        assert!(
+            (rect_of(&scroller, 1).w - 500.0).abs() < 1e-6,
+            "the premise"
+        );
+        scroller.widen(1, 0.1, area(), settings());
+        let one = rect_of(&scroller, 1);
+        assert!(
+            (one.w - 600.0).abs() < 1e-6,
+            "the press was swallowed by the floor: {one:?}"
+        );
     }
 }

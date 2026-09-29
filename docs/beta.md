@@ -60,7 +60,6 @@ in it that undermines the claim.
 | | why |
 |---|---|
 | [#113](https://github.com/Lilium-Linux/solium/issues/113) resize shakes | the pane's rect follows the *client's* size, so during a drag the edge opposite the one you are holding is what moves. Felt every time a window is touched, and worse the slower the client -- Firefox visibly worse than kitty |
-| [#115](https://github.com/Lilium-Linux/solium/issues/115) minimum size is never read | a client that refuses to shrink overflows its tile, and every window beside it is wrong too, because the arrangement was computed as though the refusal never happened |
 | `tiling.adopt` | prunes windows on workspaces no monitor is showing out of their own trees, and its blind re-insert halves whichever window was topmost -- the one you were just using |
 | fullscreen fires no event | so `tiling.apply` yanks a fullscreen video back into its tile, frameless, the next time any window opens |
 

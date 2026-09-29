@@ -754,6 +754,13 @@ pub(crate) fn mark_shown(pane: &Pane) -> bool {
     !pane.drawn().shown.replace(true)
 }
 
+/// Whether [`mark_shown`] has claimed that moment for this pane: whether its
+/// client has been shown at all. What `sol.windows()` calls `shown`; see
+/// `WindowInfo::shown`.
+pub(crate) fn was_shown(pane: &Pane) -> bool {
+    pane.drawn().shown.get()
+}
+
 /// Put a pane at `start` and animate it to where it actually lives.
 ///
 /// The primitive behind every "appears from somewhere" animation. With a dock
