@@ -1526,6 +1526,9 @@ impl State {
         // shows: those are `send_dark_frames`', once a second. See
         // `power.rs`, and
         // `a_window_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`.
+        //
+        // Each screen's own layer and lock surfaces as well, told by that
+        // screen alone (`a_layer_surface_is_not_told_to_draw_by_a_monitor_it_is_not_on`).
         for screen in &self.screens {
             if self.solium.power.is_off(&screen.output) {
                 continue;
