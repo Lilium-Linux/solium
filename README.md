@@ -76,8 +76,8 @@ neither helps if Solium itself hangs.
 
 What it installs is a copy: rebuilding or checking out another branch does not
 change it, and running `dev/install.sh` again replaces it. It refuses while a
-Solium session is running from it, and while `~/.local/share/solium` (or
-`share`) is a link, which it would otherwise delete through.
+Solium session is running from it, and while `~/.local/share/solium` is a
+link, which it would otherwise delete through.
 
 To remove it, `dev/install.sh --uninstall`, then the
 `sudo rm -f /usr/local/share/wayland-sessions/solium.desktop` it prints. Your

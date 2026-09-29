@@ -783,9 +783,10 @@ start from the old install while it runs; that the build image exists; and
 that nothing it would delete is reached through a link. Install replaces
 `share/solium/{qml,lua}` and uninstall removes them with `rm -rf`, so a
 `share/solium` left linked to a checkout would lose the checkout's QML and
-Lua: both refuse while `share` or `share/solium` is a link, or while
-`share/solium` resolves into the checkout. A prefix that is itself a link
-(`~/.local` moved to another disk) is fine. **After:** the installed
+Lua: both refuse while `share/solium` is a link, or while it resolves into
+the checkout. A prefix or a `share` that is itself a link (moved to another
+disk) is fine, and the staged session file is written beside its target and
+renamed over it, so it never writes through a link. **After:** the installed
 `solium --check` has to pass, the gate's scripts check, and the asset root it
 logs (`RUST_LOG=solium::assets=debug`, `shipped assets root=…`) has to be the
 installed `share/solium`. If either fails, the new files are already in place,

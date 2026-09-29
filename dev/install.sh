@@ -101,11 +101,13 @@ session_file="$session_dir/solium.desktop"
 # Install replaces $share/qml and $share/lua, and uninstall removes them, with
 # `rm -rf`. Through a link that deletes whatever the link leads to: a
 # share/solium left linked to a checkout would lose its QML and Lua, uncommitted
-# work included. So neither goes on while share or share/solium is a link, or
-# while share/solium resolves into this checkout by any other route.
-# dev/install-check.sh plants files behind each of the three and asserts that
-# install and uninstall both refuse and the files survive.
-for path in "$dest/share" "$share"; do
+# work included. So neither goes on while share/solium is a link, or while it
+# resolves into this checkout by any other route. A linked <prefix>/share is
+# fine -- a ~/.local/share moved to another disk is an ordinary setup -- because
+# the realpath check below still catches one that leads into this checkout.
+# dev/install-check.sh plants files behind each case and asserts that install
+# and uninstall both refuse and the files survive.
+for path in "$share"; do
     if [[ -L "$path" ]]; then
         die "$path is a symlink (to $(readlink "$path")). This script deletes what \
 is under $share, so it will not go through a link: remove the link yourself first"
@@ -246,8 +248,15 @@ cp -RL "$root/crates/solium/qml" "$root/crates/solium/lua" "$share/"
 # with PATH=/usr/local/bin:/usr/bin:/bin (DefaultPath in /etc/plasmalogin.conf),
 # and whether ~/.local/bin is added after that is up to the user's shell
 # profile. dev/install-check.sh asserts the Exec is absolute.
-sed "s|^Exec=solium|Exec=$prefix/bin/solium|" "$source_session" > "$staged_session"
-chmod 644 "$staged_session"
+# Written beside the target and renamed over it, never through a redirect: a
+# redirect follows a link, and a staged solium.desktop linked to the checkout's
+# own session file would be emptied before sed read it.
+staged_tmp="$(mktemp "$share/.solium.desktop.XXXXXX")"
+sed "s|^Exec=solium|Exec=$prefix/bin/solium|" "$source_session" > "$staged_tmp"
+chmod 644 "$staged_tmp"
+mv -f "$staged_tmp" "$staged_session"
+grep -qx "Exec=$prefix/bin/solium --tty" "$staged_session" \
+    || die "the generated session file has no absolute Exec line: $staged_session"
 
 uninstall_cmd="dev/install.sh --uninstall"
 [[ "$prefix" == "$default_prefix" ]] || uninstall_cmd+=" --prefix $prefix"
@@ -273,8 +282,10 @@ if ! RUST_LOG="info,solium::assets=debug" "$bin" --check >"$check_log" 2>&1; the
     die "$bin --check failed. $not_checked"
 fi
 chosen="$(sed -n 's/.*shipped assets root=\([^ ]*\).*/\1/p' "$check_log" | head -1)"
+# Both sides resolved: the binary logs the path it was reached by, which goes
+# through a linked <prefix>/share, while $share is spelled by its real place.
 expected="$(realpath "$share")"
-if [[ "$chosen" != "$expected" ]]; then
+if [[ -z "$chosen" || "$(realpath -m "$chosen")" != "$expected" ]]; then
     cat "$check_log" >&2
     die "the installed binary took its QML and Lua from '${chosen:-nowhere}', not \
 $expected. $not_checked"

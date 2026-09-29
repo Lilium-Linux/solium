@@ -107,11 +107,30 @@ mkdir -p "$work/link-a$prefix/share"
 ln -s "$work/link-a-target" "$work/link-a$prefix/share/solium"
 refuses_through_link link-a "a linked share/solium" "$work/link-a" \
     "$work/link-a-target" "is a symlink" "$install_sh"
-# share a link: share/solium is then somewhere else's solium/.
-mkdir -p "$work/link-b$prefix" "$work/link-b-target"
+# share a link, as a ~/.local/share moved to another disk leaves it: an
+# ordinary setup, so install goes through it, and uninstall removes only what
+# install put there. Another application's data beside it survives both.
+mkdir -p "$work/link-b$prefix" "$work/link-b-target/other-app"
+echo keep >"$work/link-b-target/other-app/data"
 ln -s "$work/link-b-target" "$work/link-b$prefix/share"
-refuses_through_link link-b "a linked share" "$work/link-b" \
-    "$work/link-b-target/solium" "is a symlink" "$install_sh"
+DESTDIR="$work/link-b" "$install_sh" --no-build --session-dir "$sessions" >"$work/link-b-install.log" 2>&1
+check "install goes through a linked share" [ $? -eq 0 ]
+check "  and lands where the link leads" [ -d "$work/link-b-target/solium/qml" -a -d "$work/link-b-target/solium/lua" ]
+DESTDIR="$work/link-b" "$install_sh" --uninstall --session-dir "$sessions" >"$work/link-b-uninstall.log" 2>&1
+check "uninstall goes through a linked share" [ $? -eq 0 ]
+check "  and removes what install put there" [ ! -e "$work/link-b-target/solium/qml" -a ! -e "$work/link-b-target/solium/lua" ]
+check "  and another application's data survives" grep -qx keep "$work/link-b-target/other-app/data"
+check "  and the link itself is left alone" [ -L "$work/link-b$prefix/share" ]
+# A staged session file that is a link: writing it must replace the link, never
+# write through it into what it points at.
+mkdir -p "$work/link-d$prefix/share/solium"
+echo planted >"$work/link-d-planted.desktop"
+ln -s "$work/link-d-planted.desktop" "$work/link-d$prefix/share/solium/solium.desktop"
+DESTDIR="$work/link-d" "$install_sh" --no-build --session-dir "$sessions" >"$work/link-d-install.log" 2>&1
+check "a linked staged session file is replaced" [ $? -eq 0 -a ! -L "$work/link-d$prefix/share/solium/solium.desktop" ]
+check "  and what it pointed at is untouched" grep -qx planted "$work/link-d-planted.desktop"
+check "  and the new one has the absolute Exec" grep -qx "Exec=$prefix/bin/solium --tty" "$work/link-d$prefix/share/solium/solium.desktop"
+DESTDIR="$work/link-d" "$install_sh" --uninstall --session-dir "$sessions" >/dev/null 2>&1
 # The prefix a link into the checkout, so no link sits where the two cases
 # above look, and share/solium still resolves into the checkout. A stand-in
 # checkout under $work, since the real one is what a failure would delete.
