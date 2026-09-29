@@ -990,6 +990,30 @@ impl Solium {
         matches!(self.topmost_above(location, true), Some(Above::Client(..)))
     }
 
+    /// Whether a window has `location`, over everything below the windows: a
+    /// pane drawn over it, which is what [`Self::window_under`] asks of each
+    /// ([`owns`]), or a menu of one reaching past its frame, which is what
+    /// [`Self::surface_under`] asks (`pane_surface_at`). A script's surface
+    /// below the windows is offered no press there:
+    /// `a_window_over_a_scripted_dock_keeps_the_press`.
+    pub(crate) fn windows_have(&self, location: Point<f64, Logical>) -> bool {
+        let now = self.clock.now();
+        let screens = self.screens();
+        self.panes_front_first(location).any(|pane| {
+            let outer = self.pane_outer(pane);
+            owns(
+                outer,
+                pane.ghost(),
+                self.drawn_at(pane, outer, now),
+                location,
+                &screens,
+            ) || !matches!(
+                self.pane_surface_at(pane, location, now, &screens),
+                PaneSurface::Miss
+            )
+        })
+    }
+
     /// The panes in the order the hit tests walk them at `location`: the one
     /// lifted over the bars on the monitor under it, and then the rest,
     /// topmost first.

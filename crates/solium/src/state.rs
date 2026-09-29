@@ -1802,24 +1802,46 @@ impl Solium {
         // is what is on top there, in `crate::stack`'s order: not under a
         // client's surface at its own layer or above, nor under the window
         // lifted over the bars.
+        let above = self.topmost_above(location, true);
         if above_windows {
-            return match self.topmost_above(location, true)? {
+            return match above? {
                 hit_test::Above::Script(output, id, area) => Some((output, id, area)),
                 hit_test::Above::Client(..) | hit_test::Above::Lifted => None,
             };
         }
 
-        // Below them in the same order. A client's surfaces there are passed
-        // over: they are not offered the pointer, and never were.
-        // `a_background_mapped_after_a_bottom_surface_stays_under_it`.
+        // Below them, the same order walked on down, and the same rule: only
+        // where nothing above the windows has the point, no window has it,
+        // and no client's surface at a layer over the script's has it. A
+        // client's surfaces there are not offered the pointer, and never were,
+        // but one drawn over a script's surface is still over it.
+        // `a_background_mapped_after_a_bottom_surface_stays_under_it` and
+        // `a_window_over_a_scripted_dock_keeps_the_press`.
+        if above.is_some() || self.windows_have(location) {
+            return None;
+        }
         let output = monitor::at(&self.space, location)?;
         let geometry = self.space.output_geometry(&output)?;
-        crate::stack::below().find_map(|band| match band {
-            crate::stack::Band::Layer(layer, crate::stack::Owner::Script) => self
-                .script_at(&output, geometry, layer, location)
-                .map(|(id, area)| (output.clone(), id, area)),
-            _ => None,
-        })
+        for band in crate::stack::below() {
+            match band {
+                crate::stack::Band::Layer(layer, crate::stack::Owner::Script) => {
+                    if let Some((id, area)) = self.script_at(&output, geometry, layer, location) {
+                        return Some((output, id, area));
+                    }
+                }
+                crate::stack::Band::Layer(layer, crate::stack::Owner::Client) => {
+                    // A layer map's geometry is in its own output's coordinates.
+                    let local = location - geometry.loc.to_f64();
+                    if layer::surface_under(&output, layer, local).is_some() {
+                        return None;
+                    }
+                }
+                // Neither is below the windows: `stack::below` never yields
+                // them (`above_and_below_split_the_order_at_the_windows`).
+                crate::stack::Band::Fullscreen | crate::stack::Band::Windows => {}
+            }
+        }
+        None
     }
 
     /// The script's interactive surface at one layer that has `location`,

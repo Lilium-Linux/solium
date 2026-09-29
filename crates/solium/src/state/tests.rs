@@ -16587,15 +16587,21 @@ end)
 
             /// **Below the windows, by layer too**: a client's background
             /// mapped after its bottom surface stays under it, and at each
-            /// layer the client's surface is over the script's.
+            /// layer the client's surface is over the script's -- and the
+            /// script's dock has the press only where nothing is drawn over
+            /// it.
             #[test]
             fn a_background_mapped_after_a_bottom_surface_stays_under_it() {
                 let mut desk = Desk::new();
                 let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state.space.map_element(window, (600, 500), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
                 let script_bottom = scripted(&mut desk, "dock", Scripted::Bottom, strip(0, 1920));
                 let script_background =
                     scripted(&mut desk, "wallpaper", Scripted::Background, screen());
-                let (bottom, _bottom) = layer_surface(&mut desk, Client::Bottom, None, 30, 0);
+                let (bottom, _bottom) = layer_surface(&mut desk, Client::Bottom, Some(200), 30, 0);
                 let (background, _background) =
                     layer_surface(&mut desk, Client::Background, None, 30, 0);
                 let below: Vec<Seen> = drawn(&desk)
@@ -16614,16 +16620,89 @@ end)
                     "under the window: the client's bottom surface, the script's, the \
                      client's background, the script's"
                 );
-                // And a client's surfaces below the windows are still offered
-                // no pointer, so the script's dock under one has the press.
+                // A client's surfaces below the windows are offered no
+                // pointer, and never were -- but the client's bottom surface
+                // is drawn over the script's dock, so the dock does not have
+                // the press there either. Beside it, over only the client's
+                // background, it does.
                 assert_eq!(
                     (
+                        delivered(&desk, 100.0, 15.0),
+                        claimed_below(&desk, 100.0, 15.0),
                         delivered(&desk, 1000.0, 15.0),
-                        desk.state
-                            .surface_claiming(false, (1000.0, 15.0).into())
-                            .map(|(_, id, _)| id)
+                        claimed_below(&desk, 1000.0, 15.0),
                     ),
-                    (None, Some(script_bottom))
+                    (None, None, None, Some(script_bottom)),
+                    "(on the client's bottom surface: the surface the pointer reaches, the \
+                     script's surface offered the press; the same beside it)"
+                );
+            }
+
+            /// The script's surface below the windows a press at a point is
+            /// offered to.
+            fn claimed_below(desk: &Desk, x: f64, y: f64) -> Option<crate::scripted::SurfaceId> {
+                desk.state
+                    .surface_claiming(false, (x, y).into())
+                    .map(|(_, id, _)| id)
+            }
+
+            /// **A window over a script's dock keeps the press, and so do
+            /// its menu reaching past it and a client's bar.** The dock was
+            /// offered every press below the windows whatever was drawn over
+            /// it: click-to-focus focused the window, and the press went to
+            /// the dock.
+            #[test]
+            fn a_window_over_a_scripted_dock_keeps_the_press() {
+                let mut desk = Desk::new();
+                let dock = scripted(&mut desk, "dock", Scripted::Bottom, screen());
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, Some(200), 30, 0);
+                let opened = desk.open_surface();
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                desk.pump();
+                let window = window_of(&desk, opened.pane);
+                desk.state
+                    .space
+                    .map_element(window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let menu = drawn_popup(
+                    &mut desk.display,
+                    &mut desk.state,
+                    &desk.conn,
+                    &desk.qh,
+                    &mut desk.queue,
+                    &mut desk.client,
+                    &opened.xdg,
+                    (390, 50),
+                    (120, 80),
+                );
+                let on_the_menu = Point::<f64, Logical>::from((560.0, 190.0));
+                assert!(
+                    desk.state
+                        .real_geometry(&window)
+                        .is_some_and(|real| !real.to_f64().contains(on_the_menu))
+                        && delivered(&desk, on_the_menu.x, on_the_menu.y) == Some(id(&menu)),
+                    "the premise: the menu reaches past its window, and has the pointer there"
+                );
+
+                assert_eq!(
+                    (
+                        desk.state
+                            .window_under((300.0, 250.0).into())
+                            .map(|(under, _)| under),
+                        claimed_below(&desk, 300.0, 250.0),
+                        claimed_below(&desk, on_the_menu.x, on_the_menu.y),
+                        (
+                            delivered(&desk, 100.0, 15.0),
+                            claimed_below(&desk, 100.0, 15.0)
+                        ),
+                        claimed_below(&desk, 1000.0, 700.0),
+                    ),
+                    (Some(window), None, None, (Some(id(&bar)), None), Some(dock)),
+                    "(the window a press on it focuses, the dock offered that press, the dock \
+                     offered one on the menu, the surface the pointer reaches on the bar and \
+                     the dock offered a press there, the dock offered one where nothing is \
+                     over it)"
                 );
             }
 
@@ -16829,6 +16908,7 @@ end)
                 );
                 assert_eq!(delivered(&desk, 100.0, 15.0), Some(id(&bar)));
             }
+
         }
     }
 
