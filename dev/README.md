@@ -30,6 +30,7 @@ a demo into a regression test.
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
+| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file, the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs, and an uninstall that leaves nothing. See *Installing it* |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
@@ -723,6 +724,108 @@ for a machine that has nothing else, never as a preference.
 and ignores the rest. Several places take the first output rather than the right
 one — `work_area`, the snapshot handed to scripts, the layer map — and those are
 the lines multi-output has to fix.
+
+## Installing it
+
+For picking Solium at the login screen rather than starting it from a TTY.
+This is an install from a checkout on Fedora 44, not packaging: there is no
+`.spec`, COPR or `PKGBUILD` yet (#66).
+
+```sh
+dev/install.sh                 # build, install into ~/.local, check, print the sudo line
+sudo install -Dm644 ~/.local/share/solium/solium.desktop /usr/local/share/wayland-sessions/solium.desktop
+dev/install.sh --uninstall     # remove it again; prints `sudo rm -f …` for the session file
+```
+
+| | |
+|---|---|
+| `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/share/solium/{qml,lua}`, and the generated `DIR/share/solium/solium.desktop` |
+| `--session-dir DIR` | where the display manager reads sessions, default `/usr/local/share/wayland-sessions`. Only the printed `sudo` line writes there |
+| `--no-build` | install the release binary already in `target/install` |
+| `--jobs N`, `--image IMAGE` | the build's cargo jobs (2) and container (`localhost/solium-build:fc44`) |
+| `--uninstall` | remove what an install with the same `--prefix` put there |
+| `DESTDIR=` | stage the prefix under this directory instead; the session file's `Exec` still names the real prefix. `--session-dir` is used as given, so a test can point it at `/tmp` |
+| `SOLIUM_BUILD_LOCK=`, `SOLIUM_BUILD_MEMORY=` | the lock the build takes (`~/.cache/solium-build.lock`) and the container's memory cap (`6g`) |
+
+`dev/install-check.sh` runs all of that into `/tmp` and checks every step.
+
+**Why it builds at `/solium-src`, a path the host does not have.** `assets.rs`
+tries the build tree before the install layout:
+
+```rust
+const BUILD_TREE: &str = env!("CARGO_MANIFEST_DIR");
+// …
+places.extend(baked.map(PathBuf::from));
+places.push(PathBuf::from(build_tree));
+// … then "the install layout answering for itself":
+places.extend(
+    exe.and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|prefix| prefix.join("share").join("solium")),
+);
+```
+
+A binary compiled at the checkout's own path finds the checkout there, so once
+installed it would go on reading the checkout's QML and Lua, and a
+`git checkout` would change a running session. Measured: `target/debug/solium`
+copied into a prefix with its own `share/solium` still logs the tree it was
+compiled in as its `shipped assets root`, and `install.sh`'s check refuses it.
+Compiled at `/solium-src` in the container, the build tree it names is not on
+the host, so the installed copy falls through to `<prefix>/share/solium`. That
+build goes to its own `target/install`, apart from the builds made at the
+checkout's path. Nothing is baked into `SOLIUM_DATADIR`, so the same binary
+works from any prefix, a `DESTDIR` staging area included.
+
+**Checked before it starts:** a Solium running from the binary it would
+replace (found through `/proc/<pid>/exe`, as `fuser` does; it refuses and
+stops nothing), and that the build image exists. **After:** the installed
+`solium --check` has to pass, the gate's scripts check, and the asset root it
+logs (`RUST_LOG=solium::assets=debug`, `shipped assets root=…`) has to be the
+installed `share/solium`. It also warns if the `solium` on `PATH` is not the one
+it installed.
+
+**Which display manager, and where it looks.** Fedora 44 KDE runs Plasma Login
+(`systemctl status display-manager` names `plasmalogin.service`), a fork of
+SDDM. `/etc/plasmalogin.conf` has no session-directory setting; the greeter
+lists sessions with
+`QStandardPaths::locateAll(GenericDataLocation, "wayland-sessions")`
+(`src/frontend/settings/models/sessionmodel.cpp` in plasma-login-manager
+6.7.5), which is `/usr/local/share/wayland-sessions` and then
+`/usr/share/wayland-sessions`. The default is the `/usr/local` one, because no
+package owns it. It only watches directories that existed when it started, and
+that one does not exist until `install -D` makes it, so log out after running
+the `sudo` line rather than expecting a greeter already on screen to notice.
+
+**The `Exec` is absolute** (`Exec=/home/you/.local/bin/solium --tty`): Plasma
+Login starts a session with `PATH=/usr/local/bin:/usr/bin:/bin` (`DefaultPath`
+in `/etc/plasmalogin.conf`), and whether `~/.local/bin` is added after that is
+up to your shell profile.
+
+**Where the log goes.** `--tty`, which the session file passes, is what turns
+the log file on (`main.rs`):
+
+```rust
+let log = matches!(backend.as_deref(), Some("--tty"))
+    .then(open_log)
+    .flatten();
+```
+
+and `open_log` puts it under `$XDG_STATE_HOME`, falling back to
+`~/.local/state`:
+
+```rust
+let base = std::env::var_os("XDG_STATE_HOME")
+    .map(PathBuf::from)
+    .or_else(|| {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+    })?;
+let directory = base.join("solium");
+```
+
+So `~/.local/state/solium/session.log`, appended to by every session. Plasma
+Login also sends the session's stderr, which carries the same lines, to
+`~/.local/share/plasmalogin/wayland-session.log`, and truncates that at each
+login (`O_TRUNC` in its `src/helper/UserSession.cpp`).
 
 ## Where it runs
 
