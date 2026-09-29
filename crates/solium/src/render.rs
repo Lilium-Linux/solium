@@ -296,7 +296,7 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // built, so the shape this finds is the shape this frame draws.
     state.reassert_cursor();
     // Every QML animation in the process, advanced once for this frame --
-    // decorations, the cursor, the shell. Whether any scene then has something
+    // decorations, the cursor, scripted surfaces. Whether any scene then has something
     // new to draw is each scene's own answer.
     //
     // Once per *frame* and not once per output: with two monitors, ticking in
@@ -306,9 +306,6 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         let _tick = crate::pacing::span(crate::pacing::Phase::Tick);
         crate::qml::tick(state.clock.now());
     }
-    // The shell reads the window list; it changes only when windows do.
-    state.publish_windows();
-
     let mut warps = Vec::new();
     let mut passes = Vec::new();
 
@@ -1532,11 +1529,10 @@ fn scripted(
     //
     // This did not used to be asked at all, which is the same defect one step
     // further on: a scripted surface got the next frame only when something
-    // unrelated damaged the screen. Everything on `Quickshell.SystemClock` is
-    // the plain case -- a bar whose clock ticks on a `Timer` -- and it cannot
-    // even recover on the next tick, because `qml::tick` is what drains Qt's
-    // event queue and it only runs on a frame that is being drawn. No frame,
-    // no timer; no timer, no reason for a frame.
+    // unrelated damaged the screen. A clock that ticks on a `Timer` is the
+    // plain case, and it cannot even recover on the next tick, because
+    // `qml::tick` is what drains Qt's event queue and it only runs on a frame
+    // that is being drawn. No frame, no timer; no timer, no reason for a frame.
     if animating {
         state.redraw = true;
     }

@@ -22,11 +22,12 @@
 //!
 //! ## What is deliberately not here
 //!
-//! Input. These surfaces are drawn and not clicked. The shell and the tweaks
-//! panel each have their own pointer routing today, and giving every scripted
-//! surface a share of the pointer is a bigger question than this — it needs
-//! the scoped grab in #85. A surface that wants clicks is still a layer-shell
-//! client, which is the supported route and always was.
+//! Most input. A surface is drawn and not clicked unless it is declared
+//! `interactive`, and then it gets plain pointer motion and presses, which is
+//! enough for the tweaks panel's buttons. Keyboard focus, grabs and everything
+//! else a real client gets are a bigger question than this — they need the
+//! scoped grab in #85. A surface that wants them is a layer-shell client,
+//! which is the supported route and always was.
 
 use std::{collections::HashMap, path::PathBuf};
 

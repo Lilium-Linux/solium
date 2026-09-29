@@ -558,8 +558,8 @@ other way round.
 ### Your own colours
 
 Copy `Solium/Theme.qml` into `~/.config/solium/qml/Solium/` and change it.
-Every frame and every shell surface reads it, so one file restyles the desktop
-rather than the titlebars.
+Every frame and every other scene that imports `Solium` reads it, so one file
+restyles the desktop rather than the titlebars.
 
 ### Your own animation feel
 

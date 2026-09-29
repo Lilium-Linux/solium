@@ -1,9 +1,12 @@
-//! A shell surface: the compositor drawing QML that is not its own.
+//! A hosted QML scene: one file the compositor draws. Every surface a script
+//! declares with `sol.surface` is one — the wallpaper and the tweaks panel
+//! among them — and so is the scene a launched window shows until its
+//! application draws.
 //!
-//! No opinion about what the shell *is*. It hosts one QML file, gives it the
-//! whole output to place itself in, forwards every pointer event, and rebuilds
-//! it when the file changes. What appears is entirely the shell's business —
-//! the compositor supplies a canvas, an event stream and a reload, and nothing
+//! No opinion about what the scene *is*. It hosts one QML file, gives it the
+//! area it was placed in, forwards pointer events, and rebuilds it when the
+//! file changes. What appears is entirely the scene's business — the
+//! compositor supplies a canvas, an event stream and a reload, and nothing
 //! else.
 //!
 //! That boundary is deliberate. The first version of this was a dock, with
@@ -384,7 +387,7 @@ fn build(source: &Path, properties: &str, width: i32, height: i32) -> Result<qml
     qml::Scene::for_host(source, width, height, Some(properties))
 }
 
-/// The newest modification time anywhere the shell's QML lives.
+/// The newest modification time anywhere the scene's QML lives.
 fn newest_change(source: &Path) -> Option<SystemTime> {
     fn newest_in(directory: &Path, best: &mut Option<SystemTime>, depth: usize) {
         if depth > 4 {
@@ -409,11 +412,9 @@ fn newest_change(source: &Path) -> Option<SystemTime> {
     let mut newest = std::fs::metadata(source)
         .and_then(|data| data.modified())
         .ok();
-    // The tree it came from, when one is named: editing a widget three
-    // directories away is still editing the shell.
-    if let Some(root) = std::env::var_os("SOLIUM_SHELL_WATCH") {
-        newest_in(Path::new(&root), &mut newest, 0);
-    } else if let Some(parent) = source.parent() {
+    // The directory it came from: editing a component beside it is still
+    // editing the scene.
+    if let Some(parent) = source.parent() {
         newest_in(parent, &mut newest, 0);
     }
     newest

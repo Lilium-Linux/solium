@@ -5735,10 +5735,9 @@ mod tests {
 /// misses in complete silence. So this walks `lua/*.lua` and resolves each name
 /// through the same function the compositor uses at run time.
 ///
-/// **What it cannot see.** Only names written as literals. `shell.lua` takes
-/// its scene from the environment and `workspaces.lua` builds `"super+" ..
-/// index` in a loop; a name assembled at run time is outside this and outside
-/// any static check. Lua comments are stripped, so a documented example that is
+/// **What it cannot see.** Only names written as literals. `workspaces.lua`
+/// builds `"super+" .. index` in a loop; a name assembled at run time is
+/// outside this and outside any static check. Lua comments are stripped, so a documented example that is
 /// deliberately a placeholder -- a path into somebody's home directory -- does
 /// not fail a build.
 #[cfg(test)]
@@ -5803,8 +5802,8 @@ mod shipped {
     /// spaces between: `easing =` finds `easing = "outCubic"` and `sol.on(`
     /// finds `sol.on("open", ...)`. Anything else after the marker -- a
     /// variable, a table, a concatenation -- is skipped rather than guessed at.
-    /// That is the limit this module states up front, and it is why
-    /// `shell.lua`'s `scene = scene` never appears here.
+    /// That is the limit this module states up front, and it is why a
+    /// `scene = scene` never appears here.
     fn named(text: &str, marker: &str) -> Vec<(usize, String)> {
         // An empty marker matches at every position and consumes none of them,
         // so the walk below would never move. Refused here rather than left to

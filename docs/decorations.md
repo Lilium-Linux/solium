@@ -1,7 +1,9 @@
 # Decorations, and other things the compositor draws
 
 Everything the compositor draws that is not a client's window is QML, hosted
-in-process. Window frames, the pointer, the loading window, the shell itself.
+in-process. Window frames, the pointer, the loading window, the wallpaper,
+and any other scene a script declares. A shell is not among them: it is a
+separate client, drawn by itself (see [shell-boundary.md](shell-boundary.md)).
 There is nothing to compile and no Rust to touch: write a file, name it, press
 `super+shift+r`.
 
@@ -31,7 +33,7 @@ other application on the machine follows.
 | window frames | `qml/panes/<name>/` | `pane = "top"` |
 | the loading window | `qml/loading/*.qml` | `loading = { scene = "window" }` |
 | the pointer | `qml/cursor.qml` | `SOLIUM_QML_CURSOR` |
-| a shell (bar, dock) | anywhere | `SOLIUM_SHELL_SCENE` |
+| any other scene | anywhere | `sol.surface(name, { scene = ... })` |
 
 Your own directory is `~/.config/solium/qml/`, and it is searched first in
 every case. A file you write shadows the shipped one of the same name, and
