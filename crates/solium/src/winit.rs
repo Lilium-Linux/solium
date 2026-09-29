@@ -183,17 +183,6 @@ pub(crate) fn run() -> Result<()> {
         );
     }
 
-    // Said once, at startup, because with the knob set this is the difference
-    // between a bare desktop and a broken one. `qml::set_allocator` is the
-    // hardware backend's call and there is no equivalent here — winit hands its
-    // renderer a display, not a GBM device — so a scene has nothing to allocate
-    // a buffer from. Qt still comes up on the GPU if it can, and then refuses
-    // software scenes as well, so with this knob set nested draws no QML at
-    // all. That is not something to work out from a blank window.
-    if crate::dev::qml_gpu() {
-        tracing::info!("nested: no GBM device, so QML scenes have no buffer to render into");
-    }
-
     let size = backend.window_size();
     // The host's actual refresh, not an assumed 60: a client pacing itself to
     // the wrong number is a client that misses frames on purpose.
@@ -273,13 +262,21 @@ pub(crate) fn run() -> Result<()> {
     // immediately. A broken config leaves the compositor usable and unbound
     // rather than refusing to start.
     let config = Scripts::config_path();
-    state.start_scripts(match Scripts::load(&config) {
+    let scripts = match Scripts::load(&config) {
         Ok(scripts) => Some(scripts),
         Err(err) => {
             tracing::error!(?err, config = %config.display(), "no scripts loaded");
             None
         }
-    });
+    };
+    // Here, with the configuration read and nothing drawn yet: every scene is
+    // built after this, and one built undecided would start Qt on software.
+    // See `qml::renderer::an_undecided_process_is_software`.
+    crate::qml::renderer::decide(
+        crate::qml::renderer::Entry::Nested,
+        &scripts.as_ref().map(Scripts::qml).unwrap_or_default(),
+    );
+    state.start_scripts(scripts);
 
     // The screens exist and the scripts have loaded: whichever came second,
     // this is the first moment a script can be told where the monitors are.

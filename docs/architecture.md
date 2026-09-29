@@ -268,12 +268,16 @@ through an animation driver the render loop advances. That last part is not a
 detail — QML animating off Qt's own timer would drift against every window
 transform beside it, which is the same mistake as having two animation clocks.
 
-Rendering goes through Qt's *software* scene graph and is uploaded as a memory
-buffer, because no Qt QPA plugin available here will adopt the compositor's EGL
-context. See `docs/spikes/2026-09-04-qml-in-compositor.md` for the measurement,
-the two Qt traps it hides, and the two routes back to the GPU. Chrome is small
-and only re-uploaded when Qt reports it changed, so this is not on the critical
-path.
+No Qt QPA plugin available here will adopt the compositor's EGL context, so
+the GPU route runs the other way round: the compositor allocates a buffer
+through GBM and Qt's OpenGL scene graph renders into it as an imported dmabuf.
+That is the default wherever a trial render in a child process passes at
+startup. Where it does not, Qt's *software* scene graph renders into a memory
+buffer that is uploaded instead — chrome is small and only re-uploaded when Qt
+reports it changed. Qt fixes the choice for the life of the process, which is
+why it is made before Qt starts; `dev/README.md`, *QML on the GPU*, has how to
+force either one. See `docs/spikes/2026-09-04-qml-in-compositor.md` for the
+original measurement and the two Qt traps it hides.
 
 **The bar reserves its height.** `work_area` excludes it, so windows are placed
 below it, never under it. A bar windows slide beneath is a panel; a bar that

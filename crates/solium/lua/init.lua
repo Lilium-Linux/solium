@@ -6,6 +6,11 @@
 
 local config = require("config")
 
+-- Which scene graph QML renders on: the one setting a reload does not change,
+-- because it is read once, before Qt starts. See `config.lua` and
+-- `the_renderer_is_decided_once_per_process`.
+sol.qml(config.qml)
+
 -- Settings the compositor itself holds, applied from the same file as
 -- everything else. All of them take effect immediately when reloaded.
 sol.pane(config.pane)
