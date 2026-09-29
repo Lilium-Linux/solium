@@ -905,13 +905,17 @@ pub(crate) fn run() -> Result<()> {
         // on `send_frames` in tty.rs. Zero here means every client redraws as
         // fast as it can for as long as it is open. A window only a monitor
         // that is off shows is `send_dark_frames`', as on the hardware.
-        if let Some(lit) = state
+        //
+        // Every lit monitor, as on the hardware, and not the first alone: a
+        // layer or lock surface is told only by its own monitor's refresh
+        // (`a_layer_surface_is_not_told_to_draw_by_a_monitor_it_is_not_on`),
+        // so with `SOLIUM_OUTPUTS=2` a bar on the second would never be told.
+        for lit in state
             .space
             .outputs()
-            .find(|each| !state.power.is_off(each))
-            .cloned()
+            .filter(|each| !state.power.is_off(each))
         {
-            state.send_frames_on(&lit, wall, frame_interval(&lit));
+            state.send_frames_on(lit, wall, frame_interval(lit));
         }
         state.send_dark_frames(wall);
 

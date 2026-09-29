@@ -89,6 +89,11 @@
 //! sway's behaviour, for anyone who wants it.
 //! `a_window_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`.
 //!
+//! The layer and lock surfaces on a dark monitor are told exactly as a window
+//! shown only there is, by the same code (#149,
+//! `a_layer_surface_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`,
+//! `a_lock_surface_is_told_to_draw_while_locked`).
+//!
 //! [sway-frame]: https://github.com/swaywm/sway/blob/1652c54b73f67df17b7b4ab0b0f7048204aa8104/sway/desktop/output.c#L313-L375
 //! [niri-fallback]: https://github.com/niri-wm/niri/blob/1f03391ea644c2a43597de7f637269e26d1e1b49/src/niri.rs#L5268-L5336
 //! [niri-redraw]: https://github.com/niri-wm/niri/blob/1f03391ea644c2a43597de7f637269e26d1e1b49/src/niri.rs#L4757-L4781
@@ -97,7 +102,7 @@
 use std::time::Duration;
 
 use smithay::{
-    desktop::Window,
+    desktop::{LayerSurface, Window, layer_map_for_output, utils::send_frames_surface_tree},
     output::Output,
     reexports::{
         wayland_protocols_wlr::output_power_management::v1::server::{
@@ -106,9 +111,10 @@ use smithay::{
         },
         wayland_server::{
             Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
-            backend::GlobalId,
+            backend::GlobalId, protocol::wl_surface::WlSurface,
         },
     },
+    wayland::compositor::SurfaceData,
 };
 
 use crate::state::Solium;
@@ -396,41 +402,72 @@ impl Solium {
 
     /// Whether `window` is on screens that are all off. See [`unlit`].
     pub(crate) fn in_the_dark(&self, window: &Window) -> bool {
+        self.shown_only_in_the_dark(&self.space.outputs_for_element(window))
+    }
+
+    /// Whether something shown on the monitors `on` is shown only on screens
+    /// that are off: a window by the monitors it is on, and a layer or lock
+    /// surface by its one monitor. See [`unlit`].
+    fn shown_only_in_the_dark<'a>(&self, on: impl IntoIterator<Item = &'a Output>) -> bool {
         if self.power.off.is_empty() {
             return false;
         }
         let every_screen_off = self.space.outputs().next().is_some()
             && self.space.outputs().all(|output| self.power.is_off(output));
         unlit(
-            self.space
-                .outputs_for_element(window)
-                .iter()
-                .map(|output| self.power.is_off(output)),
+            on.into_iter().map(|output| self.power.is_off(output)),
             every_screen_off,
         )
     }
 
-    /// `output` has refreshed: tell its windows they may draw again, at most
-    /// once per `throttle`.
+    /// What only `output` draws: every layer surface in its layer map, and
+    /// the lock surface for it while the session is locked.
+    fn drawn_only_on(&self, output: &Output, mut each: impl FnMut(Paced<'_>)) {
+        for layer in layer_map_for_output(output).layers() {
+            each(Paced::Layer(layer));
+        }
+        if let Some(surface) = self.lock.as_ref().and_then(|lock| lock.surface_for(output)) {
+            each(Paced::Lock(surface.wl_surface()));
+        }
+    }
+
+    /// `output` has refreshed: tell what it shows that it may draw again, at
+    /// most once per `throttle`.
     ///
     /// Every window, as it always was, but one shown only on screens that are
     /// off: that one is [`Self::send_dark_frames`]'s. So a lit monitor's
     /// refresh does not keep a window on a dark one drawing at full rate.
     /// `a_window_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`.
+    ///
+    /// And the layer and lock surfaces on `output` itself, and no other
+    /// monitor's: each is on one monitor, and only its refresh tells it
+    /// (`a_layer_surface_is_told_to_draw_after_a_frame_on_its_monitor`,
+    /// `a_layer_surface_is_not_told_to_draw_by_a_monitor_it_is_not_on`,
+    /// `a_lock_surface_is_told_to_draw_while_locked`). On a monitor that is
+    /// off they are `send_dark_frames`', like a window there
+    /// (`a_layer_surface_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`).
     pub(crate) fn send_frames_on(&self, output: &Output, time: Duration, throttle: Duration) {
         for window in self.space.elements() {
             if self.in_the_dark(window) {
                 continue;
             }
-            window.send_frame(output, time, Some(throttle), |_, _| Some(output.clone()));
+            Paced::Window(window).send(output, time, throttle, Some(output));
         }
+        if self.shown_only_in_the_dark([output]) {
+            return;
+        }
+        self.drawn_only_on(output, |paced| {
+            paced.send(output, time, throttle, Some(output));
+        });
     }
 
-    /// Frame callbacks for the windows no lit screen draws, at most one per
-    /// `idle.off_frame_interval` each, and none at all for 0. Asked once a
-    /// loop iteration by both backends. See "Frame callbacks on a dark
-    /// monitor", and
-    /// `a_window_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`.
+    /// Frame callbacks for what no lit screen draws -- the windows shown only
+    /// on screens that are off, and every layer and lock surface on one -- at
+    /// most one per `idle.off_frame_interval` each, and none at all for 0.
+    /// Asked once a loop iteration by both backends. See "Frame callbacks on a
+    /// dark monitor", and
+    /// `a_window_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`,
+    /// `a_layer_surface_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`.
     pub(crate) fn send_dark_frames(&self, time: Duration) {
         let interval = self.idle.settings().off_frame_interval;
         if self.power.off.is_empty() || interval.is_zero() {
@@ -449,9 +486,47 @@ impl Solium {
             else {
                 continue;
             };
-            // No output is anybody's primary: smithay then sends only to a
-            // surface whose last callback is older than `interval`.
-            window.send_frame(&output, time, Some(interval), |_, _| None);
+            Paced::Window(window).send(&output, time, interval, None);
+        }
+        for output in self.space.outputs() {
+            if self.shown_only_in_the_dark([output]) {
+                self.drawn_only_on(output, |paced| paced.send(output, time, interval, None));
+            }
+        }
+    }
+}
+
+/// Something that asks for frame callbacks, told with smithay 0.7's own call
+/// for it.
+///
+/// Each call covers the whole of what the client drew:
+/// `LayerSurface::send_frame` (smithay 0.7.0,
+/// `src/desktop/wayland/layer.rs:621-642`) sends to the layer surface, every
+/// subsurface of it and every popup it has open
+/// (`a_layer_surface_is_told_to_draw_after_a_frame_on_its_monitor`), and a
+/// lock surface, which can have no popups, is `send_frames_surface_tree`
+/// (`src/desktop/wayland/utils.rs:208-267`) on its own tree, subsurfaces
+/// included (`a_lock_surface_is_told_to_draw_while_locked`).
+enum Paced<'a> {
+    Window(&'a Window),
+    Layer(&'a LayerSurface),
+    Lock(&'a WlSurface),
+}
+
+impl Paced<'_> {
+    /// `output` has refreshed, and `primary` is the monitor to count as every
+    /// surface's primary. smithay sends to every surface whose primary is
+    /// `output`, and otherwise only to one whose last callback is older than
+    /// `throttle`: so `None` is the dark pass, at most one per `throttle`
+    /// (`a_layer_surface_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`).
+    fn send(&self, output: &Output, time: Duration, throttle: Duration, primary: Option<&Output>) {
+        let primary = move |_: &WlSurface, _: &SurfaceData| primary.cloned();
+        match self {
+            Self::Window(window) => window.send_frame(output, time, Some(throttle), primary),
+            Self::Layer(layer) => layer.send_frame(output, time, Some(throttle), primary),
+            Self::Lock(surface) => {
+                send_frames_surface_tree(surface, output, time, Some(throttle), primary);
+            }
         }
     }
 }
