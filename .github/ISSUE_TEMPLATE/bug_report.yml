@@ -75,7 +75,7 @@ body:
     id: qml-mode
     attributes:
       label: QML mode shown in the log
-      description: Whether the log says QML is on the GPU or on software, and the line that says so (search the log for "QML on the GPU" or "using software").
+      description: Search the log for "QML on the GPU", "GPU path", "using software" and "software scene graph", and paste what matches. If nothing does, QML is on the default software path; say whether SOLIUM_QML_GPU was set.
 
   - type: textarea
     id: log
