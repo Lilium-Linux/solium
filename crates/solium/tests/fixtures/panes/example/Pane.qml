@@ -7,17 +7,19 @@
 // and delegated content, `insets`, `requires`, `client.radius`, which is read,
 // and `client.shadow`, which is still reserved — so that
 //
-//     solium --check-qml crates/solium/qml/panes/example/Pane.qml
+//     solium --check-qml crates/solium/tests/fixtures/panes/example/Pane.qml
 //
 // says `ok` about the whole surface rather than about one corner of it.
 //
-// **It draws.** `pane = "example"` — or `SOLIUM_PANE=example` —
-// frames every window with this, which is what a name that is a folder under
-// `panes/` means. It is also what two tests build a real `Decoration` out of:
-// `render`'s ordering test and `style`'s reading test both come here, so this
-// file is the fixture as well as the documentation.
+// **It draws.** It is a test fixture rather than a shipped style, so it is not
+// offered by name; point at the folder instead —
+// `SOLIUM_PANE=$PWD/crates/solium/tests/fixtures/panes/example` — and it frames
+// every window. It is also what tests build a real `Decoration` out of:
+// `render`'s ordering test, `style`'s reading test and `decoration`'s bundle
+// test all come here, so this file is the fixture as well as the
+// documentation.
 //
-// It is deliberately not a copy of a shipped style: `panes/top/` is what
+// It is deliberately not a copy of a shipped style: `qml/panes/top/` is what
 // `pane = "top"` draws, and a second copy of it living here would drift from
 // the original with nothing to notice.
 

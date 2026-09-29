@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# Feeds SOLIUM_PANE=wave from cava. Nothing in the compositor knows about
-# audio: this writes numbers to a file and the style polls it.
+# Feeds the wave demonstration style from cava. Nothing in the compositor knows
+# about audio: this writes numbers to a file and the style polls it.
 #
-#     crates/solium/qml/panes/wave/cava-feed.sh &
-#     QML_XHR_ALLOW_FILE_READ=1 SOLIUM_PANE=wave ./target/debug/solium --tty
+#     crates/solium/tests/fixtures/panes/wave/cava-feed.sh &
+#     QML_XHR_ALLOW_FILE_READ=1 SOLIUM_PANE=$PWD/crates/solium/tests/fixtures/panes/wave \
+#         ./target/debug/solium --tty
 #
 # QML_XHR_ALLOW_FILE_READ is Qt's, not Solium's: reading a local file from QML
 # is off by default and has to be asked for. Without it the style still runs --

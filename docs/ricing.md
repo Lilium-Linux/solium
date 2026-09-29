@@ -132,8 +132,8 @@ A style may round the client's own corners. It is the one effect that reads the
 window's *own* pixels, so a pane that declares it is rendered to a texture first
 and then drawn back through a fragment program — one extra pass per frame, for
 that window only. `client.radius: 0` is no effect at all rather than a radius of
-nothing, so a style that does not want it pays for none of this, and twelve of
-the shipped bundles do not want it.
+nothing, so a style that does not want it pays for none of this, and nine of
+the eleven shipped bundles do not want it.
 
 `pane = "rounded"` is one that does, and is there to be looked at. Two things
 in it are worth copying. The radius is in **logical** pixels — the compositor

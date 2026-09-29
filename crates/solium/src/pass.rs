@@ -104,7 +104,7 @@ const fn runnable(inputs: Inputs) -> bool {
 /// Only reachable with a non-empty effect list. That is not the same as "never
 /// on an unstyled machine" any more, and the weaker claim is the true one:
 /// `style::load` pushes nothing for an absent or zero `client.radius`, which is
-/// thirteen of the fifteen shipped bundles -- but `panes/rounded/` and
+/// nine of the eleven shipped bundles -- but `panes/rounded/` and
 /// `panes/flush/` each declare `client.radius: 12`, so a session using either
 /// walks a one-element list here on the branch below.
 ///

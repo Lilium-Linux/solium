@@ -9,14 +9,14 @@
 // window only. `crates/solium/src/pass.rs` is that pass and
 // `crates/effects/src/fragment.rs` is the program.
 //
-// **It ships because the feature could not otherwise be looked at.** Twelve of
-// the bundles here declare no radius at all and `example/` declares `0`, which
-// is *no effect* rather than a radius of nothing — so until this folder existed
-// there was nothing on a running machine that could draw a rounded corner, and
-// a shader nobody can see is a shader nobody can check. `example/` is the
-// format written out in full and is asserted to cost nothing; this is the one
-// that costs something, which is why it is a folder of its own rather than one
-// more line in that file.
+// **It ships because the feature could not otherwise be looked at.** The other
+// bundles here declared no radius at all and the example fixture declares `0`,
+// which is *no effect* rather than a radius of nothing — so until this folder
+// existed there was nothing on a running machine that could draw a rounded
+// corner, and a shader nobody can see is a shader nobody can check. The example
+// is the format written out in full and is asserted to cost nothing; this is
+// the one that costs something, which is why it is a folder of its own rather
+// than one more line in that file.
 //
 // **The two halves of the seam are both in this folder, drawn by different
 // things, and that is the design rather than an accident.** The compositor

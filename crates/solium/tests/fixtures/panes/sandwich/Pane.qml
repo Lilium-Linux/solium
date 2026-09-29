@@ -4,7 +4,10 @@
 // cannot be confused. The client sits *between* them — which is the thing a
 // single QML file can never do, and the reason layers are separate scenes.
 //
-//     SOLIUM_PANE=sandwich
+//     SOLIUM_PANE=$PWD/crates/solium/tests/fixtures/panes/sandwich
+//
+// A demonstration kept with the test fixtures rather than shipped, so it is
+// never offered by name; the path above is how to see it.
 //
 // What to look for:
 //   * a solid blue margin around the window — that is the `behind` layer,

@@ -3196,7 +3196,7 @@ mod tests {
     /// The claim this whole feature exists for, and an ordering claim — so the
     /// evidence is the list itself. `pane_pieces` is the walk the compositor
     /// runs, `PANE_ORDER` is the order it runs it in, and `Decoration` here is a
-    /// real one: the shipped `panes/example/` bundle, read by the real
+    /// real one: the `tests/fixtures/panes/example/` bundle, read by the real
     /// `style::load` and built into three real Qt scenes by
     /// `Decoration::from_style`. What is stood in for is the *element*, because
     /// making one needs a `GlesRenderer` and `cargo test` has no GPU — so the
@@ -3215,9 +3215,11 @@ mod tests {
     #[test]
     fn a_client_is_drawn_between_two_layers_of_its_own_style() {
         on_the_qt_thread(|| {
-            let dir =
-                std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes/example"));
-            let style = crate::style::load(dir).expect("the shipped example loads");
+            let dir = std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/panes/example"
+            ));
+            let style = crate::style::load(dir).expect("the example fixture loads");
             let decoration =
                 crate::decoration::Decoration::from_style(&style, 300, 200).expect("three scenes");
 

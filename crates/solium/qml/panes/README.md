@@ -49,7 +49,7 @@ PaneStyle {
 |---|---|
 | `insets.top`, `.right`, `.bottom`, `.left` | what the style reserves from the client, **once, for the whole style** |
 | `requires` | what the style needs from the machine. `["gpu"]` is the only term today, and a style naming one this build has never heard of is refused rather than drawn wrong |
-| `client.radius` | rounds the client's own surface, in logical pixels. A non-zero one is an offscreen pass per window per frame. `0` is no effect at all, and so is leaving the key out — which is what twelve of the fifteen bundles that ship do. `example/` writes `0`, to show the key exists and costs nothing; `rounded/` and `flush/` are the two that ask for the pass |
+| `client.radius` | rounds the client's own surface, in logical pixels. A non-zero one is an offscreen pass per window per frame. `0` is no effect at all, and so is leaving the key out — which is what nine of the eleven bundles that ship do. The example fixture writes `0`, to show the key exists and costs nothing; `rounded/` and `flush/` are the two that ask for the pass |
 | `client.radiusTopLeft`, `.radiusTopRight`, `.radiusBottomLeft`, `.radiusBottomRight` | one corner each, in logical pixels. Every one of them defaults to `client.radius`, so a style that wants four the same writes one key and these never come up. **A `0` has to be written out**: squaring a corner is half of what these are for, so an absent corner follows `radius` rather than being square. `flush/` is the shipped example |
 | `client.shadow` | reserved for the shadow cast by the client's silhouette; declared, and read by nobody yet |
 | the `Layer` children | the layers, in declaration order |
@@ -62,10 +62,11 @@ A folder without a `Pane.qml` is not a style. A bare name skips it and goes on
 to the next place it would have looked, so an empty `panes/top/` of your own
 does not quietly replace the shipped `top` with a window that has no frame.
 
-`panes/example/` is the format written out in full -- all three depths, both
-spellings of `bleed`, inline content and delegated content -- and
+`crates/solium/tests/fixtures/panes/example/` is the format written out in
+full -- all three depths, both spellings of `bleed`, inline content and
+delegated content -- and
 
-    solium --check-qml crates/solium/qml/panes/example/Pane.qml
+    solium --check-qml crates/solium/tests/fixtures/panes/example/Pane.qml
 
 says whether it still parses. Run it on **each file** of a bundle you write:
 that is what catches a layer whose content will not build, which is otherwise a
@@ -162,8 +163,8 @@ costs a flag read, a transition runs at the screen's refresh rate, and a loop
 with a pause in it survives the pause. Bear in mind only that a layer which
 never stops animating never stops costing anything: on the software path it is
 rasterised on the CPU, so a full-width gradient moving at 260Hz is about a
-tenth of a core. Bind an endless animation to `focused`, as `wave/` does, and
-an unfocused window costs nothing.
+tenth of a core. Bind an endless animation to `focused`, as the `wave`
+demonstration does, and an unfocused window costs nothing.
 
 ## What is here
 
@@ -183,12 +184,19 @@ before styles had layers. The rest are here to show what layers add:
 
 | folder | |
 |---|---|
-| `example/` | the format written out in full, and the fixture two tests build |
 | `rounded/` | `client.radius`: the compositor cuts all four of the client's corners with a fragment program, and the bar -- at `behind`, reaching `clientRadius` past its band -- shows through the two it cut inside the window |
 | `flush/` | the same seam the other way up: `radiusTopLeft` and `radiusTopRight` at `0`, so the client's top is square, the bar's own rounded top is the window's top, and the two meet flat. The only shipped bundle whose four corners differ |
+| `shadow/` | `behind` plus `bleed`: stacked rectangles standing in for a blur |
+
+And four demonstrations, which are not shipped and are never offered by name.
+They live with the test fixtures in `crates/solium/tests/fixtures/panes/`, and
+`SOLIUM_PANE=<that path>/<name>` puts one on every window:
+
+| folder | |
+|---|---|
+| `example/` | the format written out in full, and the fixture the tests build |
 | `sandwich/` | one layer behind the client and one above it, in colours that cannot be confused |
 | `wave/` | a border that physically waves, upward past the pane, using `bleed` |
-| `shadow/` | `behind` plus `bleed`: stacked rectangles standing in for a blur |
 | `bleedy/` | what bleed does to hit-testing, and to the window next door |
 
 ## One QML file is still a decoration

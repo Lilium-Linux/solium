@@ -988,10 +988,10 @@ impl Backing {
 /// The four radii a layer of this style should hug, in logical pixels.
 ///
 /// All zero when the style declares no effect that masks the client, which is
-/// thirteen of the fifteen shipped bundles and every style nobody has
+/// nine of the eleven shipped bundles and every style nobody has
 /// touched; `panes/rounded/` and `panes/flush/` are the two that declare a
 /// radius -- and `flush/` is the one whose four are not all the same number --
-/// while `panes/example/` writes `0` on purpose to show the key costs nothing. A
+/// while the example fixture writes `0` on purpose to show the key costs nothing. A
 /// style wanting a rounded border around a *square* client declares no
 /// `client.radius` and sets its own `radius` — and pays for no pass, which is
 /// the point.
@@ -3160,7 +3160,8 @@ mod tests {
     /// is reachable from tests and from nowhere else.
     ///
     /// Two shapes of bundle, because the useful claim is that one entry point
-    /// reaches both. `example` declares three layers at three depths; `top`
+    /// reaches both. The example fixture declares three layers at three
+    /// depths, and is named by its path, which `build` takes as given; `top`
     /// declares one at `frame`, which is what a decoration has always been and
     /// is the shape all eight shipped styles were converted into.
     ///
@@ -3194,22 +3195,10 @@ mod tests {
             let fallback = build(None, 300, 200).expect("the default builds");
             assert_eq!(fallback.insets().top, TITLEBAR_HEIGHT);
 
-            let bundle = build(Some("example"), 300, 200).expect("the shipped example builds");
-            // Guarded for the reason `style`'s `find_reaches_the_shipped_example`
-            // is: a user bundle called `example` is entitled to win, that is the
-            // feature, and then the shipped file's three layers are the wrong
-            // assertion.
-            let shipped = crate::style::find("example")
-                == Some(PathBuf::from(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/qml/panes/example"
-                )));
-            if shipped {
-                let depths: Vec<Depth> = bundle.layers.iter().map(|it| it.depth).collect();
-                assert_eq!(depths, [Depth::Behind, Depth::Frame, Depth::Above]);
-            } else {
-                assert!(!bundle.layers.is_empty(), "a user bundle is still a bundle");
-            }
+            let example = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/panes/example");
+            let bundle = build(Some(example), 300, 200).expect("the example fixture builds");
+            let depths: Vec<Depth> = bundle.layers.iter().map(|it| it.depth).collect();
+            assert_eq!(depths, [Depth::Behind, Depth::Frame, Depth::Above]);
         });
     }
 
@@ -3900,9 +3889,9 @@ mod tests {
 
     /// **A name in two places of the same kind is offered once.**
     ///
-    /// The user's `panes/example/` shadows the shipped one, so the panel has
-    /// one `example` button rather than two identical ones, only one of which
-    /// could ever be reached.
+    /// A user's `panes/top/` shadows the shipped one, so the panel has one
+    /// `top` button rather than two identical ones, only one of which could
+    /// ever be reached.
     #[test]
     fn a_name_in_two_places_is_offered_once() {
         let mine = shelf("mine");
@@ -4057,13 +4046,15 @@ mod tests {
                 "{name} is offered more than once"
             );
         }
-        assert!(
-            ships.contains(&Offered {
-                kind: StyleKind::Bundle,
-                name: "example".to_owned(),
-            }),
-            "and the worked example, which is what the format is documented by"
-        );
+        // And none of the demonstrations. They are test fixtures, kept out of
+        // the list a user picks from; offering one would mean the move out of
+        // `qml/panes/` had been undone.
+        for demo in ["example", "bleedy", "sandwich", "wave"] {
+            assert!(
+                !ships.iter().any(|it| it.name == demo),
+                "{demo} is a test fixture and must not be offered. Offered: {ships:?}"
+            );
+        }
     }
 
     /// **Everything the panel offers is what pressing it would resolve to.**

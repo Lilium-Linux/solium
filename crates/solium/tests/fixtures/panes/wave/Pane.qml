@@ -1,6 +1,9 @@
 // Sine waves flowing round the window, outside it.
 //
-//     SOLIUM_PANE=wave
+//     SOLIUM_PANE=$PWD/crates/solium/tests/fixtures/panes/wave
+//
+// A demonstration kept with the test fixtures rather than shipped, so it is
+// never offered by name; the path above is how to see it.
 //
 // **The window does not move and does not shrink.** `insets` reserves nothing,
 // so the client is laid out exactly as it would be with no decoration at all;

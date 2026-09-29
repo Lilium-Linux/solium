@@ -9,7 +9,10 @@
 // There is no titlebar on purpose. `insets` reserves nothing, so the client
 // fills the pane and every coloured pixel you can see is bleed.
 //
-//     SOLIUM_PANE=bleedy
+//     SOLIUM_PANE=$PWD/crates/solium/tests/fixtures/panes/bleedy
+//
+// A demonstration kept with the test fixtures rather than shipped, so it is
+// never offered by name; the path above is how to see it.
 //
 // What to look for, in order:
 //   * a band all the way round every window, outside it

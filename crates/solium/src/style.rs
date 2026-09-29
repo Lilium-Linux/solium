@@ -8,7 +8,7 @@
 //!
 //! This module is the *reading*. The types it reads are declared in
 //! `qml/Solium/PaneStyle.qml` and `qml/Solium/Layer.qml`, and
-//! `qml/panes/example/` is one written out in full.
+//! `tests/fixtures/panes/example/` is one written out in full.
 //!
 //! "Layer" is triple-booked in this tree and these are the third: `layer.rs` is
 //! wlr-layer-shell, `scripted::Layer` is the `Background`/`Bottom`/`Top`/
@@ -899,9 +899,10 @@ mod tests {
         });
     }
 
-    /// The shipped example, read back exactly as it is written.
+    /// The example fixture, read back exactly as it is written.
     ///
-    /// `panes/example/` exists to be the format written out once, so this is
+    /// `tests/fixtures/panes/example/` exists to be the format written out
+    /// once, so this is
     /// also the test that the format still parses after anyone edits it. The
     /// layers are asserted **in declaration order** and the two depths are out
     /// of stacking order in the file on purpose over in the fixture above;
@@ -911,8 +912,11 @@ mod tests {
     #[test]
     fn the_example_bundle_reads_back_as_it_is_written() {
         on_the_qt_thread(|| {
-            let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes/example"));
-            let style = load(dir).expect("the shipped example loads");
+            let dir = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/panes/example"
+            ));
+            let style = load(dir).expect("the example fixture loads");
 
             let names: Vec<&str> = style.layers.iter().map(|it| it.name.as_str()).collect();
             assert_eq!(
@@ -1212,22 +1216,22 @@ mod tests {
     ///   made-up `/home/someone/…` returns `None`, and the claim that the
     ///   lookup is testable without a filesystem is not true of a lookup that
     ///   consults one.
-    /// * **It uses a name that also ships.** `example` exists in both places, so
+    /// * **It uses a name that also ships.** `border` exists in both places, so
     ///   this pins the *order*. A name only the user has would be found first
     ///   either way and would pass against a reversed lookup.
     #[test]
     fn a_bare_name_prefers_the_users_directory() {
         let user = scratch("user-panes");
-        bundle_at(&user.join("example"));
+        bundle_at(&user.join("border"));
 
         assert_eq!(
-            super::resolve("example", Some(&user)),
-            Some(user.join("example")),
-            "the user's `example` shadows the shipped one"
+            super::resolve("border", Some(&user)),
+            Some(user.join("border")),
+            "the user's `border` shadows the shipped one"
         );
         assert_ne!(
-            super::resolve("example", Some(&user)),
-            Some(shipped_example())
+            super::resolve("border", Some(&user)),
+            Some(shipped_border())
         );
 
         let _ = std::fs::remove_dir_all(&user);
@@ -1254,12 +1258,12 @@ mod tests {
     #[test]
     fn a_bare_name_needs_a_manifest_and_not_merely_a_folder() {
         let user = scratch("user-panes-empty-bundle");
-        std::fs::create_dir_all(user.join("example")).expect("an empty folder");
+        std::fs::create_dir_all(user.join("border")).expect("an empty folder");
 
         assert_eq!(
-            super::resolve("example", Some(&user)),
-            Some(shipped_example()),
-            "an empty `example/` is not a bundle, so the shipped one still answers"
+            super::resolve("border", Some(&user)),
+            Some(shipped_border()),
+            "an empty `border/` is not a bundle, so the shipped one still answers"
         );
 
         // A name that is *only* there as an empty folder is nowhere at all,
@@ -1280,7 +1284,7 @@ mod tests {
         // point: one location someone typed deserves an error about that
         // location, and a search does not stop at a folder that is not a
         // bundle.
-        let empty = user.join("example");
+        let empty = user.join("border");
         assert_eq!(
             super::resolve(empty.to_str().expect("a utf-8 scratch path"), Some(&user)),
             Some(empty),
@@ -1313,10 +1317,10 @@ mod tests {
     fn a_bare_name_falls_back_to_the_shipped_bundle() {
         let user = scratch("user-panes-empty");
 
-        assert_eq!(super::resolve("example", None), Some(shipped_example()));
+        assert_eq!(super::resolve("border", None), Some(shipped_border()));
         assert_eq!(
-            super::resolve("example", Some(&user)),
-            Some(shipped_example()),
+            super::resolve("border", Some(&user)),
+            Some(shipped_border()),
             "an empty user directory is not an answer"
         );
 
@@ -1339,32 +1343,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&user);
     }
 
-    /// `find` against this machine, which must reach the shipped example.
+    /// `find` against this machine, which must reach a shipped bundle.
     ///
     /// The one assertion `resolve`'s tests cannot make: that the directory
     /// `find` builds out of `user_qml_dir` is the one styles are actually in.
-    /// Guarded, because a user bundle called `example` is entitled to win —
+    /// Guarded, because a user bundle called `border` is entitled to win —
     /// that is the feature — and then the shipped path is the wrong assertion.
     #[test]
-    fn find_reaches_the_shipped_example() {
+    fn find_reaches_a_shipped_bundle() {
         let user = crate::qml::user_qml_dir().map(|dir| dir.join("panes"));
         // A bundle and not merely a folder, which is what `resolve` asks: an
-        // empty `example/` of the user's does not shadow anything.
-        let shadowed = user.is_some_and(|dir| dir.join("example").join("Pane.qml").is_file());
+        // empty `border/` of the user's does not shadow anything.
+        let shadowed = user.is_some_and(|dir| dir.join("border").join("Pane.qml").is_file());
         if shadowed {
             assert!(
-                super::find("example").is_some(),
+                super::find("border").is_some(),
                 "a user bundle is still a bundle"
             );
         } else {
-            assert_eq!(super::find("example"), Some(shipped_example()));
+            assert_eq!(super::find("border"), Some(shipped_border()));
         }
         assert_eq!(super::find("no-such-style-ships-here"), None);
     }
 
-    /// The bundle this tree ships, by the same route `resolve` reaches it.
-    fn shipped_example() -> PathBuf {
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes")).join("example")
+    /// A bundle this tree ships, by the same route `resolve` reaches it.
+    ///
+    /// `border`, the smallest of them. The worked example is a test fixture
+    /// and not shipped, so no bare name finds it.
+    fn shipped_border() -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes")).join("border")
     }
 
     /// A style is refused when the path cannot give it what it asked for.
@@ -1485,8 +1492,8 @@ mod tests {
     /// Declaring nothing is portable, both ways of declaring it.
     ///
     /// `requires: []` and no `requires` at all are the same answer, which is
-    /// what makes the property something a style can leave out. The shipped
-    /// bundle is the `[]` case — see
+    /// what makes the property something a style can leave out. The example
+    /// fixture is the `[]` case — see
     /// `the_example_bundle_reads_back_as_it_is_written`, which loads it — and
     /// this is the absent one, read back through the list itself rather than
     /// only through the style loading.

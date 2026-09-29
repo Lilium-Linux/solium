@@ -507,7 +507,7 @@ fn a_frame_reserves_what_it_always_reserved() {
 /// | the frame band **and** `decorated_under` switched to the canvas, through `decoration::spread` | the whole suite still passes, 201 of 201 |
 ///
 /// The regression is instead caught with a real pointer, by hand: two panes
-/// side by side under `bleedy`, a press
+/// side by side under the `bleedy` fixture, a press
 /// 60px into the first one's bleed and 20px inside the second, and the
 /// second takes focus. Run against the canvas-hit-test build above, the
 /// *first* window takes it and the second is left unfocused — a neighbour
