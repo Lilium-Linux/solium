@@ -17,8 +17,8 @@ header says which passage it is.
 ## Behaviour modelled on other projects, with no code from them
 
 These reimplement how something behaves. The behaviour is the specification;
-nothing was copied, and so no licence of theirs applies here. They are credited
-because the ideas are theirs.
+no code was copied beyond the passage listed above, and so no licence of theirs
+applies here. They are credited because the ideas are theirs.
 
 | Where | Behaviour of | Their licence |
 |---|---|---|

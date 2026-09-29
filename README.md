@@ -263,7 +263,7 @@ line is drawn and defended.
 **Smithay** is a Wayland compositor library, not a compositor. It hands over
 protocol plumbing, input and backends while leaving layout, rendering and
 policy to us — which is where a desktop environment's character actually lives.
-[niri](https://github.com/YaLTeR/niri) is Rust-on-Smithay with working touch and
+[niri](https://github.com/niri-wm/niri) is Rust-on-Smithay with working touch and
 gesture support, so the multi-form-factor path has a reference implementation
 rather than being a bet.
 
@@ -329,7 +329,7 @@ of it.
   than this project's: DRM, GBM, libinput, the seat, the protocol
   implementations. Its example compositor is also the first place to look when
   something here does not make sense.
-- **[niri](https://github.com/YaLTeR/niri)** — the reference for how a serious
+- **[niri](https://github.com/niri-wm/niri)** — the reference for how a serious
   Smithay compositor is actually put together, and the answer to more than one
   "surely this cannot be the way" while reading DRM code. Its scrolling layout
   is why `lua/scrolling.lua` exists to be compared against.

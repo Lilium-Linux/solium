@@ -167,5 +167,6 @@ These come from the Hyprland fork Solium replaces, and each one cost real time.
 
 Solium began as a Hyprland fork. That work is archived, and its post-mortem —
 most usefully, why an out-of-process QML shell was the wrong architecture — is
-in the [lilium-de](https://github.com/Lilium-Linux) repository. Read it before
+in the `lilium-de` repository of the [Lilium-Linux](https://github.com/Lilium-Linux)
+organisation. Read it before
 proposing a helper process.
