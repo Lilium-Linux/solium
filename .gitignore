@@ -23,7 +23,6 @@ crates/effects/preview/preview.html
 build/
 .split-baseline/
 .claude/
-.superpowers/
 
 # Environment files and machine-local overrides, which may hold secrets or
 # one machine's paths.
