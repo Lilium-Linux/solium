@@ -33,6 +33,10 @@ jobs:
   # trusted a green run on some ancestor commit would be trusting a merge
   # nobody tested. It costs a few minutes.
   verify:
+    # A manual run can be started from any branch, and the draft job pushes the
+    # bump to `release`: from anywhere else that would fast-forward `release`
+    # past the merge that is supposed to be the only way in.
+    if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
     # Fedora, not the runner's Ubuntu: this needs Qt 6 Quick >= 6.5 and Ubuntu
     # ships 6.4.2. Keep in step with dev/Containerfile's FEDORA_VERSION and
@@ -78,6 +82,7 @@ jobs:
 
   draft:
     needs: verify
+    if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
