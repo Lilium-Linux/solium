@@ -1,0 +1,94 @@
+name: Bug report
+description: Something in Solium does not work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A security problem (anything that gets past the
+        lock screen, or lets one client see another's input or pixels) should
+        not be filed here: see SECURITY.md for the private route.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: The smallest set of steps, programs or configuration that shows it.
+      placeholder: |
+        1. Start Solium with ...
+        2. Open ...
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Solium version or commit
+      description: The release, or `git rev-parse --short HEAD` for a build from source.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: session
+    attributes:
+      label: How it was running
+      options:
+        - On a TTY (--tty), as a real session
+        - Nested, as a window inside another session
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      description: For example "AMD RX 6600, Mesa 25.2" or "NVIDIA RTX 3070, 580.xx proprietary". `solium --probe` names the GPU.
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution
+      description: Name and version, for example "Fedora 44" or "Arch, updated 2026-09-20".
+    validations:
+      required: true
+
+  - type: input
+    id: qt
+    attributes:
+      label: Qt version
+      description: For example from `pkg-config --modversion Qt6Quick` or your package manager.
+    validations:
+      required: true
+
+  - type: input
+    id: qml-mode
+    attributes:
+      label: QML mode shown in the log
+      description: Whether the log says QML is on the GPU or on software, and the line that says so (search the log for "QML on the GPU" or "using software").
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Session log
+      description: |
+        The relevant part of `~/.local/state/solium/session.log`, or attach the
+        whole file. For a nested run, the terminal output instead.
+      render: text
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Anything you changed in `~/.config/solium/` that might matter, and the output of `solium --check`.
+      render: text

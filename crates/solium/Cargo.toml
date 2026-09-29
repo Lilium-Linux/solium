@@ -3,6 +3,7 @@ name        = "solium"
 description = "Wayland compositor for Lilium DE"
 version.workspace    = true
 edition.workspace    = true
+rust-version.workspace = true
 license.workspace    = true
 repository.workspace = true
 

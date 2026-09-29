@@ -1,0 +1,40 @@
+name: Feature request
+description: Something Solium should do that it does not.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check docs/gaps.md and the open issues first: much of what is missing
+        is already listed, with what it would take.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The task or the application that needs it, rather than the feature itself.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like to happen
+      description: How it should behave, from the outside.
+    validations:
+      required: true
+
+  - type: textarea
+    id: script
+    attributes:
+      label: Could a script do it?
+      description: |
+        Layouts, modes and bindings are Lua (see docs/modes.md and
+        docs/ricing.md). If this could be a script given one more event or
+        primitive, say which one; that is usually the smaller change.
+
+  - type: textarea
+    id: elsewhere
+    attributes:
+      label: How others do it
+      description: Another compositor or desktop that does this, and anything about its behaviour worth copying or avoiding.

@@ -17,6 +17,70 @@ wallpaper is drawn by the compositor too, and is a QML file you can replace.
 [docs/modes.md](docs/modes.md) has the same picture for every mode, frame by
 frame.
 
+## Building
+
+Solium needs **Rust 1.88 or newer** (edition 2024), a C++17 compiler, **Qt 6.5
+or newer** (Qt Quick and Qml), and the development files for Wayland,
+libinput, libudev, libseat, xkbcommon, GBM, EGL, libdrm and libdisplay-info.
+Lua is compiled in and needs nothing installed.
+
+Rust is easiest from [rustup](https://rustup.rs); a distribution's own Rust
+works too if it is new enough. The system packages:
+
+**Fedora**
+
+```sh
+sudo dnf install gcc gcc-c++ pkgconf-pkg-config wayland-devel libinput-devel \
+    systemd-devel libseat-devel libxkbcommon-devel mesa-libgbm-devel \
+    mesa-libEGL-devel libdrm-devel libdisplay-info-devel \
+    qt6-qtbase-devel qt6-qtdeclarative-devel
+```
+
+**Arch Linux**
+
+```sh
+sudo pacman -S --needed base-devel wayland libinput systemd-libs seatd \
+    libxkbcommon mesa libdrm libdisplay-info qt6-base qt6-declarative
+```
+
+**Debian 13 and Ubuntu 24.10 or newer** (older releases ship a Qt older than
+6.5)
+
+```sh
+sudo apt install build-essential pkg-config libwayland-dev libinput-dev \
+    libudev-dev libseat-dev libxkbcommon-dev libgbm-dev libegl-dev libdrm-dev \
+    libdisplay-info-dev qt6-base-dev qt6-declarative-dev
+```
+
+**openSUSE Tumbleweed**
+
+```sh
+sudo zypper install gcc-c++ pkgconf qt6-base-devel qt6-declarative-devel \
+    'pkgconfig(wayland-server)' 'pkgconfig(libinput)' 'pkgconfig(libudev)' \
+    'pkgconfig(libseat)' 'pkgconfig(xkbcommon)' 'pkgconfig(gbm)' 'pkgconfig(egl)' \
+    'pkgconfig(libdrm)' 'pkgconfig(libdisplay-info)'
+```
+
+Then, from the checkout:
+
+```sh
+cargo build            # target/debug/solium; add --release for an optimised build
+```
+
+**Or in a container**, if your distribution cannot provide the packages. This
+needs only podman and rustup on the host: the image has the C toolchain and the
+libraries, and your own Rust is mounted into it. The binary it builds is meant
+to run on a Fedora 44 host, since it links that image's libraries.
+
+```sh
+podman build -t solium-build:fc44 -f dev/Containerfile dev/
+SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 dev/gate.sh
+```
+
+`dev/gate.sh` builds and runs every check; [dev/README.md](dev/README.md#building)
+has the plain `podman run` for a build on its own, and
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rest of what a change needs.
+
 ## Running it
 
 From a free TTY (`Ctrl+Alt+F3`), and not from inside a running desktop session —
@@ -250,6 +314,9 @@ of it.
 | [docs/beta.md](docs/beta.md) | what has to be true before a public preview |
 | [docs/gaps.md](docs/gaps.md) | everything not built yet, exhaustively |
 | [dev/README.md](dev/README.md) | the knobs and checks it is tested with |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | how to send a change, and the design rules it is judged by |
+| [SECURITY.md](SECURITY.md) | reporting a vulnerability privately |
+| [THIRD_PARTY.md](THIRD_PARTY.md) | what came from other projects, and every dependency's licence |
 | `docs/spikes/` | decisions, with the evidence that settled them |
 
 ## Thanks to
@@ -281,6 +348,7 @@ of it.
 Solium is free software under the [GNU General Public License, version 3
 only](LICENSE) (`GPL-3.0-only`).
 
-Contributions are welcome. Each contributor agrees once to the
-[Contributor License Agreement](CLA.md); the pull request template carries
-the one sentence that does it.
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Each
+contributor agrees once to the [Contributor License Agreement](CLA.md); the
+pull request template carries the one sentence that does it. What came from
+other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).

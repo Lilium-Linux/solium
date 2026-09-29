@@ -1,7 +1,8 @@
 //! Compiles the Qt Quick host shim and links Qt.
 //!
-//! Qt is discovered through pkg-config rather than hard-coded paths: the
-//! container this builds in is Arch, CI is Ubuntu, and their Qt layouts differ.
+//! Qt is discovered through pkg-config rather than hard-coded paths: the build
+//! container and CI are Fedora, but whoever builds a package may be on any
+//! distribution, and distributions lay Qt out differently.
 
 use std::path::PathBuf;
 
@@ -35,9 +36,11 @@ fn main() {
             // A build script cannot carry on without its dependency, and a
             // panic backtrace here would bury the one useful line. Say what is
             // missing and what installs it.
-            eprintln!("error: Qt 6 Quick development files not found: {err}");
-            eprintln!("       Debian/Ubuntu: qt6-base-dev qt6-declarative-dev");
+            eprintln!("error: Qt 6 Quick (6.5 or newer) development files not found: {err}");
+            eprintln!("       Fedora:        qt6-qtbase-devel qt6-qtdeclarative-devel");
             eprintln!("       Arch:          qt6-base qt6-declarative");
+            eprintln!("       Debian/Ubuntu: qt6-base-dev qt6-declarative-dev (Debian 13, Ubuntu 24.10 or newer)");
+            eprintln!("       openSUSE:      qt6-base-devel qt6-declarative-devel");
             std::process::exit(1);
         }
     };
@@ -72,9 +75,10 @@ fn main() {
         }
         Err(err) => {
             eprintln!("error: EGL development files not found: {err}");
-            eprintln!("       Debian/Ubuntu: libegl-dev");
             eprintln!("       Fedora:        mesa-libEGL-devel");
             eprintln!("       Arch:          mesa");
+            eprintln!("       Debian/Ubuntu: libegl-dev");
+            eprintln!("       openSUSE:      Mesa-libEGL-devel");
             std::process::exit(1);
         }
     }
