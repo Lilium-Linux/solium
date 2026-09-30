@@ -60,8 +60,10 @@ pub(crate) fn run() -> Result<()> {
     let mut event_loop: EventLoop<Solium> =
         EventLoop::try_new().context("creating the event loop")?;
     // Ctrl+C in the terminal, or `timeout`, leaves the way a quit binding
-    // does. `signals::tests::each_ending_signal_stops_the_loop`.
-    crate::signals::listen(&event_loop.handle(), |state: &mut Solium| {
+    // does, and Ctrl+C again ends a run that cannot.
+    // `signals::tests::each_ending_signal_stops_the_loop` and
+    // `the_same_signal_twice_ends_a_process_that_cannot_stop`.
+    let signals = crate::signals::listen(&event_loop.handle(), |state: &mut Solium| {
         state.request = Some(crate::state::Request::Quit);
     });
     let display: Display<Solium> = Display::new().context("creating the wayland display")?;
@@ -284,6 +286,7 @@ pub(crate) fn run() -> Result<()> {
     // Nested, the session this window is in keeps its own environment: this
     // tells nobody unless `SOLIUM_SESSION_BUS` names a bus. See `session.rs`.
     let settings = scripts.as_ref().map(Scripts::session).unwrap_or_default();
+    signals.stop_timeout(settings.stop_timeout);
     state.session =
         crate::session::Session::begin(settings, crate::session::Place::Nested, dev::session_bus());
     state.session.wayland(&socket_name);

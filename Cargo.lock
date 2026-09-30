@@ -1935,11 +1935,10 @@ name = "solium"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "async-signal",
  "cc",
- "futures-core",
  "mlua",
  "pkg-config",
+ "signal-hook-registry",
  "smithay",
  "solium-animation",
  "solium-effects",

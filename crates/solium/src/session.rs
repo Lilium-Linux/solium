@@ -63,14 +63,19 @@ pub(crate) struct Settings {
     pub(crate) systemd: bool,
     /// Start [`AUTOSTART`] beside [`TARGET`].
     pub(crate) autostart: bool,
+    /// How long after SIGTERM, SIGINT or SIGHUP a Solium that has not ended
+    /// ends itself, however it was started: see `signals.rs`.
+    pub(crate) stop_timeout: Duration,
 }
 
 impl Default for Settings {
-    /// Both on. `the_shipped_configuration_tells_the_session_and_starts_autostart`.
+    /// Both on, and five seconds.
+    /// `the_shipped_configuration_tells_the_session_and_starts_autostart`.
     fn default() -> Self {
         Self {
             systemd: true,
             autostart: true,
+            stop_timeout: crate::signals::STOP_TIMEOUT,
         }
     }
 }
@@ -407,6 +412,16 @@ impl Sink for Worker {
 fn connect(bus: Option<&str>) -> zbus::Result<zbus::blocking::Connection> {
     let builder = match bus {
         Some(address) => zbus::blocking::connection::Builder::address(address)?,
+        // A test that got this far by mistake would ask the developer's own
+        // systemd about their session, and could stop its target as a
+        // leftover. `tests_never_reach_the_session_bus`.
+        #[cfg(test)]
+        None => {
+            return Err(zbus::Error::Address(
+                "tests never use the session bus".to_owned(),
+            ));
+        }
+        #[cfg(not(test))]
         None => zbus::blocking::connection::Builder::session()?,
     };
     builder.method_timeout(PATIENCE).build()
@@ -779,7 +794,7 @@ mod tests {
         let mut session = Session::begin(
             Settings {
                 systemd: false,
-                autostart: true,
+                ..Settings::default()
             },
             Place::Session,
             None,
@@ -798,8 +813,8 @@ mod tests {
     #[test]
     fn session_autostart_false_starts_the_session_without_autostart() {
         let (mut session, recorder) = session(Settings {
-            systemd: true,
             autostart: false,
+            ..Settings::default()
         });
         session.wayland("wayland-5");
         session.x11(None);
@@ -872,6 +887,13 @@ mod tests {
         assert_eq!(recorder.take(), Vec::new());
         assert!(state.session.started);
         assert!(state.session.autostart);
+    }
+
+    /// Every test that needs a bus names one; a session that reaches for the
+    /// session bus instead, from a test, gets none.
+    #[test]
+    fn tests_never_reach_the_session_bus() {
+        assert!(connect(None).is_err());
     }
 
     #[test]

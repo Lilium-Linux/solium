@@ -2753,12 +2753,13 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // Whether this session is announced to systemd and D-Bus activation, and
-    // whether that starts XDG autostart: `config.session`, handed over by
-    // `init.lua`. Kept aside like `sol.qml`, for the backend to read once the
-    // configuration has loaded. An absent table or key keeps the default,
-    // on; a value that is not `true` or `false` is named in the log and the
-    // default kept. `a_configured_session_is_read_by_the_backend`.
+    // Whether this session is announced to systemd and D-Bus activation,
+    // whether that starts XDG autostart, and how long a signal to end waits
+    // for a clean stop: `config.session`, handed over by `init.lua`. Kept
+    // aside like `sol.qml`, for the backend to read once the configuration
+    // has loaded. An absent table or key keeps the default; a value of the
+    // wrong kind is named in the log and the default kept.
+    // `a_configured_session_is_read_by_the_backend`.
     sol.set(
         "session",
         lua.create_function(|lua, options: Option<mlua::Table>| {
@@ -2777,6 +2778,17 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                             "session: true or false; keeping the default, true"
                         ),
                     }
+                }
+                match options.get::<Value>("stop_timeout") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match value.as_u64().filter(|&millis| millis > 0) {
+                        Some(millis) => settings.stop_timeout = Duration::from_millis(millis),
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "session.stop_timeout is a whole number of milliseconds above 0; \
+                             keeping the default"
+                        ),
+                    },
                 }
             }
             lua.set_app_data(settings);
@@ -4802,7 +4814,11 @@ mod tests {
                 .expect("loading the test script")
                 .session()
         };
-        let settings = |systemd, autostart| crate::session::Settings { systemd, autostart };
+        let settings = |systemd, autostart| crate::session::Settings {
+            systemd,
+            autostart,
+            ..crate::session::Settings::default()
+        };
 
         assert_eq!(
             configured("sol.session({ systemd = false })"),
@@ -4812,12 +4828,23 @@ mod tests {
             configured("sol.session({ autostart = false })"),
             settings(true, false)
         );
-        // Said nothing, three ways, and said something that is not a boolean.
+        assert_eq!(
+            configured("sol.session({ stop_timeout = 1500 })"),
+            crate::session::Settings {
+                stop_timeout: Duration::from_millis(1500),
+                ..settings(true, true)
+            }
+        );
+        // Said nothing, three ways, and said something of the wrong kind.
         for source in [
             "",
             "sol.session(nil)",
             "sol.session({})",
             r#"sol.session({ systemd = "no", autostart = 0 })"#,
+            "sol.session({ stop_timeout = 0 })",
+            "sol.session({ stop_timeout = -5 })",
+            "sol.session({ stop_timeout = 2.5 })",
+            r#"sol.session({ stop_timeout = "soon" })"#,
         ] {
             assert_eq!(configured(source), settings(true, true), "{source:?}");
         }
@@ -4848,7 +4875,8 @@ mod tests {
 
         std::fs::write(
             directory.join("user.lua"),
-            "return { session = { systemd = false, autostart = false, autostrat = true } }",
+            "return { session = { systemd = false, autostart = false, stop_timeout = 900, \
+             autostrat = true } }",
         )
         .expect("writing the user file");
         let scripts = load(format!(
@@ -4861,7 +4889,8 @@ mod tests {
             scripts.session(),
             crate::session::Settings {
                 systemd: false,
-                autostart: false
+                autostart: false,
+                stop_timeout: Duration::from_millis(900),
             }
         );
         let unknown: Vec<String> = scripts
