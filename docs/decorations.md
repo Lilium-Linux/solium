@@ -1,79 +1,91 @@
 # Decorations, and other things the compositor draws
 
-Everything the compositor draws that is not a client's window is QML, hosted
-in-process. Window frames, the pointer, the loading window, the wallpaper, a
-shell you name in the configuration, and any other scene a script declares
-(see [shell-boundary.md](shell-boundary.md) for the shell). There is nothing to
-compile and no Rust to touch: write a file, name it, press `super+shift+r`.
+Most of what the compositor draws that is not a client's window is QML, hosted
+in-process: the window frames, the loading window, the wallpaper, a shell you
+name in the configuration, any other scene a script declares, and the pointer
+when no cursor theme is set (see [shell-boundary.md](shell-boundary.md) for the
+shell). There is nothing to compile and no Rust to touch: write a file, name
+it, press `super+shift+r`.
+
+Two things on screen are not QML: a pointer from an XCursor theme, which is
+the theme's own picture, and the rounded corners cut into a client, which are
+a fragment program the compositor runs over the client's pixels.
 
 The property-by-property contract for a frame lives next to the styles, at
-[`crates/solium/qml/panes/README.md`](../crates/solium/qml/panes/README.md).
-This is the guide: what the pieces are, how to write one, and what it costs.
+[`crates/solium/qml/panes/README.md`](../crates/solium/qml/panes/README.md),
+and so does the one list of the styles that ship. This is the guide: what the
+pieces are, how to write one, and what it costs.
 
-![Titlebars drawn by the compositor in QML, at rest and scaled down in overview](window-frames.png)
+![Three terminals tiled in the default top frame, then the same three in overview](window-frames.png)
 
-Both halves are the same QML. In overview each frame scales with the window it
-belongs to rather than being redrawn at a new size, because a frame is part of
-the window as far as the transform layer is concerned — which is why a mode can
-scale a window at all without knowing what a titlebar is.
+*Three terminals tiled, in the default `top` style over the default wallpaper:
+the focused window's titlebar is white, the other two light grey. Below, the
+same three in overview.* Both halves are the same QML. In overview each frame
+scales with the window it belongs to rather than being redrawn at a new size,
+because a frame is part of the window as far as the transform layer is
+concerned, which is why a mode can scale a window at all without knowing what
+a titlebar is.
 
-<img src="cursor.png" width="112" alt="The pointer, drawn from QML like everything else">
+## What is QML, and where it comes from
 
-The pointer is the same story in miniature: not an image loaded from a cursor
-theme, but QML rasterised by the compositor, so it belongs to the same design
-system as the frames. See [#81](https://github.com/Lilium-Linux/solium/issues/81)
-for what that costs — there is no way yet to make it match the theme every
-other application on the machine follows.
-
-## The five kinds
-
-| what | where | named by |
+| what | shipped as | named by |
 |---|---|---|
 | window frames | `qml/panes/<name>/` | `pane = "top"` |
 | the loading window | `qml/loading/*.qml` | `loading = { scene = "window" }` |
-| the pointer | `qml/cursor.qml` | `SOLIUM_QML_CURSOR` |
-| a shell (bar, dock, launcher) | anywhere | `shell = { scene = ... }` |
-| any other scene | anywhere | `sol.surface(name, { scene = ... })` |
+| the wallpaper | `qml/wallpaper.qml` | `wallpaper = ...` (see [ricing.md](ricing.md)) |
+| a shell (bar, dock, launcher) | nothing ships | `shell = { scene = ... }` |
+| any other scene | nothing ships | `sol.surface(name, { scene = ... })` |
+| the pointer, with no cursor theme | `qml/cursor.qml` | `SOLIUM_QML_CURSOR`, for one run |
 
-Your own directory is `~/.config/solium/qml/`, and it is searched first in
-every case. A file you write shadows the shipped one of the same name, and
-everything you did not write still comes from the shipped set — including its
-later improvements. That is the whole mechanism; there is no manifest and
-nothing to register.
+Your own directory is `~/.config/solium/qml/`, and for everything in that
+table but the pointer it is searched first. A file you write shadows the
+shipped one of the same name, and everything you did not write still comes
+from the shipped set, including its later improvements. A folder under
+`panes/` counts only if it has a `Pane.qml` in it, so an empty one does not
+replace the shipped style of that name. There is no registry: nothing has to
+be listed anywhere for a style to be found.
 
-## Writing a frame
+The pointer is the exception: `~/.config/solium/qml/cursor.qml` is not looked
+for. [The pointer](#the-pointer) below says what is.
 
-Start from `border.qml`. It is the smallest useful decoration and every other
-one is it plus something:
+## Writing a pane style
+
+A style is a folder. `Pane.qml` is its manifest: what the frame reserves from
+the client, and a list of layers. Each layer is its own QML scene, drawn at
+its own depth: `behind` the client, in the `frame` (over the client), or
+`above` the frame. `panes/border/` is the smallest, and the one to read first:
 
 ```qml
+// panes/border/Pane.qml
+import QtQuick
+import Solium
+
+PaneStyle {
+    insets.top: 3
+    insets.right: 3
+    insets.bottom: 3
+    insets.left: 3
+
+    requires: []
+
+    Layer { depth: "frame"; name: "border"; source: "Frame.qml" }
+}
+```
+
+```qml
+// panes/border/Frame.qml, shortened
 import QtQuick
 import Solium
 
 Item {
     id: frame
 
-    // What it reserves. The client is placed inside what is left.
-    property int insetTop: 3
-    property int insetRight: 3
-    property int insetBottom: 3
-    property int insetLeft: 3
-
-    // Set by the compositor every frame.
-    property string title: ""
-    property bool focused: false
-    property bool pointerInside: false
-    property int contentWidth: 0
-    property int contentHeight: 0
-
-    // Read by the compositor.
-    property string action: ""
-    property string hovered: ""
+    property int insetTop: 0         // set by the compositor, from Pane.qml
+    property bool focused: false     // set by the compositor
 
     Rectangle {
         anchors.fill: parent
-        color: "transparent"        // the client shows through
-        radius: 6
+        color: "transparent"         // the client shows through
         border {
             width: frame.insetTop
             color: frame.focused ? Theme.accent : Theme.edgeInactive
@@ -83,46 +95,77 @@ Item {
 }
 ```
 
-Four things about that are the whole model.
+Five things about that are the whole model.
 
-**The root covers the window's entire outer rect** — frame and client together,
-not a strip at the top. Whatever you do not paint stays transparent and the
-client shows through. That is why a bar can be on any side, or there can be no
-bar at all, or a bar that floats over the window and reserves nothing.
+**A layer's root covers the window's entire outer rect**, frame and client
+together, not a strip at the top. Whatever it does not paint stays transparent
+and the client shows through. That is why a bar can be on any side, or there
+can be no bar at all. A layer that declares `bleed` gets a larger canvas, the
+window grown by that much, and `bleedLeft` and `bleedTop` say where the window
+is inside it.
 
-**The insets are what you reserve**, read once when the frame is built. Reserve
-nothing and your decoration becomes an overlay: it draws on top of the client
-and never moves it.
+**The insets are what the style reserves**, declared once on the manifest,
+and the compositor hands the same four numbers to every layer as `insetTop`,
+`insetRight`, `insetBottom` and `insetLeft`. Reserve nothing and the style
+becomes an overlay: it draws over the client and never moves it.
 
-**`focused` and `pointerInside` are given to you every frame**, so reacting to
-focus or to the cursor is a binding rather than a subscription. `pointerInside`
-is true while the pointer is anywhere over the window, *including over the
-client* — which is how a border can follow a cursor that is over a text editor.
+**`focused`, `pointerInside`, `title` and the sizes are written for you** when
+they change, so reacting to focus or to the cursor is a binding rather than a
+subscription. `pointerInside` is true while the pointer is anywhere over the
+window, *including over the client*, which is how a border can follow a cursor
+that is over a text editor.
 
-**`action` is how you ask for something.** Set it to `"close"` or `"maximize"`;
-the compositor takes it and clears it, so a press is acted on once.
+**`action` is how a button asks for something.** Set it to `"close"` or
+`"maximize"`; the compositor takes it and clears it, so a press is acted on
+once, on release.
 
-## The one trap
-
-`hovered` decides whether a press starts a window drag. A decoration whose
-buttons do not set it will have its buttons dragging the window instead of
-pressing — which looks like the buttons being broken rather than like a missing
-property.
+**`onButton` is how a button keeps a press from dragging the window.** A press
+on the frame starts a window move unless a layer says the pointer is over a
+button, and the property the compositor reads for that is a boolean called
+`onButton`. The shipped `top` style keeps it next to the name of the button
+under the pointer:
 
 ```qml
+property string hovered: ""                       // which button, or ""
+readonly property bool onButton: hovered !== ""   // what the compositor reads
+
 MouseArea {
     anchors.fill: parent
     hoverEnabled: true
-    onEntered: frame.hovered = "close"
-    onExited: if (frame.hovered === "close") frame.hovered = ""
+    onContainsMouseChanged: frame.hovered = containsMouse ? "close" : ""
     onClicked: frame.action = "close"
 }
 ```
 
+A layer whose buttons do not declare `onButton` has its buttons drag the
+window instead of pressing, which looks like broken buttons rather than like a
+missing property. `hovered` on its own is not read by anything. Five of the
+shipped styles with buttons, `left`, `bottom`, `pulse`, `reactive` and
+`reveal`, declare `hovered` and not `onButton`, so their buttons may not press
+([#158](https://github.com/Lilium-Linux/solium/issues/158)). `top` is the one
+to copy.
+
+Two more things a style author meets. Presses reach a layer only inside the
+band the insets reserve; hover goes everywhere, presses do not, so a button
+drawn over the client or out in the bleed cannot be clicked. And a tiled
+window can be small: the shipped bars hide the title, then their buttons, when
+there is no room for them (#133), and a style of yours should plan for a small
+`paneWidth` too.
+
+The full list of what a layer is told and what is read back, `depth` and
+`bleed` in detail, and `client.radius` for rounding the client itself, are in
+the [panes README](../crates/solium/qml/panes/README.md).
+
+One QML file with an `Item` at its root is still a style, called a
+decoration: put it in `~/.config/solium/qml/decorations/` and name it. It is
+one `frame` layer, and it declares its own `insetTop` and the rest, because it
+has no manifest. A bundle is found first, so a file there named like a shipped
+style (`top.qml`) never draws; give it a name of its own.
+
 ## Sizes are logical, always
 
 A frame is laid out in **logical** pixels and rasterised at whatever its
-monitor's scale is. `insetTop: 3` is three logical pixels on a 1x screen and
+monitor's scale is. `insets.top: 3` is three logical pixels on a 1x screen and
 six real ones on a 2x screen, and `Theme.fontSize` behaves the same way.
 
 Nothing is required of you for that to work, and that is the point: there is no
@@ -138,12 +181,14 @@ more blur. Test it with `SOLIUM_OUTPUTS=2` and a scale on one of them; see
 
 ## Colours and fonts
 
-Nothing in a frame should contain a hex code. `Solium.Theme` has them:
+Nothing in a frame should contain a hex code. `Solium.Theme` has eighteen
+properties:
 
-`surface`, `surfaceInactive`, `surfaceSunken`, `edge`, `edgeInactive`, `text`,
-`textDim`, `accent`, `positive`, `warning`, `danger`, `control`,
-`controlInactive`, and the metrics `titlebarHeight`, `radius`, `gap`, `margin`,
-`fontFamily`, `fontSize`, `quick`, `normal`.
+- colours: `surface`, `surfaceInactive`, `edge`, `edgeInactive`, `text`,
+  `textDim`, `control`, `controlInactive`, `accent`, `warning`, `danger`;
+- metrics: `titlebarHeight`, `gap`, `margin`;
+- type: `fontFamily`, `fontSize`;
+- chrome durations, in milliseconds: `quick`, `normal`.
 
 The frames, the loading window and a hosted shell that imports `Solium` all
 read that one singleton, so a colour changed there changes all of them. The
@@ -154,32 +199,107 @@ first ([#88](https://github.com/Lilium-Linux/solium/issues/88)). A frame that
 hardcodes a colour is a frame that stops matching the moment anyone changes
 anything.
 
+## The pointer
+
+The pointer is the machine's XCursor theme whenever there is one:
+
+```lua
+cursor = { theme = "Adwaita", size = 24 },
+```
+
+`theme` is a directory under `~/.icons`, `~/.local/share/icons` or
+`/usr/share/icons`. `size` is in logical pixels, 8 to 256, and is multiplied
+by each monitor's scale. With either left out, `XCURSOR_THEME` and
+`XCURSOR_SIZE` decide, and then 24 pixels and no theme. A reload applies a
+change. An application can name the shape it wants, an I-beam or a resize
+arrow, through `cursor-shape`, and gets it from the theme; a shape the theme
+lacks falls back to that theme's own arrow. Over a frame the compositor sets
+the pointer itself: the arrow over a titlebar, and the matching resize arrow
+on each edge.
+
+<img src="cursor.png" width="232" alt="Solium's own pointer, magnified eight times, over the dark wallpaper and over a white titlebar">
+
+*Solium's own pointer at 24 pixels, magnified eight times: over the dark part
+of the wallpaper, and over a focused `top` titlebar.* It is what you get with
+no theme set anywhere, or with one named that is not installed, and it is QML:
+`qml/cursor.qml`. Its colours are fixed rather than taken from `Theme`, a
+white body with a dark outline, because the pointer sits on whatever a client
+drew and has to stay legible on black and on white alike.
+
+To change it, point `SOLIUM_QML_CURSOR` at a file of your own for a run. A copy
+in `~/.config/solium/qml/` is not looked for, and the scene is built once, so
+an edit to it needs a restart rather than a reload.
+
+## Which windows get a frame, and what a failure looks like
+
+Every window is offered a frame drawn by the compositor. A client that insists
+on drawing its own frame gets to, and is left without one; so are menus and
+tooltips, and a fullscreen window. `pane = "none"` (or `SOLIUM_PANE=none`) draws
+no frame at all and builds no QML scene per window.
+
+A style that cannot be loaded (a name that is nowhere, a layer whose QML does
+not build, or a `requires` this session cannot meet) leaves each window it
+was for **bare**: no frame and no space reserved for one, and a line in the
+log saying so (#90). Fixing the file and pressing `super+shift+r` frames the
+windows opened after that; a window already left bare stays bare until it is
+opened again.
+
+## What it costs
+
+Which path QML renders on decides most of this. On the hardware it is the GPU
+by default, when a trial render at startup passes. Nested it is software, and
+so it is with `qml.renderer = "software"`, when the trial fails, or when the
+last GPU start in the compositor did not work. The log line that begins
+`QML renderer:` says which one a session got, and why.
+
+**On both paths**, an idle layer costs a flag read: Qt is asked each frame
+whether the scene has anything new, and the compositor draws only then. Bleed
+is paid for in full, because every pixel of the larger canvas is drawn each
+time the layer changes, so a bar throwing spikes upward should ask for
+`bleed: { "top": 48 }` rather than `48`.
+
+**On the GPU**, each layer is drawn by Qt's OpenGL scene graph straight into a
+buffer the compositor allocated, and nothing is copied or uploaded. A window
+being resized moves its layers onto a new buffer rather than rebuilding them,
+so their animations carry on through it.
+
+**In software**, Qt rasterises a changed layer on the CPU, and the compositor
+copies it into a buffer and uploads it. A `frame` layer that paints only
+inside its own insets has only those bands copied, and the upload is the one
+box around them: for a titlebar that is about 4% of the window, and for a
+style that reserves all four sides it is the whole window. A layer that
+reserves space *and* paints outside it has to say so with
+`property bool overlay: true`, or what it paints outside is not copied. A
+layer at `behind` or `above`, a layer with any bleed, and every layer of a
+style that reserves nothing are overlays already.
+
+**`requires: ["gpu"]`** is for a style that needs the GPU path. The software
+scene graph does not implement `ShaderEffect`, and `Canvas` does not appear to
+paint on it, so a style using either would draw wrong in software without a
+word. Declaring it means that on a software session, nested ones included, the
+style is refused and its windows are left bare, with the unmet term in the
+log. `gpu` is the only term there is, and a term this build has never heard of
+is refused too.
+
 ## Animation inside a frame
 
-Nothing to declare. Qt is asked each frame whether the scene has anything new,
-and the compositor draws only then — so an idle frame costs a flag read, a
-transition runs at the screen's refresh rate, and a loop with a pause in it
-survives the pause.
+Nothing to declare: a transition runs at the screen's refresh rate, and a loop
+with a pause in it survives the pause.
 
-Two things to know before you animate:
+**A layer that never stops animating never stops costing anything.** The one
+measurement there is dates from 2026-09-06, on the software path before the
+GPU one existed: with the `pulse` style animating at the screen's full rate,
+the whole compositor used about a tenth of a core. `pulse` runs its animation
+only while its window is focused, so an unfocused window costs nothing. Making
+that trade knowingly is fine; making it by accident is not.
 
-**A frame that never stops animating never stops costing anything.** On the
-software renderer it is rasterised on the CPU: a full-width gradient moving at
-260 Hz is about a tenth of a core. `pulse.qml` does that deliberately while focused. Making that trade
-knowingly is fine; making it by accident is not.
-
-**Stay inside your own bands if you can.** A frame that paints only where it
-reserved space has only those bands copied and uploaded when it changes — a
-titlebar is around 4% of a window, and copying the other 96% every frame is
-most of what an animating decoration costs. If you reserve space *and* paint
-outside it, say so with `property bool overlay: true`, which opts out of that
-optimisation. Usually the better answer is to reserve the couple of pixels you
-were painting over.
+QML animations run on the compositor's clock rather than Qt's own timer, so a
+titlebar easing in step with its window stays in step.
 
 ## The loading window
 
 The other scene worth writing. It is what is inside a window between the user
-asking for an application and the application existing — and the window is
+asking for an application and the application existing, and the window is
 already real by then: it has its slot, the other windows have moved aside, it
 can be closed.
 
@@ -209,12 +329,19 @@ Item {
 }
 ```
 
+The rest of `loading` in `config.lua` decides what the wait looks like:
+`patience` (how long before a window whose application never came is given
+up), `reserves_a_slot` (whether the others move aside at once), `decorated`
+(whether its frame is drawn meanwhile, which gives you a close button for an
+application that is not coming) and `fade`.
+
 **Do not fade it out yourself when the application arrives.** The compositor
-does that, over `loading.fade`, and a scene *cannot* do it for itself: Qt's
-software renderer repaints only what it thinks changed, onto the pixels already
-there, so each half-transparent frame lands on its own opaque previous one and
-nothing fades at all. This is not a rule of thumb — it is a thing that was
-tried, and the first attempt was a hard cut with one stray frame in it.
+does that, over `loading.fade`. Whether a window is see-through is a
+presentation transform, like where it is and how big, so the compositor
+applies it to the scene's picture as it draws it. On the software renderer a
+scene could not do it anyway: Qt repaints only what it thinks changed, onto
+the pixels already there, so each half-transparent frame lands on its own
+opaque previous one and nothing fades.
 
 ## Trying things quickly
 
@@ -224,32 +351,31 @@ SOLIUM_LOADING=mine    ./target/debug/solium     # one run, one loading scene
 solium --check-qml path/to/thing.qml             # does it even load?
 ```
 
-`--check-qml` loads one file and says what went wrong without starting a
-compositor. Porting a scene means walking a chain of "type X unavailable"
-errors, and doing that through a real session costs ten seconds a link.
+`--check-qml` loads one file and prints `ok` or what Qt reported, without
+starting a compositor. Read what it prints: it exits 0 either way. It loads
+the file in software, so it cannot check a `requires: ["gpu"]` style's
+shaders, and on a `Pane.qml` it does not follow `source:`, so run it on each
+file of a bundle. Porting a scene means walking a chain of "type X
+unavailable" errors, and doing that through a real session costs ten seconds a
+link.
 
 `super+shift+r` in a running session reads the configuration again, drops the
 QML cache and rebuilds every frame. Windows keep their slots and each client is
-resized to whatever the new decoration left it — so a frame can be written
-against a desktop you are using.
+resized to whatever the new style left it, so a frame can be written against a
+desktop you are using. While `SOLIUM_PANE` is set, it decides the style and
+`pane =` does not.
 
-With `--debug-mode`, `super+shift+d` opens a panel that switches decoration,
-transform and morph live. It is a development tool and will not be here
-forever, but while it is, it is the fastest way to see eight decorations in
-eight seconds.
+With `--debug-mode`, the Developer Tweaks panel is shown at startup and
+`super+shift+d` hides and shows it. It lists every style it finds, yours
+included, under "Pane style" (bundles) and "Decoration" (single files), and
+switches the style live. It also has presentation effects for the focused
+window and a reload button.
 
 ## What ships
 
-| file | |
-|---|---|
-| `top.qml` | a titlebar above the window — the default |
-| `left.qml` | a vertical titlebar down the left side |
-| `bottom.qml` | a titlebar underneath |
-| `border.qml` | no bar, just a frame — read this one first |
-| `reactive.qml` | a border that lights where the cursor is, with a bar |
-| `proximity.qml` | a border that answers the pointer arriving and leaving |
-| `reveal.qml` | a bar that slides out of the window's edge on approach |
-| `pulse.qml` | a bar with an animation running in it |
+The shipped styles, and the demonstrations kept with the tests, are listed
+once, in the [panes README](../crates/solium/qml/panes/README.md#what-is-here).
+`top` is the default.
 
 See also: **[ricing.md](ricing.md)** for the settings,
 **[animation.md](animation.md)** for the engine that moves the windows these

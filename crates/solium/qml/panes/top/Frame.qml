@@ -35,10 +35,11 @@ Item {
     // Read by the compositor.
     property string action: ""
 
-    // Which button the pointer is over, or empty. Read by the compositor to
-    // decide whether a press starts a window drag — QML owns the button
-    // layout, so QML is what knows. Duplicating the geometry in Rust would be
-    // a mirror of state with two authorities.
+    // Which button the pointer is over, or empty. `onButton`, from it, is what
+    // the compositor reads to decide whether a press starts a window drag
+    // (`decoration::tests::the_pointer_arrives_in_the_layers_own_canvas`) —
+    // QML owns the button layout, so QML is what knows. Duplicating the
+    // geometry in Rust would be a mirror of state with two authorities.
     property string hovered: ""
     readonly property bool onButton: hovered !== ""
 
@@ -106,9 +107,10 @@ Item {
     // are hidden with `visible` rather than squeezed: that takes a piece out
     // of the picture and out of the pointer's reach in one property, since an
     // invisible item receives no mouse events -- so a hidden button cannot set
-    // `hovered`, which the compositor reads to decide whether a press on the
-    // bar starts a drag. The `Row` lays out only its visible buttons, so close
-    // stays against the right edge when maximise goes.
+    // `hovered`, and so `onButton`, which the compositor reads to decide
+    // whether a press on the bar starts a drag. The `Row` lays out only its
+    // visible buttons, so close stays against the right edge when maximise
+    // goes.
     //
     // The close button needs its own 13px, `Theme.margin` to its right and as
     // much again to its left: 37px. The maximise button needs another

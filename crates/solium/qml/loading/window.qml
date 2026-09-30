@@ -13,10 +13,11 @@
 // compositor every frame; this one uses only the first.
 //
 // Do not try to fade this out yourself when the application arrives — the
-// compositor does it, and a scene cannot: Qt's software renderer repaints only
-// what changed, onto the pixels already there, so each half-transparent frame
-// lands on its own opaque previous one and nothing fades. `loading.fade` is the
-// setting.
+// compositor does it, because whether a window is see-through is a
+// presentation transform, like where it is and how big. `loading.fade` is the
+// setting. On the software renderer a scene could not do it anyway: Qt repaints
+// only what changed, onto the pixels already there, so each half-transparent
+// frame lands on its own opaque previous one and nothing fades.
 //
 //     SOLIUM_LOADING=mine        ~/.config/solium/qml/loading/mine.qml
 //     SOLIUM_LOADING=~/mine.qml  anywhere

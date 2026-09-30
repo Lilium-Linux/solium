@@ -150,10 +150,12 @@ exactly this reason. Animate motion the user did not personally drag.
 which is the point of a lock.
 
 **A scene fading itself out.** The dissolve from a loading window to its
-application is the compositor's, not the scene's, and a QML scene *cannot* do it
-for itself: Qt's software renderer repaints only what it thinks changed, onto the
-pixels already there, so each half-transparent frame lands on its own opaque
-previous one and nothing fades. `loading.fade` is the setting.
+application is the compositor's, not the scene's. Whether a window is
+see-through is a presentation transform, like where it is and how big, so the
+compositor applies it to the scene's picture as it draws it. On the software
+renderer a scene could not do it anyway: Qt repaints only what it thinks
+changed, onto the pixels already there, so each half-transparent frame lands on
+its own opaque previous one and nothing fades. `loading.fade` is the setting.
 
 ## What it costs
 
