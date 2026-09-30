@@ -42,26 +42,40 @@ fn keys(table: &Table) -> BTreeSet<String> {
         .collect()
 }
 
-/// Every name the compositor puts in `sol`, `sol.layout`, and on the two
-/// objects `sol.layout` makes, spelled the way `sol.lua` declares them:
+/// Every name the compositor puts in `sol`, in each table inside it, and on
+/// the two objects `sol.layout` makes, spelled the way `sol.lua` declares them:
 /// `sol.keep`, `sol.layout.grid`, `Tree:insert`, `Scroller:consume`.
 ///
-/// The two tables are read from the real `sol` table, built the way a load
-/// builds it, so nothing here can be a stale copy. The objects' methods are
-/// read from their `impl mlua::UserData` blocks instead, because mlua keeps a
-/// userdata's methods behind a closure that Lua cannot list.
+/// The tables are read from the real `sol` table, built the way a load builds
+/// it, so nothing here can be a stale copy. Every table-valued key is walked
+/// into, not only `sol.layout`: a namespace added later has its functions
+/// checked too. A key starting with `_` is the compositor's own bookkeeping,
+/// declared in `sol.lua` as a field but not walked into. The objects' methods
+/// are read from their `impl mlua::UserData` blocks instead, because mlua keeps
+/// a userdata's methods behind a closure that Lua cannot list.
 fn registered() -> BTreeSet<String> {
     let lua = Lua::new();
     let sol = build_api(&lua).expect("building the sol table");
-    let mut names: BTreeSet<String> = keys(&sol)
-        .into_iter()
-        .map(|name| format!("sol.{name}"))
-        .collect();
-    let layout: Table = sol.get("layout").expect("sol.layout is a table");
-    names.extend(
-        keys(&layout)
-            .into_iter()
-            .map(|name| format!("sol.layout.{name}")),
+    let mut names = BTreeSet::new();
+    for (key, value) in sol.pairs::<Value, Value>().filter_map(Result::ok) {
+        let Value::String(name) = key else {
+            continue;
+        };
+        let name = name.to_string_lossy();
+        if let Value::Table(table) = value
+            && !name.starts_with('_')
+        {
+            names.extend(
+                keys(&table)
+                    .into_iter()
+                    .map(|inner| format!("sol.{name}.{inner}")),
+            );
+        }
+        names.insert(format!("sol.{name}"));
+    }
+    assert!(
+        names.iter().any(|name| name.starts_with("sol.layout.")),
+        "no sol.layout.* names found; the walk into sol's tables is broken"
     );
 
     for (object, userdata) in [("Tree", "TilingTree"), ("Scroller", "Scrolling")] {
