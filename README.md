@@ -270,9 +270,9 @@ is named.
 Titlebars, the pointer, the wallpaper and every pane style are QML, rendered
 in-process through `QQuickRenderControl` and drawn as ordinary render elements.
 Not a shell talking to a compositor over a protocol — the same process, the
-same frame. A shell can be hosted in that same engine too, Quickshell-written
-ones included, through `shell = { scene = ... }` in the configuration: see
-[docs/shell-boundary.md](docs/shell-boundary.md).
+same frame. A shell can be hosted in that same engine too, as QML written
+against Solium's own API, through `shell = { scene = ... }` in the
+configuration: see [docs/shell-boundary.md](docs/shell-boundary.md).
 
 That is why a titlebar can be reloaded while the session runs, why the pointer
 belongs to the same theme as the window frames, and why a decoration can be a

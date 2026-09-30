@@ -11,10 +11,10 @@ the line, and it is not where a Wayland tutorial would put it.
 - A shell is named in the configuration, `shell = { scene = "<its root QML
   file>" }`, and hosted in-process through `sol.surface`, by `lua/shell.lua`.
   The shipped configuration names none.
-- A shell written against [Quickshell](https://quickshell.outfoxxed.me/)'s QML
-  API is hosted the same way. Solium's Quickshell compatibility layer answers
-  its `import Quickshell` lines from inside the compositor; it is an
-  API-compatible shim, not Quickshell (see [THIRD_PARTY.md](../THIRD_PARTY.md)).
+- A shell is QML written against Solium's own API: `import Solium` for
+  `Theme`, and an `action` property for what it asks Lua to do
+  ([below](#what-a-hosted-shell-is-given)). Quickshell support was removed
+  (#172); Quickshell itself may add Solium support on its own side.
 - A shell that is a separate program — Waybar, a Quickshell instance run on
   its own, any `wlr-layer-shell` panel — is supported too, as an ordinary
   client. It needs nothing from the configuration and gets nothing from the
@@ -133,27 +133,9 @@ metrics the frames are drawn with, overridable by one file in
 action) ... end)` in Lua is told. Anything Lua can do — `sol.spawn`, switching
 workspaces, any binding — a hosted shell can ask for this way.
 
-**The Quickshell compatibility layer**, on the QML search path after the
-compositor's own modules, so it can never shadow `Solium.*`:
-
-| Module | What answers |
-|---|---|
-| `Quickshell` | `Singleton`, `Scope`, `Variants` (an `Instantiator`), `SystemClock`; the `Quickshell` singleton's `execDetached`, `iconPath`, `env`, `processId`, `appId`, `configDir` and `shellDir`; and the `Quickshell.Io` types again |
-| `Quickshell.Io` | `Process`, `StdioCollector`, `SplitParser`, `FileView`, `Socket` — real, in C++ |
-| `Quickshell.Wayland` | `ToplevelManager.toplevels`, filled from the compositor's own window list; `PanelWindow` (and `WlrLayershell`) as a window whose content item the compositor draws across the scene; `Toplevel`'s shape |
-| `Quickshell.Hyprland` | `Hyprland.toplevels` and `Hyprland.activeToplevel`, from the same list; `HyprlandToplevel`'s shape |
-| `Quickshell.Widgets` | `IconImage`, `ClippingRectangle`, `WrapperItem` |
-| `Quickshell.Services.Pipewire`, `.Notifications`, `.Mpris`, `Quickshell.Networking`, `Quickshell.Bluetooth` | The types, with empty data: enough for a shell to load, not to work |
-
-The window list carries each window's `title`, `appId` and whether it is
-`activated`, and is built only once some scene has read it. Icons are served
-at `image://theme/<name>` from the icon theme, and `iconPath` answers with
-such a URL; a name that is a path, or has a `/` in it, gets the generic
-application icon rather than that file (#145).
-
 ## What it is not given
 
-Said plainly, because a shim that loads is easy to mistake for one that works:
+Said plainly, because a shell that loads is easy to mistake for one that works:
 
 - **No input region: the scene takes every press and hover on its monitor.**
   The pointer is claimed anywhere inside the scene's area, which is the whole
@@ -161,47 +143,24 @@ Said plainly, because a shim that loads is easy to mistake for one that works:
   36-pixel bar claims the screen under it too. So while a shell is hosted, the
   windows on that monitor cannot be clicked, focused with the pointer or
   dragged with `super`. What it wants is an input region: a point claimed only
-  where the scene has an item under it, or a surface sized from
-  `PanelWindow`'s anchors and `implicitHeight`.
+  where the scene has an item under it.
 - **One monitor.** One scene, on the primary monitor. A hosted shell on every
-  screen is a later design step, and `Quickshell.screens` is empty.
-- **No reserved space, and no placement.** `PanelWindow`'s anchors and
-  `exclusiveZone` are accepted and ignored: its content fills the scene, and a
-  hosted bar does not take its strip out of the work area, so windows are
-  placed under it. The attached `WlrLayershell.layer`, `.namespace` and
-  `.keyboardFocus` are not there at all. Its `width` and `height` are
-  read-only, so `PanelWindow { height: 30 }` fails to load, and there is no
-  `margins` group, so `margins { top: 4 }` fails too; either stops the whole
-  shell loading.
+  screen is a later design step.
+- **No reserved space, and no placement.** The scene fills the primary
+  monitor's usable area, and a hosted bar does not take its strip out of the
+  work area, so windows are placed under it.
 - **No keyboard, and every button is the left one.** Pointer motion and
   presses — no keyboard focus, no grabs (#85), no wheel, and a right or middle
   press arrives as a left press, so a right-click on a hosted button activates
   it. A launcher's text field cannot be typed into.
 - **A `Timer` only fires on a frame something else asked for.** Qt's events
   are drained when a frame is drawn, and a settled desktop draws none, so a
-  `SystemClock` stops until the pointer moves or a window changes. What that
-  wants is a wake-up deadline; `host.cpp` says why counting timers as
-  animation is the wrong fix.
-- **Windows can be read, not driven.** The list's entries are plain records,
-  with no `activate()` or `close()`; `Hyprland.dispatch` logs that it has no
-  mapping; `Hyprland.monitors` and `workspaces` are empty. Driving the
-  compositor goes through `action` and Lua.
-- **Programs it starts are not Solium's clients.** `Process` and
-  `execDetached` start children with the compositor's own environment, which
-  does not point `WAYLAND_DISPLAY` at Solium the way `sol.spawn` does. And a
-  `Process` declared with `running: true` never starts, whatever its
-  `command`: `running` is acted on the moment it is set, before the command is,
-  where Quickshell waits for the component to complete. Set `running` from
-  `Component.onCompleted` instead.
-- **Services are shapes, not services.** PipeWire, notifications, MPRIS,
-  networking and Bluetooth report nothing, and there is no `Quickshell.
-  Services.UPower`, `SystemTray` or `Pam` at all.
-- **No Quickshell windows of other kinds.** There is no `ShellRoot`,
-  `FloatingWindow`, `PopupWindow` or `WlSessionLock`; a lock screen is a
-  separate `ext-session-lock` client.
-- **`configDir` is not the shell's directory.** `Quickshell.configDir` and
-  `shellDir` answer `SOLIUM_SHELL_DIR`, or `~/.config/solium` when it is unset,
-  where Quickshell would answer the shell's own directory.
+  clock stops until the pointer moves or a window changes. What that wants is
+  a wake-up deadline; `host.cpp` says why counting timers as animation is the
+  wrong fix.
+- **No window list, and no icons.** Nothing tells a hosted scene which
+  windows exist, and there is no `image://` provider for the icon theme.
+  Driving the compositor goes through `action` and Lua.
 
 ## What is still a client
 
@@ -416,6 +375,6 @@ arrives.
 None of that is reachable from a separate process. A client dock can pass a
 rectangle over IPC, but by the time the window exists the two are separate
 scenes and nothing holds both at once to interpolate between them. That is why
-a shell written for Quickshell is hosted here rather than run beside the
-compositor under Quickshell itself: hosted, its icons and the windows are in
-one engine, and the morph is a reparent rather than a fake.
+a shell is hosted here rather than run beside the compositor as a program of
+its own: hosted, its icons and the windows are in one engine, and the morph is
+a reparent rather than a fake.

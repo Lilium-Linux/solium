@@ -637,9 +637,9 @@ file:
 return { shell = { scene = "~/.config/solium/shell/shell.qml" } }
 ```
 
-One scene, on the primary monitor. A shell written for Quickshell runs this
-way too; [shell-boundary.md](shell-boundary.md) has how to install one and what
-it is and is not given.
+One scene, on the primary monitor, written against Solium's own QML API;
+[shell-boundary.md](shell-boundary.md) has how to install one and what it is
+and is not given.
 
 A bar can also be an ordinary client over `wlr-layer-shell`, which means any
 panel already written for that protocol works. A surface names the output it
