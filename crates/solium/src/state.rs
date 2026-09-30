@@ -328,8 +328,10 @@ pub(crate) struct Solium {
     /// The Lua runtime. Modes live in here, not in the compositor.
     pub(crate) scripts: Option<Scripts>,
 
-    /// The active mode's name, as a script reported it. The compositor does
-    /// not know what modes exist — it only knows what to put in the bar.
+    /// The active mode's name, as a script last reported it with `sol.status`
+    /// (`input::tests::a_shifted_digit_fires_the_binding_that_names_the_digit`
+    /// reads it back). The compositor does not know what modes exist; it keeps
+    /// the name and logs it when it changes, and nothing draws it.
     pub(crate) status: String,
 
     /// Whether a mode owns input. While it does, keys and clicks belong to the
