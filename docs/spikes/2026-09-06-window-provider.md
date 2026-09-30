@@ -1,7 +1,17 @@
 # The window provider
 
 **Date:** 2026-09-06
-**Status:** design, before any code moves. Branch: `window-provider`.
+**Status:** done, 2026-09-07. A spike record: the current design is in
+[architecture.md, *A window is a pane*](../architecture.md#a-window-is-a-pane-not-a-clients-surface).
+
+**Since then (2026-09-30).** Both leftovers listed under *What is left* are
+fixed: #34, and #35, by an activation token that moves a client into the window
+waiting for it when the process walk misses. A frame is now a field of the
+pane, not a table keyed by `PaneId`. The loading window's frame is still built,
+but by default not drawn (`loading.decorated = false`), and its scene fades off
+the application that replaces it (`loading.fade`). The *leaving* content was
+built later, in #126: a window whose client has gone fades out from its last
+picture. X11 windows are never adopted; each opens a window of its own.
 
 ## Why
 

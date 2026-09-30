@@ -1,5 +1,17 @@
 # Drawing a window as geometry, not a rectangle
 
+**Since then (2026-09-30).** Steps 1, 2 and 4 of the order below shipped as
+written, on 2026-09-06. Step 3 shipped as script keys — `rotate_x`, `rotate_y`,
+`rotate_z` and `perspective`, and later `z` and `pivot`, documented in
+[modes.md](../modes.md#depth-and-pivot) — but no Stage Manager mode:
+that is atrium, #85, not yet written. Step 5 became one built-in fragment
+effect, rounded corners, not shaders chosen by name. `Frame` has since gained
+`z`, `pivot` and `zoom`, and a window drawn through a matrix costs an offscreen
+pass as well as a quad. The genie is still the only deformation: a fold or a
+curl needs a depth per vertex, which the deformation interface does not carry.
+The two sections below that no longer held, *Why hit-testing does not move* and
+*The cost, stated plainly*, are corrected in place.
+
 ## The wall we hit
 
 A presentation transform can currently say exactly two things:
