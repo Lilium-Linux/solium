@@ -32,16 +32,34 @@ local monitors = require("monitors")
 
 -- `moved` is where the user dragged a dialog to, by id, as an offset from its
 -- parent's top-left corner. See `dialogs.dropped`.
-local dialogs = { moved = {} }
+--
+-- `lifted` is the windows the user took out of the arrangement themselves
+-- (`super+shift+space`, #150), by id, kept so a reload does not put them back.
+-- `a_window_floated_by_the_user_stays_out_through_a_reload`.
+local kept = sol.keep("dialogs", { lifted = {} })
+local dialogs = { moved = {}, lifted = kept.lifted }
 
 -- Whether a layout should leave this window out of its arrangement.
 --
 -- One function rather than `window.modal` written out at seven call sites,
 -- because this is the predicate that is most likely to want a second clause
 -- later — and a policy spelled out at seven call sites is a policy that gets
--- changed at six.
+-- changed at six. The second clause is a window the user floated, which both
+-- layouts then treat exactly as they treat a dialog with no parent: out of the
+-- arrangement, over the middle of its screen at the size it had.
+-- `super_shift_space_floats_a_tiled_window_and_tiles_it_again`.
 function dialogs.floats(window)
-    return window.modal == true
+    return window.modal == true or dialogs.lifted[window.id] == true
+end
+
+-- Float window `id`, or put it back into the arrangement if it floats already.
+-- `super_shift_space_floats_a_tiled_window_and_tiles_it_again`.
+function dialogs.toggle(id)
+    if dialogs.lifted[id] then
+        dialogs.lifted[id] = nil
+    else
+        dialogs.lifted[id] = true
+    end
 end
 
 -- The window a modal is waiting on, as a rect, or nil.
@@ -280,9 +298,12 @@ function dialogs.dropped(id, windows, placed)
     return true
 end
 
--- Forget a drag: a dialog that closed, or stopped being one.
+-- Forget a drag: a dialog that closed, or stopped being one. And, for a window
+-- that closed, that the user floated it: ids are never reused.
+-- `a_window_the_layout_does_not_arrange_gets_the_floating_answer`.
 function dialogs.forget(id)
     dialogs.moved[id] = nil
+    dialogs.lifted[id] = nil
 end
 
 -- The window with this id in a snapshot list, or nil.

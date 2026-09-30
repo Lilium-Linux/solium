@@ -375,6 +375,17 @@ pub(crate) enum Command {
     Focus {
         id: u64,
     },
+    /// Send a window fullscreen on the monitor it is on, or bring it back
+    /// from fullscreen: what the client itself would ask for, asked on its
+    /// behalf. `sol.toggle_fullscreen`, and `super+f` (#150).
+    ToggleFullscreen {
+        id: u64,
+    },
+    /// Maximise a window, or put it back: the frame's button, from a script.
+    /// `sol.toggle_maximize`, and `super+shift+m` (#150).
+    ToggleMaximize {
+        id: u64,
+    },
     /// Frame every window with a named decoration.
     Decoration {
         name: Option<String>,
@@ -2857,6 +2868,56 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // Fullscreen and maximised, from a script (#150). The window named, or
+    // the focused one when none is, and nothing when nothing is focused: a
+    // binding that names no window means the one being typed into.
+    // `sol_toggles_name_the_focused_window_when_given_none`.
+    sol.set(
+        "toggle_fullscreen",
+        lua.create_function(|lua, id: Option<u64>| {
+            let Some(id) = id.or_else(|| focused_id(lua)) else {
+                return Ok(());
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::ToggleFullscreen { id });
+            })
+        })?,
+    )?;
+
+    sol.set(
+        "toggle_maximize",
+        lua.create_function(|lua, id: Option<u64>| {
+            let Some(id) = id.or_else(|| focused_id(lua)) else {
+                return Ok(());
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::ToggleMaximize { id });
+            })
+        })?,
+    )?;
+
+    // Focus or move by direction (#150). The compositor knows no more than
+    // the verb and the direction: it hands both to every `direction`
+    // listener, and the layout in charge answers (`lua/direction.lua`). A
+    // direction that is not one of the four is an error rather than nothing,
+    // so a misspelt binding says so instead of being a key that does nothing.
+    // `sol_direction_reaches_the_listeners_and_a_bad_one_is_an_error`.
+    for (name, verb) in [("focus_direction", "focus"), ("move_direction", "move")] {
+        sol.set(
+            name,
+            lua.create_function(move |lua, dir: String| {
+                if !["left", "right", "up", "down"].contains(&dir.as_str()) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "sol.{name}: {dir:?} is not a direction; it is left, right, up or down"
+                    )));
+                }
+                let sol = &lua.globals().get::<Table>("sol")?;
+                call_listeners(sol, "direction", (verb, dir))?;
+                Ok(())
+            })?,
+        )?;
+    }
+
     // `place` changes where a window *lives*; `present` changes where it is
     // *drawn*. A layout uses this one — and leaving a mode afterwards restores
     // it to wherever the layout has since put it, which is the correct answer
@@ -3155,6 +3216,17 @@ fn snapshot(lua: &Lua) -> mlua::Result<Snapshot> {
         .unwrap_or_default())
 }
 
+/// The window with the keyboard in this dispatch's snapshot, if any.
+fn focused_id(lua: &Lua) -> Option<u64> {
+    lua.app_data_ref::<Snapshot>().and_then(|snapshot| {
+        snapshot
+            .windows
+            .iter()
+            .find(|window| window.focused)
+            .map(|window| window.id)
+    })
+}
+
 fn with_pending(lua: &Lua, f: impl FnOnce(&mut Pending)) -> mlua::Result<()> {
     match lua.app_data_mut::<Pending>() {
         Some(mut pending) => {
@@ -3346,11 +3418,17 @@ impl mlua::UserData for Scrolling {
             Ok(())
         });
 
+        // Whether the window moved. See `Scroller::move_vertically`.
+        methods.add_method_mut("move_vertically", |_, this, by: i32| {
+            Ok(this.0.move_vertically(by as isize))
+        });
+
+        // Whether the column moved. See `Scroller::move_column`.
         methods.add_method_mut("move_column", |_, this, (by, options): (i32, Table)| {
             this.0.set_floors(floors_from(&options));
-            this.0
-                .move_column(by as isize, area(&options)?, tuning(&options)?);
-            Ok(())
+            Ok(this
+                .0
+                .move_column(by as isize, area(&options)?, tuning(&options)?))
         });
 
         methods.add_method_mut("consume", |_, this, ()| {
@@ -3500,6 +3578,9 @@ impl mlua::UserData for TilingTree {
             this.0.remove(id);
             Ok(())
         });
+
+        // Whether both were in the tree. See `Tiling::swap`.
+        methods.add_method_mut("swap", |_, this, (a, b): (u64, u64)| Ok(this.0.swap(a, b)));
 
         // The keyboard path: `axis` is "width" or "height" and `by` is a signed
         // fraction that always *grows* the window when positive, from whichever
@@ -6749,6 +6830,15 @@ mod shipped {
         let expected = (1..=9).map(|index| format!("shift+super+{index}")).chain([
             "shift+super+bracketleft".to_owned(),
             "shift+super+bracketright".to_owned(),
+            // #150's, from `direction.lua` and `modes.lua` by way of `init.lua`.
+            "super+left".to_owned(),
+            "super+l".to_owned(),
+            "shift+super+down".to_owned(),
+            "shift+super+h".to_owned(),
+            "alt+super+k".to_owned(),
+            "super+f".to_owned(),
+            "shift+super+m".to_owned(),
+            "shift+super+space".to_owned(),
         ]);
         for combo in expected {
             assert!(
@@ -10368,5 +10458,1050 @@ impl Scripts {
     pub(crate) fn evaluate_in(&self, snapshot: Snapshot, chunk: &str) -> String {
         self.lua.set_app_data(snapshot);
         self.evaluate(chunk)
+    }
+}
+
+/// Focus and move by direction (#150), against the shipped scripts.
+///
+/// A compositor small enough to read: each window's rect and which one has the
+/// keyboard. `sol.place` moves a window, and its monitor with it by where its
+/// centre lands, as `Solium::output_of` decides; `sol.focus` moves the keyboard
+/// and raises the window. Every press is dispatched from the desk as the last
+/// one left it, which is what the compositor hands a script.
+#[cfg(test)]
+mod directions {
+    use super::{Command, Drawn, MonitorInfo, Parentage, Rect, Scripts, Snapshot, WindowInfo};
+    use std::path::PathBuf;
+
+    /// A landscape screen at the origin.
+    const WIDE: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 2560.0,
+        h: 1440.0,
+    };
+
+    /// A portrait screen to its right, so a column beside it is taller than
+    /// it is wide and splits one above the other.
+    const TALL: Rect = Rect {
+        x: 2560.0,
+        y: 0.0,
+        w: 1440.0,
+        h: 2560.0,
+    };
+
+    fn screen(name: &str, area: Rect) -> MonitorInfo {
+        MonitorInfo {
+            name: name.to_owned(),
+            area,
+            whole: area,
+            scale: 1.0,
+            focused: name == "DP-1",
+            primary: name == "DP-1",
+            transform: "normal".to_owned(),
+            off: false,
+        }
+    }
+
+    fn one_screen() -> Vec<MonitorInfo> {
+        vec![screen("DP-1", WIDE)]
+    }
+
+    fn two_screens() -> Vec<MonitorInfo> {
+        vec![screen("DP-1", WIDE), screen("DP-2", TALL)]
+    }
+
+    fn window(id: u64, monitor: &str, rect: Rect) -> WindowInfo {
+        WindowInfo {
+            id,
+            rect,
+            drawn: Drawn::default(),
+            title: format!("window {id}"),
+            focused: false,
+            monitor: monitor.to_owned(),
+            modal: false,
+            parent: Parentage::None,
+            leaving: false,
+            app_id: String::new(),
+            min: None,
+            max: None,
+            cramped: false,
+            shown: true,
+        }
+    }
+
+    fn about(left: f64, right: f64) -> bool {
+        (left - right).abs() < 1.0
+    }
+
+    fn same(left: Rect, right: Rect) -> bool {
+        about(left.x, right.x)
+            && about(left.y, right.y)
+            && about(left.w, right.w)
+            && about(left.h, right.h)
+    }
+
+    fn inside(rect: Rect, area: Rect) -> bool {
+        rect.x >= area.x - 1.0
+            && rect.y >= area.y - 1.0
+            && rect.x + rect.w <= area.x + area.w + 1.0
+            && rect.y + rect.h <= area.y + area.h + 1.0
+    }
+
+    /// The window ids `commands` handed the keyboard to, in order.
+    fn focuses(commands: &[Command]) -> Vec<u64> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Focus { id } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The window ids `commands` placed.
+    fn places(commands: &[Command]) -> Vec<u64> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Place { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    struct Desk {
+        scripts: Scripts,
+        entry: PathBuf,
+        monitors: Vec<MonitorInfo>,
+        windows: Vec<WindowInfo>,
+        cursor: (f64, f64),
+    }
+
+    impl Desk {
+        /// The shipped scripts in the order `init.lua` requires them, with
+        /// `before` run ahead of them, on these screens and no windows.
+        /// `package.path` is the entry's own and the directory is one per call,
+        /// for the reasons `dialogs::scripts` gives.
+        fn new(before: &str, monitors: Vec<MonitorInfo>) -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let directory = std::env::temp_dir()
+                .join(format!("solium-directions-{}-{serial}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    "package.path = {shipped:?} .. \"/?.lua\"\n\
+                     {before}\n\
+                     require(\"modes\")\n\
+                     require(\"workspaces\")\n\
+                     require(\"tiling\")\n\
+                     require(\"scrolling\")\n\
+                     require(\"direction\")\n",
+                    shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                ),
+            )
+            .expect("writing the entry point");
+            let scripts = Scripts::load(&entry).expect("loading the shipped layouts");
+            Self {
+                scripts,
+                entry,
+                monitors,
+                windows: Vec::new(),
+                cursor: (0.0, 0.0),
+            }
+        }
+
+        /// Floating windows where `windows` says, and no layout in charge.
+        fn floating(monitors: Vec<MonitorInfo>, windows: &[(u64, &str, Rect)]) -> Self {
+            let mut desk = Self::new("", monitors);
+            for &(id, monitor, rect) in windows {
+                desk.windows.push(window(id, monitor, rect));
+            }
+            desk
+        }
+
+        fn snapshot(&self) -> Snapshot {
+            let work_area = self
+                .monitors
+                .iter()
+                .find(|monitor| monitor.focused)
+                .map_or(WIDE, |monitor| monitor.area);
+            Snapshot {
+                windows: self.windows.clone(),
+                monitors: self.monitors.clone(),
+                work_area,
+                cursor: self.cursor,
+                ..Snapshot::default()
+            }
+        }
+
+        fn apply(&mut self, commands: &[Command]) {
+            for command in commands {
+                match command {
+                    Command::Place { id, rect, .. } => {
+                        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+                        let covering = self
+                            .monitors
+                            .iter()
+                            .find(|monitor| {
+                                let whole = monitor.whole;
+                                x >= whole.x
+                                    && x < whole.x + whole.w
+                                    && y >= whole.y
+                                    && y < whole.y + whole.h
+                            })
+                            .map(|monitor| monitor.name.clone());
+                        if let Some(window) =
+                            self.windows.iter_mut().find(|window| window.id == *id)
+                        {
+                            window.rect = *rect;
+                            if let Some(name) = covering {
+                                window.monitor = name;
+                            }
+                        }
+                    }
+                    Command::Focus { id } => self.focus(*id),
+                    _ => {}
+                }
+            }
+        }
+
+        /// Press a bound key, and apply what it asked for.
+        fn press(&mut self, combo: &str) -> Vec<Command> {
+            let outcome = self.scripts.key(combo, self.snapshot());
+            assert!(
+                outcome.handled,
+                "{combo} is not bound, or its handler failed"
+            );
+            self.apply(&outcome.commands);
+            outcome.commands
+        }
+
+        /// Window `id` opens on `monitor` with the pointer at `cursor`, and has
+        /// the keyboard once it is placed, as a new window does.
+        fn open(&mut self, id: u64, monitor: &str, cursor: (f64, f64)) {
+            let origin = self
+                .monitors
+                .iter()
+                .find(|each| each.name == monitor)
+                .map_or(WIDE, |each| each.area);
+            self.windows.insert(
+                0,
+                window(
+                    id,
+                    monitor,
+                    Rect {
+                        w: 800.0,
+                        h: 600.0,
+                        ..origin
+                    },
+                ),
+            );
+            self.cursor = cursor;
+            let outcome = self.scripts.opened(id, self.snapshot());
+            self.apply(&outcome.commands);
+            self.focus(id);
+        }
+
+        /// The keyboard to window `id`, which comes to the front.
+        fn focus(&mut self, id: u64) {
+            for window in &mut self.windows {
+                window.focused = window.id == id;
+            }
+            if let Some(at) = self.windows.iter().position(|window| window.id == id) {
+                let raised = self.windows.remove(at);
+                self.windows.insert(0, raised);
+            }
+        }
+
+        fn rect(&self, id: u64) -> Rect {
+            self.windows
+                .iter()
+                .find(|window| window.id == id)
+                .map(|window| window.rect)
+                .unwrap_or_default()
+        }
+
+        fn monitor(&self, id: u64) -> String {
+            self.windows
+                .iter()
+                .find(|window| window.id == id)
+                .map(|window| window.monitor.clone())
+                .unwrap_or_default()
+        }
+
+        fn rects(&self) -> Vec<(u64, Rect)> {
+            let mut out: Vec<(u64, Rect)> = self
+                .windows
+                .iter()
+                .map(|window| (window.id, window.rect))
+                .collect();
+            out.sort_by_key(|(id, _)| *id);
+            out
+        }
+
+        fn workspace_of(&self, id: u64) -> String {
+            self.scripts.evaluate(&format!(
+                "return tostring(require(\"workspaces\").of[{id}])"
+            ))
+        }
+
+        /// What `Solium::reload` does, with the desk as it is.
+        fn reload(&mut self) {
+            let mut fresh = Scripts::load_carrying(&self.entry, self.scripts.kept())
+                .expect("reloading the scripts");
+            let mut commands = fresh.restored(self.snapshot()).commands;
+            commands.extend(fresh.monitors_changed(self.snapshot()).commands);
+            commands.extend(fresh.relayout(self.snapshot()).commands);
+            self.scripts = fresh;
+            self.apply(&commands);
+        }
+    }
+
+    /// Tiling on, and four windows opened into a two-by-two grid on `DP-1`:
+    ///
+    /// ```text
+    /// 1 | 2
+    /// --+--
+    /// 3 | 4
+    /// ```
+    ///
+    /// Each opened with the pointer where it splits the tile it lands in the
+    /// way the picture says, and the picture checked, so a test reading
+    /// directions off it cannot pass on some other arrangement.
+    fn grid(before: &str, monitors: Vec<MonitorInfo>) -> Desk {
+        let mut desk = Desk::new(before, monitors);
+        desk.press("super+t");
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        desk.open(2, "DP-1", (2000.0, 720.0));
+        desk.open(3, "DP-1", (640.0, 1200.0));
+        desk.open(4, "DP-1", (1920.0, 1200.0));
+        let [one, two, three, four] = [1, 2, 3, 4].map(|id| desk.rect(id));
+        assert!(
+            one.x + one.w < two.x
+                && three.x + three.w < four.x
+                && one.y + one.h < three.y
+                && two.y + two.h < four.y
+                && about(one.x, three.x)
+                && about(one.y, two.y),
+            "the premise: a two-by-two grid, 1 2 over 3 4; it is {:?}",
+            desk.rects()
+        );
+        desk
+    }
+
+    /// **In tiling, focus and move reach the neighbouring tile in each
+    /// direction, on the arrows and on h, j, k and l.** #150.
+    ///
+    /// Every focus key from the corner that has a neighbour that way; every
+    /// move key trades the window with that neighbour, and the opposite move
+    /// puts both back exactly. At the edge of the only monitor nothing
+    /// happens: no focus, and nothing placed anywhere else.
+    #[test]
+    fn in_tiling_focus_and_move_reach_the_neighbour_in_each_direction() {
+        let mut desk = grid("", one_screen());
+        for (from, key, to) in [
+            (1, "super+right", 2),
+            (1, "super+down", 3),
+            (4, "super+left", 3),
+            (4, "super+up", 2),
+            (2, "super+h", 1),
+            (2, "super+j", 4),
+            (3, "super+k", 1),
+            (3, "super+l", 4),
+        ] {
+            desk.focus(from);
+            let commands = desk.press(key);
+            assert_eq!(focuses(&commands), [to], "{key} from window {from}");
+        }
+
+        let start = desk.rects();
+        for (from, key, with, back) in [
+            (1, "super+shift+right", 2, "super+shift+h"),
+            (1, "super+shift+down", 3, "super+alt+k"),
+            (4, "super+shift+left", 3, "super+shift+l"),
+            (4, "super+shift+up", 2, "super+shift+j"),
+        ] {
+            desk.focus(from);
+            let (was, other) = (desk.rect(from), desk.rect(with));
+            desk.press(key);
+            assert!(
+                same(desk.rect(from), other) && same(desk.rect(with), was),
+                "{key} from window {from} did not trade tiles with window {with}: {:?}",
+                desk.rects()
+            );
+            let commands = desk.press(back);
+            assert!(
+                focuses(&commands).is_empty(),
+                "a move does not move the keyboard"
+            );
+            let now = desk.rects();
+            assert!(
+                start
+                    .iter()
+                    .zip(&now)
+                    .all(|((_, before), (_, after))| same(*before, *after)),
+                "{back} after {key} is not the desk it started as: {start:?} and now {now:?}"
+            );
+        }
+
+        for (from, key) in [
+            (1, "super+left"),
+            (1, "super+up"),
+            (4, "super+right"),
+            (4, "super+down"),
+        ] {
+            desk.focus(from);
+            assert!(
+                focuses(&desk.press(key)).is_empty(),
+                "{key} from window {from}, at the edge of the only monitor"
+            );
+        }
+        for (from, key) in [(1, "super+shift+left"), (4, "super+shift+down")] {
+            desk.focus(from);
+            desk.press(key);
+            let now = desk.rects();
+            assert!(
+                start
+                    .iter()
+                    .zip(&now)
+                    .all(|((_, before), (_, after))| same(*before, *after)),
+                "{key} from window {from} at the edge of the only monitor moved something: {now:?}"
+            );
+        }
+    }
+
+    /// **At a monitor's edge, tiling goes on to the next monitor, and the desk
+    /// it is showing.** #150.
+    ///
+    /// The grid on the landscape screen; on the portrait one to its right,
+    /// showing workspace 2, window 5 above window 6. Focus crosses both ways
+    /// to the tile level with the window it left, the nearer when two are.
+    /// A move crosses too: window 2 leaves the grid, whose other windows close
+    /// up, and goes in beside window 5 on the side it arrived from, on
+    /// workspace 2. Moved back, it splits the tile it arrives at, level with
+    /// where it was -- which is the grid again. Into a monitor with nothing on
+    /// it, a window takes the whole screen.
+    #[test]
+    fn at_a_monitors_edge_tiling_crosses_to_the_desk_the_next_monitor_shows() {
+        let mut desk = grid("", two_screens());
+        let start = desk.rects();
+        assert_eq!(
+            desk.scripts
+                .evaluate("require(\"workspaces\").showing[\"DP-2\"] = 2 return \"\""),
+            ""
+        );
+        desk.open(5, "DP-2", (3280.0, 1280.0));
+        desk.open(6, "DP-2", (3280.0, 2400.0));
+        let (five, six) = (desk.rect(5), desk.rect(6));
+        assert!(
+            five.y + five.h < six.y && inside(five, TALL) && inside(six, TALL),
+            "the premise: 5 above 6 on the portrait screen: {:?}",
+            desk.rects()
+        );
+        assert_eq!(
+            desk.workspace_of(5),
+            "2",
+            "the premise: DP-2 is showing workspace 2"
+        );
+
+        for (from, key, to) in [
+            (2, "super+right", 5),
+            (4, "super+right", 5),
+            (6, "super+left", 4),
+            (5, "super+left", 2),
+        ] {
+            desk.focus(from);
+            assert_eq!(focuses(&desk.press(key)), [to], "{key} from window {from}");
+        }
+
+        desk.focus(2);
+        desk.press("super+shift+right");
+        let (two, beside, four) = (desk.rect(2), desk.rect(5), desk.rect(4));
+        assert_eq!(
+            desk.monitor(2),
+            "DP-2",
+            "window 2 did not cross: {:?}",
+            desk.rects()
+        );
+        assert!(
+            inside(two, TALL) && two.x + two.w < beside.x && two.y < beside.y + beside.h,
+            "window 2 did not go in on the left of window 5: {:?}",
+            desk.rects()
+        );
+        assert!(same(desk.rect(6), six), "window 6 was not beside the move");
+        assert!(
+            four.y < WIDE.y + 20.0 && four.h > WIDE.h - 40.0,
+            "the grid did not close up over window 2's tile: {:?}",
+            desk.rects()
+        );
+        assert_eq!(
+            desk.workspace_of(2),
+            "2",
+            "window 2 is on the desk DP-2 shows"
+        );
+
+        desk.press("super+shift+left");
+        assert_eq!(
+            desk.monitor(2),
+            "DP-1",
+            "window 2 did not come back: {:?}",
+            desk.rects()
+        );
+        let now = desk.rects();
+        assert!(
+            start.iter().all(|(id, was)| now
+                .iter()
+                .any(|(other, rect)| other == id && same(*rect, *was))),
+            "window 2 moved back is not the grid again: {start:?} and now {now:?}"
+        );
+        assert!(
+            same(desk.rect(5), five),
+            "window 5 did not take its tile back"
+        );
+        assert_eq!(desk.workspace_of(2), "1");
+
+        let mut desk = Desk::new("", two_screens());
+        desk.press("super+t");
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        desk.open(2, "DP-1", (2000.0, 720.0));
+        desk.press("super+shift+right");
+        let whole = |area: Rect| Rect {
+            x: area.x + 12.0,
+            y: area.y + 12.0,
+            w: area.w - 24.0,
+            h: area.h - 24.0,
+        };
+        assert!(
+            same(desk.rect(2), whole(TALL)) && same(desk.rect(1), whole(WIDE)),
+            "a window moved onto a monitor with nothing on it takes the screen, and the \
+             one it left takes the other: {:?}",
+            desk.rects()
+        );
+    }
+
+    /// **With `tiling.move = "split"`, a move goes into the neighbour's split
+    /// instead** (#150): window 4 moved left leaves the bottom-right tile to
+    /// window 2 and splits window 3's, on the far side, where a swap would
+    /// have traded the two. And a value that is neither is named once, and
+    /// swaps.
+    #[test]
+    fn with_tiling_move_split_a_move_goes_into_the_neighbours_split() {
+        let mut desk = grid("require(\"config\").tiling.move = \"split\"", one_screen());
+        let three = desk.rect(3);
+        desk.focus(4);
+        desk.press("super+shift+left");
+        let (two, now_three, four) = (desk.rect(2), desk.rect(3), desk.rect(4));
+        assert!(
+            two.h > WIDE.h - 40.0,
+            "window 2 did not take the right-hand column: {:?}",
+            desk.rects()
+        );
+        assert!(
+            inside(four, three) && inside(now_three, three) && four.x + four.w < now_three.x,
+            "window 4 did not go into window 3's tile on its left: {:?}",
+            desk.rects()
+        );
+
+        let logged = "_G.logged = {}\n\
+                      local log = sol.log\n\
+                      sol.log = function(message) _G.logged[#_G.logged + 1] = message log(message) end\n\
+                      require(\"config\").tiling.move = \"sideways\"";
+        let mut desk = grid(logged, one_screen());
+        let (three, four) = (desk.rect(3), desk.rect(4));
+        desk.focus(4);
+        desk.press("super+shift+left");
+        desk.press("super+shift+right");
+        desk.press("super+shift+left");
+        assert!(
+            same(desk.rect(4), three) && same(desk.rect(3), four),
+            "an unknown tiling.move did not swap: {:?}",
+            desk.rects()
+        );
+        let said = desk
+            .scripts
+            .evaluate("return table.concat(_G.logged, \"\\n\")");
+        assert_eq!(
+            said.matches("tiling.move is sideways").count(),
+            1,
+            "an unknown tiling.move is named once, not per move: {said:?}"
+        );
+    }
+
+    /// **With no layout in charge, focus and move reach the nearest window
+    /// each way.** #150.
+    ///
+    /// Window 1 in the middle, one window off each side of it. From 1, each
+    /// focus key finds that one. From window 4, above, nothing is level with
+    /// it on the left, and the nearest centre that way is window 2's. From 2
+    /// going right the nearer facing edge wins, 1's over 3's. A move trades
+    /// places with the window focus would go to, each keeping its own size,
+    /// and the opposite move puts both back. At the monitor's edge nothing
+    /// happens. Nor is a window being closed one to go to.
+    #[test]
+    fn in_floating_focus_and_move_reach_the_nearest_window_each_way() {
+        let at = |x: f64, y: f64, w: f64, h: f64| Rect { x, y, w, h };
+        let mut desk = Desk::floating(
+            one_screen(),
+            &[
+                (1, "DP-1", at(1000.0, 500.0, 500.0, 400.0)),
+                (2, "DP-1", at(200.0, 550.0, 400.0, 300.0)),
+                (3, "DP-1", at(1800.0, 450.0, 500.0, 400.0)),
+                (4, "DP-1", at(1050.0, 50.0, 400.0, 300.0)),
+                (5, "DP-1", at(950.0, 1000.0, 600.0, 300.0)),
+            ],
+        );
+        for (from, key, to) in [
+            (1, "super+left", 2),
+            (1, "super+right", 3),
+            (1, "super+up", 4),
+            (1, "super+down", 5),
+            (4, "super+h", 2),
+            (2, "super+l", 1),
+            (5, "super+k", 1),
+            (4, "super+j", 1),
+        ] {
+            desk.focus(from);
+            assert_eq!(focuses(&desk.press(key)), [to], "{key} from window {from}");
+        }
+
+        let start = desk.rects();
+        for (key, with, back) in [
+            ("super+shift+right", 3, "super+shift+h"),
+            ("super+shift+down", 5, "super+alt+k"),
+            ("super+shift+left", 2, "super+shift+l"),
+            ("super+shift+up", 4, "super+shift+j"),
+        ] {
+            desk.focus(1);
+            let (was, other) = (desk.rect(1), desk.rect(with));
+            let commands = desk.press(key);
+            let (one, them) = (desk.rect(1), desk.rect(with));
+            assert!(
+                about(one.x, other.x)
+                    && about(one.y, other.y)
+                    && about(one.w, was.w)
+                    && about(them.x, was.x)
+                    && about(them.y, was.y)
+                    && about(them.w, other.w),
+                "{key} did not trade places with window {with}: {:?}",
+                desk.rects()
+            );
+            assert!(
+                commands.iter().all(|command| match command {
+                    Command::Place { tile, .. } => !tile,
+                    _ => true,
+                }),
+                "a floating window was placed as a tile: {commands:?}"
+            );
+            desk.press(back);
+            let now = desk.rects();
+            assert!(
+                start
+                    .iter()
+                    .zip(&now)
+                    .all(|((_, before), (_, after))| same(*before, *after)),
+                "{back} after {key} is not the desk it started as: {now:?}"
+            );
+        }
+
+        // A window being closed is fading where it stood, and is not one to
+        // go to.
+        for window in &mut desk.windows {
+            window.leaving = window.id == 2;
+        }
+        desk.focus(1);
+        assert!(
+            focuses(&desk.press("super+left")).is_empty(),
+            "focus went to a window being closed"
+        );
+        for window in &mut desk.windows {
+            window.leaving = false;
+        }
+
+        desk.focus(3);
+        let commands = desk.press("super+right");
+        assert!(
+            focuses(&commands).is_empty(),
+            "nothing is right of window 3"
+        );
+        let commands = desk.press("super+shift+right");
+        assert!(
+            places(&commands).is_empty(),
+            "nothing is right of window 3 and no monitor is either: {commands:?}"
+        );
+    }
+
+    /// **At a monitor's edge, floating goes on to the next monitor.** #150.
+    ///
+    /// Focus crosses both ways. A move takes the window across, keeping its
+    /// size, as far across the portrait screen as it was across the
+    /// landscape one: a half and a quarter of the way there is a half and a
+    /// quarter of the way here -- and kept on it, where that would not be.
+    #[test]
+    fn at_a_monitors_edge_floating_crosses_to_the_next_monitor() {
+        let at = |x: f64, y: f64, w: f64, h: f64| Rect { x, y, w, h };
+        let mut desk = Desk::floating(
+            two_screens(),
+            &[
+                (1, "DP-1", at(1280.0, 360.0, 400.0, 300.0)),
+                (2, "DP-2", at(2800.0, 300.0, 600.0, 500.0)),
+            ],
+        );
+        desk.focus(1);
+        assert_eq!(focuses(&desk.press("super+right")), [2]);
+        assert_eq!(focuses(&desk.press("super+left")), [1]);
+
+        desk.press("super+shift+right");
+        assert_eq!(
+            desk.monitor(1),
+            "DP-2",
+            "window 1 did not cross: {:?}",
+            desk.rects()
+        );
+        assert!(
+            same(desk.rect(1), at(2560.0 + 720.0, 640.0, 400.0, 300.0)),
+            "window 1 is not as far across DP-2 as it was across DP-1: {:?}",
+            desk.rects()
+        );
+        assert!(
+            same(desk.rect(2), at(2800.0, 300.0, 600.0, 500.0)),
+            "window 2 was not part of the move"
+        );
+
+        // As far across would put window 3 past DP-2's right edge, so it is
+        // kept on the screen, against that edge.
+        desk.windows
+            .push(window(3, "DP-1", at(2100.0, 900.0, 400.0, 300.0)));
+        desk.focus(3);
+        desk.press("super+shift+right");
+        assert!(
+            same(desk.rect(3), at(4000.0 - 400.0, 1600.0, 400.0, 300.0)),
+            "window 3 was not kept on DP-2: {:?}",
+            desk.rects()
+        );
+    }
+
+    /// **In scrolling, the directions are the strip's own keys.** #150.
+    ///
+    /// Left and right are the columns and up and down the windows in one,
+    /// for focus and for a move; past the end of the strip, focus goes to the
+    /// window the next monitor's strip has focused, and a move takes the
+    /// window into a column of its own there.
+    #[test]
+    fn in_scrolling_the_directions_are_the_strips_own_keys() {
+        let mut desk = Desk::new("", two_screens());
+        for id in [1, 2, 3, 5] {
+            let monitor = if id == 5 { "DP-2" } else { "DP-1" };
+            desk.windows.push(window(
+                id,
+                monitor,
+                Rect {
+                    w: 400.0,
+                    h: 300.0,
+                    ..if id == 5 { TALL } else { WIDE }
+                },
+            ));
+        }
+        desk.press("super+s");
+        let x = |desk: &Desk, id| desk.rect(id).x;
+        assert!(
+            x(&desk, 1) < x(&desk, 2) && x(&desk, 2) < x(&desk, 3) && desk.monitor(3) == "DP-1",
+            "the premise: columns 1, 2, 3 on DP-1: {:?}",
+            desk.rects()
+        );
+
+        desk.focus(2);
+        assert_eq!(focuses(&desk.press("super+left")), [1]);
+        desk.focus(2);
+        assert_eq!(focuses(&desk.press("super+l")), [3]);
+
+        // Window 2 stacked under window 1: `super+comma` from column 1.
+        desk.focus(2);
+        desk.press("super+h");
+        desk.press("super+comma");
+        let (one, two) = (desk.rect(1), desk.rect(2));
+        assert!(
+            about(one.x, two.x) && one.y < two.y,
+            "the premise: 1 above 2 in one column: {:?}",
+            desk.rects()
+        );
+        desk.focus(2);
+        assert_eq!(focuses(&desk.press("super+up")), [1]);
+        assert_eq!(focuses(&desk.press("super+j")), [2]);
+
+        desk.press("super+alt+k");
+        assert!(
+            desk.rect(2).y < desk.rect(1).y,
+            "super+alt+k did not move window 2 above window 1: {:?}",
+            desk.rects()
+        );
+        desk.press("super+shift+down");
+        assert!(desk.rect(1).y < desk.rect(2).y, "and back down");
+
+        desk.press("super+shift+right");
+        assert!(
+            x(&desk, 3) < x(&desk, 2) && about(x(&desk, 1), x(&desk, 2)),
+            "the column did not move right past window 3's: {:?}",
+            desk.rects()
+        );
+        desk.press("super+shift+h");
+        assert!(x(&desk, 2) < x(&desk, 3), "and back left");
+
+        desk.focus(3);
+        assert_eq!(
+            focuses(&desk.press("super+right")),
+            [5],
+            "past the end of the strip, the next monitor's"
+        );
+        desk.focus(3);
+        desk.press("super+shift+right");
+        assert_eq!(
+            desk.monitor(3),
+            "DP-2",
+            "window 3 did not cross: {:?}",
+            desk.rects()
+        );
+        assert!(
+            inside(desk.rect(3), TALL) && x(&desk, 5) < x(&desk, 3),
+            "window 3 is not in a column of its own beside window 5: {:?}",
+            desk.rects()
+        );
+        assert_eq!(desk.workspace_of(3), "1");
+    }
+
+    /// **`super+shift+space` floats a tiled window, and tiles it again.**
+    /// #150.
+    ///
+    /// Window 2 leaves its tile, window 1 takes the screen, and 2 is centred
+    /// on it at the size it had, not as a tile; pressed again, the two share
+    /// the screen. With no layout in charge the key changes nothing, now or
+    /// when tiling is turned on afterwards.
+    #[test]
+    fn super_shift_space_floats_a_tiled_window_and_tiles_it_again() {
+        let mut desk = Desk::new("", one_screen());
+        desk.press("super+t");
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        desk.open(2, "DP-1", (2000.0, 720.0));
+        let (one, two) = (desk.rect(1), desk.rect(2));
+
+        let commands = desk.press("super+shift+space");
+        let full = Rect {
+            x: 12.0,
+            y: 12.0,
+            w: 2536.0,
+            h: 1416.0,
+        };
+        let floated = desk.rect(2);
+        assert!(
+            same(desk.rect(1), full),
+            "window 1 did not take the screen: {:?}",
+            desk.rects()
+        );
+        assert!(
+            about(floated.w, two.w)
+                && about(floated.x + floated.w / 2.0, 1280.0)
+                && about(floated.y + floated.h / 2.0, 720.0),
+            "window 2 is not centred at the size it had: {floated:?}"
+        );
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                Command::Place {
+                    id: 2,
+                    tile: false,
+                    ..
+                }
+            )),
+            "window 2 was placed as a tile: {commands:?}"
+        );
+
+        desk.press("super+shift+space");
+        assert!(
+            same(desk.rect(1), one) && same(desk.rect(2), two),
+            "pressed again, the two did not share the screen: {:?}",
+            desk.rects()
+        );
+
+        let mut desk = Desk::new("", one_screen());
+        desk.press("super+t");
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        desk.open(2, "DP-1", (2000.0, 720.0));
+        let (one, two) = (desk.rect(1), desk.rect(2));
+        desk.press("super+t");
+        let commands = desk.press("super+shift+space");
+        assert!(
+            places(&commands).is_empty(),
+            "floating mode placed something: {commands:?}"
+        );
+        desk.press("super+t");
+        assert!(
+            same(desk.rect(1), one) && same(desk.rect(2), two),
+            "super+shift+space in floating mode floated window 2 for later: {:?}",
+            desk.rects()
+        );
+    }
+
+    /// **A window the layout does not arrange gets the floating answer.**
+    /// #150.
+    ///
+    /// Window 3 floated over tiling's `1 | 2`, and over scrolling's strip:
+    /// focus from it finds the nearest window that way among everything on
+    /// screen, and a move does nothing -- trading places with a tile would
+    /// hand the tile a place its layout takes straight back. Closed, the
+    /// window is forgotten as floated.
+    #[test]
+    fn a_window_the_layout_does_not_arrange_gets_the_floating_answer() {
+        for (layout, key) in [("tiling", "super+t"), ("scrolling", "super+s")] {
+            let mut desk = Desk::new("", one_screen());
+            desk.press(key);
+            desk.open(1, "DP-1", (1280.0, 720.0));
+            desk.open(2, "DP-1", (2000.0, 720.0));
+            desk.open(3, "DP-1", (2000.0, 1200.0));
+            // Over to window 1 and back, so a strip is scrolled to its start
+            // rather than to wherever opening window 3 left it.
+            desk.press("super+left");
+            desk.press("super+left");
+            desk.focus(3);
+            desk.press("super+shift+space");
+            assert_eq!(
+                focuses(&desk.press("super+left")),
+                [1],
+                "{layout}: focus left from the floated window"
+            );
+            if layout == "tiling" {
+                desk.focus(3);
+                assert_eq!(
+                    focuses(&desk.press("super+right")),
+                    [2],
+                    "{layout}: focus right from the floated window"
+                );
+            }
+            desk.focus(3);
+            let commands = desk.press("super+shift+left");
+            assert!(
+                places(&commands).is_empty(),
+                "{layout}: the floated window moved, or moved something: {commands:?}"
+            );
+            let _ = desk.scripts.closed(3, desk.snapshot());
+            assert_eq!(
+                desk.scripts
+                    .evaluate("return tostring(require(\"dialogs\").lifted[3])"),
+                "nil",
+                "{layout}: a closed window is still marked floated"
+            );
+        }
+    }
+
+    /// **A window the user floated stays out through a reload.** #150.
+    #[test]
+    fn a_window_floated_by_the_user_stays_out_through_a_reload() {
+        let mut desk = Desk::new("", one_screen());
+        desk.press("super+t");
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        desk.open(2, "DP-1", (2000.0, 720.0));
+        desk.press("super+shift+space");
+        let (one, two) = (desk.rect(1), desk.rect(2));
+        desk.reload();
+        assert!(
+            same(desk.rect(1), one) && same(desk.rect(2), two),
+            "the reload put the floated window back in a tile: {:?}",
+            desk.rects()
+        );
+        desk.press("super+shift+space");
+        assert!(
+            desk.rect(1).w < 1400.0,
+            "and it can still be tiled again: {:?}",
+            desk.rects()
+        );
+    }
+
+    /// A script of `text` alone, in a directory of its own.
+    fn plain(name: &str, text: &str) -> Scripts {
+        let directory =
+            std::env::temp_dir().join(format!("solium-directions-{name}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(&entry, text).expect("writing the test script");
+        Scripts::load(&entry).expect("loading the test script")
+    }
+
+    /// **`sol.focus_direction` and `sol.move_direction` reach every
+    /// `direction` listener with the verb and the direction, and a direction
+    /// that is not one of the four is an error.** #150.
+    #[test]
+    fn sol_direction_reaches_the_listeners_and_a_bad_one_is_an_error() {
+        let mut scripts = plain(
+            "event",
+            r#"
+            sol.on("direction", function(verb, dir) sol.status(verb .. " " .. dir) end)
+            sol.bind("super+a", function() sol.focus_direction("left") end)
+            sol.bind("super+b", function() sol.move_direction("down") end)
+            sol.bind("super+c", function()
+                local ok, err = pcall(sol.focus_direction, "west")
+                sol.status(tostring(ok) .. ": " .. tostring(err))
+            end)
+            "#,
+        );
+        let status = |scripts: &mut Scripts, combo: &str| {
+            scripts
+                .key(combo, Snapshot::default())
+                .status
+                .unwrap_or_default()
+        };
+        assert_eq!(status(&mut scripts, "super+a"), "focus left");
+        assert_eq!(status(&mut scripts, "super+b"), "move down");
+        let refused = status(&mut scripts, "super+c");
+        assert!(
+            refused.starts_with("false: ") && refused.contains("\"west\" is not a direction"),
+            "{refused:?}"
+        );
+    }
+
+    /// **`sol.toggle_fullscreen` and `sol.toggle_maximize` name the focused
+    /// window when given none**, the window given when there is one, and
+    /// nothing when there is neither. #150.
+    #[test]
+    fn sol_toggles_name_the_focused_window_when_given_none() {
+        let mut scripts = plain(
+            "toggles",
+            r#"
+            sol.bind("super+a", function() sol.toggle_fullscreen() end)
+            sol.bind("super+b", function() sol.toggle_maximize() end)
+            sol.bind("super+c", function() sol.toggle_fullscreen(9) end)
+            "#,
+        );
+        let desk = |focused: bool| Snapshot {
+            windows: vec![
+                window(4, "DP-1", WIDE),
+                WindowInfo {
+                    focused,
+                    ..window(3, "DP-1", WIDE)
+                },
+            ],
+            ..Snapshot::default()
+        };
+        let asked = |commands: Vec<Command>| -> Vec<String> {
+            commands
+                .iter()
+                .map(|command| format!("{command:?}"))
+                .collect()
+        };
+        assert_eq!(
+            asked(scripts.key("super+a", desk(true)).commands),
+            [format!("{:?}", Command::ToggleFullscreen { id: 3 })]
+        );
+        assert_eq!(
+            asked(scripts.key("super+b", desk(true)).commands),
+            [format!("{:?}", Command::ToggleMaximize { id: 3 })]
+        );
+        assert_eq!(
+            asked(scripts.key("super+c", desk(true)).commands),
+            [format!("{:?}", Command::ToggleFullscreen { id: 9 })]
+        );
+        assert!(scripts.key("super+a", desk(false)).commands.is_empty());
+        assert!(scripts.key("super+b", desk(false)).commands.is_empty());
     }
 }

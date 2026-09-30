@@ -2671,6 +2671,77 @@ mod real_client {
         );
     }
 
+    /// **A key sends the focused window fullscreen, and maximises it, as the
+    /// client asking and the frame's button would.** #150.
+    ///
+    /// `sol.toggle_fullscreen` and `sol.toggle_maximize` with no window named,
+    /// through the commands they queue: the window covers the monitor and is
+    /// told it is fullscreen, and the same key puts it back where it was; the
+    /// same again for maximised.
+    #[test]
+    fn a_script_toggles_fullscreen_and_maximised_as_the_client_would() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        let output = one_screen(&mut state);
+        let screen = state
+            .space
+            .output_geometry(&output)
+            .expect("the monitor is mapped");
+        let directory = std::env::temp_dir().join(format!("solium-toggles-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            r#"
+            sol.bind("super+f", function() sol.toggle_fullscreen() end)
+            sol.bind("super+shift+m", function() sol.toggle_maximize() end)
+            "#,
+        )
+        .expect("writing the test script");
+        state.start_scripts(Some(
+            Scripts::load(&entry).expect("loading the test script"),
+        ));
+
+        let (conn, event_queue, client) = connect(&mut display, &mut state);
+        let qh = event_queue.handle();
+        let (window, _toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+        state.space.map_element(window.clone(), (400, 300), false);
+        state.space.refresh();
+        let before = state.real_geometry(&window).expect("the window is mapped");
+        let id = state.panes.id_of(&window).expect("the window has a pane");
+        state.focus_window(&window, SERIAL_COUNTER.next_serial());
+
+        assert!(state.trigger("super+f"), "super+f is bound");
+        assert!(
+            in_state(&window, State::Fullscreen),
+            "the key did not send it fullscreen"
+        );
+        assert_eq!(state.panes.get(id).map(Pane::slot), Some(screen));
+        assert!(state.trigger("super+f"));
+        assert!(
+            !in_state(&window, State::Fullscreen),
+            "and the key again did not bring it back"
+        );
+        assert_eq!(state.panes.get(id).map(Pane::slot), Some(before));
+
+        assert!(state.trigger("super+shift+m"), "super+shift+m is bound");
+        assert!(
+            in_state(&window, State::Maximized),
+            "the key did not maximise it"
+        );
+        assert!(state.trigger("super+shift+m"));
+        assert!(
+            !in_state(&window, State::Maximized),
+            "and the key again did not restore it"
+        );
+        assert_eq!(state.panes.get(id).map(Pane::slot), Some(before));
+    }
+
     /// **A window with no frame toggles back from maximised.**
     ///
     /// The rect a maximise goes back to lived on the window's `Decoration`,
@@ -2679,14 +2750,14 @@ mod real_client {
     /// toggle kept nothing for such a window and the second call maximised
     /// it again. Found with #92, and fixed by the same move.
     ///
-    /// **Latent, not something a user could hit.** `toggle_maximize` has
-    /// one caller, `frame_action`, reached only from a button on a
-    /// `Styled` frame; there is no `maximize_request` handler, binding or
-    /// script path. A window with no frame had no button to press. It is
-    /// tested anyway because `pane = "none"` is the only way this module
-    /// can drive `toggle_maximize` at all, and the maximise-then-fullscreen
-    /// tests below build on it working. The frameless half of #92 that was
-    /// seen is fullscreen's, in `a_window_leaving_fullscreen_is_back_where_it_was`.
+    /// **Latent until #150.** `toggle_maximize` had one caller,
+    /// `frame_action`, reached only from a button on a `Styled` frame, and a
+    /// window with no frame had no button to press. `sol.toggle_maximize`
+    /// and `super+shift+m` are a second way in, frame or none:
+    /// `a_script_toggles_fullscreen_and_maximised_as_the_client_would`. The
+    /// maximise-then-fullscreen tests below build on it working. The
+    /// frameless half of #92 that was seen is fullscreen's, in
+    /// `a_window_leaving_fullscreen_is_back_where_it_was`.
     #[test]
     fn a_window_with_no_frame_toggles_back_from_maximised() {
         let mut display = Display::<Solium>::new().expect("creating a test wayland display");

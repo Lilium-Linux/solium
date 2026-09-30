@@ -30,6 +30,8 @@
 -- the *name* is the only thing here that cannot be recomputed from what is on
 -- screen.
 
+local dialogs = require("dialogs")
+
 local modes = { registered = {} }
 
 -- Which layout is in charge, held by the host so it outlives the reload.
@@ -111,6 +113,44 @@ sol.on("restore", function()
         layout.started()
     end
     sol.status(kept.current)
+end)
+
+-- ## Out of the arrangement, and back (#150)
+--
+-- Three ways for the focused window to leave its tile. Floating is the
+-- layouts': the window leaves the arrangement and floats over it. Maximised
+-- and fullscreen are the compositor's, asked for as the frame's button and the
+-- client's own request ask, and it takes the window out of its tile for both.
+-- `a_script_toggles_fullscreen_and_maximised_as_the_client_would`,
+-- `a_maximised_window_is_not_held_in_its_old_tile` and
+-- `a_fullscreen_window_is_not_held_in_its_old_tile`.
+
+-- Float window `id`, or put it back into the arrangement. Only while a layout
+-- is in charge: with none every window floats already, and marking one would
+-- change a desktop the user is not looking at -- it would only show on the
+-- next `super+t`. `super_shift_space_floats_a_tiled_window_and_tiles_it_again`.
+function modes.toggle_floating(id)
+    local layout = modes.registered[kept.current]
+    if not layout or not layout.active then
+        return
+    end
+    dialogs.toggle(id)
+    layout.apply()
+end
+
+sol.bind("super+shift+space", function()
+    for _, window in ipairs(sol.windows()) do
+        if window.focused then
+            modes.toggle_floating(window.id)
+            return
+        end
+    end
+end)
+sol.bind("super+f", function()
+    sol.toggle_fullscreen()
+end)
+sol.bind("super+shift+m", function()
+    sol.toggle_maximize()
 end)
 
 return modes

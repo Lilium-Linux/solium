@@ -175,6 +175,7 @@ sol.on("click",  function(x, y) end)               -- only while grabbing input
 sol.on("layout", function() end)                   -- the room windows get changed
 sol.on("monitors", function() end)                 -- the screens are not the screens you knew
 sol.on("restore",  function() end)                 -- you have replaced a running session
+sol.on("direction", function(verb, dir) end)       -- a direction key: "focus" or "move", and which way
 ```
 
 Seven of these are worth reading twice.
@@ -523,6 +524,58 @@ fullscreen window covers. Both are in the global space, so either can be handed
 straight to `sol.place`. Copy the rect before adding keys to it; the one you
 were given belongs to the snapshot.
 
+## Focus and move by direction
+
+```lua
+sol.focus_direction("left")   -- or "right", "up", "down"
+sol.move_direction("left")
+```
+
+The compositor does nothing with these but tell every `direction` listener
+the verb and the direction, and a direction that is not one of the four is an
+error. `lua/direction.lua` is the listener that ships, and it asks the layout in
+charge, by two functions on the table you gave `modes.register`:
+
+```lua
+function mine.focus_direction(dir) ... return true end
+function mine.move_direction(dir) ... return true end
+```
+
+Answer `false`, or leave either out, and the key gets what a desktop with no
+layout in charge gets: focus goes to the nearest window that way, and a move
+trades places with it, each window keeping its size. `tiling.lua` answers
+`false` for focus from a window it does not tile -- a dialog, or one floated
+with `super+shift+space` -- so the keyboard still finds its way out of one.
+
+At a monitor's edge both go on to the next monitor that way, and the desk it is
+showing. `direction.find(from, dir, on)` is that search, for a layout's own
+rectangles: `on(name)` lists them for a monitor, and you get back the nearest,
+its monitor, and whether that meant crossing to another one.
+
+| | focus | move |
+|---|---|---|
+| tiling | the tile that way | trades tiles with it; `tiling.move = "split"` splits it instead |
+| scrolling | the next column, or the window above or below in one | the column, or the window within its column |
+| no layout | the nearest window that way | trades places with it |
+
+Across a monitor a move takes the window alone: into the tile it arrives beside
+in tiling, into a column of its own in scrolling, and as far across the new
+screen as it was across the old one with no layout. The shipped keys, all of
+them replaceable in `config.bindings`:
+
+| keys | |
+|---|---|
+| `super+arrows`, `super+h` `j` `k` `l` | focus that way |
+| `super+shift+arrows`, `super+shift+h` `j` `l`, `super+alt+k` | move that way |
+| `super+f` | fullscreen, and back |
+| `super+shift+m` | maximised, and back |
+| `super+shift+space` | float over the layout, and back into it |
+
+Moving up on `k` is `super+alt+k` because `super+shift+k` cycles the keyboard
+layout. A window floated with `super+shift+space` is, to both layouts, what a
+dialog with no parent is: out of the arrangement, centred on its screen at the
+size it had, until the key puts it back. It stays floated through a reload.
+
 ## The arrangements that ship
 
 You do not have to compute geometry yourself.
@@ -559,6 +612,7 @@ tree:layout(options)      -- the slots, to hand to sol.place; cramped = true on 
                           -- slot smaller than its window's own floor
 tree:resize(id, "width", share, options)               -- keyboard: an axis
 tree:drag_seam(id, "right", edge_x, edge_y, options)   -- pointer: a side
+tree:swap(a, b)           -- two windows trade tiles; every split keeps its ratio
 ```
 
 `insert` splits whatever it is pointed at, however small that leaves the

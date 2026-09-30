@@ -537,6 +537,21 @@ impl Tiling {
         self.attach(hung_from, target, branch);
     }
 
+    /// Trade the tiles of windows `a` and `b`, and change nothing else: every
+    /// split keeps its axis and its ratio, so the arrangement is the one it
+    /// was with two windows in each other's places, and a second swap puts it
+    /// back. What a keyboard move does in tiling (#150). Returns whether both
+    /// were in the tree; `false` leaves it as it was.
+    /// `swap_trades_two_tiles_and_nothing_else`.
+    pub fn swap(&mut self, a: u64, b: u64) -> bool {
+        let (Some(first), Some(second)) = (self.leaf(a), self.leaf(b)) else {
+            return false;
+        };
+        self.nodes[first] = Some(Node::Window { id: b });
+        self.nodes[second] = Some(Node::Window { id: a });
+        true
+    }
+
     /// Take a window out. Its sibling inherits the space, which is what makes
     /// closing a window a local change rather than a re-tile of the screen.
     pub fn remove(&mut self, id: u64) {
@@ -1384,6 +1399,33 @@ mod tests {
     #[test]
     fn axes_are_named_for_how_the_children_sit() {
         assert_ne!(Axis::Vertical, Axis::Horizontal);
+    }
+
+    /// **A swap trades two tiles and nothing else** (#150). Three windows at
+    /// an uneven seam: after 1 and 3 swap, each has the other's rectangle,
+    /// 2 has not moved, and swapping again is the tree it started as. A
+    /// window the tree does not hold swaps with nothing.
+    #[test]
+    fn swap_trades_two_tiles_and_nothing_else() {
+        let mut tiling = Tiling::new();
+        tiling.insert(1, None, None, area(), settings());
+        tiling.insert(2, Some(1), Some((900.0, 300.0)), area(), settings());
+        tiling.insert(3, Some(2), Some((900.0, 500.0)), area(), settings());
+        tiling.resize(1, Axis::Vertical, 0.1, area(), settings());
+        let before: Vec<_> = [1, 2, 3].map(|id| rect_of(&tiling, id)).into();
+
+        assert!(tiling.swap(1, 3), "both windows are in the tree");
+        assert_eq!(rect_of(&tiling, 1), before[2], "1 took 3's tile");
+        assert_eq!(rect_of(&tiling, 3), before[0], "3 took 1's tile");
+        assert_eq!(rect_of(&tiling, 2), before[1], "2 was not part of it");
+
+        assert!(tiling.swap(3, 1));
+        let after: Vec<_> = [1, 2, 3].map(|id| rect_of(&tiling, id)).into();
+        assert_eq!(after, before, "a second swap is the tree it started as");
+
+        assert!(!tiling.swap(1, 9), "9 is not in the tree");
+        let untouched: Vec<_> = [1, 2, 3].map(|id| rect_of(&tiling, id)).into();
+        assert_eq!(untouched, before, "a refused swap changed the tree");
     }
 }
 

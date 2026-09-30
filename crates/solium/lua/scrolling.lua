@@ -21,6 +21,7 @@ local modes = require("modes")
 local monitors = require("monitors")
 local dialogs = require("dialogs")
 local sizes = require("sizes")
+local direction = require("direction")
 
 -- `views` is the arrangement, one strip per desk (see `view_for`), and
 -- `sol.keep` holds it so that it outlives `super+shift+r`: a reload is a change
@@ -533,5 +534,83 @@ bind("super+period", function(view, on) view:expel(options(on)) end)
 
 -- Cycle the column through the preset widths.
 bind("super+r", function(view, on) view:cycle_width(options(on)) end)
+
+-- ## By direction (#150)
+--
+-- The strip's own keys, from `direction.lua`: left and right are the columns
+-- -- `super+bracketleft` and `super+ctrl+bracketleft` -- and up and down the
+-- windows in one, focused or traded as niri's `move-window-up` does. Past the
+-- end of the strip is the next monitor that way: focus goes to the window its
+-- strip has focused, and a move takes the window alone into a column of its
+-- own there. `in_scrolling_the_directions_are_the_strips_own_keys`.
+local STEP = { left = -1, right = 1, up = -1, down = 1 }
+
+-- The focused window, its strip and its monitor, or nil when the keyboard is on
+-- a window no strip holds, which then gets the floating answer to a focus and
+-- does not move. `a_window_the_layout_does_not_arrange_gets_the_floating_answer`.
+local function focused_in_strip()
+    for _, window in ipairs(sol.windows()) do
+        if window.focused then
+            local view, monitor = view_of(window.id)
+            if view:contains(window.id) then
+                return window.id, view, monitor
+            end
+            return nil
+        end
+    end
+    return nil
+end
+
+function scrolling.focus_direction(dir)
+    local id, view, monitor = focused_in_strip()
+    if not id then
+        return false
+    end
+    local area = options(monitor)
+    view:focus_window(id, area)
+    if dir == "left" or dir == "right" then
+        view:focus_sideways(STEP[dir], area)
+    else
+        view:focus_vertically(STEP[dir])
+    end
+    local to = view:focused()
+    if to == id then
+        local next = direction.beside(monitor, dir)
+        to = next and view_for(next.name):focused()
+    end
+    scrolling.apply(config.scrolling.snap)
+    if to and to ~= id then
+        sol.focus(to)
+    end
+    return true
+end
+
+function scrolling.move_direction(dir)
+    local id, view, monitor = focused_in_strip()
+    if not id then
+        return true
+    end
+    local area = options(monitor)
+    view:focus_window(id, area)
+    local moved
+    if dir == "left" or dir == "right" then
+        moved = view:move_column(STEP[dir], area)
+    else
+        moved = view:move_vertically(STEP[dir])
+    end
+    if not moved then
+        local next = direction.beside(monitor, dir)
+        if not next then
+            return true
+        end
+        for _, each in pairs(scrolling.views) do
+            each:remove(id)
+        end
+        view_for(next.name):insert(id, options(next.name))
+        workspaces.of[id] = workspaces.on(next.name)
+    end
+    scrolling.apply(config.scrolling.snap)
+    return true
+end
 
 return scrolling
