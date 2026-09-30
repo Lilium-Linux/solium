@@ -144,14 +144,28 @@ wire.
 autostart target with it, and unsets the variables in systemd, so a Plasma
 login afterwards does not inherit a dead socket. It does so on a clean exit,
 and on SIGTERM (how logind ends a session), SIGINT or SIGHUP (`signals.rs`). A
-crash or a SIGKILL leaves it no chance, so `solium-session` does the same once
-Solium has gone, if the target is still active (`dev/install-check.sh` checks
-both). Two things are left behind even so. A Solium that crashes before it has
-started the target, while it waits up to five seconds for XWayland, leaves the
-variables in systemd until the next session sets them again. And the D-Bus
-activation environment keeps them in every case, because D-Bus has no call
-that removes a variable. The next Solium session stops any target an earlier
-one left running before it says anything.
+Solium that cannot stop, because something inside it has stopped answering,
+ends itself `session.stop_timeout` (five seconds) after the signal, or at once
+when the same signal comes again half a second or more later. Neither that nor
+a crash gives Solium the chance to clean up, so `solium-session` does it once
+Solium has gone, if the target is still active. If Solium failed before it
+started the target, while it waited up to five seconds for XWayland,
+`solium-session` unsets the variables, as long as no other desktop holds
+`graphical-session.target` (`dev/install-check.sh` checks each case).
+
+Two things are left behind even so. A SIGKILL of the whole session, which
+systemd sends to whatever of it is still running once its stop timeout has
+passed (45 seconds on Fedora 44), takes `solium-session` with it; the next
+Solium session stops any target an earlier one left running before it says
+anything. And under `dbus-daemon`, the D-Bus activation environment keeps the
+variables, because D-Bus has no call that removes one. Fedora's `dbus-broker`
+hands `UpdateActivationEnvironment` on to systemd's `SetEnvironment` (its
+launcher names that method), so there the unset should clear them for D-Bus
+activation too; that has still to be seen on a real session.
+
+One Solium session runs per user at a time: `solium-session` holds a lock for
+as long as its session runs, and refuses to start a second, which would take
+the first one's target for a leftover and stop it.
 
 **When Solium is not the session, it tells nobody.** `solium --tty` started by
 hand, from a text console, leaves systemd and D-Bus alone: a desktop on

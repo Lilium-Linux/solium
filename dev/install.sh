@@ -407,6 +407,22 @@ changes nothing that is running:
 "
 fi
 
+# A session file from an earlier install goes on starting Solium the old way
+# until the sudo line is run again, and nothing else says so.
+session_note=""
+if [[ -e "$session_file" ]] && ! cmp -s "$session_file" "$staged_session"; then
+    installed_exec="$(sed -n 's/^Exec=//p' "$session_file" | head -1)"
+    case "$installed_exec" in
+        *solium-session* | *--session*) told="" ;;
+        *) told=", which tells systemd and D-Bus nothing about the session" ;;
+    esac
+    session_note="
+warning: the login screen's session file, $session_file, is not this
+install's. It starts '${installed_exec:-nothing}'$told. Run the line below
+again to replace it.
+"
+fi
+
 if [[ -z "$destdir" ]]; then
     on_path="$(command -v solium || true)"
     if [[ -z "$on_path" ]]; then
@@ -435,7 +451,7 @@ Installed Solium into $dest
   portals       $config_dest/xdg-desktop-portal/lilium-portals.conf$config_note
   check         $bin --check passed${checked:+ (${checked#  })}, using $chosen
   $path_note
-$reload_note
+$reload_note$session_note
 To offer Solium at the login screen, run this one line. It needs root, so this
 script does not run it:
 

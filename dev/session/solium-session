@@ -12,15 +12,34 @@
 # and unsets what Solium exported. dev/install-check.sh runs it against a
 # stand-in solium and systemctl.
 here="$(dirname "$(readlink -f "$0")")"
+# One Solium session per user at a time. A second would find the first one's
+# target up, take it for a crash's leftover and stop it, and whichever ended
+# first would then stop the other's. Held by this shell alone: Solium, and what
+# it starts, do not inherit it.
+: "${XDG_RUNTIME_DIR:?solium-session: XDG_RUNTIME_DIR is not set}"
+exec 9>>"$XDG_RUNTIME_DIR/solium-session.lock"
+if ! flock -n 9; then
+    echo "solium-session: a Solium session is already running for this user; not starting another" >&2
+    exit 1
+fi
 # Caught rather than obeyed: logind's SIGTERM reaches this shell too, and the
 # clean-up has to wait until Solium has gone. The shell waits for Solium before
 # running a trap, and Solium starts with the default dispositions back.
 trap : HUP INT TERM
-"$here/solium" --tty --session
+"$here/solium" --tty --session 9>&-
 status=$?
+variables="WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"
 if systemctl --user --quiet is-active solium-session.target; then
     echo "solium-session: Solium ended (status $status) and left solium-session.target running; stopping it" >&2
     systemctl --user stop solium-session.target solium-autostart.target
-    systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE
+    # shellcheck disable=SC2086
+    systemctl --user unset-environment $variables
+elif [ "$status" -ne 0 ] && ! systemctl --user --quiet is-active graphical-session.target; then
+    # A Solium that failed before it started its target, while it waited for
+    # XWayland, may have exported already. With no graphical session running,
+    # no other desktop's variables are there to lose.
+    echo "solium-session: Solium failed (status $status) before starting its target; unsetting what it may have exported" >&2
+    # shellcheck disable=SC2086
+    systemctl --user unset-environment $variables
 fi
 exit "$status"

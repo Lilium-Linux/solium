@@ -234,6 +234,21 @@ if [[ "${lines[0]:-}" == "$expected" ]]; then
 fi
 check "run without sudo, it installs the session file" cmp -s "$staged" "$sessions/solium.desktop"
 check "  mode 644" [ "$(stat -c %a "$sessions/solium.desktop")" = 644 ]
+check "  and, the login screen's copy not being there yet, nothing says it is stale" \
+    [ -z "$(grep "is not this" "$work/install.log")" ]
+
+echo "a session file from an earlier install"
+# What the login screen had before solium-session existed.
+sed -i "s|^Exec=.*|Exec=$prefix/bin/solium --tty|" "$sessions/solium.desktop"
+DESTDIR="$destdir" "$install_sh" --no-build --session-dir "$sessions" >"$work/reinstall.log" 2>&1
+check "a reinstall exits 0" [ $? -eq 0 ]
+check "  says the login screen's copy is stale, and what it starts" \
+    grep -q "It starts '$prefix/bin/solium --tty', which tells systemd and D-Bus nothing" \
+    "$work/reinstall.log"
+install -m644 "$staged" "$sessions/solium.desktop"
+DESTDIR="$destdir" "$install_sh" --no-build --session-dir "$sessions" >"$work/reinstall-current.log" 2>&1
+check "  and says nothing once the sudo line has replaced it" \
+    [ -z "$(grep "is not this" "$work/reinstall-current.log")" ]
 
 echo "--check from the staged copy"
 XDG_CONFIG_HOME="$config" RUST_LOG="info,solium::assets=debug" "$dest/bin/solium" --check \
@@ -357,14 +372,17 @@ check "  and says so" grep -q "kept, because this script did not write them" "$w
 echo "solium-session, after a Solium that could not clean up"
 # A stand-in solium beside a copy of the script, as the prefix has them, and a
 # stand-in systemctl on PATH that logs what it is asked and answers is-active
-# from a file. In the crash case the stand-in solium kills itself with
-# SIGTERM, which also shows the script's trap does not leave it ignoring that.
+# for solium-session.target and graphical-session.target from two files. In
+# the crash case the stand-in solium kills itself with SIGTERM, which also
+# shows the script's trap does not leave it ignoring that. XDG_RUNTIME_DIR is
+# one of this check's own, for the script's lock.
 wrap="$work/wrapper"
-mkdir -p "$wrap/bin" "$wrap/fakebin"
+mkdir -p "$wrap/bin" "$wrap/fakebin" "$wrap/run"
 cp "$root/dev/session/solium-session" "$wrap/bin/solium-session"
 cat >"$wrap/bin/solium" <<STANDIN
 #!/bin/sh
 echo "\$*" >"$wrap/args"
+[ -e /proc/\$\$/fd/9 ] && echo held >"$wrap/held"
 case "\$(cat "$wrap/mode")" in
     crash) kill -s TERM \$\$; sleep 5 ;;
     slow) sleep 1 ;;
@@ -375,7 +393,9 @@ STANDIN
 cat >"$wrap/fakebin/systemctl" <<STANDIN
 #!/bin/sh
 case "\$*" in
-    *is-active*) exit "\$(cat "$wrap/active")" ;;
+    *is-active*solium-session.target*) exit "\$(cat "$wrap/active")" ;;
+    *is-active*graphical-session.target*) exit "\$(cat "$wrap/graphical")" ;;
+    *is-active*) echo "is-active of an unexpected unit: \$*" >>"$wrap/systemctl.log"; exit 3 ;;
 esac
 echo "\$*" >>"$wrap/systemctl.log"
 [ -e "$wrap/gone" ] || echo "before solium had gone" >>"$wrap/systemctl.log"
@@ -383,12 +403,16 @@ STANDIN
 chmod +x "$wrap/bin/solium" "$wrap/fakebin/systemctl"
 stop_line="--user stop solium-session.target solium-autostart.target"
 unset_line="--user unset-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"
-# solium-session with the stand-in in mode $1, is-active answering $2.
+# solium-session with the stand-in in mode $1, is-active answering $2 for
+# solium-session.target and $3 (inactive unless given) for
+# graphical-session.target. The log is wrapper-$4.log, or wrapper-$1.log.
 wrapped() {
-    rm -f "$wrap/systemctl.log" "$wrap/gone" "$wrap/args"
+    rm -f "$wrap/systemctl.log" "$wrap/gone" "$wrap/args" "$wrap/held"
     echo "$1" >"$wrap/mode"
     echo "$2" >"$wrap/active"
-    PATH="$wrap/fakebin:$PATH" "$wrap/bin/solium-session" >"$work/wrapper-$1.log" 2>&1
+    echo "${3:-3}" >"$wrap/graphical"
+    XDG_RUNTIME_DIR="$wrap/run" PATH="$wrap/fakebin:$PATH" "$wrap/bin/solium-session" \
+        >"$work/wrapper-${4:-$1}.log" 2>&1
 }
 wrapped crash 0
 status=$?
@@ -396,14 +420,32 @@ check "it runs solium --tty --session" grep -qx -- "--tty --session" "$wrap/args
 check "  exits as Solium did (killed by SIGTERM: 143)" [ "$status" -eq 143 ]
 check "  stops the targets a crash left active" grep -qx -- "$stop_line" "$wrap/systemctl.log"
 check "  and unsets what Solium exported" grep -qx -- "$unset_line" "$wrap/systemctl.log"
+check "  and Solium does not hold its lock" [ ! -e "$wrap/held" ]
+wrapped crash 3 3 early
+check "a crash before the target started unsets what Solium may have exported" \
+    grep -qx -- "$unset_line" "$wrap/systemctl.log"
+check "  and stops nothing" [ -z "$(grep -x -- "$stop_line" "$wrap/systemctl.log")" ]
+wrapped crash 3 0 other
+check "  but not while another desktop holds graphical-session.target" [ ! -e "$wrap/systemctl.log" ]
 wrapped clean 3
 check "a Solium that stopped its own target is left alone" [ ! -e "$wrap/systemctl.log" ]
+# A second session while one runs: the running one's wrapper holds the lock.
+exec 8>>"$wrap/run/solium-session.lock"
+flock -n 8
+wrapped clean 3 3 second
+status=$?
+exec 8>&-
+check "a second session is refused while one runs" [ "$status" -eq 1 -a ! -e "$wrap/args" ]
+check "  says so" grep -q "already running" "$work/wrapper-second.log"
+check "  and touches nothing" [ ! -e "$wrap/systemctl.log" ]
 # logind's SIGTERM reaches the script too: it has to wait for Solium, and
 # clean up after it rather than before.
 rm -f "$wrap/systemctl.log" "$wrap/gone"
 echo slow >"$wrap/mode"
 echo 0 >"$wrap/active"
-PATH="$wrap/fakebin:$PATH" "$wrap/bin/solium-session" >"$work/wrapper-term.log" 2>&1 &
+echo 3 >"$wrap/graphical"
+XDG_RUNTIME_DIR="$wrap/run" PATH="$wrap/fakebin:$PATH" "$wrap/bin/solium-session" \
+    >"$work/wrapper-term.log" 2>&1 &
 wrapper_pid=$!
 sleep 0.3
 kill -s TERM "$wrapper_pid"

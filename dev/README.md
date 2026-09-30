@@ -36,7 +36,7 @@ saying where it was taken, it comes from the reference machine: an NVIDIA RTX
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
-| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone), and an uninstall that leaves nothing. See *Installing it* |
+| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone, and unsetting the variables after one that crashed before starting its target while no other desktop holds `graphical-session.target`) and refusing a second session while one runs, a reinstall saying when the login screen's session file is stale, and an uninstall that leaves nothing. See *Installing it* |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
@@ -805,15 +805,22 @@ keyboard at all — which is how the first run of this backend ended in a reboot
 
 Two more things stand between you and that: if libinput reports no input devices
 within five seconds, Solium stops on its own rather than hold a display nobody
-can talk to; and from another VT, `pkill -x solium` always works.
+can talk to; and from another VT, `pkill -x solium` always ends it. The first
+`SIGTERM` stops it cleanly. A Solium that cannot stop, because something inside
+it has stopped answering, ends itself five seconds later (`session.stop_timeout`),
+or at once on a second `pkill -x solium`.
 
-That second one is worth one sentence of qualification, because it is a
-last-resort escape and you are reading it before taking a VT. It holds for an
-ordinary session, and it holds with QML on the GPU only because Solium sets
-`QT_QPA_NO_SIGNAL_HANDLER` before starting Qt — without it eglfs installs its
-own `SIGTERM` handler, and the process then neither dies nor cleanly survives.
-See *QML on the GPU*. On a build that predates that, or one where
-`QT_QPA_PLATFORM` was set from outside, reach for `pkill -9 -x solium`.
+That second one is worth a qualification, because it is a last-resort escape
+and you are reading it before taking a VT. It holds because Solium's handlers
+never wait on the event loop: the second signal ends the process from the
+handler itself, and the timeout from a thread of its own
+(`signals::tests::the_same_signal_twice_ends_a_process_that_cannot_stop` and
+`a_process_that_cannot_stop_ends_when_its_stop_timeout_has_passed`). With QML
+on the GPU it holds only because Solium sets `QT_QPA_NO_SIGNAL_HANDLER` before
+starting Qt — without it eglfs installs its own `SIGTERM` handler, and the
+process then neither dies nor cleanly survives. See *QML on the GPU*. On a
+build that predates that, or one where `QT_QPA_PLATFORM` was set from outside,
+reach for `pkill -9 -x solium`.
 
 **Reading what happened.** A hardware session writes to
 `~/.local/state/solium/session.log` as well as to the terminal, because the
