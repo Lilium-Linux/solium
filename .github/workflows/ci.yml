@@ -81,6 +81,8 @@ jobs:
   docs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     container: registry.fedoraproject.org/fedora:44
     steps:
       - name: System dependencies
