@@ -51,6 +51,8 @@
 // headers. QObject brings the core types in the order Qt expects.
 #include <QtCore/QObject>
 
+#include "compat.h"
+
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
@@ -424,13 +426,20 @@ static bool start_common(const char *import_path)
     g_driver = new CompositorAnimationDriver();
     g_driver->install();
 
+    // Shell types the compositor provides, registered before any scene can
+    // ask for them.
+    solium_qml_register_compat();
+
     g_engine = new QQmlEngine();
+    solium_qml_install_icons(g_engine);
     if (import_path != nullptr) {
         // Colon-separated, like a PATH, and built by `qml.rs` (or replaced
         // whole by `SOLIUM_QML_PATH`). One entry is the compositor's own
         // module, so a scene can `import Solium` and reach the theme; the
         // user's QML directory comes before it, so their own
-        // `Solium/Theme.qml` is the one that resolves.
+        // `Solium/Theme.qml` is the one that resolves; and the Quickshell
+        // compatibility layer comes last, for a hosted shell written against
+        // Quickshell's modules.
         const auto paths = QString::fromUtf8(import_path).split(QLatin1Char(':'),
                                                                 Qt::SkipEmptyParts);
         for (const auto &path : paths) {
@@ -573,9 +582,9 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
     }
 
     // Required properties have to be supplied *at creation*: setting them
-    // afterwards is too late, and the component simply fails to build. A scene
-    // that declares a `required property` resolves and still refuses to exist
-    // without one.
+    // afterwards is too late, and the component simply fails to build. The
+    // shell's dock declares `required property var screenInfo`, which is what
+    // made it resolve and still refuse to exist.
     QVariantMap initial;
     if (initial_json != nullptr) {
         QJsonParseError parsed{};
@@ -1690,7 +1699,7 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
  * drawn.
  *
  * What it does not cover: a `Timer`. A scene whose next change is a timer
- * firing -- a clock on a `Timer` is the plain case -- is not animating
+ * firing -- Quickshell.SystemClock is the one in the tree -- is not animating
  * by this answer and will not be given the frame its timer needs to fire on,
  * because `solium_qml_tick` is what drains the event queue and only runs on a
  * frame that is drawn. Counting running Timers here would fix that and would

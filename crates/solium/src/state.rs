@@ -529,6 +529,10 @@ pub(crate) struct Solium {
     /// no pixels in it. See `crate::remains`.
     pub(crate) textures: Option<crate::remains::Textures>,
 
+    /// The last window list handed to the shell, so it is only sent again
+    /// when it differs.
+    published_windows: String,
+
     /// Set while a focus change is being reported to scripts.
     ///
     /// A script handling `focus` will often ask for focus itself — a scroller
@@ -933,6 +937,7 @@ impl Solium {
             pointer: crate::cursor::Pointer::default(),
             programs: crate::pass::Programs::default(),
             textures: None,
+            published_windows: String::new(),
             focusing: false,
             closing: None,
             pending_drop: None,

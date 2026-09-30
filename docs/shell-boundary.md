@@ -4,16 +4,6 @@ Solium is the compositor. Lilium is the desktop — its bar, its dock, its
 launcher. This is the line between them, and the line is not where a Wayland
 tutorial would put it.
 
-**Where it is today:** a shell is a separate program, a client of the
-compositor, and its bar, dock and launcher are `wlr-layer-shell` surfaces.
-Solium hosts no shell in its own process: there is no way to load a shell's
-QML into the compositor, and no compatibility layer for any shell toolkit. The
-QML engine inside the compositor draws the compositor's own scenes only —
-window frames, the pointer, the wallpaper, loading windows, pane styles, the
-tweaks panel, and whatever a script declares with `sol.surface`. The rest of
-this file is the argument that got it here, including the part that argues the
-other way.
-
 ## The requirement that decides the architecture
 
 > An object should be able to move from the dock into a window's titlebar.
@@ -33,9 +23,8 @@ object, and a synchronisation problem forever when there are two.
 ## So: one engine
 
 The compositor hosts **one QML engine**. Window decorations are scenes in it.
-The original design put the shell's surfaces — bar, dock, launcher — in it
-too, importing the same `Solium.Theme` singleton, because there is only one of
-it.
+The shell's surfaces — bar, dock, launcher — are scenes in it. They import the
+same `Solium.Theme` singleton, because there is only one of it.
 
 That design gave, in order of how hard they would otherwise be:
 
@@ -95,9 +84,9 @@ left. That looks like the compositor placing it at random, because it is.
 `sol.monitors()` gives a script the list, with `primary` and `focused` flags,
 so a shell written in Lua can decide for itself which screens get a bar.
 
-There is no in-process alternative. A shell that wants a bar per screen writes
-layer surfaces, one per output; a scene a script declares with `sol.surface`
-belongs to the configuration, not to a shell.
+`SOLIUM_SHELL_SCENE` still hosts one QML scene in-process, on the primary
+monitor. It is a development affordance for exercising the QML host, not the
+shell — a shell that wants a bar per screen writes layer surfaces.
 
 ## What this cost, honestly
 
@@ -124,9 +113,7 @@ window frames and the compositor's other scenes still depend on that care.
 | Applications | Clients | `xdg-shell` |
 | Window frames | Compositor's QML engine | directly |
 | Loading windows, the pointer | The same QML engine | directly |
-| Bar, dock, launcher | The shell, a separate client | `wlr-layer-shell` |
-| The default wallpaper, other scripted scenes | The compositor's QML engine | `sol.surface` from Lua |
-| A wallpaper program (`swaybg` and the like) | Clients | `wlr-layer-shell` |
+| Bar, dock, launcher, wallpaper | Clients | `wlr-layer-shell` |
 | Which monitor a bar is on | The client names an output | `zwlr_layer_surface_v1` |
 | Colours and metrics | `Solium.Theme`, one singleton | imported by every scene |
 | What an animation *does* | Lua script | `sol.present_from`, `sol.on("open")` |
