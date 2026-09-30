@@ -5037,6 +5037,562 @@ mod real_client {
         );
     }
 
+    /// The shipped `modes`, `workspaces`, `tiling`, `scrolling` and
+    /// `direction`, with the shipped configuration, handed to the
+    /// compositor: every key the tests below press is the one a user
+    /// presses.
+    fn start_the_shipped_layouts(state: &mut Solium, tag: &str) {
+        let directory = std::env::temp_dir().join(format!("solium-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\n\
+                 require(\"modes\")\n\
+                 require(\"workspaces\")\n\
+                 require(\"tiling\")\n\
+                 require(\"scrolling\")\n\
+                 require(\"direction\")\n",
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        )
+        .expect("writing the entry point");
+        state.start_scripts(Some(
+            Scripts::load(&entry).expect("loading the shipped layouts"),
+        ));
+    }
+
+    /// The pointer, moved to `at` as a device moves it: which monitor a key
+    /// such as `super+2` is about.
+    fn pointer_to(state: &mut Solium, at: (f64, f64)) {
+        let pointer = state
+            .seat
+            .get_pointer()
+            .expect("the fixture's seat has a pointer");
+        pointer.motion(
+            state,
+            None,
+            &smithay::input::pointer::MotionEvent {
+                location: at.into(),
+                serial: SERIAL_COUNTER.next_serial(),
+                time: 0,
+            },
+        );
+        pointer.frame(state);
+    }
+
+    /// **A fullscreen or maximised window moved to another monitor is
+    /// fullscreen or maximised on that one**, drawn there and with the
+    /// keyboard. #150's third review.
+    ///
+    /// Two monitors side by side, workspaces per monitor as shipped, and the
+    /// right one switched to workspace 2 by its key, so the two show
+    /// different numbers. `super+f` on the one window, on the left, then
+    /// `super+shift+right`: the layout moved it onto workspace 2 and into
+    /// the right monitor's tree, strip or screen, and the window stayed
+    /// covering the left monitor -- so after the next relayout it was on the
+    /// left monitor's workspace 2, which nobody is looking at, with the
+    /// keyboard still on it. Now it covers the right monitor, and `super+f`
+    /// puts it on the right monitor too: into its tile there, or with no
+    /// layout where it was on the left one. The same the other way for
+    /// maximised, with `super+shift+m` and `super+shift+left`, onto the left
+    /// monitor's workspace 1. In tiling, in scrolling and with no layout.
+    #[test]
+    fn a_fullscreen_or_maximised_window_moved_to_another_monitor_is_so_on_that_one() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        for (mode, key) in [
+            ("tiling", Some("super+t")),
+            ("scrolling", Some("super+s")),
+            ("no layout", None),
+        ] {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (left_output, right_output) = side_by_side(&mut state, "carried-test");
+            let left_screen = state
+                .space
+                .output_geometry(&left_output)
+                .expect("the left monitor is mapped");
+            let right_screen = state
+                .space
+                .output_geometry(&right_output)
+                .expect("the right monitor is mapped");
+            start_the_shipped_layouts(&mut state, "carried");
+            macro_rules! round_trip {
+                () => {
+                    pump(
+                        &mut display,
+                        &mut state,
+                        &conn,
+                        &qh,
+                        &mut queue,
+                        &mut client,
+                    );
+                };
+            }
+            macro_rules! rest {
+                () => {
+                    state.clock.advance(Duration::from_secs(1));
+                    a_frame(&mut state);
+                };
+            }
+            macro_rules! press {
+                ($combo:expr) => {
+                    assert!(state.trigger($combo), "{mode}: {} is bound", $combo);
+                    round_trip!();
+                };
+            }
+            let says = |state: &Solium, chunk: &str| {
+                state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate(chunk))
+                    .unwrap_or_default()
+            };
+
+            // Opened with the layouts running, so it belongs to the
+            // workspace its monitor shows, as every window a user opens does.
+            pointer_to(&mut state, (500.0, 500.0));
+            if let Some(key) = key {
+                press!(key);
+            }
+            let (window, toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.sync_panes();
+            round_trip!();
+            let pane = state.panes.id_of(&window).expect("the window has a pane");
+            if let Some(tile) = state.panes.get(pane).and_then(Pane::placed) {
+                commit_buffer(&client, &qh, &surface, tile.size.w, tile.size.h);
+                round_trip!();
+            }
+            rest!();
+            let workspace = format!(
+                "return tostring(require(\"workspaces\").of[{}])",
+                pane.get()
+            );
+            pointer_to(&mut state, (2500.0, 500.0));
+            press!("super+2");
+            pointer_to(&mut state, (500.0, 500.0));
+            state.focus_window(&window, SERIAL_COUNTER.next_serial());
+            rest!();
+            let before = state.real_geometry(&window).expect("the window is mapped");
+            assert_eq!(
+                (
+                    left_screen.contains_rect(before),
+                    says(
+                        &state,
+                        "local workspaces = require(\"workspaces\")\n\
+                         return workspaces.on(\"carried-test\") .. \",\" .. \
+                         workspaces.on(\"right-test\")"
+                    ),
+                    says(&state, &workspace),
+                ),
+                (true, "1,2".to_owned(), "1".to_owned()),
+                "{mode}: the premise: the window is on the left monitor's workspace 1, \
+                 and the right monitor shows workspace 2"
+            );
+
+            // Covering `screen` in `wanted`, at the size it was told for
+            // that, drawn, on workspace `on`, and with the keyboard.
+            let covers = |state: &Solium, client: &Client, wanted: State, screen, on: &str| {
+                let screen: Rectangle<i32, Logical> = screen;
+                assert!(
+                    in_state(&window, wanted),
+                    "{mode}, {wanted:?}: no longer in it"
+                );
+                assert_eq!(
+                    (
+                        state.space.element_location(&window),
+                        last_configured(client, &toplevel),
+                    ),
+                    (Some(screen.loc), Some((screen.size.w, screen.size.h))),
+                    "{mode}, {wanted:?}: the window is not on the monitor it was moved to"
+                );
+                assert_eq!(
+                    (
+                        says(state, &workspace),
+                        state.pane_on_stage(pane),
+                        state.focused_window().as_ref() == Some(&window),
+                    ),
+                    (on.to_owned(), true, true),
+                    "{mode}, {wanted:?}: (its workspace, drawn, with the keyboard)"
+                );
+            };
+            // Out of it and on `screen`: in the tile the layout has for it
+            // there, or, with no layout, where it was on `from` before it
+            // went in. At that rect, told its size, drawn, and with the
+            // keyboard. Returns the rect.
+            let left_onto = |state: &Solium, client: &Client, left: State, screen, from, was| {
+                let (screen, from, was): (
+                    Rectangle<i32, Logical>,
+                    Rectangle<i32, Logical>,
+                    Rectangle<i32, Logical>,
+                ) = (screen, from, was);
+                assert!(!in_state(&window, left), "{mode}, {left:?}: still in it");
+                let back = state
+                    .panes
+                    .get(pane)
+                    .and_then(Pane::placed)
+                    .unwrap_or_else(|| Rectangle::new(was.loc + (screen.loc - from.loc), was.size));
+                assert!(
+                    screen.contains_rect(back),
+                    "{mode}, {left:?}: the window went back to {back:?}, off {screen:?}"
+                );
+                assert_eq!(
+                    (
+                        state.space.element_location(&window),
+                        last_configured(client, &toplevel),
+                        state.pane_on_stage(pane),
+                        state.focused_window().as_ref() == Some(&window),
+                    ),
+                    (Some(back.loc), Some((back.size.w, back.size.h)), true, true),
+                    "{mode}, {left:?}: (where the window is, its size, drawn, with the keyboard)"
+                );
+                back
+            };
+
+            press!("super+f");
+            commit_buffer(
+                &client,
+                &qh,
+                &surface,
+                left_screen.size.w,
+                left_screen.size.h,
+            );
+            round_trip!();
+            rest!();
+            press!("super+shift+right");
+            state.trigger_relayout();
+            round_trip!();
+            rest!();
+            covers(&state, &client, State::Fullscreen, right_screen, "2");
+
+            press!("super+f");
+            let back = left_onto(
+                &state,
+                &client,
+                State::Fullscreen,
+                right_screen,
+                left_screen,
+                before,
+            );
+            commit_buffer(&client, &qh, &surface, back.size.w, back.size.h);
+            round_trip!();
+            rest!();
+
+            press!("super+shift+m");
+            commit_buffer(
+                &client,
+                &qh,
+                &surface,
+                right_screen.size.w,
+                right_screen.size.h,
+            );
+            round_trip!();
+            rest!();
+            press!("super+shift+left");
+            state.trigger_relayout();
+            round_trip!();
+            rest!();
+            covers(&state, &client, State::Maximized, left_screen, "1");
+
+            press!("super+shift+m");
+            let _ = left_onto(
+                &state,
+                &client,
+                State::Maximized,
+                left_screen,
+                right_screen,
+                back,
+            );
+        }
+    }
+
+    /// **Only a move by key carries a fullscreen window to another monitor.**
+    /// #150's third review.
+    ///
+    /// Scrolling on the left of two monitors side by side, four columns at
+    /// the shipped third of a screen, and the last one sent fullscreen.
+    /// `super+left` three times goes to the first column, and the strip
+    /// scrolls so that the fullscreen window's column is placed over the
+    /// right monitor -- a strip's far columns are where the strip goes on,
+    /// whatever monitor that is. That is not a move to another monitor, and
+    /// the window still covers its own.
+    #[test]
+    fn a_fullscreen_window_whose_column_scrolls_over_the_next_monitor_stays_on_its_own() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (left_output, right_output) = side_by_side(&mut state, "strip-test");
+        let left_screen = state
+            .space
+            .output_geometry(&left_output)
+            .expect("the left monitor is mapped");
+        start_the_shipped_layouts(&mut state, "strip");
+        macro_rules! round_trip {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            };
+        }
+        macro_rules! rest {
+            () => {
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+            };
+        }
+        macro_rules! press {
+            ($combo:expr) => {
+                assert!(state.trigger($combo), "{} is bound", $combo);
+                round_trip!();
+            };
+        }
+        pointer_to(&mut state, (500.0, 500.0));
+        press!("super+s");
+        let mut opened = Vec::new();
+        for _ in 0..4 {
+            let (window, toplevel, surface) =
+                open_surface(&mut display, &mut state, &conn, &client, &qh);
+            state.sync_panes();
+            round_trip!();
+            let tile = state
+                .panes
+                .of(&window)
+                .and_then(Pane::placed)
+                .expect("the strip has the window in a column");
+            commit_buffer(&client, &qh, &surface, tile.size.w, tile.size.h);
+            round_trip!();
+            opened.push((window, toplevel, surface));
+        }
+        rest!();
+        let Some((window, toplevel, surface)) = opened.pop() else {
+            return;
+        };
+        let pane = state.panes.id_of(&window).expect("the window has a pane");
+        assert_eq!(
+            state.focused_window().as_ref(),
+            Some(&window),
+            "the premise: the last window opened has the keyboard"
+        );
+
+        press!("super+f");
+        commit_buffer(
+            &client,
+            &qh,
+            &surface,
+            left_screen.size.w,
+            left_screen.size.h,
+        );
+        round_trip!();
+        rest!();
+        for _ in 0..3 {
+            press!("super+left");
+            rest!();
+        }
+        let column = state
+            .panes
+            .get(pane)
+            .and_then(Pane::left_tile)
+            .expect("the strip gave the fullscreen window a column");
+        assert_eq!(
+            state.output_of(column),
+            Some(right_output),
+            "the premise: the strip placed the fullscreen window's column, {column:?}, \
+             over the right monitor"
+        );
+        assert!(in_state(&window, State::Fullscreen), "no longer fullscreen");
+        assert_eq!(
+            (
+                state.space.element_location(&window),
+                last_configured(&client, &toplevel),
+            ),
+            (
+                Some(left_screen.loc),
+                Some((left_screen.size.w, left_screen.size.h))
+            ),
+            "the fullscreen window went to the monitor its column was scrolled over"
+        );
+    }
+
+    /// **A floated window made fullscreen stays fullscreen through a
+    /// layout's sweep, and leaving fullscreen puts it back where it
+    /// floated.** #150's third review.
+    ///
+    /// One monitor with a 30-pixel bar, tiling, two windows.
+    /// `super+shift+space` floats one and `super+f` sends it fullscreen.
+    /// `dialogs.lua` places every floated window on every sweep, centred on
+    /// its screen at the size it has and kept inside the work area, so the
+    /// next sweep put the fullscreen window under the bar and told it the
+    /// work area's size, still fullscreen. Now the sweep leaves it covering
+    /// the monitor, and `super+f` puts it back where it floated, at the size
+    /// it floated at, which a sweep asked for on leaving would place again
+    /// from the size the client has not changed yet.
+    ///
+    /// And a tiled window floated while it is fullscreen floats when it
+    /// leaves fullscreen, where a floated window of its size goes, and in no
+    /// tile.
+    #[test]
+    fn a_floated_window_made_fullscreen_is_left_so_by_a_sweep_and_goes_back_where_it_floated() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let output = one_screen(&mut state);
+        let screen = state
+            .space
+            .output_geometry(&output)
+            .expect("the monitor is mapped");
+        let _bar = bar(&mut display, &mut state, &conn, &client, &qh, 30);
+        assert_eq!(
+            state.work_area_on(&output),
+            Some(Rectangle::new((0, 30).into(), (1920, 1050).into())),
+            "the premise: the bar holds the top of the screen"
+        );
+        let (window, toplevel, surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (other, _other_toplevel, other_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.sync_panes();
+        let pane = state.panes.id_of(&window).expect("the window has a pane");
+        start_the_shipped_layouts(&mut state, "floated-fullscreen");
+        macro_rules! round_trip {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            };
+        }
+        macro_rules! rest {
+            () => {
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+            };
+        }
+        macro_rules! press {
+            ($combo:expr) => {
+                assert!(state.trigger($combo), "{} is bound", $combo);
+                round_trip!();
+            };
+        }
+        let tile_of = |state: &Solium, window: &Window| {
+            state
+                .panes
+                .of(window)
+                .and_then(Pane::placed)
+                .expect("the layout has this window in a tile")
+        };
+        // The window where it is, at the size it was last told.
+        let at = |state: &Solium, client: &Client| {
+            (
+                state.space.element_location(&window),
+                last_configured(client, &toplevel),
+            )
+        };
+
+        press!("super+t");
+        for (surface, window) in [(&surface, &window), (&other_surface, &other)] {
+            let tile = tile_of(&state, window);
+            commit_buffer(&client, &qh, surface, tile.size.w, tile.size.h);
+        }
+        round_trip!();
+        rest!();
+        state.focus_window(&window, SERIAL_COUNTER.next_serial());
+        press!("super+shift+space");
+        rest!();
+        let floated = state.real_geometry(&window).expect("the window is mapped");
+        assert_eq!(
+            (
+                state.panes.get(pane).and_then(Pane::placed),
+                at(&state, &client)
+            ),
+            (
+                None,
+                (Some(floated.loc), Some((floated.size.w, floated.size.h)))
+            ),
+            "the premise: the window floats, out of its tile"
+        );
+
+        press!("super+f");
+        commit_buffer(&client, &qh, &surface, screen.size.w, screen.size.h);
+        round_trip!();
+        rest!();
+        state.trigger_relayout();
+        round_trip!();
+        rest!();
+        assert!(in_state(&window, State::Fullscreen), "no longer fullscreen");
+        assert_eq!(
+            at(&state, &client),
+            (Some(screen.loc), Some((screen.size.w, screen.size.h))),
+            "the sweep placed the fullscreen window as a floating one"
+        );
+
+        press!("super+f");
+        assert!(!in_state(&window, State::Fullscreen), "still fullscreen");
+        assert_eq!(
+            at(&state, &client),
+            (Some(floated.loc), Some((floated.size.w, floated.size.h))),
+            "leaving fullscreen did not go back to where the window floated"
+        );
+        commit_buffer(&client, &qh, &surface, floated.size.w, floated.size.h);
+        round_trip!();
+        state.trigger_relayout();
+        round_trip!();
+        rest!();
+        assert_eq!(
+            at(&state, &client),
+            (Some(floated.loc), Some((floated.size.w, floated.size.h))),
+            "the next sweep moved the window from where it floated"
+        );
+
+        // Tiled again, fullscreen, and floated while it is.
+        press!("super+shift+space");
+        let tile = tile_of(&state, &window);
+        commit_buffer(&client, &qh, &surface, tile.size.w, tile.size.h);
+        round_trip!();
+        rest!();
+        press!("super+f");
+        commit_buffer(&client, &qh, &surface, screen.size.w, screen.size.h);
+        round_trip!();
+        rest!();
+        press!("super+shift+space");
+        rest!();
+        assert!(in_state(&window, State::Fullscreen), "no longer fullscreen");
+        assert_eq!(
+            at(&state, &client),
+            (Some(screen.loc), Some((screen.size.w, screen.size.h))),
+            "floating the fullscreen window placed it as a floating one"
+        );
+        press!("super+f");
+        assert_eq!(
+            (tile.size, tile.loc == floated.loc),
+            (floated.size, false),
+            "the premise: the window's tile is the size it floated at, somewhere else"
+        );
+        assert_eq!(
+            state
+                .panes
+                .get(pane)
+                .map(|held| (held.placed(), held.left_tile())),
+            Some((None, None)),
+            "a window floated while fullscreen went back into the tile it had"
+        );
+        assert_eq!(
+            at(&state, &client),
+            (Some(floated.loc), Some((floated.size.w, floated.size.h))),
+            "a window floated while fullscreen did not float where one of its size goes"
+        );
+    }
+
     /// **A window a layout lets go of is not held in the tile it had.**
     ///
     /// `sol.unplace` is what `modes.use` sends for every window when the
@@ -5116,6 +5672,7 @@ mod real_client {
                 tile: false,
                 inside: None,
                 cramped: false,
+                moved: false,
             }],
             ..Outcome::default()
         });
@@ -5145,6 +5702,7 @@ mod real_client {
                 tile: true,
                 inside: None,
                 cramped: false,
+                moved: false,
             }],
             ..Outcome::default()
         });
@@ -11996,6 +12554,7 @@ mod real_client {
                     h: 1000.0,
                 }),
                 cramped: false,
+                moved: false,
             });
             desk.pump();
             let tile = at(0, 0, 1600, 1000);
@@ -12051,6 +12610,7 @@ mod real_client {
                 tile,
                 inside: None,
                 cramped,
+                moved: false,
             };
             desk.place(place(true, true));
             assert!(
@@ -13913,6 +14473,7 @@ end)
                             tile: false,
                             inside: None,
                             cramped: false,
+                            moved: false,
                         }],
                         ..Outcome::default()
                     }),

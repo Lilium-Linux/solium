@@ -120,6 +120,10 @@ end
 -- `at_a_monitors_edge_the_next_monitor_is_one_wholly_that_way`,
 -- `at_a_monitors_edge_floating_crosses_to_the_next_monitor` and
 -- `of_two_monitors_that_way_the_one_level_with_the_window_is_next`.
+--
+-- With no `from`, or one with nothing past its centre that way -- a window
+-- whose centre is on no screen -- ranked from this monitor instead.
+-- `direction_beside_with_no_window_or_one_on_no_screen_ranks_from_the_monitor`.
 function direction.beside(name, dir, from)
     local here
     local all = {}
@@ -141,7 +145,8 @@ function direction.beside(name, dir, from)
             past[#past + 1] = entry
         end
     end
-    local found = direction.nearest(from, past, dir, true)
+    local found = direction.nearest(from or here, past, dir, true)
+        or direction.nearest(here, past, dir, true)
     return found and found.monitor
 end
 

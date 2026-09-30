@@ -689,7 +689,20 @@ impl XdgShellHandler for Solium {
             }
             self.map_stacked(window, back.loc, true);
         }
-        self.trigger_relayout();
+        // Back in a tile, and the layout says where that is now, as
+        // `toggle_maximize` asks it. Only then: a window going back to where
+        // it floated is there already, and a sweep now would place it again
+        // from the size its client has not changed yet -- `dialogs.lua`
+        // centres a floated window at the size it has, which is still the
+        // monitor's.
+        // `a_floated_window_made_fullscreen_is_left_so_by_a_sweep_and_goes_back_where_it_floated`.
+        if self
+            .panes
+            .get(id)
+            .is_some_and(|pane| pane.placed().is_some())
+        {
+            self.trigger_relayout();
+        }
         self.redraw = true;
         tracing::debug!("a window left fullscreen");
     }

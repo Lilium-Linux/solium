@@ -278,12 +278,16 @@ impl Solium {
                     tile,
                     inside,
                     cramped,
+                    moved,
                 } => {
                     let standing = match (tile, inside) {
                         (false, _) => Standing::Free,
                         (true, Some(inside)) => Standing::Within(outer_of(inside)),
                         (true, None) => Standing::Tile,
                     };
+                    if moved {
+                        self.carry_across(id, rect, standing);
+                    }
                     self.place(id, rect, animation, now, standing);
                     // The layout's word for this placement, said afresh each
                     // time; a window placed out of a tile is in no tile to be

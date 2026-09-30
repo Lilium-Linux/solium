@@ -52,6 +52,21 @@ fn over_the_arrangement(window: &Window) -> bool {
     })
 }
 
+/// `rect`, moved from the monitor at `from` onto the one at `to`: at the same
+/// place on it, and kept wholly on it. For `Solium::carry_across`, and
+/// `a_fullscreen_or_maximised_window_moved_to_another_monitor_is_so_on_that_one`
+/// with no layout.
+fn across(
+    rect: Rectangle<i32, Logical>,
+    from: Rectangle<i32, Logical>,
+    to: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    let size = Size::from((rect.size.w.min(to.size.w), rect.size.h.min(to.size.h)));
+    let x = (to.loc.x + rect.loc.x - from.loc.x).clamp(to.loc.x, to.loc.x + to.size.w - size.w);
+    let y = (to.loc.y + rect.loc.y - from.loc.y).clamp(to.loc.y, to.loc.y + to.size.h - size.h);
+    Rectangle::new((x, y).into(), size)
+}
+
 /// A script's rectangle as a pane's outer one: rounded to whole pixels, and
 /// never smaller than one.
 pub(super) fn outer_of(rect: Rect) -> Rectangle<i32, Logical> {
@@ -286,28 +301,41 @@ impl Solium {
         {
             return;
         }
-        // **Nor into a tile, while it is fullscreen or maximised** (#150's
-        // second review). A script cannot see that a window is either, and a
-        // layout places every window it arranges on every pass --
-        // `tiling.apply` does after a window opens, a move by key and a
-        // window floated -- so the sweep resized a fullscreen window into its
-        // tile, still fullscreen and with no frame. A tile given to one is the
-        // tile it goes back to instead, and nothing else changes: leaving
-        // fullscreen or maximised goes into the newest tile the layout gave.
-        // `a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is`.
-        let tile = match standing {
-            Standing::Tile => Some(outer),
-            Standing::Within(tile) => Some(tile),
-            Standing::Free | Standing::Kept => None,
-        };
-        if let Some(tile) = tile
+        // **Nor into a tile, nor where a layout floats it, while it is
+        // fullscreen or maximised** (#150's second and third reviews). A
+        // script cannot see that a window is either, and a layout places
+        // every window it arranges on every pass -- `tiling.apply` does after
+        // a window opens, a move by key and a window floated, and
+        // `dialogs.place` centres every floated window again at the size it
+        // has -- so a sweep resized a fullscreen window into its tile, or
+        // into the work area under a bar, still fullscreen. So the window
+        // stays where it is. A tile given to one is the tile it goes back to,
+        // and leaving fullscreen or maximised goes into the newest tile the
+        // layout gave. A placement that is not a tile leaves the tile it had
+        // as the way back: leaving goes into it and asks the layout, which
+        // floats a window floated while it was fullscreen from there, at the
+        // tile's size rather than the monitor's.
+        // `a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is` and
+        // `a_floated_window_made_fullscreen_is_left_so_by_a_sweep_and_goes_back_where_it_floated`.
+        //
+        // The one placement that moves such a window is a move by key onto
+        // another monitor, and `carry_across` has made that one by now.
+        // `a_fullscreen_or_maximised_window_moved_to_another_monitor_is_so_on_that_one`.
+        if standing != Standing::Kept
             && self
                 .panes
                 .get(pane)
                 .and_then(Pane::client)
                 .is_some_and(over_the_arrangement)
         {
-            if let Some(held) = self.panes.get_mut(pane) {
+            let tile = match standing {
+                Standing::Tile => Some(outer),
+                Standing::Within(tile) => Some(tile),
+                Standing::Free | Standing::Kept => None,
+            };
+            if let Some(tile) = tile
+                && let Some(held) = self.panes.get_mut(pane)
+            {
                 held.set_placed(tile);
                 held.leave_tile();
             }
@@ -526,6 +554,89 @@ impl Solium {
                 animation.easing,
             );
         }
+    }
+
+    /// A fullscreen or maximised window that a `super+shift+arrow` has moved
+    /// onto another monitor, fullscreen or maximised on that one: fullscreen
+    /// covers the monitor its new tile or rectangle is on, maximised fills
+    /// that monitor's work area, and the keyboard stays on it. Left over the
+    /// old monitor, it was on the new monitor's workspace -- the layout said
+    /// so -- over a screen showing another one, so it was drawn nowhere and
+    /// still had the keyboard.
+    ///
+    /// The way back comes too, to the same place on the new monitor as it had
+    /// on the old one. Left where it was, leaving fullscreen or maximised put
+    /// a window with no tile to go into on the old monitor again, where the
+    /// next relayout files it under that monitor's copy of its workspace, out
+    /// of view.
+    /// `a_fullscreen_or_maximised_window_moved_to_another_monitor_is_so_on_that_one`.
+    ///
+    /// Only for the window the keys moved (`Command::Place::moved`). A strip
+    /// scrolled past its monitor's edge puts the far columns over the next
+    /// monitor, and a fullscreen window in one of those is still on its own.
+    /// `a_fullscreen_window_whose_column_scrolls_over_the_next_monitor_stays_on_its_own`.
+    pub(super) fn carry_across(&mut self, id: u64, rect: Rect, standing: Standing) {
+        let Some(pane) = self.panes.by_script_id(id).map(Pane::id) else {
+            return;
+        };
+        let to = match standing {
+            Standing::Within(tile) => tile,
+            Standing::Tile | Standing::Free | Standing::Kept => outer_of(rect),
+        };
+        let Some(window) = self
+            .panes
+            .get(pane)
+            .and_then(Pane::client)
+            .filter(|window| over_the_arrangement(window))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(toplevel) = window.toplevel().cloned() else {
+            return;
+        };
+        let Some(here) = self
+            .pane_outer_of(pane)
+            .and_then(|outer| self.output_of(outer))
+        else {
+            return;
+        };
+        let Some(there) = self.output_of(to).filter(|there| *there != here) else {
+            return;
+        };
+        let (Some(from), Some(screen)) = (
+            self.space.output_geometry(&here),
+            self.space.output_geometry(&there),
+        ) else {
+            return;
+        };
+        let fullscreen = toplevel
+            .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen));
+        let rect = if fullscreen {
+            Some(screen)
+        } else {
+            self.maximised(&window, to)
+        };
+        let Some(rect) = rect else {
+            return;
+        };
+
+        if let Some(held) = self.panes.get_mut(pane) {
+            let back = held.restore().map(|back| across(back, from, screen));
+            held.set_restore(back);
+            held.set_slot(rect);
+        }
+        toplevel.with_pending_state(|state| state.size = Some(rect.size));
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+        self.map_stacked(window, rect.loc, false);
+        self.redraw = true;
+        tracing::debug!(
+            fullscreen,
+            to = %there.name(),
+            "a fullscreen or maximised window was moved to another monitor"
+        );
     }
 
     /// Whether the client hears about this rectangle on this frame, and the

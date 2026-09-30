@@ -424,6 +424,14 @@ pub(crate) enum Command {
         /// Whether the layout says this tile is smaller than the window's own
         /// minimum. See `WindowInfo::cramped`.
         cramped: bool,
+        /// Whether this is the window a `sol.move_direction` is moving: the
+        /// focused one, placed while the `direction` listeners run. A
+        /// fullscreen or maximised window is placed nowhere by a layout, and
+        /// this is the one exception: moved onto another monitor, it is
+        /// fullscreen or maximised there. See `Solium::carry_across`,
+        /// `a_fullscreen_or_maximised_window_moved_to_another_monitor_is_so_on_that_one`
+        /// and `a_fullscreen_window_whose_column_scrolls_over_the_next_monitor_stays_on_its_own`.
+        moved: bool,
     },
     /// No layout holds this window in a tile any more: whatever it commits,
     /// it is drawn at. What `modes.use` sends for every window when the layout
@@ -571,6 +579,10 @@ struct Pending {
     animation: AnimationSpec,
     grab: Option<bool>,
     status: Option<String>,
+    /// The window a `sol.move_direction` is moving, while its listeners run.
+    /// See `Command::Place::moved`, and
+    /// `a_fullscreen_or_maximised_window_moved_to_another_monitor_is_so_on_that_one`.
+    moving: Option<u64>,
 }
 
 /// What a script handed the host to hold while the Lua state is replaced.
@@ -2912,7 +2924,22 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     )));
                 }
                 let sol = &lua.globals().get::<Table>("sol")?;
-                call_listeners(sol, "direction", (verb, dir))?;
+                // A move is of the focused window, and every placement of it
+                // while the listeners run says so. See `Command::Place::moved`,
+                // and `a_fullscreen_or_maximised_window_moved_to_another_monitor_is_so_on_that_one`.
+                let moving = if verb == "move" {
+                    focused_id(lua)
+                } else {
+                    None
+                };
+                let mut outer = None;
+                with_pending(lua, |pending| {
+                    outer = pending.moving;
+                    pending.moving = moving.or(outer);
+                })?;
+                let heard = call_listeners(sol, "direction", (verb, dir));
+                with_pending(lua, |pending| pending.moving = outer)?;
+                heard?;
                 Ok(())
             })?,
         )?;
@@ -2959,6 +2986,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             let cramped = options.get::<Option<bool>>("cramped")?.unwrap_or(false);
             with_pending(lua, |pending| {
                 let animation = pending.animation;
+                let moved = pending.moving == Some(id);
                 pending.commands.push(Command::Place {
                     id,
                     rect,
@@ -2966,6 +2994,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     tile,
                     inside,
                     cramped,
+                    moved,
                 });
             })
         })?,
@@ -11589,6 +11618,42 @@ mod directions {
                 [to],
                 "scrolling: {key} from window {from}"
             );
+        }
+    }
+
+    /// **`direction.beside` with no window, or one whose centre is on no
+    /// screen, ranks from the monitor.** #150's third review.
+    ///
+    /// Round two made the window its third argument, and a mode of your own
+    /// calling it with the two it had before raised an error. Now, left of
+    /// the portrait screen with two stacked on its left, the one level with
+    /// the portrait screen's centre is next with no window, and with a window
+    /// whose centre is past both screens that way, which has nothing further
+    /// that way to rank -- where before that was no monitor at all. With a
+    /// window near the top it is still the upper screen.
+    #[test]
+    fn direction_beside_with_no_window_or_one_on_no_screen_ranks_from_the_monitor() {
+        let desk = Desk::new(
+            "",
+            vec![
+                screen("DP-1", PORTRAIT),
+                screen("DP-2", ABOVE_LEFT),
+                screen("DP-3", BELOW_LEFT),
+            ],
+        );
+        for (from, next) in [
+            ("", "DP-3"),
+            (", { x = -5000, y = 0, w = 100, h = 100 }", "DP-3"),
+            (", { x = 2000, y = 100, w = 800, h = 600 }", "DP-2"),
+        ] {
+            let answer = desk.scripts.evaluate_in(
+                desk.snapshot(),
+                &format!(
+                    "local next = require(\"direction\").beside(\"DP-1\", \"left\"{from})\n\
+                     return next and next.name or \"no monitor\""
+                ),
+            );
+            assert_eq!(answer, next, "left of DP-1{from}");
         }
     }
 

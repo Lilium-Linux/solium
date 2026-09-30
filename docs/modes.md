@@ -67,9 +67,13 @@ layout in charge changes — so a mode registered through `modes` gets it for
 free, and one that is not must send it itself. Maximising and fullscreen take a
 window out of its tile on their own, and the way back puts it in again. A
 script cannot see that a window is maximised or fullscreen, so a layout that
-places every window on every pass (as `tiling.apply` does) places those too,
-and that placement is kept as the tile the window goes back into: the window
-itself stays where it is, over the arrangement.
+places every window on every pass (as `tiling.apply` does, and `dialogs.lua`
+for every floated window) places those too. The window itself stays where it
+is, over the arrangement. A tile placed is kept as the tile the window goes
+back into; a placement with `tile = false` changes nothing, so a floated
+window goes back to where it floated. The one placement that moves such a
+window is a move by key onto another monitor: see
+[Focus and move by direction](#focus-and-move-by-direction).
 
 `present` is a transform. The window still lives where it lived and the client
 never learns anything happened; it is simply drawn somewhere else. Use it for
@@ -597,6 +601,16 @@ size it had, until the key puts it back. It stays floated through a reload.
 for one that was maximised before it went fullscreen, for where it was before
 either. `super+f` and `super+shift+m` act on Wayland windows only for now: an
 X11 window under XWayland does not go fullscreen or maximised by key.
+
+A fullscreen or maximised window stays so when it is moved. On its own monitor
+the move happens behind it: in tiling it trades tiles with the one that way,
+and leaving fullscreen or maximised goes into the tile it has now. Onto another
+monitor it is fullscreen or maximised there, drawn on the workspace that
+monitor shows and keeping the keyboard, and leaving stays on that monitor: in
+its tile there, or with no layout at the same place on the new screen as it
+had on the old one. A window floated with `super+shift+space` and then made
+fullscreen stays fullscreen through every layout pass, and leaving goes back to
+where it floated.
 
 ## The arrangements that ship
 
