@@ -211,6 +211,13 @@
 ---@field renderer? "auto"|"gpu"|"software" `"auto"` tries the GPU in a child process first.
 ---@field probe_timeout? integer Milliseconds the GPU trial may take.
 
+---Telling systemd and D-Bus that Solium is the session. A key left out, or
+---one of the wrong kind, keeps the default.
+---@class sol.SessionOptions
+---@field systemd? boolean Export the environment to systemd and D-Bus activation and start `solium-session.target`; undone on exit. `true` by default.
+---@field autostart? boolean Start `solium-autostart.target`, XDG autostart, beside it. `true` by default.
+---@field stop_timeout? integer Milliseconds SIGTERM, SIGINT or SIGHUP waits for a clean stop before Solium ends at once. 5000 by default.
+
 ---One entry of `sol.decorations()`.
 ---@class sol.DecorationEntry
 ---@field name string What `sol.pane` takes.
@@ -440,6 +447,17 @@ function sol.cursor_theme(options) end
 ---@param options? sol.QmlOptions
 ---@return nil
 function sol.qml(options) end
+
+---Say how this session is announced, and how long a signal to end waits.
+---
+---Read once, when the compositor starts; a reload does not change it. Who is
+---told: the session bus, when Solium is started as the session with
+---`solium --tty --session`; nobody, for a `--tty` start by hand or a nested
+---run, unless `SOLIUM_SESSION_BUS` names a bus to tell instead. The shipped
+---`init.lua` calls it with `config.session`.
+---@param options? sol.SessionOptions
+---@return nil
+function sol.session(options) end
 
 ---Stop presenting a window: animate it back to where it lives.
 ---@param id integer

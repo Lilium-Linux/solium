@@ -30,6 +30,14 @@ otherwise. So `solium --debug-mode --tty` never reaches `--tty`; write
     `~/.local/state/solium/session.log`), is written only when this is the
     **first** argument.
 
+--session
+    Read only after `--tty`, anywhere after it. `solium --tty --session` is
+    the user's graphical session, and tells systemd and D-Bus so: it exports
+    `WAYLAND_DISPLAY` and the rest, starts `solium-session.target`, and
+    undoes both on exit. `solium-session`, which the session file starts,
+    runs it this way. Without it, `--tty` tells nobody unless
+    `SOLIUM_SESSION_BUS` names a bus.
+
 --check
     Load the configuration, print every binding it registered and every one
     it removed, and exit. Exits with 1 when the configuration fails to load or
@@ -112,6 +120,13 @@ SOLIUM_DEBUG_MODE
 SOLIUM_NO_DMABUF
     Set to anything, clients are not offered `linux-dmabuf` and fall back to
     shared memory.
+
+SOLIUM_SESSION_BUS=<address>
+    The D-Bus address to tell about the session, instead of the session bus.
+    Nested, or `solium --tty` without `--session`, this is the only way
+    anything is told. Blank counts as unset. For checking the calls against a
+    private bus: `dbus-run-session -- sh -c
+    'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS solium'`.
 
 ## Hosting a shell
 
