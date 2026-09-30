@@ -38,6 +38,14 @@ case "$staging/" in
         exit 1
         ;;
 esac
+# And a shell checked out at or under <staging-dir>/qs is what the next lines
+# delete, uncommitted work and all.
+case "$source_root/" in
+    "$staging/qs/"*)
+        echo "refusing to stage over the shell's own checkout: $source_root is under $staging/qs" >&2
+        exit 1
+        ;;
+esac
 
 mkdir -p "$staging"
 rm -rf "$staging/qs"

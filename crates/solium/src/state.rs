@@ -125,6 +125,8 @@ use placement::outer_of;
 #[cfg(test)]
 use snapshot::to_rect;
 pub(crate) use snapshot::{Limits, limits_of};
+#[cfg(test)]
+pub(crate) use snapshot::{Listed, window_list_json};
 use workspaces::nothing_on_stage;
 #[cfg(test)]
 use workspaces::{SETTLED, put_away, staged};

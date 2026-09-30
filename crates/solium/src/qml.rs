@@ -2019,6 +2019,133 @@ mod compat_tests {
         });
     }
 
+    /// **`Variants` builds one instance per entry of its model**, each given
+    /// its entry as `modelData`, as Quickshell's does.
+    ///
+    /// The shim once redeclared `model` and `delegate`, which hid
+    /// Instantiator's own and left it building nothing whatever it was given:
+    /// `Variants { model: Quickshell.screens; PanelWindow {} }`, the usual
+    /// Quickshell root, would have stayed empty with screens published. The
+    /// bare `Instantiator` beside it is the control, so the test cannot pass
+    /// by counting something neither of them builds.
+    #[test]
+    fn variants_builds_one_instance_per_model_entry() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-variants");
+            let scene = directory.join("Variants.qml");
+            write(
+                &scene,
+                r#"
+                import QtQuick
+                import QtQml
+                import Quickshell
+
+                Item {
+                    readonly property int control: instantiator.count
+                    readonly property int built: variants.count
+                    readonly property int second:
+                        variants.count > 1 ? variants.objectAt(1).value : -1
+
+                    Instantiator { id: instantiator; model: [1, 2, 3]; QtObject {} }
+                    Variants {
+                        id: variants
+                        model: [1, 2, 3]
+                        Item {
+                            required property var modelData
+                            readonly property int value: modelData
+                        }
+                    }
+                }
+                "#,
+            );
+
+            super::start().expect("Qt starts");
+            let mut scene =
+                super::Scene::for_host(&scene, 16, 16, None).expect("the Variants scene builds");
+            assert_eq!(
+                scene.get_int("control"),
+                3,
+                "the control failed: Instantiator itself built nothing"
+            );
+            assert_eq!(
+                scene.get_int("built"),
+                3,
+                "Variants did not build one instance per model entry"
+            );
+            assert_eq!(
+                scene.get_int("second"),
+                2,
+                "an instance was not given its model entry"
+            );
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **`dev/stage-shell.sh` never deletes the shell it is staging.**
+    ///
+    /// It replaces `<staging-dir>/qs` on every run, and the suggested staging
+    /// directory is `~/.config/solium/qml`, so a shell cloned to
+    /// `~/.config/solium/qml/qs` was one run from being deleted, uncommitted
+    /// work and all. The control stages a shell from outside, which must
+    /// work, so the refusals cannot pass by the script failing for every
+    /// input.
+    #[test]
+    fn staging_a_shell_never_deletes_its_own_checkout() {
+        let script = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../dev/stage-shell.sh"
+        ));
+        if !script.exists() {
+            println!("skipped: dev/stage-shell.sh is not in this tree");
+            return;
+        }
+        let stage = |shell: &Path, staging: &Path| {
+            std::process::Command::new("bash")
+                .arg(script)
+                .arg(shell)
+                .arg(staging)
+                .output()
+                .expect("running dev/stage-shell.sh")
+        };
+        let base = fixture_dir("solium-stage-shell-test");
+
+        let outside = base.join("shell");
+        std::fs::create_dir_all(&outside).expect("a shell directory");
+        write(&outside.join("Bar.qml"), "import QtQuick\nItem {}\n");
+        let staging = base.join("qml");
+        let staged = stage(&outside, &staging);
+        assert!(
+            staged.status.success(),
+            "the control failed: a shell outside the staging directory was not staged: {}",
+            String::from_utf8_lossy(&staged.stderr)
+        );
+        assert!(
+            staging.join("qs/Bar.qml").exists(),
+            "the control staged nothing"
+        );
+
+        let checkout = staging.join("qs/checkout");
+        std::fs::create_dir_all(&checkout).expect("a checkout under qs");
+        write(&checkout.join("Bar.qml"), "import QtQuick\nItem {}\n");
+        write(&checkout.join("uncommitted.txt"), "work in progress\n");
+        let refused = stage(&checkout, &staging);
+        assert!(
+            !refused.status.success(),
+            "staged over a shell checked out under <staging-dir>/qs"
+        );
+        assert!(
+            checkout.join("uncommitted.txt").exists(),
+            "the shell's own checkout was deleted"
+        );
+
+        let inside = stage(&outside, &outside.join("staging"));
+        assert!(!inside.status.success(), "staged inside the shell itself");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// **A hosted shell reads the window list the compositor publishes**,
     /// through `ToplevelManager` and `Hyprland`, and the compositor only
     /// builds the list once some scene has asked for it.
@@ -2039,9 +2166,12 @@ mod compat_tests {
                 import Quickshell.Hyprland
 
                 Item {
+                    property string expected: ""
                     readonly property int count: ToplevelManager.toplevels.values.length
                     readonly property bool twoIsActive:
                         (Hyprland.activeToplevel || {}).title === "two"
+                    readonly property bool firstIsExpected:
+                        (ToplevelManager.toplevels.values[0] || {}).title === expected
                 }
                 "#,
             );
@@ -2069,6 +2199,27 @@ mod compat_tests {
             assert!(
                 scene.get_bool("twoIsActive"),
                 "Hyprland.activeToplevel is not the active window"
+            );
+
+            // What the compositor builds, with a title that once made the
+            // document invalid: see
+            // `a_window_title_with_a_backslash_and_a_tab_is_still_a_window_list`.
+            let awkward = "C:\\temp\\\tdone \"quoted\" \\";
+            super::set_windows(&crate::state::window_list_json(&[crate::state::Listed {
+                id: 3,
+                title: String::from(awkward),
+                app_id: String::from("c"),
+                activated: false,
+            }]));
+            scene.set_string("expected", awkward);
+            assert_eq!(
+                scene.get_int("count"),
+                1,
+                "a title with a backslash and a tab kept the previous list"
+            );
+            assert!(
+                scene.get_bool("firstIsExpected"),
+                "the title did not arrive as the client wrote it"
             );
 
             drop(scene);

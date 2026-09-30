@@ -514,34 +514,103 @@ impl Solium {
             return;
         }
         let focused = self.focused_window();
-        let mut windows = String::from("{\"windows\":[");
-        let mut active = String::from("null");
-        for (index, pane) in self.panes.iter().rev().enumerate() {
-            let Some(window) = pane.client() else {
-                continue;
-            };
-            let id = pane.id().get();
-            let title = self.window_title(window).replace('"', "'");
-            let app_id = self.window_app_id(window).replace('"', "'");
-            let is_active = focused.as_ref() == Some(window);
-            let entry = format!(
-                "{{\"id\":{id},\"title\":\"{title}\",\"appId\":\"{app_id}\",\"activated\":{is_active}}}"
-            );
-            if index > 0 {
-                windows.push(',');
-            }
-            windows.push_str(&entry);
-            if is_active {
-                active = entry;
-            }
-        }
-        windows.push_str("],\"active\":");
-        windows.push_str(&active);
-        windows.push('}');
+        let listed: Vec<Listed> = self
+            .panes
+            .iter()
+            .rev()
+            .filter_map(|pane| {
+                let window = pane.client()?;
+                Some(Listed {
+                    id: pane.id().get(),
+                    title: self.window_title(window),
+                    app_id: self.window_app_id(window),
+                    activated: focused.as_ref() == Some(window),
+                })
+            })
+            .collect();
+        let windows = window_list_json(&listed);
 
         if windows != self.published_windows {
             crate::qml::set_windows(&windows);
             self.published_windows = windows;
         }
+    }
+}
+
+/// One window, as the shell's window list names it.
+pub(crate) struct Listed {
+    pub(crate) id: u64,
+    pub(crate) title: String,
+    pub(crate) app_id: String,
+    pub(crate) activated: bool,
+}
+
+/// The window list as the JSON document `Toplevels::update` in `compat.cpp`
+/// parses: every window in order, and the active one again under `active`.
+///
+/// A title is whatever the client said, so it is escaped as JSON rather than
+/// pasted in: one backslash or tab made the whole document unparseable, and
+/// the shell went on showing the previous list. See
+/// `a_window_title_with_a_backslash_and_a_tab_is_still_a_window_list`.
+pub(crate) fn window_list_json(windows: &[Listed]) -> String {
+    let entry = |window: &Listed| {
+        format!(
+            "{{\"id\":{},\"title\":{},\"appId\":{},\"activated\":{}}}",
+            window.id,
+            crate::scripted::json_string(&window.title),
+            crate::scripted::json_string(&window.app_id),
+            window.activated
+        )
+    };
+    let listed: Vec<String> = windows.iter().map(entry).collect();
+    let active = windows
+        .iter()
+        .find(|window| window.activated)
+        .map_or_else(|| String::from("null"), entry);
+    format!("{{\"windows\":[{}],\"active\":{active}}}", listed.join(","))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Listed, window_list_json};
+
+    /// **A window title with a backslash and a tab is still a window list.**
+    ///
+    /// The list was built by hand and escaped only `"`, so a title ending in
+    /// `\\` or holding a tab made the document invalid JSON, and the shell kept
+    /// the previous list until that title changed. That the escaped document
+    /// is one Qt parses, title intact, is checked end to end in
+    /// `a_hosted_shell_reads_the_window_list_the_compositor_publishes`.
+    #[test]
+    fn a_window_title_with_a_backslash_and_a_tab_is_still_a_window_list() {
+        let json = window_list_json(&[
+            Listed {
+                id: 1,
+                title: String::from("C:\\temp\\\tdone \"quoted\" \\"),
+                app_id: String::from("org.example.Editor"),
+                activated: false,
+            },
+            Listed {
+                id: 2,
+                title: String::from("two"),
+                app_id: String::from("b"),
+                activated: true,
+            },
+        ]);
+        assert_eq!(
+            json,
+            concat!(
+                r#"{"windows":["#,
+                r#"{"id":1,"title":"C:\\temp\\\tdone \"quoted\" \\","appId":"org.example.Editor","activated":false},"#,
+                r#"{"id":2,"title":"two","appId":"b","activated":true}"#,
+                r#"],"active":{"id":2,"title":"two","appId":"b","activated":true}}"#,
+            )
+        );
+    }
+
+    /// No windows, and none active, is still a document.
+    #[test]
+    fn an_empty_window_list_is_still_a_window_list() {
+        assert_eq!(window_list_json(&[]), r#"{"windows":[],"active":null}"#);
     }
 }

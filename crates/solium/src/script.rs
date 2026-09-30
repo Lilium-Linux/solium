@@ -4840,11 +4840,14 @@ mod tests {
     #[test]
     #[ignore = "run by the_environment_overrides_the_configured_shell_scene, with the variable set"]
     fn shell_scene_under_the_environment() {
-        assert_eq!(
-            std::env::var("SOLIUM_SHELL_SCENE").as_deref(),
-            Ok(ENVIRONMENT_SHELL),
-            "run without the variable the parent sets"
-        );
+        // `cargo test -- --include-ignored` runs this in the test process
+        // itself, without the variable. Nothing to check there, and the line
+        // printed is neither marker that
+        // `the_environment_overrides_the_configured_shell_scene` accepts.
+        if std::env::var("SOLIUM_SHELL_SCENE").as_deref() != Ok(ENVIRONMENT_SHELL) {
+            println!("shell-override: not run by the parent, nothing checked");
+            return;
+        }
         let Some((_, commands)) = shell_after_monitors(
             "solium-script-test-shell-override",
             &format!("return {{ shell = {{ scene = \"{CONFIGURED_SHELL}\" }} }}"),
