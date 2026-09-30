@@ -513,6 +513,18 @@ extern "C" void solium_qml_set_windows(const char *json)
     }
 }
 
+/* Whether any scene has asked for the window list.
+ *
+ * `ToplevelManager` and `Hyprland` are singletons, built the first time a
+ * scene reads one and kept for the life of the engine, so this is false until
+ * a hosted shell looks and true from then on. The compositor builds the list
+ * only when it is. See
+ * `a_hosted_shell_reads_the_window_list_the_compositor_publishes`. */
+extern "C" int solium_qml_windows_wanted(void)
+{
+    return liveToplevels().isEmpty() ? 0 : 1;
+}
+
 /* Serves icons from the icon theme to QML, so `image://theme/firefox` works.
  *
  * `iconPath` answers with such a URL, and without a provider behind it every

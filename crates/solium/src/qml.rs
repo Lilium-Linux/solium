@@ -94,6 +94,7 @@ mod ffi {
             scale: f64,
         ) -> bool;
         pub(super) fn solium_qml_set_windows(json: *const c_char);
+        pub(super) fn solium_qml_windows_wanted() -> c_int;
         pub(super) fn solium_qml_clear_cache();
         pub(super) fn solium_qml_scene_new_with(
             qml_path: *const c_char,
@@ -801,6 +802,15 @@ pub(crate) fn set_windows(json: &str) {
     };
     // SAFETY: the string outlives the call, which copies what it needs.
     unsafe { ffi::solium_qml_set_windows(json.as_ptr()) }
+}
+
+/// Whether any scene has read `ToplevelManager` or `Hyprland`, which is when
+/// the window list is worth building. See
+/// `a_hosted_shell_reads_the_window_list_the_compositor_publishes`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn windows_wanted() -> bool {
+    // SAFETY: reads a list the host owns; no arguments, nothing retained.
+    unsafe { ffi::solium_qml_windows_wanted() != 0 }
 }
 
 /// Where QML modules are found, `Solium` among them.
@@ -1787,5 +1797,86 @@ mod search_path_tests {
             parts(&search_path(Some(user), &shipped)),
             vec![user.to_path_buf(), shipped.clone(), shipped.join("compat")]
         );
+    }
+}
+
+/// The Quickshell compatibility layer, as a hosted shell meets it.
+///
+/// These start Qt, on the one thread that may touch it, and build real scenes
+/// that import `Quickshell`: the shim's QML modules on the search path and the
+/// types `compat.cpp` registers behind them.
+#[cfg(test)]
+mod compat_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::qt_test::on_the_qt_thread;
+
+    /// A fresh directory under the system's temporary one.
+    fn fixture_dir(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        directory
+    }
+
+    fn write(path: &Path, text: impl AsRef<[u8]>) {
+        std::fs::write(path, text).expect("writing a fixture");
+    }
+
+    /// **A hosted shell reads the window list the compositor publishes**,
+    /// through `ToplevelManager` and `Hyprland`, and the compositor only
+    /// builds the list once some scene has asked for it.
+    ///
+    /// The only test that reads either singleton, which is what makes the
+    /// first assertion true: they are built on first use and kept for the
+    /// life of the engine.
+    #[test]
+    fn a_hosted_shell_reads_the_window_list_the_compositor_publishes() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-window-list");
+            let scene = directory.join("Windows.qml");
+            write(
+                &scene,
+                r#"
+                import QtQuick
+                import Quickshell.Wayland
+                import Quickshell.Hyprland
+
+                Item {
+                    readonly property int count: ToplevelManager.toplevels.values.length
+                    readonly property bool twoIsActive:
+                        (Hyprland.activeToplevel || {}).title === "two"
+                }
+                "#,
+            );
+
+            super::start().expect("Qt starts");
+            assert!(
+                !super::windows_wanted(),
+                "the window list is wanted before any scene has read it"
+            );
+            let mut scene =
+                super::Scene::for_host(&scene, 16, 16, None).expect("the window-list scene builds");
+            assert!(
+                super::windows_wanted(),
+                "a scene read ToplevelManager and the list is still not wanted"
+            );
+
+            super::set_windows(
+                r#"{"windows":[{"id":1,"title":"one","appId":"a","activated":false},{"id":2,"title":"two","appId":"b","activated":true}],"active":{"id":2,"title":"two","appId":"b","activated":true}}"#,
+            );
+            assert_eq!(
+                scene.get_int("count"),
+                2,
+                "ToplevelManager saw the wrong list"
+            );
+            assert!(
+                scene.get_bool("twoIsActive"),
+                "Hyprland.activeToplevel is not the active window"
+            );
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
     }
 }

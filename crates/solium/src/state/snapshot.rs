@@ -499,21 +499,18 @@ impl Solium {
     /// on it, and a bar that re-evaluates sixty times a second because nothing
     /// happened is a bar that costs something to look at.
     pub(crate) fn publish_windows(&mut self) {
-        // Nobody to tell, nothing to say. The window list is serialised for the
-        // shell, and building it walks every window, asks each for its title
-        // and app id, and allocates a string per window -- every frame, once
-        // something is animating. With no shell hosted that is pure waste, and
-        // the ordinary case is no shell hosted.
-        // Only when a foreign shell is hosted. The list is for the Quickshell
+        // Nobody to tell, nothing to say. The list is for the Quickshell
         // compatibility layer -- `ToplevelManager.toplevels` and friends -- and
         // building it walks every window, asks each for its title and app id,
-        // and allocates a string per window, every time anything changes.
+        // and allocates a string per window, every time anything changes. The
+        // ordinary case is no shell hosted, and a hosted shell that never
+        // reads the list is the same case.
         //
-        // This used to test whether the in-process shell existed, which stopped
-        // meaning anything the moment the shell became an ordinary scripted
-        // surface: a wallpaper is one of those, and there is always a
-        // wallpaper.
-        if std::env::var_os("SOLIUM_SHELL_SCENE").is_none() {
+        // This used to test whether `SOLIUM_SHELL_SCENE` was set, which stopped
+        // being the question once a shell could be named in the configuration;
+        // what is asked instead is whether any scene has read the list. See
+        // `a_hosted_shell_reads_the_window_list_the_compositor_publishes`.
+        if !crate::qml::windows_wanted() {
             return;
         }
         let focused = self.focused_window();
