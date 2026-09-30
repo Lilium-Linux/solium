@@ -1,25 +1,36 @@
-// A layer-shell panel, as an ordinary Item.
+// A layer-shell panel, as the compositor hosts it.
 //
 // In Quickshell this is a window the compositor is asked for over
-// wlr-layer-shell. Inside Solium there is nobody to ask: the scene *is* being
-// drawn by the compositor, so a panel is simply an item with the geometry the
-// compositor gave it. The anchors and exclusive-zone properties are kept so
-// shell code that sets them still loads; the compositor decides placement.
+// wlr-layer-shell, and like any window it is not an Item: what is declared in
+// it goes into its content item. Inside Solium there is nobody to ask -- the
+// scene is being drawn by the compositor -- so the host draws the content item
+// across the area the scene was given. The anchors, exclusive zone and the
+// rest are kept so shell code that sets them still loads; the compositor
+// decides placement. An Item cannot carry them: `anchors` is FINAL on Item,
+// and Qt refuses a type that redeclares it. See
+// `a_panel_window_is_drawn_through_its_content_item`.
 
 import QtQuick
 
-Item {
-    property var anchors: ({ left: false, right: false, top: false, bottom: false })
+QtObject {
+    id: panel
+
+    readonly property PanelAnchors anchors: PanelAnchors {}
     property int exclusiveZone: 0
     property string layer: "top"
     property string namespace: ""
     property var screen: null
     property color color: "transparent"
     property bool visible: true
-    default property alias contentItem: content.data
+    property real implicitWidth: 0
+    property real implicitHeight: 0
+    readonly property alias width: content.width
+    readonly property alias height: content.height
 
-    Item {
+    readonly property Item contentItem: Rectangle {
         id: content
-        anchors.fill: parent
+        color: panel.color
+        visible: panel.visible
     }
+    default property alias data: content.data
 }

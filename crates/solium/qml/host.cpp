@@ -251,6 +251,13 @@ struct SoliumQmlScene
     QQuickRenderControl *control = nullptr;
     QQuickWindow *window = nullptr;
     QQmlComponent *component = nullptr;
+    /* What the QML file built, and what its properties are read from and
+     * written to. The same object as `root` unless the file's root is shaped
+     * like a window -- Quickshell's PanelWindow is one -- in which case it is
+     * the window and `root` is its content item. See
+     * `a_panel_window_is_drawn_through_its_content_item`. */
+    QObject *object = nullptr;
+    /* What is drawn and sized. */
     QQuickItem *root = nullptr;
     QImage image;
     /* Device pixels: the size of the image the compositor uploads. */
@@ -600,10 +607,16 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
     QObject *created = initial.isEmpty() ? scene->component->create()
                                          : scene->component->createWithInitialProperties(initial);
     scene->root = qobject_cast<QQuickItem *>(created);
+    // A root shaped like a window is drawn through its content item, the way a
+    // window shows one.
+    if (scene->root == nullptr && created != nullptr) {
+        scene->root = qvariant_cast<QQuickItem *>(created->property("contentItem"));
+    }
     if (scene->root == nullptr) {
         delete created;
-        return fail("the QML root is not an Item, or the component could not be created — a required property left unset will do this");
+        return fail("the QML root is not an Item or a window with a contentItem, or the component could not be created — a required property left unset will do this");
     }
+    scene->object = created;
 
     scene->root->setParentItem(scene->window->contentItem());
     scene->root->setWidth(scene->width);
@@ -1287,7 +1300,13 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
     const bool was_gpu = scene->gpu;
     const EGLDisplay display = scene->egl_display;
 
-    delete scene->root;
+    // A window's content item is its child, and goes with it; one that is
+    // not is deleted on its own.
+    if (scene->root != nullptr && scene->root != scene->object
+        && scene->root->parent() != scene->object) {
+        delete scene->root;
+    }
+    delete scene->object;
     delete scene->component;
     delete scene->window;
     delete scene->control;
@@ -1568,7 +1587,7 @@ static bool animation_running(const QObject *item);
 static bool anything_animating()
 {
     return std::any_of(g_scenes.begin(), g_scenes.end(), [](const SoliumQmlScene *scene) {
-        return scene != nullptr && scene->root != nullptr && animation_running(scene->root);
+        return scene != nullptr && scene->object != nullptr && animation_running(scene->object);
     });
 }
 
@@ -1748,10 +1767,10 @@ static bool animation_running(const QObject *item)
 
 extern "C" int solium_qml_scene_animating(const SoliumQmlScene *scene)
 {
-    if (scene == nullptr || scene->root == nullptr) {
+    if (scene == nullptr || scene->object == nullptr) {
         return 0;
     }
-    return animation_running(scene->root) ? 1 : 0;
+    return animation_running(scene->object) ? 1 : 0;
 }
 
 extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)
@@ -1902,14 +1921,14 @@ extern "C" const unsigned char *solium_qml_scene_pixels(const SoliumQmlScene *sc
 
 extern "C" const char *solium_qml_scene_take_string(SoliumQmlScene *scene, const char *name)
 {
-    if (scene == nullptr || scene->root == nullptr) {
+    if (scene == nullptr || scene->object == nullptr) {
         return nullptr;
     }
-    const QString value = scene->root->property(name).toString();
+    const QString value = scene->object->property(name).toString();
     if (value.isEmpty()) {
         return nullptr;
     }
-    scene->root->setProperty(name, QVariant(QString()));
+    scene->object->setProperty(name, QVariant(QString()));
     scene->taken = value.toUtf8();
     return scene->taken.constData();
 }
@@ -1917,26 +1936,26 @@ extern "C" const char *solium_qml_scene_take_string(SoliumQmlScene *scene, const
 extern "C" void solium_qml_scene_set_string(SoliumQmlScene *scene, const char *name,
                                             const char *value)
 {
-    if (scene == nullptr || scene->root == nullptr) {
+    if (scene == nullptr || scene->object == nullptr) {
         return;
     }
-    scene->root->setProperty(name, QVariant(QString::fromUtf8(value)));
+    scene->object->setProperty(name, QVariant(QString::fromUtf8(value)));
 }
 
 extern "C" void solium_qml_scene_set_bool(SoliumQmlScene *scene, const char *name, int value)
 {
-    if (scene == nullptr || scene->root == nullptr) {
+    if (scene == nullptr || scene->object == nullptr) {
         return;
     }
-    scene->root->setProperty(name, QVariant(value != 0));
+    scene->object->setProperty(name, QVariant(value != 0));
 }
 
 extern "C" void solium_qml_scene_set_int(SoliumQmlScene *scene, const char *name, int value)
 {
-    if (scene == nullptr || scene->root == nullptr) {
+    if (scene == nullptr || scene->object == nullptr) {
         return;
     }
-    scene->root->setProperty(name, QVariant(value));
+    scene->object->setProperty(name, QVariant(value));
 }
 
 /* How much of the window a decoration reserves is the decoration's decision,
@@ -1949,18 +1968,18 @@ extern "C" void solium_qml_scene_set_int(SoliumQmlScene *scene, const char *name
  * it. */
 extern "C" int solium_qml_scene_get_int(const SoliumQmlScene *scene, const char *name)
 {
-    if (scene == nullptr || scene->root == nullptr || name == nullptr) {
+    if (scene == nullptr || scene->object == nullptr || name == nullptr) {
         return 0;
     }
-    return QQmlProperty(scene->root, QString::fromUtf8(name)).read().toInt();
+    return QQmlProperty(scene->object, QString::fromUtf8(name)).read().toInt();
 }
 
 extern "C" int solium_qml_scene_get_bool(const SoliumQmlScene *scene, const char *name)
 {
-    if (scene == nullptr || scene->root == nullptr || name == nullptr) {
+    if (scene == nullptr || scene->object == nullptr || name == nullptr) {
         return 0;
     }
-    return QQmlProperty(scene->root, QString::fromUtf8(name)).read().toBool() ? 1 : 0;
+    return QQmlProperty(scene->object, QString::fromUtf8(name)).read().toBool() ? 1 : 0;
 }
 
 /* The Layer children of a PaneStyle, in declaration order.
@@ -1974,10 +1993,10 @@ extern "C" int solium_qml_scene_get_bool(const SoliumQmlScene *scene, const char
 static QList<QObject *> style_layers(const SoliumQmlScene *scene)
 {
     QList<QObject *> out;
-    if (scene == nullptr || scene->root == nullptr) {
+    if (scene == nullptr || scene->object == nullptr) {
         return out;
     }
-    const QQmlListReference list(scene->root, "layers");
+    const QQmlListReference list(scene->object, "layers");
     if (!list.isValid()) {
         return out;
     }
@@ -1990,13 +2009,13 @@ static QList<QObject *> style_layers(const SoliumQmlScene *scene)
 
 extern "C" int solium_qml_scene_layer_count(const SoliumQmlScene *scene)
 {
-    if (scene == nullptr || scene->root == nullptr) {
+    if (scene == nullptr || scene->object == nullptr) {
         return -1;
     }
     /* Not "has no layers": has no `layers` *property*, or one that is not a
      * list. Either way the root is not a PaneStyle, and that is a different
      * answer from a PaneStyle declaring none. */
-    const QQmlListReference list(scene->root, "layers");
+    const QQmlListReference list(scene->object, "layers");
     if (!list.isValid()) {
         return -1;
     }
@@ -2042,12 +2061,12 @@ extern "C" const char *solium_qml_scene_layer_field(const SoliumQmlScene *scene,
 extern "C" const char *solium_qml_scene_string_at(const SoliumQmlScene *scene, const char *name,
                                                   int index)
 {
-    if (scene == nullptr || scene->root == nullptr || name == nullptr || index < 0) {
+    if (scene == nullptr || scene->object == nullptr || name == nullptr || index < 0) {
         return nullptr;
     }
     /* Through QQmlProperty, so this takes a path for the same reason
      * solium_qml_scene_get_int does. */
-    QVariant value = QQmlProperty(scene->root, QString::fromUtf8(name)).read();
+    QVariant value = QQmlProperty(scene->object, QString::fromUtf8(name)).read();
 
     /* As in solium_qml_scene_layer_field: a list written in QML can arrive
      * wrapped in a QJSValue, and every conversion below sees nothing through

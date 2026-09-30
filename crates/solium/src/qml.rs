@@ -1941,6 +1941,84 @@ mod compat_tests {
         }
     }
 
+    /// **A `PanelWindow` root is drawn through its content item**, and its
+    /// properties are the scene's.
+    ///
+    /// Quickshell's `PanelWindow` is a window, not an Item, and shell code sets
+    /// `anchors { top: true }` on it -- which an Item cannot take, because
+    /// `anchors` is FINAL on Item and Qt refuses a type that redeclares it. So
+    /// the shim is a window with a `contentItem`, and the host draws that. The
+    /// window's own properties, `action` among them, are still where the
+    /// compositor reads and writes.
+    #[test]
+    fn a_panel_window_is_drawn_through_its_content_item() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-panel-window");
+            let scene = directory.join("Panel.qml");
+            write(
+                &scene,
+                r##"
+                import QtQuick
+                import Quickshell.Wayland
+
+                PanelWindow {
+                    anchors { top: true; left: true; right: true }
+                    exclusiveZone: 20
+                    implicitHeight: 20
+                    color: "#ff0000"
+                    property int built: 7
+                    property string action: ""
+                    readonly property int drawnWidth: width
+
+                    Rectangle { x: 0; y: 0; width: 4; height: 4; color: "#0000ff" }
+                }
+                "##,
+            );
+
+            super::start().expect("Qt starts");
+            let mut scene =
+                super::Scene::for_host(&scene, 16, 16, None).expect("a PanelWindow root builds");
+            assert_eq!(
+                scene.get_int("built"),
+                7,
+                "the window's own property is unreachable"
+            );
+            assert_eq!(
+                scene.get_int("drawnWidth"),
+                16,
+                "the content item was not given the scene's size"
+            );
+            scene.set_string("action", "open-launcher");
+            assert_eq!(
+                scene.take_string("action").as_deref(),
+                Some("open-launcher")
+            );
+
+            // The pixels, on the path that has them to read.
+            if !super::on_gpu() {
+                let rendered = scene.render().expect("the panel renders");
+                let pixel = |x: usize, y: usize| {
+                    let at = y * rendered.stride + x * 4;
+                    rendered.pixels.get(at..at + 4).map(<[u8]>::to_vec)
+                };
+                // Premultiplied ARGB32, little-endian: blue, green, red, alpha.
+                assert_eq!(
+                    pixel(1, 1),
+                    Some(vec![255, 0, 0, 255]),
+                    "the child is not drawn"
+                );
+                assert_eq!(
+                    pixel(10, 10),
+                    Some(vec![0, 0, 255, 255]),
+                    "the colour is not drawn"
+                );
+            }
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
     /// **A hosted shell reads the window list the compositor publishes**,
     /// through `ToplevelManager` and `Hyprland`, and the compositor only
     /// builds the list once some scene has asked for it.
