@@ -33,6 +33,20 @@ local function scene()
     return nil
 end
 
+-- The primary monitor's usable area: the one `primary = true` picks out, or
+-- the first when none is marked. See
+-- `the_shell_is_on_the_primary_monitor_not_the_focused_one`.
+local function primary()
+    local first = nil
+    for _, monitor in ipairs(sol.monitors()) do
+        if monitor.primary then
+            return monitor
+        end
+        first = first or monitor
+    end
+    return first or sol.monitor()
+end
+
 function shell.apply()
     local chosen = scene()
     if not chosen then
@@ -42,7 +56,7 @@ function shell.apply()
         sol.surface("shell", false)
         return
     end
-    local area = sol.monitor()
+    local area = primary()
     sol.surface("shell", {
         scene = chosen,
         layer = "top",

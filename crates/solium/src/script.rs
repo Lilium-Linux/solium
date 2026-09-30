@@ -4746,6 +4746,54 @@ mod tests {
         );
     }
 
+    /// **The shell is on the primary monitor, not the focused one.** A reload
+    /// and a hotplug both place it again, and a bar that followed focus would
+    /// move screens whenever one of them happened with the pointer elsewhere.
+    #[test]
+    fn the_shell_is_on_the_primary_monitor_not_the_focused_one() {
+        if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
+            return;
+        }
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-shell-primary",
+            r#"return { shell = { scene = "/solium-fixture/shell.qml" } }"#,
+        ) else {
+            return;
+        };
+        let mut two = one_screen(&[]);
+        let [focused] = two.monitors.as_mut_slice() else {
+            panic!("one_screen has one monitor");
+        };
+        focused.primary = false;
+        let mut primary = focused.clone();
+        primary.name = "test-2".to_owned();
+        primary.focused = false;
+        primary.primary = true;
+        primary.area = Rect {
+            x: 1600.0,
+            y: 0.0,
+            w: 1920.0,
+            h: 1080.0,
+        };
+        primary.whole = primary.area;
+        two.monitors.push(primary);
+
+        let mut commands = scripts.startup().commands;
+        commands.extend(scripts.monitors_changed(two).commands);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let (declared, _) = shell_surfaces(&commands);
+        let placed: Vec<&crate::scripted::On> = declared.iter().map(|shell| &shell.on).collect();
+        assert_eq!(
+            placed,
+            vec![&crate::scripted::On::Rect(smithay::utils::Rectangle::new(
+                (1600, 0).into(),
+                (1920, 1080).into()
+            ))],
+            "the shell followed the focused monitor instead of the primary one"
+        );
+    }
+
     /// **`SOLIUM_SHELL_SCENE` wins over `shell.scene`**, because it is set per
     /// run -- `dev/run-shell.sh` sets it to the scene being worked on.
     ///
