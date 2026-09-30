@@ -1,10 +1,10 @@
 # Animation
 
 There is one animation engine and one clock. Every window that moves — a tiling
-rearrangement, entering overview, a window opening, a genie into a dock icon —
-moves through the same code. That is not tidiness: it is why modes cannot
-animate inconsistently with each other, which is the usual way a desktop ends
-up feeling assembled rather than designed.
+rearrangement, entering overview, a window opening or closing, the genie
+`super+m` plays — moves through the same code. That is not tidiness: it is why
+modes cannot animate inconsistently with each other, which is the usual way a
+desktop ends up feeling assembled rather than designed.
 
 ## The shape of it
 
@@ -53,13 +53,14 @@ something that was already on screen reads as a wobble.
 
 `inOutCubic` is `inOutQuad` with more of both ends: it holds back longer at each
 and crosses the middle faster. Reach for it when the distance *is* the point —
-the genie into the dock crosses a whole screen and wants to feel like it — and
-for `inOutQuad` when a window is only moving between two slots.
+the `super+m` genie pulls a window across most of the screen into a strip at
+its bottom edge, and wants to feel like it — and for `inOutQuad` when a window
+is only moving between two slots.
 
 `spring` ignores `duration` entirely; a spring arrives when it arrives. Its
 parameters (stiffness, damping, mass, initial velocity) are not settable from
-Lua yet — you get the default, which settles in a little over a third of a
-second with a small overshoot. A gesture's throw speed belongs in its initial
+Lua yet — you get the default, which settles in a little under half a second
+(445 ms) with a small overshoot. A gesture's throw speed belongs in its initial
 velocity and that is why the parameter exists; wiring it to a real gesture is
 E7's work.
 
@@ -135,16 +136,37 @@ obvious:
   window's real size and settles back, which is why it starts at 0.88 rather
   than nearer 1 — a small overshoot needs somewhere to have come from.
 
+## Closing
+
+A window you close shrinks to 0.86 of its size and fades out over 190 ms, on
+`inOutQuad` (`present::CLOSING`). The compositor plays that before it tells the
+application to close, so the window can still paint while it goes, and by
+default the layout moves the other windows into its place at once
+(`reflow_on_close`; [modes.md](modes.md) has the events). A window whose own
+application closes it fades the same way, from the last picture it drew
+(#126), and so does a loading window whose application never arrives, once
+`loading.patience` runs out.
+
+An application can refuse: by saying nothing for a second after it is asked,
+or by answering with a dialog. Then the window comes back. A layout that puts
+it back moves it over the layout's own duration; if nothing places it, it fades
+back in where it vanished over 150 ms, on `outCubic`.
+
+None of these numbers is in `config.lua` yet, so none can be tuned: they are
+the exception to the rule above, and so are overview's 260 and 200 ms, which
+live in `overview.lua`.
+
 ## Animations you should not write
 
 Some things must not be animated, and the reasons are worth knowing before you
 try:
 
-**A resize you are dragging.** `resize.rs` says it in a comment: the window has
-to be under the pointer's corner *this frame*. An animation puts it where the
-pointer was a hundred milliseconds ago, which reads as lag rather than as
-polish. `tiling.lua` passes `{ duration = 0 }` while a seam is being dragged for
-exactly this reason. Animate motion the user did not personally drag.
+**A resize you are dragging.** `input/resize.rs` says it in a comment: the
+window has to be under the pointer's corner *this frame*. An animation puts it
+where the pointer was a hundred milliseconds ago, which reads as lag rather
+than as polish. `tiling.lua` passes `{ duration = 0 }` while a seam is being
+dragged for exactly this reason. Animate motion the user did not personally
+drag.
 
 **A locked pointer.** Nothing to animate — the cursor does not move at all,
 which is the point of a lock.
@@ -161,10 +183,10 @@ its own opaque previous one and nothing fades. `loading.fade` is the setting.
 
 Drawing is damage-driven: a still screen draws nothing at all. An animation
 therefore has to *ask* for the next frame, and everything in the engine does —
-but it means an animation that never ends is a compositor that never idles.
-`pulse.qml` animates continuously while focused and opts out of idling for as
-long as it does. That is a fair trade you are making knowingly; making it by
-accident is not.
+but it means an animation that never ends is a compositor that never stops
+drawing. The `pulse` pane style animates continuously while its window is
+focused, and keeps the compositor drawing for as long as it does. That is a
+fair trade you are making knowingly; making it by accident is not.
 
 The clock is read fresh rather than sampled once per frame, and there is a test
 asserting so. That is not an optimisation, it is a correctness property: a
