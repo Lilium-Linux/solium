@@ -301,6 +301,7 @@ def keys_of(code, indent):
 
 
 def dedent(lines, amount):
+    """Lines of a table body, moved left by the depth they sit at in the file."""
     return "\n".join(line[amount:] if line[:amount].strip() == "" else line.lstrip() for line in lines)
 
 

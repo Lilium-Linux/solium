@@ -76,8 +76,10 @@ if [[ -n "$image" && -z "${SOLIUM_DOCS_INSIDE:-}" ]]; then
     # shellcheck disable=SC2206
     extra=(${SOLIUM_DOCS_PODMAN_ARGS:-})
     # keep-id and label=disable for the gate's reasons: what is built belongs
-    # to whoever ran this, and nothing mounted is relabelled.
-    exec podman run --rm --userns=keep-id --security-opt label=disable \
+    # to whoever ran this, and nothing mounted is relabelled. --init so Ctrl+C
+    # and a TERM reach `mdbook serve`, which as the container's first process
+    # would otherwise ignore them and go on serving.
+    exec podman run --rm --init --userns=keep-id --security-opt label=disable \
         "${extra[@]}" "${mounts[@]}" "${ports[@]}" \
         -e HOME=/tmp -e SOLIUM_DOCS_INSIDE=1 \
         -e SOLIUM_DOCS_TOOLS="$tools" -e SOLIUM_DOCS_PORT="$port" \
