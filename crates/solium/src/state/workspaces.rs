@@ -57,7 +57,7 @@ pub(super) const SETTLED: Duration = Duration::from_secs(60 * 60);
 /// the shipped workspaces meeting it.
 ///
 /// `None` when there is nothing to ask about — no screens, or no windows. The
-/// free function over plain rectangles, for the same reason [`anywhere_on`] is
+/// free function over plain rectangles, for the same reason [`super::monitors::anywhere_on`] is
 /// one: `Solium` needs a `Display` and cannot be built in a unit test, so the
 /// half that decides is the half kept testable. The instant the rectangles were
 /// measured at is the caller's, and is the other half — see

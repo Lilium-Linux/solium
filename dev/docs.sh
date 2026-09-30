@@ -118,7 +118,10 @@ echo "compositor..."
 "${polite[@]}" cargo build -p solium "${jobs[@]}" || fail "cargo build -p solium"
 
 echo "rustdoc..."
-"${polite[@]}" cargo doc --workspace --no-deps --document-private-items "${jobs[@]}" \
+# A doc link that resolves to nothing is an error, as a broken link in the book
+# is: it would be a dead link in the site's api/ pages.
+RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D rustdoc::broken_intra_doc_links" \
+    "${polite[@]}" cargo doc --workspace --no-deps --document-private-items "${jobs[@]}" \
     || fail "cargo doc"
 
 mdbook="$tools/bin/mdbook"

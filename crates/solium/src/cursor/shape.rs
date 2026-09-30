@@ -23,8 +23,8 @@
 //! `zoom-in`, `zoom-out` among them — and an empty list means the shape
 //! silently degrades to the arrow on any theme that names its files the X11
 //! way. What is written below is a **superset**: every spelling `cursor_icon`
-//! knows plus the ones it does not, in an order we chose. [`a_superset_of_the
-//! _crates_own_names`](tests::a_superset_of_the_crates_own_names) pins the
+//! knows plus the ones it does not, in an order we chose. The test
+//! `a_superset_of_the_crates_own_names` pins the
 //! superset property, so a future version of the crate that learns a new
 //! spelling cannot quietly be ahead of us without a test going red.
 //!

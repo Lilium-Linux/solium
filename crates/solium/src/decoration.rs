@@ -1920,7 +1920,7 @@ fn display_all(places: &[PathBuf]) -> String {
 /// **[`shipped_decorations`] stays in the list although this build puts nothing
 /// in it**, and is a directory that is not in the tree. It is kept so that the
 /// *kinds* of place stay matched: [`places`] is built from this function, and
-/// [`ships`] names [`shipped_decorations`] itself -- so dropping the shipped
+/// `ships` names [`shipped_decorations`] itself -- so dropping the shipped
 /// half here would leave `ships` walking a kind of place `places` does not,
 /// and the listing and the lookup would disagree about what a file style even
 /// is. `catalogue` skips a directory it cannot read, so the cost is one path

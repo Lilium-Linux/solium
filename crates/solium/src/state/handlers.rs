@@ -1381,7 +1381,7 @@ impl ClientDndGrabHandler for Solium {
     /// with the pointer installs a `DnDGrab` on it, so `pointer.is_grabbed()`
     /// is true for the whole gesture, and that one test holds *both* halves of
     /// the pointer: [`Solium::assert_cursor`] declines to recompute `chrome`,
-    /// and [`crate::input::release_cursor`] declines to clear `status` over the
+    /// and `input::release_cursor` declines to clear `status` over the
     /// gaps the drag crosses. The drag owns the pointer until it ends, exactly
     /// as a resize drag does, and it needs no flag of its own to say so.
     ///

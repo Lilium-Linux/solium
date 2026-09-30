@@ -85,7 +85,7 @@ impl Solium {
     /// first two.
     ///
     /// **Both arms judge where windows are settling, not where they are
-    /// drawn.** That is [`SETTLED`]'s rule, and the tests for each case are
+    /// drawn.** That is [`super::workspaces::SETTLED`]'s rule, and the tests for each case are
     /// named there. Asking at the present was #127's fourth review, twice
     /// over: `give_back`'s call here found the window it was giving back still
     /// at its restore's progress zero — `present::close`'s opacity zero — and

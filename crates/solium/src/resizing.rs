@@ -980,7 +980,7 @@ pub(crate) fn moved_edges(
 /// `refused=` and nothing else distinguishes them, so a log recorded to settle
 /// which one is happening has to carry the count that decided it.
 ///
-/// **Off unless [`VARIABLE`] names a file**, and off is one relaxed atomic load
+/// **Off unless [`trace::VARIABLE`] names a file**, and off is one relaxed atomic load
 /// on a path that runs once per pane per frame. Not `tracing`: the compositor's
 /// subscriber is wired for a session's diagnostics and this is a stream of tens
 /// of lines a frame that wants to land somewhere a person can `awk` at. Not

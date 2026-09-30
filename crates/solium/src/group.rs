@@ -354,7 +354,7 @@ impl Groups {
     /// is every mode — not restart its own animation.
     ///
     /// Returns the windows whose total displacement changed as a result, so the
-    /// caller can keep them looking where they are. See [`present::rebase`] for
+    /// caller can keep them looking where they are. See [`crate::present::rebase`] for
     /// why that matters: without it, sending a window to another workspace stops
     /// sliding and starts teleporting.
     pub(crate) fn declare(&mut self, name: &str, selection: Selection, now: Duration) -> Displaced {
