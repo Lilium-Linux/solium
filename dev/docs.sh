@@ -53,6 +53,16 @@ rev="${SOLIUM_DOCS_REV:-${GITHUB_SHA:-}}"
 if [[ -z "$rev" ]]; then
     rev="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
 fi
+# The docs git would commit -- tracked, or new and not ignored -- worked out
+# here for the same reason. generate.py fails on one of them SUMMARY.md leaves
+# out, and so on none a checkout ignores, such as private notes kept in docs/.
+# Without git it checks every Markdown file in docs/, which in a clean
+# checkout is the same list.
+if [[ -n "${SOLIUM_DOCS_INSIDE:-}" ]]; then
+    files="${SOLIUM_DOCS_FILES:-}"
+else
+    files="$(git -C "$root" -c core.quotePath=false ls-files --cached --others --exclude-standard -- 'docs/*.md' 2>/dev/null || true)"
+fi
 
 serve=""
 for argument in "$@"; do
@@ -93,6 +103,7 @@ if [[ -n "$image" && -z "${SOLIUM_DOCS_INSIDE:-}" ]]; then
         -e HOME=/tmp -e SOLIUM_DOCS_INSIDE=1 \
         -e SOLIUM_DOCS_TOOLS="$tools" -e SOLIUM_DOCS_PORT="$port" \
         -e SOLIUM_DOCS_JOBS="${SOLIUM_DOCS_JOBS:-}" -e SOLIUM_DOCS_REV="$rev" \
+        -e SOLIUM_DOCS_FILES="$files" \
         -e CARGO_HOME="$cargo_home" -e RUSTUP_HOME="$rustup_home" \
         -e PATH="$cargo_home/bin:/usr/local/bin:/usr/bin:/bin" \
         -w "$root" "$image" \
@@ -132,7 +143,12 @@ if [[ "$("$mdbook" --version 2>/dev/null || true)" != "mdbook v$MDBOOK_VERSION" 
 fi
 
 echo "generated pages..."
-python3 dev/docs/generate.py --solium target/debug/solium ${rev:+--rev "$rev"} \
+docs_list=()
+if [[ -n "$files" ]]; then
+    docs_list=(--docs-list -)
+fi
+printf '%s\n' "$files" \
+    | python3 dev/docs/generate.py --solium target/debug/solium ${rev:+--rev "$rev"} "${docs_list[@]}" \
     || fail "dev/docs/generate.py"
 
 if [[ -n "$serve" ]]; then

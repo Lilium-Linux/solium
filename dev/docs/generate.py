@@ -1102,27 +1102,40 @@ def rust():
     return [row[1] for row in rows]
 
 
-def unlisted_docs():
-    """Every Markdown file under docs/ that SUMMARY.md does not link.
+def unlisted_docs(candidates=None):
+    """Every doc under docs/ that SUMMARY.md does not link.
 
     mdBook renders only what SUMMARY.md lists, so a doc left out of it is left
     out of the site without a word, and the link check notices only if another
     page happens to link to it.
+
+    `candidates` are the docs git would commit, as paths from the repository
+    root, when the caller could ask git (dev/docs.sh does): a doc the checkout
+    ignores, such as private notes, is not the site's business. Without them,
+    every Markdown file under docs/, which in a clean checkout is the same.
     """
     summary = read("docs/SUMMARY.md")
     listed = {posixpath.normpath(target.split("#")[0])
               for target in re.findall(r"\]\(([^)\s]+\.md)(?:#[^)]*)?\)", summary)}
+    if candidates is None:
+        candidates = []
+        for directory, subdirectories, files in os.walk(DOCS):
+            if os.path.abspath(directory) == os.path.abspath(DOCS):
+                subdirectories[:] = [name for name in subdirectories if name != "generated"]
+            candidates += [os.path.relpath(os.path.join(directory, name), ROOT).replace(os.sep, "/")
+                           for name in files if name.endswith(".md")]
     missing = []
-    for directory, subdirectories, files in os.walk(DOCS):
-        if os.path.abspath(directory) == os.path.abspath(DOCS):
-            subdirectories[:] = [name for name in subdirectories if name != "generated"]
-        for name in files:
-            if not name.endswith(".md"):
-                continue
-            path = posixpath.normpath(os.path.relpath(os.path.join(directory, name), DOCS)
-                                      .replace(os.sep, "/"))
-            if path != "SUMMARY.md" and path not in listed:
-                missing.append(f"docs/{path}")
+    for candidate in candidates:
+        path = posixpath.normpath(candidate)
+        if not path.startswith("docs/") or not path.endswith(".md"):
+            continue
+        path = path[len("docs/"):]
+        # Fine: the contents itself, the generated pages, a listed doc, and one
+        # deleted but still in git's index.
+        if (path == "SUMMARY.md" or path.startswith("generated/") or path in listed
+                or not os.path.isfile(os.path.join(DOCS, path))):
+            continue
+        missing.append(f"docs/{path}")
     return sorted(missing)
 
 
@@ -1130,7 +1143,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--solium", required=True, help="the built compositor, for `--check`")
     parser.add_argument("--rev", help="the commit that line links point at; the current one by default")
+    parser.add_argument("--docs-list", metavar="FILE",
+                        help="the docs under docs/ that git would commit, one path from the "
+                             "repository root per line, `-` for standard input; SUMMARY.md has to "
+                             "list each. Every Markdown file under docs/ when not given")
     arguments = parser.parse_args()
+
+    candidates = None
+    if arguments.docs_list:
+        if arguments.docs_list == "-":
+            candidates = sys.stdin.read().split("\n")
+        else:
+            with open(arguments.docs_list, encoding="utf-8") as file:
+                candidates = file.read().split("\n")
+        candidates = [line.strip() for line in candidates if line.strip()]
 
     rev = arguments.rev
     if not rev:
@@ -1142,10 +1168,13 @@ def main():
             print(f"generate: warning: no --rev and no git to ask, so line links point at "
                   f"`{rev}`, where the lines they cite will move", file=sys.stderr)
 
-    unlisted = unlisted_docs()
+    unlisted = unlisted_docs(candidates)
     if unlisted:
-        sys.exit(f"generate: docs/SUMMARY.md does not list {unlisted}, so the site would "
-                 "leave them out; add them there")
+        which = ("git tracks these, or would add them" if candidates is not None
+                 else "without a list from git, every Markdown file in docs/ counts")
+        sys.exit(f"generate: docs/SUMMARY.md does not list {', '.join(unlisted)} ({which}), "
+                 "so the site would leave them out. List a doc for the site in "
+                 "docs/SUMMARY.md; keep one that is not out of docs/, or ignored by git")
 
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
