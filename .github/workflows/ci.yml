@@ -72,3 +72,36 @@ jobs:
       # bound, then exits.
       - name: Scripts
         run: ./target/debug/solium --check
+
+  # The documentation site, built exactly as docs.yml publishes it and not
+  # published, so a pull request that breaks a link, a generated reference page
+  # or the book itself fails here rather than on `stage`. A push to `stage`
+  # builds it in docs.yml instead, which is why this runs on pull requests
+  # only. The actions are pinned to commits for docs.yml's reason.
+  docs:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: System dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git gcc gcc-c++ make pkgconf-pkg-config \
+            wayland-devel libinput-devel systemd-devel libseat-devel \
+            libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
+            libdrm-devel \
+            qt6-qtbase-devel qt6-qtdeclarative-devel \
+            python3
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build the site
+        run: SOLIUM_DOCS_TOOLS="${CARGO_HOME:-$HOME/.cargo}" dev/docs.sh

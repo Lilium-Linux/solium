@@ -1273,7 +1273,7 @@ impl Solium {
     ///
     /// **The instant is the caller's, and which one is a rule rather than a
     /// habit.** The renderer and a press pass the present; the focus questions
-    /// pass [`Self::settling`]. [`SETTLED`] states it and names the tests on
+    /// pass [`Self::settling`]. [`workspaces::SETTLED`] states it and names the tests on
     /// both sides of it.
     pub(crate) fn drawn_at(
         &self,

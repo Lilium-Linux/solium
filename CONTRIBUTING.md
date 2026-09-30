@@ -231,3 +231,32 @@ most usefully, why an out-of-process QML shell was the wrong architecture — is
 in the `lilium-de` repository of the [Lilium-Linux](https://github.com/Lilium-Linux)
 organisation. Read it before
 proposing a helper process.
+
+## The documentation site
+
+The docs are also a website, <https://lilium-linux.github.io/solium/>, built
+with [mdBook](https://rust-lang.github.io/mdBook/) and published from `stage`
+by `.github/workflows/docs.yml`. Every pull request builds it as well, so a
+broken link inside it fails CI.
+
+```sh
+dev/docs.sh             # build it into target/book, and check its links
+dev/docs.sh --serve     # and serve it on http://localhost:3000
+SOLIUM_DOCS_IMAGE=localhost/solium-build:fc44 dev/docs.sh   # in the container
+```
+
+- **A doc in `docs/` is a page as it stands.** `docs/SUMMARY.md` is the table
+  of contents; a new doc goes there too.
+- **The reference pages are generated, and never committed.** The
+  configuration comes from `crates/solium/lua/config.lua`, the key bindings
+  from `solium --check`, the Lua API from `crates/solium/lua/meta/sol.lua` and
+  the flags and environment from `crates/solium/environment.txt`. Change the
+  source, not the page.
+- **A new `sol.*` name needs its entry in `sol.lua`, and a new `SOLIUM_*`
+  variable or flag its line in `environment.txt`.** The tests
+  `sol_lua_documents_exactly_the_api_the_compositor_registers` and
+  `the_environment_reference_lists_exactly_what_the_code_reads` fail until
+  they have one.
+- **Write links as paths in the repository**, the way GitHub reads them.
+  `dev/docs/links.py` points each one at its page in the book, or at the file
+  on GitHub.

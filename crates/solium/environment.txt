@@ -1,0 +1,234 @@
+# Solium's command-line flags and environment variables.
+#
+# The source of the "Flags and environment" page of the documentation site,
+# which dev/docs/generate.py builds from this file and adds, for each name,
+# the places in the code that read it. The test
+# `the_environment_reference_lists_exactly_what_the_code_reads`
+# (crates/solium/src/script/reference.rs) fails when the compositor reads a
+# `SOLIUM_*` variable or a `--flag` this file does not list, or this file lists
+# one nothing reads. Only production code counts: a name used only in a test
+# or a comment is not a knob, and does not go here.
+#
+# The format: a line starting with `#` is a comment, and one starting with
+# `## ` begins a group. An entry is a name at the start of a line, optionally
+# followed by what it takes, then its description on the lines below, indented
+# by four spaces. Descriptions are Markdown, and a relative link in one is
+# relative to this file.
+
+## Flags
+
+Only the **first** argument chooses what Solium does, and it is one of
+`--tty`, `--check`, `--check-qml` and `--probe`. Anything else in first
+place, an unknown flag or `--help` included, starts a compositor: nested, as a
+window, when `WAYLAND_DISPLAY` or `DISPLAY` is set, and on the hardware
+otherwise. So `solium --debug-mode --tty` never reaches `--tty`; write
+`solium --tty --debug-mode`.
+
+--tty
+    Run on the hardware from a free virtual terminal, taking the screen. The
+    session log, `$XDG_STATE_HOME/solium/session.log` (or
+    `~/.local/state/solium/session.log`), is written only when this is the
+    **first** argument.
+
+--session
+    Read only after `--tty`, anywhere after it. `solium --tty --session` is
+    the user's graphical session, and tells systemd and D-Bus so: it exports
+    `WAYLAND_DISPLAY` and the rest, starts `solium-session.target`, and
+    undoes both on exit. `solium-session`, which the session file starts,
+    runs it this way. Without it, `--tty` tells nobody unless
+    `SOLIUM_SESSION_BUS` names a bus.
+
+--check
+    Load the configuration, print every binding it registered and every one
+    it removed, and exit. Exits with 1 when the configuration fails to load or
+    sets a key nothing reads. Starts no compositor and needs no display.
+
+--check-qml <file.qml>
+    Load one QML file in software, print `ok` or what went wrong, and exit.
+    Starts no compositor.
+
+--probe
+    Print every connector and every mode it offers, without taking the
+    screen. Safe to run inside another session.
+
+--probe-qml-gpu
+    Internal. The child process the QML GPU trial runs in; see
+    [QML on the GPU](../../dev/README.md#qml-on-the-gpu).
+
+--debug-mode
+    Add the Developer Tweaks panel, on `super+shift+d`. Read anywhere on the
+    command line.
+
+--qml <mode>
+    Which scene graph QML renders on: `auto`, `gpu` or `software`. Also
+    written `--qml=<mode>`, and read anywhere on the command line. Wins over
+    `SOLIUM_QML`, `SOLIUM_QML_GPU` and the configuration's `qml.renderer`.
+
+## Running a session
+
+SOLIUM_LUA_INIT=<path>
+    Load this configuration instead of `~/.config/solium/init.lua` or the
+    shipped `init.lua`.
+
+SOLIUM_TERMINAL=<command line>
+    The terminal `super+return` opens, split on spaces. Unset, the shipped
+    `init.lua` opens the first terminal it finds installed.
+
+SOLIUM_PANE=<name or path>
+    The frame style for this run, over the configuration's `pane`.
+
+SOLIUM_DECORATION=<name or path>
+    The old spelling of `SOLIUM_PANE`. `SOLIUM_PANE` wins when both are set.
+
+SOLIUM_QML_TITLEBAR=<path>
+    One QML file to frame every window with, over `SOLIUM_PANE` and the
+    configuration. The oldest spelling of the knob.
+
+SOLIUM_LOADING=<name or path>
+    The scene a window shows before its application arrives, over the
+    configuration's `loading.scene`.
+
+SOLIUM_QML_CURSOR=<path>
+    The QML file the compositor's own pointer is drawn from, instead of the
+    shipped `cursor.qml`. Used only when no XCursor theme is in force.
+
+SOLIUM_QML_PATH=<paths>
+    The whole QML import path, colon separated. Replaces the search rather
+    than adding to it: the user's `~/.config/solium/qml` and the shipped QML
+    are no longer looked in.
+
+SOLIUM_QML=<mode>
+    Which scene graph QML renders on: `auto`, `gpu` or `software`. Below
+    `--qml`, above `SOLIUM_QML_GPU` and `qml.renderer`.
+
+SOLIUM_QML_GPU
+    The older spelling of `SOLIUM_QML=gpu`. Set to anything, it means `gpu`.
+
+SOLIUM_FORM_FACTOR=<form factor>
+    `desktop` (the default), `laptop`, `tablet` or `phone`. Chooses the input
+    profile: click or touch to focus, whether focus follows the pointer,
+    natural scrolling and the drag modifier. An unknown value is logged and
+    `desktop` used.
+
+SOLIUM_DRAG_MODIFIER=<modifier>
+    `logo` (also `super` or `meta`) or `alt`: the key held to drag a window
+    from anywhere in it. Over the form factor's default.
+
+SOLIUM_DEBUG_MODE
+    Set to anything, the same as `--debug-mode`.
+
+SOLIUM_NO_DMABUF
+    Set to anything, clients are not offered `linux-dmabuf` and fall back to
+    shared memory.
+
+SOLIUM_SESSION_BUS=<address>
+    The D-Bus address to tell about the session, instead of the session bus.
+    Nested, or `solium --tty` without `--session`, this is the only way
+    anything is told. Blank counts as unset. For checking the calls against a
+    private bus: `dbus-run-session -- sh -c
+    'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS solium'`.
+
+## Hosting a shell
+
+A shell is loaded as configuration, with `shell = { scene = ... }`; see
+[Where Solium ends and Lilium begins](../../docs/shell-boundary.md). These
+change that for one run, and `dev/run-shell.sh` sets all three.
+
+SOLIUM_SHELL_SCENE=<file.qml>
+    The QML file to host as the shell, over the configuration's
+    `shell.scene`. Empty counts as unset.
+
+SOLIUM_SHELL_WATCH=<directory>
+    Where to look for changed `.qml` files, down to four directories below
+    it, before rebuilding a hosted scene, instead of the scene's own
+    directory. For a shell whose files live in a tree of their own.
+
+SOLIUM_SHELL_DIR=<directory>
+    What `Quickshell.configDir` and `Quickshell.shellDir` answer in a hosted
+    shell. `~/.config/solium` when unset or empty.
+
+## Development and testing
+
+These exist so the compositor can be driven and photographed without a hand
+on the keyboard. [dev/README.md](../../dev/README.md) says how they are used.
+
+SOLIUM_CAPTURE=<path>
+    Write a rendered frame to `<path>` as a binary PPM.
+
+SOLIUM_CAPTURE_AT=<ms>
+    Capture at this many milliseconds after startup, instead of once a window
+    has settled.
+
+SOLIUM_CAPTURE_FRAMES=<n>
+    Capture a burst of `n` frames rather than one.
+
+SOLIUM_CAPTURE_INTERVAL=<ms>
+    The time between the frames of a burst. 16 by default.
+
+SOLIUM_TRIGGER_AT=<ms>:<combo>,...
+    Press key bindings at these moments, through the same path a keypress
+    takes: `5200:super+space,6200:super+space`.
+
+SOLIUM_CLICK_AT=<ms>:<x>,<y>;...
+    Press the pointer at these moments and places, separated by semicolons.
+
+SOLIUM_DRAG_AT=<ms>:<x1>,<y1>><x2>,<y2>;...
+    Drag the pointer from one place to another, through the real grab and the
+    real layout scripts.
+
+SOLIUM_LOADING_AT=<ms>:<program>,...
+    Open a window for an application that will never arrive, to exercise the
+    loading window.
+
+SOLIUM_OUTPUTS=<n>
+    Give the nested backend `n` monitors, from 1 to 4, side by side in its one
+    window.
+
+SOLIUM_OUTPUTS_AT=<ms>:<n>,...
+    Change the number of nested monitors at these moments: hotplug without a
+    cable.
+
+SOLIUM_MEMDIAG
+    Set to anything, report what the compositor is holding, once a second.
+
+SOLIUM_PACING
+    Set to anything, say where a frame's time went on the frames that took
+    longer than the monitor's frame interval.
+
+SOLIUM_RESIZE_TRACE=<file>
+    Append a per-frame trace of every resize drag to `<file>`.
+
+## Packaging
+
+SOLIUM_DATADIR=<directory>
+    Read when Solium is **built**, not when it runs: the first place the
+    binary looks for its `qml` and `lua`. After it come the tree the binary was
+    built in, then `../share/solium` beside the binary, then
+    `/usr/share/solium`; the first that holds both is used.
+
+## Also read
+
+Not Solium's own, but they change what it does.
+
+RUST_LOG=<filter>
+    Log levels, in `tracing` filter syntax. `info` by default.
+
+WAYLAND_DISPLAY
+    With this or `DISPLAY` set and no backend flag given, Solium runs nested,
+    as a window.
+
+DISPLAY
+    See `WAYLAND_DISPLAY`.
+
+XDG_CONFIG_HOME
+    Where `solium/init.lua`, `solium/user.lua` and `solium/qml` are looked
+    for; `~/.config` when unset.
+
+XDG_STATE_HOME
+    Where the session log goes; `~/.local/state` when unset.
+
+XCURSOR_THEME
+    The pointer theme when the configuration's `cursor.theme` is not set.
+
+XCURSOR_SIZE
+    The pointer size when the configuration's `cursor.size` is not set.

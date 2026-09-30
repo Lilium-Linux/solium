@@ -421,7 +421,7 @@ impl Solium {
     /// `settle_focus` judges the destination.** Here the pane is still drawn at
     /// `present::close`'s opacity zero; asked about the present, `settle_focus`
     /// declined the very window being given back, whenever too little real
-    /// time had passed since `now` for the fade to show. See [`SETTLED`], and
+    /// time had passed since `now` for the fade to show. See [`super::workspaces::SETTLED`], and
     /// `a_refused_close_gives_the_keyboard_back_to_the_window_it_brings_back`,
     /// which pins the progress-zero case rather than hoping for it.
     fn give_back(&mut self, id: crate::pane::PaneId, now: std::time::Duration) -> bool {

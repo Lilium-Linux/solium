@@ -710,7 +710,7 @@ impl Solium {
     /// [`Self::window_under`] is this at the present, which is what a press is
     /// answered from and must stay. The one other caller is
     /// [`Self::settle_focus`]'s pointer arm, which is a focus decision and so
-    /// asks at [`Self::settling`] — see [`SETTLED`] for the rule and
+    /// asks at [`Self::settling`] — see [`super::workspaces::SETTLED`] for the rule and
     /// `a_pointer_over_the_desk_being_left_does_not_hand_it_the_keyboard` for
     /// the two asked of one pixel on one frame.
     pub(super) fn window_under_at(
