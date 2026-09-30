@@ -10,6 +10,9 @@ local config = require("config")
 -- because it is read once, before Qt starts. See `config.lua` and
 -- `the_renderer_is_decided_once_per_process`.
 sol.qml(config.qml)
+-- Whether systemd and D-Bus are told about this session, read by the backend
+-- when the session starts. See `config.lua`.
+sol.session(config.session)
 
 -- Settings the compositor itself holds, applied from the same file as
 -- everything else. All of them take effect immediately when reloaded.

@@ -59,6 +59,13 @@ const CAPTURE_SETTLE_FRAMES: u32 = 30;
 pub(crate) fn run() -> Result<()> {
     let mut event_loop: EventLoop<Solium> =
         EventLoop::try_new().context("creating the event loop")?;
+    // Ctrl+C in the terminal, or `timeout`, leaves the way a quit binding
+    // does, and Ctrl+C again ends a run that cannot.
+    // `signals::tests::each_ending_signal_stops_the_loop` and
+    // `the_same_signal_twice_ends_a_process_that_cannot_stop`.
+    let signals = crate::signals::listen(&event_loop.handle(), |state: &mut Solium| {
+        state.request = Some(crate::state::Request::Quit);
+    });
     let display: Display<Solium> = Display::new().context("creating the wayland display")?;
     let display_handle = display.handle();
 
@@ -75,7 +82,7 @@ pub(crate) fn run() -> Result<()> {
     // X11 clients, if XWayland is installed. Started before the socket source
     // so that a client launched from a script's startup has a display to find.
     let loop_handle = event_loop.handle();
-    crate::xwayland::start(&loop_handle, &display_handle);
+    let x11_coming = crate::xwayland::start(&loop_handle, &display_handle);
 
     event_loop
         .handle()
@@ -276,6 +283,16 @@ pub(crate) fn run() -> Result<()> {
         crate::qml::renderer::Entry::Nested,
         &scripts.as_ref().map(Scripts::qml).unwrap_or_default(),
     );
+    // Nested, the session this window is in keeps its own environment: this
+    // tells nobody unless `SOLIUM_SESSION_BUS` names a bus. See `session.rs`.
+    let settings = scripts.as_ref().map(Scripts::session).unwrap_or_default();
+    signals.stop_timeout(settings.stop_timeout);
+    state.session =
+        crate::session::Session::begin(settings, crate::session::Place::Nested, dev::session_bus());
+    state.session.wayland(&socket_name);
+    if !x11_coming {
+        state.session.x11(None);
+    }
     state.start_scripts(scripts);
 
     // The screens exist and the scripts have loaded: whichever came second,
@@ -976,6 +993,7 @@ pub(crate) fn run() -> Result<()> {
         }
     }
 
+    state.session.end();
     Ok(())
 }
 

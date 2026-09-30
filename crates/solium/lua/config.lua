@@ -434,6 +434,46 @@ local defaults = {
         off_frame_interval = 1000,
     },
 
+    -- Telling the rest of the session that Solium is its desktop.
+    --
+    -- Portals, programs D-Bus starts on demand, ~/.config/autostart and user
+    -- services written for "a graphical session" are all started by systemd
+    -- or by D-Bus, and they find the display only if they are told where it
+    -- is. Read when the session starts. `systemd` and `autostart` count only
+    -- when Solium is started as the session (the session file's
+    -- `solium-session`); `solium --tty` by hand and a nested run leave the
+    -- session around them alone. The tests
+    -- are in `session.rs`: `a_reload_leaves_the_session_as_it_began`,
+    -- `a_manual_tty_start_tells_nobody`,
+    -- `a_nested_run_tells_nobody_unless_it_is_given_a_bus`,
+    -- `the_target_is_stopped_and_the_variables_unset_on_exit`,
+    -- `session_systemd_false_tells_nobody_anything` and
+    -- `session_autostart_false_starts_the_session_without_autostart`.
+    session = {
+        -- Tell systemd's user manager and D-Bus activation WAYLAND_DISPLAY,
+        -- DISPLAY, XDG_CURRENT_DESKTOP and XDG_SESSION_TYPE, and start
+        -- solium-session.target, which starts graphical-session.target and
+        -- every unit you have attached to it. On exit the target is stopped
+        -- and the variables unset. `false` does none of it.
+        systemd = true,
+        -- Whether solium-autostart.target starts beside it: XDG autostart,
+        -- the programs in ~/.config/autostart and /etc/xdg/autostart, which
+        -- is how a polkit agent, a keyring or nm-applet usually start.
+        -- `false` leaves autostart out, and solium-session.target, with
+        -- whatever is attached to it, still starts.
+        autostart = true,
+        -- How long, in milliseconds, SIGTERM, SIGINT or SIGHUP waits for
+        -- Solium to stop cleanly, however it was started. The first of them
+        -- stops it the way a quit binding does. If it is still running this
+        -- long afterwards, something inside it has stopped answering, and
+        -- it ends at once. The same signal again, half a second or more
+        -- after the first, ends it at once too. Tests in `signals.rs`:
+        -- `a_process_that_cannot_stop_ends_when_its_stop_timeout_has_passed`,
+        -- `the_same_signal_twice_ends_a_process_that_cannot_stop` and
+        -- `the_same_signal_twice_at_once_is_one_request`.
+        stop_timeout = 5000,
+    },
+
     -- How every window is framed.
     --
     -- A style is a **folder** under `qml/panes` holding a `Pane.qml`: what the

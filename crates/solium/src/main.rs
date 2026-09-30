@@ -35,6 +35,8 @@ mod resizing;
 mod screencopy;
 mod script;
 mod scripted;
+mod session;
+mod signals;
 mod single_pixel;
 mod stack;
 mod state;
@@ -285,12 +287,12 @@ fn main() -> Result<()> {
         // same typo found by reloading costs whatever you were doing.
         Some("--check") => check_config(),
         Some("--probe") => tty::probe(),
-        Some("--tty") => tty::run(),
+        Some("--tty") => tty::run(session::Place::tty(std::env::args().skip(2))),
         _ if std::env::var_os("WAYLAND_DISPLAY").is_some()
             || std::env::var_os("DISPLAY").is_some() =>
         {
             winit::run()
         }
-        _ => tty::run(),
+        _ => tty::run(session::Place::Console),
     }
 }

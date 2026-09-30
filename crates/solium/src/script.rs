@@ -857,6 +857,15 @@ impl Scripts {
             .unwrap_or_default()
     }
 
+    /// What the configuration said through `sol.session`: the default,
+    /// both on, when it said nothing.
+    pub(crate) fn session(&self) -> crate::session::Settings {
+        self.lua
+            .app_data_ref::<crate::session::Settings>()
+            .map(|settings| *settings)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn config_path() -> std::path::PathBuf {
         if let Some(path) = std::env::var_os("SOLIUM_LUA_INIT") {
             return std::path::PathBuf::from(path);
@@ -2740,6 +2749,49 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 },
             }
             lua.set_app_data(configured);
+            Ok(())
+        })?,
+    )?;
+
+    // Whether this session is announced to systemd and D-Bus activation,
+    // whether that starts XDG autostart, and how long a signal to end waits
+    // for a clean stop: `config.session`, handed over by `init.lua`. Kept
+    // aside like `sol.qml`, for the backend to read once the configuration
+    // has loaded. An absent table or key keeps the default; a value of the
+    // wrong kind is named in the log and the default kept.
+    // `a_configured_session_is_read_by_the_backend`.
+    sol.set(
+        "session",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut settings = crate::session::Settings::default();
+            if let Some(options) = options {
+                for (key, slot) in [
+                    ("systemd", &mut settings.systemd),
+                    ("autostart", &mut settings.autostart),
+                ] {
+                    match options.get::<Value>(key) {
+                        Ok(Value::Boolean(on)) => *slot = on,
+                        Ok(Value::Nil) | Err(_) => {}
+                        Ok(other) => tracing::warn!(
+                            key,
+                            value = describe(&other),
+                            "session: true or false; keeping the default, true"
+                        ),
+                    }
+                }
+                match options.get::<Value>("stop_timeout") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match value.as_u64().filter(|&millis| millis > 0) {
+                        Some(millis) => settings.stop_timeout = Duration::from_millis(millis),
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "session.stop_timeout is a whole number of milliseconds above 0; \
+                             keeping the default"
+                        ),
+                    },
+                }
+            }
+            lua.set_app_data(settings);
             Ok(())
         })?,
     )?;
@@ -4986,6 +5038,105 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_configured_session_is_read_by_the_backend() {
+        let directory = std::env::temp_dir().join("solium-script-test-session");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            Scripts::load(&config)
+                .expect("loading the test script")
+                .session()
+        };
+        let settings = |systemd, autostart| crate::session::Settings {
+            systemd,
+            autostart,
+            ..crate::session::Settings::default()
+        };
+
+        assert_eq!(
+            configured("sol.session({ systemd = false })"),
+            settings(false, true)
+        );
+        assert_eq!(
+            configured("sol.session({ autostart = false })"),
+            settings(true, false)
+        );
+        assert_eq!(
+            configured("sol.session({ stop_timeout = 1500 })"),
+            crate::session::Settings {
+                stop_timeout: Duration::from_millis(1500),
+                ..settings(true, true)
+            }
+        );
+        // Said nothing, three ways, and said something of the wrong kind.
+        for source in [
+            "",
+            "sol.session(nil)",
+            "sol.session({})",
+            r#"sol.session({ systemd = "no", autostart = 0 })"#,
+            "sol.session({ stop_timeout = 0 })",
+            "sol.session({ stop_timeout = -5 })",
+            "sol.session({ stop_timeout = 2.5 })",
+            r#"sol.session({ stop_timeout = "soon" })"#,
+        ] {
+            assert_eq!(configured(source), settings(true, true), "{source:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The shipped `config.lua` and `init.lua` tell the session and start
+    /// autostart, and `--check` knows both keys. Shipped files only: the
+    /// entry points `package.path` at them, past the developer's own
+    /// `~/.config/solium`.
+    #[test]
+    fn the_shipped_configuration_tells_the_session_and_starts_autostart() {
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+        let directory = std::env::temp_dir().join("solium-script-test-session-shipped");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let entry = directory.join("init.lua");
+        let load = |source: String| {
+            std::fs::write(&entry, source).expect("writing the entry point");
+            Scripts::load(&entry).expect("loading the shipped scripts")
+        };
+
+        let scripts = load(format!(
+            "package.path = {shipped:?} .. \"/?.lua\"\ndofile({shipped:?} .. \"/init.lua\")\n"
+        ));
+        assert_eq!(scripts.session(), crate::session::Settings::default());
+
+        std::fs::write(
+            directory.join("user.lua"),
+            "return { session = { systemd = false, autostart = false, stop_timeout = 900, \
+             autostrat = true } }",
+        )
+        .expect("writing the user file");
+        let scripts = load(format!(
+            "package.path = {here:?} .. \"/?.lua;\" .. {shipped:?} .. \"/?.lua\"\n\
+             sol.session(require(\"config\").session)\n",
+            here = directory.to_string_lossy(),
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            scripts.session(),
+            crate::session::Settings {
+                systemd: false,
+                autostart: false,
+                stop_timeout: Duration::from_millis(900),
+            }
+        );
+        let unknown: Vec<String> = scripts
+            .unknown_settings()
+            .into_iter()
+            .map(|setting| setting.key)
+            .collect();
+        assert_eq!(unknown, vec!["session.autostrat".to_owned()]);
     }
 
     /// The shipped `config.lua` asks for `auto` and a five second probe, through

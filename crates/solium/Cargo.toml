@@ -64,6 +64,24 @@ mlua = { version = "0.12.1", features = ["lua54", "vendored"] }
 # is no answer -- is `src/cursor/theme.rs`.
 xcursor = "0.3"
 
+# The session bus, for telling systemd and D-Bus activation that this session
+# exists (#146): `src/session.rs`. Pure Rust, so nothing links libdbus, and
+# MIT. `blocking-api` because the calls are made from a thread of their own,
+# never from the event loop; `async-io` is the runtime zbus runs that API on.
+# The calls are checked on the wire against a stand-in systemd in
+# `session::tests::the_calls_reach_systemd_and_dbus_as_their_methods`.
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+
+# SIGTERM, SIGINT and SIGHUP stop the event loop, so the session is ended
+# rather than cut off, and end the process anyway when the loop cannot stop
+# (#146): `src/signals.rs`. The registry chains handlers safely with any
+# already installed, and is what signal-hook and async-signal are built on;
+# already in the lockfile through zbus, and MIT OR Apache-2.0. The handlers
+# are Solium's own because a second signal ends the process from the handler
+# itself, which needs nothing else in the process to be answering. Tested by
+# `signals::tests::the_same_signal_twice_ends_a_process_that_cannot_stop`.
+signal-hook-registry = "1.4"
+
 [build-dependencies]
 # Qt Quick is hosted in-process, so a small C++ shim is compiled in. See
 # crates/solium/qml/host.cpp for why in-process rather than over a protocol.
@@ -102,3 +120,8 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # only, and a feature with no dependencies of its own, so the lockfile does not
 # change.
 smithay = { version = "0.7", default-features = false, features = ["renderer_test"] }
+# A stand-in systemd and bus driver for the session tests, served by zbus
+# itself over a socket of the test's own, so the calls are checked on the wire
+# without a real bus anywhere near them.
+# `session::tests::the_calls_reach_systemd_and_dbus_as_their_methods`.
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io", "p2p"] }

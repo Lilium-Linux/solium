@@ -330,6 +330,16 @@ impl Solium {
             Some(number) => process.env("DISPLAY", format!(":{number}")),
             None => process.env_remove("DISPLAY"),
         };
+        // The desktop systemd and D-Bus activation were told, `Lilium` when
+        // the session file named none, rather than none at all.
+        // `session::tests::the_desktop_is_lilium_unless_the_session_said_otherwise`.
+        process.env(
+            "XDG_CURRENT_DESKTOP",
+            crate::session::desktop(std::env::var("XDG_CURRENT_DESKTOP").ok()),
+        );
+        if std::env::var_os("XDG_SESSION_TYPE").is_none() {
+            process.env("XDG_SESSION_TYPE", "wayland");
+        }
 
         // Before the fork, so the window is on screen and the other windows
         // have moved aside by the time the program has been asked to start.
