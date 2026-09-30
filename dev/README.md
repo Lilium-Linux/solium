@@ -24,7 +24,6 @@ saying where it was taken, it comes from the reference machine: an NVIDIA RTX
 | `SOLIUM_DEV_IMAGE=` | The container `dev/run-nested.sh` runs in. |
 | `SOLIUM_SHELL_SCENE=<path>` | Host this QML file as the shell, over whatever `shell.scene` says. For one run; the configured way is `shell = { scene = ... }`. |
 | `SOLIUM_SHELL_WATCH=<dir>` | Rebuild a hosted scene when anything under `<dir>` changes, rather than anything under the scene's own directory. For a shell whose files live in a tree of their own. |
-| `SOLIUM_SHELL_DIR=<dir>` | What `Quickshell.configDir` and `Quickshell.shellDir` answer in a hosted shell. `~/.config/solium` when unset. |
 | `SOLIUM_SHELL=<dir>` | Read by `dev/run-shell.sh`, not by the compositor: the shell checkout to use when none is named on the command line. |
 | `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
 | `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |

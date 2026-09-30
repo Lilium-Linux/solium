@@ -73,8 +73,8 @@ local defaults = {
     -- `the_shell_scene_is_read_from_the_configuration`.
     -- SOLIUM_SHELL_SCENE overrides this, because that is set per run.
     -- `super+shift+r` picks up a change. See docs/shell-boundary.md for
-    -- installing one, for shells written against Quickshell, and for what the
-    -- compositor provides to a shell it hosts.
+    -- installing one and for what the compositor provides to a shell it
+    -- hosts.
     --
     -- A layer-shell bar (Waybar and the like) needs nothing here: it is an
     -- ordinary client, and you start it as one.

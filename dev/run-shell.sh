@@ -51,8 +51,7 @@ echo "scene:  ${scene#"$shell"/}"
 echo "edit anything under the shell and it reloads within half a second"
 echo
 
-SOLIUM_QML_PATH="$root/crates/solium/qml:$root/crates/solium/qml/compat" \
+SOLIUM_QML_PATH="$root/crates/solium/qml" \
 SOLIUM_SHELL_SCENE="$scene" \
 SOLIUM_SHELL_WATCH="$shell" \
-SOLIUM_SHELL_DIR="$shell" \
     "$root/dev/run-nested.sh"

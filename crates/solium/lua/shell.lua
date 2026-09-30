@@ -8,8 +8,7 @@
 --
 -- It used to be a compositor feature -- an accessor on the state, its own
 -- pointer routing, its own render hook and an environment variable read in
--- Rust. It is `sol.surface` now, and the only thing left in the compositor is
--- the Quickshell compatibility layer, which is a different job.
+-- Rust. It is `sol.surface` now.
 --
 -- One scene, on the primary monitor. The primary monitor and not the active
 -- one, for the same reason a dock goes there: a bar that moves screens when
