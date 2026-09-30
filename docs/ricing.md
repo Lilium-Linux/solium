@@ -610,11 +610,23 @@ as two screens or as one surface you happen to have cut in half.
 
 ### Bars, docks and wallpapers
 
-They are ordinary clients over `wlr-layer-shell`, which means any panel already
-written for that protocol works. A surface names the output it wants and the
-compositor honours it, so a bar on every screen is one surface per screen, each
-reserving from *that* monitor's work area. One that names no output gets the
-primary monitor.
+A shell — bar, dock and launcher together — can be hosted inside the
+compositor, in the same QML engine as the window frames, by naming its root
+file:
+
+```lua
+return { shell = { scene = "~/.config/solium/shell/shell.qml" } }
+```
+
+One scene, on the primary monitor. A shell written for Quickshell runs this
+way too; [shell-boundary.md](shell-boundary.md) has how to install one and what
+it is and is not given.
+
+A bar can also be an ordinary client over `wlr-layer-shell`, which means any
+panel already written for that protocol works. A surface names the output it
+wants and the compositor honours it, so a bar on every screen is one surface
+per screen, each reserving from *that* monitor's work area. One that names no
+output gets the primary monitor.
 
 A fullscreen window in front of the workspace its monitor is showing covers
 the top layer -- a client's bar, and one declared with `sol.surface` -- and
@@ -625,15 +637,15 @@ OSD, a launcher) stays over it. To keep the bars over fullscreen windows:
 return { fullscreen = { covers = "none" } }
 ```
 
-See **[shell-boundary.md](shell-boundary.md)** for why that is a client rather
-than something the compositor draws, and what was learned from it being the
-other way round.
+See **[shell-boundary.md](shell-boundary.md)** for why hosting is the design,
+and for both ways a shell attaches.
 
 ### Your own colours
 
 Copy `Solium/Theme.qml` into `~/.config/solium/qml/Solium/` and change it.
-Every frame and every other scene that imports `Solium` reads it, so one file
-restyles the desktop rather than the titlebars.
+Every frame reads it, and so does every other scene that imports `Solium` — a
+hosted shell among them, if it uses it — so one file restyles the desktop
+rather than the titlebars.
 
 ### Your own animation feel
 

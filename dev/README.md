@@ -22,6 +22,10 @@ saying where it was taken, it comes from the reference machine: an NVIDIA RTX
 | `SOLIUM_QML=<mode>` | Which scene graph QML renders on: `auto` (the default), `gpu` or `software`. Below `--qml <mode>`, above `SOLIUM_QML_GPU` and the configuration's `qml.renderer` — see *QML on the GPU*. |
 | `SOLIUM_QML_GPU=1` | The older spelling of `SOLIUM_QML=gpu`. Set to anything, it means `gpu`. |
 | `SOLIUM_DEV_IMAGE=` | The container `dev/run-nested.sh` runs in. |
+| `SOLIUM_SHELL_SCENE=<path>` | Host this QML file as the shell, over whatever `shell.scene` says. For one run; the configured way is `shell = { scene = ... }`. |
+| `SOLIUM_SHELL_WATCH=<dir>` | Rebuild a hosted scene when anything under `<dir>` changes, rather than anything under the scene's own directory. For a shell whose files live in a tree of their own. |
+| `SOLIUM_SHELL_DIR=<dir>` | What `Quickshell.configDir` and `Quickshell.shellDir` answer in a hosted shell. `~/.config/solium` when unset. |
+| `SOLIUM_SHELL=<dir>` | Read by `dev/run-shell.sh` and `dev/stage-shell.sh`, not by the compositor: the shell checkout to use when none is named on the command line. |
 | `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
 | `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |
 
@@ -457,6 +461,36 @@ To run something else from the build image the way `dev/foot` runs foot, add
 its package to the `dnf install` line in `dev/Containerfile` and rebuild the
 image — a `--rm` container throws anything installed into it by hand away with
 itself.
+
+## Running a shell inside Solium
+
+A shell is hosted in the compositor's own QML engine, as configuration — see
+[docs/shell-boundary.md](../docs/shell-boundary.md). To work on one, point
+`dev/run-shell.sh` at its checkout:
+
+```sh
+dev/run-shell.sh <shell-dir>                     # its shell.qml
+dev/run-shell.sh <shell-dir> qs/dock/Dock.qml    # one file of it
+SOLIUM_SHELL=<shell-dir> dev/run-shell.sh
+```
+
+The checkout is required and only ever read. Its QML is staged into
+`build/staged` by `dev/stage-shell.sh`, which writes the `qmldir` files
+Quickshell would synthesise at load time, so the shell's `import qs.*` lines
+resolve; the scene goes in as `SOLIUM_SHELL_SCENE`, so your own `shell.scene`
+is left alone; and editing anything in the checkout reloads the scene within
+half a second.
+
+`dev/stage-shell.sh <shell-dir> <dir>` on its own writes the staged copy to
+`<dir>/qs`, replacing only that. `~/.config/solium/qml` is the useful `<dir>`:
+it is on the QML search path already, which is how an installed shell's
+`qs.*` imports resolve outside this script.
+
+`solium --check-qml <file>` loads one file without starting a compositor and
+prints `ok` or the errors Qt reported — the quick way through a chain of "type
+X unavailable" errors while porting a shell. It exits 0 either way, so read
+what it prints. Put the staged tree on `SOLIUM_QML_PATH` first,
+beside the compositor's own `crates/solium/qml` and `crates/solium/qml/compat`.
 
 ## Building
 

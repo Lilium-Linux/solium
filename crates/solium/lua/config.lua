@@ -57,6 +57,31 @@ local defaults = {
     -- gradient, a shader or a clock. `super+shift+r` reloads it.
     wallpaper = "solium",
 
+    -- A shell: the bar, the dock, the launcher.
+    --
+    -- A shell is a project of its own, with its own repository, and it runs
+    -- here as your configuration: its QML is hosted in the compositor's own
+    -- engine, beside the window frames. Name its root file:
+    --
+    --     shell = { scene = "~/.config/solium/shell/shell.qml" },
+    --
+    -- `false`, the default, hosts none. `~` is expanded. It is drawn once, on
+    -- the primary monitor, over the windows, and it takes the pointer: every
+    -- press and hover on that monitor's usable area is the shell's, however
+    -- little of it the shell draws on, so while one is hosted the windows
+    -- there cannot be clicked, focused or dragged with the mouse. See
+    -- `the_shell_scene_is_read_from_the_configuration`.
+    -- SOLIUM_SHELL_SCENE overrides this, because that is set per run.
+    -- `super+shift+r` picks up a change. See docs/shell-boundary.md for
+    -- installing one, for shells written against Quickshell, and for what the
+    -- compositor provides to a shell it hosts.
+    --
+    -- A layer-shell bar (Waybar and the like) needs nothing here: it is an
+    -- ordinary client, and you start it as one.
+    shell = {
+        scene = false,
+    },
+
     -- The keyboard.
     --
     -- Empty means "whatever the session already said". Every name here is an

@@ -255,12 +255,6 @@ object must be able to *move* from the dock into a titlebar. Two processes
 painting their own pixels cannot do that; the best available would be a fake.
 One engine makes it a reparent. See `docs/shell-boundary.md`.
 
-**Since reversed for the shell.** The bar, dock and launcher are layer-shell
-clients in the shell's own process, and the compositor hosts no shell at all.
-The engine is still one engine for everything the compositor itself draws —
-frames, the pointer, the wallpaper, scripted surfaces — and
-`docs/shell-boundary.md` says what reopening the dock question would take.
-
 ### Chrome is QML, hosted in-process
 
 **Decided 2026-09-04.** The bar and window decorations are authored in QML and

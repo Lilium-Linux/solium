@@ -22,9 +22,9 @@ new style left it.
 
 Everything the layers draw with -- colours, fonts, spacing -- comes from
 `Solium.Theme`. Drop your own `Solium/Theme.qml` into `~/.config/solium/qml/`
-and every scene the compositor draws follows it (the frames, the pointer, the
-loading window, the wallpaper, `sol.surface` scenes), without touching anything
-that ships.
+and every pane follows it, with every other scene that imports `Solium` -- the
+pointer, the loading window, the wallpaper and a hosted shell that uses it --
+without touching anything that ships.
 
 ## The manifest
 

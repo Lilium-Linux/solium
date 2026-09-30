@@ -4634,6 +4634,238 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// The `sol.surface` declarations named `shell`, and whether one was taken
+    /// away, out of a batch of commands.
+    fn shell_surfaces(commands: &[Command]) -> (Vec<crate::scripted::Declaration>, bool) {
+        let declared = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Surface(declared) if declared.name == "shell" => {
+                    Some((**declared).clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let removed = commands
+            .iter()
+            .any(|command| matches!(command, Command::SurfaceGone(name) if name == "shell"));
+        (declared, removed)
+    }
+
+    /// The shipped configuration, then the screens arriving, as `shell` sees
+    /// it: what a cold start and a reload both do.
+    fn shell_after_monitors(name: &str, user: &str) -> Option<(Scripts, Vec<Command>)> {
+        let (directory, mut scripts) = shipped_init_with_user(name, user)?;
+        let mut commands = scripts.startup().commands;
+        commands.extend(scripts.monitors_changed(one_screen(&[])).commands);
+        let _ = std::fs::remove_dir_all(&directory);
+        Some((scripts, commands))
+    }
+
+    /// **The shipped configuration hosts no shell**, and says so on every
+    /// `monitors` event rather than by staying quiet.
+    ///
+    /// The second half is what makes taking a shell out of `user.lua` work on
+    /// `super+shift+r`: a surface outlives a reload until something removes it
+    /// by name, and a reload fires `monitors`, so `shell.lua` removes `shell`
+    /// whenever none is configured.
+    #[test]
+    fn the_shipped_configuration_hosts_no_shell() {
+        // The environment has already chosen a shell for this process, and
+        // that is what it is for; there is nothing for this test to say.
+        if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
+            return;
+        }
+        let Some((_, commands)) = shell_after_monitors("solium-script-test-no-shell", "return {}")
+        else {
+            return;
+        };
+        let (declared, removed) = shell_surfaces(&commands);
+        assert!(
+            declared.is_empty(),
+            "the shipped configuration hosted a shell: {declared:?}"
+        );
+        assert!(
+            removed,
+            "with no shell configured, `shell` must be taken away, or one taken out of \
+             user.lua stays on screen after a reload"
+        );
+    }
+
+    /// **`shell.scene` in `user.lua` hosts that scene**: once, over the
+    /// windows, taking the pointer, on the primary monitor's area, with `~`
+    /// expanded -- and `shell.scene` is a setting, not a typo.
+    #[test]
+    fn the_shell_scene_is_read_from_the_configuration() {
+        if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
+            return;
+        }
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let Some((scripts, commands)) = shell_after_monitors(
+            "solium-script-test-shell-scene",
+            r#"return { shell = { scene = "~/solium-fixture-shell/shell.qml" } }"#,
+        ) else {
+            return;
+        };
+
+        let unknown: Vec<String> = scripts
+            .unknown_settings()
+            .into_iter()
+            .map(|setting| setting.key)
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "`shell.scene` was reported as unrecognised: {unknown:?}"
+        );
+
+        let (declared, _) = shell_surfaces(&commands);
+        let [shell] = declared.as_slice() else {
+            panic!("expected one `shell` surface, got {declared:?}");
+        };
+        assert_eq!(
+            shell.scene,
+            std::path::PathBuf::from(home).join("solium-fixture-shell/shell.qml"),
+            "the scene is not the configured one with `~` expanded"
+        );
+        assert_eq!(shell.layer, crate::scripted::Layer::Top);
+        assert!(shell.interactive, "a shell must take the pointer");
+        assert_eq!(
+            shell.on,
+            crate::scripted::On::Rect(smithay::utils::Rectangle::new(
+                (0, 0).into(),
+                (1600, 900).into()
+            )),
+            "the shell is not on the primary monitor's area"
+        );
+        assert!(
+            shell.properties.contains("\"screenInfo\""),
+            "the shell was not told which screen it is on: {}",
+            shell.properties
+        );
+    }
+
+    /// **The shell is on the primary monitor, not the focused one.** A reload
+    /// and a hotplug both place it again, and a bar that followed focus would
+    /// move screens whenever one of them happened with the pointer elsewhere.
+    #[test]
+    fn the_shell_is_on_the_primary_monitor_not_the_focused_one() {
+        if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
+            return;
+        }
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-shell-primary",
+            r#"return { shell = { scene = "/solium-fixture/shell.qml" } }"#,
+        ) else {
+            return;
+        };
+        let mut two = one_screen(&[]);
+        let [focused] = two.monitors.as_mut_slice() else {
+            panic!("one_screen has one monitor");
+        };
+        focused.primary = false;
+        let mut primary = focused.clone();
+        primary.name = "test-2".to_owned();
+        primary.focused = false;
+        primary.primary = true;
+        primary.area = Rect {
+            x: 1600.0,
+            y: 0.0,
+            w: 1920.0,
+            h: 1080.0,
+        };
+        primary.whole = primary.area;
+        two.monitors.push(primary);
+
+        let mut commands = scripts.startup().commands;
+        commands.extend(scripts.monitors_changed(two).commands);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let (declared, _) = shell_surfaces(&commands);
+        let placed: Vec<&crate::scripted::On> = declared.iter().map(|shell| &shell.on).collect();
+        assert_eq!(
+            placed,
+            vec![&crate::scripted::On::Rect(smithay::utils::Rectangle::new(
+                (1600, 0).into(),
+                (1920, 1080).into()
+            ))],
+            "the shell followed the focused monitor instead of the primary one"
+        );
+    }
+
+    /// **`SOLIUM_SHELL_SCENE` wins over `shell.scene`**, because it is set per
+    /// run -- `dev/run-shell.sh` sets it to the scene being worked on.
+    ///
+    /// In a child process, because the environment is the process's and the
+    /// tests share one: setting the variable here would change what every
+    /// other test running beside this one reads. The child is this binary,
+    /// running [`shell_scene_under_the_environment`] alone with the variable
+    /// set.
+    #[test]
+    fn the_environment_overrides_the_configured_shell_scene() {
+        let binary = std::env::current_exe().expect("this test binary");
+        let output = std::process::Command::new(binary)
+            .args([
+                "--exact",
+                "script::tests::shell_scene_under_the_environment",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("SOLIUM_SHELL_SCENE", ENVIRONMENT_SHELL)
+            .env_remove("RUST_LOG")
+            .output()
+            .expect("running the child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "the child failed:\n{stdout}\n{stderr}"
+        );
+        if stdout.contains("shell-override: skipped") {
+            return;
+        }
+        assert!(
+            stdout.contains("shell-override: checked"),
+            "the child did not run the check:\n{stdout}\n{stderr}"
+        );
+    }
+
+    /// What the child is given, and what its configuration says instead.
+    const ENVIRONMENT_SHELL: &str = "/solium-fixture/from-the-environment/shell.qml";
+    const CONFIGURED_SHELL: &str = "/solium-fixture/from-the-configuration/shell.qml";
+
+    /// The child half of `the_environment_overrides_the_configured_shell_scene`.
+    #[test]
+    #[ignore = "run by the_environment_overrides_the_configured_shell_scene, with the variable set"]
+    fn shell_scene_under_the_environment() {
+        // `cargo test -- --include-ignored` runs this in the test process
+        // itself, without the variable. Nothing to check there, and the line
+        // printed is neither marker that
+        // `the_environment_overrides_the_configured_shell_scene` accepts.
+        if std::env::var("SOLIUM_SHELL_SCENE").as_deref() != Ok(ENVIRONMENT_SHELL) {
+            println!("shell-override: not run by the parent, nothing checked");
+            return;
+        }
+        let Some((_, commands)) = shell_after_monitors(
+            "solium-script-test-shell-override",
+            &format!("return {{ shell = {{ scene = \"{CONFIGURED_SHELL}\" }} }}"),
+        ) else {
+            println!("shell-override: skipped");
+            return;
+        };
+        let (declared, _) = shell_surfaces(&commands);
+        let scenes: Vec<&std::path::Path> =
+            declared.iter().map(|shell| shell.scene.as_path()).collect();
+        assert_eq!(
+            scenes,
+            vec![std::path::Path::new(ENVIRONMENT_SHELL)],
+            "the configured scene won over SOLIUM_SHELL_SCENE"
+        );
+        println!("shell-override: checked");
+    }
+
     /// A configured cursor theme and size reach the compositor as written.
     ///
     /// The wiring between `sol.cursor_theme` and `Command::Cursor`, which is the
@@ -6068,11 +6300,12 @@ mod tests {
 /// misses in complete silence. So this walks `lua/*.lua` and resolves each name
 /// through the same function the compositor uses at run time.
 ///
-/// **What it cannot see.** Only names written as literals. `workspaces.lua`
+/// **What it cannot see.** Only names written as literals. `shell.lua` takes
+/// its scene from the configuration or the environment and `workspaces.lua`
 /// builds `"super+" .. index` in a loop; a name assembled at run time is
-/// outside this and outside any static check. Lua comments are stripped, so a documented example that is
-/// deliberately a placeholder -- a path into somebody's home directory -- does
-/// not fail a build.
+/// outside this and outside any static check. Lua comments are stripped, so a
+/// documented example that is deliberately a placeholder -- a path into
+/// somebody's home directory -- does not fail a build.
 #[cfg(test)]
 mod shipped {
     use super::{Curve, Scripts, normalise_combo};
@@ -6135,8 +6368,8 @@ mod shipped {
     /// spaces between: `easing =` finds `easing = "outCubic"` and `sol.on(`
     /// finds `sol.on("open", ...)`. Anything else after the marker -- a
     /// variable, a table, a concatenation -- is skipped rather than guessed at.
-    /// That is the limit this module states up front, and it is why a
-    /// `scene = scene` never appears here.
+    /// That is the limit this module states up front, and it is why
+    /// `shell.lua`'s `scene = chosen` never appears here.
     fn named(text: &str, marker: &str) -> Vec<(usize, String)> {
         // An empty marker matches at every position and consumes none of them,
         // so the walk below would never move. Refused here rather than left to

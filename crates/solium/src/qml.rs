@@ -1,10 +1,10 @@
 //! Qt Quick scenes, hosted in this process.
 //!
 //! The compositor's own surfaces — window decorations, the pointer, the
-//! wallpaper and every other scene a script declares — are authored in QML and
-//! rendered by Qt's scene graph inside this process. See `qml/host.cpp` for
-//! why in-process: a shell painting frames over a protocol was tried and
-//! measured at ~15 fps, 39% CPU.
+//! wallpaper and every other scene a script declares, a hosted shell among
+//! them — are authored in QML and rendered by Qt's scene graph inside this
+//! process. See `qml/host.cpp` for why in-process: a shell painting frames
+//! over a protocol was tried and measured at ~15 fps, 39% CPU.
 //!
 //! Two paths, and only ever one of them per process, because Qt fixes its
 //! scene graph backend inside `QGuiApplication`. The software rasteriser draws
@@ -93,6 +93,8 @@ mod ffi {
             height: c_int,
             scale: f64,
         ) -> bool;
+        pub(super) fn solium_qml_set_windows(json: *const c_char);
+        pub(super) fn solium_qml_windows_wanted() -> c_int;
         pub(super) fn solium_qml_clear_cache();
         pub(super) fn solium_qml_scene_new_with(
             qml_path: *const c_char,
@@ -788,11 +790,35 @@ pub(crate) fn clear_cache() {
     unsafe { ffi::solium_qml_clear_cache() }
 }
 
+/// Hand the shell the compositor's window list.
+///
+/// The shell reads `ToplevelManager.toplevels` and `Hyprland.activeToplevel`;
+/// both are answered from this. JSON because the boundary is a C string, and a
+/// window list is small enough that its cost is not worth a bespoke encoding.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_windows(json: &str) {
+    let Ok(json) = CString::new(json) else {
+        return;
+    };
+    // SAFETY: the string outlives the call, which copies what it needs.
+    unsafe { ffi::solium_qml_set_windows(json.as_ptr()) }
+}
+
+/// Whether any scene has read `ToplevelManager` or `Hyprland`, which is when
+/// the window list is worth building. See
+/// `a_hosted_shell_reads_the_window_list_the_compositor_publishes`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn windows_wanted() -> bool {
+    // SAFETY: reads a list the host owns; no arguments, nothing retained.
+    unsafe { ffi::solium_qml_windows_wanted() != 0 }
+}
+
 /// Where QML modules are found, `Solium` among them.
 ///
-/// Colon-separated, like a `PATH`, because there are two roots: the user's
-/// own directory and the shipped one. Overridable so a whole design system can
-/// be swapped without rebuilding, which is most of the point of it being QML.
+/// Colon-separated, like a `PATH`, because there are three roots: the user's
+/// own directory, the shipped one, and the Quickshell compatibility layer a
+/// hosted shell imports. Overridable so a whole design system can be swapped
+/// without rebuilding, which is most of the point of it being QML.
 fn import_path() -> std::ffi::OsString {
     // Still the first word, and deliberately the *whole* answer rather than a
     // prefix: someone who names a path is replacing the search, not adding to
@@ -823,7 +849,10 @@ fn search_path(user: Option<&Path>, shipped: &Path) -> std::ffi::OsString {
     for part in user
         .map(Path::to_path_buf)
         .into_iter()
-        .chain([shipped.to_path_buf()])
+        // The compositor's own modules, then the compatibility shim under
+        // them: shell code brought in from elsewhere imports `Quickshell.*`,
+        // and it must not be able to shadow `Solium.*` by doing so.
+        .chain([shipped.to_path_buf(), shipped.join("compat")])
     {
         if !path.is_empty() {
             path.push(":");
@@ -1703,9 +1732,10 @@ mod search_path_tests {
         );
     }
 
-    /// And nothing else: the two roots are the whole search path.
+    /// And the compatibility shim is under both, so foreign shell code
+    /// importing `Quickshell.*` cannot shadow the compositor's own modules.
     #[test]
-    fn the_search_path_is_the_two_roots() {
+    fn the_compat_shim_is_last() {
         let shipped = Path::new("/usr/share/solium/qml");
         let parts = parts(&search_path(
             Some(Path::new("/home/someone/.config/solium/qml")),
@@ -1716,6 +1746,7 @@ mod search_path_tests {
             vec![
                 PathBuf::from("/home/someone/.config/solium/qml"),
                 shipped.to_path_buf(),
+                shipped.join("compat"),
             ]
         );
     }
@@ -1726,7 +1757,10 @@ mod search_path_tests {
     fn no_user_directory_leaves_no_empty_entry() {
         let shipped = Path::new("/usr/share/solium/qml");
         let path = search_path(None, shipped);
-        assert_eq!(parts(&path), vec![shipped.to_path_buf()]);
+        assert_eq!(
+            parts(&path),
+            vec![shipped.to_path_buf(), shipped.join("compat")]
+        );
         assert!(
             !path.to_string_lossy().starts_with(':'),
             "an empty first entry would put the working directory on the path"
@@ -1761,7 +1795,435 @@ mod search_path_tests {
         let shipped = crate::assets::qml();
         assert_eq!(
             parts(&search_path(Some(user), &shipped)),
-            vec![user.to_path_buf(), shipped]
+            vec![user.to_path_buf(), shipped.clone(), shipped.join("compat")]
         );
+    }
+}
+
+/// The Quickshell compatibility layer, as a hosted shell meets it.
+///
+/// These start Qt, on the one thread that may touch it, and build real scenes
+/// that import `Quickshell`: the shim's QML modules on the search path and the
+/// types `compat.cpp` registers behind them.
+#[cfg(test)]
+mod compat_tests {
+    use std::ffi::{CStr, CString, c_char};
+    use std::path::{Path, PathBuf};
+
+    use super::qt_test::on_the_qt_thread;
+
+    #[expect(unsafe_code, reason = "declaring a Qt host function")]
+    unsafe extern "C" {
+        fn solium_qml_theme_icon_name(id: *const c_char) -> *const c_char;
+    }
+
+    /// A fresh directory under the system's temporary one.
+    fn fixture_dir(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        directory
+    }
+
+    fn write(path: &Path, text: impl AsRef<[u8]>) {
+        std::fs::write(path, text).expect("writing a fixture");
+    }
+
+    /// **An icon id that is a file path does not load that file** (#145).
+    ///
+    /// An app id is whatever the application said, and `Quickshell.iconPath`
+    /// builds `image://theme/<name>` from it. `QIcon::fromTheme` loads a file
+    /// when handed an absolute path, so a window whose app id was a path chose
+    /// a file for the compositor to read and draw.
+    ///
+    /// The image is 7x3 so that no icon theme's fallback, which is square, can
+    /// be mistaken for it; and the same file is also loaded as a *file*, which
+    /// must work, so the test cannot pass by the image simply being unreadable.
+    #[test]
+    fn an_icon_id_that_is_a_path_does_not_load_that_file() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-icon-path");
+            let image = directory.join("seven-by-three.ppm");
+            let mut ppm = b"P6\n7 3\n255\n".to_vec();
+            ppm.extend(std::iter::repeat_n([200_u8, 30, 40], 21).flatten());
+            write(&image, ppm);
+
+            let scene = directory.join("Icon.qml");
+            write(
+                &scene,
+                r#"
+                import QtQuick
+                import Quickshell
+
+                Item {
+                    id: root
+                    required property string file
+                    readonly property int directWidth: direct.implicitWidth
+                    readonly property int directHeight: direct.implicitHeight
+                    readonly property int themedWidth: themed.implicitWidth
+                    readonly property int themedHeight: themed.implicitHeight
+                    readonly property bool checkedIsEmpty:
+                        Quickshell.iconPath(root.file, true) === ""
+                    readonly property bool uncheckedIsTheFallback:
+                        Quickshell.iconPath(root.file)
+                            === "image://theme/application-x-executable"
+
+                    Image { id: direct; source: "file://" + root.file }
+                    Image { id: themed; source: "image://theme/" + root.file }
+                }
+                "#,
+            );
+
+            super::start().expect("Qt starts");
+            let file = image.to_string_lossy();
+            let properties = format!("{{\"file\":{}}}", crate::scripted::json_string(&file));
+            let mut scene = super::Scene::for_host(&scene, 16, 16, Some(&properties))
+                .expect("the icon scene builds");
+
+            assert_eq!(
+                (scene.get_int("directWidth"), scene.get_int("directHeight")),
+                (7, 3),
+                "the control failed: the fixture does not load even as a file"
+            );
+            let themed = (scene.get_int("themedWidth"), scene.get_int("themedHeight"));
+            assert_ne!(
+                themed,
+                (7, 3),
+                "image://theme/<path> loaded the file at that path"
+            );
+            assert!(
+                scene.get_bool("checkedIsEmpty"),
+                "iconPath(path, true) answered with something other than nothing"
+            );
+            assert!(
+                scene.get_bool("uncheckedIsTheFallback"),
+                "iconPath(path) did not answer with the generic application icon"
+            );
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A name with a `/` in it, or one Qt reads as absolute, is the generic
+    /// application icon**, and an ordinary name is looked up as written.
+    ///
+    /// A theme lookup joins the name onto each theme directory, so `../` in
+    /// one walks out of the theme; `:` is Qt's own resource root, which
+    /// `QIcon::fromTheme` treats as a path too.
+    #[test]
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    fn an_icon_name_with_a_slash_is_the_fallback() {
+        let looked_up = |id: &str| -> String {
+            let id = CString::new(id).expect("no NUL in a fixture");
+            // SAFETY: `id` outlives the call, and the answer is copied before
+            // the next call on this thread can replace it.
+            unsafe { CStr::from_ptr(solium_qml_theme_icon_name(id.as_ptr())) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        for ordinary in ["firefox", "org.kde.konsole", "utilities-terminal"] {
+            assert_eq!(looked_up(ordinary), ordinary);
+        }
+        for refused in [
+            "/usr/share/pixmaps/firefox.png",
+            "../../../../etc/passwd",
+            "apps/firefox",
+            ":/qt-project.org/styles/commonstyle/images/up-16.png",
+            ":logo",
+            "",
+        ] {
+            assert_eq!(
+                looked_up(refused),
+                "application-x-executable",
+                "{refused:?} was looked up as written"
+            );
+        }
+    }
+
+    /// **A `PanelWindow` root is drawn through its content item**, and its
+    /// properties are the scene's.
+    ///
+    /// Quickshell's `PanelWindow` is a window, not an Item, and shell code sets
+    /// `anchors { top: true }` on it -- which an Item cannot take, because
+    /// `anchors` is FINAL on Item and Qt refuses a type that redeclares it. So
+    /// the shim is a window with a `contentItem`, and the host draws that. The
+    /// window's own properties, `action` among them, are still where the
+    /// compositor reads and writes.
+    #[test]
+    fn a_panel_window_is_drawn_through_its_content_item() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-panel-window");
+            let scene = directory.join("Panel.qml");
+            write(
+                &scene,
+                r##"
+                import QtQuick
+                import Quickshell.Wayland
+
+                PanelWindow {
+                    anchors { top: true; left: true; right: true }
+                    exclusiveZone: 20
+                    implicitHeight: 20
+                    color: "#ff0000"
+                    property int built: 7
+                    property string action: ""
+                    readonly property int drawnWidth: width
+
+                    Rectangle { x: 0; y: 0; width: 4; height: 4; color: "#0000ff" }
+                }
+                "##,
+            );
+
+            super::start().expect("Qt starts");
+            let mut scene =
+                super::Scene::for_host(&scene, 16, 16, None).expect("a PanelWindow root builds");
+            assert_eq!(
+                scene.get_int("built"),
+                7,
+                "the window's own property is unreachable"
+            );
+            assert_eq!(
+                scene.get_int("drawnWidth"),
+                16,
+                "the content item was not given the scene's size"
+            );
+            scene.set_string("action", "open-launcher");
+            assert_eq!(
+                scene.take_string("action").as_deref(),
+                Some("open-launcher")
+            );
+
+            // The pixels, on the path that has them to read.
+            if !super::on_gpu() {
+                let rendered = scene.render().expect("the panel renders");
+                let pixel = |x: usize, y: usize| {
+                    let at = y * rendered.stride + x * 4;
+                    rendered.pixels.get(at..at + 4).map(<[u8]>::to_vec)
+                };
+                // Premultiplied ARGB32, little-endian: blue, green, red, alpha.
+                assert_eq!(
+                    pixel(1, 1),
+                    Some(vec![255, 0, 0, 255]),
+                    "the child is not drawn"
+                );
+                assert_eq!(
+                    pixel(10, 10),
+                    Some(vec![0, 0, 255, 255]),
+                    "the colour is not drawn"
+                );
+            }
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **`Variants` builds one instance per entry of its model**, each given
+    /// its entry as `modelData`, as Quickshell's does.
+    ///
+    /// The shim once redeclared `model` and `delegate`, which hid
+    /// Instantiator's own and left it building nothing whatever it was given:
+    /// `Variants { model: Quickshell.screens; PanelWindow {} }`, the usual
+    /// Quickshell root, would have stayed empty with screens published. The
+    /// bare `Instantiator` beside it is the control, so the test cannot pass
+    /// by counting something neither of them builds.
+    #[test]
+    fn variants_builds_one_instance_per_model_entry() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-variants");
+            let scene = directory.join("Variants.qml");
+            write(
+                &scene,
+                r#"
+                import QtQuick
+                import QtQml
+                import Quickshell
+
+                Item {
+                    readonly property int control: instantiator.count
+                    readonly property int built: variants.count
+                    readonly property int second:
+                        variants.count > 1 ? variants.objectAt(1).value : -1
+
+                    Instantiator { id: instantiator; model: [1, 2, 3]; QtObject {} }
+                    Variants {
+                        id: variants
+                        model: [1, 2, 3]
+                        Item {
+                            required property var modelData
+                            readonly property int value: modelData
+                        }
+                    }
+                }
+                "#,
+            );
+
+            super::start().expect("Qt starts");
+            let mut scene =
+                super::Scene::for_host(&scene, 16, 16, None).expect("the Variants scene builds");
+            assert_eq!(
+                scene.get_int("control"),
+                3,
+                "the control failed: Instantiator itself built nothing"
+            );
+            assert_eq!(
+                scene.get_int("built"),
+                3,
+                "Variants did not build one instance per model entry"
+            );
+            assert_eq!(
+                scene.get_int("second"),
+                2,
+                "an instance was not given its model entry"
+            );
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **`dev/stage-shell.sh` never deletes the shell it is staging.**
+    ///
+    /// It replaces `<staging-dir>/qs` on every run, and the suggested staging
+    /// directory is `~/.config/solium/qml`, so a shell cloned to
+    /// `~/.config/solium/qml/qs` was one run from being deleted, uncommitted
+    /// work and all. The control stages a shell from outside, which must
+    /// work, so the refusals cannot pass by the script failing for every
+    /// input.
+    #[test]
+    fn staging_a_shell_never_deletes_its_own_checkout() {
+        let script = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../dev/stage-shell.sh"
+        ));
+        if !script.exists() {
+            println!("skipped: dev/stage-shell.sh is not in this tree");
+            return;
+        }
+        let stage = |shell: &Path, staging: &Path| {
+            std::process::Command::new("bash")
+                .arg(script)
+                .arg(shell)
+                .arg(staging)
+                .output()
+                .expect("running dev/stage-shell.sh")
+        };
+        let base = fixture_dir("solium-stage-shell-test");
+
+        let outside = base.join("shell");
+        std::fs::create_dir_all(&outside).expect("a shell directory");
+        write(&outside.join("Bar.qml"), "import QtQuick\nItem {}\n");
+        let staging = base.join("qml");
+        let staged = stage(&outside, &staging);
+        assert!(
+            staged.status.success(),
+            "the control failed: a shell outside the staging directory was not staged: {}",
+            String::from_utf8_lossy(&staged.stderr)
+        );
+        assert!(
+            staging.join("qs/Bar.qml").exists(),
+            "the control staged nothing"
+        );
+
+        let checkout = staging.join("qs/checkout");
+        std::fs::create_dir_all(&checkout).expect("a checkout under qs");
+        write(&checkout.join("Bar.qml"), "import QtQuick\nItem {}\n");
+        write(&checkout.join("uncommitted.txt"), "work in progress\n");
+        let refused = stage(&checkout, &staging);
+        assert!(
+            !refused.status.success(),
+            "staged over a shell checked out under <staging-dir>/qs"
+        );
+        assert!(
+            checkout.join("uncommitted.txt").exists(),
+            "the shell's own checkout was deleted"
+        );
+
+        let inside = stage(&outside, &outside.join("staging"));
+        assert!(!inside.status.success(), "staged inside the shell itself");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **A hosted shell reads the window list the compositor publishes**,
+    /// through `ToplevelManager` and `Hyprland`, and the compositor only
+    /// builds the list once some scene has asked for it.
+    ///
+    /// The only test that reads either singleton, which is what makes the
+    /// first assertion true: they are built on first use and kept for the
+    /// life of the engine.
+    #[test]
+    fn a_hosted_shell_reads_the_window_list_the_compositor_publishes() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-window-list");
+            let scene = directory.join("Windows.qml");
+            write(
+                &scene,
+                r#"
+                import QtQuick
+                import Quickshell.Wayland
+                import Quickshell.Hyprland
+
+                Item {
+                    property string expected: ""
+                    readonly property int count: ToplevelManager.toplevels.values.length
+                    readonly property bool twoIsActive:
+                        (Hyprland.activeToplevel || {}).title === "two"
+                    readonly property bool firstIsExpected:
+                        (ToplevelManager.toplevels.values[0] || {}).title === expected
+                }
+                "#,
+            );
+
+            super::start().expect("Qt starts");
+            assert!(
+                !super::windows_wanted(),
+                "the window list is wanted before any scene has read it"
+            );
+            let mut scene =
+                super::Scene::for_host(&scene, 16, 16, None).expect("the window-list scene builds");
+            assert!(
+                super::windows_wanted(),
+                "a scene read ToplevelManager and the list is still not wanted"
+            );
+
+            super::set_windows(
+                r#"{"windows":[{"id":1,"title":"one","appId":"a","activated":false},{"id":2,"title":"two","appId":"b","activated":true}],"active":{"id":2,"title":"two","appId":"b","activated":true}}"#,
+            );
+            assert_eq!(
+                scene.get_int("count"),
+                2,
+                "ToplevelManager saw the wrong list"
+            );
+            assert!(
+                scene.get_bool("twoIsActive"),
+                "Hyprland.activeToplevel is not the active window"
+            );
+
+            // What the compositor builds, with a title that once made the
+            // document invalid: see
+            // `a_window_title_with_a_backslash_and_a_tab_is_still_a_window_list`.
+            let awkward = "C:\\temp\\\tdone \"quoted\" \\";
+            super::set_windows(&crate::state::window_list_json(&[crate::state::Listed {
+                id: 3,
+                title: String::from(awkward),
+                app_id: String::from("c"),
+                activated: false,
+            }]));
+            scene.set_string("expected", awkward);
+            assert_eq!(
+                scene.get_int("count"),
+                1,
+                "a title with a backslash and a tab kept the previous list"
+            );
+            assert!(
+                scene.get_bool("firstIsExpected"),
+                "the title did not arrive as the client wrote it"
+            );
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
     }
 }
