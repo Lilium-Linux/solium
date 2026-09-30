@@ -361,7 +361,13 @@ fn production(path: &Path, text: &str) -> String {
                         .filter(|rest| !rest.starts_with(char::is_whitespace));
                     let closes = at_indent
                         .is_some_and(|rest| ["}", "};", "];", ");"].contains(&rest.trim_end()));
-                    let one_line = end == item && each.trim_end().ends_with(';');
+                    // `mod tests;`, or `fn helper() {}` with its braces
+                    // closed on the same line.
+                    let first = each.trim_end();
+                    let one_line = end == item
+                        && (first.ends_with(';')
+                            || (first.contains('{')
+                                && first.matches('{').count() == first.matches('}').count()));
                     if closes || one_line {
                         break;
                     }
@@ -531,6 +537,13 @@ fn parse() {
     run(&["--handed-on"]);
 }
 #[cfg(test)]
+fn helper() {}
+fn between() {
+    std::env::var("SOLIUM_BETWEEN");
+}
+#[cfg(test)]
+struct Probe { a: u8 }
+#[cfg(test)]
 mod tests {
     fn given() {
         run(&["--exact"]);
@@ -554,5 +567,5 @@ fn after() {
         .into_iter()
         .map(|(_, name)| name)
         .collect();
-    assert_eq!(variables, ["SOLIUM_AFTER"]);
+    assert_eq!(variables, ["SOLIUM_BETWEEN", "SOLIUM_AFTER"]);
 }

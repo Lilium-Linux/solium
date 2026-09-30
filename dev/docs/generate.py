@@ -935,7 +935,12 @@ def production(path, text):
                     rest = each[len(indent):] if each.startswith(indent) else None
                     closes = (rest is not None and not rest[:1].isspace()
                               and rest.rstrip() in ("}", "};", "];", ");"))
-                    if closes or (end == item and each.rstrip().endswith(";")):
+                    first = each.rstrip()
+                    # `mod tests;`, or `fn helper() {}` with its braces closed
+                    # on the same line.
+                    one_line = end == item and (first.endswith(";") or (
+                        "{" in first and first.count("{") == first.count("}")))
+                    if closes or one_line:
                         break
                     end += 1
                 end = min(end, len(lines) - 1)
