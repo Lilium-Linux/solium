@@ -1750,7 +1750,7 @@ mod search_path_tests {
         let shipped = crate::assets::qml();
         assert_eq!(
             parts(&search_path(Some(user), &shipped)),
-            vec![user.to_path_buf(), shipped.clone()]
+            vec![user.to_path_buf(), shipped]
         );
     }
 }
