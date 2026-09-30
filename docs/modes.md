@@ -5,8 +5,9 @@ is whatever you write. The compositor holds no opinion about any of them.
 
 That is not a boast about extensibility — it is the architecture's test. **If a
 new mode needs new Rust, the transform layer is missing something**, and that
-missing thing is the bug rather than your mode. Overview is ninety lines of Lua
-for exactly this reason: it was written to find out whether the claim was true.
+missing thing is the bug rather than your mode. Overview is about a hundred
+lines of Lua for exactly this reason: it was written to find out whether the
+claim was true.
 
 ![Every mode, frame by frame, twenty milliseconds apart](modes-frame-by-frame.png)
 
@@ -22,7 +23,7 @@ the most common mistake.
 
 ```lua
 sol.place(id, { x = 0, y = 0, w = 960, h = 1080 })   -- where it LIVES
-sol.present(id, { rect = { x = 40, y = 40, w = 320, h = 180 } })  -- where it is DRAWN
+sol.present(id, { x = 40, y = 40, w = 320, h = 180 })   -- where it is DRAWN
 ```
 
 `place` is the layout's authority. The window is really that size; the client is
@@ -96,7 +97,10 @@ sol.present(id, { rotate_y = 20, pivot_x = 0 })  -- turns about its left edge
 `z` is draw order and nothing else. Equal values keep the order the stack gave
 them, so the default costs nothing — and a window raised above its neighbour is
 still **clicked where the layout put it**, because `rect` stays the truth for
-input.
+input. It orders windows among themselves. With `fullscreen.covers = "top"`,
+the default, the front window on the workspace in view is lifted into a band of
+its own while it is fullscreen, above the `top` layer and above any window's
+`z`.
 
 `pivot` is a fraction of the window, not pixels: `(0.5, 0.5)` is the centre and
 is the default, `(0, 0)` the top-left corner. **Each axis defaults on its own** —
@@ -116,6 +120,42 @@ one point — and a depth would raise a desk's windows above the desk next door
 while leaving its own wallpaper behind, because depth orders the windows and
 scripted surfaces are drawn in fixed layers. Turning a whole desk as one shape
 needs a rectangle for the selection, which no group has yet.
+
+### Turning, fading and bending
+
+The rest of what `sol.present` takes, all of it animated by the same clock and
+all of it combinable with a rectangle, `z` and a pivot:
+
+```lua
+sol.present(id, { opacity = 0.5 })                     -- the compositor's alpha
+sol.present(id, { rotate_y = 35, perspective = 900 })  -- tilted, in perspective
+sol.present(id, { deform = {                           -- pulled into a rectangle
+    effect = "genie", axis = "down", spread = 1.4,
+    to = { x = 900, y = 1400, w = 120, h = 24 },       -- or { window = id },
+} })                                                   -- or { surface = name }
+```
+
+`opacity` is the compositor's, not the client's: 0 draws nothing, and a window
+at 1/255 or less takes no clicks. `rotate_x`, `rotate_y` and `rotate_z` are
+degrees, applied in that order about the pivot, and `perspective` is the
+viewer's distance in pixels, which is what makes a receding edge shrink rather
+than merely narrow. None of them moves a click: the window is still clicked
+across its flat rectangle.
+
+`deform` bends the window with a vertex effect from `crates/effects`. There is
+one, `"genie"`: `progress` from 0 (where the window is) to 1 (all of it inside
+`to`, the default), `spread` for how much of the window moves at once (0 is
+rigid, 1 by default), and `axis`, `"down"`, `"up"`, `"left"` or `"right"`, for
+which edge leads. `to` is required. `{ window = id }` and `{ surface = name }`
+are looked up again on every frame, so the effect follows its target as it
+moves; a rectangle is fixed. A target that no longer exists draws the window
+flat, and an effect name this build does not have is logged and ignored.
+Animating to a deform starts from none, and `sol.present_clear` animates back
+out of one.
+
+`sol.present_group` takes `opacity` and the rotation keys too, applied on top of
+each member's own, and a third argument, `{ duration = ..., easing = ... }`,
+for a selection that moves at its own speed.
 
 ## Moving more than a window
 
@@ -164,6 +204,7 @@ simply does not contain it. There is nothing to clean up.
 
 ```lua
 sol.on("open",   function(id) end)                 -- a window's life began
+sol.on("surface", function(name, action) end)      -- a sol.surface asked for something
 sol.on("closing", function(id) end)                -- a close was asked for
 sol.on("refused", function(id) end)                -- ...and declined: it is back
 sol.on("close",  function(id) end)                 -- it is gone
@@ -177,12 +218,18 @@ sol.on("monitors", function() end)                 -- the screens are not the sc
 sol.on("restore",  function() end)                 -- you have replaced a running session
 ```
 
-Seven of these are worth reading twice.
+`surface` is how a `sol.surface` declared with `interactive = true` talks
+back: its scene sets an `action`, and you are told the surface's name and the
+action ([ricing.md](ricing.md#your-wallpaper) has an example). Seven of the
+rest are worth reading twice.
 
-**`open` fires when the window opens, which is before its application exists.**
-A window's life begins when the user asks for the program. Your mode is told
-then, gets to place the window then, and the application appears inside it
-later. Nothing special is required of you for that to work — but it is why
+**`open` fires when the window opens, and for a launched window that is before
+its application exists.** A window started with `sol.spawn` begins its life
+when the user asks for the program: your mode is told then, gets to place the
+window then, and the application appears inside it later. That is
+`loading.reserves_a_slot`, which is on by default. A window its application
+opens by itself — a second browser window, a dialog — is told at its first
+frame instead. Nothing special is required of you for either — but it is why
 `open` is the event that puts a window into your arrangement, and `layout` is
 not. A layout keeps its own structure and adds to it on `open`; `layout` only
 means "re-run what you already hold".
@@ -250,13 +297,16 @@ the last word and the compositor does not give it again. A window launched with
 `sol.spawn` gets it the same way when its application arrives; a `sol.focus`
 for it during `open` finds no application yet to give it to.
 
-An application asking to be brought forward with a token from something you
-were using -- a notification you clicked -- is focused first and asked
-afterwards: you hear `focus`, and if your handler brings the window into view
-(the scroller scrolls its column onto the screen) it keeps the keyboard. If it
-is still somewhere nobody can see, a workspace nobody is looking at, the
-keyboard goes back to a window on screen. Nothing switches workspaces for it
-yet.
+An application asking to be brought forward -- with an activation token, such
+as a notification you clicked hands it -- is refused outright if it is on a
+workspace nobody is looking at, or is being closed: it is not focused, you hear
+no `focus`, and the keyboard stays where it was. Anywhere else it is focused
+first and asked afterwards: you hear `focus`, and if your handler brings the
+window into view (the scroller scrolls its column onto the screen) it keeps the
+keyboard. If it is still somewhere nobody can see once the layouts have had
+their say, the keyboard goes back to a window on screen. Nothing switches
+workspaces for it yet, and nothing checks where a token came from: any client
+can make one for itself.
 
 **`resize` gives you where the dragged edge should go, not where the pointer
 is and not a delta.** `edge_x` and `edge_y` are in the same coordinates
@@ -349,11 +399,11 @@ issue #116, and both halves above are what it cost.
 ## What a mode can ask
 
 ```lua
-sol.windows()          -- every window: id, rect, drawn, title, focused, monitor,
+sol.windows()          -- every window: id, x, y, w, h, title, focused, monitor,
                        --                modal, parent, leaving, app_id, min, max,
                        --                cramped, shown
 sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale,
-                       --                 transform, focused, primary
+                       --                 transform, focused, primary, power
 sol.monitor()          -- the active monitor's work area
 sol.monitor(id)        -- the work area of the monitor that window is on
 sol.cursor()           -- { x, y }
@@ -364,9 +414,17 @@ sol.window_at(x, y, skip)  -- the id under a point, optionally skipping one
 A window closing while you hold its id is ordinary: `place` and `present` on an
 id that no longer exists do nothing rather than failing.
 
-`rect` is where the window lives; `drawn` is where it is being drawn right now,
-which in a mode is somewhere else. Read `drawn` when you care what the user is
-looking at, `rect` when you care what the layout thinks.
+`x`, `y`, `w` and `h` are where the window *lives*, which is what the layout
+thinks. No field says where it is being *drawn*: a mode that presented it
+somewhere else knows, because it said so. To ask what the user is looking at,
+ask `sol.window_at`, which answers by what is on screen — the rectangle each
+window is drawn at, whether it is visible at all, and whether the monitor under
+the point is showing it.
+
+`power` is `"on"` or `"off"`. A monitor turned off, by `sol.monitor_power` or
+by `idle.screens_off_after`, keeps its place, its work area and its windows,
+and no `monitors` or `layout` event fires for it: keep arranging it as if it
+were lit, because input turns it back on exactly as it was.
 
 `modal` is a window that says it is a modal dialog — a save prompt, a
 permissions box — and `parent` is the window it belongs to. A layout should
@@ -439,8 +497,8 @@ Anything stateful is keyed by monitor as well as workspace. `tiling.lua` keeps
 a dwindle tree per pair and `scrolling.lua` a strip, via `monitors.key`:
 
 ```lua
-local function tree_for(workspace, monitor)
-    local key = monitors.key(workspace, monitor)
+local function tree_for(monitor)
+    local key = monitors.key(workspaces.on(monitor), monitor)
     ...
 end
 ```
@@ -537,7 +595,7 @@ These are pure: windows in, rectangles out. Two are not, and cannot be:
 
 ```lua
 local tree = sol.layout.tree()        -- dwindle
-local scroller = sol.layout.scroller()  -- niri's model
+local scroller = sol.layout.scroller(config.scrolling)  -- niri's model
 ```
 
 A dwindle tree is stateful because the arrangement is. Where a window lands
@@ -608,11 +666,48 @@ for is laid out short, and its slot says `cramped = true`. The scroller reads
 floor in it.
 
 `options` is a monitor's work area with `gap`, `split`, `minimum` and `floors`
-added.
+added — and, for the other arrangements, `ratio` (the master window's share,
+for `master_stack`), `column` (a column's share, for `sol.layout.scrolling`)
+and `padding` (around each thumbnail, for `grid`).
 Passing the monitor in rather than the tree asking for it is what lets one tree
 per workspace *per monitor* exist without any of them knowing about either.
 Copy the rect before adding keys — the one from `sol.monitors()` belongs to the
 snapshot.
+
+A scroller holds columns, and each column holds windows stacked top to bottom:
+
+```lua
+scroller:insert(id, options)              -- a new column, right of the active one
+scroller:insert_into_column(id, options)  -- into the active column instead
+scroller:remove(id)
+scroller:focus_window(id, options)        -- focus it, and bring its column into view
+scroller:focus_sideways(by, options)      -- by columns: -1 left, 1 right
+scroller:focus_vertically(by)             -- within the active column
+scroller:move_column(by, options)         -- swap the active column with a neighbour
+scroller:consume()                        -- pull the next column's focused window in
+scroller:expel(options)                   -- push the focused window out into a column
+scroller:move_to_column_of(id, target, options)  -- what a drop means here
+scroller:widen(id, by, options)           -- by a share of the view, clamped
+scroller:cycle_width(options)             -- through config.scrolling.widths
+scroller:configure(config.scrolling)      -- new widths, same columns and view
+scroller:scroll_by(dx)                    -- move the view, not the focus
+scroller:focused()
+scroller:contains(id)
+scroller:windows()                        -- left to right, then top to bottom
+scroller:layout(options)                  -- the slots, to hand to sol.place
+```
+
+Every column shares one width, so `widen` on any window in a column widens the
+column. Calls that move the focus to a column also bring it into view, which is
+what keeps a focused column from hanging off the edge of the screen.
+`configure` is for a strip `sol.keep` carried across a reload, which is not
+made again and would otherwise go on with the widths of the file it was made
+from.
+
+Three more pure helpers sit beside `strip`: `sol.layout.scrolling(count,
+options)` lays out `count` columns, each `options.column` of the width, and
+`sol.layout.scroll_to` and `sol.layout.strip_scroll_to` answer how far to
+scroll to bring a column into view.
 
 ### When a new window has no room
 
@@ -762,7 +857,9 @@ sol.on("close", show_cramped)
 
 Re-declaring a surface with the same properties changes nothing, so this costs
 a rebuild only when the list does; `cramped.qml` is any scene with a
-`required property string windows`. A window that is cramped and then has room
+`required property string windows`. On the `top` layer the strip goes under a
+fullscreen window, as a bar does (`fullscreen.covers`); `overlay` keeps it
+over one. A window that is cramped and then has room
 again is named in the log again the next time it is short.
 
 ## A whole mode
@@ -775,43 +872,78 @@ which is the property that matters — a mode that cannot put the desktop back
 exactly is a mode nobody will use twice. All of it is `lua/overview.lua`.
 
 
-This is real and it works. Paste it into `~/.config/solium/mymode.lua` and
-`require("mymode")` from your `init.lua`.
+This is real and it works. Save it as `~/.config/solium/mymode.lua`. A mode is
+loaded by `init.lua`, and the shipped one does not know about yours, so copy the
+shipped `init.lua` to `~/.config/solium/init.lua` — it is
+`share/solium/lua/init.lua` under the prefix Solium was installed to (`~/.local`
+for `dev/install.sh`), and `crates/solium/lua/init.lua` in a checkout — and add
+`require("mymode")` after its `require("scrolling")`. Your copy then replaces
+the shipped file entirely: it keeps what it had when you copied it and does not
+pick up what a later version adds, so compare the two after an update.
 
 ```lua
--- Two columns, newest window on the right, everything else stacked on the left.
+-- Two columns on every monitor: the most recently raised window on the right,
+-- the rest stacked on the left. Dialogs float over the window they belong to.
 local modes = require("modes")
+local monitors = require("monitors")
+local workspaces = require("workspaces")
+local dialogs = require("dialogs")
+
 local mine = { active = false }
+local gap = 12
 
 local function arrange()
     if not mine.active then return end
-    local windows = sol.windows()
-    if #windows == 0 then return end
 
-    local area = sol.monitor()
-    local gap = 12
-    local half = (area.w - gap * 3) / 2
+    -- The desk each monitor is showing, without windows on their way out.
+    local shown = {}
+    for _, window in ipairs(workspaces.visible()) do
+        if not window.leaving then
+            shown[#shown + 1] = window
+        end
+    end
 
     sol.animate({ duration = 220, easing = "outCubic" })
 
-    -- The newest window takes the right half.
-    local newest = windows[1]
-    sol.place(newest.id, {
-        x = area.x + gap * 2 + half, y = area.y + gap,
-        w = half, h = area.h - gap * 2,
-    })
+    local placed = {}
+    local function put(id, rect)
+        sol.place(id, rect)
+        placed[id] = rect
+    end
 
-    -- The rest share the left half, top to bottom.
-    local rest = #windows - 1
-    if rest > 0 then
-        local each = (area.h - gap * (rest + 1)) / rest
-        for index = 2, #windows do
-            sol.place(windows[index].id, {
-                x = area.x + gap, y = area.y + gap + (index - 2) * (each + gap),
-                w = half, h = each,
+    for _, each in ipairs(monitors.each(shown)) do
+        local area = each.monitor
+        local windows = {}
+        for _, window in ipairs(each.windows) do
+            if not dialogs.floats(window) then
+                windows[#windows + 1] = window
+            end
+        end
+
+        if #windows > 0 then
+            local half = (area.w - gap * 3) / 2
+            -- The most recently raised window takes the right half.
+            put(windows[1].id, {
+                x = area.x + gap * 2 + half, y = area.y + gap,
+                w = half, h = area.h - gap * 2,
             })
+            -- The rest share the left half, top to bottom.
+            local rest = #windows - 1
+            if rest > 0 then
+                local tall = (area.h - gap * (rest + 1)) / rest
+                for index = 2, #windows do
+                    put(windows[index].id, {
+                        x = area.x + gap,
+                        y = area.y + gap + (index - 2) * (tall + gap),
+                        w = half, h = tall,
+                    })
+                end
+            end
         end
     end
+
+    -- Dialogs last, over whatever they belong to, on that window's screen.
+    dialogs.place(shown, monitors.named, placed)
 end
 
 sol.on("open",   arrange)
@@ -827,14 +959,15 @@ sol.bind("super+y", mine.toggle)
 return mine
 ```
 
-Four things in there are the conventions rather than the content.
+Seven things in there are the conventions rather than the content.
 
 **Register with `modes`, do not keep your own on/off flag.** A layout is a
 choice of one. Two layouts both placing every window means the second one to run
 wins and the arrangement looks like whichever that happened to be — and
 switching away from one leaves its windows where it put them. `modes.use(name)`
-turns the others off, calls your `started`, and calls their `stopped`. Calling
-it with the mode already current falls back to floating, so one key toggles.
+turns the others off, calls their `stopped`, lets every window out of its tile,
+and calls your `started`. Calling it with the mode already current falls back
+to floating, so one key toggles.
 
 **Guard on `active`.** Your handlers stay registered when your mode is off.
 
@@ -843,8 +976,26 @@ queued after it, so every window in one arrangement moves over the same interval
 on the same clock. Setting it per window is how an arrangement ends up looking
 like several separate animations that happen to overlap.
 
-**Newest window first.** `sol.windows()` is topmost-first, which is the order a
-hit test wants and the order "the one I just opened" is at the front of.
+**Only the desk in view.** `sol.windows()` lists the windows of every workspace;
+`workspaces.visible` keeps the ones on the desk their monitor is showing. The
+others stay where they were last placed, and are carried a screen away by the
+workspace's own selection, so a slot given to one of them is a hole on the desk
+you are looking at.
+
+**One monitor at a time.** `monitors.each` hands you each screen with its own
+windows, and `each.monitor` is that screen's work area. Laying everything out
+against `sol.monitor()` piles every screen's windows onto the one the pointer
+is on.
+
+**Skip what is leaving, and leave dialogs to `dialogs`.** A window being closed
+is still in the snapshot, `leaving = true` — `close`'s own snapshot included —
+and a layout that places it keeps room for a window that is going. A modal dialog
+belongs over its parent, and `dialogs.place` puts it there, on the parent's
+screen, once every arrangement has been decided.
+
+**Most recently raised first.** `sol.windows()` is topmost-first, which is the
+order a hit test wants. That is not the same as newest: clicking an older window
+raises it, and it becomes `windows[1]`.
 
 ## Modes that are not layouts
 
