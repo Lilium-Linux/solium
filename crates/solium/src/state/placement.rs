@@ -718,6 +718,34 @@ impl Solium {
         let Some(toplevel) = window.toplevel().cloned() else {
             return;
         };
+
+        // **A fullscreen window leaves fullscreen for it.** Its way back is the
+        // one slot on the pane, kept for `unfullscreen_request`, and toggled
+        // from here it was spent: the window stayed fullscreen with nothing
+        // kept, and leaving fullscreen then had nowhere to go. So the
+        // maximised state under the fullscreen one is flipped, and the window
+        // leaves fullscreen into it -- which is what `unfullscreen_request`
+        // does already for a window that was maximised when it went
+        // fullscreen, the kept rect and the tile included.
+        // `maximising_a_fullscreen_window_leaves_fullscreen_for_it`.
+        let (fullscreen, maximized) = toplevel.with_pending_state(|state| {
+            (
+                state.states.contains(xdg_toplevel::State::Fullscreen),
+                state.states.contains(xdg_toplevel::State::Maximized),
+            )
+        });
+        if fullscreen {
+            toplevel.with_pending_state(|state| {
+                if maximized {
+                    state.states.unset(xdg_toplevel::State::Maximized);
+                } else {
+                    state.states.set(xdg_toplevel::State::Maximized);
+                }
+            });
+            XdgShellHandler::unfullscreen_request(self, toplevel);
+            return;
+        }
+
         let Some(current) = self.real_geometry(window) else {
             return;
         };

@@ -10511,6 +10511,33 @@ mod directions {
         vec![screen("DP-1", WIDE), screen("DP-2", TALL)]
     }
 
+    /// A smaller landscape screen top-aligned to the right of `WIDE`: a
+    /// laptop's panel beside a monitor, the shape where the one reaches
+    /// lower than the other and neither is above it.
+    const BESIDE: Rect = Rect {
+        x: 2560.0,
+        y: 0.0,
+        w: 1920.0,
+        h: 1080.0,
+    };
+
+    /// A screen touching `WIDE` only at its bottom-right corner.
+    const CORNER: Rect = Rect {
+        x: 2560.0,
+        y: 1440.0,
+        w: 1920.0,
+        h: 1080.0,
+    };
+
+    /// A smaller landscape screen whose right edge meets `TALL`'s left, so
+    /// the bottom half of the portrait screen is level with nothing on it.
+    const LEFT_OF_TALL: Rect = Rect {
+        x: 640.0,
+        y: 0.0,
+        w: 1920.0,
+        h: 1080.0,
+    };
+
     fn window(id: u64, monitor: &str, rect: Rect) -> WindowInfo {
         WindowInfo {
             id,
@@ -11184,6 +11211,262 @@ mod directions {
         );
     }
 
+    /// **The next monitor that way is one wholly past this one's edge.**
+    /// #150's review.
+    ///
+    /// The portrait screen stands to the right of the landscape one and
+    /// reaches below it, and was taken for the one below it: `super+down`
+    /// from the grid's bottom row focused the portrait screen's lower window,
+    /// and `super+shift+down` moved a window onto it. Now down from the
+    /// bottom row, and up from the portrait screen's top, is nothing at all.
+    /// The same for a smaller screen top-aligned beside a bigger one, the
+    /// usual laptop and monitor, where up from the big one and down from the
+    /// small one each reached the other -- while right and left still cross.
+    /// And a screen touching this one only at a corner is past its edge both
+    /// ways, so right and down each reach it.
+    #[test]
+    fn at_a_monitors_edge_the_next_monitor_is_one_wholly_that_way() {
+        let mut desk = grid("", two_screens());
+        desk.open(5, "DP-2", (3280.0, 1280.0));
+        desk.open(6, "DP-2", (3280.0, 2400.0));
+        let (five, six) = (desk.rect(5), desk.rect(6));
+        assert!(
+            five.y + five.h < six.y && inside(five, TALL) && inside(six, TALL),
+            "the premise: 5 above 6 on the portrait screen: {:?}",
+            desk.rects()
+        );
+        let start = desk.rects();
+        for (from, key) in [
+            (3, "super+down"),
+            (4, "super+down"),
+            (5, "super+up"),
+            (3, "super+j"),
+            (5, "super+k"),
+        ] {
+            desk.focus(from);
+            assert!(
+                focuses(&desk.press(key)).is_empty(),
+                "{key} from window {from} went to the monitor beside it"
+            );
+        }
+        for (from, key) in [
+            (3, "super+shift+down"),
+            (4, "super+shift+down"),
+            (5, "super+shift+up"),
+        ] {
+            desk.focus(from);
+            let commands = desk.press(key);
+            assert!(
+                places(&commands).is_empty(),
+                "{key} from window {from} moved something onto the monitor beside it: {commands:?}"
+            );
+        }
+        let now = desk.rects();
+        assert!(
+            start
+                .iter()
+                .zip(&now)
+                .all(|((_, before), (_, after))| same(*before, *after)),
+            "the desk changed: {start:?} and now {now:?}"
+        );
+
+        let at = |x: f64, y: f64, w: f64, h: f64| Rect { x, y, w, h };
+        let mut desk = Desk::floating(
+            vec![screen("DP-1", WIDE), screen("DP-2", BESIDE)],
+            &[
+                (1, "DP-1", at(1000.0, 1000.0, 400.0, 300.0)),
+                (2, "DP-2", at(3000.0, 300.0, 600.0, 400.0)),
+            ],
+        );
+        desk.focus(1);
+        assert!(
+            focuses(&desk.press("super+up")).is_empty(),
+            "up from the big screen reached the small one beside it"
+        );
+        assert!(
+            places(&desk.press("super+shift+up")).is_empty(),
+            "a move up from the big screen went onto the small one beside it"
+        );
+        desk.focus(2);
+        assert!(
+            focuses(&desk.press("super+down")).is_empty(),
+            "down from the small screen reached the big one beside it"
+        );
+        assert!(
+            places(&desk.press("super+shift+down")).is_empty(),
+            "a move down from the small screen went onto the big one beside it"
+        );
+        desk.focus(1);
+        assert_eq!(focuses(&desk.press("super+right")), [2]);
+        assert_eq!(focuses(&desk.press("super+left")), [1]);
+
+        let mut desk = Desk::floating(
+            vec![screen("DP-1", WIDE), screen("DP-3", CORNER)],
+            &[
+                (1, "DP-1", at(1000.0, 500.0, 400.0, 300.0)),
+                (3, "DP-3", at(3000.0, 1700.0, 400.0, 300.0)),
+            ],
+        );
+        for (from, key, to) in [
+            (1, "super+down", 3),
+            (1, "super+right", 3),
+            (3, "super+up", 1),
+            (3, "super+left", 1),
+        ] {
+            desk.focus(from);
+            assert_eq!(
+                focuses(&desk.press(key)),
+                [to],
+                "{key} from window {from}, to the screen off on a corner"
+            );
+        }
+    }
+
+    /// **In tiling, a tile off on a diagonal is not that way.** #150's review.
+    ///
+    /// On the portrait screen, window 1 above 2 and 3 side by side, and
+    /// window 9 on the smaller screen to its left. Left of window 1 was
+    /// window 2, below it, by the nearest centre; right of it, window 3.
+    /// `super+shift+left` then traded 1 with 2 and `super+shift+right` 1 with
+    /// 3, leaving a desk the opposite key did not put back. Now left of 1 is
+    /// the next monitor, window 9, and right of it nothing: the move right
+    /// changes nothing, and the move left takes 1 across. Between tiles that
+    /// are level a move trades them, and the opposite move puts both back.
+    /// And from window 2, lower than anything on the screen to its left, left
+    /// is still window 9: on the next monitor, the nearest centre counts.
+    #[test]
+    fn in_tiling_a_tile_off_on_a_diagonal_is_not_that_way() {
+        let mut desk = Desk::new("", vec![screen("DP-1", LEFT_OF_TALL), screen("DP-2", TALL)]);
+        desk.press("super+t");
+        desk.open(9, "DP-1", (1600.0, 540.0));
+        desk.open(1, "DP-2", (3280.0, 640.0));
+        desk.open(2, "DP-2", (3000.0, 2000.0));
+        desk.open(3, "DP-2", (3800.0, 2000.0));
+        let [one, two, three] = [1, 2, 3].map(|id| desk.rect(id));
+        assert!(
+            one.y + one.h < two.y
+                && about(two.y, three.y)
+                && two.x + two.w < three.x
+                && inside(one, TALL)
+                && inside(two, TALL)
+                && inside(three, TALL)
+                && inside(desk.rect(9), LEFT_OF_TALL),
+            "the premise: 1 above 2 | 3 on the portrait screen, 9 on the other: {:?}",
+            desk.rects()
+        );
+
+        for (from, key, to) in [
+            (1, "super+left", Some(9)),
+            (1, "super+h", Some(9)),
+            (1, "super+right", None),
+            (1, "super+l", None),
+            (2, "super+up", Some(1)),
+            (3, "super+up", Some(1)),
+            (2, "super+right", Some(3)),
+            (3, "super+left", Some(2)),
+            (2, "super+left", Some(9)),
+        ] {
+            desk.focus(from);
+            assert_eq!(
+                focuses(&desk.press(key)),
+                to.into_iter().collect::<Vec<_>>(),
+                "{key} from window {from}"
+            );
+        }
+
+        let start = desk.rects();
+        desk.focus(1);
+        let commands = desk.press("super+shift+right");
+        assert!(
+            places(&commands).is_empty(),
+            "window 1 moved right, with nothing level with it that way: {commands:?}"
+        );
+        desk.focus(2);
+        desk.press("super+shift+right");
+        assert!(
+            same(desk.rect(2), three) && same(desk.rect(3), two),
+            "2 and 3 did not trade tiles: {:?}",
+            desk.rects()
+        );
+        desk.press("super+shift+left");
+        let now = desk.rects();
+        assert!(
+            start
+                .iter()
+                .zip(&now)
+                .all(|((_, before), (_, after))| same(*before, *after)),
+            "the opposite move did not put both back: {start:?} and now {now:?}"
+        );
+
+        desk.focus(1);
+        desk.press("super+shift+left");
+        assert_eq!(
+            desk.monitor(1),
+            "DP-1",
+            "window 1 did not cross to the screen on its left: {:?}",
+            desk.rects()
+        );
+        assert!(
+            desk.rect(2).h > TALL.h - 40.0 && desk.rect(3).h > TALL.h - 40.0,
+            "2 and 3 did not take the portrait screen: {:?}",
+            desk.rects()
+        );
+    }
+
+    /// **A window that belongs to no workspace belongs to none after a move
+    /// across.** #150's review.
+    ///
+    /// With `follow_new_windows` off a window is on no workspace in
+    /// particular, so on every one, and a move onto the next monitor pinned
+    /// it to that monitor's: in tiling, in scrolling and with no layout.
+    #[test]
+    fn a_window_on_no_workspace_is_on_none_after_crossing() {
+        let off = "require(\"config\").workspaces.follow_new_windows = false";
+
+        let mut desk = Desk::new(off, two_screens());
+        desk.press("super+t");
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        desk.open(2, "DP-1", (2000.0, 720.0));
+        assert_eq!(desk.workspace_of(2), "nil", "the premise");
+        desk.press("super+shift+right");
+        assert_eq!(desk.monitor(2), "DP-2", "tiling: window 2 did not cross");
+        assert_eq!(desk.workspace_of(2), "nil", "tiling");
+
+        let mut desk = Desk::new(off, two_screens());
+        for id in [1, 2] {
+            desk.windows.push(window(
+                id,
+                "DP-1",
+                Rect {
+                    w: 400.0,
+                    h: 300.0,
+                    ..WIDE
+                },
+            ));
+        }
+        desk.press("super+s");
+        desk.focus(2);
+        desk.press("super+shift+right");
+        assert_eq!(desk.monitor(2), "DP-2", "scrolling: window 2 did not cross");
+        assert_eq!(desk.workspace_of(2), "nil", "scrolling");
+
+        let mut desk = Desk::new(off, two_screens());
+        desk.windows.push(window(
+            1,
+            "DP-1",
+            Rect {
+                x: 1280.0,
+                y: 360.0,
+                w: 400.0,
+                h: 300.0,
+            },
+        ));
+        desk.focus(1);
+        desk.press("super+shift+right");
+        assert_eq!(desk.monitor(1), "DP-2", "floating: window 1 did not cross");
+        assert_eq!(desk.workspace_of(1), "nil", "floating");
+    }
+
     /// **In scrolling, the directions are the strip's own keys.** #150.
     ///
     /// Left and right are the columns and up and down the windows in one,
@@ -11269,7 +11552,11 @@ mod directions {
             "window 3 is not in a column of its own beside window 5: {:?}",
             desk.rects()
         );
-        assert_eq!(desk.workspace_of(3), "1");
+        assert_eq!(
+            desk.workspace_of(3),
+            "nil",
+            "window 3 was on no workspace, and is on none there either"
+        );
     }
 
     /// **`super+shift+space` floats a tiled window, and tiles it again.**

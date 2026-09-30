@@ -68,24 +68,28 @@ end
 
 -- The rectangle in `items` nearest `from` towards `dir`, or nil.
 --
--- Two kinds of nearest, the first always winning. A rectangle wholly past
--- `from`'s edge and level with some of it is *beside* it -- every neighbouring
--- tile is -- and of those the one whose facing edge is nearest wins, then the
--- one whose centre is least to one side. Failing any, the nearest centre past
--- `from`'s own centre that way, which is how a floating window finds one that
--- overlaps it or sits off on a diagonal.
+-- A rectangle wholly past `from`'s edge and level with some of it is *beside*
+-- it -- every neighbouring tile is -- and of those the one whose facing edge is
+-- nearest wins, then the one whose centre is least to one side. That is all a
+-- layout's tiles get: a tile below and to one side of a tile is not the one to
+-- its side, which is what sway and Hyprland say as well.
+-- `in_tiling_a_tile_off_on_a_diagonal_is_not_that_way`.
+--
+-- With `loose`, failing any beside it, the nearest centre past `from`'s own
+-- centre that way, which is how a floating window finds one that overlaps it
+-- or sits off on a diagonal.
 -- `in_tiling_focus_and_move_reach_the_neighbour_in_each_direction`,
 -- `in_floating_focus_and_move_reach_the_nearest_window_each_way` and, for two
 -- beside it at once,
 -- `at_a_monitors_edge_tiling_crosses_to_the_desk_the_next_monitor_shows`.
-function direction.nearest(from, items, dir)
+function direction.nearest(from, items, dir, loose)
     local best, best_kind, best_first, best_second
     for _, item in ipairs(items) do
         local along, across = offsets(from, item, dir)
         local kind, first, second
         if gap(from, item, dir) >= -SLACK and level(from, item, dir) > SLACK then
             kind, first, second = 1, gap(from, item, dir), across
-        elseif along > SLACK then
+        elseif loose and along > SLACK then
             kind, first, second = 2, along * along + across * across, 0
         end
         if kind and (
@@ -101,35 +105,54 @@ function direction.nearest(from, items, dir)
     return best
 end
 
--- The monitor next to the one named, towards `dir`, or nil: by the same rule,
--- over the monitors' whole rectangles.
+-- The monitor next to the one named, towards `dir`, or nil.
+--
+-- Only a monitor wholly past this one's edge that way, which is wlroots' rule
+-- for the output beside another: a portrait screen standing to the right of a
+-- landscape one is to its right and never below it, however far down it
+-- reaches, and a smaller screen top-aligned beside a bigger one is above
+-- nothing. Of those, one level with this monitor, by the nearest facing edge;
+-- failing any, the nearest centre, which is a monitor off on a diagonal.
+-- `at_a_monitors_edge_the_next_monitor_is_one_wholly_that_way` and
 -- `at_a_monitors_edge_floating_crosses_to_the_next_monitor`.
 function direction.beside(name, dir)
     local here
-    local others = {}
+    local all = {}
     for _, monitor in ipairs(sol.monitors()) do
         local whole = monitor.whole or monitor
         local entry = { x = whole.x, y = whole.y, w = whole.w, h = whole.h, monitor = monitor }
         if monitor.name == name then
             here = entry
         else
-            others[#others + 1] = entry
+            all[#all + 1] = entry
         end
     end
     if not here then
         return nil
     end
-    local found = direction.nearest(here, others, dir)
+    local past = {}
+    for _, entry in ipairs(all) do
+        if gap(here, entry, dir) >= -SLACK then
+            past[#past + 1] = entry
+        end
+    end
+    local found = direction.nearest(here, past, dir, true)
     return found and found.monitor
 end
 
 -- The rectangle nearest `from` towards `dir`, among the ones `on(name)` lists
--- for `from.monitor`, and that monitor's name. At the monitor's edge, the
--- nearest on the next monitor that way instead, which may be none, then that
--- monitor's name and `true`. Nil when there is neither a window nor a monitor
--- that way. `at_a_monitors_edge_tiling_crosses_to_the_desk_the_next_monitor_shows`.
-function direction.find(from, dir, on)
-    local here = direction.nearest(from, on(from.monitor), dir)
+-- for `from.monitor`, and that monitor's name: by `direction.nearest`, `loose`
+-- or not. At the monitor's edge, the nearest on the next monitor that way
+-- instead, which may be none, then that monitor's name and `true`. Nil when
+-- there is neither a window nor a monitor that way.
+--
+-- On the next monitor the search is always loose. Everything on it is past
+-- this monitor's edge, so the nearest centre there is still that way, and a
+-- window on a screen of another height need not be level with the one it is
+-- reached from. `at_a_monitors_edge_tiling_crosses_to_the_desk_the_next_monitor_shows`
+-- and `in_tiling_a_tile_off_on_a_diagonal_is_not_that_way`.
+function direction.find(from, dir, on, loose)
+    local here = direction.nearest(from, on(from.monitor), dir, loose)
     if here then
         return here, from.monitor, false
     end
@@ -137,7 +160,7 @@ function direction.find(from, dir, on)
     if not next then
         return nil, nil, false
     end
-    return direction.nearest(from, on(next.name), dir), next.name, true
+    return direction.nearest(from, on(next.name), dir, true), next.name, true
 end
 
 -- A point just inside `rect`, by its edge on `side`, level with the centre of
@@ -159,13 +182,16 @@ end
 
 -- ## With no layout in charge
 --
--- Windows are where they are. Focus goes to the nearest one that way; a move
--- trades places with it, each window keeping its own size -- the same rule
--- tiling's swap is, so a move and the opposite move put both back. At the
--- monitor's edge a move takes the window onto the next monitor, as far across
--- it as it was across this one.
--- `in_floating_focus_and_move_reach_the_nearest_window_each_way` and
--- `at_a_monitors_edge_floating_crosses_to_the_next_monitor`.
+-- Windows are where they are. Focus goes to the nearest one that way, by
+-- `direction.find`'s loose search, since floating windows overlap and sit off
+-- on diagonals; a move trades places with it, each window keeping its own
+-- size -- the same rule tiling's swap is, so a move and the opposite move put
+-- both back. At the monitor's edge a move takes the window onto the next
+-- monitor, as far across it as it was across this one, and a window that
+-- belongs to no workspace in particular still belongs to none.
+-- `in_floating_focus_and_move_reach_the_nearest_window_each_way`,
+-- `at_a_monitors_edge_floating_crosses_to_the_next_monitor` and
+-- `a_window_on_no_workspace_is_on_none_after_crossing`.
 
 local floating = {}
 
@@ -204,7 +230,7 @@ function floating.focus(dir)
     end
     local to = direction.find(from, dir, function(name)
         return windows_on(windows, name, from.id)
-    end)
+    end, true)
     if to then
         sol.focus(to.id)
     end
@@ -218,7 +244,7 @@ function floating.move(dir)
     end
     local to, name, crossed = direction.find(from, dir, function(monitor)
         return windows_on(windows, monitor, from.id)
-    end)
+    end, true)
     if not name then
         return
     end
@@ -238,7 +264,9 @@ function floating.move(dir)
         there.y + across(from.y - here.y, here.h, there.h),
         name
     )
-    workspaces.of[from.id] = workspaces.on(name)
+    if workspaces.of[from.id] ~= nil then
+        workspaces.of[from.id] = workspaces.on(name)
+    end
 end
 
 sol.on("direction", function(verb, dir)

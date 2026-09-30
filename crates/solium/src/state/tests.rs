@@ -2742,6 +2742,114 @@ mod real_client {
         assert_eq!(state.panes.get(id).map(Pane::slot), Some(before));
     }
 
+    /// **Maximising a fullscreen window leaves fullscreen for it**, and the
+    /// way back from both is kept. #150's review.
+    ///
+    /// `super+shift+m` on a fullscreen window toggled the maximise under it
+    /// and spent the one rect kept for coming back: the window stayed
+    /// fullscreen, and `super+f` then left it the size of the monitor with
+    /// nowhere to go. Now `super+f`, `super+shift+m` is a maximised window
+    /// and no longer fullscreen, and `super+shift+m` again is the window
+    /// where it started. From maximised, `super+f` and `super+shift+m` is
+    /// the window where it started as well, neither fullscreen nor
+    /// maximised: the key flips the maximise under the fullscreen, whichever
+    /// way that is.
+    #[test]
+    fn maximising_a_fullscreen_window_leaves_fullscreen_for_it() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        let output = one_screen(&mut state);
+        let screen = state
+            .space
+            .output_geometry(&output)
+            .expect("the monitor is mapped");
+        let directory =
+            std::env::temp_dir().join(format!("solium-toggles-fs-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            r#"
+            sol.bind("super+f", function() sol.toggle_fullscreen() end)
+            sol.bind("super+shift+m", function() sol.toggle_maximize() end)
+            "#,
+        )
+        .expect("writing the test script");
+        state.start_scripts(Some(
+            Scripts::load(&entry).expect("loading the test script"),
+        ));
+
+        let (conn, mut event_queue, mut client) = connect(&mut display, &mut state);
+        let qh = event_queue.handle();
+        let (window, toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+        state.space.map_element(window.clone(), (400, 300), false);
+        state.space.refresh();
+        let before = state.real_geometry(&window).expect("the window is mapped");
+        state.focus_window(&window, SERIAL_COUNTER.next_serial());
+        macro_rules! press {
+            ($combo:expr) => {
+                assert!(state.trigger($combo), "{} is bound", $combo);
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut event_queue,
+                    &mut client,
+                );
+            };
+        }
+
+        press!("super+f");
+        assert!(in_state(&window, State::Fullscreen), "the premise");
+        press!("super+shift+m");
+        assert!(
+            !in_state(&window, State::Fullscreen),
+            "super+shift+m left the window fullscreen"
+        );
+        assert!(
+            in_state(&window, State::Maximized),
+            "super+shift+m on a fullscreen window did not maximise it"
+        );
+        assert_eq!(state.space.element_location(&window), Some(screen.loc));
+        press!("super+shift+m");
+        assert!(
+            !in_state(&window, State::Maximized) && !in_state(&window, State::Fullscreen),
+            "super+shift+m again did not restore the window"
+        );
+        assert_eq!(
+            state.space.element_location(&window),
+            Some(before.loc),
+            "the way back from fullscreen was spent"
+        );
+        assert_eq!(
+            last_configured(&client, &toplevel),
+            Some((before.size.w, before.size.h))
+        );
+
+        press!("super+shift+m");
+        press!("super+f");
+        assert!(
+            in_state(&window, State::Fullscreen) && in_state(&window, State::Maximized),
+            "the premise: fullscreen over maximised"
+        );
+        press!("super+shift+m");
+        assert!(
+            !in_state(&window, State::Maximized) && !in_state(&window, State::Fullscreen),
+            "super+shift+m on a fullscreen, maximised window left a state behind"
+        );
+        assert_eq!(state.space.element_location(&window), Some(before.loc));
+        assert_eq!(
+            last_configured(&client, &toplevel),
+            Some((before.size.w, before.size.h))
+        );
+    }
+
     /// **A window with no frame toggles back from maximised.**
     ///
     /// The rect a maximise goes back to lived on the window's `Decoration`,

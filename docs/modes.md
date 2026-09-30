@@ -529,6 +529,8 @@ were given belongs to the snapshot.
 ```lua
 sol.focus_direction("left")   -- or "right", "up", "down"
 sol.move_direction("left")
+sol.toggle_fullscreen(id)     -- fullscreen, or back; the focused window with no id
+sol.toggle_maximize(id)       -- maximised, or back; the focused window with no id
 ```
 
 The compositor does nothing with these but tell every `direction` listener
@@ -547,14 +549,27 @@ trades places with it, each window keeping its size. `tiling.lua` answers
 `false` for focus from a window it does not tile -- a dialog, or one floated
 with `super+shift+space` -- so the keyboard still finds its way out of one.
 
+Which window is that way depends on what kind of windows they are. A tile's
+neighbour is wholly past its edge and level with some of it -- a tile below and
+to one side is not to its side -- and the nearest facing edge wins. Floating
+windows overlap and sit off on diagonals, so for them, failing any such
+neighbour, the nearest centre further that way counts too.
+
 At a monitor's edge both go on to the next monitor that way, and the desk it is
-showing. `direction.find(from, dir, on)` is that search, for a layout's own
-rectangles: `on(name)` lists them for a monitor, and you get back the nearest,
-its monitor, and whether that meant crossing to another one.
+showing. The next monitor is one wholly past this one's edge, as wlroots has it:
+a portrait screen standing beside a landscape one is beside it and never below,
+and a smaller screen top-aligned next to a bigger one is above nothing. On the
+next monitor the nearest centre counts for tiles as well, since a screen of
+another height may have nothing level with the window.
+
+`direction.find(from, dir, on, loose)` is that search, for a layout's own
+rectangles: `on(name)` lists them for a monitor, `loose` is the floating rule,
+and you get back the nearest, its monitor, and whether that meant crossing to
+another one.
 
 | | focus | move |
 |---|---|---|
-| tiling | the tile that way | trades tiles with it; `tiling.move = "split"` splits it instead |
+| tiling | the tile that way | trades tiles with it; `tiling.move = "split"` splits its tile across that tile's longer side instead |
 | scrolling | the next column, or the window above or below in one | the column, or the window within its column |
 | no layout | the nearest window that way | trades places with it |
 
@@ -575,6 +590,11 @@ Moving up on `k` is `super+alt+k` because `super+shift+k` cycles the keyboard
 layout. A window floated with `super+shift+space` is, to both layouts, what a
 dialog with no parent is: out of the arrangement, centred on its screen at the
 size it had, until the key puts it back. It stays floated through a reload.
+
+`super+shift+m` on a fullscreen window leaves fullscreen for maximised, or,
+for one that was maximised before it went fullscreen, for where it was before
+either. `super+f` and `super+shift+m` act on Wayland windows only for now: an
+X11 window under XWayland does not go fullscreen or maximised by key.
 
 ## The arrangements that ship
 

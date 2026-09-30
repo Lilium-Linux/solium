@@ -693,21 +693,25 @@ local defaults = {
         reflow_on_close = "immediate",
 
         -- What a keyboard move (super+shift+arrows, #150) does with the
-        -- window it moves towards.
+        -- window it moves towards: the tile wholly past it that way and level
+        -- with it, never one off on a diagonal.
         --
         -- "swap", the default: the two trade tiles, and every split keeps its
-        -- axis and its ratio, so the opposite move puts both back. niri moves
-        -- windows this way; sway and Hyprland reshape the tree instead, which
-        -- is what a dragged seam does not survive.
+        -- axis and its ratio. Where the tile it left is the one that way from
+        -- the tile it took, as in a grid, the opposite move puts both back.
+        -- niri moves windows this way; sway and Hyprland reshape the tree
+        -- instead, which is what a dragged seam does not survive.
         --
-        -- "split": the window leaves its tile and splits the neighbour's, on
-        -- its far side, as Hyprland's `movewindow` does. Pressed again, it
-        -- goes on into the next one.
+        -- "split": the window leaves its tile and splits the neighbour's
+        -- across that tile's longer side, as a window opening in it would, as
+        -- Hyprland's `movewindow` does. Pressed again, it goes on into the
+        -- next one.
         --
         -- At the edge of a monitor either way goes onto the next monitor, in
         -- beside the tile it arrives at. Anything else is named in the log
-        -- and read as "swap". `with_tiling_move_split_a_move_goes_into_the_neighbours_split`
-        -- and `in_tiling_focus_and_move_reach_the_neighbour_in_each_direction`.
+        -- and read as "swap". `with_tiling_move_split_a_move_goes_into_the_neighbours_split`,
+        -- `in_tiling_focus_and_move_reach_the_neighbour_in_each_direction` and
+        -- `in_tiling_a_tile_off_on_a_diagonal_is_not_that_way`.
         move = "swap",
     },
 

@@ -720,9 +720,9 @@ return {
 }
 ```
 
-In tiling a move trades tiles with the neighbour, so the opposite key puts both
-back; `move = "split"` makes it split the neighbour's tile instead, as
-Hyprland's `movewindow` does. [modes.md](modes.md#focus-and-move-by-direction)
+In tiling a move trades tiles with the neighbour level with it that way, and
+in a grid the opposite key puts both back; `move = "split"` makes it split the
+neighbour's tile instead, as Hyprland's `movewindow` does. [modes.md](modes.md#focus-and-move-by-direction)
 has what each layout does with a direction.
 
 ### Your own mode

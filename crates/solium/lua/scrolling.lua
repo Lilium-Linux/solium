@@ -542,7 +542,9 @@ bind("super+r", function(view, on) view:cycle_width(options(on)) end)
 -- windows in one, focused or traded as niri's `move-window-up` does. Past the
 -- end of the strip is the next monitor that way: focus goes to the window its
 -- strip has focused, and a move takes the window alone into a column of its
--- own there. `in_scrolling_the_directions_are_the_strips_own_keys`.
+-- own there, on no workspace in particular if it was on none.
+-- `in_scrolling_the_directions_are_the_strips_own_keys` and
+-- `a_window_on_no_workspace_is_on_none_after_crossing`.
 local STEP = { left = -1, right = 1, up = -1, down = 1 }
 
 -- The focused window, its strip and its monitor, or nil when the keyboard is on
@@ -607,7 +609,9 @@ function scrolling.move_direction(dir)
             each:remove(id)
         end
         view_for(next.name):insert(id, options(next.name))
-        workspaces.of[id] = workspaces.on(next.name)
+        if workspaces.of[id] ~= nil then
+            workspaces.of[id] = workspaces.on(next.name)
+        end
     end
     scrolling.apply(config.scrolling.snap)
     return true
