@@ -66,7 +66,11 @@ local defaults = {
     --     shell = { scene = "~/.config/solium/shell/shell.qml" },
     --
     -- `false`, the default, hosts none. `~` is expanded. It is drawn once, on
-    -- the primary monitor, over the windows, and it takes the pointer.
+    -- the primary monitor, over the windows, and it takes the pointer: every
+    -- press and hover on that monitor's usable area is the shell's, however
+    -- little of it the shell draws on, so while one is hosted the windows
+    -- there cannot be clicked, focused or dragged with the mouse. See
+    -- `the_shell_scene_is_read_from_the_configuration`.
     -- SOLIUM_SHELL_SCENE overrides this, because that is set per run.
     -- `super+shift+r` picks up a change. See docs/shell-boundary.md for
     -- installing one, for shells written against Quickshell, and for what the

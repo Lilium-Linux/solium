@@ -80,7 +80,8 @@ return {
 
 `~` is expanded. The scene is drawn once, over the windows, on the primary
 monitor — the one `primary = true` marks in `monitors`, or the first — across
-that monitor's usable area, and it takes the pointer. `super+shift+r` picks up
+that monitor's usable area, and it takes the pointer there — all of it, which
+[What it is not given](#what-it-is-not-given) spells out. `super+shift+r` picks up
 a change to the setting. Editing a file under the scene's own directory
 rebuilds the scene with no reload at all: that is checked every half second
 while frames are being drawn, and a staged copy (below) has to be staged again
@@ -106,7 +107,9 @@ shell = { scene = "~/.config/solium/shell/shell.qml" },
 
 A shell whose files import one another as `qs.<directory>` — the convention
 Quickshell sets, by writing a `qmldir` for every directory at load time — also
-needs those modules staged where Solium's engine looks. From a Solium checkout:
+needs those modules staged where Solium's engine looks. The script that does
+it is not installed with Solium yet, so for now this needs a Solium checkout;
+from one:
 
 ```sh
 dev/stage-shell.sh ~/.config/solium/shell ~/.config/solium/qml
@@ -125,9 +128,9 @@ prints `ok` or what Qt reported, which is the quick way through a chain of
 **A canvas.** One scene, sized to the primary monitor's usable area, on the
 `top` layer: over the windows, under a layer-shell client's own `top` layer
 surfaces, and covered by a fullscreen window unless `fullscreen.covers` says
-otherwise. It gets pointer motion and left-button presses, so a `MouseArea`
-works. It is built with one required property, `screenInfo`: `name`, `x`, `y`,
-`width`, `height` and `scale`.
+otherwise. It gets pointer motion and presses, so a `MouseArea` works. It is
+given `screenInfo` as an initial property, which a scene reads by declaring
+`property var screenInfo`: `name`, `x`, `y`, `width`, `height` and `scale`.
 
 **The compositor's clock and frames.** Its animations advance on the same
 clock as every window transform, a running animation asks for the next frame,
@@ -164,17 +167,28 @@ application icon rather than that file (#145).
 
 Said plainly, because a shim that loads is easy to mistake for one that works:
 
+- **No input region: the scene takes every press and hover on its monitor.**
+  The pointer is claimed anywhere inside the scene's area, which is the whole
+  usable area of the primary monitor, not only where the scene draws — a
+  36-pixel bar claims the screen under it too. So while a shell is hosted, the
+  windows on that monitor cannot be clicked, focused with the pointer or
+  dragged with `super`. What it wants is an input region: a point claimed only
+  where the scene has an item under it, or a surface sized from
+  `PanelWindow`'s anchors and `implicitHeight`.
 - **One monitor.** One scene, on the primary monitor. A hosted shell on every
-  screen is a later design step, and `Quickshell.screens` is empty, so a
-  `Variants` over it builds nothing.
+  screen is a later design step, and `Quickshell.screens` is empty.
 - **No reserved space, and no placement.** `PanelWindow`'s anchors and
   `exclusiveZone` are accepted and ignored: its content fills the scene, and a
   hosted bar does not take its strip out of the work area, so windows are
   placed under it. The attached `WlrLayershell.layer`, `.namespace` and
-  `.keyboardFocus` are not there at all.
-- **No keyboard, and only the left button.** Pointer motion and left-button
-  presses — no keyboard focus, no grabs (#85), no wheel, no right or middle
-  button. A launcher's text field cannot be typed into.
+  `.keyboardFocus` are not there at all. Its `width` and `height` are
+  read-only, so `PanelWindow { height: 30 }` fails to load, and there is no
+  `margins` group, so `margins { top: 4 }` fails too; either stops the whole
+  shell loading.
+- **No keyboard, and every button is the left one.** Pointer motion and
+  presses — no keyboard focus, no grabs (#85), no wheel, and a right or middle
+  press arrives as a left press, so a right-click on a hosted button activates
+  it. A launcher's text field cannot be typed into.
 - **A `Timer` only fires on a frame something else asked for.** Qt's events
   are drained when a frame is drawn, and a settled desktop draws none, so a
   `SystemClock` stops until the pointer moves or a window changes. What that
@@ -187,9 +201,10 @@ Said plainly, because a shim that loads is easy to mistake for one that works:
 - **Programs it starts are not Solium's clients.** `Process` and
   `execDetached` start children with the compositor's own environment, which
   does not point `WAYLAND_DISPLAY` at Solium the way `sol.spawn` does. And a
-  `Process` starts the moment `running` is set: `running: true` beside a bound
-  `command` starts nothing, where Quickshell waits for the component to
-  complete.
+  `Process` declared with `running: true` never starts, whatever its
+  `command`: `running` is acted on the moment it is set, before the command is,
+  where Quickshell waits for the component to complete. Set `running` from
+  `Component.onCompleted` instead.
 - **Services are shapes, not services.** PipeWire, notifications, MPRIS,
   networking and Bluetooth report nothing, and there is no `Quickshell.
   Services.UPower`, `SystemTray` or `Pam` at all.
