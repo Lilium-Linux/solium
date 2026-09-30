@@ -1,18 +1,20 @@
 #![expect(
     unsafe_code,
-    reason = "the one file that talks to GLES directly; every other file \
-              uses Smithay's traits, which cannot place four corners \
-              independently -- see docs/spikes/2026-09-06-3d-presentation.md"
+    reason = "the one file that makes GL calls itself: Smithay's traits \
+              cannot place four corners independently -- see \
+              docs/spikes/2026-09-06-3d-presentation.md"
 )]
 
-//! Drawing a texture through arbitrary corners: the one place with GLES in it.
+//! Drawing a texture through arbitrary corners: the one file with raw GL calls.
 //!
-//! Everything else in the renderer talks to Smithay's traits. Nothing in those
-//! traits can place a texture's four corners independently, and without that
-//! there is no perspective, no genie and no fold — so this file crosses the
-//! line and the rest does not. A Vulkan backend has one file to reimplement
-//! rather than a habit to unpick. See
-//! `docs/spikes/2026-09-06-3d-presentation.md`.
+//! Nothing in Smithay's renderer traits can place a texture's four corners
+//! independently, and without that there is no perspective, no genie and no
+//! fold — so this file draws with GL itself, through `with_context`. It is not
+//! the only GLES in the renderer: the element set, the rounded-corner pass and
+//! QML on the GPU are GLES too, and
+//! `docs/spikes/2026-08-27-vulkan-on-smithay.md` lists what a Vulkan backend
+//! would have to replace. See `docs/spikes/2026-09-06-3d-presentation.md` for
+//! why this file exists.
 //!
 //! Deliberately knows nothing about windows. It takes a texture and four
 //! corners, which is what a tilted window, a Stage Manager card, an overview

@@ -14,9 +14,11 @@
 //! creating a window beside it.
 //!
 //! QML is not a special case here. A pane whose content is a scene is as
-//! ordinary as one whose content is a client, which is what makes a loading
-//! window, a placeholder for an application that died, and a surface the
-//! compositor draws for its own reasons one mechanism instead of three.
+//! ordinary as one whose content is a client, which is what makes the loading
+//! window an ordinary window rather than a special one. An application that
+//! dies leaves `Content::Leaving`, which fades out what it last showed; and
+//! what the compositor draws for its own reasons is `sol.surface`
+//! (`scripted.rs`), which is not a pane at all.
 //!
 //! `Space` has not gone away and is not going to. It stays underneath as the
 //! authority on stacking and damage for mapped clients, because that
@@ -25,8 +27,9 @@
 //! window a script means, what is drawn, what the pointer is over — asks here,
 //! and only the mapped case asks `Space` anything.
 //!
-//! See `docs/spikes/2026-09-06-window-provider.md` for the order the migration
-//! goes in and why it goes in that order.
+//! `docs/architecture.md`, "A window is a pane", is the current design;
+//! `docs/spikes/2026-09-06-window-provider.md` is the record of the migration
+//! that made it, and why it went in that order.
 use std::{path::PathBuf, time::Duration};
 
 use smithay::{
@@ -1016,8 +1019,8 @@ impl Pane {
     /// Give a pane the client it was waiting for.
     ///
     /// The id and the slot do not change, which is the whole point: nothing
-    /// downstream learns that the content used to be something else, and a
-    /// decoration keyed by pane id carries its animation straight through.
+    /// downstream learns that the content used to be something else, and the
+    /// frame, a field of the pane, carries its animation straight through.
     pub(crate) fn adopt(&mut self, window: Window) {
         // The scene comes across with it. See `Content::Client::scene`: the
         // client has mapped and has not painted, and letting go of what is on
@@ -1347,9 +1350,10 @@ impl Panes {
         // **So does one whose client has gone and which is fading out**
         // (`Content::Leaving`), until its fade is over, and then it is dropped
         // here if `Solium::settle_leaving` has not dropped it first. That is
-        // step 5 of the window-provider migration: `Solium::depart` turns a
-        // pane whose client went into one of these, drawn from what its client
-        // left, and nothing else about it is a window any more. It does not
+        // the leaving content the window-provider design named and #126
+        // built: `Solium::depart` turns a pane whose client went into one of
+        // these, drawn from what its client left, and nothing else about it is
+        // a window any more. It does not
         // ride on top: it goes back where it was in the stack, directly above
         // the highest of the panes it is drawn over (`Left::over`, which says
         // why), and above any other that is fading out from the same place --

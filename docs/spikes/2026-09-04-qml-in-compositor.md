@@ -4,6 +4,17 @@
 **Outcome:** works, via Qt's **software** scene graph. The GPU path is blocked
 on Qt, not on us, and the block is recorded below so nobody re-derives it.
 
+**Since then (2026-09-30).** This outcome was overtaken. Route 2 below, the
+dmabuf-backed render target, landed in #94 (2026-09-15), and since #147
+(2026-09-29) QML renders on the GPU by default on the hardware, with this
+page's software path as the fallback and as what a nested session uses.
+Context adoption is still impossible, so route 1 was never taken. How the
+renderer is chosen, and how to force one, is in
+[dev/README.md, *QML on the GPU*](../../dev/README.md#qml-on-the-gpu). The
+top bar measured at the end was the compositor's own and was removed on
+2026-09-05; a bar now belongs to a shell, hosted or not
+([shell-boundary.md](../shell-boundary.md)).
+
 ## Question
 
 The shell and window decorations are to be authored in QML. Out-of-process was

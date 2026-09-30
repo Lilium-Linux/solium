@@ -5,9 +5,10 @@
 //! expressed by setting a target and reaches the screen through this function,
 //! which is why they cannot animate inconsistently.
 //!
-//! Deliberately written against Smithay's `Renderer` traits and nothing lower.
-//! Reaching into GLES specifics here is what would quietly close the option of
-//! a Vulkan backend later — see `docs/spikes/2026-08-27-vulkan-on-smithay.md`.
+//! Drawn with GLES: the element set below is concrete on `GlesRenderer`, and
+//! so is everything that draws through it. What a Vulkan backend would have to
+//! replace is listed in `docs/spikes/2026-08-27-vulkan-on-smithay.md`, under
+//! "What a Vulkan port costs now".
 
 use std::sync::Mutex;
 

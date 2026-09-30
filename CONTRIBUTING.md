@@ -129,7 +129,9 @@ the layer; do not special-case the mode.
 
 ### Rules learned the hard way
 
-These come from the Hyprland fork Solium replaces, and each one cost real time.
+The first five come from the Hyprland fork Solium replaces; the rest from
+Solium's own first weeks. Each one cost real time, and the next person to hit
+one will be one of us.
 
 1. **One authority for any piece of state.** Two models of window state
    produced a deadlock where a decoration was needed to learn the geometry that
@@ -142,8 +144,61 @@ These come from the Hyprland fork Solium replaces, and each one cost real time.
    interface does too much.
 5. **In-process for anything window-coupled.** An out-of-process shell painting
    decorations was measured at ~15 fps and 39% CPU; the boundary was the
-   ceiling. Everything else that merely sits on a screen — a bar, a dock — is a
-   client; see [docs/shell-boundary.md](docs/shell-boundary.md).
+   ceiling. So window decorations are always the compositor's own. A bar or a
+   dock may run inside the compositor as a hosted shell, in the same QML engine
+   and theme as the frames, or as an ordinary layer-shell client; see
+   [docs/shell-boundary.md](docs/shell-boundary.md).
+
+And from Solium's first weeks:
+
+- **Find out what a dependency's warning means before believing it.** Smithay
+  logs `Unable to become drm master, assuming unprivileged mode` on runs that
+  work. Its own comment three lines above says why: on a modern kernel the
+  permission is granted implicitly when no other process is master, and it
+  skips the error deliberately. Read as a failure, it once became a P1 issue, a
+  rewritten document and a confident claim that the compositor had never drawn
+  a frame on hardware, against the direct report of someone who had just used
+  it. One look at the source undid all of it. **When the evidence and the
+  person who was there disagree, check the evidence.**
+- **Run a test more than once.** Three bugs in one week were found only by
+  repetition. The clipboard flush failed about one run in three: the first run
+  passed, the second passed, the third failed. A single green run is not
+  evidence for anything involving two processes and a protocol.
+- **Nested and hardware are different compositors.** The pointer was once
+  invisible on the hardware and nothing noticed, because a nested session sits
+  inside a host that draws its own cursor. The two backends also had different
+  drawing policies — one drew every loop iteration, the other on damage — so
+  every animation was developed against the one where a missing damage signal
+  is invisible. They gate on the same test now; keep it that way. The answer is
+  to make the nested backend able to *be* the hardware in the way that
+  matters, not to test less: `SOLIUM_OUTPUTS=n` gives it that many monitors,
+  and found a real bug within minutes of existing — the resize handler resized
+  only the first output. On a TTY that is an hour and a session; nested it is a
+  screenshot.
+- **Take a backtrace before theorising.** An hour once went into deciding why
+  the nested backend hung. `eu-stack -p $(pgrep -x solium)` answered it in a
+  minute: `WlEglSurface::swap_buffers`.
+- **"It broke when I changed X" is not evidence that X broke it.** A nested
+  hang was once the host machine going to sleep, and the change blamed for it,
+  twice, was innocent both times.
+- **Measurement scripts lie more often than the compositor.** Three false
+  alarms came from screenshot analysis: a "background" pixel that was the
+  cursor, a sample row that landed in a tiling gap, and a synthetic drag that
+  delivered twelve motions in one microsecond, so every client coalesced them
+  into one. Look at the picture.
+- **Run the examples in the documentation.** The mode guide's worked example
+  once did not run: `require("modes")` failed, because the Lua search path was
+  built from the chosen configuration's own directory, so writing your own
+  `init.lua` lost every shipped module. That is the central configurability
+  promise, and it had been documented as working since it was written.
+- **A compositor cannot test its own protocol support from the inside.** "The
+  global is advertised" is a different claim from "a client that uses it gets
+  the right answers". Asked to anchor a bar, `wl-probe` found that layer
+  surfaces had never been sent an initial configure: every bar and dock had
+  been invisible for as long as the compositor had claimed to support them,
+  and no shipped check used the protocol. A protocol added gets a check from a
+  client's side, in `wl-probe` or as a real client in the test suite
+  (`mod real_client` in `crates/solium/src/state/tests.rs`).
 
 ### Naming
 
@@ -157,8 +212,14 @@ These come from the Hyprland fork Solium replaces, and each one cost real time.
 
 ### Testing
 
-- Capture screenshots with an independent tool, not through the thing under
-  test.
+- **Test evidence is captured independently of the thing under test.** A
+  scene's or a shell's own screenshot of itself shows only what it believes it
+  drew, and a host desktop's screenshot of the nested window shows nothing
+  about what Solium composited. Read back the composited frame instead
+  (`SOLIUM_CAPTURE`, in
+  [dev/README.md](dev/README.md#capturing-a-frame)). The pictures in the
+  documentation are captured the same way, by the compositor reading back its
+  own framebuffer, because what they show is what it draws.
 - A check that can only be run by hand is written down in
   [dev/README.md](dev/README.md), with what it asserts and why no automated
   test reaches it.

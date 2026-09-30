@@ -4,6 +4,20 @@
 **Date:** 2026-08-27
 **Outcome:** start on GLES2. Vulkan is a later, optional port.
 
+**Since then (2026-09-30).** The outcome held: Solium draws with GLES2 through
+`renderer_gl`; Smithay 0.7, which it builds against, still has no Vulkan
+renderer; and niri still uses GLES. The constraint this spike set did not
+hold. The [3D-presentation spike](2026-09-06-3d-presentation.md) crossed the
+trait line on purpose on 2026-09-06, in one file, and GLES has since spread
+past that file. So a Vulkan backend is no longer "a contained change";
+[What a Vulkan port costs now](#what-a-vulkan-port-costs-now) says what it
+would take. No issue schedules one. Two of the three reasons given below for
+wanting Vulkan do not need it: explicit sync
+([#59](https://github.com/Lilium-Linux/solium/issues/59)) is a protocol Smithay
+offers on GLES, and Smithay's multi-GPU renderer
+([#63](https://github.com/Lilium-Linux/solium/issues/63)) is built on GLES.
+Compute shaders remain a reason. "Also found", at the end, is resolved.
+
 ## Question
 
 Does Smithay support Vulkan rendering today, or does choosing Vulkan mean
@@ -49,7 +63,7 @@ A from-scratch renderer backend implementing, at minimum:
 | `ExportMem` | screenshots, screencopy |
 | `Blit`, `BlitFrame` | framebuffer blitting |
 
-`ImportDma` on NVIDIA is the risky one. Every Wayland client hands us a dmabuf,
+`ImportDma` on NVIDIA is the risky one. Every GPU-rendering client hands us a dmabuf,
 and importing those into Vulkan images with correct format and modifier
 negotiation on the proprietary driver is exactly where this kind of work stalls
 — and it must work before a single window appears on screen.
@@ -81,10 +95,29 @@ GLES2 does perfectly well. The honest reasons to want Vulkan later are compute
 shaders, explicit synchronisation, and better multi-GPU handling — none of which
 we need to build overview mode. The document has been corrected.
 
+## What a Vulkan port costs now
+
+Added 2026-09-30. `render.rs` says "the cost is recorded in the spike"; this
+is that record. Each row is GLES or EGL that a Vulkan backend would have to
+replace, on top of the renderer traits in the table above.
+
+| What | Where | Why it is GLES |
+|---|---|---|
+| The render elements | `crates/solium/src/render.rs` | the element set is typed on `GlesRenderer`, because the warp element can only be GLES |
+| Drawing through four corners (perspective, the genie) | `warp.rs` | raw GL through `with_context`: nothing on the traits places a texture's four corners independently |
+| Rounded corners | `pass.rs`, `crates/effects/src/fragment.rs` | a GLSL ES 1.00 program compiled with `compile_custom_texture_shader`, which is GLES-only, drawn by a render element of its own |
+| A closed window fading out | `remains.rs` | a render element of its own on `GlesRenderer` |
+| QML on the GPU, the default since #147 | `qml/host.cpp`, `qml/paint.rs`, `surface.rs`, and the cursor and decoration scenes | Qt renders with OpenGL into a buffer the compositor allocated; the compositor then makes its own EGL context current again and waits on Qt's EGL fence |
+| Everything that draws or reads back | `cursor.rs`, `decoration.rs`, `offscreen.rs`, `screencopy.rs`, `tty.rs`, `winit.rs` | each takes a `GlesRenderer` |
+
+What would carry over: the transform (`present.rs`), the animation and layout
+crates, the effects crate's vertex effects, and every script. QML's software fallback draws into
+ordinary memory, so it needs only a new upload.
+
 ## Also found
 
-**There is no Rust toolchain on this machine** — not on the host, not in the
-`lilium` container. Install user-local via `rustup`, matching how the other
-toolchains here are installed (sudo requires a password on this box).
-
-That is a prerequisite for #10 and everything after it.
+At the time, the machine this spike was written on had no Rust toolchain,
+neither on the host nor in the container then in use, and #10 waited on one.
+**Resolved:** Solium builds natively with a `rustup` toolchain, or in the
+project's build image with Rust mounted in from the user's own `rustup`
+([dev/README.md, *Building*](../../dev/README.md#building)), and #10 is closed.

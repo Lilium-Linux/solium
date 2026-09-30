@@ -7,7 +7,7 @@
 //! `XKB_DEFAULT_LAYOUT`, `XKB_DEFAULT_VARIANT`, `XKB_DEFAULT_MODEL`,
 //! `XKB_DEFAULT_RULES` and `XKB_DEFAULT_OPTIONS` when they are. So
 //! `XKB_DEFAULT_LAYOUT=ua,us` in front of the binary has always worked, and
-//! this was written down as though it had not — see the note in `docs/gaps.md`.
+//! was once written down in the docs as though it had not.
 //!
 //! What was missing is smaller and still real:
 //!

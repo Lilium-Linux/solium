@@ -11,12 +11,12 @@
 //!
 //! ## Why the newer protocol is not this one
 //!
-//! `ext-image-copy-capture-v1` replaces this and is where things are going,
-//! but the `wayland-protocols` release this project builds against does not
-//! carry it yet, and nothing installed anywhere speaks it. Choosing the
-//! superseded protocol is deliberate: it is the one every tool in existence
-//! already uses, and a preview that cannot take a screenshot is a preview
-//! nobody can file a bug about. `ext-image-copy-capture-v1` is #47.
+//! `ext-image-copy-capture-v1` replaces this and is where things are going.
+//! The `wayland-protocols` crate carries it, but Smithay 0.7 has no handler
+//! for it either. Choosing the superseded protocol is deliberate: it is the one
+//! the tools people already have speak, and a preview that cannot take a
+//! screenshot is a preview nobody can file a bug about.
+//! `ext-image-copy-capture-v1` is #47.
 //!
 //! ## When the copy happens
 //!
