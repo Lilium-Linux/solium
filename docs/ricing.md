@@ -724,3 +724,25 @@ Frames stop being driven a few identical renders after they stop moving, so an
 idle window costs a comparison rather than a rasterisation. A decoration that
 animates continuously (`pulse` does, while focused) opts out of that for as
 long as it animates.
+
+## Editor completion
+
+Solium ships a definitions file for
+[lua-language-server](https://luals.github.io/),
+[`lua/meta/sol.lua`](../crates/solium/lua/meta/sol.lua), which describes every
+`sol.*` function with its arguments. Point the server at it and your editor
+completes `sol.` and checks what you pass. A `.luarc.json` in
+`~/.config/solium`, beside your `user.lua`:
+
+```json
+{
+    "runtime.version": "Lua 5.4",
+    "workspace.library": ["/usr/share/solium/lua"]
+}
+```
+
+That is where a package puts Solium's Lua. `dev/install.sh` puts it in
+`~/.local/share/solium/lua`, and in a checkout it is `crates/solium/lua`; write
+the whole path either way. Naming the `lua` folder rather than `lua/meta`
+also lets the server follow `require("modes")` and the other shipped modules.
+The same file is the Lua API page of the documentation site.
