@@ -24,7 +24,7 @@ saying where it was taken, it comes from the reference machine: an NVIDIA RTX
 | `SOLIUM_DEV_IMAGE=` | The container `dev/run-nested.sh` runs in. |
 | `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
 | `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |
-| `SOLIUM_SESSION_BUS=<address>` | The D-Bus address to tell about the session (the environment export, and starting and stopping `solium-session.target`) instead of the session bus. Nested, this is the only way anything is told: without it a nested run leaves the session it runs inside alone. For checking the calls against a private bus: `dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'`. See `session.rs`. |
+| `SOLIUM_SESSION_BUS=<address>` | The D-Bus address to tell about the session (the environment export, and starting and stopping `solium-session.target` and `solium-autostart.target`) instead of the session bus. Nested, or `solium --tty` without `--session`, this is the only way anything is told: without it such a run leaves the session around it alone. For checking the calls against a private bus: `dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'`. See `session.rs`. |
 
 ## Checks
 
@@ -36,7 +36,7 @@ saying where it was taken, it comes from the reference machine: an NVIDIA RTX
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
-| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, and an uninstall that leaves nothing. See *Installing it* |
+| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone), and an uninstall that leaves nothing. See *Installing it* |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
@@ -853,12 +853,12 @@ dev/install.sh --uninstall     # remove it again; prints `sudo rm -f …` for th
 
 | | |
 |---|---|
-| `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/share/solium/{qml,lua}`, and the generated `DIR/share/solium/solium.desktop` |
-| `XDG_CONFIG_HOME=` | where the session's other files go, default `~/.config`, whatever the prefix: `systemd/user/solium-session.target`, `systemd/user/solium-session-no-autostart.target` and `xdg-desktop-portal/lilium-portals.conf`, copied from `dev/session/` |
+| `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/bin/solium-session` (what the session file starts: `solium --tty --session`, and the clean-up after a Solium that crashed), `DIR/share/solium/{qml,lua}`, and the generated `DIR/share/solium/solium.desktop` |
+| `XDG_CONFIG_HOME=` | where the session's other files go, default `~/.config`, whatever the prefix: `systemd/user/solium-session.target`, `systemd/user/solium-autostart.target` and `xdg-desktop-portal/lilium-portals.conf`, copied from `dev/session/` |
 | `--session-dir DIR` | where the display manager reads sessions, default `/usr/local/share/wayland-sessions`. Only the printed `sudo` line writes there |
 | `--no-build` | install the release binary already in `target/install` |
 | `--jobs N`, `--image IMAGE` | the build's cargo jobs (2) and container (`localhost/solium-build:fc44`) |
-| `--uninstall` | remove `bin/solium`, `share/solium/{qml,lua}` and the generated `solium.desktop` under the same `--prefix`, whatever put them there, and the three files in `XDG_CONFIG_HOME` only while they are what install wrote |
+| `--uninstall` | remove `bin/solium`, `bin/solium-session`, `share/solium/{qml,lua}` and the generated `solium.desktop` under the same `--prefix`, whatever put them there, and the three files in `XDG_CONFIG_HOME` only while they are what install wrote |
 | `DESTDIR=` | stage the prefix and `XDG_CONFIG_HOME` under this directory instead; the session file's `Exec` still names the real prefix. `--session-dir` is used as given, so a test can point it at `/tmp` |
 | `SOLIUM_BUILD_LOCK=`, `SOLIUM_BUILD_MEMORY=` | the lock the build takes (`~/.cache/solium-build.lock`) and the container's memory cap (`6g`) |
 
@@ -942,12 +942,13 @@ and `ctrl_alt_backspace_stops_the_compositor`), because the kernel stops acting
 on them once a graphical session owns the VT, so neither helps if Solium
 itself hangs.
 
-**The `Exec` is absolute** (`Exec=/home/you/.local/bin/solium --tty`): Plasma
+**The `Exec` is absolute** (`Exec=/home/you/.local/bin/solium-session`, which
+runs the `solium --tty --session` beside it): Plasma
 Login starts a session with `PATH=/usr/local/bin:/usr/bin:/bin` (`DefaultPath`
 in `/etc/plasmalogin.conf`), and whether `~/.local/bin` is added after that is
 up to your shell profile.
 
-**Where the log goes.** `--tty`, which the session file passes, is what turns
+**Where the log goes.** `--tty`, which `solium-session` passes, is what turns
 the log file on (`main.rs`):
 
 ```rust

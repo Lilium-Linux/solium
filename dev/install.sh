@@ -2,10 +2,11 @@
 #
 # Install Solium from this checkout, so the login screen can start it.
 #
-# Builds a release binary in the build container, copies it and the shipped
-# QML and Lua into a prefix (~/.local by default), and writes a session file
-# for the display manager. The systemd user units Solium starts and its portal
-# choice (#146) go into the user's configuration directory. It never uses sudo:
+# Builds a release binary in the build container, copies it, the
+# solium-session script the login screen starts, and the shipped QML and Lua
+# into a prefix (~/.local by default), and writes a session file for the
+# display manager. The systemd user units Solium starts and its portal choice
+# (#146) go into the user's configuration directory. It never uses sudo:
 # the session file has to go somewhere only root can write, so the script
 # prints the one line that puts it there. `--uninstall` takes all of it back
 # out. `dev/install-check.sh` runs an install and an uninstall into /tmp and
@@ -20,10 +21,11 @@ usage: dev/install.sh [options]
        dev/install.sh --uninstall [--prefix DIR] [--session-dir DIR]
 
   --prefix DIR        where to install (default: \$HOME/.local)
-                        DIR/bin/solium, DIR/share/solium/{qml,lua,solium.desktop}
+                        DIR/bin/{solium,solium-session},
+                        DIR/share/solium/{qml,lua,solium.desktop}
                         and, whatever the prefix, into \$XDG_CONFIG_HOME
                         (default: \$HOME/.config):
-                        systemd/user/solium-session{,-no-autostart}.target
+                        systemd/user/solium-{session,autostart}.target
                         and xdg-desktop-portal/lilium-portals.conf
   --session-dir DIR   where the display manager reads Wayland sessions
                         (default: /usr/local/share/wayland-sessions); the
@@ -109,6 +111,9 @@ destdir="${destdir%"${destdir##*[!/]}"}"
 
 dest="$destdir$prefix"
 bin="$dest/bin/solium"
+# What the session file starts: `solium --tty --session`, and the clean-up
+# after a Solium that could not do its own (dev/session/solium-session).
+wrapper="$dest/bin/solium-session"
 share="$dest/share/solium"
 staged_session="$share/solium.desktop"
 session_file="$session_dir/solium.desktop"
@@ -123,7 +128,7 @@ session_file="$session_dir/solium.desktop"
 config_dest="$destdir$config_home"
 config_files=(
     "solium-session.target:$config_dest/systemd/user/solium-session.target"
-    "solium-session-no-autostart.target:$config_dest/systemd/user/solium-session-no-autostart.target"
+    "solium-autostart.target:$config_dest/systemd/user/solium-autostart.target"
     "lilium-portals.conf:$config_dest/xdg-desktop-portal/lilium-portals.conf"
 )
 manifest="$share/config.sha256"
@@ -212,10 +217,12 @@ if [[ $uninstall -eq 1 ]]; then
         rm -f "$manifest"
         removed+=("$manifest")
     fi
-    if [[ -e "$bin" ]]; then
-        rm -f "$bin"
-        removed+=("$bin")
-    fi
+    for path in "$bin" "$wrapper"; do
+        if [[ -e "$path" ]]; then
+            rm -f "$path"
+            removed+=("$path")
+        fi
+    done
     for path in "$share/qml" "$share/lua" "$staged_session"; do
         if [[ -e "$path" ]]; then
             rm -rf "$path"
@@ -257,8 +264,10 @@ source_session="$root/dev/session/solium.desktop"
 [[ -f "$source_session" ]] || die "missing $source_session"
 [[ $(grep -c '^Exec=' "$source_session") -eq 1 ]] \
     || die "$source_session must have exactly one Exec line"
-grep -q '^Exec=solium\( \|$\)' "$source_session" \
-    || die "$source_session's Exec no longer starts with 'solium'; update dev/install.sh"
+grep -qx 'Exec=solium-session' "$source_session" \
+    || die "$source_session's Exec is no longer 'solium-session'; update dev/install.sh"
+source_wrapper="$root/dev/session/solium-session"
+[[ -f "$source_wrapper" ]] || die "missing $source_wrapper"
 for entry in "${config_files[@]}"; do
     [[ -f "$root/dev/session/${entry%%:*}" ]] || die "missing $root/dev/session/${entry%%:*}"
 done
@@ -297,24 +306,26 @@ mkdir -p "$dest/bin" "$share" 2>/dev/null \
     || die "cannot write to $dest. This script never uses sudo: choose a --prefix you own"
 
 install -m755 "$built" "$bin"
+install -m755 "$source_wrapper" "$wrapper"
 # Copied, not linked, so a later `git checkout` cannot change a running
 # session. dev/install-check.sh diffs the copy against the checkout and asserts
 # there are no symlinks in it.
 rm -rf "$share/qml" "$share/lua"
 cp -RL "$root/crates/solium/qml" "$root/crates/solium/lua" "$share/"
 
-# The Exec names the binary by its full path. Plasma Login starts a session
-# with PATH=/usr/local/bin:/usr/bin:/bin (DefaultPath in /etc/plasmalogin.conf),
-# and whether ~/.local/bin is added after that is up to the user's shell
-# profile. dev/install-check.sh asserts the Exec is absolute.
+# The Exec names solium-session by its full path, and solium-session runs the
+# solium beside it. Plasma Login starts a session with
+# PATH=/usr/local/bin:/usr/bin:/bin (DefaultPath in /etc/plasmalogin.conf), and
+# whether ~/.local/bin is added after that is up to the user's shell profile.
+# dev/install-check.sh asserts the Exec is absolute.
 # Written beside the target and renamed over it, never through a redirect: a
 # redirect follows a link, and a staged solium.desktop linked to the checkout's
 # own session file would be emptied before sed read it.
 staged_tmp="$(mktemp "$share/.solium.desktop.XXXXXX")"
-sed "s|^Exec=solium|Exec=$prefix/bin/solium|" "$source_session" > "$staged_tmp"
+sed "s|^Exec=solium-session\$|Exec=$prefix/bin/solium-session|" "$source_session" > "$staged_tmp"
 chmod 644 "$staged_tmp"
 mv -f "$staged_tmp" "$staged_session"
-grep -qx "Exec=$prefix/bin/solium --tty" "$staged_session" \
+grep -qx "Exec=$prefix/bin/solium-session" "$staged_session" \
     || die "the generated session file has no absolute Exec line: $staged_session"
 
 # The units and the portal choice. Each written beside its target and renamed
@@ -414,12 +425,13 @@ cat <<EOF
 
 Installed Solium into $dest
   binary        $bin
+  started by    $wrapper
   QML and Lua   $share/qml, $share/lua
                 (copies: rebuilding or checking out another branch does not change them)
   session file  $staged_session
                 ($(grep -m1 '^Exec=' "$staged_session"))
   units         $config_dest/systemd/user/solium-session.target
-                $config_dest/systemd/user/solium-session-no-autostart.target
+                $config_dest/systemd/user/solium-autostart.target
   portals       $config_dest/xdg-desktop-portal/lilium-portals.conf$config_note
   check         $bin --check passed${checked:+ (${checked#  })}, using $chosen
   $path_note

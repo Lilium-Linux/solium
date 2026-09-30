@@ -3,8 +3,8 @@
 # Does dev/install.sh install, check and uninstall cleanly?
 #
 # A full install into a DESTDIR under /tmp, with --session-dir under /tmp too,
-# then every file it put there (the systemd units and the portal configuration
-# included), the sudo lines it printed (run without sudo, since they point into
+# then every file it put there (solium-session, the systemd units and the
+# portal configuration included), the sudo lines it printed (run without sudo, since they point into
 # /tmp), `--check` from the staged copy, and an uninstall that leaves nothing
 # behind. Before and around that, the refusals: paths it
 # cannot print safely, a link it would delete through, a Solium running from
@@ -12,7 +12,9 @@
 # after the files are in place. Everything it writes is under one directory of
 # its own in /tmp, removed when every check passes and kept when one fails. A
 # unit or portal configuration of the user's own, edited or linked, has to
-# survive both an install and an uninstall.
+# survive both an install and an uninstall. solium-session, run against a
+# stand-in solium and systemctl, cleans up after a Solium that could not, and
+# only then.
 #
 #   dev/install-check.sh [--no-build]
 #
@@ -46,7 +48,7 @@ units="$destdir$config_home/systemd/user"
 portals="$destdir$config_home/xdg-desktop-portal"
 config_files=(
     "solium-session.target:$units/solium-session.target"
-    "solium-session-no-autostart.target:$units/solium-session-no-autostart.target"
+    "solium-autostart.target:$units/solium-autostart.target"
     "lilium-portals.conf:$portals/lilium-portals.conf"
 )
 
@@ -142,7 +144,7 @@ ln -s "$work/link-d-planted.desktop" "$work/link-d$prefix/share/solium/solium.de
 DESTDIR="$work/link-d" "$install_sh" --no-build --session-dir "$sessions" >"$work/link-d-install.log" 2>&1
 check "a linked staged session file is replaced" [ $? -eq 0 -a ! -L "$work/link-d$prefix/share/solium/solium.desktop" ]
 check "  and what it pointed at is untouched" grep -qx planted "$work/link-d-planted.desktop"
-check "  and the new one has the absolute Exec" grep -qx "Exec=$prefix/bin/solium --tty" "$work/link-d$prefix/share/solium/solium.desktop"
+check "  and the new one has the absolute Exec" grep -qx "Exec=$prefix/bin/solium-session" "$work/link-d$prefix/share/solium/solium.desktop"
 DESTDIR="$work/link-d" "$install_sh" --uninstall --session-dir "$sessions" >/dev/null 2>&1
 # The prefix a link into the checkout, so no link sits where the two cases
 # above look, and share/solium still resolves into the checkout. A stand-in
@@ -177,14 +179,16 @@ fi
 echo "files"
 check "bin/solium is executable" [ -x "$dest/bin/solium" ]
 check "bin/solium is the release build" cmp -s "$dest/bin/solium" "$root/target/install/release/solium"
+check "bin/solium-session is executable" [ -x "$dest/bin/solium-session" ]
+check "  and a copy of dev/session/solium-session" cmp -s "$dest/bin/solium-session" "$root/dev/session/solium-session"
 check "share/solium/qml is a copy of crates/solium/qml" diff -r "$root/crates/solium/qml" "$share/qml"
 check "share/solium/lua is a copy of crates/solium/lua" diff -r "$root/crates/solium/lua" "$share/lua"
 check "a file left by an earlier install is gone" [ ! -e "$share/qml/removed-since.qml" ]
 check "nothing staged is a symlink" [ -z "$(find "$destdir" -type l)" ]
-# The binary, the session file, three configuration files and the record of
-# them.
-expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua") + 6))
-check "exactly those files, the session file, the units, the portal choice and their record ($expected_files)" \
+# The binary, solium-session, the session file, three configuration files and
+# the record of them.
+expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua") + 7))
+check "exactly those files, solium-session, the session file, the units, the portal choice and their record ($expected_files)" \
     [ "$(count_files "$destdir")" -eq "$expected_files" ]
 for entry in "${config_files[@]}"; do
     name="${entry%%:*}"
@@ -196,19 +200,23 @@ for entry in "${config_files[@]}"; do
 done
 check "solium-session.target binds graphical-session.target" \
     grep -qx "BindsTo=graphical-session.target" "$units/solium-session.target"
-check "  and wants XDG autostart" \
-    grep -qx "Wants=xdg-desktop-autostart.target" "$units/solium-session.target"
-check "solium-session-no-autostart.target binds it and does not" \
-    [ "$(grep -c -x -e "BindsTo=graphical-session.target" -e "Wants=xdg-desktop-autostart.target" \
-        "$units/solium-session-no-autostart.target")" = 1 ]
+check "  and is ordered before it" \
+    grep -qx "Before=graphical-session.target" "$units/solium-session.target"
+check "  and leaves XDG autostart to solium-autostart.target" \
+    [ -z "$(grep -x "Wants=xdg-desktop-autostart.target" "$units/solium-session.target")" ]
+check "solium-autostart.target wants XDG autostart" \
+    grep -qx "Wants=xdg-desktop-autostart.target" "$units/solium-autostart.target"
+check "  and stops with solium-session.target, after which it starts" \
+    [ "$(grep -c -x -e "PartOf=solium-session.target" -e "After=solium-session.target" \
+        "$units/solium-autostart.target")" = 2 ]
 check "the portals: gtk, and wlr for ScreenCast and Screenshot" \
     diff <(grep -v '^#' "$portals/lilium-portals.conf") <(printf '%s\n' '[preferred]' default=gtk \
         org.freedesktop.impl.portal.ScreenCast=wlr org.freedesktop.impl.portal.Screenshot=wlr)
 check "install.sh names the units and the portal choice" \
     grep -q "portals       $portals/lilium-portals.conf" "$work/install.log"
 check "the session file is mode 644" [ "$(stat -c %a "$staged")" = 644 ]
-check "Exec is absolute: Exec=$prefix/bin/solium --tty" \
-    grep -qx "Exec=$prefix/bin/solium --tty" "$staged"
+check "Exec is absolute: Exec=$prefix/bin/solium-session" \
+    grep -qx "Exec=$prefix/bin/solium-session" "$staged"
 check "  and is the only line that differs from dev/session/solium.desktop" \
     diff <(grep -v '^Exec=' "$root/dev/session/solium.desktop") <(grep -v '^Exec=' "$staged")
 check "install.sh wrote nothing into --session-dir itself" [ ! -e "$sessions" ]
@@ -325,9 +333,9 @@ echo "[preferred]
 default=kde" >"$own_portals/lilium-portals.conf"
 echo "dotfiles" >"$work/dotfiles-unit"
 ln -s "$work/dotfiles-unit" "$own_units/solium-session.target"
-echo "an older copy" >"$own_units/solium-session-no-autostart.target"
-echo "$(sha256sum <"$own_units/solium-session-no-autostart.target" | cut -d' ' -f1) \
-$own_units/solium-session-no-autostart.target" >"$own$prefix/share/solium/config.sha256"
+echo "an older copy" >"$own_units/solium-autostart.target"
+echo "$(sha256sum <"$own_units/solium-autostart.target" | cut -d' ' -f1) \
+$own_units/solium-autostart.target" >"$own$prefix/share/solium/config.sha256"
 DESTDIR="$own" "$install_sh" --no-build --session-dir "$sessions" >"$work/own-install.log" 2>&1
 check "install exits 0" [ $? -eq 0 ]
 check "  keeps an edited portal choice" grep -qx "default=kde" "$own_portals/lilium-portals.conf"
@@ -337,21 +345,80 @@ check "  says it kept both" \
     [ "$(grep -c -e "$own_portals/lilium-portals.conf" -e "$own_units/solium-session.target\$" \
         "$work/own-install.log")" -ge 2 ]
 check "  replaces a copy it wrote earlier" \
-    cmp -s "$root/dev/session/solium-session-no-autostart.target" "$own_units/solium-session-no-autostart.target"
+    cmp -s "$root/dev/session/solium-autostart.target" "$own_units/solium-autostart.target"
 check "  and records only that one" [ "$(wc -l <"$own$prefix/share/solium/config.sha256")" -eq 1 ]
 DESTDIR="$own" "$install_sh" --uninstall --session-dir "$sessions" >"$work/own-uninstall.log" 2>&1
 check "uninstall exits 0" [ $? -eq 0 ]
-check "  removes the unit it wrote" [ ! -e "$own_units/solium-session-no-autostart.target" ]
+check "  removes the unit it wrote" [ ! -e "$own_units/solium-autostart.target" ]
 check "  keeps the edited portal choice" grep -qx "default=kde" "$own_portals/lilium-portals.conf"
 check "  keeps the linked unit" [ -L "$own_units/solium-session.target" ]
 check "  and says so" grep -q "kept, because this script did not write them" "$work/own-uninstall.log"
+
+echo "solium-session, after a Solium that could not clean up"
+# A stand-in solium beside a copy of the script, as the prefix has them, and a
+# stand-in systemctl on PATH that logs what it is asked and answers is-active
+# from a file. In the crash case the stand-in solium kills itself with
+# SIGTERM, which also shows the script's trap does not leave it ignoring that.
+wrap="$work/wrapper"
+mkdir -p "$wrap/bin" "$wrap/fakebin"
+cp "$root/dev/session/solium-session" "$wrap/bin/solium-session"
+cat >"$wrap/bin/solium" <<STANDIN
+#!/bin/sh
+echo "\$*" >"$wrap/args"
+case "\$(cat "$wrap/mode")" in
+    crash) kill -s TERM \$\$; sleep 5 ;;
+    slow) sleep 1 ;;
+esac
+echo gone >"$wrap/gone"
+exit 0
+STANDIN
+cat >"$wrap/fakebin/systemctl" <<STANDIN
+#!/bin/sh
+case "\$*" in
+    *is-active*) exit "\$(cat "$wrap/active")" ;;
+esac
+echo "\$*" >>"$wrap/systemctl.log"
+[ -e "$wrap/gone" ] || echo "before solium had gone" >>"$wrap/systemctl.log"
+STANDIN
+chmod +x "$wrap/bin/solium" "$wrap/fakebin/systemctl"
+stop_line="--user stop solium-session.target solium-autostart.target"
+unset_line="--user unset-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"
+# solium-session with the stand-in in mode $1, is-active answering $2.
+wrapped() {
+    rm -f "$wrap/systemctl.log" "$wrap/gone" "$wrap/args"
+    echo "$1" >"$wrap/mode"
+    echo "$2" >"$wrap/active"
+    PATH="$wrap/fakebin:$PATH" "$wrap/bin/solium-session" >"$work/wrapper-$1.log" 2>&1
+}
+wrapped crash 0
+status=$?
+check "it runs solium --tty --session" grep -qx -- "--tty --session" "$wrap/args"
+check "  exits as Solium did (killed by SIGTERM: 143)" [ "$status" -eq 143 ]
+check "  stops the targets a crash left active" grep -qx -- "$stop_line" "$wrap/systemctl.log"
+check "  and unsets what Solium exported" grep -qx -- "$unset_line" "$wrap/systemctl.log"
+wrapped clean 3
+check "a Solium that stopped its own target is left alone" [ ! -e "$wrap/systemctl.log" ]
+# logind's SIGTERM reaches the script too: it has to wait for Solium, and
+# clean up after it rather than before.
+rm -f "$wrap/systemctl.log" "$wrap/gone"
+echo slow >"$wrap/mode"
+echo 0 >"$wrap/active"
+PATH="$wrap/fakebin:$PATH" "$wrap/bin/solium-session" >"$work/wrapper-term.log" 2>&1 &
+wrapper_pid=$!
+sleep 0.3
+kill -s TERM "$wrapper_pid"
+wait "$wrapper_pid"
+status=$?
+check "SIGTERM to it waits for Solium to go" [ "$status" -eq 0 -a -e "$wrap/gone" ]
+check "  and then cleans up" grep -qx -- "$stop_line" "$wrap/systemctl.log"
+check "  and not before" [ -z "$(grep -x "before solium had gone" "$wrap/systemctl.log")" ]
 
 echo "uninstall"
 DESTDIR="$destdir" "$install_sh" --uninstall --session-dir "$sessions" >"$work/uninstall.log" 2>&1
 check "exits 0" [ $? -eq 0 ]
 check "no file is left under DESTDIR" [ "$(count_files "$destdir")" -eq 0 ]
 check "  the units and the portal choice included" \
-    [ ! -e "$units/solium-session.target" -a ! -e "$units/solium-session-no-autostart.target" \
+    [ ! -e "$units/solium-session.target" -a ! -e "$units/solium-autostart.target" \
         -a ! -e "$portals/lilium-portals.conf" ]
 check "share/solium is gone" [ ! -e "$share" ]
 mapfile -t lines < <(grep -E '^  sudo ' "$work/uninstall.log")
