@@ -105,19 +105,7 @@ git clone <the shell's repository> ~/.config/solium/shell
 shell = { scene = "~/.config/solium/shell/shell.qml" },
 ```
 
-A shell whose files import one another as `qs.<directory>` — the convention
-Quickshell sets, by writing a `qmldir` for every directory at load time — also
-needs those modules staged where Solium's engine looks. The script that does
-it is not installed with Solium yet, so for now this needs a Solium checkout;
-from one:
-
-```sh
-dev/stage-shell.sh ~/.config/solium/shell ~/.config/solium/qml
-```
-
-That writes `~/.config/solium/qml/qs/`, which is on the QML search path
-already, and replaces only that directory. Run it again after updating the
-shell. A shell that imports its own files by relative path needs no staging.
+A shell that imports its own files by relative path needs nothing more.
 
 `solium --check-qml <file>` loads one file without starting a compositor and
 prints `ok` or what Qt reported, which is the quick way through a chain of

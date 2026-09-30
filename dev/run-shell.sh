@@ -2,18 +2,15 @@
 #
 # Run Solium nested with a shell hosted in it, reloading as you edit.
 #
-#   dev/run-shell.sh <shell-dir>                     # its shell.qml
-#   dev/run-shell.sh <shell-dir> qs/dock/Dock.qml    # one file of it
+#   dev/run-shell.sh <shell-dir>                  # its shell.qml
+#   dev/run-shell.sh <shell-dir> dock/Dock.qml    # one file of it
 #   SOLIUM_SHELL=<shell-dir> dev/run-shell.sh [scene]
 #
 # <shell-dir> is the shell's own checkout, and it is required: this script
-# knows no shell of its own. Its QML is staged into build/staged on every run
-# (see dev/stage-shell.sh), so the checkout is only ever read and its
-# `import qs.*` lines resolve. A scene is a file, or a path inside the staged
-# tree, where the checkout's root is `qs/`; the default is the checkout's own
-# `shell.qml`, the root file a Quickshell shell has. Editing anything under
-# the checkout reloads the scene within half a second — no restart, no
-# rebuild.
+# knows no shell of its own. The checkout is only ever read. A scene is a
+# file, or a path inside the checkout; the default is the checkout's own
+# `shell.qml`. Editing anything under the checkout reloads the scene within
+# half a second — no restart, no rebuild.
 #
 # The scene is handed over as SOLIUM_SHELL_SCENE, the per-run override of
 # `shell.scene`, so the configuration you normally run is left alone.
@@ -43,26 +40,18 @@ fi
 shell="$(cd "$shell" && pwd)"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-staged="$root/build/staged"
-
-"$root/dev/stage-shell.sh" "$shell" "$staged" >/dev/null || exit 1
 
 scene="${1:-$shell/shell.qml}"
-[[ -f "$scene" ]] || scene="$staged/$scene"
+[[ -f "$scene" ]] || scene="$shell/$scene"
 [[ -f "$scene" ]] || { echo "no such scene: ${1:-$shell/shell.qml}" >&2; exit 1; }
 scene="$(cd "$(dirname "$scene")" && pwd)/$(basename "$scene")"
 
 echo "shell:  $shell"
-echo "scene:  ${scene#"$staged"/}"
+echo "scene:  ${scene#"$shell"/}"
 echo "edit anything under the shell and it reloads within half a second"
 echo
 
-# The staged tree is what the engine reads, so restage on every change too.
-( while sleep 1; do "$root/dev/stage-shell.sh" "$shell" "$staged" >/dev/null 2>&1; done ) &
-restager=$!
-trap 'kill "$restager" 2>/dev/null' EXIT
-
-SOLIUM_QML_PATH="$root/crates/solium/qml:$root/crates/solium/qml/compat:$staged" \
+SOLIUM_QML_PATH="$root/crates/solium/qml:$root/crates/solium/qml/compat" \
 SOLIUM_SHELL_SCENE="$scene" \
 SOLIUM_SHELL_WATCH="$shell" \
 SOLIUM_SHELL_DIR="$shell" \
