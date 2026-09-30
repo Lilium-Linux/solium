@@ -35,6 +35,7 @@ mod resizing;
 mod screencopy;
 mod script;
 mod scripted;
+mod session;
 mod single_pixel;
 mod stack;
 mod state;

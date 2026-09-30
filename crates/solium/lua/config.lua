@@ -409,6 +409,32 @@ local defaults = {
         off_frame_interval = 1000,
     },
 
+    -- Telling the rest of the session that Solium is its desktop.
+    --
+    -- Portals, programs D-Bus starts on demand, ~/.config/autostart and user
+    -- services written for "a graphical session" are all started by systemd
+    -- or by D-Bus, and they find the display only if they are told where it
+    -- is. Read when the session starts, on the hardware (`solium --tty`); a
+    -- nested run leaves the session it runs inside alone. The tests are in
+    -- `session.rs`: `a_reload_leaves_the_session_as_it_began`,
+    -- `a_nested_run_tells_nobody_unless_it_is_given_a_bus`,
+    -- `the_target_is_stopped_and_the_variables_unset_on_exit`,
+    -- `session_systemd_false_tells_nobody_anything` and
+    -- `session_autostart_false_starts_the_target_without_autostart`.
+    session = {
+        -- Tell systemd's user manager and D-Bus activation WAYLAND_DISPLAY,
+        -- DISPLAY, XDG_CURRENT_DESKTOP and XDG_SESSION_TYPE, and start
+        -- solium-session.target, which starts graphical-session.target. On
+        -- exit the target is stopped and the variables unset. `false` does
+        -- none of it.
+        systemd = true,
+        -- Whether that target also starts XDG autostart: the programs in
+        -- ~/.config/autostart and /etc/xdg/autostart, which is how a polkit
+        -- agent, a keyring or nm-applet usually start. `false` starts
+        -- solium-session-no-autostart.target instead.
+        autostart = true,
+    },
+
     -- How every window is framed.
     --
     -- A style is a **folder** under `qml/panes` holding a `Pane.qml`: what the

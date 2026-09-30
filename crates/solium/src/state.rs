@@ -373,6 +373,9 @@ pub(crate) struct Solium {
     pub(crate) xwm: Option<smithay::xwayland::X11Wm>,
     /// The X display number XWayland took, for `DISPLAY` in children.
     pub(crate) x11_display: Option<u32>,
+    /// What systemd and D-Bus activation have been told about this session,
+    /// and the stop and unset it owes them on exit. See `session.rs`.
+    pub(crate) session: crate::session::Session,
     pub(crate) xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
     /// Raw pointer motion, for anything that reads movement rather than
     /// position.
@@ -876,6 +879,7 @@ impl Solium {
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
+            session: crate::session::Session::off(),
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
                 &display_handle,
             ),

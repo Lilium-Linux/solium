@@ -1,0 +1,9 @@
+# solium-session.target without XDG autostart, for `session.autostart = false`
+# (`session::tests::session_autostart_false_starts_the_target_without_autostart`).
+# dev/install.sh puts it in ~/.config/systemd/user.
+[Unit]
+Description=Solium session, without XDG autostart
+Documentation=man:systemd.special(7) https://github.com/Lilium-Linux/solium/blob/stage/docs/shell-boundary.md
+BindsTo=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target

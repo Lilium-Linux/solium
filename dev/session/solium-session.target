@@ -1,0 +1,15 @@
+# A Solium session, for systemd's user manager (#146).
+#
+# Solium starts this once it has told systemd and D-Bus activation where its
+# display is, and stops it on exit (`session::tests`,
+# `the_calls_reach_systemd_and_dbus_as_their_methods`). Starting it starts
+# graphical-session.target, and with it XDG autostart. `session.autostart =
+# false` in the configuration starts solium-session-no-autostart.target
+# instead. dev/install.sh puts both in ~/.config/systemd/user.
+[Unit]
+Description=Solium session
+Documentation=man:systemd.special(7) https://github.com/Lilium-Linux/solium/blob/stage/docs/shell-boundary.md
+BindsTo=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target
+Wants=xdg-desktop-autostart.target

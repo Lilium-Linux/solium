@@ -154,6 +154,21 @@ pub(crate) fn loading_at() -> Vec<(Duration, String)> {
     parse_list("SOLIUM_LOADING_AT", |value| Some(value.trim().to_owned()))
 }
 
+/// The D-Bus address to tell about this session, instead of the session bus.
+///
+/// ```sh
+/// dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'
+/// ```
+///
+/// Nested, this is the only way the session is told anything: without it a
+/// nested run leaves the environment of the session it runs inside alone, as
+/// it must. `a_nested_run_tells_nobody_unless_it_is_given_a_bus`.
+pub(crate) fn session_bus() -> Option<String> {
+    std::env::var("SOLIUM_SESSION_BUS")
+        .ok()
+        .filter(|address| !address.trim().is_empty())
+}
+
 fn millis(name: &str) -> Option<Duration> {
     let raw = std::env::var(name).ok()?;
     match raw.trim().parse::<u64>() {

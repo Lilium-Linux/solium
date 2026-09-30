@@ -340,7 +340,7 @@ pub(crate) fn run() -> Result<()> {
     solium.socket_name = start_socket(&mut event_loop, display)?;
 
     let loop_handle = event_loop.handle();
-    crate::xwayland::start(&loop_handle, &display_handle);
+    let x11_coming = crate::xwayland::start(&loop_handle, &display_handle);
 
     let config = Scripts::config_path();
     let scripts = match Scripts::load(&config) {
@@ -357,6 +357,18 @@ pub(crate) fn run() -> Result<()> {
         crate::qml::renderer::Entry::Tty,
         &scripts.as_ref().map(Scripts::qml).unwrap_or_default(),
     );
+    // Told once the configuration has said whether to, with the socket
+    // already bound. See `session.rs` and its tests.
+    let settings = scripts.as_ref().map(Scripts::session).unwrap_or_default();
+    solium.session = crate::session::Session::begin(
+        settings,
+        crate::session::Place::Hardware,
+        crate::dev::session_bus(),
+    );
+    solium.session.wayland(&solium.socket_name);
+    if !x11_coming {
+        solium.session.x11(None);
+    }
     solium.start_scripts(scripts);
 
     let mut state = State {
@@ -683,7 +695,9 @@ pub(crate) fn run() -> Result<()> {
             }
             let _ = state.solium.display_handle.flush_clients();
         })
-        .map_err(|err| anyhow!("running the event loop: {err}"))
+        .map_err(|err| anyhow!("running the event loop: {err}"))?;
+    state.solium.session.end();
+    Ok(())
 }
 
 /// One monitor's pipeline: its connector, its CRTC, its buffers, its flips.
