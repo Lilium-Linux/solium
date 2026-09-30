@@ -28,7 +28,7 @@ saying where it was taken, it comes from the reference machine: an NVIDIA RTX
 | `SOLIUM_SHELL=<dir>` | Read by `dev/run-shell.sh` and `dev/stage-shell.sh`, not by the compositor: the shell checkout to use when none is named on the command line. |
 | `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
 | `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |
-| `SOLIUM_SESSION_BUS=<address>` | The D-Bus address to tell about the session (the environment export, and starting and stopping `solium-session.target` and `solium-autostart.target`) instead of the session bus. Nested, or `solium --tty` without `--session`, this is the only way anything is told: without it such a run leaves the session around it alone. For checking the calls against a private bus: `dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'`. See `session.rs`. |
+| `SOLIUM_SESSION_BUS=<address>` | The D-Bus address to tell about the session (the environment export, and starting and stopping `solium-session.target` and `solium-autostart.target`), and to own `org.freedesktop.ScreenSaver` on (`idle.dbus_inhibit`, `screensaver.rs`), instead of the session bus. Nested, or `solium --tty` without `--session`, this is the only way anything is told: without it such a run leaves the session around it alone. For checking the calls against a private bus: `dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'`. See `session.rs`. |
 
 ## Checks
 
