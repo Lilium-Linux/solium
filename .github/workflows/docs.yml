@@ -37,8 +37,10 @@ jobs:
     container: registry.fedoraproject.org/fedora:44
     steps:
       # ci.yml's list, plus Python for dev/docs/*.py and tar for the upload.
-      # git before the checkout, for ci.yml's reason, and because the
-      # generated pages link each line they cite at this commit.
+      # git before the checkout, for ci.yml's reason. The commit the pages'
+      # line links point at is GITHUB_SHA, which dev/docs.sh reads, and not
+      # git's HEAD: git in a container job may refuse a checkout the runner
+      # owns.
       - name: System dependencies
         run: |
           dnf install -y --setopt=install_weak_deps=False \

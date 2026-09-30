@@ -34,6 +34,9 @@
 #   SOLIUM_DOCS_PODMAN_ARGS=<args>  extra arguments for `podman run`.
 #   SOLIUM_DOCS_JOBS=<n>            cargo -j<n>.
 #   SOLIUM_DOCS_PORT=<port>         the port --serve listens on; 3000.
+#   SOLIUM_DOCS_REV=<commit>        the commit the pages' line links point at:
+#                                   GITHUB_SHA in CI, and the checkout's HEAD
+#                                   otherwise.
 set -euo pipefail
 
 # The mdBook this site is built with. CI runs this script, so this is the one
@@ -44,12 +47,18 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${SOLIUM_DOCS_IMAGE:-${SOLIUM_GATE_IMAGE:-}}"
 tools="${SOLIUM_DOCS_TOOLS:-${XDG_CACHE_HOME:-$HOME/.cache}/solium-docs}"
 port="${SOLIUM_DOCS_PORT:-3000}"
+# Worked out here, outside the container, which has no git, and passed in: a
+# line link is only right at the commit whose lines it counted.
+rev="${SOLIUM_DOCS_REV:-${GITHUB_SHA:-}}"
+if [[ -z "$rev" ]]; then
+    rev="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+fi
 
 serve=""
 for argument in "$@"; do
     case "$argument" in
         --serve) serve=1 ;;
-        -h|--help) sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "docs.sh: unknown argument $argument (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -83,7 +92,7 @@ if [[ -n "$image" && -z "${SOLIUM_DOCS_INSIDE:-}" ]]; then
         "${extra[@]}" "${mounts[@]}" "${ports[@]}" \
         -e HOME=/tmp -e SOLIUM_DOCS_INSIDE=1 \
         -e SOLIUM_DOCS_TOOLS="$tools" -e SOLIUM_DOCS_PORT="$port" \
-        -e SOLIUM_DOCS_JOBS="${SOLIUM_DOCS_JOBS:-}" \
+        -e SOLIUM_DOCS_JOBS="${SOLIUM_DOCS_JOBS:-}" -e SOLIUM_DOCS_REV="$rev" \
         -e CARGO_HOME="$cargo_home" -e RUSTUP_HOME="$rustup_home" \
         -e PATH="$cargo_home/bin:/usr/local/bin:/usr/bin:/bin" \
         -w "$root" "$image" \
@@ -120,7 +129,8 @@ if [[ "$("$mdbook" --version 2>/dev/null || true)" != "mdbook v$MDBOOK_VERSION" 
 fi
 
 echo "generated pages..."
-python3 dev/docs/generate.py --solium target/debug/solium || fail "dev/docs/generate.py"
+python3 dev/docs/generate.py --solium target/debug/solium ${rev:+--rev "$rev"} \
+    || fail "dev/docs/generate.py"
 
 if [[ -n "$serve" ]]; then
     echo "serving on http://localhost:$port"
