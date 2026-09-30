@@ -1,0 +1,80 @@
+name: Docs
+
+# The documentation site, https://lilium-linux.github.io/solium/, published on
+# every push to `stage` and whenever it is run by hand.
+#
+# Built by `dev/docs.sh`, the same script a contributor runs, in the same
+# Fedora container `ci.yml` builds in: the key-bindings page comes from
+# `solium --check` and the Rust internals from rustdoc, so the compositor has
+# to build here, with everything that needs. Pull requests build the site in
+# `ci.yml` instead, without publishing it.
+#
+# Every third-party action is pinned to a commit, with its tag beside it: a
+# tag can be moved to point at other code, and this workflow can write to the
+# site.
+
+on:
+  push:
+    branches: [stage]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time. A newer push queues behind one in progress rather
+# than cancelling it half way.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Keep in step with ci.yml, and with dev/Containerfile's FEDORA_VERSION.
+    container: registry.fedoraproject.org/fedora:44
+    steps:
+      # ci.yml's list, plus Python for dev/docs/*.py and tar for the upload.
+      # git before the checkout, for ci.yml's reason, and because the
+      # generated pages link each line they cite at this commit.
+      - name: System dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git gcc gcc-c++ make pkgconf-pkg-config \
+            wayland-devel libinput-devel systemd-devel libseat-devel \
+            libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
+            libdrm-devel \
+            qt6-qtbase-devel qt6-qtdeclarative-devel \
+            python3 tar
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # mdBook goes into CARGO_HOME, whose bin/ rust-cache keeps, so it is
+      # compiled once rather than on every push.
+      - name: Build the site
+        run: SOLIUM_DOCS_TOOLS="${CARGO_HOME:-$HOME/.cargo}" dev/docs.sh
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: target/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
