@@ -126,8 +126,12 @@ def readme():
     )
 
     install = "\n".join(text for title, text in parts if title in links.INSTALL_SECTIONS)
-    first = [text for title, text in sections(read("docs/ricing.md"))
-             if title in ("The thirty-second version", "Where things live")]
+    wanted = ("The thirty-second version", "Where things live")
+    first = [text for title, text in sections(read("docs/ricing.md")) if title in wanted]
+    if len(first) != len(wanted):
+        found = {title for title, _ in sections(read("docs/ricing.md"))}
+        sys.exit(f"generate: docs/ricing.md has no section called "
+                 f"{[title for title in wanted if title not in found]}")
     page = (
         "# Getting started\n\n"
         "Building Solium, running it, installing it, and a first configuration. "
@@ -1098,6 +1102,30 @@ def rust():
     return [row[1] for row in rows]
 
 
+def unlisted_docs():
+    """Every Markdown file under docs/ that SUMMARY.md does not link.
+
+    mdBook renders only what SUMMARY.md lists, so a doc left out of it is left
+    out of the site without a word, and the link check notices only if another
+    page happens to link to it.
+    """
+    summary = read("docs/SUMMARY.md")
+    listed = {posixpath.normpath(target.split("#")[0])
+              for target in re.findall(r"\]\(([^)\s]+\.md)(?:#[^)]*)?\)", summary)}
+    missing = []
+    for directory, subdirectories, files in os.walk(DOCS):
+        if os.path.abspath(directory) == os.path.abspath(DOCS):
+            subdirectories[:] = [name for name in subdirectories if name != "generated"]
+        for name in files:
+            if not name.endswith(".md"):
+                continue
+            path = posixpath.normpath(os.path.relpath(os.path.join(directory, name), DOCS)
+                                      .replace(os.sep, "/"))
+            if path != "SUMMARY.md" and path not in listed:
+                missing.append(f"docs/{path}")
+    return sorted(missing)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--solium", required=True, help="the built compositor, for `--check`")
@@ -1111,6 +1139,13 @@ def main():
                                  text=True, check=True).stdout.strip()
         except (OSError, subprocess.CalledProcessError):
             rev = links.BRANCH
+            print(f"generate: warning: no --rev and no git to ask, so line links point at "
+                  f"`{rev}`, where the lines they cite will move", file=sys.stderr)
+
+    unlisted = unlisted_docs()
+    if unlisted:
+        sys.exit(f"generate: docs/SUMMARY.md does not list {unlisted}, so the site would "
+                 "leave them out; add them there")
 
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
