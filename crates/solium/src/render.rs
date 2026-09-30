@@ -314,8 +314,6 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         let _tick = crate::pacing::span(crate::pacing::Phase::Tick);
         crate::qml::tick(state.clock.now());
     }
-    // The shell reads the window list; it changes only when windows do.
-    state.publish_windows();
 
     let mut warps = Vec::new();
     let mut passes = Vec::new();

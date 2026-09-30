@@ -62,10 +62,7 @@ function shell.apply()
         layer = "top",
         on = { x = area.x, y = area.y, w = area.w, h = area.h },
         interactive = true,
-        -- What shell components ask about the screen they are on. The window
-        -- list is not here: it reaches QML through `ToplevelManager` and
-        -- `Hyprland`, which any scene can read; see
-        -- `a_hosted_shell_reads_the_window_list_the_compositor_publishes`.
+        -- What shell components ask about the screen they are on.
         properties = {
             screenInfo = {
                 name = "primary",
