@@ -1,23 +1,46 @@
 #!/usr/bin/env bash
 #
-# Stage the Lilium shell's QML so Solium's QML engine can import it.
+# Stage a Quickshell shell's QML so Solium's QML engine can import it.
 #
 # Quickshell synthesises a `qmldir` for every directory of the shell at load
-# time, which is why the shell ships none and why a plain QQmlEngine cannot
-# import `qs.services`. This does the same thing ahead of time, into a tree of
-# symlinks, so the shell's own repository is left untouched.
+# time, which is why a shell written for it ships none and why a plain
+# QQmlEngine cannot import `qs.services`. This does the same thing ahead of
+# time, into a copy, so the shell's own repository is left untouched.
 #
-#   dev/stage-shell.sh ~/personal_projects/lilium-shell  build/shell
+#   dev/stage-shell.sh <shell-root> <staging-dir>
+#   SOLIUM_SHELL=<shell-root> dev/stage-shell.sh <staging-dir>
 #
-# Then put the staged tree's *parent* on SOLIUM_QML_PATH, so `import qs.dock`
-# resolves to <staged>/qs/dock.
+# The copy is <staging-dir>/qs, and only that is replaced on each run, so the
+# staging directory can be one that holds other things -- your own
+# ~/.config/solium/qml, which is on the QML search path already, so that
+# `import qs.dock` resolves to <staging-dir>/qs/dock with nothing else set.
 set -euo pipefail
 
-source_root="${1:?usage: stage-shell.sh <shell-root> <staging-dir>}"
-staging="${2:?usage: stage-shell.sh <shell-root> <staging-dir>}"
-source_root="$(cd "$source_root" && pwd)"
+usage="usage: stage-shell.sh <shell-root> <staging-dir>, or SOLIUM_SHELL=<shell-root> stage-shell.sh <staging-dir>"
+if [[ $# -ge 2 ]]; then
+    source_root="$1"
+    staging="$2"
+elif [[ $# -eq 1 && -n "${SOLIUM_SHELL:-}" ]]; then
+    source_root="$SOLIUM_SHELL"
+    staging="$1"
+else
+    echo "$usage" >&2
+    exit 2
+fi
+[[ -d "$source_root" ]] || { echo "no such shell directory: $source_root" >&2; exit 1; }
+source_root="$(realpath "$source_root")"
+staging="$(realpath -m "$staging")"
 
-rm -rf "$staging"
+# Staging inside the shell would copy the copy on the next run.
+case "$staging/" in
+    "$source_root"/*)
+        echo "refusing to stage inside the shell itself: $staging" >&2
+        exit 1
+        ;;
+esac
+
+mkdir -p "$staging"
+rm -rf "$staging/qs"
 mkdir -p "$staging/qs"
 
 # Every directory holding QML becomes a module. A file with `pragma Singleton`
