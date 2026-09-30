@@ -531,7 +531,8 @@ function sol.close(id) end
 ---@return nil
 function sol.spawn(program, ...) end
 
----Whether a program can be found on `PATH`. Nothing is run.
+---Whether a program can be found on `PATH`. A name with a `/` in it is
+---checked as a path. Nothing is run.
 ---@param program string
 ---@return boolean
 function sol.which(program) end
