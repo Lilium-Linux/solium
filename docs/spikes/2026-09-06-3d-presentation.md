@@ -63,11 +63,19 @@ worse to make one frame possible.
 ## Why hit-testing does not move
 
 `rect` remains the truth for input. A window drawn in perspective is still
-clicked where the layout put it — the alternative is inverting a projective
+clicked where its flat rectangle is — the alternative is inverting a projective
 transform per pointer event and then explaining to a script why the window it
-placed is not where clicks land. Modes that need clicks to follow the drawn
-shape already invert their own transform through `to_window_space`; that stays
-their business.
+placed is not where clicks land.
+
+**Corrected 2026-09-30.** This section used to say that modes needing clicks to
+follow the drawn shape invert their own transform through `to_window_space`.
+None can. `present::to_window_space` is the compositor's own inverse of the
+rectangle alone, its offset and its scale; no script can call it, and nothing
+inverts the matrix or the deformation. What shipped is this: a window takes
+clicks at the `rect` it is *presented* at, not the one its layout placed, which
+is why an overview thumbnail is clicked where it is drawn; a frame at an
+opacity of 1/255 or less takes no clicks at all; and the matrix, the
+deformation and `z` (added later, as draw order) never move a click.
 
 ## What this needs from the renderer
 
@@ -83,16 +91,26 @@ Smithay offers all three pieces, at different depths:
 
 ## The cost, stated plainly
 
-`render.rs` carries a note that it is written against Smithay's `Renderer`
+`render.rs` carried a note that it was written against Smithay's `Renderer`
 traits and nothing lower, because reaching into GLES is what would quietly
 close the door on a Vulkan backend. This crosses that line.
 
 It is worth crossing, and the reason is that the alternative is worse: without
 it the compositor can only ever offer effects that are rectangles, which rules
-out the entire class of thing this project exists to do. But the line should be
-crossed in *one place*. Everything GLES lives in `warp.rs`; the rest of the
-renderer keeps talking to traits. A Vulkan backend then has one file to
+out the entire class of thing this project exists to do. The plan was to cross
+it in *one place*, `warp.rs`, so that a Vulkan backend would have one file to
 reimplement rather than a habit to unpick.
+
+**Since then (2026-09-30), the line was not held to one file.** Raw GL calls
+are still only in `warp.rs`. But the render elements are typed on
+`GlesRenderer`, because the warp element can only be GLES; rounded corners are
+a GLSL ES program compiled through a GLES-only call (`pass.rs`) and drawn by a
+GLES render element of their own, and the fade a closed window leaves behind
+has one too (`remains.rs`); and QML on the GPU, the default since #147, shares
+its buffers and its fences with Qt through EGL. A Vulkan backend needs its own element set,
+not just its own warp.
+[What a Vulkan port costs now](2026-08-27-vulkan-on-smithay.md#what-a-vulkan-port-costs-now)
+lists every piece.
 
 ## Order of work
 

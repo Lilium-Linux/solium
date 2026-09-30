@@ -299,9 +299,10 @@ window's own texture, which is why they apply to the pane rather than to the
 client, and why a corner radius can differ per corner so a titlebar and a window
 can meet more than one way.
 
-The renderer is reached through Smithay's `Renderer`/`Frame` traits rather than
-GLES directly, so the whole transform layer stays portable to a Vulkan backend
-that does not exist yet.
+Drawing is GLES2, through Smithay's `GlesRenderer`, and the code says so
+rather than hiding behind Smithay's generic renderer traits: a window drawn
+through four corners, the rounded-corner shader and QML on the GPU each need
+GLES or EGL, which those traits do not offer.
 
 ### And the parts that are deliberately not ours
 
@@ -324,14 +325,17 @@ rather than being a bet.
 **Rust** because this codebase is meant to last. Memory safety removes an entire
 class of compositor crash, and a crash in a compositor takes the session with it.
 
-**GLES2 to start**, through Smithay's renderer traits. Smithay has no Vulkan
-renderer — its `backend::vulkan` is device enumeration only — and niri, the
-reference implementation we chose this stack for, uses GLES. Vulkan would mean
+**GLES2**, through Smithay's GLES renderer. Smithay has no Vulkan renderer —
+its `backend::vulkan` is device enumeration only — and niri, the reference
+implementation we chose this stack for, uses GLES. Vulkan would have meant
 writing a renderer backend plus NVIDIA dmabuf import before a single window
-appeared. See `docs/spikes/2026-08-27-vulkan-on-smithay.md`.
+appeared. See
+[docs/spikes/2026-08-27-vulkan-on-smithay.md](docs/spikes/2026-08-27-vulkan-on-smithay.md).
 
-The transform layer is written against Smithay's `Renderer`/`Frame` traits, not
-against GLES directly, so a Vulkan backend stays a contained change later.
+The price is that a Vulkan backend would be a port, not a swap. The render
+elements are typed on `GlesRenderer`, the four-corner warp calls GL directly,
+rounded corners are a GLSL ES program, and QML on the GPU shares its buffers
+through EGL. Each of those needs a Vulkan counterpart; the spike lists them.
 
 ## Status
 

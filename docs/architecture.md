@@ -32,7 +32,7 @@ something** — that is the test.
 ├──────────────────────────────────────────────┤
 │  Presentation transform + animation clock    │  Rust
 ├──────────────────────────────────────────────┤
-│  Render: Smithay renderer traits (GLES2)     │  Rust
+│  Render: Smithay's GlesRenderer (GLES2)      │  Rust
 ├──────────────────────────────────────────────┤
 │  Smithay: protocols, input, backends         │  crate
 └──────────────────────────────────────────────┘
@@ -188,11 +188,28 @@ returns the frame it was given, and the first thing anything asks is whether any
 selection exists at all. A compositor that routed every window through new
 arithmetic to support a group nobody declared would have made every frame worse.
 
-**Backend independence.** The transform layer talks to Smithay's `Renderer` and
-`Frame` traits, never to GLES directly. Scaling and cross-fading textures is
-unremarkable work that GLES2 does well; the reasons to want Vulkan later are
-compute shaders, explicit sync and multi-GPU, none of which overview mode needs.
-Reaching past the traits into GLES specifics closes that option quietly.
+**The renderer is GLES, and the code says so.** Scaling and cross-fading
+textures is unremarkable work that GLES2 does well, and Smithay has no Vulkan
+renderer to choose instead. Drawing does not stay behind Smithay's generic
+`Renderer` and `Frame` traits, because three things it needs are not on them:
+
+- drawing a texture through four independent corners, for perspective and the
+  genie (`warp.rs`, the only Rust file that makes raw GL calls);
+- a fragment program of Solium's own, for rounded corners (`pass.rs`, which
+  compiles the GLSL ES source kept in `crates/effects`);
+- the EGL context and fence that QML on the GPU shares with Qt (`qml/paint.rs`,
+  `surface.rs`).
+
+So the render elements are typed on `GlesRenderer` (`render.rs`). What stays
+free of any renderer is the arithmetic: `present.rs` and the animation, effects
+and layout crates depend on no renderer, and the effects crate carries the
+rounded-corner shader only as source text. A Vulkan backend would need its own
+element set, warp, pass programs and QML import, which makes it a port rather
+than a swap; the [Vulkan spike](spikes/2026-08-27-vulkan-on-smithay.md) lists
+the pieces. The one reason left to pay for that is compute shaders. Explicit
+sync ([#59](https://github.com/Lilium-Linux/solium/issues/59)) is a protocol
+Smithay offers on GLES too, and Smithay's multi-GPU renderer
+([#63](https://github.com/Lilium-Linux/solium/issues/63)) is built on GLES.
 
 ### Scripting
 
