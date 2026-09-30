@@ -84,8 +84,8 @@ that monitor's usable area, and it takes the pointer there — all of it, which
 [What it is not given](#what-it-is-not-given) spells out. `super+shift+r` picks up
 a change to the setting. Editing a file under the scene's own directory
 rebuilds the scene with no reload at all: that is checked every half second
-while frames are being drawn, and a staged copy (below) has to be staged again
-first. `false`, the default, hosts nothing, and taking the setting out takes
+while frames are being drawn.
+`false`, the default, hosts nothing, and taking the setting out takes
 the shell away on the next reload.
 
 `SOLIUM_SHELL_SCENE=<file>` overrides the setting for one run. It is how

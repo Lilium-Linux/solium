@@ -73,7 +73,7 @@ cargo metadata --format-version 1 --locked \
 ## System libraries
 
 Linked at build time and found on the system, never bundled: Qt 6 (Core, Gui,
-Qml, Quick; LGPL-3.0, or GPL), Wayland (MIT), libinput (MIT), libseat (MIT),
-libxkbcommon (MIT), Mesa's GBM and EGL (MIT), libdrm (MIT) and systemd's
-libudev (LGPL-2.1-or-later). Each is used through its
-public interface and is compatible with GPL-3.0.
+Qml and Quick, and the modules they require; LGPL-3.0, or GPL), Wayland (MIT),
+libinput (MIT), libseat (MIT), libxkbcommon (MIT), Mesa's GBM and EGL (MIT),
+libdrm (MIT) and systemd's libudev (LGPL-2.1-or-later). Each is used through
+its public interface and is compatible with GPL-3.0.
