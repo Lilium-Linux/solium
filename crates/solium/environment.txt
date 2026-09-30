@@ -112,6 +112,25 @@ SOLIUM_NO_DMABUF
     Set to anything, clients are not offered `linux-dmabuf` and fall back to
     shared memory.
 
+## Hosting a shell
+
+A shell is loaded as configuration, with `shell = { scene = ... }`; see
+[Where Solium ends and Lilium begins](../../docs/shell-boundary.md). These
+change that for one run, and `dev/run-shell.sh` sets all three.
+
+SOLIUM_SHELL_SCENE=<file.qml>
+    The QML file to host as the shell, over the configuration's
+    `shell.scene`. Empty counts as unset.
+
+SOLIUM_SHELL_WATCH=<directory>
+    Where to look for changed `.qml` files, down to four directories below
+    it, before rebuilding a hosted scene, instead of the scene's own
+    directory. For a shell whose files live in a tree of their own.
+
+SOLIUM_SHELL_DIR=<directory>
+    What `Quickshell.configDir` and `Quickshell.shellDir` answer in a hosted
+    shell. `~/.config/solium` when unset or empty.
+
 ## Development and testing
 
 These exist so the compositor can be driven and photographed without a hand
