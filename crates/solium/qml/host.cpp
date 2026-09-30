@@ -38,7 +38,9 @@
  * Two things about this file that are easy to get wrong:
  *
  *   * There is no Qt event loop. Nothing calls exec(), so Qt's timers never
- *     fire on their own; the compositor pumps events once per frame.
+ *     fire on their own; the compositor pumps events once per frame, and
+ *     between frames when Qt's next timer is due (solium_qml_next_due_ms,
+ *     tested by `qml::wake::tests::a_timer_fires_while_no_frame_is_drawn`).
  *   * QML animations are driven by an explicit animation driver fed from the
  *     compositor's clock. Left to itself Qt would animate off its own timer and
  *     drift against every transform around it.
@@ -107,6 +109,8 @@
  */
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+
+#include <dlfcn.h>
 
 #include <algorithm>
 #include <cstring>
@@ -326,6 +330,12 @@ namespace {
  * are append, erase-one and walk.
  */
 std::vector<SoliumQmlScene *> g_scenes;
+
+/* How many times a clean scene has turned dirty, in the whole process. Read
+ * around solium_qml_drain, so a drain reports a scene it changed and not one
+ * that was already waiting to be drawn.
+ * `qml::wake::tests::a_timer_fires_while_no_frame_is_drawn`. */
+unsigned long long g_dirtied = 0;
 
 } // namespace
 
@@ -625,10 +635,16 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
     // Qt tells us when the scene needs redrawing, so an idle bar costs one
     // comparison per frame instead of a rasterisation and an upload.
     // Lambdas rather than slots, so this file still needs no moc.
+    const auto mark_dirty = [scene]() {
+        if (!scene->dirty) {
+            scene->dirty = true;
+            ++g_dirtied;
+        }
+    };
     QObject::connect(scene->control, &QQuickRenderControl::renderRequested,
-                     scene->control, [scene]() { scene->dirty = true; });
+                     scene->control, mark_dirty);
     QObject::connect(scene->control, &QQuickRenderControl::sceneChanged,
-                     scene->control, [scene]() { scene->dirty = true; });
+                     scene->control, mark_dirty);
 
     return true;
 }
@@ -1582,8 +1598,8 @@ static bool animation_running(const QObject *item);
  * animation driver at all -- it fires out of `processEvents`, off Qt's own
  * event loop -- so pinning this clock cannot slow one down. Measured: a 100ms
  * repeating Timer fired 9 times over 960ms of ticked frames, identically with
- * the clock pinned and unpinned. The gap a running Timer *does* have is
- * unchanged and is described on `solium_qml_scene_animating`. */
+ * the clock pinned and unpinned. Between frames a Timer is served by
+ * solium_qml_drain; see `solium_qml_scene_animating`. */
 static bool anything_animating()
 {
     return std::any_of(g_scenes.begin(), g_scenes.end(), [](const SoliumQmlScene *scene) {
@@ -1644,6 +1660,98 @@ extern "C" void solium_qml_tick(long long elapsed_ms)
          * scenes. See `CompositorAnimationDriver` for what the answer is for. */
         g_driver->advanceTo(static_cast<qint64>(elapsed_ms), anything_animating());
     }
+}
+
+namespace {
+
+/*
+ * The half of GLib's GMainContext API that lets another loop poll it.
+ *
+ * Qt's event dispatcher is a GMainContext here. Both platforms this file picks,
+ * offscreen and eglfs, create theirs with createUnixEventDispatcher, which is a
+ * QPAEventDispatcherGlib unless QT_NO_GLIB is set (qtbase v6.11.2,
+ * src/gui/platform/unix/qgenericunixeventdispatcher.cpp:12-19), and on the
+ * application's thread that is g_main_context_default()
+ * (src/corelib/kernel/qeventdispatcher_glib.cpp:276-285). Its timer source
+ * reports Qt's next due timer, `timerList.timerWait()`, as its prepare timeout
+ * (ibid. :101-112), and GLib's prepare and query hand that timeout to whoever
+ * asks. Qt itself has no public way to say it: remainingTime takes a timer id,
+ * and the id behind a QML Timer is QUnifiedTimer's private pauseTimer
+ * (src/corelib/animation/qabstractanimation.cpp:333-350).
+ *
+ * Looked up at run time, not linked: a Qt built without GLib has no context to
+ * ask, and GLib is not otherwise a build dependency. What finding it buys is
+ * `qml::wake::tests::a_timer_fires_while_no_frame_is_drawn`.
+ */
+struct MainContext
+{
+    void *(*get)() = nullptr;
+    int (*acquire)(void *) = nullptr;
+    void (*release)(void *) = nullptr;
+    int (*prepare)(void *, int *) = nullptr;
+    int (*query)(void *, int, int *, void *, int) = nullptr;
+};
+
+template <typename Function>
+void look_up(Function &out, const char *name)
+{
+    out = reinterpret_cast<Function>(dlsym(RTLD_DEFAULT, name));
+}
+
+const MainContext &main_context()
+{
+    static const MainContext found = [] {
+        MainContext glib;
+        look_up(glib.get, "g_main_context_default");
+        look_up(glib.acquire, "g_main_context_acquire");
+        look_up(glib.release, "g_main_context_release");
+        look_up(glib.prepare, "g_main_context_prepare");
+        look_up(glib.query, "g_main_context_query");
+        return glib;
+    }();
+    return found;
+}
+
+} // namespace
+
+extern "C" int solium_qml_next_due_ms()
+{
+    const MainContext &glib = main_context();
+    if (g_app == nullptr || glib.get == nullptr || glib.acquire == nullptr
+        || glib.release == nullptr || glib.prepare == nullptr || glib.query == nullptr) {
+        return -1;
+    }
+    void *context = glib.get();
+    if (context == nullptr || glib.acquire(context) == 0) {
+        return -1;
+    }
+    int priority = 0;
+    glib.prepare(context, &priority);
+    int timeout = -1;
+    glib.query(context, priority, &timeout, nullptr, 0);
+    glib.release(context);
+    return timeout;
+}
+
+extern "C" int solium_qml_drain()
+{
+    if (g_app == nullptr) {
+        return 0;
+    }
+    const unsigned long long before = g_dirtied;
+    /* A QML Timer firing alone is two passes: QUnifiedTimer's pauseTimer, then
+     * the QEvent_MaybeTick it posts (qtdeclarative v6.11.2,
+     * src/qmlmeta/types/qqmltimer.cpp:31-36), which one GLib iteration does
+     * not reach. Both in one wake:
+     * `qml::wake::tests::a_clock_scene_repaints_once_a_second_with_no_other_damage`. */
+    constexpr int passes = 4;
+    for (int pass = 0; pass < passes; ++pass) {
+        QCoreApplication::processEvents();
+        if (solium_qml_next_due_ms() != 0) {
+            break;
+        }
+    }
+    return g_dirtied != before ? 1 : 0;
 }
 
 /* Whether Qt has asked for this scene to be drawn again. */
@@ -1719,11 +1827,10 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
  *
  * What it does not cover: a `Timer`. A scene whose next change is a timer
  * firing -- Quickshell.SystemClock is the one in the tree -- is not animating
- * by this answer and will not be given the frame its timer needs to fire on,
- * because `solium_qml_tick` is what drains the event queue and only runs on a
- * frame that is drawn. Counting running Timers here would fix that and would
- * also pin the compositor at full rate for as long as any clock exists, which
- * is the wrong trade; what that wants is a wake-up deadline, not a busy loop.
+ * by this answer, and counting running Timers here would pin the compositor at
+ * full rate for as long as any clock exists. The Timer is served between
+ * frames instead, at the deadline Qt itself reports: solium_qml_next_due_ms,
+ * and `qml::wake::tests::a_clock_scene_repaints_once_a_second_with_no_other_damage`.
  */
 static bool animation_running(const QObject *item)
 {

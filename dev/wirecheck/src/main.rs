@@ -76,6 +76,8 @@ unsafe extern "C" {
     fn solium_qml_scene_free(scene: *mut c_void);
     fn solium_qml_scene_animating(scene: *const c_void) -> c_int;
     fn solium_qml_tick(elapsed_ms: i64);
+    fn solium_qml_next_due_ms() -> c_int;
+    fn solium_qml_drain() -> c_int;
 
     fn wirecheck_belief_names_scene(scene: *mut c_void) -> c_int;
     fn wirecheck_egl_agrees_with(scene: *mut c_void) -> c_int;
@@ -1160,6 +1162,111 @@ fn appear_animation(
     Ok((scene, buffer))
 }
 
+/// **A `Timer` on a GPU host fires between frames**, the way `qml::wake`
+/// serves one: Qt's own deadline from `solium_qml_next_due_ms`, then
+/// `solium_qml_drain`, with no `solium_qml_tick` and no render in between.
+///
+/// Three things are asserted. The Timer fires. The drain reports the scene it
+/// changed, so the compositor would draw it. And the compositor's EGL context
+/// is still current after every drain: the drain runs from the event loop with
+/// the compositor holding the thread, and a drain that took it would leave the
+/// next frame's GL going nowhere.
+///
+/// After the appear case, which needs a process with nothing registered, and
+/// before `quadrants.qml`, whose endless animation puts Qt's animation timer on
+/// the driver for the rest of the run: a Timer then advances only with `tick`,
+/// which is a frame. The Timer is stopped again before returning, and the scene
+/// is kept for the same reason the appear case keeps its own.
+fn timer_between_frames(
+    gbm: &GbmDevice<DrmDeviceFd>,
+    renderer: &mut GlesRenderer,
+) -> Result<(*mut c_void, target::Target)> {
+    println!("\n=== a Timer on a GPU host, between frames ===");
+    const SIZE: i32 = 16;
+    let buffer = target::allocate(gbm, SIZE, SIZE).context("the timer scene's buffer")?;
+    let (fd, stride, modifier, fourcc) = buffer.as_ffi().context("as_ffi")?;
+    let path = CString::new(
+        repo()
+            .join("dev/wirecheck/timer.qml")
+            .as_os_str()
+            .as_encoded_bytes(),
+    )?;
+    let scene = unsafe {
+        solium_qml_scene_new_gpu(
+            path.as_ptr(),
+            SIZE,
+            SIZE,
+            fd,
+            stride,
+            modifier,
+            fourcc,
+            std::ptr::null(),
+        )
+    };
+    restore(renderer)?;
+    if scene.is_null() {
+        return Err(anyhow!("a GPU host could not build dev/wirecheck/timer.qml"));
+    }
+    // Drawn once, so the scene is clean and a change is a change.
+    let mut fence: c_int = -1;
+    if unsafe { solium_qml_scene_render_gpu(scene, &raw mut fence) } != 1 {
+        return Err(anyhow!("the timer scene's first render failed"));
+    }
+    restore(renderer)?;
+    if fence >= 0 {
+        wait_for(renderer, unsafe { OwnedFd::from_raw_fd(fence) })?;
+    }
+
+    let window = std::time::Duration::from_millis(600);
+    let started = std::time::Instant::now();
+    let (mut drains, mut changed) = (0_u32, 0_u32);
+    loop {
+        let left = window.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        let due = unsafe { solium_qml_next_due_ms() };
+        let wait = u64::try_from(due)
+            .map(std::time::Duration::from_millis)
+            .map_or(left, |due| due.min(left));
+        std::thread::sleep(wait);
+        if unsafe { solium_qml_drain() } != 0 {
+            changed += 1;
+        }
+        drains += 1;
+        if !renderer.egl_context().is_current() {
+            return Err(anyhow!(
+                "solium_qml_drain took the compositor's EGL context off the thread: the next \
+                 frame's GL would go to no context at all, which on EGL is not an error"
+            ));
+        }
+    }
+    let fired = unsafe { solium_qml_scene_get_int(scene, c"fired".as_ptr()) };
+    println!(
+        "  {drains} drains in {}ms, {changed} of them found the scene clean and changed it \
+         (nothing redraws it here); the 50ms Timer fired {fired} times; our context \
+         current after every one",
+        window.as_millis()
+    );
+    if fired < 6 {
+        return Err(anyhow!(
+            "a 50ms Timer fired {fired} times in {}ms with no frame drawn",
+            window.as_millis()
+        ));
+    }
+    if changed == 0 {
+        return Err(anyhow!(
+            "the Timer recoloured the scene {fired} times and no drain said so, so the \
+             compositor would never draw it"
+        ));
+    }
+
+    unsafe { solium_qml_scene_set_bool(scene, c"ticking".as_ptr(), 0) };
+    unsafe { solium_qml_drain() };
+    restore(renderer)?;
+    Ok((scene, buffer))
+}
+
 /// Advance that counter by one, and hand back what it now reads.
 ///
 /// Deliberately round-trips through the QML item rather than counting here: the
@@ -1312,6 +1419,7 @@ fn main() -> Result<()> {
     // buffer under it closes its dmabuf fd when it drops, so it has to outlive
     // the scene that is still pointed at it.
     let (_appearing, _appear_buffer) = appear_animation(&gbm, &renderer, &mut clock)?;
+    let (_timing, _timer_buffer) = timer_between_frames(&gbm, &mut renderer)?;
 
     let scene_target = target::allocate(&gbm, pixels, pixels).context("target::allocate")?;
     let (fd, stride, modifier, fourcc) = scene_target.as_ffi().context("as_ffi")?;

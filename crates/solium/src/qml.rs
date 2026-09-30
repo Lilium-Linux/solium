@@ -26,6 +26,7 @@
 pub(crate) mod paint;
 pub(crate) mod renderer;
 mod target;
+pub(crate) mod wake;
 
 /// The largest a scene may be, per side.
 ///
@@ -111,6 +112,8 @@ mod ffi {
             scale: f64,
         );
         pub(super) fn solium_qml_tick(elapsed_ms: c_longlong);
+        pub(super) fn solium_qml_next_due_ms() -> c_int;
+        pub(super) fn solium_qml_drain() -> c_int;
         pub(super) fn solium_qml_scene_render(scene: *mut Scene) -> c_int;
         pub(super) fn solium_qml_scene_pixels(scene: *const Scene, stride: *mut c_int)
         -> *const u8;
@@ -727,8 +730,10 @@ fn keep_qt_off_the_hardware(node: &Path) -> Result<()> {
         // a socketpair, and the `_exit(1)` happens later, wherever Qt's event
         // queue is next drained — for us that is `qml::tick`'s
         // `processEvents`, reached only from `render::prepare`, which both
-        // backends gate on `redraw || animating`. So a SIGTERM to a compositor
-        // with nothing to draw is not handled and not fatal; it just sits
+        // backends gate on `redraw || animating`, or `qml::drain` when a Qt
+        // timer is due (`wake::tests::a_timer_fires_while_no_frame_is_drawn`).
+        // So a SIGTERM to a compositor with nothing to draw and no timer due
+        // is not handled and not fatal; it just sits
         // there, and the next thing that wants a frame turns it into an
         // `_exit(1)` from inside a render. That skips every Rust destructor on
         // the way out — the libseat session, the DRM master release, the VT
@@ -886,6 +891,26 @@ pub(crate) fn tick(elapsed: Duration) {
     // SAFETY: the host is started before any scene exists, and this touches
     // only process-global state.
     unsafe { ffi::solium_qml_tick(millis) }
+}
+
+/// How long until Qt next has work of its own, or `None` when nothing is
+/// scheduled. See `solium_qml_next_due_ms` in `qml/host.h`, and
+/// `wake::tests::an_idle_host_does_not_wake_repeatedly`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn next_due() -> Option<Duration> {
+    // SAFETY: touches only process-global state, as `tick` does.
+    let millis = unsafe { ffi::solium_qml_next_due_ms() };
+    u64::try_from(millis).ok().map(Duration::from_millis)
+}
+
+/// Deliver Qt's due timers and posted events outside a frame, and say whether
+/// that changed a scene. `wake::tests::a_timer_fires_while_no_frame_is_drawn`;
+/// on the GPU path, `dev/wirecheck`'s "a Timer on a GPU host, between frames".
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn drain() -> bool {
+    no_frame_in_flight("qml::drain");
+    // SAFETY: touches only process-global state, as `tick` does.
+    unsafe { ffi::solium_qml_drain() != 0 }
 }
 
 /// Matches `SOLIUM_QML_UNCHANGED` in `qml/host.h`.

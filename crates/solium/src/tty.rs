@@ -359,8 +359,13 @@ pub(crate) fn run() -> Result<()> {
     );
     solium.start_scripts(scripts);
 
+    let qt = crate::qml::wake::Wake::insert(&event_loop.handle(), |state: &mut State, changed| {
+        state.solium.redraw |= changed;
+    })?;
+
     let mut state = State {
         solium,
+        qt,
         session,
         renderer: None,
         screens: Vec::new(),
@@ -681,6 +686,7 @@ pub(crate) fn run() -> Result<()> {
             if std::mem::take(&mut state.solium.rescan_outputs) {
                 state.resync_screens();
             }
+            state.qt.arm();
             let _ = state.solium.display_handle.flush_clients();
         })
         .map_err(|err| anyhow!("running the event loop: {err}"))
@@ -753,6 +759,8 @@ impl std::fmt::Debug for Screen {
 /// Everything the hardware backend holds, plus the compositor itself.
 pub(crate) struct State {
     pub(crate) solium: Solium,
+    /// Qt's timers, between frames. See `qml::wake`.
+    qt: crate::qml::wake::Wake,
     session: LibSeatSession,
     renderer: Option<GlesRenderer>,
     /// One per connected monitor, in the order the connectors were enumerated.

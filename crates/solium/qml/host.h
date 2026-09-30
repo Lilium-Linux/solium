@@ -202,6 +202,20 @@ void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int height, doubl
  */
 void solium_qml_tick(long long elapsed_ms);
 
+/*
+ * Milliseconds until Qt next has work of its own: a timer due, or 0 when
+ * events are already waiting. -1 when nothing is scheduled at all.
+ * `qml::wake::tests::an_idle_host_does_not_wake_repeatedly`.
+ */
+int solium_qml_next_due_ms(void);
+
+/*
+ * Deliver Qt's due timers and posted events outside a frame. Advances no
+ * animation; returns 1 when that turned a clean scene dirty.
+ * `qml::wake::tests::a_clock_scene_repaints_once_a_second_with_no_other_damage`.
+ */
+int solium_qml_drain(void);
+
 /* Returned by a render that was skipped because nothing had changed. */
 #define SOLIUM_QML_UNCHANGED 2
 

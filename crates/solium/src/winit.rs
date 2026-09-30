@@ -109,6 +109,12 @@ pub(crate) fn run() -> Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("inserting the display source: {e}"))?;
 
+    // Qt's timers, between frames. See `qml::wake`.
+    let mut qt =
+        crate::qml::wake::Wake::insert(&event_loop.handle(), |state: &mut Solium, changed| {
+            state.redraw |= changed;
+        })?;
+
     // The app_id is stable and specific so the host compositor can be told
     // where to put this window and to leave the focus alone -- developing a
     // compositor should not steal focus from whatever is already running.
@@ -971,6 +977,7 @@ pub(crate) fn run() -> Result<()> {
         } else {
             Duration::from_millis(16)
         };
+        qt.arm();
         if event_loop.dispatch(Some(timeout), &mut state).is_err() {
             break;
         }
