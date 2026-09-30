@@ -24,6 +24,7 @@ saying where it was taken, it comes from the reference machine: an NVIDIA RTX
 | `SOLIUM_DEV_IMAGE=` | The container `dev/run-nested.sh` runs in. |
 | `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
 | `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |
+| `SOLIUM_SESSION_BUS=<address>` | The D-Bus address to tell about the session (the environment export, and starting and stopping `solium-session.target`) instead of the session bus. Nested, this is the only way anything is told: without it a nested run leaves the session it runs inside alone. For checking the calls against a private bus: `dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'`. See `session.rs`. |
 
 ## Checks
 
@@ -35,7 +36,7 @@ saying where it was taken, it comes from the reference machine: an NVIDIA RTX
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
-| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file, the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, and an uninstall that leaves nothing. See *Installing it* |
+| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, and an uninstall that leaves nothing. See *Installing it* |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
@@ -853,14 +854,25 @@ dev/install.sh --uninstall     # remove it again; prints `sudo rm -f …` for th
 | | |
 |---|---|
 | `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/share/solium/{qml,lua}`, and the generated `DIR/share/solium/solium.desktop` |
+| `XDG_CONFIG_HOME=` | where the session's other files go, default `~/.config`, whatever the prefix: `systemd/user/solium-session.target`, `systemd/user/solium-session-no-autostart.target` and `xdg-desktop-portal/lilium-portals.conf`, copied from `dev/session/` |
 | `--session-dir DIR` | where the display manager reads sessions, default `/usr/local/share/wayland-sessions`. Only the printed `sudo` line writes there |
 | `--no-build` | install the release binary already in `target/install` |
 | `--jobs N`, `--image IMAGE` | the build's cargo jobs (2) and container (`localhost/solium-build:fc44`) |
-| `--uninstall` | remove `bin/solium`, `share/solium/{qml,lua}` and the generated `solium.desktop` under the same `--prefix`. There is no manifest: it removes those paths whatever put them there |
-| `DESTDIR=` | stage the prefix under this directory instead; the session file's `Exec` still names the real prefix. `--session-dir` is used as given, so a test can point it at `/tmp` |
+| `--uninstall` | remove `bin/solium`, `share/solium/{qml,lua}` and the generated `solium.desktop` under the same `--prefix`, whatever put them there, and the three files in `XDG_CONFIG_HOME` only while they are what install wrote |
+| `DESTDIR=` | stage the prefix and `XDG_CONFIG_HOME` under this directory instead; the session file's `Exec` still names the real prefix. `--session-dir` is used as given, so a test can point it at `/tmp` |
 | `SOLIUM_BUILD_LOCK=`, `SOLIUM_BUILD_MEMORY=` | the lock the build takes (`~/.cache/solium-build.lock`) and the container's memory cap (`6g`) |
 
 `dev/install-check.sh` runs all of that into `/tmp` and checks every step.
+
+**The units and the portal configuration go beside your own configuration,**
+so they are treated as yours once you change them. Install records a
+checksum of each file it writes in `share/solium/config.sha256`, and replaces
+or removes a file only while it still matches. A file edited since, or a link
+(a dotfiles checkout, say), is kept, and install and uninstall both name it.
+Solium starts the targets itself (`session.rs`), so nothing needs enabling.
+systemd reads new unit files at the next login, and install prints the
+`systemctl --user daemon-reload` that has it read them at once. That command
+changes nothing that is running, and install does not run it for you.
 
 **Why it builds at `/solium-src`, a path the host does not have.** `assets.rs`
 tries the build tree before the install layout:

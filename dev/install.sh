@@ -4,10 +4,12 @@
 #
 # Builds a release binary in the build container, copies it and the shipped
 # QML and Lua into a prefix (~/.local by default), and writes a session file
-# for the display manager. It never uses sudo: the session file has to go
-# somewhere only root can write, so the script prints the one line that puts it
-# there. `--uninstall` takes all of it back out. `dev/install-check.sh` runs an
-# install and an uninstall into /tmp and checks every step.
+# for the display manager. The systemd user units Solium starts and its portal
+# choice (#146) go into the user's configuration directory. It never uses sudo:
+# the session file has to go somewhere only root can write, so the script
+# prints the one line that puts it there. `--uninstall` takes all of it back
+# out. `dev/install-check.sh` runs an install and an uninstall into /tmp and
+# checks every step.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,6 +21,10 @@ usage: dev/install.sh [options]
 
   --prefix DIR        where to install (default: \$HOME/.local)
                         DIR/bin/solium, DIR/share/solium/{qml,lua,solium.desktop}
+                        and, whatever the prefix, into \$XDG_CONFIG_HOME
+                        (default: \$HOME/.config):
+                        systemd/user/solium-session{,-no-autostart}.target
+                        and xdg-desktop-portal/lilium-portals.conf
   --session-dir DIR   where the display manager reads Wayland sessions
                         (default: /usr/local/share/wayland-sessions); the
                         printed sudo line installs the session file there
@@ -29,9 +35,10 @@ usage: dev/install.sh [options]
   -h, --help          this text
 
 environment:
-  DESTDIR               stage everything under the prefix into DESTDIR instead
-                          (the session file's Exec still names the prefix);
-                          --session-dir is used as given
+  DESTDIR               stage everything under the prefix and \$XDG_CONFIG_HOME
+                          into DESTDIR instead (the session file's Exec still
+                          names the prefix); --session-dir is used as given
+  XDG_CONFIG_HOME       where the units and the portal configuration go
   SOLIUM_BUILD_LOCK     lock the build takes (default: \$XDG_CACHE_HOME/solium-build.lock)
   SOLIUM_BUILD_MEMORY   memory cap of the build container (default: 6g)
 EOF
@@ -41,6 +48,8 @@ die() { echo "install.sh: $*" >&2; exit 1; }
 
 default_prefix="$HOME/.local"
 default_session_dir="/usr/local/share/wayland-sessions"
+default_config_home="$HOME/.config"
+config_home="${XDG_CONFIG_HOME:-$default_config_home}"
 prefix="$default_prefix"
 session_dir="$default_session_dir"
 build=1
@@ -78,6 +87,12 @@ for name in prefix session_dir; do
     [[ "$value" =~ ^[A-Za-z0-9._/+@-]+$ ]] \
         || die "--${name//_/-} may only contain letters, digits and ._/+@-: $value"
 done
+# Printed the same way, in the uninstall line.
+[[ "$config_home" == /* ]] || die "XDG_CONFIG_HOME must be an absolute path: $config_home"
+[[ "$config_home" =~ ^[A-Za-z0-9._/+@-]+$ ]] \
+    || die "XDG_CONFIG_HOME may only contain letters, digits and ._/+@-: $config_home"
+config_home="${config_home%"${config_home##*[!/]}"}"
+[[ -n "$config_home" ]] || die "/ is not a usable XDG_CONFIG_HOME"
 destdir="${DESTDIR:-}"
 [[ -z "$destdir" || "$destdir" == /* ]] || die "DESTDIR must be an absolute path: $destdir"
 [[ -z "$destdir" || "$destdir" =~ ^[A-Za-z0-9._/+@-]+$ ]] \
@@ -97,6 +112,29 @@ bin="$dest/bin/solium"
 share="$dest/share/solium"
 staged_session="$share/solium.desktop"
 session_file="$session_dir/solium.desktop"
+
+# What goes into the user's configuration rather than the prefix, as
+# `<file in dev/session>:<where>`: the units Solium starts (`session.rs`) and
+# which portal answers what. Beside the user's own configuration, so a file
+# there is only replaced or removed while it is still exactly what this script
+# wrote, as `config.sha256` in share/solium records it. One edited since, or a
+# link, is the user's and is kept. dev/install-check.sh plants both and asserts
+# both are left alone.
+config_dest="$destdir$config_home"
+config_files=(
+    "solium-session.target:$config_dest/systemd/user/solium-session.target"
+    "solium-session-no-autostart.target:$config_dest/systemd/user/solium-session-no-autostart.target"
+    "lilium-portals.conf:$config_dest/xdg-desktop-portal/lilium-portals.conf"
+)
+manifest="$share/config.sha256"
+
+# Whether $1 is a file this script wrote and nobody has changed since.
+ours() {
+    local path="$1" recorded
+    [[ -f "$path" && ! -L "$path" && -f "$manifest" ]] || return 1
+    recorded="$(awk -v path="$path" '$2 == path { print $1 }' "$manifest")"
+    [[ -n "$recorded" && "$(sha256sum <"$path" | cut -d' ' -f1)" == "$recorded" ]]
+}
 
 # Install replaces $share/qml and $share/lua, and uninstall removes them, with
 # `rm -rf`. Through a link that deletes whatever the link leads to: a
@@ -160,6 +198,20 @@ this script replaces nothing a running session is using, and stops nothing."
 if [[ $uninstall -eq 1 ]]; then
     refuse_if_running
     removed=()
+    kept=()
+    for entry in "${config_files[@]}"; do
+        path="${entry#*:}"
+        if ours "$path"; then
+            rm -f "$path"
+            removed+=("$path")
+        elif [[ -e "$path" || -L "$path" ]]; then
+            kept+=("$path")
+        fi
+    done
+    if [[ -e "$manifest" ]]; then
+        rm -f "$manifest"
+        removed+=("$manifest")
+    fi
     if [[ -e "$bin" ]]; then
         rm -f "$bin"
         removed+=("$bin")
@@ -179,6 +231,10 @@ if [[ $uninstall -eq 1 ]]; then
     else
         echo "removed:"
         printf '  %s\n' "${removed[@]}"
+    fi
+    if [[ ${#kept[@]} -gt 0 ]]; then
+        echo "kept, because this script did not write them as they are now:"
+        printf '  %s\n' "${kept[@]}"
     fi
     if [[ -e "$session_file" ]]; then
         echo
@@ -203,6 +259,9 @@ source_session="$root/dev/session/solium.desktop"
     || die "$source_session must have exactly one Exec line"
 grep -q '^Exec=solium\( \|$\)' "$source_session" \
     || die "$source_session's Exec no longer starts with 'solium'; update dev/install.sh"
+for entry in "${config_files[@]}"; do
+    [[ -f "$root/dev/session/${entry%%:*}" ]] || die "missing $root/dev/session/${entry%%:*}"
+done
 
 if [[ $build -eq 1 ]]; then
     command -v podman >/dev/null || die "podman is not installed, and the build runs in a container"
@@ -258,16 +317,44 @@ mv -f "$staged_tmp" "$staged_session"
 grep -qx "Exec=$prefix/bin/solium --tty" "$staged_session" \
     || die "the generated session file has no absolute Exec line: $staged_session"
 
+# The units and the portal choice. Each written beside its target and renamed
+# over it, like the session file, so a link is replaced rather than written
+# through -- except that a link, or a file edited since this script wrote it,
+# is the user's, and is kept instead.
+config_written=()
+config_kept=()
+manifest_tmp="$(mktemp "$share/.config.sha256.XXXXXX")"
+for entry in "${config_files[@]}"; do
+    source="$root/dev/session/${entry%%:*}"
+    path="${entry#*:}"
+    if [[ -L "$path" ]] || { [[ -e "$path" ]] && ! ours "$path" && ! cmp -s "$source" "$path"; }; then
+        config_kept+=("$path")
+        continue
+    fi
+    mkdir -p "$(dirname "$path")" 2>/dev/null \
+        || die "cannot write to $(dirname "$path"): choose an XDG_CONFIG_HOME you own"
+    tmp="$(mktemp "$(dirname "$path")/.${path##*/}.XXXXXX")"
+    cp "$source" "$tmp"
+    chmod 644 "$tmp"
+    mv -f "$tmp" "$path"
+    config_written+=("$path")
+    echo "$(sha256sum <"$path" | cut -d' ' -f1) $path" >>"$manifest_tmp"
+done
+chmod 644 "$manifest_tmp"
+mv -f "$manifest_tmp" "$manifest"
+
 uninstall_cmd="dev/install.sh --uninstall"
 [[ "$prefix" == "$default_prefix" ]] || uninstall_cmd+=" --prefix $prefix"
 [[ "$session_dir" == "$default_session_dir" ]] || uninstall_cmd+=" --session-dir $session_dir"
 [[ -z "$destdir" ]] || uninstall_cmd="DESTDIR=$destdir $uninstall_cmd"
+[[ "$config_home" == "$default_config_home" ]] || uninstall_cmd="XDG_CONFIG_HOME=$config_home $uninstall_cmd"
 
 # The new files are already in place when the check runs, and a session file
 # from an earlier install would start them at the next login, so a failure says
 # so. dev/install-check.sh fails the check on purpose and asserts the message.
-not_checked="The new files are already in place under $dest. Do not log into \
-Solium until this is fixed and dev/install.sh re-run, or take them out with:
+not_checked="The new files are already in place under $dest and $config_dest. Do \
+not log into Solium until this is fixed and dev/install.sh re-run, or take them \
+out with:
   $uninstall_cmd"
 
 # The gate's scripts check, run from the installed copy, with the asset root
@@ -292,6 +379,23 @@ $expected. $not_checked"
 fi
 checked="$(grep -m1 '^  ok:' "$check_log" || true)"
 
+config_note=""
+if [[ ${#config_kept[@]} -gt 0 ]]; then
+    config_note="
+  kept          these, because this script did not write them as they are now
+                (a link, or edited since): compare each with dev/session/
+$(printf '                  %s\n' "${config_kept[@]}")"
+fi
+reload_note=""
+if [[ -z "$destdir" && ${#config_written[@]} -gt 0 ]]; then
+    reload_note="
+systemd reads the units at your next login. To have it read them now, which
+changes nothing that is running:
+
+  systemctl --user daemon-reload
+"
+fi
+
 if [[ -z "$destdir" ]]; then
     on_path="$(command -v solium || true)"
     if [[ -z "$on_path" ]]; then
@@ -314,9 +418,12 @@ Installed Solium into $dest
                 (copies: rebuilding or checking out another branch does not change them)
   session file  $staged_session
                 ($(grep -m1 '^Exec=' "$staged_session"))
+  units         $config_dest/systemd/user/solium-session.target
+                $config_dest/systemd/user/solium-session-no-autostart.target
+  portals       $config_dest/xdg-desktop-portal/lilium-portals.conf$config_note
   check         $bin --check passed${checked:+ (${checked#  })}, using $chosen
   $path_note
-
+$reload_note
 To offer Solium at the login screen, run this one line. It needs root, so this
 script does not run it:
 

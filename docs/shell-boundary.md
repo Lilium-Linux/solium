@@ -117,6 +117,90 @@ process, in exchange for a desktop that could do what the design asked for. A
 shell is a separate process now, and gets a separate process's robustness; the
 window frames and the compositor's other scenes still depend on that care.
 
+## How the rest of the desktop starts
+
+Whatever Solium loads itself starts with it and needs nothing below: its own
+QML scenes, and everything `init.lua` declares. Every other program of the
+desktop is a separate process, and on a systemd machine it is started by the
+user's systemd, or by D-Bus when something first asks for it. That covers a
+shell written as a separate client, a polkit authentication agent, a keyring,
+`nm-applet`, and the portals.
+
+So Solium tells both where it is (#146). On the hardware (`solium --tty`),
+once its Wayland socket is up, it sends `WAYLAND_DISPLAY`,
+`XDG_CURRENT_DESKTOP` (`Lilium`, unless the session file's `DesktopNames` set
+it already) and `XDG_SESSION_TYPE=wayland` to systemd's user manager
+(`SetEnvironment`) and to D-Bus activation (`UpdateActivationEnvironment`). It
+sends them again with `DISPLAY` once XWayland has one. Then it starts
+`solium-session.target`, which starts `graphical-session.target` and
+`xdg-desktop-autostart.target`. On exit it stops that target and unsets the
+variables in systemd, so a Plasma login afterwards does not inherit a dead
+socket. (D-Bus has no call that removes a variable from its activation
+environment, so that one is left.) `session.rs` has the tests, and
+`the_calls_reach_systemd_and_dbus_as_their_methods` checks the calls on the
+wire.
+
+A nested Solium does none of this, because the session it runs inside is not
+its own to change. `session.systemd = false` turns all of it off, and
+`session.autostart = false` starts `solium-session-no-autostart.target`
+instead, which leaves out XDG autostart. `dev/install.sh` puts both targets in
+`~/.config/systemd/user` and `lilium-portals.conf` in
+`~/.config/xdg-desktop-portal`.
+
+A program that should start with a Solium session can do it in one of two
+ways.
+
+**XDG autostart.** Put a `.desktop` file in `~/.config/autostart`, or in
+`/etc/xdg/autostart` for every user. systemd's autostart generator turns each
+into a service when `xdg-desktop-autostart.target` starts, and skips any whose
+`OnlyShowIn=` does not name `Lilium` or whose `NotShowIn=` does:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Lilium shell
+Exec=lilium-shell
+OnlyShowIn=Lilium;
+```
+
+**A systemd user unit.** It is tied to the graphical session, so it stops
+when Solium does:
+
+```ini
+[Unit]
+Description=Lilium shell
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/lilium-shell
+Restart=on-failure
+
+[Install]
+WantedBy=solium-session.target
+```
+
+Enable it with `systemctl --user enable lilium-shell.service`.
+`WantedBy=graphical-session.target` also starts it under any other desktop
+that runs a systemd session, such as Plasma or GNOME. `solium-session.target`
+starts it only under Solium.
+
+**Polkit agents and keyrings start the same way, and most say which desktops
+they are for.** Fedora's KDE polkit agent, for instance, ships
+`/etc/xdg/autostart/polkit-kde-authentication-agent-1.desktop` with
+`OnlyShowIn=KDE;`, so autostart skips it under Lilium. It also ships
+`plasma-polkit-agent.service`, which is already `PartOf=graphical-session.target`,
+so a single command starts it with every Solium session:
+
+```sh
+systemctl --user add-wants solium-session.target plasma-polkit-agent.service
+```
+
+The alternative is to copy the `.desktop` file into `~/.config/autostart` and
+add `Lilium` to its `OnlyShowIn=`. A keyring that D-Bus starts on demand,
+such as KWallet's `kwalletd6`, needs no entry: once the environment is
+exported, the first program that asks for a secret starts it.
+
 ## Summary
 
 | | Where it runs | How it reaches the compositor |
@@ -127,6 +211,7 @@ window frames and the compositor's other scenes still depend on that care.
 | Bar, dock, launcher | The shell, a separate client | `wlr-layer-shell` |
 | The default wallpaper, other scripted scenes | The compositor's QML engine | `sol.surface` from Lua |
 | A wallpaper program (`swaybg` and the like) | Clients | `wlr-layer-shell` |
+| A polkit agent, a keyring, a separate shell's processes | Clients, started by systemd or D-Bus | XDG autostart, or a unit `PartOf=graphical-session.target` |
 | Which monitor a bar is on | The client names an output | `zwlr_layer_surface_v1` |
 | Colours and metrics | `Solium.Theme`, one singleton | imported by every scene |
 | What an animation *does* | Lua script | `sol.present_from`, `sol.on("open")` |

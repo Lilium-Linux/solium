@@ -146,6 +146,21 @@ change it, and running `dev/install.sh` again replaces it. It refuses while a
 Solium session is running from it, and while `~/.local/share/solium` is a
 link, which it would otherwise delete through.
 
+**The rest of the session.** It also puts `solium-session.target` and
+`solium-session-no-autostart.target` in `~/.config/systemd/user`, and
+`lilium-portals.conf` in `~/.config/xdg-desktop-portal`. A Solium session tells
+systemd and D-Bus where its display is and starts that target, which starts
+`graphical-session.target` and XDG autostart. Portals, the programs in
+`~/.config/autostart`, and user services written for a graphical session then
+find Solium. A file there that you have edited, or linked, is left alone. The
+portal file sends screen capture to `xdg-desktop-portal-wlr`, which Fedora
+packages separately (`sudo dnf install xdg-desktop-portal-wlr`). A separate
+shell, a polkit agent and a keyring start through XDG autostart or a user unit
+with `PartOf=graphical-session.target`.
+[docs/shell-boundary.md](docs/shell-boundary.md#how-the-rest-of-the-desktop-starts)
+says how, with the one command that starts Fedora's KDE polkit agent under
+Solium. `session.systemd = false` in your configuration turns all of it off.
+
 To remove it, `dev/install.sh --uninstall`, then the
 `sudo rm -f /usr/local/share/wayland-sessions/solium.desktop` it prints. Your
 `~/.config/solium` and the session log stay.
