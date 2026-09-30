@@ -943,8 +943,12 @@ pub(crate) fn poll_set(fds: &mut Vec<PollFd>) -> Option<Duration> {
     u64::try_from(timeout).ok().map(Duration::from_millis)
 }
 
-/// Whether any QML animation in the process is running, drawn or not.
-/// `wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`.
+/// Whether anything in the process is on the animation clock, drawn or not:
+/// a running animation, transition or flick, or a `Timer` the driver is
+/// holding beside something no scene holds. See `solium_qml_animating` in
+/// `qml/host.h`;
+/// `wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`,
+/// `wake::tests::a_timer_beside_an_animation_no_scene_holds_fires_with_no_frame_drawn`.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
 pub(crate) fn animating() -> bool {
     // SAFETY: touches only process-global state, as `tick` does.

@@ -231,8 +231,11 @@ typedef struct SoliumQmlPollFd {
 int solium_qml_poll_set(int *timeout_ms, SoliumQmlPollFd *fds, int capacity);
 
 /*
- * Whether any QML animation in the process is running, drawn or not.
- * `qml::wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`.
+ * Whether anything in the process is on the animation clock, drawn or not: a
+ * running animation, transition or flick, or a Timer the driver is holding
+ * beside something no scene holds.
+ * `qml::wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`,
+ * `qml::wake::tests::a_timer_beside_an_animation_no_scene_holds_fires_with_no_frame_drawn`.
  */
 int solium_qml_animating(void);
 

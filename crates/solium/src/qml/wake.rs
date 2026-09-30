@@ -608,6 +608,56 @@ mod tests {
         });
     }
 
+    /// **A paused animation does not wake an idle loop.**
+    ///
+    /// `paused` leaves an animation's `running` true while it takes the
+    /// animation off the clock. A hidden spinner on the common
+    /// `paused: !visible` idiom is exactly that, and counted as animating it
+    /// kept an otherwise idle desktop stepping the clock a frame at a time
+    /// for nothing. Here an endless animation is paused, and after it settles
+    /// a second of the loop must be one wait, with the scene no longer
+    /// animating.
+    #[test]
+    fn a_paused_animation_does_not_wake_an_idle_loop() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-paused",
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property bool hidden: false
+                    property real turn: 0
+                    NumberAnimation on turn {
+                        from: 0
+                        to: 360
+                        duration: 1000
+                        loops: Animation.Infinite
+                        paused: root.hidden
+                    }
+                }
+                ",
+            );
+
+            scene.set_bool("hidden", true);
+            let settling = run(Duration::from_millis(200), || {});
+            let idle = run(Duration::from_secs(1), || {});
+            let animating = scene.animation_in_flight();
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                !animating,
+                "a paused animation still counts as animating its scene"
+            );
+            assert!(
+                idle.wakes <= 1 && idle.iterations <= 2,
+                "a paused animation kept the loop waking: {idle:?} (settling: {settling:?})"
+            );
+        });
+    }
+
     /// **An animation a `Timer` starts between frames starts where the Timer
     /// fired**, not at the last frame drawn.
     ///
@@ -677,11 +727,13 @@ mod tests {
     /// step from the next one.**
     ///
     /// Scenes start animations outside any drain or frame -- an input handler,
-    /// a Wayland request, a scene being built -- so by the first drain after
-    /// one it is already running. It has taken no step, though, and the last
+    /// a Wayland request, a scene being built -- so when a drain comes before
+    /// the next frame, a Timer due or a descriptor ready, the animation is
+    /// already running by then. It has taken no step, though, and the last
     /// step can be long ago. Here nothing steps the clock for 300 ms, a
     /// property write starts a 260 ms animation, and the frame drawn 16 ms
-    /// after the next drain must show it a step in, not over.
+    /// after the next drain must show it a step in, not over. With no drain
+    /// between: `an_animation_started_after_an_idle_gap_takes_a_frame_first`.
     #[test]
     fn an_animation_started_between_steps_starts_at_the_next() {
         on_the_qt_thread(|| {
@@ -722,6 +774,62 @@ mod tests {
 
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **An animation started after an idle gap takes a frame's step first**,
+    /// with no drain between.
+    ///
+    /// Input reaches a scene synchronously: a click writes a property, the
+    /// property starts an animation, and the frame the click asks for is the
+    /// next thing to touch Qt -- no Timer is due and nothing drains first.
+    /// Here nothing has stepped the clock for 300 ms when the write starts a
+    /// 260 ms animation, and each of the two frames after it, 20 ms apart,
+    /// must show it a step or two in. A first step handed the whole gap ends
+    /// the animation before it is ever seen.
+    #[test]
+    fn an_animation_started_after_an_idle_gap_takes_a_frame_first() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-gap",
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property bool go: false
+                    property real value: 0
+                    readonly property int permille: Math.round(root.value * 1000)
+                    NumberAnimation {
+                        target: root
+                        property: 'value'
+                        from: 0
+                        to: 1
+                        duration: 260
+                        running: root.go
+                    }
+                }
+                ",
+            );
+            // The last step, on a desktop with nothing animating.
+            crate::qml::tick(now());
+            std::thread::sleep(Duration::from_millis(300));
+            scene.set_bool("go", true);
+            let mut shown = Vec::new();
+            for _ in 0..2 {
+                // More than 16 ms, so that each frame's tick drains Qt's queue.
+                std::thread::sleep(Duration::from_millis(20));
+                crate::qml::tick(now());
+                shown.push(scene.get_int("permille"));
+            }
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                shown.iter().all(|permille| *permille < 200),
+                "the two frames after a write that started a 260 ms animation, 300 ms after the \
+                 last step, showed it at {shown:?} permille: it was handed the gap"
+            );
         });
     }
 
@@ -785,6 +893,267 @@ mod tests {
 
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A `Timer` keeps firing beside a transition that is never drawn, and
+    /// the transition moves.**
+    ///
+    /// The animations inside a `Transition` never say they are running, so a
+    /// walk that asked only them saw nothing animate while the transition held
+    /// every Timer on the animation clock: no step was taken between frames,
+    /// the clock's origin was dragged along behind it, and the Timer and the
+    /// transition both stood still, drawn or not. Here a state change starts a
+    /// one-second transition in a scene nothing draws, beside a 100 ms Timer.
+    /// Over a second with no frame the Timer must fire about ten times, and
+    /// the value must be well on its way.
+    #[test]
+    fn a_timer_beside_an_undrawn_transition_fires_and_the_transition_moves() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-transition",
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property bool go: false
+                    property int fired: 0
+                    property real value: 0
+                    readonly property int permille: Math.round(root.value * 1000)
+                    states: State {
+                        name: 'there'
+                        when: root.go
+                        PropertyChanges {
+                            target: root
+                            value: 1
+                        }
+                    }
+                    transitions: Transition {
+                        NumberAnimation {
+                            property: 'value'
+                            duration: 1000
+                        }
+                    }
+                    Timer {
+                        interval: 100
+                        running: true
+                        repeat: true
+                        onTriggered: root.fired += 1
+                    }
+                }
+                ",
+            );
+
+            scene.set_bool("go", true);
+            let seen = run(Duration::from_secs(1), || {});
+            let fired = scene.get_int("fired");
+            let permille = scene.get_int("permille");
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                (8..=10).contains(&fired),
+                "a 100 ms Timer beside an undrawn transition fired {fired} times in a second: \
+                 {seen:?}"
+            );
+            assert!(
+                permille >= 500,
+                "a one-second transition nothing draws was {permille}/1000 of the way after a \
+                 second: {seen:?}"
+            );
+        });
+    }
+
+    /// **A transition moves on the frames that draw it.**
+    ///
+    /// The same blindness on the drawn path: with nothing counted as animating,
+    /// every frame's tick dragged the clock's origin up to the frame, so the
+    /// clock read zero on every frame and the transition never took a step,
+    /// however many frames were drawn. Here thirty frames 16 ms apart follow
+    /// the state change, and the one-second transition must be at least 300
+    /// of its 1000 permille on its way.
+    #[test]
+    fn a_transition_moves_on_the_frames_that_draw_it() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-transition-drawn",
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property bool go: false
+                    property real value: 0
+                    readonly property int permille: Math.round(root.value * 1000)
+                    states: State {
+                        name: 'there'
+                        when: root.go
+                        PropertyChanges {
+                            target: root
+                            value: 1
+                        }
+                    }
+                    transitions: Transition {
+                        NumberAnimation {
+                            property: 'value'
+                            duration: 1000
+                        }
+                    }
+                }
+                ",
+            );
+
+            scene.set_bool("go", true);
+            for _ in 0..30 {
+                std::thread::sleep(Duration::from_millis(16));
+                crate::qml::tick(now());
+            }
+            let permille = scene.get_int("permille");
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                permille >= 300,
+                "a one-second transition was {permille}/1000 of the way after thirty frames"
+            );
+        });
+    }
+
+    /// **A `Timer` keeps firing beside a flick that is never drawn, and the
+    /// flick moves.**
+    ///
+    /// A Flickable -- every ListView -- moves on a timeline of its own, which
+    /// is an animation job but no animation object a walk can find. Flicked in
+    /// a scene nothing draws, it held every Timer on the animation clock with
+    /// no step taken, and stood still itself. Here one is flicked at 2000 px/s
+    /// beside a 100 ms Timer; over a second with no frame the Timer must fire
+    /// about ten times and the content must have travelled at least 500 px of
+    /// the 1250 a second covers at Qt's default deceleration, 1500 px/s²
+    /// (qtbase v6.11.2, src/gui/kernel/qplatformtheme.cpp:701-702).
+    #[test]
+    fn a_timer_beside_an_undrawn_flick_fires_and_the_flick_moves() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-flick",
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property bool go: false
+                    property int fired: 0
+                    readonly property int scrolled: Math.round(list.contentY)
+                    Flickable {
+                        id: list
+                        width: 64
+                        height: 16
+                        contentWidth: 64
+                        contentHeight: 100000
+                    }
+                    onGoChanged: if (root.go) list.flick(0, -2000)
+                    Timer {
+                        interval: 100
+                        running: true
+                        repeat: true
+                        onTriggered: root.fired += 1
+                    }
+                }
+                ",
+            );
+
+            scene.set_bool("go", true);
+            let seen = run(Duration::from_secs(1), || {});
+            let fired = scene.get_int("fired");
+            let scrolled = scene.get_int("scrolled");
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                (8..=10).contains(&fired),
+                "a 100 ms Timer beside an undrawn flick fired {fired} times in a second: {seen:?}"
+            );
+            assert!(
+                scrolled >= 500,
+                "a flick at 2000 px/s nothing draws had moved {scrolled} px after a second: \
+                 {seen:?}"
+            );
+        });
+    }
+
+    /// **A `Timer` keeps firing beside an animation no scene holds.**
+    ///
+    /// No walk of the scenes reaches everything that runs on the animation
+    /// clock: an animation built with no parent, or one in a singleton. Such
+    /// an animation holds every Timer on the clock just the same. Here one is built with `createObject(null)` and never
+    /// ends, beside a 100 ms Timer; the walk must not see it -- the control --
+    /// and over a second with no frame the Timer must still fire about ten
+    /// times, on wakes a frame apart rather than a spinning loop.
+    #[test]
+    fn a_timer_beside_an_animation_no_scene_holds_fires_with_no_frame_drawn() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-orphan",
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property int fired: 0
+                    property real turn: 0
+                    property bool done: false
+                    property var spinner: null
+                    Component {
+                        id: spinning
+                        NumberAnimation {
+                            target: root
+                            property: 'turn'
+                            from: 0
+                            to: 360
+                            duration: 1000
+                            loops: Animation.Infinite
+                            running: true
+                        }
+                    }
+                    Component.onCompleted: root.spinner = spinning.createObject(null)
+                    onDoneChanged: if (root.done) {
+                        root.spinner.running = false
+                        root.spinner.destroy()
+                    }
+                    Timer {
+                        interval: 100
+                        running: true
+                        repeat: true
+                        onTriggered: root.fired += 1
+                    }
+                }
+                ",
+            );
+
+            let walked = scene.animation_in_flight();
+            let seen = run(Duration::from_secs(1), || {});
+            let fired = scene.get_int("fired");
+
+            // The animation outlives the scene unless it is stopped here, and
+            // would hold every later test's Timers on the clock.
+            scene.set_bool("done", true);
+            let _ = run(Duration::from_millis(100), || {});
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                !walked,
+                "the control failed: a walk of the scene reached the animation built with no parent"
+            );
+            assert!(
+                (8..=10).contains(&fired),
+                "a 100 ms Timer beside an animation no scene holds fired {fired} times in a \
+                 second: {seen:?}"
+            );
+            assert!(
+                seen.wakes <= 100,
+                "an animation no scene holds woke the loop {} times in a second: {seen:?}",
+                seen.wakes
+            );
         });
     }
 
