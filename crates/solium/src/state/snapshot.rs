@@ -499,16 +499,13 @@ impl Solium {
     /// on it, and a bar that re-evaluates sixty times a second because nothing
     /// happened is a bar that costs something to look at.
     pub(crate) fn publish_windows(&mut self) {
-        // Nobody to tell, nothing to say. The list is for the Quickshell
-        // compatibility layer -- `ToplevelManager.toplevels` and friends -- and
-        // building it walks every window, asks each for its title and app id,
-        // and allocates a string per window, every time anything changes. The
-        // ordinary case is no shell hosted, and a hosted shell that never
-        // reads the list is the same case.
-        //
-        // This used to test whether `SOLIUM_SHELL_SCENE` was set, which stopped
-        // being the question once a shell could be named in the configuration;
-        // what is asked instead is whether any scene has read the list. See
+        // Nobody to tell, nothing to say. Only the Quickshell compatibility
+        // layer reads the list -- `ToplevelManager.toplevels` and friends --
+        // and that layer is deprecated and going. Building it walks every
+        // window, asks each for its title and app id, and allocates a string
+        // per window, every time anything changes, so it is built only once a
+        // scene has read it: with no shell hosted, or one that never reads it,
+        // nothing is built. See
         // `a_hosted_shell_reads_the_window_list_the_compositor_publishes`.
         if !crate::qml::windows_wanted() {
             return;

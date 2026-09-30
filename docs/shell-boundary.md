@@ -15,8 +15,11 @@ the line, and it is not where a Wayland tutorial would put it.
   API is hosted the same way. Solium's Quickshell compatibility layer answers
   its `import Quickshell` lines from inside the compositor; it is an
   API-compatible shim, not Quickshell (see [THIRD_PARTY.md](../THIRD_PARTY.md)).
-- A shell that is a separate program — Waybar, a Quickshell instance run on
-  its own, any `wlr-layer-shell` panel — is supported too, as an ordinary
+  That layer is deprecated and will be removed in a change of its own; a new
+  shell is a plain Qt Quick scene written against Solium's own API,
+  [below](#what-a-hosted-shell-is-given).
+- A shell that runs as its own program — Waybar, a Quickshell instance run
+  on its own, any `wlr-layer-shell` panel — is supported too, as an ordinary
   client. It needs nothing from the configuration and gets nothing from the
   compositor's engine.
 
@@ -48,20 +51,32 @@ is only one of it.
 
 That gives, in order of how hard they would otherwise be:
 
-- **One design system.** `qml/Solium/Theme.qml` is read by every scene that
-  imports it. Changing a colour there changes the titlebars and a shell that
-  uses it together, with no rebuild, because they are the same object and not
-  two copies. A shell brought in with a theme of its own keeps its own until
-  it is pointed at this one.
-- **Objects that travel.** An item lifted from the dock into a titlebar is a
-  reparent inside one scene graph. It keeps its colours because it never left
-  the design system, and it can be animated across because both ends are on the
-  compositor's clock.
-- **No protocol for shell geometry.** The dock's icon rectangles need not be
-  published to the compositor; the compositor's engine *has* them. A genie
-  animation can read a rectangle out of the same engine that drew the icon, so
-  it cannot be animating against a stale copy — the failure mode a
-  side-channel protocol would have made possible.
+- **One design system.** `Solium.Theme`
+  (`crates/solium/qml/Solium/Theme.qml`) is what the window frames and the
+  loading window are drawn with, and any hosted scene that imports `Solium`
+  can read it. Changing a colour there changes the titlebars and a shell that
+  uses it together, with no rebuild, because they read the same object and
+  not two copies. A shell brought in with a theme of its own keeps its own
+  until it is pointed at this one. Two of the compositor's own scenes keep
+  fixed colours instead: the fallback pointer, which has to stay legible over
+  whatever a client drew, and the default wallpaper.
+- **Objects that travel, planned.** The aim is that an item can leave the
+  dock and land in a titlebar, one object the whole way. None of it is built,
+  and it will not be a reparent: every scene has a `QQuickWindow` of its own,
+  so each is its own scene graph, and an item cannot move from one to
+  another. The plan is a flight or a morph: a third, live instance of the same
+  component, drawn over both ends while they are hidden and moved on the
+  compositor's clock. One engine is what lets that instance be the component
+  itself, with the same theme, rather than a picture of it.
+- **No protocol for shell geometry, planned.** A hosted dock's icon
+  rectangles need not be published to the compositor, because the
+  compositor's engine already has them. The plan is for a scene to name an
+  item as an anchor (`Solium.region`) and for an animation to aim at that
+  name, read again on every frame, so a genie follows an icon while it moves
+  and can never animate against a stale copy. Nothing of that is built yet,
+  and no issue tracks it. Today a genie aims at a window, a `sol.surface`
+  scene or a fixed rectangle ([modes.md](modes.md)). Only a dock that runs as
+  its own program would need a protocol to hand its rectangles over.
 
 This is the arrangement Apple has, and it is unavailable to anyone configuring
 an existing compositor. It is the reason for writing one.
@@ -137,16 +152,20 @@ clock as every window transform, a running animation asks for the next frame,
 and the scene is redrawn only when Qt says it changed.
 
 **The `Solium` QML module.** `Solium.Theme` above all: the colours, fonts and
-metrics the frames are drawn with, overridable by one file in
-`~/.config/solium/qml/Solium/`.
+metrics the frames are drawn with. A `Theme.qml` of your own in
+`~/.config/solium/qml/Solium/` is meant to override it, and does not yet: the
+shipped module is found first
+([#88](https://github.com/Lilium-Linux/solium/issues/88)).
 
 **A way back to the configuration.** A scene sets a string property named
 `action`, the compositor takes it, and `sol.on("surface", function(name,
 action) ... end)` in Lua is told. Anything Lua can do — `sol.spawn`, switching
 workspaces, any binding — a hosted shell can ask for this way.
 
-**The Quickshell compatibility layer**, on the QML search path after the
-compositor's own modules, so it can never shadow `Solium.*`:
+**The Quickshell compatibility layer**, which is deprecated and will be
+removed in a change of its own: a new shell should use only what is above. It
+is on the QML search path and holds only `Quickshell` modules, so nothing a
+shell imports through it can shadow `Solium.*`:
 
 | Module | What answers |
 |---|---|
@@ -395,17 +414,18 @@ time it opens.
 | A hosted shell: bar, dock, launcher | The same QML engine | `shell.scene`, through `sol.surface` |
 | A client shell (Waybar and the like), wallpaper programs | Clients | `wlr-layer-shell` |
 | A polkit agent, a keyring, applets and other separate programs | Clients, started by systemd or D-Bus | XDG autostart, or a unit `PartOf=graphical-session.target` |
-| Which monitor a bar is on | Hosted: the primary. A client: the output it names | `zwlr_layer_surface_v1` |
+| Which monitor a bar is on | Hosted: the primary. A client: the output it names | the output argument of `zwlr_layer_shell_v1.get_layer_surface` |
 | Colours and metrics | `Solium.Theme`, one singleton | imported by every scene that wants it |
 | What an animation *does* | Lua script | `sol.present_from`, `sol.on("open")` |
 
 ## History: the dock that proved it
 
 The first in-compositor dock was compositor code — `shell.rs` and `sol.dock` —
-and it was taken back out: it made the compositor own a design, a font stack
-and a layout it had no reason to, and it hid the question of how a
-*replaceable* shell attaches instead of answering it. `layer.rs` records that
-in full. The answer is the one above: the shell is configuration, and the
+and it was taken back out, as the compiled-in bar before it had been: it made
+the compositor own a design, a font stack and a layout it had no reason to,
+and it hid the question of how a *replaceable* shell attaches instead of
+answering it. `layer.rs` records that for the bar, and `surface.rs` for the
+dock. The answer is the one above: the shell is configuration, and the
 compositor hosts whatever the configuration names.
 
 The dock was a QML scene rendered by the same host that draws the window
@@ -428,6 +448,7 @@ arrives.
 None of that is reachable from a separate process. A client dock can pass a
 rectangle over IPC, but by the time the window exists the two are separate
 scenes and nothing holds both at once to interpolate between them. That is why
-a shell written for Quickshell is hosted here rather than run beside the
-compositor under Quickshell itself: hosted, its icons and the windows are in
-one engine, and the morph is a reparent rather than a fake.
+a shell is hosted here rather than run beside the compositor as a program of
+its own: hosted, its icons are in the same engine as the window frames, so the
+flight planned above can be a live instance of the icon's own component rather
+than a fake.

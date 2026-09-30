@@ -1725,10 +1725,6 @@ impl Solium {
         })
     }
 
-    /// The Developer Tweaks panel, built on first use.
-    ///
-    /// A second shell surface rather than anything new: it is QML hosted in
-    /// the compositor, which is a thing that already exists here. What it
     /// Declare a surface, or replace one of the same name.
     ///
     /// Re-declaring something identical keeps its rasterisations, because

@@ -1,9 +1,11 @@
-// The pointer, drawn by the design system like everything else we draw.
+// The pointer Solium draws itself: what a name is drawn from when no XCursor
+// theme is configured, none is in the environment, or the one named is not
+// installed (`cursor.rs`; `no_theme_configured_is_our_own_pointer` and
+// `a_theme_that_will_not_load_falls_back_to_our_own_pointer` there). With a
+// theme, the pointer is that theme's.
 //
-// A cursor is chrome: it belongs to the same theme as the titlebars and the
-// shell, so it lives here rather than being loaded from whatever icon theme
-// happens to be installed. Change `Theme.text` and the pointer changes with the
-// window frames, because there is only one of it.
+// Its colours are fixed rather than taken from `Theme`; the comment on the
+// `ShapePath` below says why.
 //
 // Rendered once per size into a buffer and reused — it is the same picture
 // every frame.

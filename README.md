@@ -20,8 +20,8 @@ frame.
 ## Building
 
 Solium needs **Rust 1.88 or newer** (edition 2024), a C++17 compiler, **Qt 6.5
-or newer** (Qt Quick and Qml), and the development files for Wayland,
-libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm.
+or newer** (Qt Quick, Qml and Network), and the development files for
+Wayland, libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm.
 Lua is compiled in and needs nothing installed.
 
 Rust is easiest from [rustup](https://rustup.rs); a distribution's own Rust
@@ -254,9 +254,10 @@ list.
 
 Everything is a file you write, and none of it needs the compositor rebuilt.
 `~/.config/solium/user.lua` holds only what you want changed; your own QML in
-`~/.config/solium/qml` shadows what ships, file by file — drop in a single
-`Solium/Theme.qml` and every frame and surface restyles without copying the
-rest. See **[docs/ricing.md](docs/ricing.md)**.
+`~/.config/solium/qml` shadows what ships, file by file. A single
+`Solium/Theme.qml` there is meant to restyle every frame and surface without
+copying the rest; until [#88](https://github.com/Lilium-Linux/solium/issues/88)
+is fixed, the shipped one still wins. See **[docs/ricing.md](docs/ricing.md)**.
 
 ## How it is built
 
@@ -268,16 +269,18 @@ is named.
 Titlebars, the pointer, the wallpaper and every pane style are QML, rendered
 in-process through `QQuickRenderControl` and drawn as ordinary render elements.
 Not a shell talking to a compositor over a protocol — the same process, the
-same frame. A shell can be hosted in that same engine too, Quickshell-written
-ones included, through `shell = { scene = ... }` in the configuration: see
-[docs/shell-boundary.md](docs/shell-boundary.md).
+same frame. A shell can be hosted in that same engine too, as a plain Qt Quick
+scene named with `shell = { scene = ... }` in the configuration: see
+[docs/shell-boundary.md](docs/shell-boundary.md). The Quickshell compatibility
+layer, which lets a shell written for Quickshell load, is deprecated and will
+be removed.
 
-That is why a titlebar can be reloaded while the session runs, why the pointer
-belongs to the same theme as the window frames, and why a decoration can be a
-gradient, a shader or a clock without the compositor learning what any of those
-are. It is also why Qt is a hard dependency and why the render loop has to drive
-Qt's animations by hand: a `Timer` in a settled QML scene never fires, because
-nothing advances it but a frame the compositor decided to draw.
+That is why a titlebar can be reloaded while the session runs, why a hosted
+shell can read the same theme as the window frames, and why a decoration can be
+a gradient, a shader or a clock without the compositor learning what any of
+those are. It is also why Qt is a hard dependency and why the render loop has
+to drive Qt's animations by hand: a `Timer` in a settled QML scene never fires,
+because nothing advances it but a frame the compositor decided to draw.
 
 On the hardware, QML renders on the GPU: Qt draws into a buffer the compositor
 allocated, once a trial render in a short-lived child process has shown that

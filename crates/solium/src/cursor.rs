@@ -69,7 +69,7 @@
 //! what every other application on the machine draws; see [`theme`], which is
 //! where that arrived and why. When there is no theme — none configured, none
 //! in the environment, or a name nothing on disk answers to — a name is drawn
-//! from *ours*, from QML, through the same design system as the window frames.
+//! from *ours*, from QML, `qml/cursor.qml`.
 //!
 //! **The QML pointer is not a fallback that was left lying around; it is the
 //! floor.** It is deliberate, it is what a session with no theme configured

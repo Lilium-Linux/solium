@@ -32,9 +32,11 @@
 //! is per-asset: `qml::import_path` puts the user's QML directory first on the
 //! import path, `style::places` searches the user's `panes/` first,
 //! `script::load` puts the user's Lua first on `package.path`. Dropping a
-//! single `Solium/Theme.qml` into the user's directory has to restyle
+//! single `Solium/Theme.qml` into the user's directory is meant to restyle
 //! everything without copying the rest, and that is most of the point of the
-//! design.
+//! design. It does not yet, and #88 is why: `qml/host.cpp` hands the import
+//! path to Qt one `addImportPath` at a time, each of which goes in front, so
+//! the shipped `Solium` module is found before the user's.
 
 use std::{
     path::{Path, PathBuf},

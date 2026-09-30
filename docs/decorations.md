@@ -145,11 +145,14 @@ Nothing in a frame should contain a hex code. `Solium.Theme` has them:
 `controlInactive`, and the metrics `titlebarHeight`, `radius`, `gap`, `margin`,
 `fontFamily`, `fontSize`, `quick`, `normal`.
 
-Copy `Solium/Theme.qml` into `~/.config/solium/qml/Solium/` and change it, and
-every scene that imports `Solium` follows — the frames, the pointer, the
-loading window, the wallpaper, and a hosted shell that uses it. One file
-restyles the desktop rather than the titlebars. A frame that hardcodes a colour
-is a frame that stops matching the moment anyone changes anything.
+The frames, the loading window and a hosted shell that imports `Solium` all
+read that one singleton, so a colour changed there changes all of them. The
+fallback pointer and the default wallpaper do not read it; their colours are
+fixed. A copy of `Solium/Theme.qml` in `~/.config/solium/qml/Solium/` is meant
+to be how you change it, and does not work yet: the shipped module is found
+first ([#88](https://github.com/Lilium-Linux/solium/issues/88)). A frame that
+hardcodes a colour is a frame that stops matching the moment anyone changes
+anything.
 
 ## Animation inside a frame
 
