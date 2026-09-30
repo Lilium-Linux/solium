@@ -1,10 +1,13 @@
 # Does the compositor's half of the QML GPU path still work?
 
-    cd dev/wirecheck && cargo build        # in the container, as always
+    cd dev/wirecheck && cargo build        # natively, or in the build image
     ./target/debug/wirecheck               # on the host, which is where the GPU is
 
-`dev/gate.sh` runs both steps. Exit status is the result; there is nothing to
-read unless it fails.
+`dev/gate.sh` runs both steps (see "The gate" in
+[dev/README.md](../README.md)), passing the first `/dev/dri/renderD*` the
+machine has and writing the output to `dev/wirecheck/target/wirecheck.log`.
+Exit status is the result; there is nothing to read unless it fails, and then
+the gate prints the log's last 25 lines.
 
 This drives the **real** `crates/solium/qml/host.cpp` — compiled from source by
 `build.rs`, not linked out of `target/`, because a glob over
@@ -13,8 +16,9 @@ This drives the **real** `crates/solium/qml/host.cpp` — compiled from source b
 to this crate, so a worktree or somebody else's clone checks its own code.
 
 Against them it stands up a genuine smithay `GlesRenderer`, built the way
-`tty::State::open_gpu` builds one, and runs the sequence `ShellSurface::on_gpu`
-runs:
+`tty::State::open_gpu` builds one, and runs the sequence a hosted scene's
+`Gpu::element` runs on a frame Qt has something new for — through
+`Gpu::sample`, `Gpu::refresh` and `Gpu::render`:
 
     scene_new_gpu → restore our EGL context → render_gpu → restore
       → EGLFence::import → Renderer::wait → import_dmabuf
@@ -29,6 +33,31 @@ not a `#[test]`. It sets the `QT_QPA_EGLFS_*` environment itself, the same way
 `qml::keep_qt_off_the_hardware` does, so it opens the render node and never the
 card — it is safe to run inside a live session.
 
+## The cases, in the order they run
+
+The sections below are not in this order; this is the order `src/main.rs`
+runs them in. Each one stops the run at its first failure, except the byte
+comparisons of the first frame and the frame loop, which are recorded and
+judged at the very end.
+
+| | case | what it proves | fails with |
+|---|---|---|---|
+| 1 | the appear animation (`appear.qml`) | an animation started from rest takes steps, rather than landing in one tick | `the appear animation never took a step` |
+| 2 | the first frame (`quadrants.qml`) | Qt builds and renders a scene into the compositor's dmabuf; an independent EGL display, with neither Qt nor smithay in it, sees the pixels; and the picture is byte for byte the software path's | `an independent EGL display sees nothing in the buffer Qt reported rendering`, or `the GPU path does not match the software path` at the end |
+| 3 | the pointer's route | that frame, read back and uploaded as memory, is byte for byte what the software path uploads | `reading a scene's dmabuf back does not give the bytes the software path uploads` |
+| 4 | frames 2..N | every later frame, into a buffer wiped first, matches the reference | `the GPU path does not match the software path`, at the end of the run |
+| 5 | the resize | a rebind keeps the object tree and its running animation, the scene reads as animating, the new size draws right, and freeing the scene takes none of the compositor's GL objects | `the QML tree was rebuilt by a resize`, or `freeing the resized scene destroyed` … |
+| 6 | the compositor's own scenes | `cursor.qml`, `panes/top/Frame.qml` and `delegate.qml` build and draw on a GPU host; the first two read as not animating, and `delegate.qml`, whose one animation is in a `Repeater` delegate, reads as animating | `a GPU host could not build the` …, or `` `solium_qml_scene_animating` says `` … |
+| 7 | the pointer's size | `cursor.qml` at 16, 24, 48 and 96 draws from the corner and fills the same fraction at each | `the pointer fills` … |
+| 8 | the rounded-corner shader | it compiles in all three variants, and draws the middle intact, all four corners cut, four radii in the right quadrants and a zero radius square | `the rounded-corner shader did not compile`, or a message naming the variant or corner |
+| 9 | the first rebind | a scene built at 1x1 and never rendered rebinds and draws its new buffer right | `a scene rebound before it had ever rendered does not draw its new buffer` |
+| 10 | build and free | a scene built and freed without rendering takes none of the compositor's GL objects | `building and freeing a scene without rendering destroyed` … |
+| 11 | C-1 | a scene freed with the compositor's context current takes none of the compositor's GL objects, by a census of GL names | `Qt's teardown destroyed` … |
+
+**C-1** is the name the harness prints for case 11 (`=== C-1: free a scene
+with the compositor's context current ===`), and it is the name the controls
+below use.
+
 ## What it asserts, and why each one is not obvious
 
 **The picture matches the software path, byte for byte.** Not "looks right": the
@@ -36,9 +65,10 @@ same known image is uploaded through `import_memory` — which is top-down by
 definition and is what the software shell path uses — and drawn through
 identical element parameters. Comparing the two readbacks cancels whatever
 convention the offscreen target itself has, which is the only way to check
-orientation without asserting one. Run at scale 1, 2 and 1.25, because the
-element's `src` is in device pixels and its `size` is logical, and a transform
-that is right at 1 can be wrong everywhere else.
+orientation without asserting one. The gate runs it at scale 1 only; run it at
+`WIRECHECK_SCALE=2` and `1.25` too after touching the element transform,
+because the element's `src` is in device pixels and its `size` is logical, and
+a transform that is right at 1 can be wrong everywhere else.
 
 **Frames 2..N, not just the first.** The first frame after a scene is built is
 safe under bugs the rest are not, because `initialize()` left Qt's context
@@ -72,7 +102,7 @@ Measured at scale 1: `spin` reads 80 after five ticked frames and 96 after the
 rebind and one more. Under `WIRECHECK_REBUILD_ON_RESIZE` it reads 80 -> 0, which
 is printed in that control's own failure message.
 
-**Every scene the compositor builds, on a GPU host.** The compositor's real
+**The pointer and a pane layer, on a GPU host.** The compositor's real
 `qml/cursor.qml` and `qml/panes/top/Frame.qml`, built through
 `solium_qml_scene_new_gpu` and rendered. Before they moved to the GPU path,
 those two went down the *software* constructor, which a GPU host refuses
@@ -633,25 +663,26 @@ WIRECHECK_REBUILD_ON_RESIZE=1 ./target/debug/wirecheck   # must fail
 Expect `the QML tree was rebuilt by a resize: frames went 5 -> 1`. Run it at more
 than one scale; it has been checked at 1, 2 and 1.25.
 
-It is a knob here rather than a revert of `surface.rs` because nothing in this
-binary links the compositor crate: putting `build(...)` back in `render_on_gpu`
-changes nothing this runs. What `surface.rs` still owns is which of the two to
-call, and that is one line under a size comparison.
+It is a knob here rather than a revert because nothing in this binary links
+the compositor crate. The choice between rebinding and rebuilding is made in
+`Gpu::render`, in `crates/solium/src/qml/paint.rs`: one comparison of the size
+the scene is bound at against the size asked for, then `rebind_sized` on a new
+buffer. Changing it there changes nothing this runs.
 
 ## Knobs
 
 | | |
 |---|---|
-| `argv[1]` | render node, default `/dev/dri/renderD128`; honoured by the independent readback too, which used to hardcode it |
-| `WIRECHECK_SCALE`, `WIRECHECK_LOGICAL` | the scale and logical size to run at |
-| `WIRECHECK_FRAMES` | how many frames after the first, default 3 |
-| `WIRECHECK_QML` | the scene to render, default `quadrants.qml` beside this file |
+| `argv[1]` | render node, default `/dev/dri/renderD128`; honoured by the independent readback too, which used to hardcode it. `dev/gate.sh` passes the first `/dev/dri/renderD*` the machine has |
+| `WIRECHECK_SCALE`, `WIRECHECK_LOGICAL` | the scale and logical size to run at, default 1 and 64. The gate sets neither |
+| `WIRECHECK_FRAMES` | the number of the last frame the frame loop draws, default 3: frames 2 and 3 are compared after the first, and `1` compares none |
+| `WIRECHECK_QML` | the scene the first frame, the frame loop, the resize, the first rebind, build-and-free and C-1 use, default `quadrants.qml` beside this file. Every one of them compares against the quadrants picture, so another file fails them by design |
 | `WIRECHECK_HOST_CPP` | a different `host.cpp`, for the controls above; `host-control-clock.cpp` beside this file is the appear case's |
 | `WIRECHECK_REBUILD_ON_RESIZE` | rebuild the scene on a resize instead of rebinding it — the resize control above |
 | `WIRECHECK_STOP_THE_CLOCK` | stop ticking from the rebind onward — the animation control above |
 | `WIRECHECK_KEEP_RESIZED_SCENE` | do not free the resized scene, so the teardown control reaches C-1 |
 | `WIRECHECK_RESTORE_EARLY=0` | skip the restore after `scene_new_gpu` |
-| `WIRECHECK_NO_RESTORE` | skip *every* restore of the compositor's context, not only the early one |
+| `WIRECHECK_NO_RESTORE` | skip both restores of the compositor's context around the first scene's build and first render, the early one included. Every restore after that still runs |
 | `WIRECHECK_LATE_RENDERER`, `WIRECHECK_SEPARATE_GBM` | build the renderer after Qt, or on its own device |
 | `WIRECHECK_RENDERER_NODE` | the node the renderer's own device comes from, with `WIRECHECK_SEPARATE_GBM`; defaults to `argv[1]` |
 
