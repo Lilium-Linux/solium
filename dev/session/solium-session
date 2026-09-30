@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# Solium as the user's graphical session: what the session file starts (#146).
+#
+# `solium --tty --session` is the only start that tells systemd and D-Bus
+# activation about the session (`session::tests::a_manual_tty_start_tells_nobody`).
+# Solium undoes that itself on a clean exit and on SIGTERM, SIGINT or SIGHUP
+# (`session::tests::the_target_is_stopped_and_the_variables_unset_on_exit`,
+# `signals::tests::each_ending_signal_stops_the_loop`), but a crash or a SIGKILL
+# gives it no chance, and a target has no process for systemd to see go. So
+# when Solium has gone and solium-session.target is still active, this stops it
+# and unsets what Solium exported. dev/install-check.sh runs it against a
+# stand-in solium and systemctl.
+here="$(dirname "$(readlink -f "$0")")"
+# Caught rather than obeyed: logind's SIGTERM reaches this shell too, and the
+# clean-up has to wait until Solium has gone. The shell waits for Solium before
+# running a trap, and Solium starts with the default dispositions back.
+trap : HUP INT TERM
+"$here/solium" --tty --session
+status=$?
+if systemctl --user --quiet is-active solium-session.target; then
+    echo "solium-session: Solium ended (status $status) and left solium-session.target running; stopping it" >&2
+    systemctl --user stop solium-session.target solium-autostart.target
+    systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE
+fi
+exit "$status"

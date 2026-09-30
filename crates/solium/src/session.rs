@@ -3,33 +3,50 @@
 //! Portals, D-Bus-activated programs, XDG autostart and user services bound to
 //! `graphical-session.target` are all started by systemd's user manager or by
 //! D-Bus activation, and neither has ever heard of this compositor's socket.
-//! So once it is up Solium tells them, over the session bus:
+//! So once it is up, a Solium started as the session tells them, over the
+//! session bus:
 //!
 //! 1. `org.freedesktop.systemd1.Manager.SetEnvironment` and
 //!    `org.freedesktop.DBus.UpdateActivationEnvironment` with
 //!    `WAYLAND_DISPLAY`, `XDG_CURRENT_DESKTOP` and `XDG_SESSION_TYPE`, and
 //!    again with `DISPLAY` once XWayland has one;
-//! 2. `StartUnit` on `solium-session.target`, once X11 has answered one way or
-//!    the other, so an X11 program in `~/.config/autostart` finds `DISPLAY`;
-//! 3. on exit, `StopUnit` on that target and `UnsetEnvironment` on the
+//! 2. `StartUnit` on `solium-session.target`, and on `solium-autostart.target`
+//!    while `session.autostart` is on, once X11 has answered one way or the
+//!    other, so an X11 program in `~/.config/autostart` finds `DISPLAY`;
+//! 3. on exit, `StopUnit` on the session target and `UnsetEnvironment` on the
 //!    variables, so a Plasma login afterwards inherits no dead socket.
 //!
 //! `the_environment_goes_out_when_the_socket_is_up_and_again_with_display`,
 //! `the_target_is_stopped_and_the_variables_unset_on_exit` and
 //! `the_calls_reach_systemd_and_dbus_as_their_methods` hold it to that.
 //!
+//! Before any of that, the bus thread asks systemd who has
+//! `graphical-session.target` ([`claim`]). Targets a previous Solium left
+//! running are stopped first, and another desktop of this user's is left
+//! alone: `a_session_left_running_is_stopped_before_the_first_export` and
+//! `another_desktop_holding_the_graphical_session_is_left_alone`.
+//!
 //! The calls are made from a thread of their own, because a session bus that
 //! is slow to answer must never hold a frame: see [`Worker`].
 
-use std::{collections::HashMap, sync::mpsc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
-/// The target a session starts, with XDG autostart. `dev/session/` ships it.
+use zbus::zvariant::OwnedObjectPath;
+
+/// The target a session starts, which starts `graphical-session.target`.
+/// `dev/session/` ships it, and a user's own units attach to it.
 pub(crate) const TARGET: &str = "solium-session.target";
-/// The same target without `Wants=xdg-desktop-autostart.target`, for
-/// `session.autostart = false`: a unit's dependencies are fixed when it is
-/// loaded, so the choice is between two units.
-/// `session_autostart_false_starts_the_target_without_autostart`.
-pub(crate) const TARGET_WITHOUT_AUTOSTART: &str = "solium-session-no-autostart.target";
+/// XDG autostart, started after [`TARGET`] while `session.autostart` is on,
+/// and stopped with it (`PartOf=`). A separate unit so that turning autostart
+/// off leaves what is attached to [`TARGET`] starting.
+/// `session_autostart_false_starts_the_session_without_autostart`.
+pub(crate) const AUTOSTART: &str = "solium-autostart.target";
+/// What a desktop's session target binds to, and so what says one is running.
+const GRAPHICAL: &str = "graphical-session.target";
 
 /// How long one call may take, and how long exit waits for the last ones.
 ///
@@ -44,7 +61,7 @@ const PATIENCE: Duration = Duration::from_secs(2);
 pub(crate) struct Settings {
     /// Export the environment and start the target at all.
     pub(crate) systemd: bool,
-    /// Start [`TARGET`] rather than [`TARGET_WITHOUT_AUTOSTART`].
+    /// Start [`AUTOSTART`] beside [`TARGET`].
     pub(crate) autostart: bool,
 }
 
@@ -58,15 +75,37 @@ impl Default for Settings {
     }
 }
 
-/// Which backend is starting a session.
+/// How this compositor was started, which says whether it is the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Place {
-    /// `--tty`: this compositor *is* the session.
-    Hardware,
+    /// `solium --tty --session`, which is how `solium-session`, the session
+    /// file's `Exec`, starts it: this compositor is the user's graphical
+    /// session.
+    Session,
+    /// `solium --tty` started by hand: from a text console, say, while the
+    /// user's own desktop runs on another VT with the same systemd and the
+    /// same session bus. Told nothing unless `SOLIUM_SESSION_BUS` names a
+    /// bus. `a_manual_tty_start_tells_nobody`.
+    Console,
     /// A window inside another session, whose environment belongs to that
     /// session. Told nothing unless `SOLIUM_SESSION_BUS` names a bus.
     /// `a_nested_run_tells_nobody_unless_it_is_given_a_bus`.
     Nested,
+}
+
+impl Place {
+    /// `--tty`, from what came after it on the command line: `--session`
+    /// anywhere there, like `--qml`. `a_manual_tty_start_tells_nobody`.
+    pub(crate) fn tty(arguments: impl IntoIterator<Item = String>) -> Self {
+        if arguments
+            .into_iter()
+            .any(|argument| argument == "--session")
+        {
+            Self::Session
+        } else {
+            Self::Console
+        }
+    }
 }
 
 /// One call on the session bus.
@@ -95,7 +134,7 @@ trait Sink {
 pub(crate) struct Session {
     /// `None` once ended, and for a session that tells nobody anything.
     sink: Option<Box<dyn Sink>>,
-    target: &'static str,
+    autostart: bool,
     desktop: String,
     socket: Option<String>,
     display: Option<u32>,
@@ -111,7 +150,7 @@ impl std::fmt::Debug for Session {
         formatter
             .debug_struct("Session")
             .field("telling", &self.sink.is_some())
-            .field("target", &self.target)
+            .field("autostart", &self.autostart)
             .field("started", &self.started)
             .field("exported", &self.exported)
             .finish_non_exhaustive()
@@ -120,11 +159,12 @@ impl std::fmt::Debug for Session {
 
 impl Session {
     /// A session that tells nobody anything: `session.systemd = false`, a
-    /// nested run, and every `Solium` before its backend starts one.
+    /// start that is not the session, and every `Solium` before its backend
+    /// starts one.
     pub(crate) fn off() -> Self {
         Self {
             sink: None,
-            target: TARGET,
+            autostart: true,
             desktop: String::new(),
             socket: None,
             display: None,
@@ -137,7 +177,8 @@ impl Session {
     /// The session a backend starts, from the configuration's `session`.
     ///
     /// `bus` is `SOLIUM_SESSION_BUS`: the bus to tell instead of the session
-    /// bus, and nested the only way to tell one at all.
+    /// bus, and the only way to tell one at all from a start that is not the
+    /// session.
     pub(crate) fn begin(settings: Settings, place: Place, bus: Option<String>) -> Self {
         if !settings.systemd {
             tracing::info!(
@@ -146,10 +187,12 @@ impl Session {
             );
             return Self::off();
         }
-        if place == Place::Nested && bus.is_none() {
-            tracing::debug!(
-                "nested: the session this runs inside keeps its own environment \
-                 (SOLIUM_SESSION_BUS names a bus to tell instead)"
+        if place != Place::Session && bus.is_none() {
+            tracing::info!(
+                ?place,
+                "not started as the session (the session file's solium-session, or \
+                 `solium --tty --session`): systemd and D-Bus activation keep the \
+                 environment they have. SOLIUM_SESSION_BUS names a bus to tell instead"
             );
             return Self::off();
         }
@@ -169,11 +212,7 @@ impl Session {
     fn with_sink(settings: Settings, sink: Box<dyn Sink>, desktop: String) -> Self {
         Self {
             sink: Some(sink),
-            target: if settings.autostart {
-                TARGET
-            } else {
-                TARGET_WITHOUT_AUTOSTART
-            },
+            autostart: settings.autostart,
             desktop,
             socket: None,
             display: None,
@@ -209,8 +248,10 @@ impl Session {
         let Some(mut sink) = self.sink.take() else {
             return;
         };
+        // One stop: the autostart target is `PartOf=` this one, so it goes
+        // with it. `the_target_is_stopped_and_the_variables_unset_on_exit`.
         if self.started {
-            sink.send(Call::StopUnit(self.target.to_owned()));
+            sink.send(Call::StopUnit(TARGET.to_owned()));
         }
         // Unset only: D-Bus has no call that removes a variable from the
         // activation environment, so nothing is sent there.
@@ -273,7 +314,10 @@ impl Session {
         let Some(sink) = self.sink.as_mut() else {
             return;
         };
-        sink.send(Call::StartUnit(self.target.to_owned()));
+        sink.send(Call::StartUnit(TARGET.to_owned()));
+        if self.autostart {
+            sink.send(Call::StartUnit(AUTOSTART.to_owned()));
+        }
         self.started = true;
     }
 }
@@ -286,7 +330,7 @@ impl Drop for Session {
 
 /// `XDG_CURRENT_DESKTOP` as the session file's `DesktopNames` set it, or
 /// `Lilium` when nothing did. `the_desktop_is_lilium_unless_the_session_said_otherwise`.
-fn desktop(set: Option<String>) -> String {
+pub(crate) fn desktop(set: Option<String>) -> String {
     set.filter(|name| !name.is_empty())
         .unwrap_or_else(|| "Lilium".to_owned())
 }
@@ -309,7 +353,14 @@ impl Worker {
             .spawn(move || {
                 match connect(bus.as_deref()) {
                     Ok(connection) => {
+                        let telling = claim(&connection);
+                        // Drained either way, so the calls queued meanwhile
+                        // and the ones exit sends end here too.
+                        // `another_desktop_holding_the_graphical_session_is_left_alone`.
                         for call in incoming {
+                            if !telling {
+                                continue;
+                            }
                             match perform(&connection, &call) {
                                 Ok(()) => tracing::info!(?call, "told the session"),
                                 Err(err) => {
@@ -366,6 +417,133 @@ const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER: &str = "org.freedesktop.systemd1.Manager";
 const DBUS: &str = "org.freedesktop.DBus";
 const DBUS_PATH: &str = "/org/freedesktop/DBus";
+
+/// One unit, as `ListUnitsByNames` answers: its active state and its job.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct UnitState {
+    active: String,
+    job: String,
+}
+
+impl UnitState {
+    /// Running in any sense, stopping included.
+    fn up(&self) -> bool {
+        matches!(
+            self.active.as_str(),
+            "active" | "activating" | "reloading" | "deactivating"
+        )
+    }
+
+    /// On its way down.
+    fn stopping(&self) -> bool {
+        self.job == "stop" || self.active == "deactivating"
+    }
+
+    /// Up, and staying up.
+    fn holds(&self) -> bool {
+        self.up() && !self.stopping()
+    }
+}
+
+/// `ListUnitsByNames`'s `a(ssssssouso)`, of which the fourth and ninth are
+/// read.
+type UnitInfo = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    OwnedObjectPath,
+    u32,
+    String,
+    OwnedObjectPath,
+);
+
+fn units(connection: &zbus::blocking::Connection) -> zbus::Result<HashMap<String, UnitState>> {
+    let reply = connection.call_method(
+        Some(SYSTEMD),
+        SYSTEMD_PATH,
+        Some(SYSTEMD_MANAGER),
+        "ListUnitsByNames",
+        &vec![GRAPHICAL, TARGET, AUTOSTART],
+    )?;
+    let listed: Vec<UnitInfo> = reply.body().deserialize()?;
+    Ok(listed
+        .into_iter()
+        .map(|(name, _, _, active, _, _, _, _, job, _)| (name, UnitState { active, job }))
+        .collect())
+}
+
+/// Whether this session may tell systemd and D-Bus anything, asked before
+/// the first export.
+///
+/// Solium's targets up before this Solium has started them are a previous
+/// Solium's, left by a crash: they are stopped, and `graphical-session.target`
+/// given [`PATIENCE`] to go with them, so what was bound to the dead display
+/// stops. `a_session_left_running_is_stopped_before_the_first_export`.
+///
+/// `graphical-session.target` up and staying up after that belongs to
+/// another desktop of this user's, and this session leaves systemd and D-Bus
+/// to it. `another_desktop_holding_the_graphical_session_is_left_alone`.
+///
+/// A systemd that cannot be asked is told anyway: without one there is no
+/// target to hold, and D-Bus activation still wants the environment.
+/// `a_systemd_that_cannot_be_asked_is_told_anyway`.
+fn claim(connection: &zbus::blocking::Connection) -> bool {
+    let mut states = match units(connection) {
+        Ok(states) => states,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "could not ask systemd who has {GRAPHICAL}; telling it about this session anyway"
+            );
+            return true;
+        }
+    };
+    let state = |states: &HashMap<String, UnitState>, unit: &str| {
+        states.get(unit).cloned().unwrap_or_default()
+    };
+    let leftovers: Vec<&str> = [TARGET, AUTOSTART]
+        .into_iter()
+        .filter(|unit| state(&states, unit).up())
+        .collect();
+    if !leftovers.is_empty() {
+        tracing::warn!(
+            ?leftovers,
+            "a Solium session that did not end cleanly left these running: stopping them \
+             before this one starts"
+        );
+        for unit in &leftovers {
+            if state(&states, unit).stopping() {
+                continue;
+            }
+            if let Err(err) = perform(connection, &Call::StopUnit((*unit).to_owned())) {
+                tracing::warn!(?err, unit, "could not stop it");
+            }
+        }
+        let deadline = Instant::now() + PATIENCE;
+        while state(&states, GRAPHICAL).up() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            match units(connection) {
+                Ok(now) => states = now,
+                Err(err) => {
+                    tracing::warn!(?err, "could not ask systemd again");
+                    break;
+                }
+            }
+        }
+    }
+    if state(&states, GRAPHICAL).holds() {
+        tracing::warn!(
+            "{GRAPHICAL} is already active, and not for a Solium session: another desktop \
+             of this user's is running (on another VT, say). This session leaves systemd \
+             and D-Bus activation alone, so that desktop keeps its display"
+        );
+        return false;
+    }
+    true
+}
 
 /// One call, on the wire. `the_calls_reach_systemd_and_dbus_as_their_methods`.
 fn perform(connection: &zbus::blocking::Connection, call: &Call) -> zbus::Result<()> {
@@ -433,7 +611,10 @@ mod tests {
     use std::{
         cell::RefCell,
         rc::Rc,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU32, Ordering},
+        },
     };
 
     use super::*;
@@ -479,7 +660,14 @@ mod tests {
         ]
     }
 
-    /// Exactly those variables, at both moments, and the target once X11 has
+    fn start() -> [Call; 2] {
+        [
+            Call::StartUnit(TARGET.to_owned()),
+            Call::StartUnit(AUTOSTART.to_owned()),
+        ]
+    }
+
+    /// Exactly those variables, at both moments, and the targets once X11 has
     /// answered.
     #[test]
     fn the_environment_goes_out_when_the_socket_is_up_and_again_with_display() {
@@ -503,7 +691,7 @@ mod tests {
             "XDG_SESSION_TYPE=wayland",
         ])
         .to_vec();
-        expected.push(Call::StartUnit(TARGET.to_owned()));
+        expected.extend(start());
         assert_eq!(recorder.take(), expected);
 
         // XWayland answers once; a repeat says nothing new.
@@ -511,7 +699,7 @@ mod tests {
         assert_eq!(recorder.take(), Vec::new());
     }
 
-    /// No X11 coming: the target starts on the first export alone, and a
+    /// No X11 coming: the targets start on the first export alone, and a
     /// display that turns up late is still exported.
     #[test]
     fn without_x11_the_target_starts_after_the_first_export() {
@@ -519,8 +707,8 @@ mod tests {
         session.wayland("wayland-1");
         session.x11(None);
         let calls = recorder.take();
-        assert_eq!(calls.len(), 3, "{calls:?}");
-        assert_eq!(calls[2], Call::StartUnit(TARGET.to_owned()));
+        assert_eq!(calls.len(), 4, "{calls:?}");
+        assert_eq!(calls[2..], start());
 
         session.x11(Some(0));
         let calls = recorder.take();
@@ -593,7 +781,7 @@ mod tests {
                 systemd: false,
                 autostart: true,
             },
-            Place::Hardware,
+            Place::Session,
             None,
         );
         assert!(session.is_off());
@@ -605,22 +793,26 @@ mod tests {
         assert!(session.exported.is_empty());
     }
 
+    /// The session target, and what users attach to it, still starts; only
+    /// XDG autostart is left out.
     #[test]
-    fn session_autostart_false_starts_the_target_without_autostart() {
+    fn session_autostart_false_starts_the_session_without_autostart() {
         let (mut session, recorder) = session(Settings {
             systemd: true,
             autostart: false,
         });
         session.wayland("wayland-5");
         session.x11(None);
-        assert_eq!(
-            recorder.take().last(),
-            Some(&Call::StartUnit(TARGET_WITHOUT_AUTOSTART.to_owned()))
+        let calls = recorder.take();
+        assert_eq!(calls.last(), Some(&Call::StartUnit(TARGET.to_owned())));
+        assert!(
+            !calls.contains(&Call::StartUnit(AUTOSTART.to_owned())),
+            "{calls:?}"
         );
         session.end();
         assert_eq!(
             recorder.take().first(),
-            Some(&Call::StopUnit(TARGET_WITHOUT_AUTOSTART.to_owned()))
+            Some(&Call::StopUnit(TARGET.to_owned()))
         );
     }
 
@@ -629,6 +821,26 @@ mod tests {
     #[test]
     fn a_nested_run_tells_nobody_unless_it_is_given_a_bus() {
         assert!(Session::begin(Settings::default(), Place::Nested, None).is_off());
+    }
+
+    /// `solium --tty` by hand, from a text console beside a desktop on another
+    /// VT: that desktop's systemd and bus are this one's too, and are left
+    /// alone. Only `--session`, which `solium-session` passes, tells them.
+    #[test]
+    fn a_manual_tty_start_tells_nobody() {
+        let place = |arguments: &[&str]| Place::tty(arguments.iter().map(|&each| each.to_owned()));
+        assert_eq!(place(&[]), Place::Console);
+        assert_eq!(place(&["--qml", "gpu"]), Place::Console);
+        assert_eq!(place(&["--sessions"]), Place::Console);
+        assert_eq!(place(&["--session"]), Place::Session);
+        assert_eq!(place(&["--qml", "gpu", "--session"]), Place::Session);
+        let mut manual = Session::begin(Settings::default(), place(&[]), None);
+        assert!(manual.is_off());
+        manual.wayland("wayland-11");
+        manual.x11(Some(5));
+        manual.end();
+        assert!(manual.exported.is_empty());
+        assert!(!manual.started);
     }
 
     /// Read when the session starts: a configuration applied later -- which
@@ -659,7 +871,7 @@ mod tests {
 
         assert_eq!(recorder.take(), Vec::new());
         assert!(state.session.started);
-        assert_eq!(state.session.target, TARGET);
+        assert!(state.session.autostart);
     }
 
     #[test]
@@ -687,10 +899,7 @@ mod tests {
     /// handshake for ever, and exit waits for it no longer than [`PATIENCE`].
     #[test]
     fn a_bus_that_never_answers_holds_the_exit_for_at_most_its_patience() {
-        let directory =
-            std::env::temp_dir().join(format!("solium-session-test-silent-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let directory = scratch("silent");
         let path = directory.join("bus");
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("binding the socket");
         // Accepted and held, so the peer is connected and hears nothing.
@@ -711,40 +920,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// A directory of this test's own.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "solium-session-test-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        directory
+    }
+
     /// What the stand-in heard, as `interface.Method args`.
     type Heard = Arc<Mutex<Vec<String>>>;
+    /// Each unit's active state and job, as the stand-in systemd has them.
+    type Units = Arc<Mutex<HashMap<String, UnitState>>>;
 
-    struct StandInSystemd(Heard);
+    struct StandInSystemd {
+        heard: Heard,
+        units: Units,
+        /// Whether `ListUnitsByNames` is a method this systemd has.
+        lists: bool,
+    }
+
+    impl StandInSystemd {
+        fn hear(&self, what: String) {
+            self.heard.lock().expect("the list").push(what);
+        }
+
+        /// A unit started or stopped, and `graphical-session.target`, which is
+        /// `StopWhenUnneeded=`, up exactly while one of Solium's is.
+        fn set(&self, unit: &str, active: &str) {
+            let state = |active: &str| UnitState {
+                active: active.to_owned(),
+                job: String::new(),
+            };
+            let mut units = self.units.lock().expect("the units");
+            units.insert(unit.to_owned(), state(active));
+            let needed = [TARGET, AUTOSTART]
+                .iter()
+                .any(|unit| units.get(*unit).is_some_and(UnitState::up));
+            units.insert(
+                GRAPHICAL.to_owned(),
+                state(if needed { "active" } else { "inactive" }),
+            );
+        }
+    }
 
     #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
     impl StandInSystemd {
         fn set_environment(&self, assignments: Vec<String>) {
-            self.0
-                .lock()
-                .expect("the list")
-                .push(format!("systemd1.Manager.SetEnvironment {assignments:?}"));
+            self.hear(format!("systemd1.Manager.SetEnvironment {assignments:?}"));
         }
         fn unset_environment(&self, names: Vec<String>) {
-            self.0
-                .lock()
-                .expect("the list")
-                .push(format!("systemd1.Manager.UnsetEnvironment {names:?}"));
+            self.hear(format!("systemd1.Manager.UnsetEnvironment {names:?}"));
         }
-        fn start_unit(&self, name: String, mode: String) -> zbus::zvariant::OwnedObjectPath {
-            self.0
-                .lock()
-                .expect("the list")
-                .push(format!("systemd1.Manager.StartUnit {name} {mode}"));
-            zbus::zvariant::OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/1")
-                .expect("a job path")
+        fn start_unit(&self, name: String, mode: String) -> OwnedObjectPath {
+            self.hear(format!("systemd1.Manager.StartUnit {name} {mode}"));
+            self.set(&name, "active");
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/1").expect("a job path")
         }
-        fn stop_unit(&self, name: String, mode: String) -> zbus::zvariant::OwnedObjectPath {
-            self.0
-                .lock()
-                .expect("the list")
-                .push(format!("systemd1.Manager.StopUnit {name} {mode}"));
-            zbus::zvariant::OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/2")
-                .expect("a job path")
+        fn stop_unit(&self, name: String, mode: String) -> OwnedObjectPath {
+            self.hear(format!("systemd1.Manager.StopUnit {name} {mode}"));
+            self.set(&name, "inactive");
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/2").expect("a job path")
+        }
+        fn list_units_by_names(&self, names: Vec<String>) -> zbus::fdo::Result<Vec<UnitInfo>> {
+            if !self.lists {
+                return Err(zbus::fdo::Error::UnknownMethod("not this systemd".into()));
+            }
+            self.hear(format!("systemd1.Manager.ListUnitsByNames {names:?}"));
+            let units = self.units.lock().expect("the units");
+            let path = OwnedObjectPath::try_from("/").expect("a path");
+            Ok(names
+                .into_iter()
+                .map(|name| {
+                    let state = units.get(&name).cloned().unwrap_or_else(|| UnitState {
+                        active: "inactive".to_owned(),
+                        job: String::new(),
+                    });
+                    (
+                        name,
+                        String::new(),
+                        "loaded".to_owned(),
+                        state.active,
+                        String::new(),
+                        String::new(),
+                        path.clone(),
+                        0,
+                        state.job,
+                        path.clone(),
+                    )
+                })
+                .collect())
         }
     }
 
@@ -752,6 +1022,11 @@ mod tests {
 
     #[zbus::interface(name = "org.freedesktop.DBus")]
     impl StandInDriver {
+        /// What a client says first on a bus.
+        fn hello(&self) -> String {
+            ":1.1".to_owned()
+        }
+        fn add_match(&self, _rule: String) {}
         fn update_activation_environment(&self, environment: HashMap<String, String>) {
             let mut sorted: Vec<_> = environment.into_iter().collect();
             sorted.sort();
@@ -762,46 +1037,95 @@ mod tests {
         }
     }
 
-    /// Each [`Call`] arrives as the method, interface, path and arguments
-    /// systemd and the bus driver answer to. Served by zbus over a socket
-    /// pair, so no bus, real or private, is anywhere near it.
-    #[test]
-    fn the_calls_reach_systemd_and_dbus_as_their_methods() {
-        let heard = Heard::default();
-        let (server_end, client_end) =
-            std::os::unix::net::UnixStream::pair().expect("a socket pair");
-        let server = {
-            let heard = heard.clone();
-            std::thread::spawn(move || {
-                zbus::blocking::connection::Builder::async_io_unix_stream(server_end)
-                    .server(zbus::Guid::generate())
-                    .expect("a server guid")
-                    .p2p()
-                    .serve_at(SYSTEMD_PATH, StandInSystemd(heard.clone()))
-                    .expect("serving systemd")
-                    .serve_at(DBUS_PATH, StandInDriver(heard))
-                    .expect("serving the driver")
-                    .build()
-                    .expect("the stand-in's connection")
-            })
-        };
-        let client = zbus::blocking::connection::Builder::async_io_unix_stream(client_end)
-            .p2p()
-            .build()
-            .expect("the client's connection");
-        let _server = server.join().expect("the stand-in");
+    /// A stand-in session bus: systemd's manager and the bus driver, served by
+    /// zbus at a socket of the test's own to the one connection a [`Worker`]
+    /// makes. A whole session plays through it, with no bus, real or
+    /// private, anywhere near.
+    struct StandIn {
+        address: String,
+        heard: Heard,
+        directory: std::path::PathBuf,
+        _stop: mpsc::Sender<()>,
+    }
 
-        let (mut session, recorder) = session(Settings::default());
-        session.wayland("wayland-9");
-        session.x11(Some(4));
-        session.end();
-        for call in recorder.take() {
-            perform(&client, &call).expect("the stand-in answers");
+    impl StandIn {
+        fn new(units: &[(&str, &str, &str)], lists: bool) -> Self {
+            let directory = scratch("bus");
+            let path = directory.join("bus");
+            let listener =
+                std::os::unix::net::UnixListener::bind(&path).expect("binding the socket");
+            let heard = Heard::default();
+            let states = Units::default();
+            for &(unit, active, job) in units {
+                states.lock().expect("the units").insert(
+                    unit.to_owned(),
+                    UnitState {
+                        active: active.to_owned(),
+                        job: job.to_owned(),
+                    },
+                );
+            }
+            let (stop, stopped) = mpsc::channel::<()>();
+            {
+                let heard = heard.clone();
+                std::thread::spawn(move || {
+                    let Ok((stream, _)) = listener.accept() else {
+                        return;
+                    };
+                    let systemd = StandInSystemd {
+                        heard: heard.clone(),
+                        units: states,
+                        lists,
+                    };
+                    let connection =
+                        zbus::blocking::connection::Builder::async_io_unix_stream(stream)
+                            .server(zbus::Guid::generate())
+                            .expect("a server guid")
+                            .p2p()
+                            .serve_at(SYSTEMD_PATH, systemd)
+                            .expect("serving systemd")
+                            .serve_at(DBUS_PATH, StandInDriver(heard))
+                            .expect("serving the driver")
+                            .build();
+                    // Served until the test is done with it.
+                    let _ = stopped.recv();
+                    drop(connection);
+                });
+            }
+            Self {
+                address: format!("unix:path={}", path.display()),
+                heard,
+                directory,
+                _stop: stop,
+            }
         }
 
+        /// A session, from its first export to its exit, told to this bus.
+        fn play(&self, settings: Settings) -> Vec<String> {
+            let mut session = Session::begin(settings, Place::Session, Some(self.address.clone()));
+            assert!(!session.is_off());
+            session.wayland("wayland-9");
+            session.x11(Some(4));
+            session.end();
+            self.heard.lock().expect("the list").clone()
+        }
+    }
+
+    impl Drop for StandIn {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    const LISTED: &str = "systemd1.Manager.ListUnitsByNames \
+                          [\"graphical-session.target\", \"solium-session.target\", \
+                          \"solium-autostart.target\"]";
+
+    /// Everything a session sends after it has been let in, as heard.
+    fn told(display_socket: &str) -> Vec<String> {
         let vars = |display: bool| {
             let mut sorted = vec![
-                ("WAYLAND_DISPLAY".to_owned(), "wayland-9".to_owned()),
+                ("WAYLAND_DISPLAY".to_owned(), display_socket.to_owned()),
                 ("XDG_CURRENT_DESKTOP".to_owned(), "Lilium".to_owned()),
                 ("XDG_SESSION_TYPE".to_owned(), "wayland".to_owned()),
             ];
@@ -811,23 +1135,79 @@ mod tests {
             sorted.sort();
             format!("DBus.UpdateActivationEnvironment {sorted:?}")
         };
-        assert_eq!(
-            *heard.lock().expect("the list"),
-            vec![
-                "systemd1.Manager.SetEnvironment [\"WAYLAND_DISPLAY=wayland-9\", \
+        vec![
+            format!(
+                "systemd1.Manager.SetEnvironment [\"WAYLAND_DISPLAY={display_socket}\", \
                  \"XDG_CURRENT_DESKTOP=Lilium\", \"XDG_SESSION_TYPE=wayland\"]"
-                    .to_owned(),
-                vars(false),
-                "systemd1.Manager.SetEnvironment [\"WAYLAND_DISPLAY=wayland-9\", \
+            ),
+            vars(false),
+            format!(
+                "systemd1.Manager.SetEnvironment [\"WAYLAND_DISPLAY={display_socket}\", \
                  \"DISPLAY=:4\", \"XDG_CURRENT_DESKTOP=Lilium\", \"XDG_SESSION_TYPE=wayland\"]"
-                    .to_owned(),
-                vars(true),
-                "systemd1.Manager.StartUnit solium-session.target replace".to_owned(),
-                "systemd1.Manager.StopUnit solium-session.target replace".to_owned(),
-                "systemd1.Manager.UnsetEnvironment [\"WAYLAND_DISPLAY\", \
-                 \"XDG_CURRENT_DESKTOP\", \"XDG_SESSION_TYPE\", \"DISPLAY\"]"
-                    .to_owned(),
-            ]
+            ),
+            vars(true),
+            "systemd1.Manager.StartUnit solium-session.target replace".to_owned(),
+            "systemd1.Manager.StartUnit solium-autostart.target replace".to_owned(),
+            "systemd1.Manager.StopUnit solium-session.target replace".to_owned(),
+            "systemd1.Manager.UnsetEnvironment [\"WAYLAND_DISPLAY\", \
+             \"XDG_CURRENT_DESKTOP\", \"XDG_SESSION_TYPE\", \"DISPLAY\"]"
+                .to_owned(),
+        ]
+    }
+
+    /// Each [`Call`] arrives as the method, interface, path and arguments
+    /// systemd and the bus driver answer to, through the bus thread and in
+    /// the order the session sent them, after the one question [`claim`]
+    /// asks.
+    #[test]
+    fn the_calls_reach_systemd_and_dbus_as_their_methods() {
+        let bus = StandIn::new(&[], true);
+        let mut expected = vec![LISTED.to_owned()];
+        expected.extend(told("wayland-9"));
+        assert_eq!(bus.play(Settings::default()), expected);
+    }
+
+    /// A crash leaves the targets up and `graphical-session.target` with them,
+    /// bound to a display that has gone. The next session stops them before
+    /// it says anything, and then starts its own.
+    #[test]
+    fn a_session_left_running_is_stopped_before_the_first_export() {
+        let bus = StandIn::new(
+            &[
+                (GRAPHICAL, "active", ""),
+                (TARGET, "active", ""),
+                (AUTOSTART, "active", ""),
+            ],
+            true,
         );
+        let mut expected = vec![
+            LISTED.to_owned(),
+            "systemd1.Manager.StopUnit solium-session.target replace".to_owned(),
+            "systemd1.Manager.StopUnit solium-autostart.target replace".to_owned(),
+            LISTED.to_owned(),
+        ];
+        expected.extend(told("wayland-9"));
+        assert_eq!(bus.play(Settings::default()), expected);
+    }
+
+    /// Plasma on another VT holds `graphical-session.target`, and shares this
+    /// user's systemd and bus. Nothing is exported, started, stopped or unset
+    /// over it, before or at exit.
+    #[test]
+    fn another_desktop_holding_the_graphical_session_is_left_alone() {
+        let bus = StandIn::new(&[(GRAPHICAL, "active", "")], true);
+        assert_eq!(bus.play(Settings::default()), vec![LISTED.to_owned()]);
+
+        // On its way down it holds nothing: a logout of that desktop is ending.
+        let bus = StandIn::new(&[(GRAPHICAL, "active", "stop")], true);
+        let mut expected = vec![LISTED.to_owned()];
+        expected.extend(told("wayland-9"));
+        assert_eq!(bus.play(Settings::default()), expected);
+    }
+
+    #[test]
+    fn a_systemd_that_cannot_be_asked_is_told_anyway() {
+        let bus = StandIn::new(&[], false);
+        assert_eq!(bus.play(Settings::default()), told("wayland-9"));
     }
 }

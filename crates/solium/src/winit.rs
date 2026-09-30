@@ -59,6 +59,11 @@ const CAPTURE_SETTLE_FRAMES: u32 = 30;
 pub(crate) fn run() -> Result<()> {
     let mut event_loop: EventLoop<Solium> =
         EventLoop::try_new().context("creating the event loop")?;
+    // Ctrl+C in the terminal, or `timeout`, leaves the way a quit binding
+    // does. `signals::tests::each_ending_signal_stops_the_loop`.
+    crate::signals::listen(&event_loop.handle(), |state: &mut Solium| {
+        state.request = Some(crate::state::Request::Quit);
+    });
     let display: Display<Solium> = Display::new().context("creating the wayland display")?;
     let display_handle = display.handle();
 

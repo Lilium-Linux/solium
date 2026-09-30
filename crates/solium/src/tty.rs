@@ -325,9 +325,17 @@ fn preferred_mode(connector: &connector::Info) -> Option<DrmMode> {
         .copied()
 }
 
-pub(crate) fn run() -> Result<()> {
+/// The hardware session. `place` says whether this is the user's graphical
+/// session (`--tty --session`) or a start by hand (`--tty`); see `session.rs`.
+pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     let mut event_loop: EventLoop<State> =
         EventLoop::try_new().context("creating the event loop")?;
+    // First, so that a SIGTERM from logind at any point from here on stops
+    // the loop, and the session ends through `Session::end` below.
+    // `signals::tests::each_ending_signal_stops_the_loop`.
+    crate::signals::listen(&event_loop.handle(), |state: &mut State| {
+        state.signal.stop()
+    });
     let display: Display<Solium> = Display::new().context("creating the wayland display")?;
     let display_handle = display.handle();
 
@@ -360,11 +368,7 @@ pub(crate) fn run() -> Result<()> {
     // Told once the configuration has said whether to, with the socket
     // already bound. See `session.rs` and its tests.
     let settings = scripts.as_ref().map(Scripts::session).unwrap_or_default();
-    solium.session = crate::session::Session::begin(
-        settings,
-        crate::session::Place::Hardware,
-        crate::dev::session_bus(),
-    );
+    solium.session = crate::session::Session::begin(settings, place, crate::dev::session_bus());
     solium.session.wayland(&solium.socket_name);
     if !x11_coming {
         solium.session.x11(None);

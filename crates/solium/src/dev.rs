@@ -160,9 +160,11 @@ pub(crate) fn loading_at() -> Vec<(Duration, String)> {
 /// dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'
 /// ```
 ///
-/// Nested, this is the only way the session is told anything: without it a
-/// nested run leaves the environment of the session it runs inside alone, as
-/// it must. `a_nested_run_tells_nobody_unless_it_is_given_a_bus`.
+/// Nested, or `solium --tty` without `--session`, this is the only way the
+/// session is told anything: without it such a run leaves the environment of
+/// the session around it alone, as it must.
+/// `a_nested_run_tells_nobody_unless_it_is_given_a_bus` and
+/// `a_manual_tty_start_tells_nobody`.
 pub(crate) fn session_bus() -> Option<String> {
     std::env::var("SOLIUM_SESSION_BUS")
         .ok()

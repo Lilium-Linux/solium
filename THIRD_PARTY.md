@@ -37,7 +37,8 @@ Wayland, event-loop and hardware crates it builds on (the `wayland-*` crates,
 are all MIT too. Lua comes from `mlua`
 (MIT), which compiles the Lua sources vendored by `lua-src` (MIT). The session
 bus is spoken through `zbus` and the `zvariant` crates (MIT), on the `async-io`
-family of crates (MIT OR Apache-2.0).
+family of crates (MIT OR Apache-2.0), one of which, `async-signal`, also reads
+the signals that end a session.
 
 | Licence | Crates |
 |---|---|
