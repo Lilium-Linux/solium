@@ -225,8 +225,10 @@ awake behind a lock screen.
 
 The screens go dark on their own after ten minutes with nobody at the machine
 (`idle.screens_off_after` in `config.lua`; 0 turns it off), unless something on
-screen is holding an inhibitor — a film does not go dark, the ten minutes start
-again when it lets go, and nothing holds a lock screen lit. Any key, click or motion turns every screen back on and is
+screen is holding an inhibitor, or a browser holds one over D-Bus
+(`org.freedesktop.ScreenSaver`, which Solium owns while `idle.dbus_inhibit` is
+on) — a film does not go dark, the ten minutes start again when it lets go, and
+nothing holds a lock screen lit. Any key, click or motion turns every screen back on and is
 delivered as usual, so the first key typed at a lock screen that went dark is
 part of the password rather than lost. A monitor that is off keeps its place,
 its work area and its windows; nothing moves and no client is told it went.

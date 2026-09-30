@@ -2239,6 +2239,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `sol.resize` gives, and a value that is not a number of zero or more is
     // named in the log and the default kept.
     // `the_idle_blank_turns_every_screen_off_after_the_timeout`.
+    // `dbus_inhibit` is true or false, and anything else is named and the
+    // default kept: `idle_dbus_inhibit_false_owns_nothing`.
     sol.set(
         "idle",
         lua.create_function(|lua, options: Option<mlua::Table>| {
@@ -2271,6 +2273,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 }
                 if let Some(interval) = read("off_frame_interval", 0.001) {
                     idle.off_frame_interval = interval;
+                }
+                match options.get::<Value>("dbus_inhibit") {
+                    Ok(Value::Boolean(on)) => idle.dbus_inhibit = on,
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(other) => tracing::warn!(
+                        value = describe(&other),
+                        "idle.dbus_inhibit: true or false; keeping the default, true"
+                    ),
                 }
             }
             with_pending(lua, |pending| {

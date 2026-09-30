@@ -294,6 +294,14 @@ pub(crate) fn run() -> Result<()> {
         state.session.x11(None);
     }
     state.start_scripts(scripts);
+    // After the scripts, so that `idle.dbus_inhibit = false` owns nothing even
+    // for a moment (`idle_dbus_inhibit_false_owns_nothing`), and by the
+    // session's rule, so that a nested run owns it only on the bus
+    // `SOLIUM_SESSION_BUS` names
+    // (`a_nested_run_owns_no_name_unless_it_is_given_a_bus`).
+    state
+        .idle
+        .serve_dbus(crate::session::Place::Nested, dev::session_bus());
 
     // The screens exist and the scripts have loaded: whichever came second,
     // this is the first moment a script can be told where the monitors are.

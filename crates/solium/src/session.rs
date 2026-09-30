@@ -192,7 +192,7 @@ impl Session {
             );
             return Self::off();
         }
-        if place != Place::Session && bus.is_none() {
+        if !speaks(place, bus.as_deref()) {
             tracing::info!(
                 ?place,
                 "not started as the session (the session file's solium-session, or \
@@ -333,6 +333,18 @@ impl Drop for Session {
     }
 }
 
+/// Whether a Solium started from `place` may speak on a bus at all: always
+/// as the session, and otherwise only on the bus `SOLIUM_SESSION_BUS` names,
+/// so that a nested run or a manual `--tty` never speaks on the session bus
+/// of the desktop around it. The session and `org.freedesktop.ScreenSaver`
+/// (`screensaver.rs`) both follow it:
+/// `a_nested_run_tells_nobody_unless_it_is_given_a_bus`,
+/// `a_manual_tty_start_tells_nobody` and
+/// `a_nested_run_owns_no_name_unless_it_is_given_a_bus`.
+pub(crate) fn speaks(place: Place, bus: Option<&str>) -> bool {
+    place == Place::Session || bus.is_some()
+}
+
 /// `XDG_CURRENT_DESKTOP` as the session file's `DesktopNames` set it, or
 /// `Lilium` when nothing did. `the_desktop_is_lilium_unless_the_session_said_otherwise`.
 pub(crate) fn desktop(set: Option<String>) -> String {
@@ -409,7 +421,9 @@ impl Sink for Worker {
     }
 }
 
-fn connect(bus: Option<&str>) -> zbus::Result<zbus::blocking::Connection> {
+/// A connection to `bus`, or to the session bus for `None`: the session's,
+/// and `screensaver.rs`'s. `tests_never_reach_the_session_bus`.
+pub(crate) fn connect(bus: Option<&str>) -> zbus::Result<zbus::blocking::Connection> {
     let builder = match bus {
         Some(address) => zbus::blocking::connection::Builder::address(address)?,
         // A test that got this far by mistake would ask the developer's own

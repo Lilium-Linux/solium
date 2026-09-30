@@ -24,7 +24,8 @@
 //! is: both loops wake at least every 16 ms, so `settle` compares two
 //! instants once a frame and no timer is needed at all.
 //!
-//! The inhibitor half *is* Smithay's, because it has no timers in it.
+//! The inhibitor half *is* Smithay's, because it has no timers in it. Browsers
+//! take theirs over D-Bus instead, and those arrive through `screensaver.rs`.
 //!
 //! ## What counts as an inhibitor
 //!
@@ -103,6 +104,12 @@ pub(crate) struct Settings {
     /// `power.rs`, and
     /// `a_window_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`.
     pub(crate) off_frame_interval: Duration,
+    /// Own `org.freedesktop.ScreenSaver` on the session bus, so that the
+    /// inhibitors browsers take over D-Bus hold the screens on as a Wayland
+    /// one does. See `screensaver.rs`, and
+    /// `a_dbus_inhibit_holds_the_idle_blank_off_and_uninhibit_lets_it_happen`
+    /// and `idle_dbus_inhibit_false_owns_nothing`.
+    pub(crate) dbus_inhibit: bool,
 }
 
 impl Default for Settings {
@@ -123,6 +130,7 @@ impl Default for Settings {
         Self {
             screens_off_after: Duration::from_secs(600),
             off_frame_interval: Duration::from_secs(1),
+            dbus_inhibit: true,
         }
     }
 }
@@ -164,6 +172,8 @@ pub(crate) struct Idle {
     /// (`an_idle_inhibitor_holds_the_idle_blank_off`).
     blanked: bool,
     settings: Settings,
+    /// The inhibitors that come over the session bus (#152).
+    screensaver: crate::screensaver::ScreenSaver,
 }
 
 impl Idle {
@@ -192,6 +202,20 @@ impl Idle {
             tracing::debug!(?settings, "idle settings");
             self.settings = settings;
         }
+        self.screensaver.serve(settings.dbus_inhibit);
+    }
+
+    /// The backend has started, with the configuration read: which bus
+    /// `org.freedesktop.ScreenSaver` may be owned on, by the rule the session
+    /// follows (`session::speaks`).
+    pub(crate) fn serve_dbus(&mut self, place: crate::session::Place, bus: Option<String>) {
+        self.screensaver
+            .permit(place, bus, self.settings.dbus_inhibit);
+    }
+
+    /// Whether a client holds the screens on over the session bus.
+    pub(crate) fn dbus_inhibiting(&self) -> bool {
+        self.screensaver.holding()
     }
 }
 

@@ -11048,6 +11048,170 @@ mod real_client {
                 );
             }
 
+            /// A stand-in session bus with `org.freedesktop.ScreenSaver` owned
+            /// on it, as a nested run given `SOLIUM_SESSION_BUS` owns it.
+            fn owning_screensaver(session: &mut Session) -> crate::screensaver::tests::StandInBus {
+                let bus = crate::screensaver::tests::StandInBus::new(false);
+                session
+                    .state
+                    .idle
+                    .serve_dbus(crate::session::Place::Nested, Some(bus.address.clone()));
+                assert_eq!(
+                    bus.requests().len(),
+                    1,
+                    "org.freedesktop.ScreenSaver was not asked for"
+                );
+                bus
+            }
+
+            /// **An inhibitor taken over D-Bus holds the idle blank off**, as
+            /// the `org.freedesktop.ScreenSaver.Inhibit` Chrome and Firefox
+            /// call during a film does, with no window of theirs anywhere,
+            /// and `UnInhibit` lets it happen `screens_off_after` later. An
+            /// `ext-idle-notify` notification that honours inhibitors --
+            /// `swayidle`'s timeouts -- is held off with it; a locker's, which
+            /// ignores them, is not.
+            ///
+            /// With the D-Bus inhibitors not counted in `idle_inhibited`,
+            /// fails at "went dark"; with `UnInhibit` not heard, at "still
+            /// lit".
+            #[test]
+            fn a_dbus_inhibit_holds_the_idle_blank_off_and_uninhibit_lets_it_happen() {
+                let mut session = Session::new();
+                let monitor = session.output(0);
+                let bus = owning_screensaver(&mut session);
+                let notifier = session
+                    .app
+                    .client
+                    .idle_notifier
+                    .clone()
+                    .expect("ext_idle_notifier_v1 bound");
+                let seat = session.app.client.seat.clone().expect("wl_seat bound");
+                let dims = notifier.get_idle_notification(600_000, &seat, &session.app.qh, ());
+                let locks =
+                    notifier.get_input_idle_notification(1_800_000, &seat, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+                let told = |session: &mut Session,
+                            notification: &ext_idle_notification_v1::ExtIdleNotificationV1| {
+                    session.app.pump(&mut session.display, &mut session.state);
+                    let id = wayland_client::Proxy::id(notification);
+                    session
+                        .app
+                        .client
+                        .idle_events
+                        .iter()
+                        .filter(|(each, _)| *each == id)
+                        .map(|(_, idled)| *idled)
+                        .collect::<Vec<_>>()
+                };
+
+                bus.arrive(":1.42");
+                let film = bus.inhibit(":1.42", "/org/freedesktop/ScreenSaver");
+                session.wait(Duration::ZERO);
+                session.wait(Duration::from_secs(3_600));
+                assert!(
+                    !session.state.power.is_off(&monitor),
+                    "a film holding an inhibitor over D-Bus went dark"
+                );
+                assert_eq!(
+                    told(&mut session, &dims),
+                    [false; 0],
+                    "held off by a film over D-Bus, and swayidle was told it was idle"
+                );
+                assert_eq!(
+                    told(&mut session, &locks),
+                    [true],
+                    "a locker's notification was held off by a film"
+                );
+
+                bus.uninhibit(":1.42", film);
+                session.wait(Duration::from_secs(599));
+                assert!(
+                    !session.state.power.is_off(&monitor),
+                    "the screen went dark before ten minutes after the film let go"
+                );
+                session.wait(Duration::from_secs(2));
+                assert!(
+                    session.state.power.is_off(&monitor),
+                    "ten minutes after UnInhibit and the screen is still lit"
+                );
+                assert_eq!(told(&mut session, &dims), [true]);
+            }
+
+            /// **Behind the lock screen a D-Bus inhibitor holds nothing**, as
+            /// a Wayland one holds nothing: a browser playing behind the lock
+            /// does not keep a lock screen lit all night.
+            ///
+            /// With the D-Bus inhibitors counted before the lock is asked
+            /// about, fails at "stayed lit".
+            #[test]
+            fn a_dbus_inhibitor_holds_nothing_behind_the_lock_screen() {
+                let mut session = Session::new();
+                let monitor = session.output(0);
+                let bus = owning_screensaver(&mut session);
+                bus.arrive(":1.42");
+                bus.inhibit(":1.42", "/ScreenSaver");
+                let _lock = session.lock();
+
+                session.wait(Duration::ZERO);
+                session.wait(Duration::from_secs(601));
+                assert!(
+                    session.state.power.is_off(&monitor),
+                    "behind the lock a browser's inhibitor held the lock screen lit"
+                );
+            }
+
+            /// **`idle.dbus_inhibit = false` owns nothing**: the bus is not
+            /// even connected to. A reload that turns it on owns the name, and
+            /// one that turns it off again lets it go. A value that is not a
+            /// boolean keeps the default.
+            ///
+            /// With the setting not read, fails at "connected"; with a reload
+            /// not heard, at "not asked for" or "kept".
+            #[test]
+            fn idle_dbus_inhibit_false_owns_nothing() {
+                let mut session = Session::new();
+                let directory = std::env::temp_dir()
+                    .join(format!("solium-dbus-inhibit-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&directory);
+                let entry = directory.join("init.lua");
+                let load = |session: &mut Session, lua: &str| {
+                    std::fs::write(&entry, lua).expect("writing the test script");
+                    session.state.start_scripts(Some(
+                        Scripts::load(&entry).expect("loading the test script"),
+                    ));
+                    session.state.idle.settings().dbus_inhibit
+                };
+                assert!(
+                    load(&mut session, "sol.idle{ dbus_inhibit = 'no' }"),
+                    "a value that is not a boolean did not keep the default"
+                );
+                assert!(!load(&mut session, "sol.idle{ dbus_inhibit = false }"));
+
+                let bus = crate::screensaver::tests::StandInBus::new(false);
+                session
+                    .state
+                    .idle
+                    .serve_dbus(crate::session::Place::Nested, Some(bus.address.clone()));
+                assert!(
+                    !bus.connected(Duration::from_millis(500)),
+                    "idle.dbus_inhibit = false connected to the bus"
+                );
+
+                assert!(load(&mut session, "sol.idle{}"));
+                assert_eq!(
+                    bus.requests(),
+                    ["RequestName org.freedesktop.ScreenSaver 4"],
+                    "a reload turned it on and the name was not asked for"
+                );
+                assert!(!load(&mut session, "sol.idle{ dbus_inhibit = false }"));
+                assert!(
+                    bus.closed(Duration::from_secs(5)),
+                    "a reload turned it off and the name was kept"
+                );
+                let _ = std::fs::remove_dir_all(&directory);
+            }
+
             /// **Input wakes every screen**, and the input that wakes them is
             /// delivered: a key press, a motion, a button. A release does not
             /// wake them, because a binding that turns them off is let go
@@ -11569,6 +11733,7 @@ mod real_client {
                     crate::idle::Settings {
                         screens_off_after: Duration::from_secs(90),
                         off_frame_interval: Duration::from_millis(250),
+                        dbus_inhibit: true,
                     },
                     "sol.idle did not reach the compositor"
                 );

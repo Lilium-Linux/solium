@@ -544,6 +544,25 @@ then, so a film ending an hour in does not take the screen with it, and the
 next one in a playlist does not start in the dark. Nothing holds it off behind
 the lock screen, which goes dark like anything else.
 
+**Browsers ask over D-Bus instead.** Chrome and Firefox keep the screen on
+during a film by calling `org.freedesktop.ScreenSaver.Inhibit` on the session
+bus, not through the Wayland protocol, so Solium owns that name while it runs,
+and what they hold counts like a window's inhibitor: the timer waits, and so do
+`swayidle`'s timeouts. It goes when the browser lets go, closes or crashes, and
+holds nothing behind the lock screen. Firefox asks `org.freedesktop.ScreenSaver`
+first for a tab in view, before the portal. A program that asks the portal's
+`Inhibit` reaches the same place through `xdg-desktop-portal-gtk`, which
+`lilium-portals.conf` gives `Inhibit` to, as long as no GNOME session runs on
+the same bus; KDE's backend sends it to Plasma's power manager, which is not
+there, so do not give `Inhibit` to `kde`. If another desktop already owns the
+name on the same bus -- one running on another VT -- it keeps it: Solium says
+so in its log and carries on without it. Nested, the name is owned only on the
+bus `SOLIUM_SESSION_BUS` names. To leave it alone altogether:
+
+```lua
+return { idle = { dbus_inhibit = false } }
+```
+
 **Any key, click, scroll, touch or pointer motion turns every screen back on**,
 however they went off, and that input is delivered as usual rather than
 swallowed. The case that decides it is typing a password at a lock screen that

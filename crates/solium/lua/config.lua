@@ -451,6 +451,16 @@ local defaults = {
         -- that waits for that inside its swap would otherwise stop dead for
         -- as long as the screen is dark. 0 stops it, which is what sway does.
         off_frame_interval = 1000,
+
+        -- Answer the other way programs ask for the screens to stay on:
+        -- `org.freedesktop.ScreenSaver` on the session bus, which is what
+        -- Chrome and Firefox call during a film instead of the Wayland idle
+        -- inhibitor. Such an inhibitor holds the blank above off -- and
+        -- `swayidle`'s timeouts -- like one on a window in view, goes when
+        -- the program that took it closes or crashes, and holds nothing
+        -- behind the lock screen. false leaves the name to whoever else wants
+        -- it. Nested, it is owned only on the bus SOLIUM_SESSION_BUS names.
+        dbus_inhibit = true,
     },
 
     -- Telling the rest of the session that Solium is its desktop.

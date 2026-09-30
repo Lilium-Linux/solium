@@ -70,6 +70,9 @@ xcursor = "0.3"
 # never from the event loop; `async-io` is the runtime zbus runs that API on.
 # The calls are checked on the wire against a stand-in systemd in
 # `session::tests::the_calls_reach_systemd_and_dbus_as_their_methods`.
+# Also what owns `org.freedesktop.ScreenSaver`, whose inhibitors browsers take
+# (#152): `src/screensaver.rs`, checked against a stand-in bus in
+# `screensaver::tests::a_caller_that_leaves_the_bus_drops_its_inhibitors`.
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
 
 # SIGTERM, SIGINT and SIGHUP stop the event loop, so the session is ended
@@ -123,5 +126,6 @@ smithay = { version = "0.7", default-features = false, features = ["renderer_tes
 # A stand-in systemd and bus driver for the session tests, served by zbus
 # itself over a socket of the test's own, so the calls are checked on the wire
 # without a real bus anywhere near them.
-# `session::tests::the_calls_reach_systemd_and_dbus_as_their_methods`.
+# `session::tests::the_calls_reach_systemd_and_dbus_as_their_methods`, and the
+# stand-in bus of `screensaver::tests`.
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io", "p2p"] }

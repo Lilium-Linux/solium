@@ -376,6 +376,8 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         solium.session.x11(None);
     }
     solium.start_scripts(scripts);
+    // After the scripts, as nested: see `winit.rs` and `screensaver.rs`.
+    solium.idle.serve_dbus(place, crate::dev::session_bus());
 
     let mut state = State {
         solium,
