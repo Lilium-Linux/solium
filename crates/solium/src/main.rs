@@ -33,6 +33,7 @@ mod remains;
 mod render;
 mod resizing;
 mod screencopy;
+mod screensaver;
 mod script;
 mod scripted;
 mod session;

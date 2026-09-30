@@ -1672,15 +1672,23 @@ impl Solium {
     ///   left running behind a lock screen keeps the machine awake all night
     ///   displaying a lock screen, which is the exact opposite of what both
     ///   features are for.
+    ///
+    /// An inhibitor taken over D-Bus (`screensaver.rs`) has no surface to ask
+    /// about, so it counts for as long as it is held, and like the rest not
+    /// behind the lock:
+    /// `a_dbus_inhibit_holds_the_idle_blank_off_and_uninhibit_lets_it_happen` and
+    /// `a_dbus_inhibitor_holds_nothing_behind_the_lock_screen`.
     pub(crate) fn idle_inhibited(&self) -> bool {
         if self.lock.is_some() {
             return false;
         }
         // Collected first: `inhibiting` borrows `self.idle` and the visibility
         // test borrows the rest of `self`.
-        self.idle
-            .inhibiting()
-            .any(|surface| self.surface_is_visible(surface))
+        self.idle.dbus_inhibiting()
+            || self
+                .idle
+                .inhibiting()
+                .any(|surface| self.surface_is_visible(surface))
     }
 
     /// Whether a surface belongs to a window that is drawn somewhere.
