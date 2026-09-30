@@ -685,10 +685,10 @@ impl Pane {
     /// Put this pane back into the tile it left, now that it is back at its
     /// restore rectangle. See [`Self::left_tile`].
     ///
-    /// A tile a layout has placed it in since wins over the kept one: that is
-    /// the layout's newer answer. It happens — `tiling.apply` places every
-    /// leaf of its trees on every sweep, and a maximise takes no window out of
-    /// its tree.
+    /// A tile it is in already wins over the kept one: that is the layout's
+    /// newer answer. A layout's sweep does not give a maximised or fullscreen
+    /// window one: `Solium::move_pane` makes the tile the kept one instead,
+    /// `a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is`.
     pub(crate) const fn return_to_tile(&mut self) {
         let left = self.left_tile.take();
         if self.placed.is_none() {

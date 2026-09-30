@@ -186,6 +186,25 @@ local defaults = {
     -- binds successfully and never fires. `--check` prints what was bound,
     -- which is the only honest answer available -- read it and look for the
     -- key you meant.
+    --
+    -- The keys that get around a desktop by direction (#150) are replaced here
+    -- like any other. They ship in `direction.lua` and `modes.lua`:
+    --
+    --   super+arrows, super+h/j/k/l          focus the window that way
+    --   super+shift+arrows,                  move it that way, and at a
+    --     super+shift+h/j/l, super+alt+k     screen's edge onto the next one
+    --   super+f                              fullscreen, and back
+    --   super+shift+m                        maximised, and back
+    --   super+shift+space                    float over the layout, and back
+    --
+    -- Up on k is super+alt+k because super+shift+k cycles the keyboard layout
+    -- (`init.lua`). What a direction does is the layout's: see `tiling.move`
+    -- below, and docs/modes.md. Pressed with either half of `us,ru` live:
+    -- `the_direction_and_window_keys_fire_while_russian_is_active`.
+    --
+    --     bindings = {
+    --         ["super+ctrl+h"] = function() sol.focus_direction("left") end,
+    --     },
     bindings = {},
 
     -- The pointer.
@@ -737,6 +756,28 @@ local defaults = {
         --
         -- Anything else is read as "immediate".
         reflow_on_close = "immediate",
+
+        -- What a keyboard move (super+shift+arrows, #150) does with the
+        -- window it moves towards: the tile wholly past it that way and level
+        -- with it, never one off on a diagonal.
+        --
+        -- "swap", the default: the two trade tiles, and every split keeps its
+        -- axis and its ratio. Where the tile it left is the one that way from
+        -- the tile it took, as in a grid, the opposite move puts both back.
+        -- niri moves windows this way; sway and Hyprland reshape the tree
+        -- instead, which is what a dragged seam does not survive.
+        --
+        -- "split": the window leaves its tile and splits the neighbour's
+        -- across that tile's longer side, as a window opening in it would, as
+        -- Hyprland's `movewindow` does. Pressed again, it goes on into the
+        -- next one.
+        --
+        -- At the edge of a monitor either way goes onto the next monitor, in
+        -- beside the tile it arrives at. Anything else is named in the log
+        -- and read as "swap". `with_tiling_move_split_a_move_goes_into_the_neighbours_split`,
+        -- `in_tiling_focus_and_move_reach_the_neighbour_in_each_direction` and
+        -- `in_tiling_a_tile_off_on_a_diagonal_is_not_that_way`.
+        move = "swap",
     },
 
     scrolling = {

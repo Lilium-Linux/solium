@@ -316,14 +316,40 @@ impl Scroller {
         .unwrap_or(0);
     }
 
+    /// Swap the focused window with the one above it in its column (`by` is
+    /// -1) or below it (1), carrying focus along: niri's `move-window-up` and
+    /// `move-window-down` (#150). Returns whether anything moved, which it
+    /// does not at the top or the bottom of the column.
+    /// `move_vertically_swaps_within_the_column_and_stops_at_its_ends`.
+    pub fn move_vertically(&mut self, by: isize) -> bool {
+        let Some(column) = self.columns.get_mut(self.active) else {
+            return false;
+        };
+        let Some(to) = column
+            .active
+            .checked_add_signed(by)
+            .filter(|to| *to < column.windows.len())
+        else {
+            return false;
+        };
+        if to == column.active {
+            return false;
+        }
+        column.windows.swap(column.active, to);
+        column.active = to;
+        true
+    }
+
     /// Swap the active column with its neighbour, carrying focus along.
-    pub fn move_column(&mut self, by: isize, area: Rect, settings: Settings) {
+    /// Returns whether it moved, which it does not at either end of the strip
+    /// (#150). `move_column_says_whether_it_moved`.
+    pub fn move_column(&mut self, by: isize, area: Rect, settings: Settings) -> bool {
         if self.columns.len() < 2 {
-            return;
+            return false;
         }
         let last = self.columns.len() - 1;
         let Ok(from) = isize::try_from(self.active) else {
-            return;
+            return false;
         };
         let to = usize::try_from(
             from.saturating_add(by)
@@ -331,10 +357,11 @@ impl Scroller {
         )
         .unwrap_or(0);
         if to == self.active {
-            return;
+            return false;
         }
         self.columns.swap(self.active, to);
         self.focus_column(to, area, settings);
+        true
     }
 
     /// Pull the next column's focused window into this one.
@@ -611,6 +638,40 @@ mod tests {
         scroller
     }
 
+    /// **A window moves up and down its own column, and no further** (#150).
+    /// Three stacked in one column: moving the bottom one up trades it with
+    /// the middle one and keeps it focused; at the top a move up does
+    /// nothing, and neither does one in a column of one.
+    #[test]
+    fn move_vertically_swaps_within_the_column_and_stops_at_its_ends() {
+        let mut scroller = with(3);
+        scroller.focus_sideways(-2, area(), settings());
+        scroller.consume();
+        scroller.consume();
+        assert_eq!(
+            scroller.columns().len(),
+            1,
+            "the premise: one column of three"
+        );
+        assert_eq!(scroller.columns()[0].windows, vec![1, 2, 3]);
+        assert_eq!(scroller.focused(), Some(3));
+
+        assert!(scroller.move_vertically(-1));
+        assert_eq!(scroller.columns()[0].windows, vec![1, 3, 2]);
+        assert_eq!(scroller.focused(), Some(3), "focus went with the window");
+        assert!(scroller.move_vertically(-1));
+        assert_eq!(scroller.columns()[0].windows, vec![3, 1, 2]);
+        assert!(!scroller.move_vertically(-1), "at the top of the column");
+        assert_eq!(scroller.columns()[0].windows, vec![3, 1, 2]);
+        assert!(scroller.move_vertically(1));
+        assert_eq!(scroller.columns()[0].windows, vec![1, 3, 2]);
+
+        let mut alone = with(2);
+        assert!(!alone.move_vertically(1), "a column of one has no below");
+        assert!(!alone.move_vertically(-1));
+        assert!(!Scroller::new().move_vertically(1), "an empty strip");
+    }
+
     /// The defining property. Nothing here divides by how many windows exist,
     /// so a tenth window cannot make the first nine thinner.
     #[test]
@@ -833,9 +894,41 @@ mod tests {
     fn moving_a_column_carries_focus_with_it() {
         let mut scroller = with(3);
         let focused = scroller.focused();
-        scroller.move_column(-1, area(), settings());
+        assert!(scroller.move_column(-1, area(), settings()));
         assert_eq!(scroller.focused(), focused, "the window went with the move");
         assert_eq!(scroller.active_column(), 1);
+    }
+
+    /// **A column move says whether it moved** (#150), so the layout can tell
+    /// the end of the strip -- where a move goes on to the next monitor --
+    /// from a move that happened. Three columns, the last focused: right is
+    /// the end, left is not, and the first column's left is the other end.
+    #[test]
+    fn move_column_says_whether_it_moved() {
+        let mut scroller = with(3);
+        let order = |scroller: &Scroller| -> Vec<u64> {
+            scroller
+                .columns()
+                .iter()
+                .flat_map(|column| column.windows.clone())
+                .collect()
+        };
+        assert!(
+            !scroller.move_column(1, area(), settings()),
+            "the last column"
+        );
+        assert_eq!(order(&scroller), vec![1, 2, 3]);
+        assert!(scroller.move_column(-1, area(), settings()));
+        assert!(scroller.move_column(-1, area(), settings()));
+        assert_eq!(order(&scroller), vec![3, 1, 2]);
+        assert!(
+            !scroller.move_column(-1, area(), settings()),
+            "the first column"
+        );
+        assert!(
+            !with(1).move_column(-1, area(), settings()),
+            "a strip of one"
+        );
     }
 
     /// A column wider than the view is left-aligned, because no offset shows

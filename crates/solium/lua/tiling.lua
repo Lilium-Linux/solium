@@ -20,6 +20,7 @@ local modes = require("modes")
 local monitors = require("monitors")
 local dialogs = require("dialogs")
 local sizes = require("sizes")
+local direction = require("direction")
 
 -- `exiled` is the ids this layout has taken out of its trees because they are
 -- modal dialogs, and it is what makes `unset_modal` reversible: only a window
@@ -954,5 +955,127 @@ sol.bind("super+equal", nudge("width", 0.05))
 -- that commit.
 sol.bind("super+ctrl+minus", nudge("height", -0.05))
 sol.bind("super+ctrl+equal", nudge("height", 0.05))
+
+-- ## By direction (#150)
+--
+-- `direction.lua` hands these the keys; which window is that way is its
+-- `direction.find`, over the tiles the trees laid out, and not `loose`: the
+-- tile that way is one wholly past this one's edge and level with it, never
+-- one off on a diagonal, and with none on this monitor the next monitor is
+-- asked. `in_tiling_focus_and_move_reach_the_neighbour_in_each_direction` and
+-- `in_tiling_a_tile_off_on_a_diagonal_is_not_that_way`.
+
+-- The focused window's tile, marked with its monitor, or nil when the keyboard
+-- is on a window no tree in view holds: a dialog, or one the user floated.
+-- `a_window_the_layout_does_not_arrange_gets_the_floating_answer`.
+local function focused_tile()
+    local id = focused_window()
+    if not id then
+        return nil
+    end
+    local monitor = monitors.of(id)
+    for _, slot in ipairs(tree_for(monitor):layout(options(monitor))) do
+        if slot.id == id then
+            slot.monitor = monitor
+            return slot
+        end
+    end
+    return nil
+end
+
+-- Every tile on the desk monitor `name` is showing, but window `except`'s.
+-- `at_a_monitors_edge_tiling_crosses_to_the_desk_the_next_monitor_shows`.
+local function tiles_on(name, except)
+    local out = {}
+    for _, slot in ipairs(tree_for(name):layout(options(name))) do
+        if slot.id ~= except then
+            slot.monitor = name
+            out[#out + 1] = slot
+        end
+    end
+    return out
+end
+
+-- Whether a keyboard move goes into the neighbour's split rather than trading
+-- places with it: `config.tiling.move`, read at each move. Anything but
+-- "split" is a swap, and anything but "swap" as well is named once.
+-- `with_tiling_move_split_a_move_goes_into_the_neighbours_split`.
+local function moves_into_split()
+    local given = config.tiling.move
+    if given == "split" then
+        return true
+    end
+    if given ~= nil and given ~= "swap" then
+        once(string.format(
+            "tiling.move is %s, which is neither \"swap\" nor \"split\"; a move swaps",
+            tostring(given)
+        ))
+    end
+    return false
+end
+
+-- Focus the tile that way. A window no tree holds is left to the floating
+-- answer, which finds its neighbours among every window on screen.
+-- `a_window_the_layout_does_not_arrange_gets_the_floating_answer`.
+function tiling.focus_direction(dir)
+    local from = focused_tile()
+    if not from then
+        return false
+    end
+    local to = direction.find(from, dir, function(name)
+        return tiles_on(name, from.id)
+    end)
+    if to then
+        sol.focus(to.id)
+    end
+    return true
+end
+
+-- Trade places with the tile that way: every split keeps its axis and its
+-- ratio, and nothing else moves. At the monitor's edge the window leaves its
+-- tree for the tree of the desk the next monitor is showing, going in beside
+-- the tile it arrives at, or taking the screen when that desk is empty. With
+-- `tiling.move = "split"` a move within a monitor splits the neighbour's tile
+-- instead, across its longer side as a window opening there would, which is
+-- Hyprland's `movewindow`. A window no tree holds does not move. A window that
+-- belongs to no workspace in particular belongs to none after crossing, too.
+-- `in_tiling_focus_and_move_reach_the_neighbour_in_each_direction`,
+-- `in_tiling_a_tile_off_on_a_diagonal_is_not_that_way`,
+-- `with_tiling_move_split_a_move_goes_into_the_neighbours_split`,
+-- `at_a_monitors_edge_tiling_crosses_to_the_desk_the_next_monitor_shows`,
+-- `a_window_on_no_workspace_is_on_none_after_crossing` and
+-- `a_window_the_layout_does_not_arrange_gets_the_floating_answer`.
+function tiling.move_direction(dir)
+    local from = focused_tile()
+    if not from then
+        return true
+    end
+    local to, name, crossed = direction.find(from, dir, function(monitor)
+        return tiles_on(monitor, from.id)
+    end)
+    if not name then
+        return true
+    end
+    if to and not crossed and not moves_into_split() then
+        tree_for(name):swap(from.id, to.id)
+    else
+        for _, tree in pairs(tiling.trees) do
+            tree:remove(from.id)
+        end
+        local tree = tree_for(name)
+        if to then
+            local side = crossed and direction.opposite[dir] or dir
+            local x, y = direction.inside(to, side, from)
+            rejoin(tree, from.id, to.id, x, y, options(name), true)
+        else
+            rejoin(tree, from.id, nil, nil, nil, options(name), true)
+        end
+        if crossed and workspaces.of[from.id] ~= nil then
+            workspaces.of[from.id] = workspaces.on(name)
+        end
+    end
+    tiling.apply(config.tiling.snap)
+    return true
+end
 
 return tiling

@@ -53,6 +53,10 @@ require("overview")
 require("workspaces")
 require("tiling")
 require("scrolling")
+-- Focus and move by direction, in whichever layout is in charge (#150).
+-- `every_shipped_binding_is_reachable_on_us` loads this file and asks for its
+-- keys.
+require("direction")
 
 -- Programs. `sol.spawn` starts them as clients of this compositor, whatever
 -- session the compositor itself happens to be nested in.

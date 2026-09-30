@@ -1937,6 +1937,82 @@ mod tests {
         );
     }
 
+    /// **The #150 keys fire on `us,ru` with Russian active, and reach what
+    /// they are for.** #132.
+    ///
+    /// `every_shipped_binding_fires_on_both_groups_of_us_ru` asks whether each
+    /// shipped combination fires at all, with a stand-in bound to it. This
+    /// keeps the shipped handlers -- `direction.lua`'s and `modes.lua`'s --
+    /// and stands in only for what they call, so a key that fires but calls
+    /// the wrong thing fails here too. H, J, K, L, F and M are the keys
+    /// Russian labels in Cyrillic; the arrows and space are here because they
+    /// are the keys the fix for those must not break. And super+shift+k is
+    /// left to the keyboard layout: move-up on k is super+alt+k.
+    #[test]
+    fn the_direction_and_window_keys_fire_while_russian_is_active() {
+        const ALT: u32 = 64;
+        const H: u32 = 43;
+        const J: u32 = 44;
+        const L: u32 = 46;
+        const F: u32 = 41;
+        const SPACE: u32 = 65;
+        const UP: u32 = 111;
+        const LEFT: u32 = 113;
+        const RIGHT: u32 = 114;
+        const DOWN: u32 = 116;
+
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+        let script = format!(
+            "package.path = {shipped:?} .. \"/?.lua\"\n\
+             sol.toggle_fullscreen = function() sol.status(\"fullscreen\") end\n\
+             sol.toggle_maximize = function() sol.status(\"maximize\") end\n\
+             require(\"modes\")\n\
+             require(\"workspaces\")\n\
+             require(\"tiling\")\n\
+             require(\"scrolling\")\n\
+             require(\"direction\")\n\
+             require(\"modes\").toggle_floating = function(id) sol.status(\"floating \" .. id) end\n\
+             sol.windows = function() return {{ {{ id = 7, focused = true, monitor = \"spy\", x = 0, y = 0, w = 1, h = 1 }} }} end\n\
+             sol.on(\"direction\", function(verb, dir) sol.status(verb .. \" \" .. dir) end)\n"
+        );
+        let chords: &[(&str, &[u32])] = &[
+            ("focus left", &[SUPER, LEFT]),
+            ("focus right", &[SUPER, RIGHT]),
+            ("focus up", &[SUPER, UP]),
+            ("focus down", &[SUPER, DOWN]),
+            ("focus left", &[SUPER, H]),
+            ("focus down", &[SUPER, J]),
+            ("focus up", &[SUPER, K]),
+            ("focus right", &[SUPER, L]),
+            ("move left", &[SUPER, SHIFT, LEFT]),
+            ("move right", &[SUPER, SHIFT, RIGHT]),
+            ("move up", &[SUPER, SHIFT, UP]),
+            ("move down", &[SUPER, SHIFT, DOWN]),
+            ("move left", &[SUPER, SHIFT, H]),
+            ("move down", &[SUPER, SHIFT, J]),
+            ("move up", &[SUPER, ALT, K]),
+            ("move right", &[SUPER, SHIFT, L]),
+            ("fullscreen", &[SUPER, F]),
+            ("maximize", &[SUPER, SHIFT, M]),
+            ("floating 7", &[SUPER, SHIFT, SPACE]),
+            ("", &[SUPER, SHIFT, K]),
+        ];
+        let mut wrong = Vec::new();
+        for (name, group) in [("windows-latin", 0), ("windows-russian", 1)] {
+            with_keyboard(name, "us,ru", group, &script, |state| {
+                for (expected, keys) in chords {
+                    let fired = chord(state, keys);
+                    if fired != *expected {
+                        wrong.push(format!(
+                            "group {group}: {keys:?} wanted {expected:?}, got {fired:?}"
+                        ));
+                    }
+                }
+            });
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
     /// **Every shipped binding fires on both halves of `us,ru`.** #132.
     ///
     /// `letters_fire_while_russian_is_active` asks about chords somebody

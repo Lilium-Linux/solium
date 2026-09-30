@@ -66,11 +66,15 @@ placed with `tile = false` or let go with `sol.unplace`. `sol.unplace` is for
 a layout letting go, and `modes.use` sends it for every window whenever the
 layout in charge changes — so a mode registered through `modes` gets it for
 free, and one that is not must send it itself. Maximising and fullscreen take a
-window out of its tile on their own, and the way back puts it in again — but
-only until your layout next places it. A script cannot see that a window is
-maximised, so a layout that places every window on every pass (as
-`tiling.apply` does) puts a maximised one back in its tile and resizes it
-there.
+window out of its tile on their own, and the way back puts it in again. A
+script cannot see that a window is maximised or fullscreen, so a layout that
+places every window on every pass (as `tiling.apply` does, and `dialogs.lua`
+for every floated window) places those too. The window itself stays where it
+is, over the arrangement. A tile placed is kept as the tile the window goes
+back into; a placement with `tile = false` changes nothing, so a floated
+window goes back to where it floated. The one placement that moves such a
+window is a move by key onto another monitor: see
+[Focus and move by direction](#focus-and-move-by-direction).
 
 `present` is a transform. The window still lives where it lived and the client
 never learns anything happened; it is simply drawn somewhere else. Use it for
@@ -216,6 +220,7 @@ sol.on("click",  function(x, y) end)               -- only while grabbing input
 sol.on("layout", function() end)                   -- the room windows get changed
 sol.on("monitors", function() end)                 -- the screens are not the screens you knew
 sol.on("restore",  function() end)                 -- you have replaced a running session
+sol.on("direction", function(verb, dir) end)       -- a direction key: "focus" or "move", and which way
 ```
 
 `surface` is how a `sol.surface` declared with `interactive = true` talks
@@ -581,6 +586,90 @@ fullscreen window covers. Both are in the global space, so either can be handed
 straight to `sol.place`. Copy the rect before adding keys to it; the one you
 were given belongs to the snapshot.
 
+## Focus and move by direction
+
+```lua
+sol.focus_direction("left")   -- or "right", "up", "down"
+sol.move_direction("left")
+sol.toggle_fullscreen(id)     -- fullscreen, or back; the focused window with no id
+sol.toggle_maximize(id)       -- maximised, or back; the focused window with no id
+```
+
+The compositor does nothing with these but tell every `direction` listener
+the verb and the direction, and a direction that is not one of the four is an
+error. `lua/direction.lua` is the listener that ships, and it asks the layout in
+charge, by two functions on the table you gave `modes.register`:
+
+```lua
+function mine.focus_direction(dir) ... return true end
+function mine.move_direction(dir) ... return true end
+```
+
+Answer `false`, or leave either out, and the key gets what a desktop with no
+layout in charge gets: focus goes to the nearest window that way, and a move
+trades places with it, each window keeping its size. `tiling.lua` answers
+`false` for focus from a window it does not tile -- a dialog, or one floated
+with `super+shift+space` -- so the keyboard still finds its way out of one.
+
+Which window is that way depends on what kind of windows they are. A tile's
+neighbour is wholly past its edge and level with some of it -- a tile below and
+to one side is not to its side -- and the nearest facing edge wins. Floating
+windows overlap and sit off on diagonals, so for them, failing any such
+neighbour, the nearest centre further that way counts too.
+
+At a monitor's edge both go on to the next monitor that way, and the desk it is
+showing. The next monitor is one wholly past this one's edge, as wlroots has it:
+a portrait screen standing beside a landscape one is beside it and never below,
+and a smaller screen top-aligned next to a bigger one is above nothing. Of two
+that way, the one level with the window wins, so with two screens stacked
+beside a big one the window's own height picks between them. On the next
+monitor the nearest centre counts for tiles as well, since a screen of another
+height may have nothing level with the window.
+
+`direction.find(from, dir, on, loose)` is that search, for a layout's own
+rectangles: `on(name)` lists them for a monitor, `loose` is the floating rule,
+and you get back the nearest, its monitor, and whether that meant crossing to
+another one.
+
+| | focus | move |
+|---|---|---|
+| tiling | the tile that way | trades tiles with it; `tiling.move = "split"` splits its tile across that tile's longer side instead |
+| scrolling | the next column, or the window above or below in one | the column, or the window within its column |
+| no layout | the nearest window that way | trades places with it |
+
+Across a monitor a move takes the window alone: into the tile it arrives beside
+in tiling, into a column of its own in scrolling, and as far across the new
+screen as it was across the old one with no layout. The shipped keys, all of
+them replaceable in `config.bindings`:
+
+| keys | |
+|---|---|
+| `super+arrows`, `super+h` `j` `k` `l` | focus that way |
+| `super+shift+arrows`, `super+shift+h` `j` `l`, `super+alt+k` | move that way |
+| `super+f` | fullscreen, and back |
+| `super+shift+m` | maximised, and back |
+| `super+shift+space` | float over the layout, and back into it |
+
+Moving up on `k` is `super+alt+k` because `super+shift+k` cycles the keyboard
+layout. A window floated with `super+shift+space` is, to both layouts, what a
+dialog with no parent is: out of the arrangement, centred on its screen at the
+size it had, until the key puts it back. It stays floated through a reload.
+
+`super+shift+m` on a fullscreen window leaves fullscreen for maximised, or,
+for one that was maximised before it went fullscreen, for where it was before
+either. `super+f` and `super+shift+m` act on Wayland windows only for now: an
+X11 window under XWayland does not go fullscreen or maximised by key.
+
+A fullscreen or maximised window stays so when it is moved. On its own monitor
+the move happens behind it: in tiling it trades tiles with the one that way,
+and leaving fullscreen or maximised goes into the tile it has now. Onto another
+monitor it is fullscreen or maximised there, drawn on the workspace that
+monitor shows and keeping the keyboard, and leaving stays on that monitor: in
+its tile there, or with no layout at the same place on the new screen as it
+had on the old one. A window floated with `super+shift+space` and then made
+fullscreen stays fullscreen through every layout pass, and leaving goes back to
+where it floated.
+
 ## The arrangements that ship
 
 You do not have to compute geometry yourself.
@@ -617,6 +706,7 @@ tree:layout(options)      -- the slots, to hand to sol.place; cramped = true on 
                           -- slot smaller than its window's own floor
 tree:resize(id, "width", share, options)               -- keyboard: an axis
 tree:drag_seam(id, "right", edge_x, edge_y, options)   -- pointer: a side
+tree:swap(a, b)           -- two windows trade tiles; every split keeps its ratio
 ```
 
 `insert` splits whatever it is pointed at, however small that leaves the

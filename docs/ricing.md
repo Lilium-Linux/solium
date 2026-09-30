@@ -713,6 +713,30 @@ sol.bind("super+return", function() sol.spawn("kitty") end)
 require("bindings")
 ```
 
+### Moving around by keyboard
+
+`super+arrows` and `super+h/j/k/l` focus the window that way,
+`super+shift+arrows` and `super+shift+h/j/l` move it, and `super+alt+k` moves
+it up -- `super+shift+k` is the keyboard layout. At the edge of a screen both go
+on to the next one. `super+f` is fullscreen, `super+shift+m` maximised and
+`super+shift+space` floats a window over the layout; each key again puts it
+back. Rebind any of them in `bindings`:
+
+```lua
+return {
+    bindings = {
+        ["super+ctrl+h"] = function() sol.focus_direction("left") end,
+        ["super+alt+k"]  = false,
+    },
+    tiling = { move = "split" },
+}
+```
+
+In tiling a move trades tiles with the neighbour level with it that way, and
+in a grid the opposite key puts both back; `move = "split"` makes it split the
+neighbour's tile instead, as Hyprland's `movewindow` does. [modes.md](modes.md#focus-and-move-by-direction)
+has what each layout does with a direction.
+
 ### Your own mode
 
 A mode is a Lua module that reacts to events — `open`, `close`, `focus`,
