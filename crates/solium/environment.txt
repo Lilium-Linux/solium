@@ -122,9 +122,10 @@ SOLIUM_NO_DMABUF
     shared memory.
 
 SOLIUM_SESSION_BUS=<address>
-    The D-Bus address to tell about the session, instead of the session bus.
-    Nested, or `solium --tty` without `--session`, this is the only way
-    anything is told. Blank counts as unset. For checking the calls against a
+    The D-Bus address to tell about the session, and to own
+    `org.freedesktop.ScreenSaver` on (`idle.dbus_inhibit`), instead of the
+    session bus. Nested, or `solium --tty` without `--session`, this is the
+    only way either happens. Blank counts as unset. For checking the calls against a
     private bus: `dbus-run-session -- sh -c
     'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS solium'`.
 

@@ -199,6 +199,7 @@
 ---@class sol.IdleOptions
 ---@field screens_off_after? number Seconds with nobody at the machine before every screen is turned off. 0 never does.
 ---@field off_frame_interval? number How often, in milliseconds, a window on a screen that is off is still told it may draw. 0 stops it.
+---@field dbus_inhibit? boolean Own `org.freedesktop.ScreenSaver`, so a browser's D-Bus inhibitor keeps the screens on like a Wayland one. Default true.
 
 ---The pointer's theme. A key left out, or no table, means the configuration
 ---did not say, and `XCURSOR_THEME` and `XCURSOR_SIZE` have their turn.
@@ -256,6 +257,7 @@
 ---| "scroll" # The wheel turned with Super held: `(dx, dy)`.
 ---| "click" # A press while a script holds input: `(x, y)`.
 ---| "surface" # An interactive surface set its `action`: `(name, action)`.
+---| "direction" # `sol.focus_direction` or `sol.move_direction` was called: `(verb, dir)`, `verb` being `"focus"` or `"move"`. The layout in charge answers.
 ---| "layout" # Arrange the windows you already hold again: `()`.
 ---| "monitors" # The monitors changed, or were announced at startup or after a reload: `()`.
 ---| "restore" # These scripts replaced a running session's, after a reload and never at startup: `()`.
@@ -503,6 +505,34 @@ function sol.animate(options) end
 ---@return nil
 function sol.focus(id) end
 
+---Make a window fullscreen, or give it back its place if it already is. With no
+---id, the focused window; with nothing focused, nothing happens.
+---@param id? integer
+---@return nil
+function sol.toggle_fullscreen(id) end
+
+---Maximise a window to its monitor's work area, or give it back its place if
+---it already is. With no id, the focused window; with nothing focused, nothing
+---happens.
+---@param id? integer
+---@return nil
+function sol.toggle_maximize(id) end
+
+---Move the keyboard to the window beside the focused one. Every `direction`
+---listener is told `("focus", dir)`, and the layout in charge answers
+---(`lua/direction.lua`). Anything but the four directions is an error.
+---@param dir "left"|"right"|"up"|"down"
+---@return nil
+function sol.focus_direction(dir) end
+
+---Move the focused window in a direction: `direction` listeners are told
+---`("move", dir)`. Tiling trades it with its neighbour, scrolling moves it
+---within or between columns, and a fullscreen or maximised window moved to
+---another monitor stays so there. Anything but the four directions is an error.
+---@param dir "left"|"right"|"up"|"down"
+---@return nil
+function sol.move_direction(dir) end
+
 ---Put a window where it lives: the layout's call.
 ---
 ---The client is told the size and asked to redraw. The rect is a tile unless
@@ -596,6 +626,7 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "scroll", handler: fun(dx: number, dy: number))
 ---@overload fun(event: "click", handler: fun(x: number, y: number))
 ---@overload fun(event: "surface", handler: fun(name: string, action: string))
+---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
 ---@overload fun(event: "layout"|"monitors"|"restore", handler: fun())
 ---@param event sol.Event
 ---@param handler function
@@ -769,6 +800,13 @@ function Tree:contains(id) end
 ---@return integer[]
 function Tree:windows() end
 
+---Trade the tiles of windows `a` and `b` and change nothing else: every split
+---keeps its axis and its ratio, so a second swap puts it back.
+---@param a integer
+---@param b integer
+---@return boolean both_were_in_the_tree
+function Tree:swap(a, b) end
+
 ---Where every window in the tree goes, ready for `sol.place`.
 ---@param options sol.LayoutOptions
 ---@return sol.Slot[]
@@ -815,6 +853,12 @@ function Scroller:focus_sideways(by, options) end
 ---@param by integer
 ---@return nil
 function Scroller:focus_vertically(by) end
+
+---Swap the focused window with the one above it in its column (`by` is -1) or
+---below it (1), carrying focus along. Nothing moves at the top or bottom.
+---@param by integer
+---@return boolean moved
+function Scroller:move_vertically(by) end
 
 ---Swap the active column with its neighbour `by` places away, carrying focus.
 ---@param by integer
