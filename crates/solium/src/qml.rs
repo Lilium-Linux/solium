@@ -1807,9 +1807,15 @@ mod search_path_tests {
 /// types `compat.cpp` registers behind them.
 #[cfg(test)]
 mod compat_tests {
+    use std::ffi::{CStr, CString, c_char};
     use std::path::{Path, PathBuf};
 
     use super::qt_test::on_the_qt_thread;
+
+    #[expect(unsafe_code, reason = "declaring a Qt host function")]
+    unsafe extern "C" {
+        fn solium_qml_theme_icon_name(id: *const c_char) -> *const c_char;
+    }
 
     /// A fresh directory under the system's temporary one.
     fn fixture_dir(name: &str) -> PathBuf {
@@ -1821,6 +1827,118 @@ mod compat_tests {
 
     fn write(path: &Path, text: impl AsRef<[u8]>) {
         std::fs::write(path, text).expect("writing a fixture");
+    }
+
+    /// **An icon id that is a file path does not load that file** (#145).
+    ///
+    /// An app id is whatever the application said, and `Quickshell.iconPath`
+    /// builds `image://theme/<name>` from it. `QIcon::fromTheme` loads a file
+    /// when handed an absolute path, so a window whose app id was a path chose
+    /// a file for the compositor to read and draw.
+    ///
+    /// The image is 7x3 so that no icon theme's fallback, which is square, can
+    /// be mistaken for it; and the same file is also loaded as a *file*, which
+    /// must work, so the test cannot pass by the image simply being unreadable.
+    #[test]
+    fn an_icon_id_that_is_a_path_does_not_load_that_file() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-icon-path");
+            let image = directory.join("seven-by-three.ppm");
+            let mut ppm = b"P6\n7 3\n255\n".to_vec();
+            ppm.extend(std::iter::repeat_n([200_u8, 30, 40], 21).flatten());
+            write(&image, ppm);
+
+            let scene = directory.join("Icon.qml");
+            write(
+                &scene,
+                r#"
+                import QtQuick
+                import Quickshell
+
+                Item {
+                    id: root
+                    required property string file
+                    readonly property int directWidth: direct.implicitWidth
+                    readonly property int directHeight: direct.implicitHeight
+                    readonly property int themedWidth: themed.implicitWidth
+                    readonly property int themedHeight: themed.implicitHeight
+                    readonly property bool checkedIsEmpty:
+                        Quickshell.iconPath(root.file, true) === ""
+                    readonly property bool uncheckedIsTheFallback:
+                        Quickshell.iconPath(root.file)
+                            === "image://theme/application-x-executable"
+
+                    Image { id: direct; source: "file://" + root.file }
+                    Image { id: themed; source: "image://theme/" + root.file }
+                }
+                "#,
+            );
+
+            super::start().expect("Qt starts");
+            let file = image.to_string_lossy();
+            let properties = format!("{{\"file\":{}}}", crate::scripted::json_string(&file));
+            let mut scene = super::Scene::for_host(&scene, 16, 16, Some(&properties))
+                .expect("the icon scene builds");
+
+            assert_eq!(
+                (scene.get_int("directWidth"), scene.get_int("directHeight")),
+                (7, 3),
+                "the control failed: the fixture does not load even as a file"
+            );
+            let themed = (scene.get_int("themedWidth"), scene.get_int("themedHeight"));
+            assert_ne!(
+                themed,
+                (7, 3),
+                "image://theme/<path> loaded the file at that path"
+            );
+            assert!(
+                scene.get_bool("checkedIsEmpty"),
+                "iconPath(path, true) answered with something other than nothing"
+            );
+            assert!(
+                scene.get_bool("uncheckedIsTheFallback"),
+                "iconPath(path) did not answer with the generic application icon"
+            );
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A name with a `/` in it, or one Qt reads as absolute, is the generic
+    /// application icon**, and an ordinary name is looked up as written.
+    ///
+    /// A theme lookup joins the name onto each theme directory, so `../` in
+    /// one walks out of the theme; `:` is Qt's own resource root, which
+    /// `QIcon::fromTheme` treats as a path too.
+    #[test]
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    fn an_icon_name_with_a_slash_is_the_fallback() {
+        let looked_up = |id: &str| -> String {
+            let id = CString::new(id).expect("no NUL in a fixture");
+            // SAFETY: `id` outlives the call, and the answer is copied before
+            // the next call on this thread can replace it.
+            unsafe { CStr::from_ptr(solium_qml_theme_icon_name(id.as_ptr())) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        for ordinary in ["firefox", "org.kde.konsole", "utilities-terminal"] {
+            assert_eq!(looked_up(ordinary), ordinary);
+        }
+        for refused in [
+            "/usr/share/pixmaps/firefox.png",
+            "../../../../etc/passwd",
+            "apps/firefox",
+            ":/qt-project.org/styles/commonstyle/images/up-16.png",
+            ":logo",
+            "",
+        ] {
+            assert_eq!(
+                looked_up(refused),
+                "application-x-executable",
+                "{refused:?} was looked up as written"
+            );
+        }
     }
 
     /// **A hosted shell reads the window list the compositor publishes**,

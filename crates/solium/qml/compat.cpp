@@ -21,6 +21,28 @@
 
 #include <csignal>
 
+namespace {
+/* What an `image://theme/` request may ask the icon theme for.
+ *
+ * `QIcon::fromTheme` loads a *file* when handed an absolute path, and a theme
+ * lookup joins the name onto each theme directory, so a name with a `/` in it
+ * can reach outside the theme. An app id is whatever the application said, and
+ * `iconPath` builds `image://theme/<name>` from it, so either would let a
+ * window pick a file for the compositor to load (#145). Such a name gets the
+ * generic application icon instead. See
+ * `an_icon_id_that_is_a_path_does_not_load_that_file` and
+ * `an_icon_name_with_a_slash_is_the_fallback`. */
+const QString kFallbackIcon = QStringLiteral("application-x-executable");
+
+QString themeIconName(const QString &id)
+{
+    if (id.isEmpty() || id.contains(QLatin1Char('/')) || QDir::isAbsolutePath(id)) {
+        return kFallbackIcon;
+    }
+    return id;
+}
+} // namespace
+
 void StdioCollector::append(const QString &chunk)
 {
     if (chunk.isEmpty()) {
@@ -413,6 +435,11 @@ void QuickshellGlobal::execDetached(const QVariant &command)
 
 QString QuickshellGlobal::iconPath(const QString &name, const QVariant &check)
 {
+    // Never a path into QIcon, not even to ask whether it is an icon. See
+    // `an_icon_id_that_is_a_path_does_not_load_that_file`.
+    if (themeIconName(name) != name) {
+        return check.toBool() ? QString() : QStringLiteral("image://theme/") + kFallbackIcon;
+    }
     if (QIcon::hasThemeIcon(name)) {
         return QStringLiteral("image://theme/") + name;
     }
@@ -538,9 +565,9 @@ public:
     {
         const int width = requested.width() > 0 ? requested.width() : 64;
         const int height = requested.height() > 0 ? requested.height() : 64;
-        QIcon icon = QIcon::fromTheme(id);
+        QIcon icon = QIcon::fromTheme(themeIconName(id));
         if (icon.isNull()) {
-            icon = QIcon::fromTheme(QStringLiteral("application-x-executable"));
+            icon = QIcon::fromTheme(kFallbackIcon);
         }
         QPixmap pixmap = icon.pixmap(QSize(width, height));
         if (size != nullptr) {
@@ -553,6 +580,15 @@ public:
 void solium_qml_install_icons(QQmlEngine *engine)
 {
     engine->addImageProvider(QStringLiteral("theme"), new ThemeIconProvider());
+}
+
+/* The name the icon provider would look up for `id`, for the tests. Valid
+ * until the next call on the same thread. */
+extern "C" const char *solium_qml_theme_icon_name(const char *id)
+{
+    thread_local QByteArray answer;
+    answer = themeIconName(QString::fromUtf8(id != nullptr ? id : "")).toUtf8();
+    return answer.constData();
 }
 
 void solium_qml_register_compat()
