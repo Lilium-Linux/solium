@@ -40,6 +40,18 @@ pub(crate) enum Standing {
     Within(Rectangle<i32, Logical>),
 }
 
+/// Whether this window is fullscreen or maximised, as the compositor last
+/// decided it: in the pending state, which is what `Solium::toggle_maximize`
+/// and the fullscreen requests write.
+fn over_the_arrangement(window: &Window) -> bool {
+    window.toplevel().is_some_and(|toplevel| {
+        toplevel.with_pending_state(|state| {
+            state.states.contains(xdg_toplevel::State::Fullscreen)
+                || state.states.contains(xdg_toplevel::State::Maximized)
+        })
+    })
+}
+
 /// A script's rectangle as a pane's outer one: rounded to whole pixels, and
 /// never smaller than one.
 pub(super) fn outer_of(rect: Rect) -> Rectangle<i32, Logical> {
@@ -137,11 +149,16 @@ impl Solium {
 
     /// Whether a layout placing another window must leave this one above it:
     /// a window being closed, from the press until it is given back or gone,
-    /// and one drawn translucent -- which is where a refused window is from
-    /// the moment it is given back until its return lands.
+    /// one drawn translucent -- which is where a refused window is from the
+    /// moment it is given back until its return lands -- and one fullscreen or
+    /// maximised, which covers the arrangement rather than taking part in it,
+    /// so a neighbour a sweep places is not stacked over it.
+    /// `a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is`.
     fn stays_over_a_layout(&self, window: &Window, now: Duration) -> bool {
         self.panes.of(window).is_some_and(|pane| {
-            pane.leaving() || present::frame(pane, self.pane_outer(pane), now).opacity < 1.0
+            pane.leaving()
+                || over_the_arrangement(window)
+                || present::frame(pane, self.pane_outer(pane), now).opacity < 1.0
         })
     }
 
@@ -267,6 +284,33 @@ impl Solium {
             .get(pane)
             .is_some_and(|held| held.gone() || held.ghost())
         {
+            return;
+        }
+        // **Nor into a tile, while it is fullscreen or maximised** (#150's
+        // second review). A script cannot see that a window is either, and a
+        // layout places every window it arranges on every pass --
+        // `tiling.apply` does after a window opens, a move by key and a
+        // window floated -- so the sweep resized a fullscreen window into its
+        // tile, still fullscreen and with no frame. A tile given to one is the
+        // tile it goes back to instead, and nothing else changes: leaving
+        // fullscreen or maximised goes into the newest tile the layout gave.
+        // `a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is`.
+        let tile = match standing {
+            Standing::Tile => Some(outer),
+            Standing::Within(tile) => Some(tile),
+            Standing::Free | Standing::Kept => None,
+        };
+        if let Some(tile) = tile
+            && self
+                .panes
+                .get(pane)
+                .and_then(Pane::client)
+                .is_some_and(over_the_arrangement)
+        {
+            if let Some(held) = self.panes.get_mut(pane) {
+                held.set_placed(tile);
+                held.leave_tile();
+            }
             return;
         }
         // The frame's share comes off whichever sides it reserved; what is
@@ -728,7 +772,7 @@ impl Solium {
         // does already for a window that was maximised when it went
         // fullscreen, the kept rect and the tile included.
         // `maximising_a_fullscreen_window_leaves_fullscreen_for_it`.
-        let (fullscreen, maximized) = toplevel.with_pending_state(|state| {
+        let (fullscreen, was_maximized) = toplevel.with_pending_state(|state| {
             (
                 state.states.contains(xdg_toplevel::State::Fullscreen),
                 state.states.contains(xdg_toplevel::State::Maximized),
@@ -736,7 +780,7 @@ impl Solium {
         });
         if fullscreen {
             toplevel.with_pending_state(|state| {
-                if maximized {
+                if was_maximized {
                     state.states.unset(xdg_toplevel::State::Maximized);
                 } else {
                     state.states.set(xdg_toplevel::State::Maximized);
@@ -762,15 +806,19 @@ impl Solium {
         // at all.
         let restore = self.panes.get_mut(id).and_then(Pane::take_restore);
 
-        let (location, size, maximized) = match restore {
+        let (back, maximized) = match restore {
             // Restoring: back to exactly where it was, because that rect was
             // stored rather than recomputed -- unless the monitor it was on
             // has gone since, see `back_on_a_screen`.
-            Some(previous) => {
-                let back = self.back_on_a_screen(window, previous);
-                (back.loc, back.size, false)
-            }
-            None => (filled.loc, filled.size, true),
+            Some(previous) => (Some(self.back_on_a_screen(window, previous)), false),
+            // Maximised with no way back kept: a window that went fullscreen
+            // before it had drawn, so `fullscreen_request` kept no rect, and
+            // was maximised from there. Restored as leaving fullscreen restores
+            // it, with no rect and so no size, and the client picks its own;
+            // maximising it again left the key dead for a press.
+            // `a_window_maximised_with_no_way_back_is_restored_with_no_size`.
+            None if was_maximized => (None, false),
+            None => (Some(filled), true),
         };
 
         // **And out of its tile, or back into it (#133).** A tiled client is
@@ -780,17 +828,19 @@ impl Solium {
         // so a window restored into it is tiled again at once rather than at
         // the next sweep -- which is what a tiled edge drag started from it
         // reads (#124).
-        if let Some(pane) = self.panes.get_mut(id) {
+        let tiled = self.panes.get_mut(id).is_some_and(|pane| {
             if maximized {
                 pane.set_restore(Some(current));
                 pane.leave_tile();
+                false
             } else {
                 pane.return_to_tile();
+                pane.placed().is_some()
             }
-        }
+        });
 
         toplevel.with_pending_state(|state| {
-            state.size = Some(size);
+            state.size = back.map(|back| back.size);
             if maximized {
                 state.states.set(xdg_toplevel::State::Maximized);
             } else {
@@ -798,7 +848,17 @@ impl Solium {
             }
         });
         toplevel.send_pending_configure();
-        self.map_stacked(window.clone(), location, true);
+        if let Some(back) = back {
+            self.map_stacked(window.clone(), back.loc, true);
+        }
+        // Back in a tile, and the layout says where that is now: a sweep while
+        // the window was maximised kept the tile it gave, which need not be the
+        // one the window left -- a move by key traded it for its neighbour's --
+        // so it is asked, as `unfullscreen_request` asks.
+        // `a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is`.
+        if tiled {
+            self.trigger_relayout();
+        }
         tracing::debug!(maximized, "window maximise toggled");
     }
 

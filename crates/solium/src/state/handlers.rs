@@ -573,8 +573,8 @@ impl XdgShellHandler for Solium {
         // cut down to the tile it came from is a video playing in a corner of
         // the monitor. Unconditionally rather than beside the rect above,
         // because a window that is already fullscreen, or was maximised first,
-        // may have been put back in a tile by a sweep since -- and
-        // `leave_tile` keeps an older way back when there is no tile to take.
+        // has left its tile already -- and `leave_tile` keeps that older way
+        // back when there is no tile to take.
         if let Some(pane) = self.panes.get_mut(id) {
             pane.leave_tile();
         }

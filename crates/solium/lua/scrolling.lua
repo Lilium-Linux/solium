@@ -547,15 +547,18 @@ bind("super+r", function(view, on) view:cycle_width(options(on)) end)
 -- `a_window_on_no_workspace_is_on_none_after_crossing`.
 local STEP = { left = -1, right = 1, up = -1, down = 1 }
 
--- The focused window, its strip and its monitor, or nil when the keyboard is on
--- a window no strip holds, which then gets the floating answer to a focus and
--- does not move. `a_window_the_layout_does_not_arrange_gets_the_floating_answer`.
+-- The focused window, its strip, its monitor and its row in `sol.windows()`,
+-- which is what the next monitor that way is reckoned from; or nil when the
+-- keyboard is on a window no strip holds, which then gets the floating answer
+-- to a focus and does not move.
+-- `a_window_the_layout_does_not_arrange_gets_the_floating_answer` and
+-- `of_two_monitors_that_way_the_one_level_with_the_window_is_next`.
 local function focused_in_strip()
     for _, window in ipairs(sol.windows()) do
         if window.focused then
             local view, monitor = view_of(window.id)
             if view:contains(window.id) then
-                return window.id, view, monitor
+                return window.id, view, monitor, window
             end
             return nil
         end
@@ -564,7 +567,7 @@ local function focused_in_strip()
 end
 
 function scrolling.focus_direction(dir)
-    local id, view, monitor = focused_in_strip()
+    local id, view, monitor, window = focused_in_strip()
     if not id then
         return false
     end
@@ -577,7 +580,7 @@ function scrolling.focus_direction(dir)
     end
     local to = view:focused()
     if to == id then
-        local next = direction.beside(monitor, dir)
+        local next = direction.beside(monitor, dir, window)
         to = next and view_for(next.name):focused()
     end
     scrolling.apply(config.scrolling.snap)
@@ -588,7 +591,7 @@ function scrolling.focus_direction(dir)
 end
 
 function scrolling.move_direction(dir)
-    local id, view, monitor = focused_in_strip()
+    local id, view, monitor, window = focused_in_strip()
     if not id then
         return true
     end
@@ -601,7 +604,7 @@ function scrolling.move_direction(dir)
         moved = view:move_vertically(STEP[dir])
     end
     if not moved then
-        local next = direction.beside(monitor, dir)
+        local next = direction.beside(monitor, dir, window)
         if not next then
             return true
         end

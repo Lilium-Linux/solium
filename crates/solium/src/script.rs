@@ -10538,6 +10538,38 @@ mod directions {
         h: 1080.0,
     };
 
+    /// A screen under `BESIDE`, so the two stand stacked to the right of
+    /// `WIDE`: the upper level with its top, this one with its bottom.
+    const UNDER_BESIDE: Rect = Rect {
+        x: 2560.0,
+        y: 1080.0,
+        w: 1920.0,
+        h: 1080.0,
+    };
+
+    /// A portrait screen with `ABOVE_LEFT` and `BELOW_LEFT` stacked on its
+    /// left, the upper level with its top half and the lower with its bottom.
+    const PORTRAIT: Rect = Rect {
+        x: 1920.0,
+        y: 0.0,
+        w: 1440.0,
+        h: 2560.0,
+    };
+
+    const ABOVE_LEFT: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 1920.0,
+        h: 1080.0,
+    };
+
+    const BELOW_LEFT: Rect = Rect {
+        x: 0.0,
+        y: 1080.0,
+        w: 1920.0,
+        h: 1080.0,
+    };
+
     fn window(id: u64, monitor: &str, rect: Rect) -> WindowInfo {
         WindowInfo {
             id,
@@ -11411,6 +11443,153 @@ mod directions {
             "2 and 3 did not take the portrait screen: {:?}",
             desk.rects()
         );
+    }
+
+    /// **Of two monitors that way, the one level with the window is next.**
+    /// #150's second review.
+    ///
+    /// The next monitor was ranked from the rectangle of the monitor the
+    /// window is on, so of two screens stacked beside it the same one was
+    /// next from every window: right of the big screen's lower tile was the
+    /// upper of the two screens beside it, and left of a portrait screen's
+    /// upper tile the lower of the two on its left. It is ranked from the
+    /// window now, as wlroots ranks from a point in the focused window: in
+    /// tiling for focus and for a move, and in scrolling past the end of the
+    /// strip.
+    #[test]
+    fn of_two_monitors_that_way_the_one_level_with_the_window_is_next() {
+        let mut desk = Desk::new(
+            "",
+            vec![
+                screen("DP-1", WIDE),
+                screen("DP-2", BESIDE),
+                screen("DP-3", UNDER_BESIDE),
+            ],
+        );
+        desk.press("super+t");
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        desk.open(2, "DP-1", (2000.0, 720.0));
+        desk.open(3, "DP-1", (1920.0, 1200.0));
+        desk.open(5, "DP-2", (3520.0, 540.0));
+        desk.open(6, "DP-3", (3520.0, 1620.0));
+        // Window 2 taller, so window 3 under it is level with DP-3 alone.
+        desk.focus(2);
+        for _ in 0..6 {
+            desk.press("super+ctrl+equal");
+        }
+        let (upper, lower) = (desk.rect(2), desk.rect(3));
+        assert!(
+            about(upper.x, lower.x)
+                && upper.y + upper.h < lower.y
+                && lower.y > UNDER_BESIDE.y
+                && upper.y + upper.h / 2.0 < BESIDE.y + BESIDE.h
+                && inside(desk.rect(5), BESIDE)
+                && inside(desk.rect(6), UNDER_BESIDE),
+            "the premise: 2 above 3 on DP-1's right, 3 level with DP-3 alone, \
+             5 on DP-2 and 6 on DP-3: {:?}",
+            desk.rects()
+        );
+        for (from, key, to) in [
+            (2, "super+right", 5),
+            (2, "super+l", 5),
+            (3, "super+right", 6),
+            (3, "super+l", 6),
+        ] {
+            desk.focus(from);
+            assert_eq!(focuses(&desk.press(key)), [to], "{key} from window {from}");
+        }
+        desk.focus(3);
+        desk.press("super+shift+right");
+        assert_eq!(
+            desk.monitor(3),
+            "DP-3",
+            "super+shift+right from window 3 took it to the other screen: {:?}",
+            desk.rects()
+        );
+
+        let stacked_left = || {
+            vec![
+                screen("DP-1", PORTRAIT),
+                screen("DP-2", ABOVE_LEFT),
+                screen("DP-3", BELOW_LEFT),
+            ]
+        };
+        let mut desk = Desk::new("", stacked_left());
+        desk.press("super+t");
+        desk.open(7, "DP-2", (960.0, 540.0));
+        desk.open(8, "DP-3", (960.0, 1620.0));
+        desk.open(1, "DP-1", (2640.0, 640.0));
+        desk.open(2, "DP-1", (2640.0, 2000.0));
+        let (one, two) = (desk.rect(1), desk.rect(2));
+        assert!(
+            one.y + one.h < two.y
+                && inside(one, PORTRAIT)
+                && inside(two, PORTRAIT)
+                && one.y + one.h / 2.0 < ABOVE_LEFT.y + ABOVE_LEFT.h
+                && two.y > BELOW_LEFT.y,
+            "the premise: 1 above 2 on the portrait screen, 2 level with DP-3 alone: {:?}",
+            desk.rects()
+        );
+        for (from, key, to) in [
+            (1, "super+left", 7),
+            (1, "super+h", 7),
+            (2, "super+left", 8),
+            (2, "super+h", 8),
+        ] {
+            desk.focus(from);
+            assert_eq!(focuses(&desk.press(key)), [to], "{key} from window {from}");
+        }
+        desk.focus(1);
+        desk.press("super+shift+left");
+        assert_eq!(
+            desk.monitor(1),
+            "DP-2",
+            "super+shift+left from window 1 took it to the lower screen: {:?}",
+            desk.rects()
+        );
+
+        let mut desk = Desk::new("", stacked_left());
+        for (id, monitor, area) in [
+            (7, "DP-2", ABOVE_LEFT),
+            (8, "DP-3", BELOW_LEFT),
+            (1, "DP-1", PORTRAIT),
+            (2, "DP-1", PORTRAIT),
+        ] {
+            desk.windows.push(window(
+                id,
+                monitor,
+                Rect {
+                    w: 400.0,
+                    h: 300.0,
+                    ..area
+                },
+            ));
+        }
+        desk.press("super+s");
+        // Window 2 stacked under window 1: `super+comma` from column 1, on
+        // DP-1 because the strip's own keys act on the monitor in front.
+        desk.focus(2);
+        desk.press("super+h");
+        desk.press("super+comma");
+        let (one, two) = (desk.rect(1), desk.rect(2));
+        assert!(
+            about(one.x, two.x)
+                && one.y + one.h < two.y
+                && inside(one, PORTRAIT)
+                && inside(two, PORTRAIT)
+                && one.y + one.h / 2.0 < ABOVE_LEFT.y + ABOVE_LEFT.h
+                && two.y > BELOW_LEFT.y,
+            "the premise: scrolling, 1 above 2 in the portrait screen's one column: {:?}",
+            desk.rects()
+        );
+        for (from, key, to) in [(1, "super+left", 7), (2, "super+left", 8)] {
+            desk.focus(from);
+            assert_eq!(
+                focuses(&desk.press(key)),
+                [to],
+                "scrolling: {key} from window {from}"
+            );
+        }
     }
 
     /// **A window that belongs to no workspace belongs to none after a move

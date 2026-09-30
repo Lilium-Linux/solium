@@ -65,11 +65,11 @@ placed with `tile = false` or let go with `sol.unplace`. `sol.unplace` is for
 a layout letting go, and `modes.use` sends it for every window whenever the
 layout in charge changes — so a mode registered through `modes` gets it for
 free, and one that is not must send it itself. Maximising and fullscreen take a
-window out of its tile on their own, and the way back puts it in again — but
-only until your layout next places it. A script cannot see that a window is
-maximised, so a layout that places every window on every pass (as
-`tiling.apply` does) puts a maximised one back in its tile and resizes it
-there.
+window out of its tile on their own, and the way back puts it in again. A
+script cannot see that a window is maximised or fullscreen, so a layout that
+places every window on every pass (as `tiling.apply` does) places those too,
+and that placement is kept as the tile the window goes back into: the window
+itself stays where it is, over the arrangement.
 
 `present` is a transform. The window still lives where it lived and the client
 never learns anything happened; it is simply drawn somewhere else. Use it for
@@ -558,9 +558,11 @@ neighbour, the nearest centre further that way counts too.
 At a monitor's edge both go on to the next monitor that way, and the desk it is
 showing. The next monitor is one wholly past this one's edge, as wlroots has it:
 a portrait screen standing beside a landscape one is beside it and never below,
-and a smaller screen top-aligned next to a bigger one is above nothing. On the
-next monitor the nearest centre counts for tiles as well, since a screen of
-another height may have nothing level with the window.
+and a smaller screen top-aligned next to a bigger one is above nothing. Of two
+that way, the one level with the window wins, so with two screens stacked
+beside a big one the window's own height picks between them. On the next
+monitor the nearest centre counts for tiles as well, since a screen of another
+height may have nothing level with the window.
 
 `direction.find(from, dir, on, loose)` is that search, for a layout's own
 rectangles: `on(name)` lists them for a monitor, `loose` is the floating rule,

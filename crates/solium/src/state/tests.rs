@@ -2850,6 +2850,118 @@ mod real_client {
         );
     }
 
+    /// **A window maximised with no way back kept is restored with no
+    /// size.** #150's second review.
+    ///
+    /// A window that went fullscreen before it had drawn keeps no rect to
+    /// come back to, and `super+shift+m` takes it from fullscreen to
+    /// maximised. The next `super+shift+m` found nothing to restore and
+    /// maximised it again, so the press did nothing. Now it leaves
+    /// maximised as leaving fullscreen does with nothing kept: the client
+    /// is configured with no size, and picks its own.
+    #[test]
+    fn a_window_maximised_with_no_way_back_is_restored_with_no_size() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        let output = one_screen(&mut state);
+        let screen = state
+            .space
+            .output_geometry(&output)
+            .expect("the monitor is mapped");
+        let directory =
+            std::env::temp_dir().join(format!("solium-toggles-bare-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            r#"
+            sol.bind("super+shift+m", function() sol.toggle_maximize() end)
+            "#,
+        )
+        .expect("writing the test script");
+        state.start_scripts(Some(
+            Scripts::load(&entry).expect("loading the test script"),
+        ));
+
+        let (conn, mut event_queue, mut client) = connect(&mut display, &mut state);
+        let qh = event_queue.handle();
+        let compositor = client.compositor.clone().expect("wl_compositor bound");
+        let wm_base = client.wm_base.clone().expect("xdg_wm_base bound");
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        toplevel.set_fullscreen(None);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut event_queue,
+            &mut client,
+        );
+        let window = state
+            .space
+            .elements()
+            .next()
+            .cloned()
+            .expect("new_toplevel maps a window before it has drawn anything");
+        let id = state.panes.id_of(&window).expect("the window has a pane");
+        commit_buffer(&client, &qh, &surface, screen.size.w, screen.size.h);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut event_queue,
+            &mut client,
+        );
+        state.focus_window(&window, SERIAL_COUNTER.next_serial());
+
+        assert!(state.trigger("super+shift+m"), "super+shift+m is bound");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut event_queue,
+            &mut client,
+        );
+        assert!(
+            in_state(&window, State::Maximized) && !in_state(&window, State::Fullscreen),
+            "the premise: out of fullscreen into maximised"
+        );
+        assert_eq!(
+            state.panes.get(id).and_then(Pane::restore),
+            None,
+            "the premise: no way back kept"
+        );
+
+        client.configures.clear();
+        assert!(state.trigger("super+shift+m"));
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut event_queue,
+            &mut client,
+        );
+        assert!(
+            !in_state(&window, State::Maximized),
+            "the second press maximised the window again"
+        );
+        assert_eq!(
+            sizes_sent(&client, &toplevel),
+            vec![(0, 0)],
+            "with nowhere kept to go back to, the client picks its own size"
+        );
+    }
+
     /// **A window with no frame toggles back from maximised.**
     ///
     /// The rect a maximise goes back to lived on the window's `Decoration`,
@@ -4729,6 +4841,199 @@ mod real_client {
             state.panes.get(pane).and_then(Pane::placed),
             Some(tile),
             "and leaving fullscreen puts it back in that tile"
+        );
+    }
+
+    /// **A layout's sweep leaves a fullscreen or maximised window where it
+    /// is, and the way back is the tile it gave last.** #150's second
+    /// review.
+    ///
+    /// The shipped tiling, two windows side by side. `super+f` on the left
+    /// one, then `super+shift+right`, which trades it with its neighbour and
+    /// lays the tree out again: that sweep put the fullscreen window into
+    /// its new tile, resized there and still fullscreen with no frame, and
+    /// raised the neighbour over it. Now it still covers the monitor, on
+    /// top, at the size it was told, and `super+f` puts it in the tile on
+    /// the right. The same for maximised, with `super+shift+m` and a move
+    /// back left.
+    #[test]
+    fn a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let output = one_screen(&mut state);
+        let screen = state
+            .space
+            .output_geometry(&output)
+            .expect("the monitor is mapped");
+        let (first, first_toplevel, first_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (second, second_toplevel, second_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.sync_panes();
+
+        let directory =
+            std::env::temp_dir().join(format!("solium-kept-over-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\n\
+                 require(\"modes\")\n\
+                 require(\"workspaces\")\n\
+                 require(\"tiling\")\n\
+                 require(\"direction\")\n",
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        )
+        .expect("writing the entry point");
+        state.start_scripts(Some(
+            Scripts::load(&entry).expect("loading the shipped layouts"),
+        ));
+        macro_rules! round_trip {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            };
+        }
+        // Every animation landed, the windows' own fade in among them: a
+        // window drawn translucent is kept over a layout's placements
+        // already, which would hide the stacking asserted below.
+        macro_rules! rest {
+            () => {
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+            };
+        }
+        macro_rules! press {
+            ($combo:expr) => {
+                assert!(state.trigger($combo), "{} is bound", $combo);
+                round_trip!();
+            };
+        }
+        let tile_of = |state: &Solium, window: &Window| {
+            state
+                .panes
+                .of(window)
+                .and_then(Pane::placed)
+                .expect("the layout has this window in a tile")
+        };
+        press!("super+t");
+        for (surface, window) in [(&first_surface, &first), (&second_surface, &second)] {
+            let tile = tile_of(&state, window);
+            commit_buffer(&client, &qh, surface, tile.size.w, tile.size.h);
+        }
+        round_trip!();
+        rest!();
+        let ((window, toplevel, surface), other) =
+            if tile_of(&state, &first).loc.x < tile_of(&state, &second).loc.x {
+                ((&first, &first_toplevel, &first_surface), &second)
+            } else {
+                ((&second, &second_toplevel, &second_surface), &first)
+            };
+        let (left, right) = (tile_of(&state, window), tile_of(&state, other));
+        assert!(
+            left.loc.x + left.size.w < right.loc.x,
+            "the premise: two tiles side by side: {left:?} and {right:?}"
+        );
+        let pane = state.panes.id_of(window).expect("the window has a pane");
+        state.focus_window(window, SERIAL_COUNTER.next_serial());
+
+        // Over the layout while it is fullscreen or maximised, and at the
+        // size it was told for that; and the tile it goes back to is `tile`.
+        let covers = |state: &Solium, client: &Client, wanted: State, tile| {
+            assert!(in_state(window, wanted), "{wanted:?}: no longer in it");
+            assert_eq!(
+                state.space.element_location(window),
+                Some(screen.loc),
+                "{wanted:?}: the sweep moved the window"
+            );
+            assert_eq!(
+                last_configured(client, toplevel),
+                Some((screen.size.w, screen.size.h)),
+                "{wanted:?}: the sweep resized the window to a tile"
+            );
+            assert_eq!(
+                state
+                    .space
+                    .elements()
+                    .last()
+                    .map(|top| state.window_id(top)),
+                Some(state.window_id(window)),
+                "{wanted:?}: the sweep stacked a neighbour over the window"
+            );
+            assert_eq!(
+                state
+                    .panes
+                    .get(pane)
+                    .map(|held| (held.placed(), held.left_tile())),
+                Some((None, Some(tile))),
+                "{wanted:?}: the window is not out of its tile with the newest one kept"
+            );
+        };
+
+        press!("super+f");
+        commit_buffer(&client, &qh, surface, screen.size.w, screen.size.h);
+        round_trip!();
+        rest!();
+        press!("super+shift+right");
+        assert_eq!(
+            tile_of(&state, other),
+            left,
+            "the premise: the move traded the two, and the layout placed the neighbour"
+        );
+        covers(&state, &client, State::Fullscreen, right);
+
+        press!("super+f");
+        assert!(!in_state(window, State::Fullscreen));
+        assert_eq!(
+            state.panes.get(pane).and_then(Pane::placed),
+            Some(right),
+            "leaving fullscreen did not go into the newest tile"
+        );
+        assert_eq!(state.space.element_location(window), Some(right.loc));
+        assert_eq!(
+            last_configured(&client, toplevel),
+            Some((right.size.w, right.size.h))
+        );
+        commit_buffer(&client, &qh, surface, right.size.w, right.size.h);
+        round_trip!();
+        rest!();
+
+        press!("super+shift+m");
+        commit_buffer(&client, &qh, surface, screen.size.w, screen.size.h);
+        round_trip!();
+        rest!();
+        press!("super+shift+left");
+        assert_eq!(
+            tile_of(&state, other),
+            right,
+            "the premise: the move traded the two back"
+        );
+        covers(&state, &client, State::Maximized, left);
+
+        press!("super+shift+m");
+        assert!(!in_state(window, State::Maximized));
+        assert_eq!(
+            state.panes.get(pane).and_then(Pane::placed),
+            Some(left),
+            "leaving maximised did not go into the newest tile"
+        );
+        assert_eq!(
+            state.space.element_location(window),
+            Some(left.loc),
+            "leaving maximised went back to the tile it left, not the one it has"
+        );
+        assert_eq!(
+            last_configured(&client, toplevel),
+            Some((left.size.w, left.size.h))
         );
     }
 
@@ -7158,6 +7463,10 @@ mod real_client {
     /// an interval for exactly the windows a drag is touching — which is
     /// the one place case (1) short-circuited before the check that exists
     /// to catch it.
+    ///
+    /// The change here is a decoration mode. A maximised or fullscreen
+    /// window is no layout's to place, so a drag's frame does not reach one:
+    /// `a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is`.
     #[test]
     fn a_pending_change_is_flushed_even_while_the_drag_is_throttled() {
         tiled_fixture!(display, state, conn, queue, client, qh);
@@ -7209,9 +7518,12 @@ mod real_client {
             .toplevel()
             .expect("the fixture's window is an xdg toplevel")
             .with_pending_state(|state| {
-                state.states.set(
-                    smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
-                );
+                use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as Decoration;
+                state.decoration_mode = Some(if state.decoration_mode == Some(Decoration::ServerSide) {
+                    Decoration::ClientSide
+                } else {
+                    Decoration::ServerSide
+                });
             });
         // And a throttled frame of the drag arrives before the interval is
         // up. This is the frame that used to swallow it.

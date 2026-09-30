@@ -111,11 +111,16 @@ end
 -- for the output beside another: a portrait screen standing to the right of a
 -- landscape one is to its right and never below it, however far down it
 -- reaches, and a smaller screen top-aligned beside a bigger one is above
--- nothing. Of those, one level with this monitor, by the nearest facing edge;
--- failing any, the nearest centre, which is a monitor off on a diagonal.
--- `at_a_monitors_edge_the_next_monitor_is_one_wholly_that_way` and
--- `at_a_monitors_edge_floating_crosses_to_the_next_monitor`.
-function direction.beside(name, dir)
+-- nothing. Of those, the nearest to `from`, the rectangle of the window the
+-- key was pressed on, by `direction.nearest`'s loose rule: one level with the
+-- window, by the nearest facing edge, and failing any the nearest centre,
+-- which is a monitor off on a diagonal. From the window and not from this
+-- monitor, as wlroots ranks from a point in the focused window: of two
+-- screens stacked beside a big one, the one level with the window is next.
+-- `at_a_monitors_edge_the_next_monitor_is_one_wholly_that_way`,
+-- `at_a_monitors_edge_floating_crosses_to_the_next_monitor` and
+-- `of_two_monitors_that_way_the_one_level_with_the_window_is_next`.
+function direction.beside(name, dir, from)
     local here
     local all = {}
     for _, monitor in ipairs(sol.monitors()) do
@@ -136,7 +141,7 @@ function direction.beside(name, dir)
             past[#past + 1] = entry
         end
     end
-    local found = direction.nearest(here, past, dir, true)
+    local found = direction.nearest(from, past, dir, true)
     return found and found.monitor
 end
 
@@ -156,7 +161,7 @@ function direction.find(from, dir, on, loose)
     if here then
         return here, from.monitor, false
     end
-    local next = direction.beside(from.monitor, dir)
+    local next = direction.beside(from.monitor, dir, from)
     if not next then
         return nil, nil, false
     end
