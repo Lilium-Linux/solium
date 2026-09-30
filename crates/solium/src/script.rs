@@ -4005,6 +4005,12 @@ pub(crate) fn normalise_combo(combo: &str) -> String {
     canonical
 }
 
+// The generated reference pages check their sources against the code here.
+// Declared right above the tests, never higher: two tests read this file's
+// production code as everything before its first `#[cfg(test)]`.
+#[cfg(test)]
+mod reference;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10603,7 +10609,3 @@ impl Scripts {
         self.evaluate(chunk)
     }
 }
-
-// The generated reference pages check their sources against the code here.
-#[cfg(test)]
-mod reference;
