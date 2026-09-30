@@ -1,16 +1,23 @@
 # Roadmap
 
-Epics in dependency order. Each should leave the compositor running and testable.
+Epics in dependency order. Each should leave the compositor running and
+testable.
 
-**E1 to E6 have landed.** The compositor boots on hardware, transforms and
-animates windows through one engine, is scripted in Lua, has floating, tiling
-and scrolling layouts, draws its own decorations from QML, and expresses every
-mode as a script over the transform — which was the bet, and it held: none of
-the modes needed new Rust.
+**E1 to E5 have landed, and E6 closed as "modes as scripts".** The compositor
+boots on hardware, transforms and animates windows through one engine, is
+scripted in Lua, has floating, tiling and scrolling layouts, draws its own
+decorations from QML, and expresses every mode as a script over the transform
+— which was the bet, and it held: no mode has code of its own in the
+compositor. Overview needed no new Rust at all. Tiling and scrolling choose
+among arrangements that are Rust, in `crates/layout`; the Lua decides which,
+and when.
 
-E7 and E8 are open. So is the protocol work that turns a working compositor into
-a usable one; that lives on the issue tracker rather than here, prioritised by
-whether an application can be used at all without it.
+E7 to E10 are open. So is the work that turns a working compositor into a usable
+one. The [`daily-drive`
+label](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20is%3Aopen%20label%3Adaily-drive)
+is that list, prioritised by whether an application can be used at all without
+the thing, and [What is left](#what-is-left-to-be-a-complete-compositor) below
+says why the order is what it is.
 
 For what has to be true before anyone else can run this, and the order to do it
 in, see [beta.md](beta.md).
@@ -22,8 +29,8 @@ meant at the time is the more useful record.
 
 Smithay skeleton with a Vulkan renderer — the plan at the time; it shipped on
 GLES instead, for the reasons in `docs/spikes/2026-08-27-vulkan-on-smithay.md`.
-Winit backend for development, DRM for real hardware. One xdg-shell client rendered on screen, keyboard and pointer
-input working, clean shutdown.
+Winit backend for development, DRM for real hardware. One xdg-shell client
+rendered on screen, keyboard and pointer input working, clean shutdown.
 
 Done when: a terminal opens in Solium under a nested session and accepts typing.
 
@@ -77,6 +84,16 @@ commit, never on a side channel.
 
 Done when: all three work, and none required new Rust.
 
+**Closed as "modes as scripts"**, which is what shipped: overview, tiling and
+scrolling are scripts, and `modes.lua` decides which one is in charge. The app
+switcher and peek were never written. The genie is an effect, but its only
+binding, `super+m`, is a development one aimed at a fixed rectangle, because
+there is no dock icon to aim at. The rule about the dock's rectangle was
+written for a dock outside the compositor's engine. A dock hosted in it would
+name its icon from QML, which is planned and not built; only a dock that runs
+as its own program would need a protocol. See
+[tier 3](#3-the-part-that-is-not-parity).
+
 ## E7 — Touch, gestures, form factors
 
 Touch input, gesture recognition, and per-form-factor input profiles and mode
@@ -101,6 +118,21 @@ problems, and a spike reading how Hyprland and niri each solved resize.
 Done when there is one answer to "where is this window", and a mode that gets
 it wrong fails loudly rather than quietly.
 
+**Status.** Open. What has landed: one function, `Solium::move_pane`, makes the
+three copies agree whenever a pane is placed; during a resize the pane's slot,
+not the client's size, is the authority
+([#113](https://github.com/Lilium-Linux/solium/issues/113),
+[#120](https://github.com/Lilium-Linux/solium/issues/120),
+[#123](https://github.com/Lilium-Linux/solium/issues/123),
+[#124](https://github.com/Lilium-Linux/solium/issues/124)); every hit test asks
+one question, whether a pane owns the point on a screen that draws it
+([#134](https://github.com/Lilium-Linux/solium/issues/134)); and the layouts
+survive a reload ([#118](https://github.com/Lilium-Linux/solium/issues/118),
+[#129](https://github.com/Lilium-Linux/solium/issues/129)). What is left is the
+done-when itself: showing that every path goes through that one answer, and
+making a wrong one fail loudly. No spike on how Hyprland and niri solved resize
+is in the repository.
+
 ### [E10](https://github.com/Lilium-Linux/solium/issues/85) — Atrium, and what modes still cannot do
 
 A stage-manager mode, named for the central hall of a Roman house rather than
@@ -111,20 +143,30 @@ exactly the list of what the transform layer still lacks.
 Done when atrium is a script somebody can rewrite, and nothing in it needed a
 special case in `render.rs`.
 
+**Status.** Open, and atrium is not written. Three of the pieces
+[#85](https://github.com/Lilium-Linux/solium/issues/85) lists have landed:
+groups (`sol.group`, `sol.present_group`), stacking from a script (`z` in
+`sol.present`), and an opacity in the transform. Paths, an input grab scoped to
+part of the screen, and blur behind a window
+([#78](https://github.com/Lilium-Linux/solium/issues/78)) have not.
+
 ---
 
 ## What is left to be a complete compositor
 
-The epics above describe the *architecture* and it is finished: one engine, one
-clock, modes as scripts, decorations in-process. What is left is almost none of
-it. A compositor is complete when a person can use it all day without meeting
-something it cannot do, and that is a different list — mostly protocols, mostly
-unglamorous, and each one invisible until the day it is missing.
+The epics above describe the *architecture*, and most of it holds: one engine,
+one clock, modes as scripts, decorations in-process. E9 and E10 are the parts
+of it still open. A compositor is complete when a person can use it all day
+without meeting something it cannot do, and that is a different list —
+protocols, session plumbing and missing keys, mostly unglamorous, and each one
+invisible until the day it is missing.
 
-Three tiers, and the order matters more than the contents. This is the
-*prioritised* view; **[docs/gaps.md](gaps.md)** is the exhaustive one — every
-protocol not implemented and every non-protocol gap, whether or not it is worth
-doing soon.
+Three tiers, and the order matters more than the contents. They are the argument
+for the order, not a status board: the live list is the [`daily-drive`
+label](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20is%3Aopen%20label%3Adaily-drive),
+and a row here is an example of its tier. **[docs/gaps.md](gaps.md)** is the
+exhaustive list — every protocol not implemented and every non-protocol gap,
+whether or not it is worth doing soon.
 
 ### 1. Things a desktop cannot do without
 
@@ -133,24 +175,28 @@ compositor and does not come back.
 
 | | why it stops someone |
 |---|---|
-| ~~[#27](https://github.com/Lilium-Linux/solium/issues/27) session lock~~ | **done.** `ext-session-lock-v1`. It locks before the lock program draws, and stays locked if that program dies |
-| ~~[#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout~~ | **done.** `config.keyboard`, plus the repeat rate, which was the part with no way round it |
-| [#26](https://github.com/Lilium-Linux/solium/issues/26) IME | no CJK, no compose key, no emoji picker. Unusable for most of the world's writers |
+| [#26](https://github.com/Lilium-Linux/solium/issues/26) IME | no CJK, no emoji picker, no on-screen keyboard. Unusable for most of the world's writers. `compose:ralt` gives a compose key meanwhile |
 | [#55](https://github.com/Lilium-Linux/solium/issues/55) virtual-keyboard | the other half of an on-screen keyboard, which is what a phone is |
-| [#56](https://github.com/Lilium-Linux/solium/issues/56) window rules | nothing matches on `app_id`. The first thing anybody configures |
-| ~~[#54](https://github.com/Lilium-Linux/solium/issues/54) output power~~ | **done**: `wlr-output-power-management`, `sol.monitor_power`, and a built-in idle blank so no daemon is needed. Not yet run on hardware |
+| [#56](https://github.com/Lilium-Linux/solium/issues/56) window rules | a script can read a window's `app_id`, but there is no rules table. The first thing anybody configures |
 | [#63](https://github.com/Lilium-Linux/solium/issues/63) multi-GPU | a monitor on the second card cannot be driven at all — which is docking an ordinary laptop |
-| ~~[#36](https://github.com/Lilium-Linux/solium/issues/36) idle-inhibit~~ | **done**, with `ext-idle-notify` beside it — the two are one feature. The screens going dark is #54's, and an inhibitor holds that off too |
-| [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | **done and closed.** A monitor plugged in mid-session is picked up and one unplugged is dropped, confirmed on the hardware rather than on paper |
-| [#24](https://github.com/Lilium-Linux/solium/issues/24) cursor-shape | clients fall back today, so it costs nothing — until one does not |
-| [#50](https://github.com/Lilium-Linux/solium/issues/50) foreign-toplevel | a dock cannot list windows or switch to them, so Lilium's own shell cannot have a task switcher |
-| [#51](https://github.com/Lilium-Linux/solium/issues/51) output-management | monitors are configured in a file; E8's settings surface cannot move one at runtime, and `kanshi` cannot work |
+| [#50](https://github.com/Lilium-Linux/solium/issues/50) foreign-toplevel | a shell that runs as its own program cannot list windows or switch to them, so it cannot have a task switcher |
+| [#51](https://github.com/Lilium-Linux/solium/issues/51) output-management | monitors are arranged by the configuration and moved on a reload; no client can move one, so E8's settings surface and `kanshi` cannot |
 | [#52](https://github.com/Lilium-Linux/solium/issues/52) data-control | no clipboard manager can work |
 
 The last three were found by writing this section, which is the argument for
 writing it. The shell is the reason all three matter more here than elsewhere:
 a dock that cannot enumerate windows is a launcher, and a settings panel that
 cannot move a monitor is a text editor with buttons.
+
+**The session.** Four gaps between the compositor and the rest of the user
+session, each a day lost; [gaps.md](gaps.md#the-session) has the detail.
+
+| | why it stops someone |
+|---|---|
+| [#146](https://github.com/Lilium-Linux/solium/issues/146) the session environment | portals, autostart and a shell started as a user unit cannot find the display |
+| [#152](https://github.com/Lilium-Linux/solium/issues/152) D-Bus idle inhibit | a film in a browser can go dark after ten minutes |
+| [#153](https://github.com/Lilium-Linux/solium/issues/153) logind | `loginctl lock-session` does nothing, and nothing locks before sleep unless `swayidle -w` does |
+| [#157](https://github.com/Lilium-Linux/solium/issues/157) libinput settings | no tap-to-click, so tapping a touchpad does nothing |
 
 ### 2. Things that have to be true, not built
 
@@ -159,12 +205,11 @@ and all of it decides whether the thing is trustworthy.
 
 | | |
 |---|---|
-| [#33](https://github.com/Lilium-Linux/solium/issues/33) the per-window leak | ~5 MB and ~1 descriptor per window, measured nested. Whether it is real on hardware is untested |
-| [#48](https://github.com/Lilium-Linux/solium/issues/48) the seat flake | two sessions in twenty-five got no input devices and were stopped by the watchdog |
-| [#65](https://github.com/Lilium-Linux/solium/issues/65) a hardware soak | the compositor has never run unattended for hours on a real session |
-| [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | there is none, and a preview nobody can install is a preview nobody tries |
+| [#48](https://github.com/Lilium-Linux/solium/issues/48) the seat flake | three of forty-three logged sessions got no input devices and were stopped by the watchdog; a longer watchdog would not have saved one, and the cause is not known |
+| [#65](https://github.com/Lilium-Linux/solium/issues/65) a hardware soak | the compositor has never run unattended for hours on a real session; `dev/soak.sh` can now do it on a TTY |
+| [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | `dev/install.sh` installs from a checkout, but there are no packages, and a preview nobody can install is a preview nobody tries |
 | [#64](https://github.com/Lilium-Linux/solium/issues/64) suspend and resume | never tested once. A laptop that cannot be closed and opened is not a laptop |
-| [#83](https://github.com/Lilium-Linux/solium/issues/83) portals | screen sharing is reasoning, not evidence: nothing has been run end to end |
+| [#83](https://github.com/Lilium-Linux/solium/issues/83) portals | screen sharing is reasoning, not evidence: nothing has been run end to end, and until [#146](https://github.com/Lilium-Linux/solium/issues/146) a portal cannot find the display |
 
 ### 3. The part that is not parity
 
@@ -179,9 +224,11 @@ is why this project exists.
   fixed schema, so adding a mode adds its settings.
 - **The dock, and the morph.** `sol.present_from` still does what
   `docs/shell-boundary.md` records: a window grows out of the rectangle an icon
-  occupied. What is missing is a dock to give it a rectangle — and doing that
-  across a process boundary is the design question that file says to reopen
-  rather than route around.
+  occupied. What is missing is a dock icon to aim at. For a dock hosted in the
+  compositor that is a question inside one engine, not a protocol: the plan is
+  for its QML to name the icon so an animation can follow it. A dock that runs
+  as its own program would need a protocol to hand the rectangle over, and
+  doing that without a side channel is still open.
 
 ### What "complete" would mean here
 
@@ -191,12 +238,13 @@ somebody can rewrite; and when nothing in a normal day makes the user notice
 they are running something unusual. The first is E7. The second is done. The
 third is tier one.
 
-**Honest position on evidence.** Everything in tiers one and two is judged from
-nested runs and from reading. The hardware backend brings up both monitors,
-picks modes and CRTCs correctly, and has been used with real applications on a
-TTY — but no soak, no leak measurement and no HiDPI or screencopy test has ever
-run on it. That is not a small caveat and it belongs in the plan rather than in
-a footnote.
+**Honest position on evidence.** Most of tiers one and two is judged from nested
+runs and from reading. Some has been confirmed on the hardware: hotplug, popups
+and menus, and the drag icon. The hardware backend brings up more than one
+monitor, picks modes and CRTCs, and has been used with real applications on a
+TTY — but no soak, no leak measurement and no screencopy test has ever run on
+it. That is not a small caveat and it belongs in the plan rather than in a
+footnote.
 
 ---
 
