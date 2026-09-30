@@ -833,6 +833,90 @@ mod tests {
         });
     }
 
+    /// **An animation started on the frame after another ended takes a
+    /// frame's step first**, beside a `Timer`.
+    ///
+    /// A Timer keeps QML's animation timer registered and paused, so an
+    /// animation started beside it starts the animation driver from inside the
+    /// events a frame delivers, before that frame steps the clock. On the frame
+    /// after another animation ended, the clock's origin was still where that
+    /// one had started, so the new animation was handed the whole of the old
+    /// one's run as its first step. Here a 300 ms animation runs to its end
+    /// beside an idle Timer, a one-second animation starts on the next frame,
+    /// and each of the two frames after it, 20 ms apart, must show it less
+    /// than 150 of its 1000 permille in.
+    #[test]
+    fn an_animation_started_as_another_ends_takes_a_frame_first() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-handover",
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property bool first: false
+                    property bool second: false
+                    property real lead: 0
+                    property real value: 0
+                    readonly property int led: Math.round(root.lead * 1000)
+                    readonly property int permille: Math.round(root.value * 1000)
+                    NumberAnimation {
+                        target: root
+                        property: 'lead'
+                        from: 0
+                        to: 1
+                        duration: 300
+                        running: root.first
+                    }
+                    NumberAnimation {
+                        target: root
+                        property: 'value'
+                        from: 0
+                        to: 1
+                        duration: 1000
+                        running: root.second
+                    }
+                    Timer {
+                        interval: 60000
+                        running: true
+                    }
+                }
+                ",
+            );
+            // The Timer's start, delivered: QML's animation timer pauses on it.
+            crate::qml::tick(now());
+            scene.set_bool("first", true);
+            let mut frames = 0_u32;
+            while scene.get_int("led") < 1000 && frames < 60 {
+                std::thread::sleep(Duration::from_millis(20));
+                crate::qml::tick(now());
+                frames += 1;
+            }
+            let ended = scene.get_int("led");
+            // The first frame after the one the old animation ended on.
+            scene.set_bool("second", true);
+            let mut shown = Vec::new();
+            for _ in 0..2 {
+                std::thread::sleep(Duration::from_millis(20));
+                crate::qml::tick(now());
+                shown.push(scene.get_int("permille"));
+            }
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                ended, 1000,
+                "the control failed: the first animation had not ended after {frames} frames"
+            );
+            assert!(
+                shown.iter().all(|permille| *permille < 150),
+                "the two frames after a one-second animation started, on the frame after a \
+                 300 ms one ended, showed it at {shown:?} permille: it was handed the old one"
+            );
+        });
+    }
+
     /// **A `Timer` keeps firing beside an animation that is never drawn.**
     ///
     /// While any animation runs, Qt moves every Timer onto the animation
@@ -972,7 +1056,9 @@ mod tests {
     /// clock read zero on every frame and the transition never took a step,
     /// however many frames were drawn. Here thirty frames 16 ms apart follow
     /// the state change, and the one-second transition must be at least 300
-    /// of its 1000 permille on its way.
+    /// of its 1000 permille on its way. The scene must also say it is
+    /// animating as the transition starts: the render loop asks it on a clean
+    /// frame, and a "no" there asks for no more frames.
     #[test]
     fn a_transition_moves_on_the_frames_that_draw_it() {
         on_the_qt_thread(|| {
@@ -1005,6 +1091,7 @@ mod tests {
             );
 
             scene.set_bool("go", true);
+            let walked = scene.animation_in_flight();
             for _ in 0..30 {
                 std::thread::sleep(Duration::from_millis(16));
                 crate::qml::tick(now());
@@ -1013,6 +1100,10 @@ mod tests {
 
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                walked,
+                "a scene whose transition had just started did not say it was animating"
+            );
             assert!(
                 permille >= 300,
                 "a one-second transition was {permille}/1000 of the way after thirty frames"
@@ -1030,7 +1121,8 @@ mod tests {
     /// beside a 100 ms Timer; over a second with no frame the Timer must fire
     /// about ten times and the content must have travelled at least 500 px of
     /// the 1250 a second covers at Qt's default deceleration, 1500 px/s²
-    /// (qtbase v6.11.2, src/gui/kernel/qplatformtheme.cpp:701-702).
+    /// (qtbase v6.11.2, src/gui/kernel/qplatformtheme.cpp:701-702). The scene
+    /// must also say it is animating as the flick starts, for the render loop.
     #[test]
     fn a_timer_beside_an_undrawn_flick_fires_and_the_flick_moves() {
         on_the_qt_thread(|| {
@@ -1063,12 +1155,17 @@ mod tests {
             );
 
             scene.set_bool("go", true);
+            let walked = scene.animation_in_flight();
             let seen = run(Duration::from_secs(1), || {});
             let fired = scene.get_int("fired");
             let scrolled = scene.get_int("scrolled");
 
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                walked,
+                "a scene whose Flickable had just been flicked did not say it was animating"
+            );
             assert!(
                 (8..=10).contains(&fired),
                 "a 100 ms Timer beside an undrawn flick fired {fired} times in a second: {seen:?}"
@@ -1085,10 +1182,11 @@ mod tests {
     ///
     /// No walk of the scenes reaches everything that runs on the animation
     /// clock: an animation built with no parent, or one in a singleton. Such
-    /// an animation holds every Timer on the clock just the same. Here one is built with `createObject(null)` and never
-    /// ends, beside a 100 ms Timer; the walk must not see it -- the control --
-    /// and over a second with no frame the Timer must still fire about ten
-    /// times, on wakes a frame apart rather than a spinning loop.
+    /// an animation holds every Timer on the clock just the same. Here one is
+    /// built with `createObject(null)` and never ends, beside a 100 ms Timer;
+    /// the walk must not see it -- the control -- and over a second with no
+    /// frame the Timer must still fire about ten times, on wakes a frame apart
+    /// rather than a spinning loop.
     #[test]
     fn a_timer_beside_an_animation_no_scene_holds_fires_with_no_frame_drawn() {
         on_the_qt_thread(|| {
@@ -1153,6 +1251,174 @@ mod tests {
                 seen.wakes <= 100,
                 "an animation no scene holds woke the loop {} times in a second: {seen:?}",
                 seen.wakes
+            );
+        });
+    }
+
+    /// **A `Timer` in a singleton keeps firing beside an animation no scene
+    /// holds.**
+    ///
+    /// Most of a shell's Timers are in `pragma Singleton` services -- a clock,
+    /// notification expiry -- where no walk of the scenes reaches them, and an
+    /// animation built with no parent holds every one of them on the animation
+    /// clock. A clock that asked the scenes whether to step found no animation
+    /// and no Timer, stepped nothing, and the singleton's Timer never fired.
+    /// Here no scene holds a Timer, a singleton holds a 100 ms one, and an
+    /// endless animation is built with `createObject(null)`; over a second
+    /// with no frame the Timer must fire about ten times, on wakes a frame
+    /// apart rather than a spinning loop.
+    #[test]
+    fn a_singleton_timer_beside_a_parentless_animation_fires_with_no_frame_drawn() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build_beside(
+                "solium-qml-test-wake-singleton",
+                &[
+                    ("qmldir", "singleton Beat 1.0 Beat.qml\n"),
+                    (
+                        "Beat.qml",
+                        r"
+                        pragma Singleton
+                        import QtQuick
+
+                        Item {
+                            id: beat
+                            property bool on: true
+                            property int fired: 0
+                            Timer {
+                                interval: 100
+                                running: beat.on
+                                repeat: true
+                                onTriggered: beat.fired += 1
+                            }
+                        }
+                        ",
+                    ),
+                ],
+                r#"
+                import QtQuick
+                import "."
+
+                Item {
+                    id: root
+                    readonly property int fired: Beat.fired
+                    property real turn: 0
+                    property bool done: false
+                    property var spinner: null
+                    Component {
+                        id: spinning
+                        NumberAnimation {
+                            target: root
+                            property: 'turn'
+                            from: 0
+                            to: 360
+                            duration: 1000
+                            loops: Animation.Infinite
+                            running: true
+                        }
+                    }
+                    Component.onCompleted: root.spinner = spinning.createObject(null)
+                    onDoneChanged: if (root.done) {
+                        Beat.on = false
+                        root.spinner.running = false
+                        root.spinner.destroy()
+                    }
+                }
+                "#,
+            );
+
+            let walked = scene.animation_in_flight();
+            let seen = run(Duration::from_secs(1), || {});
+            let fired = scene.get_int("fired");
+
+            // Both outlive the scene unless they are stopped here: the
+            // animation would hold every later test's Timers on the clock, and
+            // the Timer would wake every later test's idle loop.
+            scene.set_bool("done", true);
+            let _ = run(Duration::from_millis(100), || {});
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                !walked,
+                "the control failed: a walk of the scene reached the animation built with no \
+                 parent"
+            );
+            assert!(
+                (8..=10).contains(&fired),
+                "a 100 ms Timer in a singleton, beside an animation no scene holds, fired {fired} \
+                 times in a second: {seen:?}"
+            );
+            assert!(
+                seen.wakes <= 100,
+                "an animation no scene holds woke the loop {} times in a second: {seen:?}",
+                seen.wakes
+            );
+        });
+    }
+
+    /// **A ListView's highlight moves on the frames that draw it**, with
+    /// nothing else animating.
+    ///
+    /// The highlight follows the current item on a job the view keeps to
+    /// itself, where no walk of the scenes reaches it. A clock that asked the
+    /// scenes whether anything was animating found nothing, dragged its origin
+    /// up to every frame and read zero on each, so the highlight never took a
+    /// step however many frames were drawn: an arrow key in a launcher moved
+    /// nothing. Here the current item moves nine rows, 144 px, over a second,
+    /// and after thirty frames 16 ms apart the highlight must be at least
+    /// 20 px on its way.
+    #[test]
+    fn a_list_highlight_moves_on_the_frames_that_draw_it() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-highlight",
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property bool go: false
+                    readonly property int travelled:
+                        list.highlightItem ? Math.round(list.highlightItem.y) : -1
+                    ListView {
+                        id: list
+                        width: 64
+                        height: 160
+                        model: 10
+                        delegate: Item {
+                            width: 64
+                            height: 16
+                        }
+                        highlight: Item {}
+                        highlightMoveDuration: 1000
+                        highlightMoveVelocity: -1
+                        currentIndex: root.go ? 9 : 0
+                    }
+                }
+                ",
+            );
+            // The frame that first shows it, with the view laid out.
+            assert!(
+                scene.render().expect("the first frame").changed,
+                "a new scene had nothing to draw"
+            );
+            let before = scene.get_int("travelled");
+            scene.set_bool("go", true);
+            for _ in 0..30 {
+                std::thread::sleep(Duration::from_millis(16));
+                crate::qml::tick(now());
+            }
+            let travelled = scene.get_int("travelled");
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                before, 0,
+                "the control failed: the highlight did not start on the first row"
+            );
+            assert!(
+                travelled >= 20,
+                "a highlight moving 144 px over a second was {travelled} px on its way after \
+                 thirty frames"
             );
         });
     }

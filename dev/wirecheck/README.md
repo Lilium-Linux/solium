@@ -177,14 +177,17 @@ return 0;  ->  Error: `solium_qml_scene_animating` says nothing is animating in
 The `cursor.qml` reading is the one that matters most, and it is there to rule
 out a specific wrong answer rather than a hypothetical one.
 `QAnimationDriver::isRunning()` reads like the direct question and is not: a
-driver is one object for the whole process, `quadrants.qml` has been animating
-since long before the scene case runs, and `QAnimationDriver::advanceAnimation`
-ends in `QUnifiedTimer::localRestart`, which starts the driver again whenever it
-is not running **and nothing is registered at all** (qtbase v6.11.2,
-`src/corelib/animation/qabstractanimation.cpp:333`). So a process-wide answer is
-`true` on that line for ever, and a compositor gated on it never sleeps again —
-measured separately at 400 frames of 400, never idle, once anything else damaged
-the screen while an animation was finishing. This case fails on it.
+driver is one object for the whole process, and `quadrants.qml` has been
+animating since long before the scene case runs, so a process-wide answer is
+`true` on that line. This case fails on it. Before `host.cpp` kept a pause
+registered for the life of the process it was worse:
+`QAnimationDriver::advanceAnimation` ends in `QUnifiedTimer::localRestart`,
+which starts the driver again whenever it is not running **and nothing is
+registered at all** (qtbase v6.11.2,
+`src/corelib/animation/qabstractanimation.cpp:333`), so the answer was `true` for
+ever, and a compositor gated on it never slept again — measured then at 400
+frames of 400, never idle, once anything else damaged the screen while an
+animation was finishing.
 
 Neither assertion allocates a GL object, so the teardown control's destroyed
 list is unmoved by them: re-measured after adding this case, C-1 still reports
@@ -208,12 +211,14 @@ at least one strictly between the two ends. Not that it *reaches* its end — it
 does that either way, instantly, which is the bug.
 
 **It has to run first, before any other scene exists**, and that is not a
-stylistic choice. Qt zeroes its animation reference only on the edge from *no*
-animations in the process to one (`QUnifiedTimer::startTimers`, qtbase v6.11.2,
-`src/corelib/animation/qabstractanimation.cpp:378-389`), and `quadrants.qml`'s
-`Animation.Infinite` holds that registry open from the moment it is built until
-the process exits. On any later line the edge never happens, every delta is
-16ms, and this case passes with the defect fully present. The precondition is
+stylistic choice. Qt takes the driver's `elapsed()` into its own clock only when
+the driver starts (`QUnifiedTimer::startAnimationDriver`, qtbase v6.11.2,
+`src/corelib/animation/qabstractanimation.cpp:242-266`), which is on the edge
+from *nothing* on the clock to something — `host.cpp` keeps a pause registered
+so that the driver stops at all — and `quadrants.qml`'s `Animation.Infinite`
+keeps the driver running from the moment it is built until the process exits.
+On any later line the edge never happens, every delta is 16ms, and this case
+passes with the defect fully present. The precondition, a stopped driver, is
 asserted through `wirecheck_anything_animating` rather than left to a comment,
 so a case added ahead of it fails loudly instead of quietly making this one
 vacuous.

@@ -1025,21 +1025,22 @@ fn animating(scene: *mut c_void) -> bool {
 /// Qt's contract for `QAnimationDriver::elapsed()` is "the number of
 /// milliseconds since the animations was started" -- its own driver returns
 /// `d->running ? d->timer.elapsed() : 0`, restarted inside `start()`. It relies
-/// on that: when the process goes from no animations to one,
-/// `QUnifiedTimer::startTimers` zeroes `lastTick` and `driverStartTime` (qtbase
-/// v6.11.2, `src/corelib/animation/qabstractanimation.cpp:378-389`), so the
-/// first delta a brand new animation is given is whatever `elapsed()` reads
-/// right then. A driver reporting the compositor's uptime hands it the whole
-/// uptime, and any animation shorter than the session is over before its first
-/// drawn frame.
+/// on that: when the driver starts, `QUnifiedTimer::startAnimationDriver` takes
+/// `driverStartTime` from Qt's own clock and adds `elapsed()` to it from then
+/// on (qtbase v6.11.2, `src/corelib/animation/qabstractanimation.cpp:242-266`),
+/// so the first delta a brand new animation is given is whatever `elapsed()`
+/// reads right then. A driver reporting the compositor's uptime hands it the
+/// whole uptime, and any animation shorter than the session is over before its
+/// first drawn frame.
 ///
 /// Which is why this has to run **first**, before any other scene exists. The
-/// zeroing happens only on the empty-to-non-empty edge, and `quadrants.qml`'s
-/// `Animation.Infinite` holds the registry open from the moment it is built
-/// until the process exits -- so on any later line the reset never happens, the
-/// deltas are all 16ms, and this case would pass with the defect present. The
-/// precondition is asserted through `wirecheck_anything_animating` rather than
-/// left to this comment.
+/// driver starts only on the edge from nothing on the clock to something --
+/// host.cpp keeps a pause registered so that it stops at all -- and
+/// `quadrants.qml`'s `Animation.Infinite` keeps it running from the moment it
+/// is built until the process exits. On any later line the driver never
+/// starts, the deltas are all 16ms, and this case would pass with the defect
+/// present. The precondition, a stopped driver, is asserted through
+/// `wirecheck_anything_animating` rather than left to this comment.
 ///
 /// The assertion is that the value passes *through the middle*. Not that it
 /// reaches its end -- it does that either way, instantly, which is the bug --
@@ -1109,9 +1110,9 @@ fn appear_animation(
     if animating(scene) || unsafe { wirecheck_anything_animating() } != 0 {
         return Err(anyhow!(
             "something in this process is already animating before the appear case writes \
-             anything. Qt zeroes its animation reference only on the edge from no animations \
-             to one, so with the registry already open this case cannot fail however broken \
-             the clock is. A scene built ahead of this one is the way that happens"
+             anything. Qt takes the driver's clock into its own only when the driver starts, \
+             so with it already running this case cannot fail however broken the clock is. \
+             A scene built ahead of this one is the way that happens"
         ));
     }
 
@@ -1174,7 +1175,7 @@ fn appear_animation(
 /// the compositor holding the thread, and a drain that took it would leave the
 /// next frame's GL going nowhere.
 ///
-/// After the appear case, which needs a process with nothing registered, and
+/// After the appear case, which needs a process with the driver stopped, and
 /// before `quadrants.qml`, whose endless animation puts every Timer on the
 /// animation driver for the rest of the run: `timer_beside_an_animation` runs
 /// this scene again there. The Timer is stopped again before returning, and

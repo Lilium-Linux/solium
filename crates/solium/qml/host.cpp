@@ -69,6 +69,7 @@
 // QtGlobal by everything else in here that calls qWarning; named explicitly
 // because this file now *installs* the handler rather than only feeding it.
 #include <QtCore/QtMessageHandler>
+#include <QtCore/QPauseAnimation>
 #include <QtCore/QSize>
 #include <QtCore/QSocketNotifier>
 #include <QtCore/QUrl>
@@ -138,39 +139,36 @@ namespace {
  * src/corelib/animation/qabstractanimation.cpp:826-857). It is time *since
  * animating began*, not a process clock, and Qt relies on that:
  *
- *   When the process goes from having no animations at all to having one,
- *   `QUnifiedTimer::startTimers` finds its reference time invalid and resets
- *   the lot -- `lastTick = 0; time.start(); temporalDrift = 0;
- *   driverStartTime = 0` (ibid. :378-389). The next tick computes
- *   `delta = elapsed() - lastTick`, so whatever `elapsed()` returns at that
- *   moment is handed to the newly started animation as its first step.
+ *   The driver starts when the first job that is not a pause joins the clock
+ *   (see the pause in start_common, which is why it stops at all).
+ *   `startAnimationDriver` then takes `driverStartTime` from Qt's own clock,
+ *   and from then on Qt's time is `driverStartTime + driver->elapsed()`
+ *   (ibid. :242-266). The next tick computes `delta = elapsed() - lastTick`,
+ *   so whatever this driver's `elapsed()` reads at the start is handed to the
+ *   newly started animation as its first step.
  *
  * Reporting the compositor's uptime there hands a brand new animation the
  * entire uptime in one step. Measured on this Qt, offscreen, software
  * adaptation, with the compositor's own loop: reveal.qml's 260ms appear
  * animation went from y=-34 to y=0 in a single tick, at every uptime from
  * 640ms to an hour, with or without an idle gap before it. It never played.
+ * dev/wirecheck's appear case is that measurement, kept.
  *
- * Qt cannot correct for it either, because the correction it has --
- * `startAnimationDriver` setting `driverStartTime = elapsed()` -- only runs
- * when the driver is stopped, and this driver is not: `QUnifiedTimer::restart`
- * -> `localRestart` starts it again whenever no animation is registered, so it
- * is started once at the first tick of the process and runs for ever after.
- * Measured here: one start at 16ms, one stop for a single tick when an
- * animation finished, and a restart immediately after with nothing animating.
+ * So the origin is kept here: dragged along behind the clock for as long as the
+ * driver is stopped, and brought up to it whenever the driver starts. So
+ * `elapsed()` reads 0 at every start and counts from the animation that broke
+ * the stillness, which is what Qt's own driver would have reported and what its
+ * bookkeeping assumes.
  *
- * So the origin is kept here instead, and dragged along behind the clock for as
- * long as the process has nothing animating. `elapsed()` reads 0 across a still
- * desktop and starts counting from the animation that breaks it, which is what
- * Qt's own driver would have reported and what its bookkeeping assumes.
+ * The caller says whether the driver is running; see `anything_animating`.
  *
- * The caller answers "is anything animating"; see `solium_qml_tick`.
- *
- * Note what this deliberately does *not* do: it does not clamp the step. While
- * anything is animating the origin is frozen, so this clock advances exactly
- * with `Clock::now()` and a frame that arrives late advances every animation by
- * however long it was late -- a 300ms stall moves a 260ms animation straight to
- * its end.
+ * Note what this deliberately does *not* do: it does not clamp the step, but
+ * for the first one after nothing animated, which is at most a 60 Hz frame
+ * (`qml::wake::tests::an_animation_started_after_an_idle_gap_takes_a_frame_first`).
+ * While anything is animating the origin is frozen, so this clock advances
+ * exactly with `Clock::now()` and a frame that arrives late advances every
+ * animation by however long it was late -- a 300ms stall moves a 260ms
+ * animation straight to its end.
  *
  * That is correct, and clamping it would be a second and worse defect. The
  * compositor's own transforms -- `present.rs`, the pane rectangles a decoration
@@ -183,14 +181,14 @@ namespace {
  * the clock says it should be is the same answer every other animated thing on
  * the screen gives.
  *
- * The origin only ever moves across stretches in which no QML animation exists,
- * so it cannot introduce that drift either: there is nothing to be in step with
- * while it slides.
+ * The origin only ever moves while no animation is measuring from it, so it
+ * cannot introduce that drift either: there is nothing to be in step with while
+ * it slides.
  *
  * A QML `Timer` is on this clock too. It is a QPauseAnimationJob (qtdeclarative
  * v6.11.2, src/qmlmeta/types/qqmltimer.cpp:40), and QUnifiedTimer advances it
- * from this driver whenever any other animation is registered, and from its
- * private pauseTimer only while nothing else is (qtbase v6.11.2,
+ * from this driver whenever a job that is not a pause is registered, and from
+ * its private pauseTimer only while none is (qtbase v6.11.2,
  * qabstractanimation.cpp:333-350). So a frame is not the only thing that moves
  * this clock: between frames solium_qml_drain moves it the same way, which is
  * how a Timer beside an animation nobody draws still fires
@@ -199,6 +197,23 @@ namespace {
 class CompositorAnimationDriver : public QAnimationDriver
 {
 public:
+    /* Whenever the driver starts, the origin comes up to the clock and the
+     * next step is a first one. Dragging it while stopped is not enough on
+     * its own: beside a Timer, which keeps QML's animation timer registered
+     * and paused, a new animation starts the driver from inside the events a
+     * frame delivers, before that frame's step. On the frame after another
+     * animation ended, the origin was still where that one started, and the
+     * new one was handed the old one's whole run as its first step
+     * (`qml::wake::tests::an_animation_started_as_another_ends_takes_a_frame_first`).
+     * A lambda on the base class's signal, so still no moc. */
+    CompositorAnimationDriver()
+    {
+        QObject::connect(this, &QAnimationDriver::started, this, [this] {
+            m_origin = m_elapsed;
+            m_measuring = false;
+        });
+    }
+
     qint64 elapsed() const override { return m_elapsed - m_origin; }
 
     /* Bring the clock to `elapsed` and step nothing. The path between frames
@@ -489,6 +504,28 @@ static bool start_common(const char *import_path)
 
     g_driver = new CompositorAnimationDriver();
     g_driver->install();
+
+    /* A pause that never ends, so that the driver runs exactly while a job
+     * that is not a pause is on the clock, whoever holds the job.
+     *
+     * `localRestart` stops the driver when every registered animation timer
+     * is paused, which a timer is while it holds pauses and nothing else, and
+     * starts it otherwise -- including when no timer is registered at all
+     * (qtbase v6.11.2, src/corelib/animation/qabstractanimation.cpp:333-350
+     * and :614-622; qtdeclarative v6.11.2,
+     * src/qml/animations/qabstractanimationjob.cpp:123-131). So a process with
+     * nothing registered ran the driver for ever. With this, QtCore's
+     * animation timer is always registered, and paused unless a QtCore
+     * animation runs, and the driver stops by the step after the last other
+     * job leaves. Its own deadline is
+     * about 24 days out, so it wakes nothing
+     * (`qml::wake::tests::an_idle_host_does_not_wake_repeatedly`,
+     * `qml::wake::tests::a_paused_animation_does_not_wake_an_idle_loop`,
+     * `qml::wake::tests::a_singleton_timer_beside_a_parentless_animation_fires_with_no_frame_drawn`). */
+    auto *always = new QPauseAnimation(g_app);
+    always->setDuration(std::numeric_limits<int>::max());
+    always->setLoopCount(-1);
+    always->start();
 
     // Shell types the compositor provides, registered before any scene can
     // ask for them.
@@ -1624,56 +1661,25 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
     return true;
 }
 
-/* What a walk of one scene found running: something that moves on the
- * animation clock, and a `Timer`. See `find_running`. */
-struct WalkFound
-{
-    bool animation = false;
-    bool timer = false;
-};
-
-static void find_running(const QObject *item, WalkFound &found);
-
 /* Is anything at all in this process on the animation clock?
  *
- * The per-scene question `solium_qml_scene_animating` answers, asked of every
- * scene, because the animation clock is per process. Short-circuits on the
- * first scene that says yes.
- *
- * A wrong "no" costs more here than in the render loop. It moves the origin up
- * behind the clock, so `elapsed()` stands still and nothing on the driver takes
- * a step, drawn or not -- every Timer beside it included. So the walk counts
- * a running transition and a moving Flickable as well as an animation
- * (`qml::wake::tests::a_transition_moves_on_the_frames_that_draw_it`,
- * `qml::wake::tests::a_timer_beside_an_undrawn_transition_fires_and_the_transition_moves`,
+ * The driver's own answer, which the pause start_common starts makes exact: it
+ * runs while a job that is not a pause is on the clock, whoever holds the job.
+ * A scene, a singleton or nothing at all -- an animation built with no parent
+ * -- and Qt itself, whose ListView highlight and Flickable timeline are
+ * private jobs no walk of the scenes can find
+ * (`qml::wake::tests::a_singleton_timer_beside_a_parentless_animation_fires_with_no_frame_drawn`,
+ * `qml::wake::tests::a_timer_beside_an_animation_no_scene_holds_fires_with_no_frame_drawn`,
+ * `qml::wake::tests::a_list_highlight_moves_on_the_frames_that_draw_it`,
  * `qml::wake::tests::a_timer_beside_an_undrawn_flick_fires_and_the_flick_moves`).
  *
- * And a running `Timer` counts while the driver runs, which is what catches an
- * animation no walk reaches. A Timer is itself a job on this clock (see
- * `CompositorAnimationDriver`). Alone, it is on QUnifiedTimer's pauseTimer,
- * and that stops the driver: `localRestart` stops it whenever every animation
- * timer is paused (qtbase v6.11.2, qabstractanimation.cpp:333-350), and
- * QQmlAnimationTimer pauses while only pause jobs run (qtdeclarative v6.11.2,
- * src/qml/animations/qabstractanimationjob.cpp:123-131). Where the origin sits
- * does not matter to it then
- * (`qml::wake::tests::a_timer_fires_while_no_frame_is_drawn`). Once its start
- * is delivered, then, the driver running beside a running Timer is some other
- * job holding the Timer on the driver, whether or not a scene holds that job
- * -- one built with no parent, say
- * (`qml::wake::tests::a_timer_beside_an_animation_no_scene_holds_fires_with_no_frame_drawn`). */
+ * A wrong "no" moves the origin up behind the clock, so `elapsed()` stands
+ * still and nothing on the driver takes a step, drawn or not, every Timer
+ * beside it included. A walk of the scenes was that wrong "no" for every job
+ * it could not reach. */
 static bool anything_animating()
 {
-    WalkFound found;
-    for (const SoliumQmlScene *scene : g_scenes) {
-        if (scene == nullptr || scene->object == nullptr) {
-            continue;
-        }
-        find_running(scene->object, found);
-        if (found.animation) {
-            return true;
-        }
-    }
-    return found.timer && g_driver != nullptr && g_driver->isRunning();
+    return g_driver != nullptr && g_driver->isRunning();
 }
 
 /* Advance every animation in the process, once for the whole frame.
@@ -1724,9 +1730,8 @@ extern "C" void solium_qml_tick(long long elapsed_ms)
         }
     }
     if (g_driver != nullptr) {
-        /* Asked once for the whole process, and asked *here* rather than
-         * inside the driver, because the driver has no way to reach the
-         * scenes. See `CompositorAnimationDriver` for what the answer is for. */
+        /* See `anything_animating`, and `CompositorAnimationDriver` for what
+         * the answer is for. */
         g_driver->advanceTo(static_cast<qint64>(elapsed_ms), anything_animating());
     }
 }
@@ -1955,15 +1960,18 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
  * appear case is what asks it.
  *
  * Asked of the scene and not of the process. `QAnimationDriver::isRunning()`
- * looks like the direct answer and is not one: `QAnimationDriver::advanceAnimation`
- * ends in `QUnifiedTimer::restart` -> `localRestart`, which starts the driver
- * again whenever it is not running, *including when no animation is registered*
- * (qtbase v6.11.2, src/corelib/animation/qabstractanimation.cpp:333-349). Qt's
- * own stop is queued, so the driver reads stopped for exactly one tick and
- * running for every tick after it, for ever. Measured here: with the screen
- * being damaged for eight frames after the animation starts -- a pointer still
- * moving, which is usually *why* it started -- a compositor gated on
- * `isRunning()` drew 400 frames of 400 and never went idle again.
+ * is the process's answer, exact since the pause in start_common (see
+ * `anything_animating`), and one animation anywhere would keep every scene
+ * drawing on it: dev/wirecheck's scene case reads 0 from `cursor.qml` while
+ * `quadrants.qml` animates. Before that pause it was worse:
+ * `QAnimationDriver::advanceAnimation` ends in `QUnifiedTimer::restart` ->
+ * `localRestart`, which starts the driver again whenever it is not running,
+ * *including when no animation is registered* (qtbase v6.11.2,
+ * src/corelib/animation/qabstractanimation.cpp:333-349), so it read running
+ * for ever. Measured then: with the screen being damaged for eight frames
+ * after the animation starts -- a pointer still moving, which is usually *why*
+ * it started -- a compositor gated on `isRunning()` drew 400 frames of 400 and
+ * never went idle again.
  *
  * `running` on a QQuickAbstractAnimation is exact instead, and per scene --
  * with `paused`, which leaves `running` true while it takes the job off the
@@ -1976,25 +1984,25 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
  * which is the only frame the answer can change anything. A settled
  * reactive.qml is 21 QObjects and 0.6 us.
  *
- * Two more things run on the driver without a running animation to show for
- * it. The animations inside a `Transition` -- States, a Popup's enter and exit,
- * a ListView's add and remove -- never have `running` set. The Transition
+ * Two more things move a scene without a running animation to show for it.
+ * The animations inside a `Transition` -- States, a Popup's enter and exit, a
+ * ListView's add and remove -- never have `running` set. The Transition
  * disables their user control (src/quick/util/qquicktransition.cpp:124), and
  * then `running` is set only through notifyRunningChanged
  * (qquickanimation.cpp:115-122), which a Behavior calls
  * (qquickbehavior.cpp:240) and a Transition does not. The Transition's own
  * `running` is exact
- * (`qml::wake::tests::a_timer_beside_an_undrawn_transition_fires_and_the_transition_moves`).
+ * (`qml::wake::tests::a_transition_moves_on_the_frames_that_draw_it`).
  * And a Flickable -- a ListView, a GridView -- moves on a QQuickTimeLine,
  * which is an animation job (src/quick/util/qquicktimeline_p_p.h:30) that
  * the Flickable holds as a member and not as a child
- * (src/quick/items/qquickflickable_p_p.h:187); its `moving` stays true until
- * that timeline completes (qquickflickable.cpp:3386-3395)
+ * (src/quick/items/qquickflickable_p_p.h:187); its `moving` is set as the
+ * flick starts and stays true until that timeline completes
+ * (qquickflickable.cpp:3386-3395)
  * (`qml::wake::tests::a_timer_beside_an_undrawn_flick_fires_and_the_flick_moves`).
  *
- * `anything_animating` asks the same question of every scene at once, for the
- * animation *clock* rather than for the frame -- see `solium_qml_tick` -- and
- * adds a Timer the driver is holding.
+ * This is the frame's question and not the clock's. The clock asks the driver,
+ * which sees every job, walked or not; see `anything_animating`.
  *
  * What it does not cover: a `Timer`. A scene whose next change is a timer
  * firing -- Quickshell.SystemClock is the one in the tree -- is not animating
@@ -2008,41 +2016,25 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
  */
 static bool animation_running(const QObject *item)
 {
-    WalkFound found;
-    find_running(item, found);
-    return found.animation;
-}
-
-/* The walk itself: it stops at the first thing that moves on the clock, and
- * notes a running Timer on the way
- * (`qml::wake::tests::a_timer_beside_an_animation_no_scene_holds_fires_with_no_frame_drawn`).
- * Of the four kinds only a Flickable is an item, so an item is asked one
- * inherits() and not four. */
-static void find_running(const QObject *item, WalkFound &found)
-{
+    /* Of the three kinds only a Flickable is an item, so an item is asked one
+     * inherits() and not three. */
     const auto *as_item = qobject_cast<const QQuickItem *>(item);
     if (as_item != nullptr) {
         if (item->inherits("QQuickFlickable") && item->property("moving").toBool()) {
-            found.animation = true;
-            return;
+            return true;
         }
     } else if (item->inherits("QQuickAbstractAnimation")) {
         if (item->property("running").toBool() && !item->property("paused").toBool()) {
-            found.animation = true;
-            return;
+            return true;
         }
     } else if (item->inherits("QQuickTransition")) {
         if (item->property("running").toBool()) {
-            found.animation = true;
-            return;
+            return true;
         }
-    } else if (!found.timer && item->inherits("QQmlTimer")) {
-        found.timer = item->property("running").toBool();
     }
     for (const QObject *child : item->children()) {
-        find_running(child, found);
-        if (found.animation) {
-            return;
+        if (animation_running(child)) {
+            return true;
         }
     }
     /* And the visual children, which are not always the QObject ones.
@@ -2067,14 +2059,12 @@ static void find_running(const QObject *item, WalkFound &found)
      * would visit the whole subtree twice at every level. */
     if (as_item != nullptr) {
         for (const QQuickItem *child : as_item->childItems()) {
-            if (child->parent() != item) {
-                find_running(child, found);
-                if (found.animation) {
-                    return;
-                }
+            if (child->parent() != item && animation_running(child)) {
+                return true;
             }
         }
     }
+    return false;
 }
 
 extern "C" int solium_qml_scene_animating(const SoliumQmlScene *scene)
