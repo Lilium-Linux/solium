@@ -1575,10 +1575,10 @@ fn scripted(
     // This did not used to be asked at all, which is the same defect one step
     // further on: a scripted surface got the next frame only when something
     // unrelated damaged the screen. Everything on `Quickshell.SystemClock` is
-    // the plain case -- a bar whose clock ticks on a `Timer` -- and it cannot
-    // even recover on the next tick, because `qml::tick` is what drains Qt's
-    // event queue and it only runs on a frame that is being drawn. No frame,
-    // no timer; no timer, no reason for a frame.
+    // the plain case -- a bar whose clock ticks on a `Timer`. The Timer fires
+    // between frames, through `qml::wake`, and asks for the frame its change
+    // needs; this keeps asking while the change animates
+    // (`qml::wake::tests::a_clock_scene_repaints_once_a_second_with_no_other_damage`).
     if painted.animating {
         state.redraw = true;
     }

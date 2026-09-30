@@ -359,9 +359,13 @@ pub(crate) fn run() -> Result<()> {
     );
     solium.start_scripts(scripts);
 
-    let qt = crate::qml::wake::Wake::insert(&event_loop.handle(), |state: &mut State, changed| {
-        state.solium.redraw |= changed;
-    })?;
+    let qt = crate::qml::wake::Wake::insert(
+        &event_loop.handle(),
+        |state: &State| state.solium.clock.now(),
+        |state: &mut State, changed| {
+            state.solium.redraw |= changed;
+        },
+    )?;
 
     let mut state = State {
         solium,
@@ -686,7 +690,8 @@ pub(crate) fn run() -> Result<()> {
             if std::mem::take(&mut state.solium.rescan_outputs) {
                 state.resync_screens();
             }
-            state.qt.arm();
+            let coming = state.frame_coming();
+            state.qt.arm(coming);
             let _ = state.solium.display_handle.flush_clients();
         })
         .map_err(|err| anyhow!("running the event loop: {err}"))
@@ -1214,6 +1219,23 @@ impl State {
         // Positions, then the anchored surfaces that depend on them.
         self.solium.place_outputs();
         Ok(notifier)
+    }
+
+    /// Whether a frame will be drawn, and QML's clock advanced by it, with
+    /// nothing else happening: `render` is asked for one, and some screen will
+    /// draw a picture or is flipping and will ask again when it lands.
+    /// `qml::wake::tests::a_frame_is_coming_only_if_a_monitor_will_draw_it`.
+    fn frame_coming(&self) -> bool {
+        let wanted = self.active
+            && (self.solium.redraw
+                || self.animating
+                || self.screens.iter().any(|screen| screen.owed));
+        crate::qml::wake::frame_coming(
+            wanted,
+            self.screens.iter().map(|screen| {
+                (!screen.pending).then(|| self.solium.power_step(&screen.output, screen.lit))
+            }),
+        )
     }
 
     /// Draw a frame on every screen that is ready for one.
