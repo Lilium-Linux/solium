@@ -1,11 +1,10 @@
 # Decorations, and other things the compositor draws
 
 Everything the compositor draws that is not a client's window is QML, hosted
-in-process. Window frames, the pointer, the loading window, the wallpaper,
-and any other scene a script declares. A shell is not among them: it is a
-separate client, drawn by itself (see [shell-boundary.md](shell-boundary.md)).
-There is nothing to compile and no Rust to touch: write a file, name it, press
-`super+shift+r`.
+in-process. Window frames, the pointer, the loading window, the wallpaper, a
+shell you name in the configuration, and any other scene a script declares
+(see [shell-boundary.md](shell-boundary.md) for the shell). There is nothing to
+compile and no Rust to touch: write a file, name it, press `super+shift+r`.
 
 The property-by-property contract for a frame lives next to the styles, at
 [`crates/solium/qml/panes/README.md`](../crates/solium/qml/panes/README.md).
@@ -26,13 +25,14 @@ system as the frames. See [#81](https://github.com/Lilium-Linux/solium/issues/81
 for what that costs — there is no way yet to make it match the theme every
 other application on the machine follows.
 
-## The four kinds
+## The five kinds
 
 | what | where | named by |
 |---|---|---|
 | window frames | `qml/panes/<name>/` | `pane = "top"` |
 | the loading window | `qml/loading/*.qml` | `loading = { scene = "window" }` |
 | the pointer | `qml/cursor.qml` | `SOLIUM_QML_CURSOR` |
+| a shell (bar, dock, launcher) | anywhere | `shell = { scene = ... }` |
 | any other scene | anywhere | `sol.surface(name, { scene = ... })` |
 
 Your own directory is `~/.config/solium/qml/`, and it is searched first in
@@ -146,11 +146,10 @@ Nothing in a frame should contain a hex code. `Solium.Theme` has them:
 `fontFamily`, `fontSize`, `quick`, `normal`.
 
 Copy `Solium/Theme.qml` into `~/.config/solium/qml/Solium/` and change it, and
-every scene the compositor draws follows — the frames, the pointer, the loading
-window, the wallpaper and `sol.surface` scenes. One file restyles all of it
-rather than the titlebars; a shell is a separate client and themes itself. A
-frame that hardcodes a colour is a frame that stops matching the moment anyone
-changes anything.
+every scene that imports `Solium` follows — the frames, the pointer, the
+loading window, the wallpaper, and a hosted shell that uses it. One file
+restyles the desktop rather than the titlebars. A frame that hardcodes a colour
+is a frame that stops matching the moment anyone changes anything.
 
 ## Animation inside a frame
 

@@ -1,7 +1,7 @@
 //! A hosted QML scene: one file the compositor draws. Every surface a script
-//! declares with `sol.surface` is one — the wallpaper and the tweaks panel
-//! among them — and so is the scene a launched window shows until its
-//! application draws.
+//! declares with `sol.surface` is one — the wallpaper, the tweaks panel and a
+//! hosted shell among them — and so is the scene a launched window shows
+//! until its application draws.
 //!
 //! No opinion about what the scene *is*. It hosts one QML file, gives it the
 //! area it was placed in, forwards pointer events, and rebuilds it when the
@@ -412,9 +412,11 @@ fn newest_change(source: &Path) -> Option<SystemTime> {
     let mut newest = std::fs::metadata(source)
         .and_then(|data| data.modified())
         .ok();
-    // The directory it came from: editing a component beside it is still
-    // editing the scene.
-    if let Some(parent) = source.parent() {
+    // The tree it came from, when one is named: editing a widget three
+    // directories away is still editing the shell.
+    if let Some(root) = std::env::var_os("SOLIUM_SHELL_WATCH") {
+        newest_in(Path::new(&root), &mut newest, 0);
+    } else if let Some(parent) = source.parent() {
         newest_in(parent, &mut newest, 0);
     }
     newest

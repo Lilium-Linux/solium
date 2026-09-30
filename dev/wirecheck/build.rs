@@ -30,6 +30,7 @@ fn main() {
     // anything to do with the file that was edited.
     println!("cargo:rerun-if-changed=src/host_tu.cpp");
     println!("cargo:rerun-if-changed=src/readback.cpp");
+    println!("cargo:rerun-if-changed={}", qml.join("compat.cpp").display());
 
     let mut build = cc::Build::new();
     build
@@ -41,7 +42,8 @@ fn main() {
         // src/host_tu.cpp is a five-line translation unit whose only job is to
         // #include the real host.cpp verbatim. host.cpp is compiled exactly
         // once, from this checkout, unmodified.
-        .file("src/host_tu.cpp");
+        .file("src/host_tu.cpp")
+        .file(qml.join("compat.cpp"));
     // Overridable only so a deliberately broken copy can be compiled as a
     // negative control; the default is always the host.cpp beside this crate.
     let host = std::env::var_os("WIRECHECK_HOST_CPP")
@@ -69,6 +71,9 @@ fn main() {
         format!("\"{}\"", host.display()).as_str(),
     );
 
+    let _ = pkg_config::Config::new()
+        .atleast_version("6.5")
+        .probe("Qt6Network");
     let qt = pkg_config::Config::new()
         .atleast_version("6.5")
         .probe("Qt6Quick")
@@ -89,6 +94,19 @@ fn main() {
         build.include(path);
     }
 
+    // moc, exactly as the crate's own build.rs does.
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let generated = out.join("moc_compat.cpp");
+    let moc = find_moc(&qt);
+    let status = std::process::Command::new(&moc)
+        .arg(qml.join("compat.h"))
+        .arg("-o")
+        .arg(&generated)
+        .status()
+        .expect("running moc");
+    assert!(status.success(), "moc failed");
+    build.file(&generated);
+
     build.compile("solium_qml_host");
 
     // The readback: an independent EGL display on its own GBM device, no Qt and
@@ -108,4 +126,31 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=EGL");
     println!("cargo:rustc-link-lib=dylib=GLESv2");
     println!("cargo:rustc-link-lib=dylib=gbm");
+}
+
+fn find_moc(qt: &pkg_config::Library) -> PathBuf {
+    if let Some(path) = std::env::var_os("QT_MOC") {
+        return PathBuf::from(path);
+    }
+    for directory in &qt.link_paths {
+        for candidate in [
+            directory.join("qt6/libexec/moc"),
+            directory.join("qt6/bin/moc"),
+        ] {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    for candidate in [
+        "/usr/lib64/qt6/libexec/moc",
+        "/usr/lib/qt6/libexec/moc",
+        "/usr/lib/x86_64-linux-gnu/qt6/libexec/moc",
+    ] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return path;
+        }
+    }
+    PathBuf::from("moc")
 }
