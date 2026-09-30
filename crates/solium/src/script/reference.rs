@@ -285,8 +285,93 @@ fn sol_lua_documents_exactly_the_api_the_compositor_registers() {
     );
 }
 
-/// Every file of the compositor that could read the environment or its
-/// arguments: the Rust, the C++ QML host, the shipped Lua and QML.
+/// The production code of one of the compositor's source files, with every
+/// line that is not production code blanked, so line numbers still match.
+///
+/// What goes: comment lines (`//`, or `--` in Lua), and in Rust every item
+/// under a `#[cfg(test)]` -- a test module, a test-only function, `impl` or
+/// `use`. Tests pass arguments to other programs (`--exact` to the test
+/// runner) and assert that things are *not* flags, and none of that is a
+/// flag or a variable Solium reads.
+///
+/// An item ends at its first line at the attribute's indentation that ends in
+/// `;`, or that closes it: `}`, `};`, `];` or `);`, which is where rustfmt puts
+/// a closing bracket. A `#[cfg(test)]` on anything but an item (a statement, a
+/// match arm, a variant) is left alone: it is a line or two, and cannot hide a
+/// read.
+fn production(path: &Path, text: &str) -> String {
+    const ITEMS: [&str; 12] = [
+        "mod ",
+        "fn ",
+        "const ",
+        "static ",
+        "impl",
+        "use ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "type ",
+        "thread_local!",
+        "macro_rules!",
+    ];
+    let rust = path.extension().is_some_and(|end| end == "rs");
+    let comment = if path.extension().is_some_and(|end| end == "lua") {
+        "--"
+    } else {
+        "//"
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        if rust && line.trim() == "#[cfg(test)]" {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let mut item = index + 1;
+            while lines
+                .get(item)
+                .is_some_and(|next| next.trim_start().starts_with("#["))
+            {
+                item += 1;
+            }
+            let head = lines.get(item).map_or("", |next| next.trim());
+            let head = ["pub(crate) ", "pub(super) ", "pub "]
+                .iter()
+                .find_map(|visibility| head.strip_prefix(visibility))
+                .unwrap_or(head);
+            if ITEMS.iter().any(|kind| head.starts_with(kind)) {
+                let mut end = item;
+                while let Some(each) = lines.get(end) {
+                    let at_indent = each
+                        .strip_prefix(indent)
+                        .filter(|rest| !rest.starts_with(char::is_whitespace));
+                    let closes = at_indent
+                        .is_some_and(|rest| ["}", "};", "];", ");"].contains(&rest.trim_end()));
+                    let one_line = end == item && each.trim_end().ends_with(';');
+                    if closes || one_line {
+                        break;
+                    }
+                    end += 1;
+                }
+                let end = end.min(lines.len() - 1);
+                kept.extend(std::iter::repeat_n("", end + 1 - index));
+                index = end + 1;
+                continue;
+            }
+        }
+        kept.push(if line.trim_start().starts_with(comment) {
+            ""
+        } else {
+            line
+        });
+        index += 1;
+    }
+    kept.join("\n")
+}
+
+/// The production code of every file of the compositor that could read the
+/// environment or its arguments -- the Rust, the C++ QML host, the shipped Lua
+/// and QML -- except this one, whose strings are the names it looks for.
 fn compositor_sources() -> Vec<(PathBuf, String)> {
     fn walk(directory: &Path, out: &mut Vec<(PathBuf, String)>) {
         let Ok(entries) = std::fs::read_dir(directory) else {
@@ -300,8 +385,10 @@ fn compositor_sources() -> Vec<(PathBuf, String)> {
                 .extension()
                 .and_then(|end| end.to_str())
                 .is_some_and(|end| ["rs", "lua", "cpp", "h", "qml"].contains(&end))
+                && !path.ends_with("src/script/reference.rs")
                 && let Ok(text) = std::fs::read_to_string(&path)
             {
+                let text = production(&path, &text);
                 out.push((path, text));
             }
         }
@@ -313,16 +400,17 @@ fn compositor_sources() -> Vec<(PathBuf, String)> {
     }
     let build = root.join("build.rs");
     if let Ok(text) = std::fs::read_to_string(&build) {
+        let text = production(&build, &text);
         out.push((build, text));
     }
     out
 }
 
 /// Every double-quoted literal in `text` that starts with `prefix` and runs on
-/// in characters `allowed` accepts.
-fn literals(text: &str, prefix: &str, allowed: impl Fn(char) -> bool) -> BTreeSet<String> {
+/// in characters `allowed` accepts, with where its opening quote is.
+fn literals(text: &str, prefix: &str, allowed: impl Fn(char) -> bool) -> Vec<(usize, String)> {
     let opening = format!("\"{prefix}");
-    let mut found = BTreeSet::new();
+    let mut found = Vec::new();
     for (at, _) in text.match_indices(&opening) {
         let rest = &text[at + 1..];
         let name: String = rest.chars().take_while(|c| allowed(*c)).collect();
@@ -331,20 +419,43 @@ fn literals(text: &str, prefix: &str, allowed: impl Fn(char) -> bool) -> BTreeSe
         // `"---"`, which is the start of a Lua doc comment rather than a flag.
         let named = name[prefix.len()..].starts_with(|c: char| c.is_ascii_alphanumeric());
         if named && rest[name.len()..].starts_with('"') {
-            found.insert(name);
+            found.push((at, name));
         }
     }
     found
 }
 
+/// Whether the literal whose opening quote is at `at` is compared with
+/// something: `== "--x"`, `Some("--x")`, `strip_prefix("--x")`, a match arm
+/// `"--x" =>`, or a named constant, `const FLAG: &str = "--x"`. That is how a
+/// flag is read; a `"--x"` handed to another program, or written in a
+/// message, is not.
+fn compared(text: &str, at: usize, length: usize) -> bool {
+    let before = text[..at].trim_end();
+    let after = text[at + length..].trim_start();
+    [
+        "==",
+        "!=",
+        "Some(",
+        "strip_prefix(",
+        "starts_with(",
+        "&str =",
+    ]
+    .iter()
+    .any(|context| before.ends_with(context))
+        || after.starts_with("=>")
+        || after.starts_with('|')
+}
+
 /// **`environment.txt` lists exactly the variables and flags the code reads.**
 ///
-/// A variable is a `"SOLIUM_..."` literal anywhere in the compositor's sources
+/// A variable is a `"SOLIUM_..."` literal in the compositor's production code
 /// -- the Rust, the QML host, the shipped Lua -- and a flag is a `"--..."`
-/// literal in the Rust. Test-only variables are real reads too, and the file
-/// has a section for them. A name the code reads and the file does not list is
-/// a knob nobody is told about; a name the file lists and nothing reads is a
-/// row on the reference page describing something that does nothing.
+/// literal in its Rust that is compared with something (see [`compared`]).
+/// Tests and comments are not read (see [`production`]). A name the code reads
+/// and the file does not list is a knob nobody is told about; a name the file
+/// lists and nothing reads is a row on the reference page describing
+/// something that does nothing.
 #[test]
 fn the_environment_reference_lists_exactly_what_the_code_reads() {
     let registry = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/environment.txt"))
@@ -358,13 +469,20 @@ fn the_environment_reference_lists_exactly_what_the_code_reads() {
 
     let mut read = BTreeSet::new();
     for (path, text) in compositor_sources() {
-        read.extend(literals(&text, "SOLIUM_", |c| {
-            c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'
-        }));
+        read.extend(
+            literals(&text, "SOLIUM_", |c| {
+                c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'
+            })
+            .into_iter()
+            .map(|(_, name)| name),
+        );
         if path.extension().is_some_and(|end| end == "rs") {
-            read.extend(literals(&text, "--", |c| {
-                c.is_ascii_lowercase() || c == '-'
-            }));
+            read.extend(
+                literals(&text, "--", |c| c.is_ascii_lowercase() || c == '-')
+                    .into_iter()
+                    .filter(|(at, name)| compared(&text, *at, name.len() + 2))
+                    .map(|(_, name)| name),
+            );
         }
     }
     assert!(
@@ -384,4 +502,43 @@ fn the_environment_reference_lists_exactly_what_the_code_reads() {
          read by the code, not listed: {unlisted:?}\n  \
          listed, read by nothing: {unread:?}"
     );
+}
+
+/// The scan that test relies on, on a file shaped like the ones it reads: a
+/// flag in a comparison counts, a test module and a comment do not, and the
+/// production code after a test item is still read.
+#[test]
+fn the_environment_scan_reads_production_code_only() {
+    let source = r#"#[cfg(test)]
+use std::fmt;
+fn parse() {
+    // "--not-this"
+    if argument == "--yes" || matches!(first, Some("--also")) {}
+    run(&["--handed-on"]);
+}
+#[cfg(test)]
+mod tests {
+    fn given() {
+        run(&["--exact"]);
+        assert!(!flag("--sessions"));
+        std::env::var("SOLIUM_TEST_ONLY");
+    }
+}
+fn after() {
+    std::env::var("SOLIUM_AFTER");
+}
+"#;
+    let text = production(Path::new("main.rs"), source);
+    assert_eq!(text.lines().count(), source.lines().count());
+    let flags: Vec<String> = literals(&text, "--", |c| c.is_ascii_lowercase() || c == '-')
+        .into_iter()
+        .filter(|(at, name)| compared(&text, *at, name.len() + 2))
+        .map(|(_, name)| name)
+        .collect();
+    assert_eq!(flags, ["--yes", "--also"]);
+    let variables: Vec<String> = literals(&text, "SOLIUM_", |c| c.is_ascii_uppercase() || c == '_')
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert_eq!(variables, ["SOLIUM_AFTER"]);
 }

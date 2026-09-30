@@ -897,8 +897,61 @@ def lua_api(rev):
 # Flags and environment -----------------------------------------------------------
 
 
+# The Rust items a `#[cfg(test)]` can take away. See `production` in
+# crates/solium/src/script/reference.rs, which this matches line for line.
+TEST_ITEMS = ("mod ", "fn ", "const ", "static ", "impl", "use ", "struct ", "enum ",
+              "trait ", "type ", "thread_local!", "macro_rules!")
+
+
+def production(path, text):
+    """A source file with every line that is not production code blanked.
+
+    Comment lines go, and in Rust every item under `#[cfg(test)]`, so a flag a
+    test hands to the test runner is not cited as a place Solium reads it. The
+    same cut the environment test makes.
+    """
+    rust = path.endswith(".rs")
+    comment = "--" if path.endswith(".lua") else "//"
+    lines = text.split("\n")
+    kept = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if rust and line.strip() == "#[cfg(test)]":
+            indent = line[:len(line) - len(line.lstrip())]
+            item = index + 1
+            while item < len(lines) and lines[item].lstrip().startswith("#["):
+                item += 1
+            head = lines[item].strip() if item < len(lines) else ""
+            head = re.sub(r"^pub(\((crate|super)\))? ", "", head)
+            if head.startswith(TEST_ITEMS):
+                end = item
+                while end < len(lines):
+                    each = lines[end]
+                    rest = each[len(indent):] if each.startswith(indent) else None
+                    closes = (rest is not None and not rest[:1].isspace()
+                              and rest.rstrip() in ("}", "};", "];", ");"))
+                    if closes or (end == item and each.rstrip().endswith(";")):
+                        break
+                    end += 1
+                end = min(end, len(lines) - 1)
+                kept.extend([""] * (end + 1 - index))
+                index = end + 1
+                continue
+        kept.append("" if line.lstrip().startswith(comment) else line)
+        index += 1
+    return "\n".join(kept)
+
+
+VARIABLE = re.compile(r'"((?:SOLIUM_|XDG_|XCURSOR_)[A-Z0-9_]+|WAYLAND_DISPLAY|DISPLAY)"')
+# A flag is read where it is compared: `== "--x"`, `Some("--x")`,
+# `strip_prefix("--x")`, a match arm `"--x" =>`, or `const X: &str = "--x"`.
+FLAG = re.compile(r'(?:==|!=|Some\(|strip_prefix\(|starts_with\(|&str =)\s*"(--[a-z][a-z-]*)"'
+                  r'|"(--[a-z][a-z-]*)"(?=\s*(?:=>|\|))')
+
+
 def reads():
-    """Where each `"SOLIUM_..."`, `"--flag"` and named variable is read."""
+    """Where production code reads each `"SOLIUM_..."`, `"--flag"` and named variable."""
     found = {}
     for part in ("src", "lua", "qml"):
         for directory, _, files in os.walk(os.path.join(ROOT, "crates/solium", part)):
@@ -907,10 +960,17 @@ def reads():
                     continue
                 full = os.path.join(directory, name)
                 relative = os.path.relpath(full, ROOT)
+                # The environment test's own file: its strings are the names it looks for.
+                if relative == "crates/solium/src/script/reference.rs":
+                    continue
                 with open(full, encoding="utf-8") as file:
-                    for number, line in enumerate(file, 1):
-                        for match in re.finditer(r'"((?:SOLIUM_|XDG_|XCURSOR_)[A-Z0-9_]+|WAYLAND_DISPLAY|DISPLAY|--[a-z][a-z-]*)"', line):
-                            found.setdefault(match.group(1), []).append((relative, number))
+                    text = production(relative, file.read())
+                matches = [(m.start(1), m.group(1)) for m in VARIABLE.finditer(text)]
+                if relative.endswith(".rs"):
+                    matches += [(m.start(1) if m.group(1) else m.start(2), m.group(1) or m.group(2))
+                                for m in FLAG.finditer(text)]
+                for at, found_name in sorted(matches):
+                    found.setdefault(found_name, []).append((relative, text.count("\n", 0, at) + 1))
     return found
 
 

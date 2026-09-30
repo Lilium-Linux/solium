@@ -6,7 +6,8 @@
 # `the_environment_reference_lists_exactly_what_the_code_reads`
 # (crates/solium/src/script/reference.rs) fails when the compositor reads a
 # `SOLIUM_*` variable or a `--flag` this file does not list, or this file lists
-# one nothing reads.
+# one nothing reads. Only production code counts: a name used only in a test
+# or a comment is not a knob, and does not go here.
 #
 # The format: a line starting with `#` is a comment, and one starting with
 # `## ` begins a group. An entry is a name at the start of a line, optionally
@@ -189,12 +190,6 @@ SOLIUM_DATADIR=<directory>
     binary looks for its `qml` and `lua`. After it come the tree the binary was
     built in, then `../share/solium` beside the binary, then
     `/usr/share/solium`; the first that holds both is used.
-
-## Tests only
-
-SOLIUM_DESK_SVG=<file>
-    Makes one test write a picture of the workspace slide. Unset, the test
-    does nothing.
 
 ## Also read
 
