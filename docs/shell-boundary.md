@@ -258,6 +258,132 @@ process, in exchange for a desktop that can actually do what the design asks
 for. A shell that would rather have a separate process's robustness can have
 it, as a client, and gives up the one engine to get it.
 
+## How the rest of the desktop starts
+
+Whatever Solium loads itself starts with it and needs nothing below: its own
+QML scenes, and everything `init.lua` declares. A shell that Solium loads
+through its configuration is one of those, and needs none of this either.
+Every other program of the desktop is a separate process, and on a systemd
+machine it is started by the user's systemd, or by D-Bus when something first
+asks for it. That covers a polkit authentication agent, a keyring, applets
+such as `nm-applet`, a bar that is a program of its own, and the portals.
+
+So Solium tells both where it is (#146), when it is started as the session.
+The session file starts `solium-session`, which runs `solium --tty --session`.
+Once its Wayland socket is up, Solium sends `WAYLAND_DISPLAY`,
+`XDG_CURRENT_DESKTOP` (`Lilium`, unless the session file's `DesktopNames` set
+it already) and `XDG_SESSION_TYPE=wayland` to systemd's user manager
+(`SetEnvironment`) and to D-Bus activation (`UpdateActivationEnvironment`). It
+sends them again with `DISPLAY` once XWayland has one. Then it starts
+`solium-session.target`, which starts `graphical-session.target`, and
+`solium-autostart.target`, which starts `xdg-desktop-autostart.target`.
+`session.rs` has the tests, and
+`the_calls_reach_systemd_and_dbus_as_their_methods` checks the calls on the
+wire.
+
+**On the way out** Solium stops `solium-session.target`, which takes the
+autostart target with it, and unsets the variables in systemd, so a Plasma
+login afterwards does not inherit a dead socket. It does so on a clean exit,
+and on SIGTERM (how logind ends a session), SIGINT or SIGHUP (`signals.rs`). A
+Solium that cannot stop, because something inside it has stopped answering,
+ends itself `session.stop_timeout` (five seconds) after the signal, or at once
+when the same signal comes again half a second or more later. Neither that nor
+a crash gives Solium the chance to clean up, so `solium-session` does it once
+Solium has gone, if the target is still active. If Solium failed before it
+started the target, while it waited up to five seconds for XWayland,
+`solium-session` unsets the variables, as long as no other desktop holds
+`graphical-session.target` (`dev/install-check.sh` checks each case).
+
+Two things are left behind even so. A SIGKILL of the whole session, which
+systemd sends to whatever of it is still running once its stop timeout has
+passed (45 seconds on Fedora 44), takes `solium-session` with it; the next
+Solium session stops any target an earlier one left running before it says
+anything. And under `dbus-daemon`, the D-Bus activation environment keeps the
+variables, because D-Bus has no call that removes one. Fedora's `dbus-broker`
+hands `UpdateActivationEnvironment` on to systemd's `SetEnvironment` (its
+launcher names that method), so there the unset should clear them for D-Bus
+activation too; that has still to be seen on a real session.
+
+One Solium session runs per user at a time: `solium-session` holds a lock for
+as long as its session runs, and refuses to start a second, which would take
+the first one's target for a leftover and stop it.
+
+**When Solium is not the session, it tells nobody.** `solium --tty` started by
+hand, from a text console, leaves systemd and D-Bus alone: a desktop on
+another VT shares them, and its display is not Solium's to replace. A nested
+Solium leaves the session it runs in alone for the same reason. And a Solium
+session that finds `graphical-session.target` already held by another desktop
+of the same user leaves systemd and D-Bus to that desktop, and says so in the
+log.
+
+`session.systemd = false` turns all of it off. `session.autostart = false`
+leaves out `solium-autostart.target`, and so XDG autostart, while
+`solium-session.target` and every unit attached to it still start.
+`dev/install.sh` puts both targets in `~/.config/systemd/user` and
+`lilium-portals.conf` in `~/.config/xdg-desktop-portal`.
+
+A program that should start with a Solium session can do it in one of two
+ways.
+
+**XDG autostart.** Put a `.desktop` file in `~/.config/autostart`, or in
+`/etc/xdg/autostart` for every user. systemd's autostart generator turns each
+into a service when `xdg-desktop-autostart.target` starts. It skips any whose
+`OnlyShowIn=` does not name `Lilium`, whose `NotShowIn=` does, or that says
+`X-systemd-skip=true`:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Network applet
+Exec=nm-applet --indicator
+OnlyShowIn=Lilium;
+```
+
+**A systemd user unit.** It is tied to the graphical session, so it stops
+when Solium does, and attached to `solium-session.target`, so it starts
+whether autostart is on or not:
+
+```ini
+[Unit]
+Description=A bar
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/waybar
+Restart=on-failure
+
+[Install]
+WantedBy=solium-session.target
+```
+
+Save it as `~/.config/systemd/user/bar.service` and enable it with
+`systemctl --user enable bar.service`. `WantedBy=graphical-session.target`
+also starts it under any other desktop that runs a systemd session, such as
+Plasma or GNOME. `solium-session.target` starts it only under Solium.
+
+**Polkit agents and keyrings start the same way, and most say which desktops
+they are for.** Fedora's KDE polkit agent, for instance, ships
+`/etc/xdg/autostart/polkit-kde-authentication-agent-1.desktop` with
+`OnlyShowIn=KDE;` and `X-systemd-skip=true`, so autostart skips it under
+Lilium, and a copy of it would be skipped too. It also ships
+`plasma-polkit-agent.service`, which is already
+`PartOf=graphical-session.target`, so a single command starts it with every
+Solium session, autostart on or off:
+
+```sh
+systemctl --user add-wants solium-session.target plasma-polkit-agent.service
+```
+
+A keyring that D-Bus starts on demand, such as KWallet's `kwalletd6`, needs no
+entry: once the environment is exported, the first program that asks for a
+secret starts it. It is not unlocked with the login password, though. Under
+Plasma, `plasma-kwallet-pam.service` runs `/usr/libexec/pam_kwallet_init`,
+which hands the wallet what PAM kept at login, through the socket named by
+`PAM_KWALLET5_LOGIN`. Solium does not export that variable to systemd, and the
+script does nothing without it, so the wallet asks for its password the first
+time it opens.
+
 ## Summary
 
 | | Where it runs | How it reaches the compositor |
@@ -268,6 +394,7 @@ it, as a client, and gives up the one engine to get it.
 | The wallpaper, other scripted scenes | The same QML engine | `sol.surface` from Lua |
 | A hosted shell: bar, dock, launcher | The same QML engine | `shell.scene`, through `sol.surface` |
 | A client shell (Waybar and the like), wallpaper programs | Clients | `wlr-layer-shell` |
+| A polkit agent, a keyring, applets and other separate programs | Clients, started by systemd or D-Bus | XDG autostart, or a unit `PartOf=graphical-session.target` |
 | Which monitor a bar is on | Hosted: the primary. A client: the output it names | `zwlr_layer_surface_v1` |
 | Colours and metrics | `Solium.Theme`, one singleton | imported by every scene that wants it |
 | What an animation *does* | Lua script | `sol.present_from`, `sol.on("open")` |

@@ -325,9 +325,18 @@ fn preferred_mode(connector: &connector::Info) -> Option<DrmMode> {
         .copied()
 }
 
-pub(crate) fn run() -> Result<()> {
+/// The hardware session. `place` says whether this is the user's graphical
+/// session (`--tty --session`) or a start by hand (`--tty`); see `session.rs`.
+pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     let mut event_loop: EventLoop<State> =
         EventLoop::try_new().context("creating the event loop")?;
+    // First, so that a SIGTERM from logind at any point from here on stops
+    // the loop, and the session ends through `Session::end` below. If the
+    // loop cannot stop, the process still ends: see `signals.rs`.
+    // `signals::tests::each_ending_signal_stops_the_loop`.
+    let signals = crate::signals::listen(&event_loop.handle(), |state: &mut State| {
+        state.signal.stop()
+    });
     let display: Display<Solium> = Display::new().context("creating the wayland display")?;
     let display_handle = display.handle();
 
@@ -340,7 +349,7 @@ pub(crate) fn run() -> Result<()> {
     solium.socket_name = start_socket(&mut event_loop, display)?;
 
     let loop_handle = event_loop.handle();
-    crate::xwayland::start(&loop_handle, &display_handle);
+    let x11_coming = crate::xwayland::start(&loop_handle, &display_handle);
 
     let config = Scripts::config_path();
     let scripts = match Scripts::load(&config) {
@@ -357,6 +366,15 @@ pub(crate) fn run() -> Result<()> {
         crate::qml::renderer::Entry::Tty,
         &scripts.as_ref().map(Scripts::qml).unwrap_or_default(),
     );
+    // Told once the configuration has said whether to, with the socket
+    // already bound. See `session.rs` and its tests.
+    let settings = scripts.as_ref().map(Scripts::session).unwrap_or_default();
+    signals.stop_timeout(settings.stop_timeout);
+    solium.session = crate::session::Session::begin(settings, place, crate::dev::session_bus());
+    solium.session.wayland(&solium.socket_name);
+    if !x11_coming {
+        solium.session.x11(None);
+    }
     solium.start_scripts(scripts);
 
     let mut state = State {
@@ -683,7 +701,9 @@ pub(crate) fn run() -> Result<()> {
             }
             let _ = state.solium.display_handle.flush_clients();
         })
-        .map_err(|err| anyhow!("running the event loop: {err}"))
+        .map_err(|err| anyhow!("running the event loop: {err}"))?;
+    state.solium.session.end();
+    Ok(())
 }
 
 /// One monitor's pipeline: its connector, its CRTC, its buffers, its flips.

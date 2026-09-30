@@ -41,12 +41,16 @@ foundation is [Smithay](https://github.com/Smithay/smithay) (MIT), and the
 Wayland, event-loop and hardware crates it builds on (the `wayland-*` crates,
 `calloop`, `drm`, `gbm`, `input`, `libseat`, `udev`, `xkbcommon`, `xcursor`)
 are all MIT too. Lua comes from `mlua`
-(MIT), which compiles the Lua sources vendored by `lua-src` (MIT).
+(MIT), which compiles the Lua sources vendored by `lua-src` (MIT). The session
+bus is spoken through `zbus` and the `zvariant` crates (MIT), on the `async-io`
+family of crates (MIT OR Apache-2.0). The signals that end a session are caught
+through `signal-hook-registry` (MIT OR Apache-2.0), which that family already
+uses.
 
 | Licence | Crates |
 |---|---|
-| MIT OR Apache-2.0 (in any of its spellings) | 137 |
-| MIT | 83 |
+| MIT OR Apache-2.0 (in any of its spellings) | 161 |
+| MIT | 92 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT (`rustix`, `linux-raw-sys`, `io-lifetimes`, `wasip2`, `wit-bindgen`) | 8 |
 | Apache-2.0 (`winit`, `cgmath`, `approx`, `gl_generator`, `khronos_api`, `gethostname`) | 6 |
 | Other choices that include MIT: with Unlicense, Zlib, BSD-2-Clause or BSD-3-Clause | 15 |
@@ -56,7 +60,7 @@ are all MIT too. Lua comes from `mlua`
 | `Apache-2.0 AND MIT` (`dpi`) | 1 |
 | MIT OR Apache-2.0 OR LGPL-2.1-or-later (`r-efi`, two versions) | 2 |
 
-That is all 255 crates the lock file names. None is GPL- or AGPL-only, and
+That is all 288 crates the lock file names. None is GPL- or AGPL-only, and
 none has an unknown licence. The one entry that mentions a GPL-family licence,
 `r-efi`, offers MIT and Apache-2.0 as alternatives, and is a dependency of
 `getrandom` only on UEFI targets, so no Linux build compiles it.

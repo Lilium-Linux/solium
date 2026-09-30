@@ -142,9 +142,31 @@ Ctrl+Alt+F3 switches to a text console, where you can log in and read
 neither helps if Solium itself hangs.
 
 What it installs is a copy: rebuilding or checking out another branch does not
-change it, and running `dev/install.sh` again replaces it. It refuses while a
-Solium session is running from it, and while `~/.local/share/solium` is a
-link, which it would otherwise delete through.
+change it, and running `dev/install.sh` again replaces it. When the login
+screen's session file is from an older install, it says so, and the `sudo`
+line has to be run again. It refuses while a Solium session is running from
+it, and while `~/.local/share/solium` is a link, which it would otherwise
+delete through.
+
+**The rest of the session.** It also puts `solium-session.target` and
+`solium-autostart.target` in `~/.config/systemd/user`, and
+`lilium-portals.conf` in `~/.config/xdg-desktop-portal`. The session file
+starts `solium-session`, which starts Solium as the session: Solium tells
+systemd and D-Bus where its display is and starts those targets, which start
+`graphical-session.target` and XDG autostart, and they are stopped again when
+it ends, a crash included. A Solium that has stopped answering ends itself five
+seconds after logout asks it to (`session.stop_timeout`), so that it is cleaned
+up after too. One Solium session runs per user at a time. Portals, the
+programs in `~/.config/autostart`, and user services written for a graphical
+session then find Solium. A file there
+that you have edited, or linked, is left alone. The portal file sends screen
+capture to `xdg-desktop-portal-wlr`, which Fedora packages separately
+(`sudo dnf install xdg-desktop-portal-wlr`). A polkit agent, a keyring,
+applets and other separate programs start through XDG autostart or a user unit
+with `PartOf=graphical-session.target`.
+[docs/shell-boundary.md](docs/shell-boundary.md#how-the-rest-of-the-desktop-starts)
+says how, with the one command that starts Fedora's KDE polkit agent under
+Solium. `session.systemd = false` in your configuration turns all of it off.
 
 To remove it, `dev/install.sh --uninstall`, then the
 `sudo rm -f /usr/local/share/wayland-sessions/solium.desktop` it prints. Your

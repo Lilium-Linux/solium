@@ -176,7 +176,14 @@ impl HasSolium for Solium {
 /// Failure is not fatal and deliberately so: a session with no X11 support is
 /// a working session, and one that refuses to start because XWayland is not
 /// installed is not.
-pub(crate) fn start<D>(handle: &LoopHandle<'static, D>, display: &DisplayHandle)
+///
+/// Returns whether XWayland is on its way. When it is, `Session::x11` hears
+/// how it went: its display, or `None` when it exits, cannot be managed, or is
+/// not ready within five seconds. When it is not, the caller says `None`. What
+/// the session does with each is `session::tests::
+/// the_environment_goes_out_when_the_socket_is_up_and_again_with_display` and
+/// `without_x11_the_target_starts_after_the_first_export`.
+pub(crate) fn start<D>(handle: &LoopHandle<'static, D>, display: &DisplayHandle) -> bool
 where
     D: HasSolium + XwmHandler + XWaylandShellHandler + 'static,
 {
@@ -198,7 +205,7 @@ where
         Ok(pair) => pair,
         Err(err) => {
             tracing::warn!(?err, "no XWayland: X11 clients will not run");
-            return;
+            return false;
         }
     };
 
@@ -216,13 +223,21 @@ where
                 solium.xwm = Some(wm);
                 solium.x11_display = Some(display_number);
                 tracing::info!(display = display_number, "XWayland is up");
+                solium.session.x11(Some(display_number));
             }
-            Err(err) => tracing::warn!(?err, "could not manage XWayland's windows"),
+            Err(err) => {
+                tracing::warn!(?err, "could not manage XWayland's windows");
+                data.solium().session.x11(None);
+            }
         },
-        XWaylandEvent::Error => tracing::warn!("XWayland exited during startup"),
+        XWaylandEvent::Error => {
+            tracing::warn!("XWayland exited during startup");
+            data.solium().session.x11(None);
+        }
     });
     if let Err(err) = inserted {
         tracing::warn!(?err, "could not watch XWayland");
+        return false;
     }
 
     // Say so if it never arrives.
@@ -244,6 +259,7 @@ where
                     "XWayland did not become ready; X11 clients will not run. \
                      Its own error, if it printed one, is above this line."
                 );
+                data.solium().session.x11(None);
             }
             TimeoutAction::Drop
         },
@@ -251,6 +267,7 @@ where
     if let Err(err) = timeout {
         tracing::warn!(?err, "could not watch for XWayland being slow");
     }
+    true
 }
 
 impl XWaylandShellHandler for Solium {

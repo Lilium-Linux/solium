@@ -709,10 +709,15 @@ fn keep_qt_off_the_hardware(node: &Path) -> Result<()> {
     .with_context(|| format!("writing {}", config.display()))?;
 
     // SAFETY: `set_var` is unsound only against a concurrent reader of the
-    // environment. This runs from `qml::start`, on the thread that renders,
-    // before Qt exists — Qt reads all three inside `QGuiApplication`'s
-    // constructor, which is the call after this one — and nothing else in the
-    // compositor reads the environment off the main thread.
+    // environment that bypasses its lock. This runs from `qml::start`, on the
+    // thread that renders, before Qt exists — Qt reads all three inside
+    // `QGuiApplication`'s constructor, which is the call after this one. Other
+    // threads can be running by now and do read the environment: the session
+    // bus thread (`session.rs`: zbus reads DBUS_SESSION_BUS_ADDRESS,
+    // XDG_RUNTIME_DIR and FLATPAK_ID) and the async runtime zbus brings
+    // (`blocking` reads BLOCKING_MAX_THREADS). All of them read through
+    // `std::env`, which takes the same lock as `set_var`, and none of them
+    // calls libc's `getenv`.
     #[expect(unsafe_code, reason = "std::env::set_var is unsafe in edition 2024")]
     unsafe {
         std::env::set_var("QT_QPA_EGLFS_KMS_CONFIG", &config);
