@@ -10370,3 +10370,7 @@ impl Scripts {
         self.evaluate(chunk)
     }
 }
+
+// The generated reference pages check their sources against the code here.
+#[cfg(test)]
+mod reference;
