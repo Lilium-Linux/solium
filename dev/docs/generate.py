@@ -952,7 +952,8 @@ def production(path, text):
     return "\n".join(kept)
 
 
-VARIABLE = re.compile(r'"((?:SOLIUM_|XDG_|XCURSOR_)[A-Z0-9_]+|WAYLAND_DISPLAY|DISPLAY)"')
+# Not a name a match arm answers (`=> "SOLIUM_QML"`): that labels a log line.
+VARIABLE = re.compile(r'(?<!=> )"((?:SOLIUM_|XDG_|XCURSOR_)[A-Z0-9_]+|WAYLAND_DISPLAY|DISPLAY)"')
 # A flag is read where it is compared: `== "--x"`, `Some("--x")`,
 # `strip_prefix("--x")`, a match arm `"--x" =>`, or `const X: &str = "--x"`.
 FLAG = re.compile(r'(?:==|!=|Some\(|strip_prefix\(|starts_with\(|&str =)\s*"(--[a-z][a-z-]*)"'
