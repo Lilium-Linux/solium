@@ -34,3 +34,7 @@ build/
 .vscode/
 *.swp
 .DS_Store
+
+# The documentation site. dev/docs/generate.py writes these pages from the
+# code on every build, so they are never committed; see book.toml.
+docs/generated/

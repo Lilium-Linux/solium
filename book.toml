@@ -1,0 +1,38 @@
+# The documentation site, https://lilium-linux.github.io/solium/, built with
+# mdBook. `dev/docs.sh` builds it (`--serve` to watch it); CONTRIBUTING.md has
+# the details. The docs stay where they are, in docs/, and read the same on
+# GitHub: what the book adds -- the pages generated from the code, and copies
+# of the Markdown that lives outside docs/ -- is written to docs/generated/,
+# which is not committed.
+
+[book]
+title = "Solium"
+description = "The Wayland compositor of Lilium DE: configuring it, scripting it, and working on it."
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+# A page SUMMARY.md names and nothing wrote is a failed build, not a blank page:
+# it means dev/docs/generate.py did not run, or stopped writing something.
+create-missing = false
+# Only `links`, for `{{#include}}`. The other default, `index`, renames every
+# README.md chapter to index.md, and the links other pages have to those
+# READMEs would then go nowhere.
+use-default-preprocessors = false
+
+[preprocessor.links]
+
+# Points each chapter's links at where they go in the book: see
+# dev/docs/links.py.
+[preprocessor.solium-links]
+command = "python3 dev/docs/preprocess.py"
+after = ["links"]
+
+[output.html]
+site-url = "/solium/"
+git-repository-url = "https://github.com/Lilium-Linux/solium"
+no-section-label = true
+
+[output.html.search]
+limit-results = 20
