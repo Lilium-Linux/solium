@@ -12,6 +12,10 @@ name: Docs
 # Every third-party action is pinned to a commit, with its tag beside it: a
 # tag can be moved to point at other code, and this workflow can write to the
 # site.
+#
+# Publishing needs the repository's Settings > Pages > Source set to "GitHub
+# Actions"; until it is, the deploy job fails. Run by hand from a branch other
+# than `stage`, this builds the site and does not publish it.
 
 on:
   push:
@@ -70,6 +74,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.ref == 'refs/heads/stage'
     runs-on: ubuntu-latest
     permissions:
       pages: write
