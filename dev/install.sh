@@ -58,8 +58,6 @@ build=1
 uninstall=0
 jobs=2
 image="localhost/solium-build:fc44"
-lock="${SOLIUM_BUILD_LOCK:-${XDG_CACHE_HOME:-$HOME/.cache}/solium-build.lock}"
-memory="${SOLIUM_BUILD_MEMORY:-6g}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -163,14 +161,9 @@ case "$resolved_share/" in
 uninstalling there would delete the checkout's own files: choose a --prefix outside it" ;;
 esac
 
-# Where the container sees this checkout. assets.rs looks in the build tree
-# (`CARGO_MANIFEST_DIR`) *before* `<binary>/../share/solium`, so a binary
-# compiled at the checkout's own path would go on reading the checkout's QML
-# and Lua after it was installed. Compiled here, a path the host does not have,
-# the installed binary falls through to the copy beside it. The check after
-# installing asserts exactly that, and dev/install-check.sh asserts it for a
-# staged install.
-mount="/solium-src"
+# What dev/build-release.sh builds, at a path the host does not have, so that
+# the installed copy reads the QML and Lua beside it rather than this
+# checkout's: the check after installing asserts it.
 built="$root/target/install/release/solium"
 
 # Processes of this user running the binary at $1. /proc/<pid>/exe is how
@@ -273,27 +266,7 @@ for entry in "${config_files[@]}"; do
 done
 
 if [[ $build -eq 1 ]]; then
-    command -v podman >/dev/null || die "podman is not installed, and the build runs in a container"
-    podman image exists "$image" \
-        || die "the build image $image does not exist. Build it once with:
-  podman build -t ${image#localhost/} -f dev/Containerfile dev/"
-    mkdir -p "$(dirname "$lock")"
-    echo "building a release binary in $image (waiting for $lock if another build holds it)..."
-    status=0
-    flock "$lock" podman run --rm --memory="$memory" --memory-swap="$memory" \
-        --userns=keep-id --security-opt label=disable \
-        -v "$HOME:$HOME" -v "$root:$mount" \
-        -e CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" -e CARGO_BUILD_JOBS="$jobs" \
-        -e CARGO_TARGET_DIR="$mount/target/install" \
-        -e PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
-        -w "$mount" "$image" \
-        sh -c "nice -n 19 ionice -c 3 cargo build --release -j$jobs -p solium" \
-        || status=$?
-    if [[ $status -eq 137 ]]; then
-        die "the build container was killed (exit 137: out of its $memory). Re-run with --jobs 1"
-    elif [[ $status -ne 0 ]]; then
-        die "the build failed (exit $status)"
-    fi
+    "$root/dev/build-release.sh" --jobs "$jobs" --image "$image" || die "the build failed"
 fi
 [[ -x "$built" ]] || die "no release build at $built; run without --no-build"
 

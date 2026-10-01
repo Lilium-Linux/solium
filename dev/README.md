@@ -1087,7 +1087,7 @@ compiled in as its `shipped assets root`, and `install.sh`'s check refuses it.
 Compiled at `/solium-src` in the container, the build tree it names is not on
 the host, so the installed copy falls through to `<prefix>/share/solium`. That
 build goes to its own `target/install`, apart from the builds made at the
-checkout's path. Nothing is baked into `SOLIUM_DATADIR`, so the same binary
+checkout's path, and `dev/build-release.sh` is that build on its own. Nothing is baked into `SOLIUM_DATADIR`, so the same binary
 works from any prefix, a `DESTDIR` staging area included.
 
 **Checked before it starts:** a Solium running from the binary it would
