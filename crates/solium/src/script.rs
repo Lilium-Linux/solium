@@ -4814,13 +4814,13 @@ mod tests {
         Some((scripts, commands))
     }
 
-    /// **The shipped configuration hosts no shell**, and says so on every
-    /// `monitors` event rather than by staying quiet.
+    /// **The shipped configuration hosts no shell**, and says so every time
+    /// the configuration runs rather than by staying quiet.
     ///
     /// The second half is what makes taking a shell out of `user.lua` work on
     /// `super+shift+r`: a surface outlives a reload until something removes it
-    /// by name, and a reload fires `monitors`, so `shell.lua` removes `shell`
-    /// whenever none is configured.
+    /// by name, and a reload runs the configuration again, so `shell.lua`
+    /// removes `shell` whenever none is configured.
     #[test]
     fn the_shipped_configuration_hosts_no_shell() {
         // The environment has already chosen a shell for this process, and
@@ -4897,9 +4897,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
-    /// **`shell.scene` in `user.lua` hosts that scene**: once, over the
-    /// windows, taking the pointer, on the primary monitor's area, with `~`
-    /// expanded -- and `shell.scene` is a setting, not a typo.
+    /// **`shell.scene` in `user.lua` hosts that scene**: over the windows,
+    /// taking the pointer, on every monitor, with `~` expanded, and told
+    /// nothing by hand about the screen it is on -- and `shell.scene` is a
+    /// setting, not a typo.
     #[test]
     fn the_shell_scene_is_read_from_the_configuration() {
         if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
@@ -4938,65 +4939,50 @@ mod tests {
         assert!(shell.interactive, "a shell must take the pointer");
         assert_eq!(
             shell.on,
-            crate::scripted::On::Rect(smithay::utils::Rectangle::new(
-                (0, 0).into(),
-                (1600, 900).into()
-            )),
-            "the shell is not on the primary monitor's area"
+            crate::scripted::On::EveryMonitor,
+            "the shell is not on every monitor"
         );
         assert!(
-            shell.properties.get("screenInfo").is_some(),
-            "the shell was not told which screen it is on: {:?}",
+            shell.properties.get("screenInfo").is_none(),
+            "the shell was handed `screenInfo`, which `Solium.monitor` replaces: {:?}",
             shell.properties
         );
     }
 
-    /// **The shell is on the primary monitor, not the focused one.** A reload
-    /// and a hotplug both place it again, and a bar that followed focus would
-    /// move screens whenever one of them happened with the pointer elsewhere.
+    /// **The shell is on every monitor, unless the configuration names one**:
+    /// `shell.on` is a setting, `"every-monitor"` by default (#161, Ruling 5).
     #[test]
-    fn the_shell_is_on_the_primary_monitor_not_the_focused_one() {
+    fn the_shell_is_on_every_monitor_unless_the_configuration_names_one() {
         if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
             return;
         }
-        let Some((directory, mut scripts)) = shipped_init_with_user(
-            "solium-script-test-shell-primary",
-            r#"return { shell = { scene = "/solium-fixture/shell.qml" } }"#,
-        ) else {
-            return;
-        };
-        let mut two = one_screen(&[]);
-        let [focused] = two.monitors.as_mut_slice() else {
-            panic!("one_screen has one monitor");
-        };
-        focused.primary = false;
-        let mut primary = focused.clone();
-        primary.name = "test-2".to_owned();
-        primary.focused = false;
-        primary.primary = true;
-        primary.area = Rect {
-            x: 1600.0,
-            y: 0.0,
-            w: 1920.0,
-            h: 1080.0,
-        };
-        primary.whole = primary.area;
-        two.monitors.push(primary);
-
-        let mut commands = scripts.startup().commands;
-        commands.extend(scripts.monitors_changed(two).commands);
-        let _ = std::fs::remove_dir_all(&directory);
-
-        let (declared, _) = shell_surfaces(&commands);
-        let placed: Vec<&crate::scripted::On> = declared.iter().map(|shell| &shell.on).collect();
-        assert_eq!(
-            placed,
-            vec![&crate::scripted::On::Rect(smithay::utils::Rectangle::new(
-                (1600, 0).into(),
-                (1920, 1080).into()
-            ))],
-            "the shell followed the focused monitor instead of the primary one"
-        );
+        for (user, expected) in [
+            (
+                r#"return { shell = { scene = "/solium-fixture/shell.qml" } }"#,
+                crate::scripted::On::EveryMonitor,
+            ),
+            (
+                r#"return { shell = { scene = "/solium-fixture/shell.qml", on = "primary" } }"#,
+                crate::scripted::On::Primary,
+            ),
+        ] {
+            let Some((scripts, commands)) =
+                shell_after_monitors("solium-script-test-shell-on", user)
+            else {
+                return;
+            };
+            assert!(
+                scripts.unknown_settings().is_empty(),
+                "`shell.on` was reported as unrecognised"
+            );
+            let (declared, _) = shell_surfaces(&commands);
+            let placed: Vec<&crate::scripted::On> =
+                declared.iter().map(|shell| &shell.on).collect();
+            assert!(
+                !placed.is_empty() && placed.iter().all(|on| **on == expected),
+                "{user}: {placed:?}"
+            );
+        }
     }
 
     /// **`SOLIUM_SHELL_SCENE` wins over `shell.scene`**, because it is set per

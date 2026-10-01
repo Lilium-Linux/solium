@@ -55,6 +55,8 @@
 // headers. QObject brings the core types in the order Qt expects.
 #include <QtCore/QObject>
 
+#include "attached.h"
+
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
@@ -82,6 +84,7 @@
 #include <QtGui/QSurface>
 #include <QtQml/QJSValue>
 #include <QtQml/QQmlComponent>
+#include <QtQml/QQmlContext>
 #include <QtQml/QQmlEngine>
 #include <QtQml/QQmlListReference>
 // The one thing in here that resolves a property *path*. QObject::property
@@ -129,8 +132,8 @@ namespace {
 /*
  * An animation driver the compositor advances by hand.
  *
- * No Q_OBJECT: nothing here needs signals, slots or properties, so the build
- * needs no moc step.
+ * No Q_OBJECT: nothing here needs signals, slots or properties, so host.cpp
+ * needs no moc of its own.
  *
  * What it reports is *not* the compositor's clock, and the difference is the
  * whole of this class. Qt's contract for `elapsed()` is "the number of
@@ -306,6 +309,12 @@ struct SoliumQmlScene
     QObject *object = nullptr;
     /* What is drawn and sized. */
     QQuickItem *root = nullptr;
+    /* For a scene hosted on a monitor: its own context, marked with its
+     * hosting record so every object in it finds the record. Null otherwise.
+     * `qml::hosted::tests::every_object_of_a_hosted_scene_finds_its_monitor_after_the_build`,
+     * `qml::hosted::tests::a_scene_hosted_on_no_monitor_reads_an_absent_monitor`. */
+    QQmlContext *context = nullptr;
+    SoliumHosting *hosting = nullptr;
     QImage image;
     /* Device pixels: the size of the image the compositor uploads. */
     int width = 0;
@@ -531,6 +540,7 @@ static bool start_common(const char *import_path)
     always->setLoopCount(-1);
     always->start();
 
+    solium_qml_register_types();
     g_engine = new QQmlEngine();
     add_import_paths(g_engine, import_path);
     return true;
@@ -640,6 +650,18 @@ extern "C" void solium_qml_clear_cache()
     }
 }
 
+namespace {
+/* What solium_qml_host_next_on handed over, for the next scene only. */
+bool g_next_hosted = false;
+QString g_next_monitor;
+} // namespace
+
+extern "C" void solium_qml_host_next_on(const char *monitor)
+{
+    g_next_hosted = monitor != nullptr;
+    g_next_monitor = monitor != nullptr ? QString::fromUtf8(monitor) : QString();
+}
+
 extern "C" SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width, int height,
                                                 const char **error)
 {
@@ -679,6 +701,16 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
         return false;
     };
 
+    /* Taken now, whatever happens below: a build that fails must not leave
+     * its monitor for the next scene.
+     * `qml::hosted::tests::the_host_consumes_the_monitor_even_for_a_build_that_fails`. */
+    if (g_next_hosted) {
+        scene->hosting = new SoliumHosting{g_next_monitor};
+        scene->context = new QQmlContext(g_engine->rootContext());
+        solium_hosting_mark(scene->context, scene->hosting);
+        g_next_hosted = false;
+    }
+
     scene->component =
         new QQmlComponent(g_engine, QUrl::fromLocalFile(QString::fromUtf8(qml_path)));
     if (scene->component->isError()) {
@@ -716,8 +748,9 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
         }
     }
 
-    QObject *created = initial.isEmpty() ? scene->component->create()
-                                         : scene->component->createWithInitialProperties(initial);
+    QObject *created =
+        initial.isEmpty() ? scene->component->create(scene->context)
+                          : scene->component->createWithInitialProperties(initial, scene->context);
     scene->root = qobject_cast<QQuickItem *>(created);
     // A root shaped like a window is drawn through its content item, the way a
     // window shows one.
@@ -1431,6 +1464,8 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
         delete scene->root;
     }
     delete scene->object;
+    delete scene->context;
+    delete scene->hosting;
     delete scene->component;
     delete scene->window;
     delete scene->control;

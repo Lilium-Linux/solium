@@ -312,6 +312,12 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // on monitors of different refresh rates by different amounts.
     {
         let _tick = crate::pacing::span(crate::pacing::Phase::Tick);
+        // The models hosted scenes read, one batch each, ahead of the tick
+        // and measured with it as Qt's, because applying a row runs every
+        // binding and handler on it:
+        // `models::tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
+        // `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
+        state.publish_models();
         crate::qml::tick(state.clock.now());
     }
 
@@ -1519,9 +1525,9 @@ fn wanted(
     // lives; the selection it is in says where it is drawn, and a wallpaper
     // belonging to a workspace a screen away is declared on this monitor and
     // drawn nowhere near it. Culling on the declared rectangle would rasterise
-    // a full-screen scene per desk, every frame, for pictures nobody can see —
-    // and culling after `instance` would still build them. So the order here is
-    // load-bearing: place, carry, cull, and only then ask for a rasterisation.
+    // a full-screen scene per desk, every frame, for pictures nobody can see.
+    // So the order here is load-bearing: place, carry, cull, and only then ask
+    // for a rasterisation.
     state
         .surfaces
         .iter()
@@ -1558,7 +1564,7 @@ fn scripted(
     let Some(surface) = state.surfaces.get_mut(id) else {
         return Vec::new();
     };
-    let Some(instance) = surface.instance(output) else {
+    let Some(instance) = surface.instance_mut(output) else {
         return Vec::new();
     };
     let painted = instance.element(

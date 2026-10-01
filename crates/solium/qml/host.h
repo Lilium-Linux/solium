@@ -93,6 +93,13 @@ int solium_qml_start(const char *import_path);
  */
 int solium_qml_start_gpu(const char *import_path);
 
+/* The monitor the next scene built is hosted on, or NULL for none. Consumed
+ * by the next solium_qml_scene_new_with or solium_qml_scene_new_gpu, which
+ * gives that scene a hosting record and a QML context of its own, so
+ * `Solium.monitor` names this monitor inside it while it is being built.
+ * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
+void solium_qml_host_next_on(const char *monitor);
+
 /* A scene that renders into a buffer we allocated.
  *
  * `dmabuf_fd` is borrowed for the call — EGL takes its own reference on the
@@ -392,6 +399,23 @@ const char *solium_qml_scene_string_at(const SoliumQmlScene *scene, const char *
 
 /* Pointer input, in scene coordinates. `pressed`: 1 down, 0 up, -1 motion. */
 void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed);
+
+/* The models hosted scenes read, by number.
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
+#define SOLIUM_QML_ROWS_MONITORS 0
+#define SOLIUM_QML_ROWS_WINDOWS 1
+#define SOLIUM_QML_ROWS_WORKSPACES 2
+
+/* Apply one batch of row operations, rendered by `crate::models::diff::render`,
+ * to a model: in order, every row's values written before any row is
+ * announced, and each row announced once.
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
+ * Returns 1 when Qt took the whole batch and 0, having taken none of it, when
+ * it did not, as for a step that does not match the rows held or text that is
+ * not a batch.
+ * `qml::hosted::tests::a_batch_that_does_not_match_the_rows_held_is_refused`,
+ * `qml::hosted::tests::a_refused_batch_takes_none_of_its_steps`. */
+int solium_qml_rows_apply(int model, const char *ops_json);
 
 #ifdef __cplusplus
 }

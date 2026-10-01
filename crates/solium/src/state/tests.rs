@@ -2553,8 +2553,8 @@ mod real_client {
     const RIGHT_SCREEN: &str = "right-test";
 
     /// **A surface redeclared onto another monitor drops its scene on the
-    /// first**: `declare_surface` prunes what a changed placement no longer
-    /// covers, so `sol.surface` following `sol.monitor()` from screen to
+    /// first and has one on the second**: `declare_surface` syncs that
+    /// surface, so `sol.surface` following `sol.monitor()` from screen to
     /// screen does not leave a whole Qt scene behind on each. No client, so
     /// the scene may be a real one (the #99 rule).
     #[test]
@@ -2568,7 +2568,7 @@ mod real_client {
 
             let display = Display::<Solium>::new().expect("creating a test wayland display");
             let mut state = Solium::new(display.handle());
-            let (left, _) = side_by_side(&mut state, "redeclared-left");
+            let (left, right) = side_by_side(&mut state, "redeclared-left");
             let mut declared = crate::scripted::Declaration::for_test(
                 "bar",
                 path,
@@ -2576,25 +2576,17 @@ mod real_client {
                 crate::scripted::On::Monitor("redeclared-left".to_owned()),
             );
             state.declare_surface(declared.clone());
-            let id = state.surfaces.named("bar").expect("declared");
-            assert!(
-                state
-                    .surfaces
-                    .get_mut(id)
-                    .and_then(|surface| surface.instance(&left))
-                    .is_some(),
-                "the scene builds"
-            );
+            assert!(has_scene(&mut state, "bar", &left), "the scene builds");
 
             declared.on = crate::scripted::On::Monitor(RIGHT_SCREEN.to_owned());
             state.declare_surface(declared);
-            assert_eq!(
-                state
-                    .surfaces
-                    .get(id)
-                    .map(crate::scripted::Surface::instance_count),
-                Some(0),
+            assert!(
+                !has_scene(&mut state, "bar", &left),
                 "the monitor the surface left kept its scene"
+            );
+            assert!(
+                has_scene(&mut state, "bar", &right),
+                "the monitor the surface moved to has no scene"
             );
         });
     }
@@ -2645,7 +2637,7 @@ mod real_client {
         entry
     }
 
-    /// The scene `name` draws on `output`, built there if it has none.
+    /// The scene surface `name` has on `output`.
     fn scene_on<'a>(
         state: &'a mut Solium,
         name: &str,
@@ -2655,9 +2647,19 @@ mod real_client {
         state
             .surfaces
             .get_mut(id)
-            .and_then(|surface| surface.instance(output))
-            .expect("the scene builds")
+            .and_then(|surface| surface.instance_mut(output))
+            .expect("the surface has a scene there")
             .scene_for_test()
+    }
+
+    /// Whether surface `name` has a scene on `output`.
+    fn has_scene(state: &mut Solium, name: &str, output: &Output) -> bool {
+        let id = state.surfaces.named(name).expect("the surface is declared");
+        state
+            .surfaces
+            .get_mut(id)
+            .and_then(|surface| surface.instance_mut(output))
+            .is_some()
     }
 
     /// **A monitor an unplug moves keeps the scene its `monitors` handler
@@ -2731,10 +2733,10 @@ mod real_client {
     }
 
     /// **A reload that makes another monitor primary drops the old primary's
-    /// scene**, for a surface `on = "primary"` the new configuration declares
-    /// exactly as the old one did. Nothing about the surface changed, so only
-    /// the reload itself can see that its monitor did. No client (the #99
-    /// rule).
+    /// scene and builds one on the new**, for a surface `on = "primary"` the
+    /// new configuration declares exactly as the old one did. Nothing about
+    /// the surface changed, so only the reload itself can see that its
+    /// monitor did. No client (the #99 rule).
     #[test]
     fn a_reload_that_moves_the_primary_drops_the_old_primarys_scene() {
         crate::qml::qt_test::on_the_qt_thread(|| {
@@ -2760,7 +2762,7 @@ mod real_client {
 
             let display = Display::<Solium>::new().expect("creating a test wayland display");
             let mut state = Solium::new(display.handle());
-            let (left, _) = side_by_side(&mut state, "reload-primary-left");
+            let (left, right) = side_by_side(&mut state, "reload-primary-left");
             state.start_scripts(Some(
                 Scripts::load(&before).expect("loading the test script"),
             ));
@@ -2768,14 +2770,202 @@ mod real_client {
             scene_on(&mut state, "bar", &left);
 
             state.reload_from(&after);
-            let id = state.surfaces.named("bar").expect("still declared");
+            assert!(
+                !has_scene(&mut state, "bar", &left),
+                "the monitor that stopped being primary kept its scene"
+            );
+            assert!(
+                has_scene(&mut state, "bar", &right),
+                "the new primary has no scene"
+            );
+        });
+    }
+
+    /// **A `sol.monitors{}` at run time that makes another monitor primary
+    /// drops the old primary's scene and builds one on the new**, once the
+    /// dispatch that said it is done. A binding is neither a reload nor a
+    /// hotplug, and nothing about the surface changed, so only the dispatch
+    /// can see that its monitor did. No client (the #99 rule).
+    #[test]
+    fn a_runtime_primary_change_drops_the_old_primarys_scene() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-runtime-primary");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(&scene, "import QtQuick\nItem {}\n").expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"
+                    sol.surface("bar", {{ scene = "{scene}", layer = "top", on = "primary" }})
+                    sol.bind("super+p", function()
+                        sol.monitors{{ {{ name = "{RIGHT_SCREEN}", primary = true }} }}
+                    end)
+                    "#,
+                    scene = scene.display()
+                ),
+            )
+            .expect("writing the test script");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "runtime-primary-left");
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            scene_on(&mut state, "bar", &left);
+
+            assert!(state.trigger("super+p"), "super+p is bound");
+            assert!(
+                !has_scene(&mut state, "bar", &left),
+                "the monitor that stopped being primary kept its scene"
+            );
+            assert!(
+                has_scene(&mut state, "bar", &right),
+                "the new primary has no scene"
+            );
+        });
+    }
+
+    /// **A binding that moves the primary and its surface in one go keeps the
+    /// surface's scene**: the surfaces are placed when the whole dispatch is
+    /// done, not when the layout pass `sol.monitors{}` runs inside it is,
+    /// which is before the binding's own `sol.surface` that follows it. No
+    /// client (the #99 rule).
+    #[test]
+    fn a_binding_that_moves_the_primary_and_its_surface_together_keeps_the_scene() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-primary-and-surface");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(&scene, "import QtQuick\nItem { property int kept: 0 }\n")
+                .expect("writing the scene");
+            let left_name = "primary-and-surface-left";
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"
+                    sol.surface("bar", {{ scene = "{scene}", layer = "top", on = "primary" }})
+                    sol.bind("super+p", function()
+                        sol.monitors{{ {{ name = "{RIGHT_SCREEN}", primary = true }} }}
+                        sol.surface("bar", {{ scene = "{scene}", layer = "top", on = "{left_name}" }})
+                    end)
+                    "#,
+                    scene = scene.display()
+                ),
+            )
+            .expect("writing the test script");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, _) = side_by_side(&mut state, left_name);
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            scene_on(&mut state, "bar", &left).set_int("kept", 7);
+
+            assert!(state.trigger("super+p"), "super+p is bound");
+            assert_eq!(
+                scene_on(&mut state, "bar", &left).get_int("kept"),
+                7,
+                "the scene was dropped before the binding said where the surface now is"
+            );
+        });
+    }
+
+    /// **A reload that moves a monitor keeps the scene its `monitors`
+    /// handler declares there again**: a `sol.monitors{}` at the top of the
+    /// new configuration places the surfaces only once the reload's own
+    /// `monitors` and `layout` handlers have run, as a hotplug does
+    /// (`a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`).
+    /// No client (the #99 rule).
+    #[test]
+    fn a_reload_that_moves_a_monitor_keeps_the_scene_its_handler_declares_there() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let left_name = "reload-moves-left";
+            let before = declared_over_the_right_screen("solium-state-reload-moves", &["bar"]);
+            let after = before.with_file_name("after.lua");
+            let handler = std::fs::read_to_string(&before).expect("reading the test script");
+            std::fs::write(
+                &after,
+                format!("sol.monitors{{ {{ name = \"{RIGHT_SCREEN}\", below = \"{left_name}\" }} }}\n{handler}"),
+            )
+            .expect("writing the second configuration");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (_, right) = side_by_side(&mut state, left_name);
+            state.start_scripts(Some(
+                Scripts::load(&before).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            scene_on(&mut state, "bar", &right).set_int("kept", 7);
+
+            state.reload_from(&after);
             assert_eq!(
                 state
-                    .surfaces
-                    .get(id)
-                    .map(crate::scripted::Surface::instance_count),
-                Some(0),
-                "the monitor that stopped being primary kept its scene"
+                    .space
+                    .output_geometry(&right)
+                    .map(|geometry| geometry.loc),
+                Some((0, 1080).into()),
+                "the premise: the reload put the right monitor below the left one"
+            );
+            let scene = scene_on(&mut state, "bar", &right);
+            assert_eq!(
+                (scene.get_int("kept"), scene.get_int("screenX")),
+                (7, 0),
+                "(kept, screenX): the reload built the scene again, or did not move it"
+            );
+        });
+    }
+
+    /// **A reload tries a scene that would not load again**: it forgets Qt's
+    /// cache of the failure, and it is what anybody presses after mending the
+    /// file, so a typo in a hosted shell does not cost the session. No client
+    /// (the #99 rule).
+    #[test]
+    fn a_reload_tries_again_a_scene_that_would_not_load() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-reload-mended");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(&scene, "import QtQuick\nItem { nonsense: }\n")
+                .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"sol.surface("bar", {{ scene = "{}", layer = "top", on = "every-monitor" }})"#,
+                    scene.display()
+                ),
+            )
+            .expect("writing the test script");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "reload-mended-left");
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            assert!(
+                !has_scene(&mut state, "bar", &left),
+                "the premise: the scene would not load"
+            );
+
+            std::fs::write(&scene, "import QtQuick\nItem {}\n").expect("mending the scene");
+            state.reload_from(&entry);
+            assert!(
+                has_scene(&mut state, "bar", &left) && has_scene(&mut state, "bar", &right),
+                "the reload did not try the mended scene again"
             );
         });
     }

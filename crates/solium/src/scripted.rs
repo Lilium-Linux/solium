@@ -31,7 +31,7 @@
 //! a surface that needs a keyboard has to be a layer-shell client.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
 };
 
@@ -213,12 +213,21 @@ pub(crate) struct Surface {
     /// What names this to anything that cannot hold a `String`. See
     /// [`SurfaceId`].
     id: SurfaceId,
-    /// One rasterisation per monitor it is drawn on, keyed by connector name.
+    /// One instance per monitor it is on, keyed by connector name, each
+    /// hosted on its monitor
+    /// (`tests::a_surface_on_every_monitor_has_one_live_scene_per_monitor`).
     ///
     /// Per monitor because a `ShellSurface` caches one rasterisation at one
     /// size: two screens of different sizes sharing one would re-rasterise a
     /// full-screen scene twice a frame, for ever.
     instances: HashMap<String, ShellSurface>,
+    /// The monitors its scene would not load on, not tried again until the
+    /// surface names another scene file
+    /// (`tests::a_scene_that_will_not_load_waits_for_another_scene_file`) or
+    /// the configuration is reloaded ([`Self::forget_failures`]).
+    failed: HashSet<String>,
+    /// Whether the scene file not being there has been reported.
+    missing_logged: bool,
 }
 
 impl Surface {
@@ -227,6 +236,8 @@ impl Surface {
             declared,
             id,
             instances: HashMap::new(),
+            failed: HashSet::new(),
+            missing_logged: false,
         }
     }
 
@@ -258,7 +269,7 @@ impl Surface {
         y: f64,
         pressed: Option<bool>,
     ) -> bool {
-        self.instance(output)
+        self.instance_mut(output)
             .is_some_and(|instance| instance.pointer(area, x, y, pressed))
     }
 
@@ -292,52 +303,83 @@ impl Surface {
         }
     }
 
-    /// The rasterisation for one monitor, built on first use.
-    pub(crate) fn instance(&mut self, output: &Output) -> Option<&mut ShellSurface> {
-        let name = output.name();
-        if !self.instances.contains_key(&name) {
-            match ShellSurface::new(
-                self.declared.scene.clone(),
-                &self.declared.properties.render(),
-            ) {
-                Ok(surface) => {
-                    self.instances.insert(name.clone(), surface);
-                }
-                Err(err) => {
-                    // Once per monitor, not once per frame: a scene that will
-                    // not load is a line in the log and a gap in the picture,
-                    // not a session that stops.
-                    tracing::error!(
-                        ?err,
-                        surface = self.declared.name,
-                        scene = %self.declared.scene.display(),
-                        "that surface would not load"
-                    );
-                    return None;
-                }
-            }
-        }
-        self.instances.get_mut(&name)
-    }
-
-    /// Forget every instance on a monitor this surface is no longer on: one
-    /// that has gone, one its placement has moved off, and the old primary
-    /// for a surface on the primary monitor. Each is a whole scene, kept
-    /// undrawn otherwise until that monitor is unplugged.
+    /// Build an instance for every monitor this surface is on, and drop the
+    /// rest. Called when the monitors are settled and when the surface is
+    /// declared, rather than at the first frame that draws it. A monitor that
+    /// has gone takes its instance with it, so a laptop docked and undocked
+    /// all day does not keep a full-screen scene per screen it ever saw, and
+    /// one the placement has moved off does too (Ruling 5).
+    /// `tests::an_instance_goes_with_its_monitor_and_comes_with_a_new_one`,
     /// `tests::a_surface_moved_to_another_monitor_drops_the_scene_it_left`,
     /// `tests::a_surface_on_the_primary_monitor_drops_its_scene_when_the_primary_moves`.
-    pub(crate) fn keep_placed(
+    pub(crate) fn sync(
         &mut self,
         outputs: &[(Output, Rectangle<i32, Logical>)],
         primary: Option<&Output>,
     ) {
-        let placed: Vec<String> = outputs
+        let wanted: Vec<String> = outputs
             .iter()
             .filter(|(output, geometry)| self.area_on(output, *geometry, primary).is_some())
             .map(|(output, _)| output.name())
             .collect();
-        self.instances
-            .retain(|monitor, _| placed.iter().any(|name| name == monitor));
+        self.instances.retain(|monitor, _| wanted.contains(monitor));
+        self.failed.retain(|monitor| wanted.contains(monitor));
+        // Asked before Qt is: a file that is not there is not a scene that
+        // would not load, and the first sync after it appears builds it.
+        // `tests::a_missing_scene_file_builds_nothing_until_it_is_there`.
+        if !self.declared.scene.is_file() {
+            if !self.missing_logged {
+                self.missing_logged = true;
+                tracing::error!(
+                    surface = self.declared.name,
+                    scene = %self.declared.scene.display(),
+                    "no such QML scene"
+                );
+            }
+            return;
+        }
+        if !builds_here() {
+            return;
+        }
+        for monitor in wanted {
+            if self.instances.contains_key(&monitor) || self.failed.contains(&monitor) {
+                continue;
+            }
+            match ShellSurface::hosted(
+                self.declared.scene.clone(),
+                &self.declared.properties.render(),
+                &monitor,
+            ) {
+                Ok(instance) => {
+                    self.instances.insert(monitor, instance);
+                }
+                Err(err) => {
+                    // Once per monitor, not once per sync.
+                    // `tests::a_scene_that_will_not_load_waits_for_another_scene_file`.
+                    tracing::error!(
+                        ?err,
+                        surface = self.declared.name,
+                        scene = %self.declared.scene.display(),
+                        monitor,
+                        "that surface would not load"
+                    );
+                    self.failed.insert(monitor);
+                }
+            }
+        }
+    }
+
+    /// Try its scene again, at the next sync, on every monitor it would not
+    /// load on, and say again that a scene file is not there. A reload does
+    /// (`state::tests::real_client::a_reload_tries_again_a_scene_that_would_not_load`).
+    pub(crate) fn forget_failures(&mut self) {
+        self.failed.clear();
+        self.missing_logged = false;
+    }
+
+    /// The instance on one monitor, if it was built there.
+    pub(crate) fn instance_mut(&mut self, output: &Output) -> Option<&mut ShellSurface> {
+        self.instances.get_mut(&output.name())
     }
 
     #[cfg(test)]
@@ -349,7 +391,8 @@ impl Surface {
     /// into every live instance, and keep everything else of the instances.
     /// Each instance's rebuild bag becomes the new one even when nothing was
     /// written, as when a key was only dropped. Instances on a monitor the
-    /// new placement leaves are the caller's to drop ([`Self::keep_placed`]).
+    /// new placement leaves are the caller's to drop, and on one it newly
+    /// covers to build, from the current properties ([`Self::sync`]).
     /// `tests::a_redeclared_property_is_written_into_the_live_scene`,
     /// `tests::a_table_a_list_and_a_dotted_key_reach_the_live_scene`,
     /// `tests::a_changed_placement_keeps_the_live_scene`,
@@ -462,6 +505,18 @@ impl Surfaces {
     }
 }
 
+/// Whether a scene may be built on this thread. In a test binary, only on the
+/// Qt thread: `tests::a_surface_synced_off_the_qt_thread_builds_nothing`.
+#[cfg(not(test))]
+const fn builds_here() -> bool {
+    true
+}
+
+#[cfg(test)]
+fn builds_here() -> bool {
+    crate::qml::qt_test::is_the_qt_thread()
+}
+
 /// Find a scene on the QML search path.
 ///
 /// A bare name is looked up the way an `import` would be -- the user's
@@ -565,11 +620,19 @@ mod tests {
         )
     }
 
-    /// Every monitor and its rectangle, as `Surface::keep_placed` takes them.
+    /// Every monitor and its rectangle, as `Surface::sync` takes them.
     type Monitors = Vec<(Output, Rectangle<i32, Logical>)>;
 
-    /// Two monitors side by side, and the placement `Surface::keep_placed`
-    /// is given for them.
+    /// One monitor alone, as `Surface::sync` takes it.
+    fn alone(screen: &Output) -> Monitors {
+        vec![(
+            screen.clone(),
+            Rectangle::new((0, 0).into(), (1920, 1080).into()),
+        )]
+    }
+
+    /// Two monitors side by side, and the placement `Surface::sync` is given
+    /// for them.
     fn side_by_side(left: &str, right: &str) -> (Output, Output, Monitors) {
         let (left, right) = (output(left), output(right));
         let outputs = vec![
@@ -667,7 +730,11 @@ mod tests {
             let id = surfaces.named("bar").expect("declared");
             surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&screen))
+                .expect("live")
+                .sync(&alone(&screen), Some(&screen));
+            surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance_mut(&screen))
                 .expect("the scene builds")
                 .scene_for_test()
                 .set_int("kept", 7);
@@ -676,7 +743,7 @@ mod tests {
             assert_eq!(surfaces.declare(declared), Declared::InPlace);
             let scene = surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&screen))
+                .and_then(|surface| surface.instance_mut(&screen))
                 .expect("still there")
                 .scene_for_test();
             assert_eq!(
@@ -706,7 +773,11 @@ mod tests {
             let id = surfaces.named("bar").expect("declared");
             surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&screen))
+                .expect("live")
+                .sync(&alone(&screen), Some(&screen));
+            surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance_mut(&screen))
                 .expect("the scene builds")
                 .scene_for_test()
                 .set_int("kept", 7);
@@ -716,7 +787,7 @@ mod tests {
             assert_eq!(surfaces.declare(declared), Declared::InPlace);
             let kept = surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&screen))
+                .and_then(|surface| surface.instance_mut(&screen))
                 .expect("still there")
                 .scene_for_test()
                 .get_int("kept");
@@ -738,16 +809,24 @@ mod tests {
             let id = surfaces.named("bar").expect("declared");
             surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&screen))
+                .expect("live")
+                .sync(&alone(&screen), Some(&screen));
+            surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance_mut(&screen))
                 .expect("the scene builds")
                 .scene_for_test()
                 .set_int("kept", 7);
 
             declared.scene = second;
             assert_eq!(surfaces.declare(declared), Declared::Rebuilt);
+            surfaces
+                .get_mut(id)
+                .expect("live")
+                .sync(&alone(&screen), Some(&screen));
             let kept = surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&screen))
+                .and_then(|surface| surface.instance_mut(&screen))
                 .expect("rebuilt")
                 .scene_for_test()
                 .get_int("kept");
@@ -776,10 +855,14 @@ mod tests {
             )]);
             surfaces.declare(declared.clone());
             let id = surfaces.named("bar").expect("declared");
+            surfaces
+                .get_mut(id)
+                .expect("live")
+                .sync(&alone(&screen), Some(&screen));
             assert!(
                 surfaces
                     .get_mut(id)
-                    .and_then(|surface| surface.instance(&screen))
+                    .and_then(|surface| surface.instance_mut(&screen))
                     .is_some(),
                 "the scene builds"
             );
@@ -808,7 +891,7 @@ mod tests {
             assert_eq!(surfaces.declare(declared.clone()), Declared::InPlace);
             let scene = surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&screen))
+                .and_then(|surface| surface.instance_mut(&screen))
                 .expect("still there")
                 .scene_for_test();
             assert_eq!(scene.get_int("count"), 5, "a number did not reach an int");
@@ -839,7 +922,7 @@ mod tests {
             assert_eq!(surfaces.declare(declared), Declared::InPlace);
             let scene = surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&screen))
+                .and_then(|surface| surface.instance_mut(&screen))
                 .expect("still there")
                 .scene_for_test();
             assert_eq!(scene.get_int("count"), 6);
@@ -859,7 +942,7 @@ mod tests {
         on_the_qt_thread(|| {
             crate::qml::start().expect("Qt starts");
             let path = scene_file("solium-scripted-dotted", "Scene.qml", VALUES);
-            let (left, right, _) = side_by_side("dotted-left", "dotted-right");
+            let (left, right, outputs) = side_by_side("dotted-left", "dotted-right");
             let mut surfaces = Surfaces::default();
             let mut declared = Declaration::for_test("bar", path, Layer::Top, On::EveryMonitor);
             declared.properties = properties(&[
@@ -868,9 +951,13 @@ mod tests {
             ]);
             surfaces.declare(declared.clone());
             let id = surfaces.named("bar").expect("declared");
+            surfaces
+                .get_mut(id)
+                .expect("live")
+                .sync(&outputs[..1], Some(&left));
             let scene = surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&left))
+                .and_then(|surface| surface.instance_mut(&left))
                 .expect("the scene builds")
                 .scene_for_test();
             assert_eq!(
@@ -884,9 +971,13 @@ mod tests {
                 ("panel.open", Json::Bool(true)),
             ]);
             assert_eq!(surfaces.declare(declared), Declared::InPlace);
+            surfaces
+                .get_mut(id)
+                .expect("live")
+                .sync(&outputs, Some(&left));
             let scene = surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&right))
+                .and_then(|surface| surface.instance_mut(&right))
                 .expect("the scene builds on the second monitor")
                 .scene_for_test();
             assert_eq!(
@@ -919,7 +1010,11 @@ mod tests {
             let id = surfaces.named("bar").expect("declared");
             surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&left))
+                .expect("live")
+                .sync(&outputs, Some(&left));
+            surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance_mut(&left))
                 .expect("the scene builds")
                 .scene_for_test()
                 .set_int("kept", 7);
@@ -928,14 +1023,14 @@ mod tests {
             declared.properties = properties(&[("label", Json::Text("two".to_owned()))]);
             assert_eq!(surfaces.declare(declared), Declared::InPlace);
             let surface = surfaces.get_mut(id).expect("live");
-            surface.keep_placed(&outputs, Some(&left));
-            assert_eq!(
-                surface.instance_count(),
-                0,
+            surface.sync(&outputs, Some(&left));
+            assert!(
+                surface.instance_mut(&left).is_none(),
                 "the monitor it left kept its scene"
             );
+            assert_eq!(surface.instance_count(), 1);
             let scene = surface
-                .instance(&right)
+                .instance_mut(&right)
                 .expect("the scene builds where it moved to")
                 .scene_for_test();
             assert_eq!(
@@ -947,8 +1042,8 @@ mod tests {
     }
 
     /// **A surface on the primary monitor leaves nothing on the old one when
-    /// the primary moves**: the same leak, reached by a monitor change rather
-    /// than a declaration.
+    /// the primary moves**, and is built on the new one: the same leak,
+    /// reached by a monitor change rather than a declaration.
     #[test]
     fn a_surface_on_the_primary_monitor_drops_its_scene_when_the_primary_moves() {
         on_the_qt_thread(|| {
@@ -959,18 +1054,16 @@ mod tests {
             surfaces.declare(Declaration::for_test("bar", path, Layer::Top, On::Primary));
             let id = surfaces.named("bar").expect("declared");
             let surface = surfaces.get_mut(id).expect("live");
-            assert!(surface.instance(&left).is_some(), "the scene builds");
-            surface.keep_placed(&outputs, Some(&left));
-            assert_eq!(
-                surface.instance_count(),
-                1,
-                "the primary monitor lost its scene"
-            );
-            surface.keep_placed(&outputs, Some(&right));
-            assert_eq!(
-                surface.instance_count(),
-                0,
+            surface.sync(&outputs, Some(&left));
+            assert!(surface.instance_mut(&left).is_some(), "the scene builds");
+            surface.sync(&outputs, Some(&right));
+            assert!(
+                surface.instance_mut(&left).is_none(),
                 "the monitor that stopped being primary kept its scene"
+            );
+            assert!(
+                surface.instance_mut(&right).is_some(),
+                "the new primary has no scene"
             );
         });
     }
@@ -992,10 +1085,14 @@ mod tests {
             ]);
             surfaces.declare(declared.clone());
             let id = surfaces.named("bar").expect("declared");
+            surfaces
+                .get_mut(id)
+                .expect("live")
+                .sync(&alone(&screen), Some(&screen));
             assert!(
                 surfaces
                     .get_mut(id)
-                    .and_then(|surface| surface.instance(&screen))
+                    .and_then(|surface| surface.instance_mut(&screen))
                     .is_some(),
                 "the scene builds"
             );
@@ -1004,12 +1101,265 @@ mod tests {
             assert_eq!(surfaces.declare(declared), Declared::InPlace);
             let bag = surfaces
                 .get_mut(id)
-                .and_then(|surface| surface.instance(&screen))
+                .and_then(|surface| surface.instance_mut(&screen))
                 .expect("still there")
                 .properties_for_test()
                 .to_owned();
             assert_eq!(bag, r#"{"label":"one"}"#);
         });
+    }
+
+    /// **A surface's instance is hosted on its monitor**: `Solium.monitor`
+    /// inside its scene names the monitor the instance was built for.
+    /// Primitive 2.
+    #[test]
+    fn a_surface_instance_is_hosted_on_its_monitor() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file(
+                "solium-scripted-hosted",
+                "Scene.qml",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property int named: Solium.monitor.name === "hosted-1" ? 1 : 0
+                }
+                "#,
+            );
+            let screen = output("hosted-1");
+            let mut surfaces = Surfaces::default();
+            surfaces.declare(Declaration::for_test(
+                "bar",
+                path,
+                Layer::Top,
+                On::EveryMonitor,
+            ));
+            let id = surfaces.named("bar").expect("declared");
+            surfaces
+                .get_mut(id)
+                .expect("live")
+                .sync(&alone(&screen), Some(&screen));
+            let named = surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance_mut(&screen))
+                .expect("the scene builds")
+                .scene_for_test()
+                .get_int("named");
+            assert_eq!(
+                named, 1,
+                "the instance's scene does not know the monitor it is on"
+            );
+        });
+    }
+
+    /// A scene that reads whether it is on the monitor named `left`.
+    fn on_left(left: &str) -> String {
+        format!(
+            r#"
+            import QtQuick
+            import Solium
+            Item {{ readonly property int onLeft: Solium.monitor.name === "{left}" ? 1 : 0 }}
+            "#
+        )
+    }
+
+    /// **A surface on every monitor is one live scene per monitor, and each
+    /// knows its own** (#161).
+    #[test]
+    fn a_surface_on_every_monitor_has_one_live_scene_per_monitor() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file("solium-scripted-sync", "Scene.qml", &on_left("sync-left"));
+            let (left, right, outputs) = side_by_side("sync-left", "sync-right");
+            let mut surfaces = Surfaces::default();
+            surfaces.declare(Declaration::for_test(
+                "bar",
+                path,
+                Layer::Top,
+                On::EveryMonitor,
+            ));
+            let id = surfaces.named("bar").expect("declared");
+            let surface = surfaces.get_mut(id).expect("live");
+            surface.sync(&outputs, Some(&left));
+            assert_eq!(surface.instance_count(), 2);
+            let on = |surface: &mut super::Surface, output: &Output| {
+                surface
+                    .instance_mut(output)
+                    .expect("an instance")
+                    .scene_for_test()
+                    .get_int("onLeft")
+            };
+            assert_eq!(
+                (on(surface, &left), on(surface, &right)),
+                (1, 0),
+                "each instance must read its own monitor"
+            );
+        });
+    }
+
+    /// **An instance goes with its monitor, and a monitor that arrives gets
+    /// one**, built there and then rather than at the first frame.
+    #[test]
+    fn an_instance_goes_with_its_monitor_and_comes_with_a_new_one() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file(
+                "solium-scripted-hotplug",
+                "Scene.qml",
+                &on_left("hotplug-left"),
+            );
+            let (left, right, outputs) = side_by_side("hotplug-left", "hotplug-right");
+            let mut surfaces = Surfaces::default();
+            surfaces.declare(Declaration::for_test(
+                "bar",
+                path,
+                Layer::Top,
+                On::EveryMonitor,
+            ));
+            let id = surfaces.named("bar").expect("declared");
+            let surface = surfaces.get_mut(id).expect("live");
+            surface.sync(&outputs[..1], Some(&left));
+            assert_eq!(surface.instance_count(), 1);
+            surface.sync(&outputs, Some(&left));
+            assert!(
+                surface.instance_mut(&right).is_some(),
+                "the monitor that arrived has no instance"
+            );
+            surface.sync(&outputs[1..], Some(&right));
+            assert!(
+                surface.instance_mut(&left).is_none(),
+                "the monitor that went kept its instance"
+            );
+            assert_eq!(surface.instance_count(), 1);
+        });
+    }
+
+    #[test]
+    fn a_surface_on_the_primary_monitor_has_one_instance() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file(
+                "solium-scripted-primary",
+                "Scene.qml",
+                &on_left("primary-one-left"),
+            );
+            let (_, right, outputs) = side_by_side("primary-one-left", "primary-one-right");
+            let mut surfaces = Surfaces::default();
+            surfaces.declare(Declaration::for_test("bar", path, Layer::Top, On::Primary));
+            let id = surfaces.named("bar").expect("declared");
+            let surface = surfaces.get_mut(id).expect("live");
+            surface.sync(&outputs, Some(&right));
+            assert_eq!(surface.instance_count(), 1);
+            assert!(
+                surface.instance_mut(&right).is_some(),
+                "not on the primary monitor"
+            );
+        });
+    }
+
+    /// **A scene file that is not there builds nothing, until it is there**:
+    /// it is not a scene that would not load, so the first sync after it
+    /// appears builds it. Ruling 5.
+    #[test]
+    fn a_missing_scene_file_builds_nothing_until_it_is_there() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-scripted-missing");
+            let _ = std::fs::remove_dir_all(&directory);
+            let path = directory.join("Scene.qml");
+            let (left, _, outputs) = side_by_side("missing-left", "missing-right");
+            let mut surfaces = Surfaces::default();
+            surfaces.declare(Declaration::for_test(
+                "bar",
+                path,
+                Layer::Top,
+                On::EveryMonitor,
+            ));
+            let id = surfaces.named("bar").expect("declared");
+            let surface = surfaces.get_mut(id).expect("live");
+            surface.sync(&outputs, Some(&left));
+            assert_eq!(surface.instance_count(), 0);
+
+            scene_file("solium-scripted-missing", "Scene.qml", KEPT);
+            surface.sync(&outputs, Some(&left));
+            assert_eq!(
+                surface.instance_count(),
+                2,
+                "the scene that appeared was taken for one that would not load"
+            );
+        });
+    }
+
+    /// **A scene that will not load is not tried again on the same monitor
+    /// until the surface names another scene file**, so a broken scene is a
+    /// line in the log per monitor rather than a build on every sync. Ruling 5.
+    #[test]
+    fn a_scene_that_will_not_load_waits_for_another_scene_file() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let broken = scene_file(
+                "solium-scripted-broken",
+                "Broken.qml",
+                "import QtQuick\nItem { nonsense: }\n",
+            );
+            let (left, _, outputs) = side_by_side("broken-left", "broken-right");
+            let mut surfaces = Surfaces::default();
+            let mut declared =
+                Declaration::for_test("bar", broken.clone(), Layer::Top, On::EveryMonitor);
+            surfaces.declare(declared.clone());
+            let id = surfaces.named("bar").expect("declared");
+            let surface = surfaces.get_mut(id).expect("live");
+            surface.sync(&outputs, Some(&left));
+            assert_eq!(surface.instance_count(), 0, "a broken scene built");
+
+            // Mended, and Qt's cache of the failure forgotten as a reload
+            // forgets it, so only the surface itself can say not to retry.
+            std::fs::write(&broken, KEPT).expect("mending the scene");
+            crate::qml::clear_cache();
+            surface.sync(&outputs, Some(&left));
+            assert_eq!(
+                surface.instance_count(),
+                0,
+                "a scene that would not load was tried again"
+            );
+
+            declared.scene = scene_file("solium-scripted-mended", "Scene.qml", KEPT);
+            assert_eq!(surfaces.declare(declared), Declared::Rebuilt);
+            let surface = surfaces.get_mut(id).expect("live");
+            surface.sync(&outputs, Some(&left));
+            assert_eq!(
+                surface.instance_count(),
+                2,
+                "another scene file was not built"
+            );
+        });
+    }
+
+    /// **Off the Qt thread nothing is built**, whatever the scene: a test that
+    /// is not on it, as no test driving a real Wayland client is, would
+    /// otherwise build there the shipped wallpaper its configuration declares,
+    /// and Qt answers a scene built off its thread with a `qFatal` that takes
+    /// the whole test binary down (the #99 rule).
+    #[test]
+    fn a_surface_synced_off_the_qt_thread_builds_nothing() {
+        let path = scene_file("solium-scripted-off-thread", "Scene.qml", KEPT);
+        let (left, _, outputs) = side_by_side("off-thread-left", "off-thread-right");
+        let mut surfaces = Surfaces::default();
+        surfaces.declare(Declaration::for_test(
+            "bar",
+            path,
+            Layer::Top,
+            On::EveryMonitor,
+        ));
+        let id = surfaces.named("bar").expect("declared");
+        let surface = surfaces.get_mut(id).expect("live");
+        surface.sync(&outputs, Some(&left));
+        assert_eq!(
+            surface.instance_count(),
+            0,
+            "a scene was built off the Qt thread"
+        );
     }
 
     #[test]

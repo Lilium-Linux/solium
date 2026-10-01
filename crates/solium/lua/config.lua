@@ -55,7 +55,8 @@ local defaults = {
     --
     --     wallpaper = { "~/Pictures/one.png", "~/Pictures/two.png" },
     --
-    -- Fewer pictures than workspaces cycles. It costs one screen-sized
+    -- Fewer pictures than workspaces cycles. It costs a scene per desk on
+    -- every monitor, built when it is declared, and one screen-sized
     -- rasterisation per desk you have actually visited, per monitor, which is
     -- why a single image stays a single static surface: every desk sharing one
     -- picture makes a wallpaper that slides pixel-identical to one that does
@@ -83,12 +84,15 @@ local defaults = {
     --
     --     shell = { scene = "~/.config/solium/shell/shell.qml" },
     --
-    -- `false`, the default, hosts none. `~` is expanded. It is drawn once, on
-    -- the primary monitor, over the windows, and it takes the pointer: every
-    -- press and hover on that monitor's usable area is the shell's, however
-    -- little of it the shell draws on, so while one is hosted the windows
-    -- there cannot be clicked, focused or dragged with the mouse (#173). See
-    -- `the_shell_scene_is_read_from_the_configuration`.
+    -- `false`, the default, hosts none. `~` is expanded. It is drawn once on
+    -- every monitor, over the windows, across the whole monitor, and each
+    -- instance reads its own monitor as `Solium.monitor`. `on = "primary"`,
+    -- or a connector name, draws one instead. It takes the pointer: every
+    -- press and hover on its monitor is the shell's, however little of it
+    -- the shell draws on, so while one is hosted the windows there cannot be
+    -- clicked, focused or dragged with the mouse (#173). See
+    -- `the_shell_scene_is_read_from_the_configuration` and
+    -- `the_shell_is_on_every_monitor_unless_the_configuration_names_one`.
     -- SOLIUM_SHELL_SCENE overrides this, because that is set per run.
     -- `super+shift+r` picks up a change. See docs/shell-boundary.md for
     -- installing one and for what the compositor provides to a shell it
@@ -96,14 +100,14 @@ local defaults = {
     --
     -- What a hosted shell does not have yet: keyboard focus, or any button
     -- but the left one -- a right or middle press arrives as a left one, and
-    -- the wheel not at all (#163); room of its own, since a bar reserves none
-    -- and windows are placed under it (#162); and a scene per monitor, or
-    -- what is on the others (#161).
+    -- the wheel not at all (#163); and room of its own, since a bar reserves
+    -- none and windows are placed under it (#162).
     --
     -- A layer-shell bar (Waybar and the like) needs nothing here: it is an
     -- ordinary client, and you start it as one.
     shell = {
         scene = false,
+        on = "every-monitor",
     },
 
     -- The keyboard.

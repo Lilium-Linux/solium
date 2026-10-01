@@ -248,6 +248,10 @@ pub(crate) struct Solium {
     /// that. See `scripted.rs`.
     pub(crate) surfaces: crate::scripted::Surfaces,
 
+    /// What Qt last took of each model hosted scenes read, so a frame sends
+    /// only what changed since: `models::tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
+    pub(crate) published: crate::models::Published,
+
     /// Every selection a script has named, and where each is being carried.
     ///
     /// **Not a sixth table keyed by `PaneId`.** A group holds its own members
@@ -558,6 +562,18 @@ pub(crate) struct Solium {
     /// scripts that a window's `cramped` changed (#115), so that pass does not
     /// run another. See `Solium::apply`.
     retelling_cramped: bool,
+
+    /// Whether a `sol.monitors{}` was applied since the surfaces were last
+    /// placed, so they are placed once the dispatch that applied it is done.
+    /// `tests::real_client::a_runtime_primary_change_drops_the_old_primarys_scene`.
+    monitors_rearranged: bool,
+
+    /// How deep the dispatches running now are: an `apply` inside another, as
+    /// the layout pass a `sol.monitors{}` runs is, or inside a reload, which
+    /// places the surfaces itself once every handler it runs has run.
+    /// `tests::real_client::a_binding_that_moves_the_primary_and_its_surface_together_keeps_the_scene`,
+    /// `tests::real_client::a_reload_that_moves_a_monitor_keeps_the_scene_its_handler_declares_there`.
+    dispatching: u32,
 
     /// A resize asked for by an edge drag, not yet applied.
     ///
@@ -913,6 +929,7 @@ impl Solium {
             power_state: crate::power::PowerState::new::<Self>(&display_handle),
             power: crate::power::Power::default(),
             surfaces: crate::scripted::Surfaces::default(),
+            published: crate::models::Published::default(),
             groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),
@@ -945,6 +962,8 @@ impl Solium {
             pending_drop: None,
             pending_resize: None,
             retelling_cramped: false,
+            monitors_rearranged: false,
+            dispatching: 0,
             client_sizes: crate::script::ClientSizes::default(),
             resize_hold: None,
             resize_bridge: None,
@@ -1737,8 +1756,9 @@ impl Solium {
     /// Re-declaring something identical keeps its rasterisations, because
     /// every reload re-runs the whole configuration and re-declares
     /// everything: without that check a `super+shift+r` that changed a gap
-    /// would re-decode every wallpaper on every monitor. A declaration that
-    /// moved a surface drops its scenes on the monitors it left
+    /// would re-decode every wallpaper on every monitor. Any other declaration
+    /// syncs the surface's instances there and then: a scene on every monitor
+    /// it is now on, and none on the monitors it left
     /// (`tests::real_client::a_surface_redeclared_onto_another_monitor_drops_its_scene_on_the_first`).
     ///
     /// Only that surface's: another surface a handler has yet to declare
@@ -1754,7 +1774,7 @@ impl Solium {
                 .named(&name)
                 .and_then(|id| self.surfaces.get_mut(id))
             {
-                surface.keep_placed(&outputs, primary.as_ref());
+                surface.sync(&outputs, primary.as_ref());
             }
             self.redraw = true;
         }
@@ -1922,14 +1942,12 @@ impl Solium {
         }
     }
 
-    /// Drop the rasterisations belonging to monitors a surface is no longer
-    /// on: monitors that are no longer there, and monitors its placement or
-    /// the primary monitor has moved off
-    /// (`scripted::tests::a_surface_moved_to_another_monitor_drops_the_scene_it_left`).
-    ///
-    /// Each is a full-screen image held for a screen that has gone -- on a
-    /// laptop docked and undocked all day that is a slow leak of exactly the
-    /// largest thing the compositor allocates.
+    /// Give every surface an instance on each monitor it is on, and no other:
+    /// one on a monitor that arrived, and none on a monitor that has gone or
+    /// that its placement or the primary monitor has moved off
+    /// (`scripted::tests::a_surface_on_every_monitor_has_one_live_scene_per_monitor`,
+    /// `tests::real_client::an_unplugged_monitor_still_loses_its_scene`,
+    /// `tests::real_client::a_reload_that_moves_the_primary_drops_the_old_primarys_scene`).
     ///
     /// Called once the scripts have answered the change, never before: after
     /// both the `monitors` and the `layout` handlers. A surface either of them
@@ -1938,14 +1956,15 @@ impl Solium {
     /// about to keep
     /// (`tests::real_client::a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`,
     /// `tests::real_client::a_layout_declared_strip_keeps_its_scene_through_an_unplug`).
-    fn prune_surfaces(&mut self) {
+    pub(crate) fn sync_instances(&mut self) {
+        self.monitors_rearranged = false;
         let (outputs, primary) = (self.monitor_rects(), self.primary_output());
         for surface in self.surfaces.iter_mut() {
-            surface.keep_placed(&outputs, primary.as_ref());
+            surface.sync(&outputs, primary.as_ref());
         }
     }
 
-    /// Every monitor and its rectangle, as `Surface::keep_placed` takes them.
+    /// Every monitor and its rectangle, as `Surface::sync` takes them.
     fn monitor_rects(&self) -> Vec<(Output, Rectangle<i32, Logical>)> {
         self.space
             .outputs()

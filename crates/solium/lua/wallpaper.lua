@@ -30,9 +30,10 @@
 -- *different* that makes the movement visible, and that is the moment to start
 -- paying for it.
 --
--- What it costs when you do ask: one screen-sized rasterisation per desk you
--- have actually visited, per monitor. A desk you have never been to has never
--- been drawn, and a surface is not built until it is drawn.
+-- What it costs when you do ask: a scene per desk on every monitor, built when
+-- it is declared (`a_surface_on_every_monitor_has_one_live_scene_per_monitor`),
+-- and one screen-sized rasterisation per desk you have actually visited, per
+-- monitor, since a desk you have never been to has never been drawn.
 
 local config = require("config")
 

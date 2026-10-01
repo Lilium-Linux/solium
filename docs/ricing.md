@@ -290,10 +290,11 @@ wallpaper = { "~/Pictures/one.png", "~/Pictures/two.png" },
 
 `workspaces.lua` puts each one in the same selection as its desk's windows, so
 one animation carries both and the background stops being left behind when you
-switch. Fewer pictures than workspaces cycles. It costs one screen-sized
-rasterisation per desk you have actually visited, per monitor — which is why one
-image stays one static surface: every desk sharing a picture would make a
-wallpaper that slides pixel-identical to one that does not.
+switch. Fewer pictures than workspaces cycles. It costs a scene per desk on
+every monitor, built when it is declared, and one screen-sized rasterisation per
+desk you have actually visited, per monitor — which is why one image stays one
+static surface: every desk sharing a picture would make a wallpaper that slides
+pixel-identical to one that does not.
 
 The more interesting part is that **there is no wallpaper in the compositor.**
 `lua/wallpaper.lua` calls one thing:
@@ -323,7 +324,9 @@ sol.surface("clock", {
 `layer` is `background`, `bottom`, `top` or `overlay`, and each sits *under*
 the matching wlr-layer-shell layer — so a real bar covers a scripted one, and
 `swaybg` covers this wallpaper. `on` takes `every-monitor`, `primary`, a
-connector name, or a rect in the global space.
+connector name, or a rect in the global space. Each monitor it is on gets a
+scene of its own, built when the surface is declared or the monitor arrives and
+dropped when the monitor goes, and inside it `Solium.monitor` is that monitor.
 `sol.surface(name, false)` removes one.
 
 `interactive = true` lets the pointer reach it. The scene sets an `action`
@@ -665,7 +668,8 @@ file:
 return { shell = { scene = "~/.config/solium/shell/shell.qml" } }
 ```
 
-One scene, on the primary monitor, written against Solium's own QML API;
+One scene on every monitor, or on the one `shell.on` names, written against
+Solium's own QML API;
 [shell-boundary.md](shell-boundary.md) has how to install one and what it is
 and is not given.
 

@@ -90,11 +90,17 @@ return {
 }
 ```
 
-`~` is expanded. The scene is drawn once, over the windows, on the primary
-monitor — the one `primary = true` marks in `monitors`, or the first — across
-that monitor's usable area, and it takes the pointer there — all of it, which
+`~` is expanded. The scene is drawn on every monitor, one instance each, over
+the windows and across the whole monitor; each instance reads its own monitor
+as `Solium.monitor`. `shell = { on = "primary" }`, or a connector name, draws
+one instance instead
+(`script::tests::the_shell_is_on_every_monitor_unless_the_configuration_names_one`).
+It takes the pointer there — all of it, which
 [What it is not given](#what-it-is-not-given) spells out. `super+shift+r` picks up
-a change to the setting. Editing a file under the scene's own directory
+a change to the setting, and tries again a scene that would not load, so a
+typo in the shell costs a reload rather than the session
+(`state::tests::real_client::a_reload_tries_again_a_scene_that_would_not_load`).
+Editing a file under the scene's own directory
 rebuilds the scene with no reload at all: that is checked every half second
 while frames are being drawn.
 `false`, the default, hosts nothing, and taking the setting out takes
@@ -131,17 +137,15 @@ prints `ok` or what Qt reported, which is the quick way through a chain of
 
 ## What a hosted shell is given
 
-**A canvas.** One scene, sized to the primary monitor's usable area, on the
-`top` layer: over the windows, under a layer-shell client's own `top` layer
+**A canvas.** One scene per monitor, each the size of its whole monitor, on
+the `top` layer: over the windows, under a layer-shell client's own `top` layer
 surfaces, and covered by a fullscreen window unless `fullscreen.covers` says
-otherwise. It gets pointer motion and presses, so a `MouseArea` works. It is
-given `screenInfo` when it is built and kept current: a changed area of the
-primary monitor is written into the live scene without rebuilding it, even
-when unplugging the monitor beside it moves it
-(`state::tests::real_client::a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`), and
-another monitor made primary gets a scene built there. A scene reads it by
-declaring `property var screenInfo`: `name`, `x`, `y`, `width`, `height` and
-`scale`.
+otherwise
+(`scripted::tests::a_surface_on_every_monitor_has_one_live_scene_per_monitor`).
+It gets pointer motion and presses, so a `MouseArea` works. A monitor that
+arrives gets its instance there and then, and one that goes takes its instance
+with it (`scripted::tests::an_instance_goes_with_its_monitor_and_comes_with_a_new_one`).
+It reads where it is from `Solium.monitor`, below; `screenInfo` is gone.
 
 **The compositor's clock and frames.** Its animations advance on the same
 clock as every window transform, a running animation asks for the next frame,
@@ -151,11 +155,31 @@ descriptor for — a socket, an answer from another thread — arrives when it
 is ready, with no frame drawn unless the scene changed. A `Timer` is on that
 same clock, so one beside an animation nothing draws still fires.
 
-**The `Solium` QML module.** `Solium.Theme` above all: the colours, fonts and
-metrics the frames are drawn with. A `Theme.qml` of your own in
-`~/.config/solium/qml/Solium/` is meant to override it, and does not yet: the
-shipped module is found first
+**The `Solium` QML module.** `Theme` above all: the colours, fonts and
+metrics the frames are drawn with. Beside it, `import Solium` brings the
+attached `Solium` object, which any item can read: `Solium.monitor` is the
+monitor this instance of the scene is on
+(`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
+The module's types are written unqualified, as `Theme` is. A `Theme.qml` of
+your own in `~/.config/solium/qml/Solium/` is meant to override it, and does
+not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
+
+**Its monitor, live.** `Solium.monitor` is the row of the monitor this
+instance is on: `name`, `whole` and `area` (rectangles in the global space,
+`area` being the work area), `scale`, `transform`, `primary`, and `present`
+(`valid` reads the same). It changes in place, once per frame and all at once,
+when the monitor does, and a monitor that goes reads `present: false` and
+keeps its name; the same monitor coming back is the same row again
+(`qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`).
+Until the compositor publishes a monitor, its row carries only the `name`, and
+`present` and `valid` read false
+(`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
+A scene that wants its own coordinates subtracts `whole.x` and `whole.y`.
+`transform` is spelled as `sol.monitors()` spells it: `"normal"`, `"_90"`,
+`"_180"`, `"_270"`, `"flipped"`, `"flipped90"`, `"flipped180"` or
+`"flipped270"`, and not `"90"` or `"flipped-90"` as `sol.monitors{ ... }` takes
+it (`models::monitors::tests::a_turned_monitor_row_names_its_transform_as_smithay_does`).
 
 **A way back to the configuration.** A scene sets a string property named
 `action`, the compositor takes it, and `sol.on("surface", function(name,
@@ -168,16 +192,14 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
 
 - **No input region: the scene takes every press and hover on its monitor.**
   The pointer is claimed anywhere inside the scene's area, which is the whole
-  usable area of the primary monitor, not only where the scene draws — a
-  36-pixel bar claims the screen under it too. So while a shell is hosted, the
-  windows on that monitor cannot be clicked, focused with the pointer or
+  of its monitor, not only where the scene draws — a 36-pixel bar claims the
+  screen under it too. So while a shell is hosted, the windows on a monitor it
+  is on cannot be clicked, focused with the pointer or
   dragged with `super`. What it wants is an input region: a point claimed only
   where the scene has an item under it.
-- **One monitor.** One scene, on the primary monitor. A hosted shell on every
-  screen is a later design step.
-- **No reserved space, and no placement.** The scene fills the primary
-  monitor's usable area, and a hosted bar does not take its strip out of the
-  work area, so windows are placed under it.
+- **No reserved space, and no placement.** The scene fills its whole
+  monitor, and a hosted bar does not take its strip out of the work area, so
+  windows are placed under it.
 - **No keyboard, and every button is the left one.** Pointer motion and
   presses — no keyboard focus, no grabs (#85), no wheel, and a right or middle
   press arrives as a left press, so a right-click on a hosted button activates
@@ -366,7 +388,7 @@ time it opens.
 | A hosted shell: bar, dock, launcher | The same QML engine | `shell.scene`, through `sol.surface` |
 | A client shell (Waybar and the like), wallpaper programs | Clients | `wlr-layer-shell` |
 | A polkit agent, a keyring, applets and other separate programs | Clients, started by systemd or D-Bus | XDG autostart, or a unit `PartOf=graphical-session.target` |
-| Which monitor a bar is on | Hosted: the primary. A client: the output it names | the output argument of `zwlr_layer_shell_v1.get_layer_surface` |
+| Which monitor a bar is on | Hosted: every monitor, or the one `shell.on` names. A client: the output it names | the output argument of `zwlr_layer_shell_v1.get_layer_surface` |
 | Colours and metrics | `Solium.Theme`, one singleton | imported by every scene that wants it |
 | What an animation *does* | Lua script | `sol.present_from`, `sol.on("open")` |
 

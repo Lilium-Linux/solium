@@ -10,9 +10,11 @@
 -- pointer routing, its own render hook and an environment variable read in
 -- Rust. It is `sol.surface` now.
 --
--- One scene, on the primary monitor. The primary monitor and not the active
--- one, for the same reason a dock goes there: a bar that moves screens when
--- the pointer does is a bar nobody asked to move.
+-- One scene on every monitor by default, and each instance reads its own as
+-- `Solium.monitor`: `shell.on` in config.lua, which may also say "primary" or
+-- name a connector. Declared when the configuration runs, which a reload does
+-- again, so taking the shell out of the configuration takes it away. See
+-- `the_shell_is_on_every_monitor_unless_the_configuration_names_one`.
 
 local config = require("config")
 
@@ -32,20 +34,6 @@ local function scene()
     return nil
 end
 
--- The primary monitor's usable area: the one `primary = true` picks out, or
--- the first when none is marked. See
--- `the_shell_is_on_the_primary_monitor_not_the_focused_one`.
-local function primary()
-    local first = nil
-    for _, monitor in ipairs(sol.monitors()) do
-        if monitor.primary then
-            return monitor
-        end
-        first = first or monitor
-    end
-    return first or sol.monitor()
-end
-
 function shell.apply()
     local chosen = scene()
     if not chosen then
@@ -55,31 +43,15 @@ function shell.apply()
         sol.surface("shell", false)
         return
     end
-    local area = primary()
+    local settings = type(config.shell) == "table" and config.shell or {}
     sol.surface("shell", {
         scene = chosen,
         layer = "top",
-        on = { x = area.x, y = area.y, w = area.w, h = area.h },
+        on = settings.on or "every-monitor",
         interactive = true,
-        -- What shell components ask about the screen they are on.
-        properties = {
-            screenInfo = {
-                name = "primary",
-                x = area.x,
-                y = area.y,
-                width = area.w,
-                height = area.h,
-                scale = 1,
-            },
-        },
     })
 end
 
--- On the `monitors` event and not here: scripts load before the screens are
--- known -- on the hardware backend, before the GPU is open -- so a rect
--- computed now is computed against zeros. It fires once at startup, again on
--- every hotplug, and after every reload, which is when this needs redoing
--- anyway. See `the_shell_scene_is_read_from_the_configuration`.
-sol.on("monitors", shell.apply)
+shell.apply()
 
 return shell
