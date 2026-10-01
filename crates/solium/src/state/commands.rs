@@ -572,6 +572,12 @@ impl Solium {
         match Scripts::load_carrying(path, carried) {
             Ok(scripts) => {
                 crate::qml::clear_cache();
+                // And with Qt's cache of a scene that would not load gone, the
+                // scene is tried again: a reload is what anybody presses after
+                // mending one (`a_reload_tries_again_a_scene_that_would_not_load`).
+                for surface in self.surfaces.iter_mut() {
+                    surface.forget_failures();
+                }
                 let style = self.decorations.style().map(ToOwned::to_owned);
                 // Twice, and to the same place it started, to defeat
                 // `set_style`'s "nothing changed" guard. What the second call

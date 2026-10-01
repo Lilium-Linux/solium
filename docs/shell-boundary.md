@@ -97,7 +97,10 @@ one instance instead
 (`script::tests::the_shell_is_on_every_monitor_unless_the_configuration_names_one`).
 It takes the pointer there — all of it, which
 [What it is not given](#what-it-is-not-given) spells out. `super+shift+r` picks up
-a change to the setting. Editing a file under the scene's own directory
+a change to the setting, and tries again a scene that would not load, so a
+typo in the shell costs a reload rather than the session
+(`state::tests::real_client::a_reload_tries_again_a_scene_that_would_not_load`).
+Editing a file under the scene's own directory
 rebuilds the scene with no reload at all: that is checked every half second
 while frames are being drawn.
 `false`, the default, hosts nothing, and taking the setting out takes

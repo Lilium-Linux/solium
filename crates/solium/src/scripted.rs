@@ -223,7 +223,8 @@ pub(crate) struct Surface {
     instances: HashMap<String, ShellSurface>,
     /// The monitors its scene would not load on, not tried again until the
     /// surface names another scene file
-    /// (`tests::a_scene_that_will_not_load_waits_for_another_scene_file`).
+    /// (`tests::a_scene_that_will_not_load_waits_for_another_scene_file`) or
+    /// the configuration is reloaded ([`Self::forget_failures`]).
     failed: HashSet<String>,
     /// Whether the scene file not being there has been reported.
     missing_logged: bool,
@@ -366,6 +367,14 @@ impl Surface {
                 }
             }
         }
+    }
+
+    /// Try its scene again, at the next sync, on every monitor it would not
+    /// load on, and say again that a scene file is not there. A reload does
+    /// (`state::tests::real_client::a_reload_tries_again_a_scene_that_would_not_load`).
+    pub(crate) fn forget_failures(&mut self) {
+        self.failed.clear();
+        self.missing_logged = false;
     }
 
     /// The instance on one monitor, if it was built there.

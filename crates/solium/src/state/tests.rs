@@ -2926,6 +2926,50 @@ mod real_client {
         });
     }
 
+    /// **A reload tries a scene that would not load again**: it forgets Qt's
+    /// cache of the failure, and it is what anybody presses after mending the
+    /// file, so a typo in a hosted shell does not cost the session. No client
+    /// (the #99 rule).
+    #[test]
+    fn a_reload_tries_again_a_scene_that_would_not_load() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-reload-mended");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(&scene, "import QtQuick\nItem { nonsense: }\n")
+                .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"sol.surface("bar", {{ scene = "{}", layer = "top", on = "every-monitor" }})"#,
+                    scene.display()
+                ),
+            )
+            .expect("writing the test script");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "reload-mended-left");
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            assert!(
+                !has_scene(&mut state, "bar", &left),
+                "the premise: the scene would not load"
+            );
+
+            std::fs::write(&scene, "import QtQuick\nItem {}\n").expect("mending the scene");
+            state.reload_from(&entry);
+            assert!(
+                has_scene(&mut state, "bar", &left) && has_scene(&mut state, "bar", &right),
+                "the reload did not try the mended scene again"
+            );
+        });
+    }
+
     /// A strip a `layout` handler declares over the monitor an unplug moved
     /// keeps its scene: docs/modes.md's cramped strip, and any bar declared
     /// from `layout`. The prune runs after the `layout` handlers too.

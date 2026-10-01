@@ -305,7 +305,7 @@ function sol.windows() end
 ---is that monitor. A scene file that is not there is logged, and built once it
 ---is there, at the next reload, change of monitors or changed declaration; a
 ---scene that will not load is logged once per monitor and not tried again
----until another `scene` is declared.
+---until another `scene` is declared or the configuration is reloaded.
 ---@param name string
 ---@param options sol.SurfaceOptions|false|nil
 ---@return nil
