@@ -43,6 +43,35 @@ fn ancestry(pid: u32) -> Vec<u32> {
     family
 }
 
+/// What a launch's token coming back on a window made of it, as
+/// [`Solium::claim_into`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Claimed {
+    /// The window is in the pane the token was minted for, now or already:
+    /// the launch's arrival, and nothing else to do with the token.
+    Arrived,
+    /// The window was there before the launch (#177). An application that
+    /// keeps one instance passed the launch on to the instance running, and
+    /// that one brought forward the window it had. The launch's pane has
+    /// dissolved; the window stays where it is, and the token is an
+    /// activation, which the scripts hear as `activate(id, "launch")`.
+    Relaunched,
+    /// Neither: an ordinary request to be brought forward.
+    Ordinary,
+}
+
+impl Claimed {
+    /// The reason `activate` gives the scripts for a token that did not
+    /// arrive anywhere. `relaunch::relaunching_an_application_tells_the_scripts_no_close_for_its_window`
+    /// and `relaunch::a_genuine_activation_is_told_as_a_request_and_the_view_stays_where_it_is`.
+    pub(super) const fn why(self) -> &'static str {
+        match self {
+            Self::Relaunched => "launch",
+            Self::Arrived | Self::Ordinary => "request",
+        }
+    }
+}
+
 /// What the scripts did with a window opening, as [`Solium::trigger_open`]
 /// reports it.
 #[derive(Clone, Copy, Debug, Default)]
@@ -187,9 +216,9 @@ impl Solium {
     /// this puts it where it belonged: the window it was already in is retired
     /// and its content moves to the one that has been waiting.
     ///
-    /// Returns whether the token was this window's own -- it is in the window
-    /// the token was minted for, now or already -- so that only a token that
-    /// is not falls through to being an ordinary request for focus.
+    /// Answers [`Claimed::Arrived`] when the token was this window's own -- it
+    /// is in the window the token was minted for, now or already -- so that
+    /// only a token that is not falls through to being a request for focus.
     ///
     /// **Already** is the ordinary case, and it is asked first. An application
     /// that is itself the process `sol.spawn` started was adopted by its pid
@@ -209,19 +238,53 @@ impl Solium {
     /// sends the token before the first frame, as winit does, and after, and
     /// asserts both; `a_launched_window_on_screen_takes_the_keyboard_when_it_activates_with_its_own_token`
     /// is the other half.
-    pub(super) fn claim_into(&mut self, pane: crate::pane::PaneId, surface: &WlSurface) -> bool {
+    ///
+    /// **A window older than the launch is never claimed** (#177), and the
+    /// launch's pane dissolves instead: [`Claimed::Relaunched`]. See below.
+    pub(super) fn claim_into(&mut self, pane: crate::pane::PaneId, surface: &WlSurface) -> Claimed {
         let Some(window) = self.window_for(surface) else {
-            return false;
+            return Claimed::Ordinary;
         };
         let Some(wrong) = self.panes.id_of(&window) else {
-            return false;
+            return Claimed::Ordinary;
         };
         if wrong == pane {
-            return true;
+            return Claimed::Arrived;
         }
         // Still waiting, or already given up on.
         if !self.panes.get(pane).is_some_and(Pane::is_loading) {
-            return false;
+            return Claimed::Ordinary;
+        }
+        // **A window that was there before the launch is not its arrival.**
+        // An application that keeps one instance -- Firefox, Telegram, any
+        // GTK or Qt one with the flag -- passes a second launch to the
+        // instance running, and that instance brings forward the window it
+        // already has, with this launch's token. Claimed, that window left its
+        // workspace for the one in view and changed its id, and the scripts
+        // heard it close (#177). A window that maps for the launch -- one per
+        // activation, or a forking launcher's -- is newer than the launch's
+        // pane, and is claimed below as it always was.
+        //
+        // **Older is one comparison**, because a pane's id is when it was
+        // made: see `PaneId::next`. So the launch's pane goes as one whose
+        // application never came does, fading where it stood while the
+        // layout closes up, and the token is an activation like any other: the
+        // window stays where it lives, with its id, and nothing tells the
+        // scripts it closed.
+        // `relaunch::relaunching_an_application_in_tiling_on_the_workspace_in_view_grows_its_window_back_into_its_own_tile`
+        // and `relaunch::relaunching_an_application_tells_the_scripts_no_close_for_its_window`;
+        // `relaunch::a_window_opened_for_a_relaunch_still_arrives_in_the_window_opened_for_the_launch`
+        // is the other side.
+        if wrong < pane {
+            tracing::debug!(
+                pane = pane.get(),
+                window = wrong.get(),
+                "an application already running answered its launch with a window it had, \
+                 and the window opened for the launch dissolves"
+            );
+            self.depart(pane);
+            self.redraw = true;
+            return Claimed::Relaunched;
         }
 
         if let Some(held) = self.panes.get_mut(pane) {
@@ -255,7 +318,20 @@ impl Solium {
             self.hand_off_keyboard(&window);
         }
         self.redraw = true;
-        true
+        Claimed::Arrived
+    }
+
+    /// Tell the scripts a window asked to be brought forward, once the
+    /// compositor has answered it, and why: see [`Claimed::why`]. Fired from
+    /// `request_activation` alone, for every token that did not arrive.
+    pub(super) fn trigger_activate(&mut self, pane: crate::pane::PaneId, claim: Claimed) {
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.activated(pane.get(), claim.why(), snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
     }
 
     /// Give a mapped client to the window that was opened for it, or open a

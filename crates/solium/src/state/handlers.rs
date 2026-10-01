@@ -1048,10 +1048,14 @@ impl XdgActivationHandler for Solium {
         data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
-        // Ours, from a launch: the window belongs in the one we opened for it.
-        if let Some(pane) = data.user_data.get::<LaunchedFor>().map(|it| it.0)
-            && self.claim_into(pane, &surface)
-        {
+        // Ours, from a launch: the window belongs in the one we opened for it
+        // -- unless it was there before the launch, which `claim_into` says
+        // as `Relaunched` once it has dissolved the launch's window (#177).
+        let claimed = match data.user_data.get::<LaunchedFor>() {
+            Some(launched) => self.claim_into(launched.0, &surface),
+            None => Claimed::Ordinary,
+        };
+        if claimed == Claimed::Arrived {
             self.activation_state.remove_token(&token);
             return;
         }
@@ -1100,12 +1104,17 @@ impl XdgActivationHandler for Solium {
         // Before #134's second review it kept it, and every key typed went
         // somewhere nobody could see.
         //
-        // Switching to that workspace is arguably what a click on its
-        // notification should do. That is `workspaces.lua`'s decision rather
-        // than the compositor's, which does not know what a workspace is, and
-        // nothing tells it an activation happened yet. Until something does, a
-        // click like that changes nothing on screen, as it never did, and the
-        // typing no longer goes with it.
+        // **Switching to that workspace is the scripts' decision**, not the
+        // compositor's, which does not know what a workspace is. So once it
+        // has answered, they are told: `activate(id, why)`, below. For a
+        // launch's token on a window that was already running the shipped
+        // `workspaces.lua` shows the window's workspace and focuses it, as a
+        // dock does for a running application
+        // (`relaunch::relaunching_an_application_whose_window_is_on_another_workspace_keeps_it_there_and_brings_it_into_view`).
+        // For any other token it does nothing more, since any client can make
+        // one: a click on a notification for a window on a hidden desk still
+        // changes nothing on screen, and the typing does not go with it
+        // (`relaunch::a_genuine_activation_is_told_as_a_request_and_the_view_stays_where_it_is`).
         if let Some(window) = self.window_for(&surface) {
             let pane = self.panes.id_of(&window);
             if pane
@@ -1131,6 +1140,9 @@ impl XdgActivationHandler for Solium {
                     );
                     self.hand_off_keyboard(&window);
                 }
+            }
+            if let Some(pane) = pane {
+                self.trigger_activate(pane, claimed);
             }
         }
         self.activation_state.remove_token(&token);

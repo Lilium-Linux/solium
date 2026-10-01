@@ -45,6 +45,15 @@ pub(crate) struct PaneId(u64);
 impl PaneId {
     /// The next identity. Monotonic and never reused: an id that came back
     /// would let a stale reference address a different window.
+    ///
+    /// **So ids are in the order panes were made**, and an id below another's
+    /// is a pane made before it. One counter serves [`Pane::loading`] and
+    /// [`Pane::mapped`] alike, and the compositor makes every pane on its own
+    /// thread. `Solium::claim_into` tells a window that was there before a
+    /// launch from one that came for it by that alone (#177); the premises of
+    /// `relaunch::relaunching_an_application_tells_the_scripts_no_close_for_its_window`
+    /// and `relaunch::a_window_opened_for_a_relaunch_still_arrives_in_the_window_opened_for_the_launch`
+    /// assert the order both ways.
     fn next() -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(1);

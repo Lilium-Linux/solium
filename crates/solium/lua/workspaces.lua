@@ -395,6 +395,38 @@ sol.on("open", function(id)
     end
 end)
 
+-- An application you launched was already running, and answered by bringing
+-- forward the window it had: Firefox, Telegram, anything that keeps one
+-- instance (#177). The window stays on its own workspace, so the view goes to
+-- it there, on its own monitor, and it takes the keyboard -- what a dock does
+-- for an application that is running. The compositor will not focus a window
+-- on a workspace nobody is looking at, so without this the launch would show
+-- nothing at all. See `relaunching_an_application_whose_window_is_on_another_workspace_keeps_it_there_and_brings_it_into_view`
+-- and `relaunching_an_application_whose_window_is_on_the_other_monitors_hidden_workspace_switches_that_monitor`.
+--
+-- Not for any other request: any client can make itself a token, so a view
+-- that followed every one would be one any application could pull away.
+-- `a_genuine_activation_is_told_as_a_request_and_the_view_stays_where_it_is`.
+--
+-- Nor for a window being closed: the compositor refused it the keyboard, and
+-- the view going to it would show a window fading out and hand the keyboard to
+-- it. `relaunching_an_application_whose_window_is_being_closed_leaves_the_view_and_the_keyboard_where_they_were`.
+sol.on("activate", function(id, why)
+    if why ~= "launch" then
+        return
+    end
+    for _, window in ipairs(sol.windows()) do
+        if window.id == id then
+            if window.leaving then
+                return
+            end
+            workspaces.go(workspaces.at(id, window.monitor), window.monitor)
+            sol.focus(id)
+            return
+        end
+    end
+end)
+
 -- The desks are per monitor, so a screen arriving or leaving is a different set
 -- of them. This is also the first moment there are any monitors to build them
 -- from: a script's top level runs before the compositor has placed a single

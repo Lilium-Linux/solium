@@ -118,6 +118,7 @@ use hit_test::{
 };
 #[cfg(test)]
 use monitors::anywhere_on;
+use open::Claimed;
 #[cfg(test)]
 use open::{ClientKind, FirstFocus, first_focus};
 pub(crate) use placement::Standing;
