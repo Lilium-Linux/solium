@@ -6,6 +6,10 @@
 
 use std::path::PathBuf;
 
+/// The headers moc runs on: every one that declares a Q_OBJECT type.
+/// `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
+const MOC_HEADERS: &[&str] = &["qml/attached.h"];
+
 fn main() {
     // The datadir a packager bakes in, read by `option_env!` in `assets.rs`.
     // Declared here so changing it rebuilds: an `option_env!` whose value has
@@ -15,6 +19,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SOLIUM_DATADIR");
     println!("cargo:rerun-if-changed=qml/host.cpp");
     println!("cargo:rerun-if-changed=qml/host.h");
+    println!("cargo:rerun-if-changed=qml/attached.cpp");
+    println!("cargo:rerun-if-changed=qml/attached.h");
 
     let mut build = cc::Build::new();
     build
@@ -24,7 +30,9 @@ fn main() {
         // Qt headers are not warning-clean under our settings, and they are
         // not ours to fix.
         .flag_if_supported("-Wno-unused-parameter")
-        .file("qml/host.cpp");
+        .file("qml/host.cpp")
+        .file("qml/attached.cpp")
+        .include("qml");
 
     // Qt6Quick pulls in Core, Gui and Qml transitively.
     let qt = match pkg_config::Config::new()
@@ -59,6 +67,48 @@ fn main() {
         }
     }
 
+    // attached.h declares Q_OBJECT types -- the attached `Solium` object and
+    // the rows it hands out -- so it needs moc, which host.cpp itself still
+    // does not. `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
+    let out: PathBuf = std::env::var_os("OUT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let moc = find_moc(&qt);
+    for header in MOC_HEADERS {
+        let stem = std::path::Path::new(header)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("moc");
+        let generated = out.join(format!("moc_{stem}.cpp"));
+        // Qt's headers on moc's path too, so it expands `QML_ATTACHED` and the
+        // other registration macros rather than stopping at them.
+        // `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
+        let includes = qt.include_paths.iter().flat_map(|path| {
+            std::iter::once(path.clone())
+                .chain(["QtCore", "QtGui", "QtQml", "QtQuick"].map(|module| path.join(module)))
+        });
+        match std::process::Command::new(&moc)
+            .args(includes.map(|path| format!("-I{}", path.display())))
+            .arg(header)
+            .arg("-o")
+            .arg(&generated)
+            .status()
+        {
+            Ok(status) if status.success() => {
+                build.file(&generated);
+            }
+            Ok(status) => {
+                eprintln!("error: moc failed ({status}) on {header}");
+                std::process::exit(1);
+            }
+            Err(err) => {
+                eprintln!("error: could not run moc at {}: {err}", moc.display());
+                eprintln!("       set QT_MOC to its path, or install Qt 6's development tools");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // EGL, for the GPU scene path in host.cpp: importing the compositor's
     // dmabuf as a texture and fencing the frame afterwards are both EGL, and Qt
     // neither re-exports them nor offers an equivalent. Not optional even though
@@ -85,4 +135,42 @@ fn main() {
     }
 
     build.compile("solium_qml_host");
+}
+
+/// Where moc is: `QT_MOC`, then the `libexecdir` Qt's own `.pc` file names,
+/// which spike SVC-S2 found is where it should come from, then beside the
+/// libraries, then the usual distribution paths, then whatever `moc` is on the
+/// path. The crate builds only once it is found:
+/// `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
+fn find_moc(qt: &pkg_config::Library) -> PathBuf {
+    if let Some(path) = std::env::var_os("QT_MOC") {
+        return PathBuf::from(path);
+    }
+    if let Ok(directory) = pkg_config::get_variable("Qt6Core", "libexecdir") {
+        let candidate = PathBuf::from(directory).join("moc");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    for directory in &qt.link_paths {
+        for candidate in [
+            directory.join("qt6/libexec/moc"),
+            directory.join("qt6/bin/moc"),
+        ] {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    for candidate in [
+        "/usr/lib64/qt6/libexec/moc",
+        "/usr/lib/qt6/libexec/moc",
+        "/usr/lib/x86_64-linux-gnu/qt6/libexec/moc",
+    ] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return path;
+        }
+    }
+    PathBuf::from("moc")
 }

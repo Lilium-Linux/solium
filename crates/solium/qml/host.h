@@ -93,6 +93,13 @@ int solium_qml_start(const char *import_path);
  */
 int solium_qml_start_gpu(const char *import_path);
 
+/* The monitor the next scene built is hosted on, or NULL for none. Consumed
+ * by the next solium_qml_scene_new_with or solium_qml_scene_new_gpu, which
+ * gives that scene a hosting record and a QML context of its own, so
+ * `Solium.monitor` names this monitor inside it while it is being built.
+ * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
+void solium_qml_host_next_on(const char *monitor);
+
 /* A scene that renders into a buffer we allocated.
  *
  * `dmabuf_fd` is borrowed for the call — EGL takes its own reference on the

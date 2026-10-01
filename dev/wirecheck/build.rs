@@ -24,6 +24,8 @@ fn repo() -> PathBuf {
 fn main() {
     let qml = repo().join("crates/solium/qml");
     println!("cargo:rerun-if-changed={}", qml.join("host.cpp").display());
+    println!("cargo:rerun-if-changed={}", qml.join("attached.cpp").display());
+    println!("cargo:rerun-if-changed={}", qml.join("attached.h").display());
     println!("cargo:rerun-if-env-changed=WIRECHECK_HOST_CPP");
     // Our own C++ too. cc-rs does not always emit these, and a stale object
     // file here shows up as an undefined symbol at link time rather than as
@@ -41,7 +43,11 @@ fn main() {
         // src/host_tu.cpp is a five-line translation unit whose only job is to
         // #include the real host.cpp verbatim. host.cpp is compiled exactly
         // once, from this checkout, unmodified.
-        .file("src/host_tu.cpp");
+        .file("src/host_tu.cpp")
+        // host.cpp includes attached.h and calls into attached.cpp, so the
+        // real one is compiled beside it, with its moc output below: the
+        // gate's wirecheck step links only with both.
+        .file(qml.join("attached.cpp"));
     // Overridable only so a deliberately broken copy can be compiled as a
     // negative control; the default is always the host.cpp beside this crate.
     let host = std::env::var_os("WIRECHECK_HOST_CPP")
@@ -84,6 +90,32 @@ fn main() {
         }
     }
 
+    // The same moc step as crates/solium/build.rs, on the same header; the
+    // gate's wirecheck step builds only with it.
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let moc = find_moc(&qt);
+    for header in [qml.join("attached.h")] {
+        let stem = header
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("moc")
+            .to_owned();
+        let generated = out.join(format!("moc_{stem}.cpp"));
+        let includes = qt.include_paths.iter().flat_map(|path| {
+            std::iter::once(path.clone())
+                .chain(["QtCore", "QtGui", "QtQml", "QtQuick"].map(|module| path.join(module)))
+        });
+        let status = std::process::Command::new(&moc)
+            .args(includes.map(|path| format!("-I{}", path.display())))
+            .arg(&header)
+            .arg("-o")
+            .arg(&generated)
+            .status()
+            .expect("moc runs; set QT_MOC to its path");
+        assert!(status.success(), "moc failed ({status}) on {}", header.display());
+        build.file(&generated);
+    }
+
     let egl = pkg_config::Config::new().probe("egl").expect("EGL dev files");
     for path in &egl.include_paths {
         build.include(path);
@@ -108,4 +140,38 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=EGL");
     println!("cargo:rustc-link-lib=dylib=GLESv2");
     println!("cargo:rustc-link-lib=dylib=gbm");
+}
+
+/// Where moc is: the same search as `find_moc` in crates/solium/build.rs.
+fn find_moc(qt: &pkg_config::Library) -> PathBuf {
+    if let Some(path) = std::env::var_os("QT_MOC") {
+        return PathBuf::from(path);
+    }
+    if let Ok(directory) = pkg_config::get_variable("Qt6Core", "libexecdir") {
+        let candidate = PathBuf::from(directory).join("moc");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    for directory in &qt.link_paths {
+        for candidate in [
+            directory.join("qt6/libexec/moc"),
+            directory.join("qt6/bin/moc"),
+        ] {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    for candidate in [
+        "/usr/lib64/qt6/libexec/moc",
+        "/usr/lib/qt6/libexec/moc",
+        "/usr/lib/x86_64-linux-gnu/qt6/libexec/moc",
+    ] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return path;
+        }
+    }
+    PathBuf::from("moc")
 }
