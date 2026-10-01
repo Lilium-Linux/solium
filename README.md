@@ -24,7 +24,7 @@ happened yet. What stands in the way is the
 [`daily-drive` label][daily-drive], and the honest reasons are specific:
 
 - A hosted shell is not yet a whole desktop ([#169]). It takes every click and
-  hover on its monitor, however little of it the shell draws on, so while one
+  hover on its monitor ([#173]), however little of it the shell draws on, so while one
   is hosted the windows under it cannot be clicked, focused or dragged with the
   mouse. It gets no keyboard, and every button reaches it as a left press
   ([#163]); a bar reserves no room, so windows go under it ([#162]); and it is
@@ -505,4 +505,5 @@ other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 [#164]: https://github.com/Lilium-Linux/solium/issues/164
 [#166]: https://github.com/Lilium-Linux/solium/issues/166
 [#169]: https://github.com/Lilium-Linux/solium/issues/169
+[#173]: https://github.com/Lilium-Linux/solium/issues/173
 [#172]: https://github.com/Lilium-Linux/solium/issues/172

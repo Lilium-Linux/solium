@@ -66,7 +66,6 @@ them that undermines the claim. The third is clear.
 | | why |
 |---|---|
 | fullscreen fires no event | a script cannot see that a window is fullscreen or maximised, so the next relayout — a window opening, a layer surface arriving — puts a fullscreen video back into its tile. No issue tracks it yet |
-| [#150](https://github.com/Lilium-Linux/solium/issues/150) no keyboard navigation | no key moves focus or a window left, right, up or down, and none toggles floating or fullscreen: a tiling compositor you have to drive with the pointer |
 
 ### The chrome is the differentiator
 
@@ -85,8 +84,6 @@ change" is the sentence a preview is sold on, and it is now true.
 
 | | why |
 |---|---|
-| [#146](https://github.com/Lilium-Linux/solium/issues/146) the session environment | nothing exports the display to systemd or D-Bus, so portals, XDG autostart and anything else the session starts on its own cannot find it — a shell that runs as its own program included |
-| [#152](https://github.com/Lilium-Linux/solium/issues/152) D-Bus idle inhibit | the screens go off after ten minutes by default, and a browser's request to keep them on never reaches Solium, so a film can go dark |
 | [#66](https://github.com/Lilium-Linux/solium/issues/66) packages | a preview nobody can install is a preview nobody tries. **Done:** an installed binary finds its own QML and Lua, and `dev/install.sh` installs from a checkout into `~/.local` on Fedora 44 and prints the one `sudo` line that puts the session file where the login screen reads it (`dev/install-check.sh` checks it). **Left:** packages — a Fedora `.spec` and COPR, an Arch `PKGBUILD` — plus `--config` ([#106](https://github.com/Lilium-Linux/solium/issues/106)) and the configuration directory's name ([#107](https://github.com/Lilium-Linux/solium/issues/107)), which are worth settling before the recipes are written |
 | [#65](https://github.com/Lilium-Linux/solium/issues/65) a soak | the compositor has never been left running unattended for hours, with window churn, on a real session. `SOLIUM_SOAK_TTY=1 dev/soak.sh` can do it now; what is missing is the run. A preview that dies after six hours is worse than one that is missing a feature |
 | [#64](https://github.com/Lilium-Linux/solium/issues/64) suspend and resume | never tried at all, which is the same sentence about laptops |
@@ -109,10 +106,13 @@ change" is the sentence a preview is sold on, and it is now true.
 | [#54](https://github.com/Lilium-Linux/solium/issues/54) screens off | `wlr-output-power-management`, `sol.monitor_power`, and the screens going off by themselves after `idle.screens_off_after` |
 | the lock, hardened | only the lock surface can have the keyboard, and `locked` is sent only once every monitor shows the lock |
 | [#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout | in `config.keyboard`, with the repeat rate — which was the part that genuinely could not be changed. The layout could always be set through `XKB_DEFAULT_LAYOUT` |
+| [#150](https://github.com/Lilium-Linux/solium/issues/150) keyboard navigation | `super` with the arrows or `h` `j` `k` `l` moves focus, and with `shift` moves the window; `super+f` is fullscreen, `super+shift+m` maximised and `super+shift+space` floating. The layout in charge decides what a direction means |
+| [#146](https://github.com/Lilium-Linux/solium/issues/146) the session | Solium tells systemd and D-Bus activation where the display is and starts `graphical-session.target`, so portals, autostart and programs started as user units find it |
+| [#152](https://github.com/Lilium-Linux/solium/issues/152) D-Bus idle inhibit | Solium owns `org.freedesktop.ScreenSaver` (`idle.dbus_inhibit`), so a browser's request to keep the screens on holds them on like a Wayland inhibitor |
 | [#41](https://github.com/Lilium-Linux/solium/issues/41) multi-monitor | a pipeline per monitor, one global space, layouts and workspaces per screen |
 | [#43](https://github.com/Lilium-Linux/solium/issues/43) hotplug | a monitor plugged in is picked up, one pulled out is let go, and its windows come back |
 | [#39](https://github.com/Lilium-Linux/solium/issues/39) HiDPI | scale per monitor, chrome rasterised at it, chosen from the panel's dpi |
-| [#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture | `wlr-screencopy`, so grim and wf-recorder work. The portal has not been tested end to end ([#83](https://github.com/Lilium-Linux/solium/issues/83)), and cannot find the display until #146 |
+| [#28](https://github.com/Lilium-Linux/solium/issues/28) screen capture | `wlr-screencopy`, so grim and wf-recorder work. The portal has not been tested end to end ([#83](https://github.com/Lilium-Linux/solium/issues/83)) |
 | [#27](https://github.com/Lilium-Linux/solium/issues/27) session lock | `ext-session-lock-v1`, and it fails locked rather than open |
 | [#33](https://github.com/Lilium-Linux/solium/issues/33) the leak | re-measured and not reproducible: `dev/leak.sh` over 40 windows in four settled cycles returns to within ±1 MB of baseline, with file descriptors two *below* it. The number in that issue's title should not be quoted until a soak on real hardware says otherwise |
 
@@ -133,17 +133,10 @@ the QML GPU check. Two gates testing different things is one gate.
 
 ## Order, and why
 
-1. **The session: [#146](https://github.com/Lilium-Linux/solium/issues/146),
-   then [#152](https://github.com/Lilium-Linux/solium/issues/152) and
-   [#153](https://github.com/Lilium-Linux/solium/issues/153).** #146 first,
-   because it decides whether anything the session starts on its own can find
-   the display: portals, autostart, and a shell that runs as its own program.
-   #152 matters as soon as the screens go off by themselves, which they now do
-   by default.
-2. **The layouts: the fullscreen yank, then
-   [#150](https://github.com/Lilium-Linux/solium/issues/150).** The yank undoes
-   the one thing somebody watching a video asked for; #150 is the difference
-   between a tiling compositor and one you drive with the pointer.
+1. **The session: [#153](https://github.com/Lilium-Linux/solium/issues/153)**, so that `loginctl lock-session`
+   locks and the screen is locked before the machine sleeps.
+2. **The layouts: the fullscreen yank.** It undoes the one thing somebody
+   watching a video asked for.
 3. **[#102](https://github.com/Lilium-Linux/solium/issues/102)**, the decoration
    policy.
 4. **Soak and suspend on hardware,

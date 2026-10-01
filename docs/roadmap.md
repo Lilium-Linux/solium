@@ -188,13 +188,11 @@ writing it. The shell is the reason all three matter more here than elsewhere:
 a dock that cannot enumerate windows is a launcher, and a settings panel that
 cannot move a monitor is a text editor with buttons.
 
-**The session.** Four gaps between the compositor and the rest of the user
+**The session.** Two gaps between the compositor and the rest of the user
 session, each a day lost; [gaps.md](gaps.md#the-session) has the detail.
 
 | | why it stops someone |
 |---|---|
-| [#146](https://github.com/Lilium-Linux/solium/issues/146) the session environment | portals, autostart and a shell started as a user unit cannot find the display |
-| [#152](https://github.com/Lilium-Linux/solium/issues/152) D-Bus idle inhibit | a film in a browser can go dark after ten minutes |
 | [#153](https://github.com/Lilium-Linux/solium/issues/153) logind | `loginctl lock-session` does nothing, and nothing locks before sleep unless `swayidle -w` does |
 | [#157](https://github.com/Lilium-Linux/solium/issues/157) libinput settings | no tap-to-click, so tapping a touchpad does nothing |
 
@@ -209,7 +207,7 @@ and all of it decides whether the thing is trustworthy.
 | [#65](https://github.com/Lilium-Linux/solium/issues/65) a hardware soak | the compositor has never run unattended for hours on a real session; `dev/soak.sh` can now do it on a TTY, though only its clients churn there, since the TTY backend ignores the scripted key presses |
 | [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | `dev/install.sh` installs from a checkout, but there are no packages, and a preview nobody can install is a preview nobody tries |
 | [#64](https://github.com/Lilium-Linux/solium/issues/64) suspend and resume | never tested once. A laptop that cannot be closed and opened is not a laptop |
-| [#83](https://github.com/Lilium-Linux/solium/issues/83) portals | screen sharing is reasoning, not evidence: nothing has been run end to end, and until [#146](https://github.com/Lilium-Linux/solium/issues/146) a portal cannot find the display |
+| [#83](https://github.com/Lilium-Linux/solium/issues/83) portals | screen sharing is reasoning, not evidence: nothing has been run end to end |
 
 ### 3. The part that is not parity
 

@@ -91,8 +91,6 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 
 | | |
 |---|---|
-| [#146](https://github.com/Lilium-Linux/solium/issues/146) the session environment | nothing exports `WAYLAND_DISPLAY` and the rest to the systemd user manager or to D-Bus activation, and nothing starts `graphical-session.target`. Only programs Solium starts itself can find the display, so portals, D-Bus-activated applications, XDG autostart and a shell started as a user unit cannot |
-| [#152](https://github.com/Lilium-Linux/solium/issues/152) D-Bus idle inhibit | browsers ask to keep the screen on over D-Bus (`org.freedesktop.ScreenSaver`, or the portal), and none of those requests reaches Solium. The screens go off after `idle.screens_off_after`, ten minutes by default, so a film in a browser can go dark |
 | [#153](https://github.com/Lilium-Linux/solium/issues/153) logind | the `Lock` and `PrepareForSleep` signals are ignored, so `loginctl lock-session` and whatever locks that way do nothing, and locking before suspend is up to `swayidle -w` |
 | [#157](https://github.com/Lilium-Linux/solium/issues/157) libinput device settings | none are set: no tap-to-click, which libinput leaves off, so tapping a touchpad does nothing; no acceleration profile or speed, disable-while-typing, left-handed mode or middle-button emulation; and natural scrolling comes only from the form factor, for every device at once |
 
@@ -128,14 +126,14 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 | **the dock, and the morph** | `sol.present_from` already grows a window out of the rectangle an icon occupied, and a genie can aim at a window or a scripted surface. What is missing is a dock icon to aim at. A dock hosted in the compositor is in the same engine, and the plan is for its QML to name the icon so an animation can follow it while it moves; nothing of that is built, and no issue tracks it yet. Only a dock that runs as its own program would need a protocol to hand the rectangle over |
 | [#49](https://github.com/Lilium-Linux/solium/issues/49) fullscreen animation | entering fullscreen snaps |
 | [#30](https://github.com/Lilium-Linux/solium/issues/30) a minimise state | so the genie animation means something |
-| [#83](https://github.com/Lilium-Linux/solium/issues/83) portals | `xdg-desktop-portal-wlr` can screen-share through `wlr-screencopy`, but nothing has been configured or tested end to end, a portal started by D-Bus cannot find the display until #146, and file chooser and settings portals are separate again |
+| [#83](https://github.com/Lilium-Linux/solium/issues/83) portals | `xdg-desktop-portal-wlr` can screen-share through `wlr-screencopy`, but nothing has been configured or tested end to end, and file chooser and settings portals are separate again |
 
 ---
 
 ## What this list is not
 
 It is not a plan, and length is not weight: `wp_alpha_modifier_v1` is close to
-free, since the render path already carries an opacity, while #146 is the
-difference between a session whose portals and autostart work and one where
-they cannot start. The label orders these and the roadmap says why; this only
+free, since the render path already carries an opacity, while #153 is the
+difference between a laptop that locks before it sleeps and one that wakes
+up unlocked. The label orders these and the roadmap says why; this only
 makes sure none of them is forgotten.

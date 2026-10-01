@@ -87,7 +87,7 @@ local defaults = {
     -- the primary monitor, over the windows, and it takes the pointer: every
     -- press and hover on that monitor's usable area is the shell's, however
     -- little of it the shell draws on, so while one is hosted the windows
-    -- there cannot be clicked, focused or dragged with the mouse. See
+    -- there cannot be clicked, focused or dragged with the mouse (#173). See
     -- `the_shell_scene_is_read_from_the_configuration`.
     -- SOLIUM_SHELL_SCENE overrides this, because that is set per run.
     -- `super+shift+r` picks up a change. See docs/shell-boundary.md for
