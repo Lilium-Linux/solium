@@ -12340,6 +12340,135 @@ mod real_client {
                 );
             }
         }
+
+        /// **Escape is the focused window's, except while the overview is
+        /// up.** #174.
+        ///
+        /// `overview.lua` bound `escape` for good, and the key filter takes
+        /// every bound press before any client sees it, so Escape reached no
+        /// application at all. Each test drives the shipped `overview.lua`, a
+        /// real application client with the keyboard, and keys pressed
+        /// through the filter the backends feed, on `us,ru` with each half
+        /// active (#132). Each fails against `19a42c0`; the doc of each says
+        /// where.
+        mod escape {
+            use super::*;
+
+            /// Escape, Super and space, as xkb keycodes: evdev 1, 125 and
+            /// 57, plus eight.
+            const ESCAPE: u32 = 9;
+            const SUPER: u32 = 133;
+            const SPACE: u32 = 65;
+
+            /// Both halves of `us,ru`, one-based as `sol.keyboard` counts.
+            const GROUPS: [(&str, usize); 2] = [("us", 1), ("ru", 2)];
+
+            /// One window with the keyboard and the shipped `overview.lua`,
+            /// on `us,ru` with its `active`th layout locked.
+            fn overview(tag: &str, active: usize) -> Session {
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                let directory = std::env::temp_dir().join(format!(
+                    "solium-escape-{tag}-{active}-{}",
+                    std::process::id()
+                ));
+                let _ = std::fs::create_dir_all(&directory);
+                let entry = directory.join("init.lua");
+                std::fs::write(
+                    &entry,
+                    format!(
+                        "package.path = {shipped:?} .. \"/?.lua\"\n\
+                         sol.keyboard{{ layout = \"us,ru\", active = {active} }}\n\
+                         require(\"overview\")\n",
+                        shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                    ),
+                )
+                .expect("writing the entry point");
+                session.state.start_scripts(Some(
+                    Scripts::load(&entry).expect("loading the shipped overview"),
+                ));
+                session.app.pump(&mut session.display, &mut session.state);
+                let keyboard = crate::keymap::describe(&mut session.state);
+                assert_eq!(
+                    (keyboard.layouts.len(), keyboard.active),
+                    (2, active),
+                    "the premise: `us,ru` with layout {active} locked; it is {keyboard:?}"
+                );
+                assert!(
+                    session.app.client.keyboard_on.is_some(),
+                    "the premise: the window has the keyboard"
+                );
+                session
+            }
+
+            /// Press `keys` in order and let them go in reverse, through the
+            /// filter, and answer how many Escape presses the window was
+            /// sent.
+            fn chord(session: &mut Session, keys: &[u32]) -> usize {
+                session.app.client.key_events.clear();
+                for &code in keys {
+                    crate::input::key(&mut session.state, Keycode::new(code), KeyState::Pressed, 0);
+                }
+                for &code in keys.iter().rev() {
+                    crate::input::key(
+                        &mut session.state,
+                        Keycode::new(code),
+                        KeyState::Released,
+                        0,
+                    );
+                }
+                session.app.pump(&mut session.display, &mut session.state);
+                session
+                    .app
+                    .client
+                    .key_events
+                    .iter()
+                    .filter(|&&(key, down)| key == 1 && down)
+                    .count()
+            }
+
+            /// Whether the overview is up: it holds the input, and says so.
+            fn up(session: &Session) -> bool {
+                session.state.script_grab && session.state.status == "overview"
+            }
+
+            /// **With the overview closed, Escape reaches the focused
+            /// window.** Against `19a42c0`, fails at "kept from the window".
+            #[test]
+            fn escape_reaches_the_focused_window_while_the_overview_is_closed() {
+                for (name, active) in GROUPS {
+                    let mut session = overview("closed", active);
+                    assert_eq!(
+                        chord(&mut session, &[ESCAPE]),
+                        1,
+                        "{name}: Escape was kept from the window with the overview closed"
+                    );
+                }
+            }
+
+            /// **With the overview up, Escape leaves it and the window is
+            /// sent no Escape; once it has left, Escape is the window's
+            /// again.** Against `19a42c0`, fails at "still taken".
+            #[test]
+            fn escape_leaves_the_overview_and_only_then_reaches_the_window() {
+                for (name, active) in GROUPS {
+                    let mut session = overview("open", active);
+                    chord(&mut session, &[SUPER, SPACE]);
+                    assert!(up(&session), "{name}: the premise: super+space entered");
+                    assert_eq!(
+                        chord(&mut session, &[ESCAPE]),
+                        0,
+                        "{name}: the window was sent the Escape that left the overview"
+                    );
+                    assert!(!up(&session), "{name}: Escape did not leave the overview");
+                    assert_eq!(
+                        chord(&mut session, &[ESCAPE]),
+                        1,
+                        "{name}: the overview has gone and Escape is still taken from the window"
+                    );
+                }
+            }
+        }
     }
 
     /// **#115: what a client says about its own size**, read from the real
