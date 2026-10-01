@@ -38,7 +38,7 @@ use crate::{
     json::Json,
     qml::{
         self,
-        hosted::ScenePointer,
+        hosted::{Hit, ScenePointer},
         paint::{Gpu, Placement},
     },
     render::{Drawn, Element},
@@ -83,6 +83,19 @@ pub(crate) struct ShellSurface {
     monitor: Option<String>,
     newest: Option<SystemTime>,
     checked: Duration,
+    /// The last hit asked of the scene.
+    /// `tests::a_cached_hit_follows_the_scene_once_qt_has_run`.
+    hit_cache: std::cell::Cell<Option<CachedHit>>,
+}
+
+/// One hit the scene answered: the point in the scene's own coordinates, the
+/// generation it was asked at, and the answer.
+/// `tests::a_cached_hit_follows_the_scene_once_qt_has_run`.
+#[derive(Clone, Copy, Debug)]
+struct CachedHit {
+    at: (f64, f64),
+    generation: u64,
+    hit: Hit,
 }
 
 /// A hosted scene animates on a clock of its own and damages nothing the
@@ -151,6 +164,7 @@ impl ShellSurface {
             monitor: monitor.map(str::to_owned),
             newest,
             checked: Duration::ZERO,
+            hit_cache: std::cell::Cell::new(None),
         })
     }
 
@@ -167,6 +181,35 @@ impl ShellSurface {
     ) {
         let local = location - area.loc.to_f64();
         self.scene.pointer_event(local.x, local.y, event);
+    }
+
+    /// What the scene claims at a point in compositor coordinates. One item
+    /// walk per point until Qt next runs: the press, the pointer's shape and
+    /// the cursor's every-frame check all ask, and a still pointer is walked
+    /// once. `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`,
+    /// `tests::a_cached_hit_follows_the_scene_once_qt_has_run`.
+    pub(crate) fn hit(&self, area: Rectangle<i32, Logical>, location: Point<f64, Logical>) -> Hit {
+        let local = location - area.loc.to_f64();
+        let at = (local.x, local.y);
+        let generation = qml::hosted::generation();
+        if let Some(cached) = self.hit_cache.get()
+            && cached.at == at
+            && cached.generation == generation
+        {
+            return cached.hit;
+        }
+        let hit = self.scene.hit(local.x, local.y);
+        self.hit_cache.set(Some(CachedHit {
+            at,
+            generation,
+            hit,
+        }));
+        hit
+    }
+
+    /// The pointer left this scene. `qml::hosted::tests::a_left_scene_drops_its_hover`.
+    pub(crate) fn leave(&mut self) {
+        self.scene.leave();
     }
 
     /// Set a whole-number property on the scene.
@@ -251,6 +294,7 @@ impl ShellSurface {
         ) {
             Ok(scene) => {
                 self.scene = scene;
+                self.hit_cache.set(None);
                 self.backing = match self.backing {
                     Backing::Memory { .. } => Backing::Memory {
                         buffer: None,
@@ -482,7 +526,78 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::ShellSurface;
+    use crate::qml::hosted::{Hit, PointerKind, ScenePointer};
     use crate::qml::qt_test::on_the_qt_thread;
+
+    /// **A hit is cached only until Qt next runs**: asked again at the same
+    /// point, it is what the scene's items say now, after a property write
+    /// that moved the button away, after a press that hid it, and after an
+    /// edit that rebuilt the scene with the button elsewhere.
+    #[test]
+    fn a_cached_hit_follows_the_scene_once_qt_has_run() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-surface-cached-hit");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            let scene = |x: i32| {
+                format!(
+                    "import QtQuick\nItem {{\n    property int at: {x}\n    MouseArea {{ x: parent.at; width: 20; height: 20; onPressed: visible = false }}\n}}\n"
+                )
+            };
+            std::fs::write(&path, scene(0)).expect("writing the scene");
+            let mut surface =
+                ShellSurface::hosted(path.clone(), "{}", "cached-1").expect("the scene builds");
+            let area = smithay::utils::Rectangle::new((100, 0).into(), (400, 30).into());
+            let point = smithay::utils::Point::from((110.0, 10.0));
+            assert_eq!(surface.hit(area, point), Hit::Press, "the premise");
+
+            let at = |x: f64| [("at".to_owned(), crate::json::Json::Number(x))];
+            surface.set_properties("{}", &at(40.0));
+            assert_eq!(
+                surface.hit(area, point),
+                Hit::Nothing,
+                "a property write moved the button away, and the hit did not follow"
+            );
+            surface.set_properties("{}", &at(0.0));
+            assert_eq!(surface.hit(area, point), Hit::Press);
+            surface.pointer(
+                area,
+                point,
+                &ScenePointer {
+                    kind: PointerKind::Press(0x1),
+                    buttons: 0x1,
+                    modifiers: 0,
+                },
+            );
+            assert_eq!(
+                surface.hit(area, point),
+                Hit::Nothing,
+                "a press hid the button, and the hit did not follow"
+            );
+
+            std::fs::write(&path, scene(0)).expect("writing the scene");
+            let mut rebuilt =
+                ShellSurface::hosted(path.clone(), "{}", "cached-2").expect("the scene builds");
+            assert_eq!(rebuilt.hit(area, point), Hit::Press, "the premise");
+            std::fs::write(&path, scene(40)).expect("editing the scene");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(SystemTime::now() + Duration::from_secs(60)))
+                .expect("dating the edit");
+            rebuilt.reload_if_changed(Duration::from_secs(60), (400, 30));
+            assert_eq!(
+                rebuilt.hit(area, point),
+                Hit::Nothing,
+                "the edit rebuilt the scene with the button elsewhere, and the hit did not follow"
+            );
+            drop(surface);
+            drop(rebuilt);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
 
     /// **A scene rebuilt for an edit stays on its monitor**: the reload builds
     /// it hosted on the same monitor it was first built for.

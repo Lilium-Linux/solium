@@ -2696,6 +2696,60 @@ mod real_client {
         });
     }
 
+    /// **A click on a hosted button is acted on at its release**: the press
+    /// holds the pointer for the scene (Ruling 7), the release that clicks the
+    /// button reaches it through the hold, and the action the click set is
+    /// heard in that same dispatch. Tested with the Cyrillic group active
+    /// (#132). No client, so the scene is a real one (the #99 rule).
+    #[test]
+    fn a_click_on_a_hosted_button_is_acted_on_at_its_release() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            use crate::qml::hosted::{PointerKind, ScenePointer};
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-hosted-click");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nItem {\n    property string action: \"\"\n    MouseArea { width: 100; height: 30; onClicked: parent.action = \"clicked\" }\n}\n",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                r#"sol.on("surface", function(name, action) sol.status(name .. " " .. action) end)"#,
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            one_screen(&mut state);
+            russian(&mut state);
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.declare_surface(crate::scripted::Declaration::for_test(
+                "bar",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::Rect(Rectangle::new((0, 0).into(), (1920, 30).into())),
+            ));
+            let at = Point::<f64, Logical>::from((50.0, 15.0));
+            let event = |kind, buttons| ScenePointer {
+                kind,
+                buttons,
+                modifiers: 0,
+            };
+            assert!(
+                state.surface_pointer(true, at, event(PointerKind::Press(0x1), 0x1)),
+                "the premise: the button takes the press"
+            );
+            assert!(state.surface_pointer(true, at, event(PointerKind::Release(0x1), 0)));
+            assert_eq!(state.status, "bar clicked");
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
     /// **Declaring one surface does not judge another by its old placement.**
     /// One `monitors` handler declares two surfaces over the monitor an
     /// unplug moved; declaring the first must leave the second's scene alone
@@ -10443,6 +10497,51 @@ mod real_client {
                 wheels(&session.state),
                 1,
                 "the scene heard the wheel behind the lock"
+            );
+        }
+
+        /// **The lock lets go of a hosted scene's press and its hover**:
+        /// behind the lock nothing of the session's may notice the pointer,
+        /// so a press a scene held (Ruling 7) is not still held when the
+        /// session unlocks, and the scene is told the pointer left. Tested
+        /// with the Cyrillic group active (#132); the scene is stood in for,
+        /// beside these real clients (the #99 test).
+        #[test]
+        fn the_lock_lets_go_of_a_hosted_scenes_press_and_its_hover() {
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let bar = stand_in(
+                &mut session.state,
+                "bar",
+                crate::scripted::Layer::Top,
+                Rectangle::new((0, 0).into(), (1920, 30).into()),
+                crate::scripted::Stand::solid(),
+            );
+            move_pointer(&mut session.state, (100.0, 15.0), 1);
+            let region = crate::monitor::union(&session.state.space).expect("a monitor");
+            crate::synth::send_button(
+                &mut session.state,
+                region,
+                0x110,
+                smithay::backend::input::ButtonState::Pressed,
+                2,
+            );
+            assert!(
+                session.state.scene_press.is_some(),
+                "the premise: the scene holds the press"
+            );
+
+            let _lock = session.lock();
+            let left = session
+                .state
+                .surfaces
+                .get(bar)
+                .and_then(crate::scripted::Surface::stand)
+                .map(|stand| stand.left);
+            assert_eq!(
+                (session.state.scene_press.is_none(), left),
+                (true, Some(1)),
+                "(the hold let go, how many times the scene heard the pointer leave)"
             );
         }
 
@@ -20991,7 +21090,9 @@ end)
                     .map(|(surface, _)| surface.id().protocol_id())
             }
 
-            /// A script's interactive surface at `layer`, over `rect`.
+            /// A script's interactive surface at `layer`, over `rect`, its
+            /// scene stood in for by one that takes every press there: these
+            /// tests are about the order, not about what a scene claims.
             fn scripted(
                 desk: &mut Desk,
                 name: &str,
@@ -21005,16 +21106,23 @@ end)
                         layer,
                         crate::scripted::On::Rect(rect),
                     ));
-                desk.state
+                let id = desk
+                    .state
                     .surfaces
                     .named(name)
-                    .expect("the surface was declared")
+                    .expect("the surface was declared");
+                desk.state
+                    .surfaces
+                    .get_mut(id)
+                    .expect("live")
+                    .stand_in(crate::scripted::Stand::solid());
+                id
             }
 
             /// The script's surface a press at a point is offered to.
             fn claimed(desk: &Desk, x: f64, y: f64) -> Option<crate::scripted::SurfaceId> {
                 desk.state
-                    .surface_claiming(true, (x, y).into())
+                    .surface_claiming(true, (x, y).into(), crate::qml::hosted::Asking::Press)
                     .map(|(_, id, _)| id)
             }
 
@@ -21197,7 +21305,7 @@ end)
             /// offered to.
             fn claimed_below(desk: &Desk, x: f64, y: f64) -> Option<crate::scripted::SurfaceId> {
                 desk.state
-                    .surface_claiming(false, (x, y).into())
+                    .surface_claiming(false, (x, y).into(), crate::qml::hosted::Asking::Press)
                     .map(|(_, id, _)| id)
             }
 
@@ -21770,6 +21878,269 @@ end)
                         .iter()
                         .any(|event| matches!(event.kind, PointerKind::Wheel { .. }))
                 );
+            }
+
+            /// A button over 600..664 x 500..540 of the screen, nothing elsewhere.
+            fn button_over_the_window(at: Point<f64, Logical>) -> crate::qml::hosted::Hit {
+                if (600.0..664.0).contains(&at.x) && (500.0..540.0).contains(&at.y) {
+                    crate::qml::hosted::Hit::Press
+                } else {
+                    crate::qml::hosted::Hit::Nothing
+                }
+            }
+
+            /// A panel over the window, rounded by 20 at its top-left corner.
+            fn rounded_over_the_window(at: Point<f64, Logical>) -> crate::qml::hosted::Hit {
+                let (dx, dy) = (20.0 - (at.x - 600.0), 20.0 - (at.y - 500.0));
+                let in_corner = dx > 0.0 && dy > 0.0 && dx * dx + dy * dy > 400.0;
+                if (600.0..664.0).contains(&at.x) && (500.0..564.0).contains(&at.y) && !in_corner {
+                    crate::qml::hosted::Hit::Press
+                } else {
+                    crate::qml::hosted::Hit::Nothing
+                }
+            }
+
+            fn hover_everywhere(_: Point<f64, Logical>) -> crate::qml::hosted::Hit {
+                crate::qml::hosted::Hit::Hover
+            }
+
+            fn screen_wide() -> Rectangle<i32, Logical> {
+                Rectangle::new((0, 0).into(), (1920, 1080).into())
+            }
+
+            /// A window at 600,500, and a full-screen scene over it.
+            fn window_under_a_scene(
+                hit: fn(Point<f64, Logical>) -> crate::qml::hosted::Hit,
+            ) -> (Desk, Opened, crate::scripted::SurfaceId) {
+                let mut desk = russian_desk();
+                let opened = desk.open_surface();
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(crate::pane::Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state.space.map_element(window, (600, 500), false);
+                desk.state.space.refresh();
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.pump();
+                let scene = stood(
+                    &mut desk,
+                    "shell",
+                    Scripted::Top,
+                    screen_wide(),
+                    Stand {
+                        hit,
+                        ..Stand::solid()
+                    },
+                );
+                (desk, opened, scene)
+            }
+
+            /// The surface the pointer is on, by its protocol id.
+            fn pointer_on(desk: &Desk) -> Option<u32> {
+                desk.state
+                    .surface_under(
+                        desk.state
+                            .seat
+                            .get_pointer()
+                            .map(|pointer| pointer.current_location())
+                            .unwrap_or_default(),
+                    )
+                    .map(|(surface, _)| surface.id().protocol_id())
+            }
+
+            fn window_id(opened: &Opened) -> u32 {
+                wayland_client::Proxy::id(&opened.surface).protocol_id()
+            }
+
+            fn presses(desk: &Desk, id: crate::scripted::SurfaceId) -> usize {
+                seen(desk, id)
+                    .iter()
+                    .filter(|event| matches!(event.kind, PointerKind::Press(_)))
+                    .count()
+            }
+
+            fn click(desk: &mut Desk, at: (f64, f64), time: u64) {
+                to(desk, at, time);
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Pressed,
+                    time + 1,
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    time + 2,
+                );
+            }
+
+            /// **#173: a press where the shell draws nothing reaches the
+            /// window under it.**
+            #[test]
+            fn a_press_where_the_shell_draws_nothing_reaches_the_window_under_it() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                click(&mut desk, (630.0, 555.0), 10);
+                assert_eq!(
+                    pointer_on(&desk),
+                    Some(window_id(&opened)),
+                    "the window does not have the pointer"
+                );
+                assert_eq!(
+                    presses(&desk, shell),
+                    0,
+                    "the shell took a press where it draws nothing"
+                );
+            }
+
+            /// **#173: a press on a shell button does not reach the window.**
+            #[test]
+            fn a_press_on_a_shell_button_does_not_reach_the_window() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                click(&mut desk, (630.0, 520.0), 10);
+                assert_eq!(
+                    pointer_on(&desk),
+                    None,
+                    "a window under a shell button has the pointer (Ruling 8)"
+                );
+                assert_eq!(presses(&desk, shell), 1);
+            }
+
+            /// **#173: a press on a rounded corner's transparent part falls
+            /// through.**
+            #[test]
+            fn a_press_on_a_rounded_corners_transparent_part_falls_through() {
+                let (mut desk, opened, shell) = window_under_a_scene(rounded_over_the_window);
+                click(&mut desk, (601.0, 501.0), 10);
+                assert_eq!(pointer_on(&desk), Some(window_id(&opened)));
+                assert_eq!(presses(&desk, shell), 0);
+                click(&mut desk, (630.0, 530.0), 20);
+                assert_eq!(
+                    presses(&desk, shell),
+                    1,
+                    "inside the rounded shape the press is the shell's"
+                );
+            }
+
+            /// **A hover strip hears the pointer and leaves the window its
+            /// press** (Ruling 8).
+            #[test]
+            fn a_hover_strip_hears_the_motion_and_leaves_the_window_its_press() {
+                let (mut desk, opened, shell) = window_under_a_scene(hover_everywhere);
+                click(&mut desk, (630.0, 530.0), 10);
+                assert!(
+                    seen(&desk, shell)
+                        .iter()
+                        .any(|event| event.kind == PointerKind::Motion),
+                    "the strip heard no motion"
+                );
+                assert_eq!(presses(&desk, shell), 0, "a hover strip took a press");
+                assert_eq!(pointer_on(&desk), Some(window_id(&opened)));
+            }
+
+            /// **A press a scene took holds the pointer until the buttons are
+            /// up** (Ruling 7): dragged off the button onto the window, the
+            /// pointer is still nobody else's, and the release reaches the
+            /// scene.
+            #[test]
+            fn a_release_after_dragging_off_a_shell_button_reaches_the_scene() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                to(&mut desk, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                to(&mut desk, (630.0, 555.0), 12);
+                assert_eq!(
+                    pointer_on(&desk),
+                    None,
+                    "the window under the drag has the pointer while the scene holds it"
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    13,
+                );
+                assert!(
+                    seen(&desk, shell)
+                        .iter()
+                        .any(|event| matches!(event.kind, PointerKind::Release(0x1))),
+                    "the release went elsewhere"
+                );
+                assert!(
+                    desk.state.scene_press.is_none(),
+                    "the hold outlived the buttons"
+                );
+            }
+
+            /// **Focus follows the pointer through a shell only where the
+            /// shell takes no press** (Ruling 8, as under a client's bar): on
+            /// a shell button over a window, and dragging off it, the pointer
+            /// is the shell's and the window under it does not take the
+            /// keyboard; off the button it does.
+            #[test]
+            fn focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let other = desk.open_surface();
+                let other_window = desk
+                    .state
+                    .panes
+                    .get(other.pane)
+                    .and_then(crate::pane::Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(other_window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                desk.state
+                    .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                desk.state.profile.focus_follows_mouse = true;
+
+                to(&mut desk, (630.0, 520.0), 10);
+                let on_the_button = desk.focused();
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                to(&mut desk, (630.0, 555.0), 12);
+                let dragged_off = desk.focused();
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    13,
+                );
+                to(&mut desk, (630.0, 556.0), 14);
+                assert_eq!(
+                    (on_the_button, dragged_off, desk.focused()),
+                    (other.pane, other.pane, opened.pane),
+                    "(the window with the keyboard with the pointer on the shell button, \
+                     dragged off it onto the window, and moved on the window after the release)"
+                );
+            }
+
+            /// **A scene hears the pointer leave when it moves off its
+            /// items**, so what it hovered is hovered no longer.
+            #[test]
+            fn the_scene_hears_the_pointer_leave_when_it_moves_off_its_items() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                to(&mut desk, (630.0, 520.0), 10);
+                to(&mut desk, (630.0, 555.0), 11);
+                let left = desk
+                    .state
+                    .surfaces
+                    .get(shell)
+                    .and_then(crate::scripted::Surface::stand)
+                    .map(|stand| stand.left);
+                assert_eq!(left, Some(1));
             }
         }
     }

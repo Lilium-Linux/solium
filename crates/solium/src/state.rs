@@ -89,6 +89,7 @@ use crate::{
     layer, monitor,
     pane::Pane,
     present::{self, Clock, Frame},
+    qml::hosted::{Asking, PointerKind, ScenePointer},
     script::{
         AnimationSpec, Command, Drawn, Outcome, Parentage, Rect, Scripts, Snapshot, WindowInfo,
     },
@@ -165,6 +166,16 @@ const fn insets_for(frame: &crate::pane::Frame) -> Insets {
         crate::pane::Frame::None => Insets::NONE,
         crate::pane::Frame::Styled(decoration) => decoration.insets(),
     }
+}
+
+/// A press a hosted scene took, and where: the pointer is that scene's until
+/// every button is up (Ruling 7).
+/// `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`.
+#[derive(Clone, Debug)]
+pub(crate) struct ScenePress {
+    pub(crate) surface: crate::scripted::SurfaceId,
+    pub(crate) output: Output,
+    pub(crate) area: Rectangle<i32, Logical>,
 }
 
 /// Per-client state Smithay asks us to store.
@@ -372,6 +383,14 @@ pub(crate) struct Solium {
     /// event a hosted scene is told carries.
     /// `tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`.
     pub(crate) pointer_buttons: u32,
+    /// A press a scene took, which holds the pointer for it until every
+    /// button is up (Ruling 7).
+    /// `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`.
+    pub(crate) scene_press: Option<ScenePress>,
+    /// The scene the pointer was last over, and the one this motion found.
+    /// `tests::real_client::reflow_on_close::hosted::the_scene_hears_the_pointer_leave_when_it_moves_off_its_items`.
+    pub(crate) scene_hovered: Option<(crate::scripted::SurfaceId, Output)>,
+    pub(crate) scene_hover_seen: Option<(crate::scripted::SurfaceId, Output)>,
     // A window on its way out, and one that has been asked to close and not
     // gone, used to be two `HashMap<PaneId, Duration>` here. They are
     // `Pane::closing_at` and `Pane::asked_at` now: a timer about one window is
@@ -908,6 +927,9 @@ impl Solium {
             loading: crate::script::Loading::default(),
             hovered_frame: None,
             pointer_buttons: 0,
+            scene_press: None,
+            scene_hovered: None,
+            scene_hover_seen: None,
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
@@ -1810,6 +1832,18 @@ impl Solium {
     /// on the desktop, and the symptom would be "windows stopped responding"
     /// rather than anything mentioning wallpapers.
     ///
+    /// A surface is offered only the points its scene's items claim, for what
+    /// the event asks: motion where an item takes hover or presses, a button
+    /// or the wheel where one takes presses (Ruling 6;
+    /// `tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`,
+    /// `tests::real_client::reflow_on_close::hosted::a_hover_strip_hears_the_motion_and_leaves_the_window_its_press`).
+    /// A press a scene took holds the pointer for it, wherever the pointer
+    /// goes, until every button is up (Ruling 7;
+    /// `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`),
+    /// and what the scene asked for on the way is acted on in the same
+    /// dispatch
+    /// (`tests::real_client::a_click_on_a_hosted_button_is_acted_on_at_its_release`).
+    ///
     /// Returns whether one took it. None does while the session is locked:
     /// the pointer is the lock screen's, and nothing of the session's may
     /// notice it going past
@@ -1818,12 +1852,25 @@ impl Solium {
         &mut self,
         above_windows: bool,
         location: Point<f64, Logical>,
-        event: crate::qml::hosted::ScenePointer,
+        event: ScenePointer,
     ) -> bool {
         if self.lock.is_some() {
             return false;
         }
-        let Some((output, id, area)) = self.surface_claiming(above_windows, location) else {
+        if let Some(held) = self.scene_press.clone() {
+            if let Some(surface) = self.surfaces.get_mut(held.surface) {
+                surface.deliver(&held.output, held.area, location, event);
+            }
+            if matches!(event.kind, PointerKind::Release(_)) && event.buttons == 0 {
+                self.scene_press = None;
+            }
+            self.redraw = true;
+            self.settle_surfaces();
+            return true;
+        }
+        let Some((output, id, area)) =
+            self.surface_claiming(above_windows, location, Asking::of(event.kind))
+        else {
             return false;
         };
         let Some(surface) = self.surfaces.get_mut(id) else {
@@ -1843,13 +1890,45 @@ impl Solium {
             // Nothing is drawn there, so nothing is taken.
             return false;
         }
+        match event.kind {
+            PointerKind::Motion => self.scene_hover_seen = Some((id, output)),
+            PointerKind::Press(_) => {
+                self.scene_press = Some(ScenePress {
+                    surface: id,
+                    output,
+                    area,
+                });
+            }
+            PointerKind::Release(_) | PointerKind::Wheel { .. } => {}
+        }
         self.redraw = true;
         self.settle_surfaces();
         true
     }
 
+    /// After a motion was offered to the scenes: tell the one the pointer
+    /// left.
+    /// `tests::real_client::reflow_on_close::hosted::the_scene_hears_the_pointer_leave_when_it_moves_off_its_items`.
+    pub(crate) fn finish_scene_motion(&mut self) {
+        let now = self.scene_hover_seen.take();
+        if self.scene_press.is_some() {
+            return;
+        }
+        let key = |hovered: &Option<(crate::scripted::SurfaceId, Output)>| {
+            hovered.as_ref().map(|(id, output)| (*id, output.name()))
+        };
+        if key(&now) != key(&self.scene_hovered) {
+            if let Some((id, output)) = self.scene_hovered.take()
+                && let Some(surface) = self.surfaces.get_mut(id)
+            {
+                surface.leave(&output);
+            }
+            self.scene_hovered = now;
+        }
+    }
+
     /// Which scripted surface, if any, claims `location` on its side of the
-    /// windows.
+    /// windows, for what `asking` asks of it.
     ///
     /// **Split out of [`Self::surface_pointer`] so the pointer can ask the
     /// question without answering it.** The cursor has to know whether a press
@@ -1868,6 +1947,7 @@ impl Solium {
         &self,
         above_windows: bool,
         location: Point<f64, Logical>,
+        asking: Asking,
     ) -> Option<(Output, crate::scripted::SurfaceId, Rectangle<i32, Logical>)> {
         if self.surfaces.iter().all(|surface| !surface.interactive()) {
             return None;
@@ -1877,7 +1957,7 @@ impl Solium {
         // is what is on top there, in `crate::stack`'s order: not under a
         // client's surface at its own layer or above, nor under the window
         // lifted over the bars.
-        let above = self.topmost_above(location, true);
+        let above = self.topmost_above(location, Some(asking));
         if above_windows {
             return match above? {
                 hit_test::Above::Script(output, id, area) => Some((output, id, area)),
@@ -1900,7 +1980,9 @@ impl Solium {
         for band in crate::stack::below() {
             match band {
                 crate::stack::Band::Layer(layer, crate::stack::Owner::Script) => {
-                    if let Some((id, area)) = self.script_at(&output, geometry, layer, location) {
+                    if let Some((id, area)) =
+                        self.script_at(&output, geometry, layer, location, asking)
+                    {
                         return Some((output, id, area));
                     }
                 }
@@ -1919,8 +2001,11 @@ impl Solium {
         None
     }
 
-    /// The script's interactive surface at one layer that has `location`,
-    /// first declared first -- the order `render::stacked` draws them in.
+    /// The script's interactive surface at one layer whose scene claims
+    /// `location` for what `asking` asks, first declared first -- the order
+    /// `render::stacked` draws them in. A surface whose items take nothing
+    /// there is not in the way of what is under it
+    /// (`tests::real_client::reflow_on_close::hosted::a_press_on_a_rounded_corners_transparent_part_falls_through`).
     ///
     /// Where each of them is *drawn*, not merely where it was declared: a
     /// surface carried off by a group is not under the pointer either, which
@@ -1934,6 +2019,7 @@ impl Solium {
         geometry: Rectangle<i32, Logical>,
         layer: crate::scripted::Layer,
         location: Point<f64, Logical>,
+        asking: Asking,
     ) -> Option<(crate::scripted::SurfaceId, Rectangle<i32, Logical>)> {
         let primary = self.primary_output();
         self.surfaces
@@ -1941,9 +2027,10 @@ impl Solium {
             .filter(|surface| surface.interactive() && surface.layer() == layer)
             .filter_map(|surface| {
                 let area = surface.area_on(output, geometry, primary.as_ref())?;
-                Some((surface.id(), self.carried(surface.id(), output, area)))
+                Some((surface, self.carried(surface.id(), output, area)))
             })
-            .find(|(_, area)| area.to_f64().contains(location))
+            .find(|(surface, area)| surface.hit(output, *area, location).claims(asking))
+            .map(|(surface, area)| (surface.id(), area))
     }
 
     /// Act on whatever a scripted surface asked for.

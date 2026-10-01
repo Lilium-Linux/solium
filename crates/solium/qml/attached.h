@@ -90,12 +90,25 @@ class SoliumAttached : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(SoliumMonitor *monitor READ monitor CONSTANT)
+    /* `Solium.input`: true takes presses, "hover" only hover, false opts the
+     * item out. Unset, the item's own handlers decide. Ruling 6.
+     * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
+    Q_PROPERTY(QVariant input READ input WRITE setInput NOTIFY inputChanged)
 public:
     explicit SoliumAttached(QObject *item);
     SoliumMonitor *monitor() const;
+    QVariant input() const;
+    void setInput(const QVariant &value);
+    /* -1 unset, 0 opted out, 1 hover, 2 press, as solium_claim_at reads it.
+     * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
+    int inputClaim() const { return m_input; }
+
+signals:
+    void inputChanged();
 
 private:
     QObject *m_item;
+    int m_input = -1;
 };
 
 /* The name `Solium` in QML. It exists only to carry the attached object.
@@ -116,6 +129,13 @@ SoliumHosting *solium_hosting_of(QObject *object);
  * object created in it or in a context below it.
  * `qml::hosted::tests::every_object_of_a_hosted_scene_finds_its_monitor_after_the_build`. */
 void solium_hosting_mark(QQmlContext *context, SoliumHosting *hosting);
+class QQuickItem;
+/* What the items under `scene_point` claim: 0 nothing, 1 hover, 2 a press.
+ * The strongest claim of every visible, enabled, non-transparent item there,
+ * inside its ancestors' clips and its own contains(), as Qt's own delivery
+ * lets an item that takes no press leave it to one below. Ruling 6.
+ * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
+int solium_claim_at(QQuickItem *item, const QPointF &scene_point);
 /* The row for a connector name: until the compositor publishes one, an
  * absent row carrying the name. Created on first ask and never freed, so a
  * monitor that goes and comes back is the same row.

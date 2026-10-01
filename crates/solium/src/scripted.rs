@@ -26,7 +26,9 @@
 //! `interactive`, and then it gets pointer motion, every button, the wheel and
 //! the modifiers held
 //! (`state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`,
-//! `state::tests::real_client::reflow_on_close::hosted::the_wheel_over_a_scene_reaches_it`).
+//! `state::tests::real_client::reflow_on_close::hosted::the_wheel_over_a_scene_reaches_it`),
+//! where its scene's items take input, and the rest goes to what is under it
+//! (`state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`).
 //! Keyboard focus, grabs and everything else a real client gets are a bigger
 //! question than this — they need the scoped grab in #85. A hosted shell is
 //! one of these surfaces and has the same limits (`docs/shell-boundary.md`,
@@ -75,7 +77,11 @@ use smithay::{
     utils::{Logical, Point, Rectangle},
 };
 
-use crate::{json::Json, qml::hosted::ScenePointer, surface::ShellSurface};
+use crate::{
+    json::Json,
+    qml::hosted::{Hit, ScenePointer},
+    surface::ShellSurface,
+};
 
 /// Where a surface sits in the frame.
 ///
@@ -288,6 +294,40 @@ impl Surface {
         })
     }
 
+    /// What this surface's scene on one monitor claims at a point, nothing
+    /// outside its area.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`.
+    pub(crate) fn hit(
+        &self,
+        output: &Output,
+        area: Rectangle<i32, Logical>,
+        location: Point<f64, Logical>,
+    ) -> Hit {
+        if !area.to_f64().contains(location) {
+            return Hit::Nothing;
+        }
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_ref() {
+            return (stand.hit)(location);
+        }
+        self.instances
+            .get(&output.name())
+            .map_or(Hit::Nothing, |instance| instance.hit(area, location))
+    }
+
+    /// Tell this surface's scene on one monitor that the pointer left it.
+    /// `state::tests::real_client::reflow_on_close::hosted::the_scene_hears_the_pointer_leave_when_it_moves_off_its_items`.
+    pub(crate) fn leave(&mut self, output: &Output) {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_mut() {
+            stand.left += 1;
+            return;
+        }
+        if let Some(instance) = self.instance_mut(output) {
+            instance.leave();
+        }
+    }
+
     /// Stand `stand` in for this surface's scene on every monitor.
     #[cfg(test)]
     pub(crate) fn stand_in(&mut self, stand: Stand) {
@@ -437,22 +477,30 @@ impl Surface {
 }
 
 /// What stands in for a surface's scene in a state test, which cannot build a
-/// Qt scene beside a real Wayland client (the #99 test): what reached it. One
-/// stand answers for every instance of its surface.
+/// Qt scene beside a real Wayland client (the #99 test): what it claims, and
+/// what reached it. One stand answers for every instance of its surface.
 /// `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`.
 #[cfg(test)]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Stand {
+    /// What the scene claims at a point, in compositor coordinates.
+    pub(crate) hit: fn(Point<f64, Logical>) -> Hit,
     /// Every pointer event delivered, in the surface's own coordinates.
     pub(crate) seen: Vec<(Point<f64, Logical>, ScenePointer)>,
+    /// How many times the pointer was told it left.
+    pub(crate) left: u32,
 }
 
 #[cfg(test)]
 impl Stand {
-    /// A scene that takes everything in its area, as every surface did before
-    /// #173.
+    /// A scene that takes a press everywhere in its area, as every surface
+    /// did before #173.
     pub(crate) fn solid() -> Self {
-        Self::default()
+        Self {
+            hit: |_| Hit::Press,
+            seen: Vec::new(),
+            left: 0,
+        }
     }
 }
 

@@ -453,6 +453,7 @@ fn pointer_motion<B: InputBackend>(
             state.surface_pointer(false, location, motion);
         }
         follow_pointer(state, location, pointer.is_grabbed());
+        state.finish_scene_motion();
     }
 
     let under = state.surface_under(location);
@@ -535,6 +536,7 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
                 state.surface_pointer(false, location, motion);
             }
             follow_pointer(state, location, pointer.is_grabbed());
+            state.finish_scene_motion();
         }
         pointer.motion(
             state,
@@ -763,12 +765,15 @@ fn scene_event(state: &Solium, kind: PointerKind) -> ScenePointer {
 ///
 /// And over a client's layer surface on top of a window, which is what the
 /// pointer is on there, as it is for a press (`pointer_button`'s
-/// `on_a_client`). `focus_follows_mouse_does_not_reach_through_a_bar`.
+/// `on_a_client`), and over a hosted scene where it takes a press, or while
+/// it holds one (Rulings 7 and 8). `focus_follows_mouse_does_not_reach_through_a_bar`,
+/// `state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`.
 pub(crate) fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
     if !state.profile.focus_follows_mouse
         || grabbed
         || state.script_grab
-        || state.client_above(location)
+        || state.scene_press.is_some()
+        || state.pointed_above(location)
     {
         return;
     }

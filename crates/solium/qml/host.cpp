@@ -2570,3 +2570,20 @@ extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, 
     QMouseEvent event(type, at, at, which, held, mods);
     QCoreApplication::sendEvent(scene->window, &event);
 }
+
+extern "C" int solium_qml_scene_hit(const SoliumQmlScene *scene, double x, double y)
+{
+    if (scene == nullptr || scene->root == nullptr) {
+        return 0;
+    }
+    return solium_claim_at(scene->root, QPointF(x, y));
+}
+
+extern "C" void solium_qml_scene_pointer_leave(SoliumQmlScene *scene)
+{
+    if (scene == nullptr || scene->window == nullptr) {
+        return;
+    }
+    QEvent leave(QEvent::Leave);
+    QCoreApplication::sendEvent(scene->window, &leave);
+}

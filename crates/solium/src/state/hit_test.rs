@@ -787,14 +787,25 @@ impl Solium {
             .map(|(surface, offset)| (surface, (geometry.loc + offset).to_f64()));
         }
 
+        // A press a hosted scene took holds the pointer for that scene until
+        // every button is up (Ruling 7), so no client has it meanwhile.
+        // `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`.
+        if self.scene_press.is_some() {
+            return None;
+        }
+
         // Over the windows first, in `crate::stack`'s order: a client's layer
         // surface there is the one the pointer reaches -- a panel reserved its
         // strip precisely so nothing of a window's would be under the cursor
-        // there -- unless the window lifted over the bars covers it. A
-        // script's surfaces are not asked: `surface_pointer` offers them the
-        // pointer beside this one, through the same order.
-        if let Some(Above::Client(surface, origin)) = self.topmost_above(location, false) {
-            return Some((surface, origin));
+        // there -- unless the window lifted over the bars covers it; and where
+        // a script's scene takes a press, no client has the pointer (Ruling
+        // 8). A scene that takes only hover leaves it to what is under it.
+        // `tests::real_client::reflow_on_close::hosted::a_press_on_a_shell_button_does_not_reach_the_window`,
+        // `tests::real_client::reflow_on_close::hosted::a_hover_strip_hears_the_motion_and_leaves_the_window_its_press`.
+        match self.topmost_above(location, Some(Asking::Press)) {
+            Some(Above::Client(surface, origin)) => return Some((surface, origin)),
+            Some(Above::Script(..)) => return None,
+            Some(Above::Lifted) | None => {}
         }
 
         let now = self.clock.now();
@@ -948,14 +959,15 @@ impl Solium {
     /// band until one has something there.
     ///
     /// **The hit tests' half of the one order**, which the renderer reads in
-    /// `render::stacked`. `scripts` is whether a script's surfaces are asked:
-    /// the press and the pointer's shape ask them, and the pointer's delivery
-    /// to a client does not, since `surface_pointer` offers a script's surface
-    /// the pointer beside it. The stacking tests in `state::tests` ask each.
+    /// `render::stacked`. `scripts` is what a script's surfaces are asked
+    /// for, and `None` leaves them out: a surface is there only where its
+    /// scene's items claim the point for that
+    /// (`tests::real_client::reflow_on_close::hosted::a_hover_strip_hears_the_motion_and_leaves_the_window_its_press`).
+    /// The stacking tests in `state::tests` ask each.
     pub(crate) fn topmost_above(
         &self,
         location: Point<f64, Logical>,
-        scripts: bool,
+        scripts: Option<Asking>,
     ) -> Option<Above> {
         let output = monitor::at(&self.space, location)?;
         let geometry = self.space.output_geometry(&output)?;
@@ -968,10 +980,10 @@ impl Solium {
                 layer::surface_under(&output, layer, location - geometry.loc.to_f64())
                     .map(|(surface, origin)| Above::Client(surface, origin + geometry.loc.to_f64()))
             }
-            Band::Layer(layer, Owner::Script) if scripts => self
-                .script_at(&output, geometry, layer, location)
+            Band::Layer(layer, Owner::Script) => scripts
+                .and_then(|asking| self.script_at(&output, geometry, layer, location, asking))
                 .map(|(id, area)| Above::Script(output.clone(), id, area)),
-            Band::Layer(_, Owner::Script) | Band::Windows => None,
+            Band::Windows => None,
             Band::Fullscreen => lifted
                 .and_then(|id| self.panes.get(id))
                 .filter(|pane| {
@@ -984,10 +996,25 @@ impl Solium {
         })
     }
 
+    /// Whether something over the windows is what the pointer is on at
+    /// `location`: a client's layer surface, or a script's scene whose items
+    /// take a press there (Ruling 8). The window under either is not.
+    /// `tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`,
+    /// `focus_follows_mouse_does_not_reach_through_a_bar`.
+    pub(crate) fn pointed_above(&self, location: Point<f64, Logical>) -> bool {
+        matches!(
+            self.topmost_above(location, Some(Asking::Press)),
+            Some(Above::Client(..) | Above::Script(..))
+        )
+    }
+
     /// Whether a client's layer surface is what is on top at `location`, over
     /// the windows and their chrome: a press there is the client's.
     pub(crate) fn client_above(&self, location: Point<f64, Logical>) -> bool {
-        matches!(self.topmost_above(location, true), Some(Above::Client(..)))
+        matches!(
+            self.topmost_above(location, Some(Asking::Press)),
+            Some(Above::Client(..))
+        )
     }
 
     /// Whether a window has `location`, over everything below the windows: a
@@ -1036,15 +1063,17 @@ impl Solium {
     /// Who a press at `location` would belong to.
     ///
     /// The three links of [`claim_of`], fetched in the order `pointer_button`
-    /// fetches them. Read-only: the surface link is a geometric claim rather
-    /// than a delivery, for the reasons [`Self::surface_claiming`] gives.
+    /// fetches them. Read-only: the surface link is what the scene's items
+    /// claim for a press, asked rather than delivered, for the reasons
+    /// [`Self::surface_claiming`] gives
+    /// (`tests::real_client::reflow_on_close::hosted::a_press_on_a_shell_button_does_not_reach_the_window`).
     ///
     /// No chrome under a client's surface: one over the windows is over their
     /// chrome too, and the press is the client's, which is what
     /// `pointer_button` does with it.
     /// `an_overlay_mapped_before_a_bar_is_drawn_over_it_and_takes_the_press`.
     pub(crate) fn claim_under(&self, location: Point<f64, Logical>) -> Claim {
-        let above = self.topmost_above(location, true);
+        let above = self.topmost_above(location, Some(Asking::Press));
         let chrome = if matches!(above, Some(Above::Client(..))) {
             None
         } else {

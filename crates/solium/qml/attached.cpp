@@ -5,6 +5,9 @@
 
 #include <QtQml/QQmlContext>
 #include <QtQml/QQmlEngine>
+#include <QtQuick/QQuickItem>
+
+#include <algorithm>
 
 namespace {
 
@@ -73,6 +76,102 @@ SoliumMonitor *SoliumAttached::monitor() const
 {
     const SoliumHosting *hosting = solium_hosting_of(m_item);
     return solium_monitor_row(hosting != nullptr ? hosting->monitor : QString());
+}
+
+QVariant SoliumAttached::input() const
+{
+    switch (m_input) {
+    case 0:
+        return false;
+    case 1:
+        return QStringLiteral("hover");
+    case 2:
+        return true;
+    default:
+        return {};
+    }
+}
+
+void SoliumAttached::setInput(const QVariant &value)
+{
+    int next = -1;
+    if (value.typeId() == QMetaType::Bool) {
+        next = value.toBool() ? 2 : 0;
+    } else if (value.toString() == QStringLiteral("hover")) {
+        next = 1;
+    } else {
+        qWarning("Solium.input takes true, false or \"hover\"");
+    }
+    if (next != m_input) {
+        m_input = next;
+        emit inputChanged();
+    }
+}
+
+namespace {
+
+/* Whether an item takes presses itself, whatever handlers it has: the
+ * Qt Quick types that do.
+ * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
+bool takes_presses_itself(const QQuickItem *item)
+{
+    for (const char *type : {"QQuickMouseArea", "QQuickControl", "QQuickFlickable",
+                             "QQuickTextInput", "QQuickTextEdit"}) {
+        if (item->inherits(type)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* What one item claims for itself, before its children are asked. Its
+ * handlers first: Qt gives an item with any pointer handler every mouse
+ * button, to hand presses on to the handlers, so an item with only a
+ * HoverHandler accepts every button and still takes no press itself.
+ * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
+int own_claim(QQuickItem *item)
+{
+    auto *attached = qobject_cast<SoliumAttached *>(
+        qmlAttachedPropertiesObject<SoliumAttachedType>(item, false));
+    if (attached != nullptr && attached->inputClaim() >= 0) {
+        return attached->inputClaim();
+    }
+    bool hover_handler = false;
+    for (QObject *child : item->children()) {
+        if (child->inherits("QQuickHoverHandler")) {
+            hover_handler = true;
+        } else if (child->inherits("QQuickPointerHandler")) {
+            return 2;
+        }
+    }
+    if (hover_handler) {
+        return takes_presses_itself(item) ? 2 : 1;
+    }
+    if (item->acceptedMouseButtons() != Qt::NoButton) {
+        return 2;
+    }
+    return item->acceptHoverEvents() ? 1 : 0;
+}
+
+} // namespace
+
+int solium_claim_at(QQuickItem *item, const QPointF &scene_point)
+{
+    if (item == nullptr || !item->isVisible() || item->opacity() <= 0.0 || !item->isEnabled()) {
+        return 0;
+    }
+    const bool inside = item->contains(item->mapFromScene(scene_point));
+    if (item->clip() && !inside) {
+        return 0;
+    }
+    int claim = inside ? own_claim(item) : 0;
+    for (QQuickItem *child : item->childItems()) {
+        if (claim == 2) {
+            break;
+        }
+        claim = std::max(claim, solium_claim_at(child, scene_point));
+    }
+    return claim;
 }
 
 SoliumAttached *SoliumAttachedType::qmlAttachedProperties(QObject *object)

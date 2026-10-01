@@ -186,6 +186,16 @@ impl Solium {
             let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
             pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
         }
+        // A scene's press hold and its hover go too: behind the lock nothing
+        // of the session's may notice the pointer.
+        // `state::tests::real_client::lock_focus::the_lock_lets_go_of_a_hosted_scenes_press_and_its_hover`.
+        self.scene_press = None;
+        self.scene_hover_seen = None;
+        if let Some((id, output)) = self.scene_hovered.take()
+            && let Some(surface) = self.surfaces.get_mut(id)
+        {
+            surface.leave(&output);
+        }
     }
 
     /// [`Self::release_grabs`] for one window: dismiss the menus `window` has

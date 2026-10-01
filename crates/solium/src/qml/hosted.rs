@@ -6,6 +6,7 @@
 use std::{
     ffi::{CString, c_char, c_int},
     path::Path,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Result, anyhow};
@@ -38,6 +39,12 @@ mod ffi {
             pixel_x: f64,
             pixel_y: f64,
         );
+        pub(super) fn solium_qml_scene_hit(
+            scene: *const super::super::ffi::Scene,
+            x: f64,
+            y: f64,
+        ) -> c_int;
+        pub(super) fn solium_qml_scene_pointer_leave(scene: *mut super::super::ffi::Scene);
     }
 }
 
@@ -98,6 +105,7 @@ impl Scene {
     /// `scripted::tests::a_redeclared_property_is_written_into_the_live_scene`.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn set_json(&mut self, path: &str, value: &Json) -> bool {
+        touched();
         let (Ok(path), Ok(value)) = (CString::new(path), CString::new(value.render())) else {
             return false;
         };
@@ -112,6 +120,7 @@ impl Scene {
     /// `tests::the_wheel_reaches_a_wheel_handler_with_its_angle`.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn pointer_event(&mut self, x: f64, y: f64, event: &ScenePointer) {
+        touched();
         let still = ((0.0, 0.0), (0.0, 0.0));
         let (kind, button, (angle, pixels)) = match event.kind {
             PointerKind::Motion => (0, 0, still),
@@ -135,6 +144,83 @@ impl Scene {
                 pixels.1,
             );
         }
+    }
+}
+
+/// What a scene's items claim at a point (Ruling 6).
+/// `tests::the_item_tree_decides_what_a_point_claims`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Hit {
+    Nothing,
+    /// Motion only: a hover strip, a `HoverHandler`.
+    Hover,
+    /// Presses, releases and the wheel too.
+    Press,
+}
+
+/// What a pointer event asks of a point: motion asks for hover, a button or
+/// the wheel for a press.
+/// `state::tests::real_client::reflow_on_close::hosted::a_hover_strip_hears_the_motion_and_leaves_the_window_its_press`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Asking {
+    Hover,
+    Press,
+}
+
+impl Hit {
+    pub(crate) fn claims(self, asking: Asking) -> bool {
+        matches!(
+            (self, asking),
+            (Self::Press, _) | (Self::Hover, Asking::Hover)
+        )
+    }
+}
+
+impl Asking {
+    pub(crate) fn of(kind: PointerKind) -> Self {
+        match kind {
+            PointerKind::Motion => Self::Hover,
+            PointerKind::Press(_) | PointerKind::Release(_) | PointerKind::Wheel { .. } => {
+                Self::Press
+            }
+        }
+    }
+}
+
+/// How many times Qt may have changed an item tree: every tick, drain,
+/// resize, property write and delivery. A hit cached at one generation is
+/// good until the next, which is how one item walk serves a whole frame's
+/// questions about a still pointer.
+/// `surface::tests::a_cached_hit_follows_the_scene_once_qt_has_run`.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn touched() {
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
+}
+
+impl Scene {
+    /// What the items under a point claim.
+    /// `tests::the_item_tree_decides_what_a_point_claims`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn hit(&self, x: f64, y: f64) -> Hit {
+        // SAFETY: the scene is live for as long as `self`.
+        match unsafe { ffi::solium_qml_scene_hit(self.scene, x, y) } {
+            2 => Hit::Press,
+            1 => Hit::Hover,
+            _ => Hit::Nothing,
+        }
+    }
+
+    /// The pointer left this scene. `tests::a_left_scene_drops_its_hover`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn leave(&mut self) {
+        touched();
+        // SAFETY: the scene is live for as long as `self`.
+        unsafe { ffi::solium_qml_scene_pointer_leave(self.scene) }
     }
 }
 
@@ -166,8 +252,123 @@ pub(crate) struct ScenePointer {
 pub(crate) mod tests {
     use std::path::PathBuf;
 
-    use super::{PointerKind, ScenePointer};
+    use super::{Hit, PointerKind, ScenePointer};
     use crate::qml::{Scene, qt_test::on_the_qt_thread};
+
+    const CLAIMS: &str = r#"
+        import QtQuick
+        import QtQuick.Controls
+        import Solium
+        Item {
+            // A button at 0..20 x 0..20.
+            MouseArea { x: 0; y: 0; width: 20; height: 20 }
+            // A hover-only strip at 30..40, and a button under a hover-only item at 50..60.
+            Item { x: 30; y: 0; width: 10; height: 32; Solium.input: "hover" }
+            MouseArea { x: 50; y: 0; width: 10; height: 32 }
+            Item { x: 50; y: 0; width: 10; height: 32; Solium.input: "hover" }
+            // A rounded button at 0..20 x 22..32 whose corner is outside its
+            // mask. Qt calls only a typed `contains(point: point): bool`, and
+            // the mask is the whole shape, its bounds too.
+            MouseArea {
+                x: 0; y: 22; width: 20; height: 10
+                containmentMask: QtObject {
+                    function contains(point: point): bool {
+                        return point.x >= 0 && point.x < 20 && point.y >= 0 && point.y < 10
+                            && (point.x >= 4 || point.y >= 4)
+                    }
+                }
+            }
+            // Opted out, invisible, transparent, and a tap and a hover handler.
+            MouseArea { x: 22; y: 0; width: 6; height: 10; Solium.input: false }
+            MouseArea { x: 22; y: 11; width: 6; height: 10; visible: false }
+            MouseArea { x: 22; y: 22; width: 6; height: 10; opacity: 0 }
+            Item { x: 42; y: 0; width: 6; height: 10; TapHandler {} }
+            Item { x: 42; y: 11; width: 6; height: 10; HoverHandler {} }
+            // Items that take presses themselves, each with a HoverHandler,
+            // as a pointer cursor is set.
+            MouseArea { x: 42; y: 22; width: 6; height: 10; HoverHandler {} }
+            Button { x: 60; y: 0; width: 2; height: 10; HoverHandler {} }
+            TextInput { x: 60; y: 11; width: 2; height: 10; HoverHandler {} }
+        }
+    "#;
+
+    /// **What claims a point is the live item tree** (#173, Ruling 6): where
+    /// nothing takes input the point is nobody's, a button takes the press, a
+    /// hover strip only hover, an item outside its mask nothing, and an
+    /// opted-out, invisible or transparent item nothing.
+    #[test]
+    fn the_item_tree_decides_what_a_point_claims() {
+        on_the_qt_thread(|| {
+            let (directory, scene) = hosted("solium-hosted-claims", CLAIMS, "claims-1");
+            let cases = [
+                ((63.0, 31.0), Hit::Nothing, "where the scene draws nothing"),
+                ((10.0, 10.0), Hit::Press, "a MouseArea"),
+                ((35.0, 10.0), Hit::Hover, "Solium.input: \"hover\""),
+                (
+                    (55.0, 10.0),
+                    Hit::Press,
+                    "a hover-only item over a button leaves the press to the button",
+                ),
+                (
+                    (1.0, 23.0),
+                    Hit::Nothing,
+                    "a rounded corner outside the containment mask",
+                ),
+                ((10.0, 27.0), Hit::Press, "inside the mask"),
+                ((24.0, 5.0), Hit::Nothing, "Solium.input: false"),
+                ((24.0, 15.0), Hit::Nothing, "invisible"),
+                ((24.0, 26.0), Hit::Nothing, "opacity 0"),
+                ((44.0, 5.0), Hit::Press, "a TapHandler"),
+                ((44.0, 15.0), Hit::Hover, "a HoverHandler"),
+                ((44.0, 27.0), Hit::Press, "a MouseArea with a HoverHandler"),
+                ((61.0, 5.0), Hit::Press, "a Button with a HoverHandler"),
+                ((61.0, 15.0), Hit::Press, "a TextInput with a HoverHandler"),
+            ];
+            let wrong: Vec<String> = cases
+                .iter()
+                .filter(|((x, y), wanted, _)| scene.hit(*x, *y) != *wanted)
+                .map(|((x, y), wanted, what)| {
+                    format!(
+                        "{what} at ({x}, {y}): wanted {wanted:?}, got {:?}",
+                        scene.hit(*x, *y)
+                    )
+                })
+                .collect();
+            assert!(wrong.is_empty(), "{wrong:#?}");
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A scene told the pointer left un-hovers what it hovered.**
+    #[test]
+    fn a_left_scene_drops_its_hover() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-leave",
+                "import QtQuick\nItem { readonly property int hovered: area.containsMouse ? 1 : 0\n MouseArea { id: area; anchors.fill: parent; hoverEnabled: true } }\n",
+                "leave-1",
+            );
+            scene.pointer_event(
+                10.0,
+                10.0,
+                &ScenePointer {
+                    kind: PointerKind::Motion,
+                    buttons: 0,
+                    modifiers: 0,
+                },
+            );
+            assert_eq!(scene.get_int("hovered"), 1);
+            scene.leave();
+            assert_eq!(
+                scene.get_int("hovered"),
+                0,
+                "the hover outlived the pointer leaving"
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
 
     const BUTTONS: &str = r"
         import QtQuick

@@ -895,6 +895,7 @@ pub(crate) fn user_qml_dir() -> Option<std::path::PathBuf> {
 /// unconditional; rendering waits to be asked.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
 pub(crate) fn tick(elapsed: Duration) {
+    hosted::touched();
     let millis = c_longlong::try_from(elapsed.as_millis()).unwrap_or(c_longlong::MAX);
     // SAFETY: the host is started before any scene exists, and this touches
     // only process-global state.
@@ -962,6 +963,7 @@ pub(crate) fn animating() -> bool {
 #[expect(unsafe_code, reason = "calling into the Qt host")]
 pub(crate) fn drain(elapsed: Duration, advance: bool) -> bool {
     no_frame_in_flight("qml::drain");
+    hosted::touched();
     let millis = c_longlong::try_from(elapsed.as_millis()).unwrap_or(c_longlong::MAX);
     // SAFETY: touches only process-global state, as `tick` does.
     unsafe { ffi::solium_qml_drain(millis, c_int::from(advance)) != 0 }
@@ -1311,6 +1313,7 @@ impl Scene {
     /// differently sized scene has no business knowing what GBM is — see
     /// `ALLOCATOR`.
     fn rebind_sized(&mut self, width: i32, height: i32, scale: f64) -> Result<()> {
+        hosted::touched();
         let gbm = allocator().ok_or_else(|| {
             anyhow!("this backend has no GBM device, so it cannot resize a GPU scene")
         })?;
@@ -1388,6 +1391,7 @@ impl Scene {
         }
         self.size = (width, height);
         self.scale = scale;
+        hosted::touched();
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
         unsafe { ffi::solium_qml_scene_resize(self.scene, width, height, scale) }
     }
@@ -1494,6 +1498,7 @@ impl Scene {
 
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn set_string(&mut self, name: &str, value: &str) {
+        hosted::touched();
         let (Ok(name), Ok(value)) = (CString::new(name), CString::new(value)) else {
             tracing::warn!(name, "property name or value contains a NUL byte");
             return;
@@ -1505,6 +1510,7 @@ impl Scene {
     /// Set a whole-number property on the scene's root.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn set_int(&mut self, name: &str, value: i32) {
+        hosted::touched();
         let Ok(name) = std::ffi::CString::new(name) else {
             return;
         };
@@ -1532,6 +1538,7 @@ impl Scene {
 
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn set_bool(&mut self, name: &str, value: bool) {
+        hosted::touched();
         let Ok(name) = CString::new(name) else {
             tracing::warn!(name, "property name contains a NUL byte");
             return;
@@ -1641,6 +1648,7 @@ impl Scene {
     /// Pointer input in scene coordinates. `None` is motion.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn pointer(&mut self, x: f64, y: f64, pressed: Option<bool>) {
+        hosted::touched();
         let pressed = match pressed {
             Some(true) => 1,
             Some(false) => 0,
