@@ -426,6 +426,11 @@ pub(crate) mod tests {
                 (1, 1820),
                 "the connector came back, and the scene's row did not"
             );
+            assert_eq!(
+                scene.get_int("changes"),
+                4,
+                "the row the scene first got is not the one that came back"
+            );
             assert!(super::apply_rows(
                 super::Model::Monitors,
                 &render(&diff(&first, &[]))
