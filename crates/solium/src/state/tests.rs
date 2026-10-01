@@ -2730,6 +2730,56 @@ mod real_client {
         });
     }
 
+    /// **A reload that makes another monitor primary drops the old primary's
+    /// scene**, for a surface `on = "primary"` the new configuration declares
+    /// exactly as the old one did. Nothing about the surface changed, so only
+    /// the reload itself can see that its monitor did. No client (the #99
+    /// rule).
+    #[test]
+    fn a_reload_that_moves_the_primary_drops_the_old_primarys_scene() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-reload-primary");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(&scene, "import QtQuick\nItem {}\n").expect("writing the scene");
+            let surface = format!(
+                r#"sol.surface("bar", {{ scene = "{}", layer = "top", on = "primary" }})"#,
+                scene.display()
+            );
+            let before = directory.join("before.lua");
+            std::fs::write(&before, &surface).expect("writing the first configuration");
+            let after = directory.join("after.lua");
+            std::fs::write(
+                &after,
+                format!(
+                    "sol.monitors{{ {{ name = \"{RIGHT_SCREEN}\", primary = true }} }}\n{surface}"
+                ),
+            )
+            .expect("writing the second configuration");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, _) = side_by_side(&mut state, "reload-primary-left");
+            state.start_scripts(Some(
+                Scripts::load(&before).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            scene_on(&mut state, "bar", &left);
+
+            state.reload_from(&after);
+            let id = state.surfaces.named("bar").expect("still declared");
+            assert_eq!(
+                state
+                    .surfaces
+                    .get(id)
+                    .map(crate::scripted::Surface::instance_count),
+                Some(0),
+                "the monitor that stopped being primary kept its scene"
+            );
+        });
+    }
+
     /// The last size this toplevel was configured with, as the client saw it.
     fn last_configured(
         client: &Client,
