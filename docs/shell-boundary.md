@@ -156,12 +156,22 @@ metrics the frames are drawn with. Beside it, `import Solium` brings the
 attached `Solium` object, which any item can read: `Solium.monitor` is the
 monitor this instance of the scene is on
 (`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
-So far it carries the monitor's `name`; `present` and `valid` read false until
-monitor rows are published. The module's types are written unqualified, as
-`Theme` is. A `Theme.qml` of your own in
-`~/.config/solium/qml/Solium/` is meant to override it, and does not yet: the
-shipped module is found first
+The module's types are written unqualified, as `Theme` is. A `Theme.qml` of
+your own in `~/.config/solium/qml/Solium/` is meant to override it, and does
+not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
+
+**Its monitor, live.** `Solium.monitor` is the row of the monitor this
+instance is on: `name`, `whole` and `area` (rectangles in the global space,
+`area` being the work area), `scale`, `transform`, `primary`, and `present`
+(`valid` reads the same). It changes in place, once per frame and all at once,
+when the monitor does, and a monitor that goes reads `present: false` and
+keeps its name; the same monitor coming back is the same row again
+(`qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`).
+Until the compositor publishes a monitor, its row carries only the `name`, and
+`present` and `valid` read false
+(`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
+A scene that wants its own coordinates subtracts `whole.x` and `whole.y`.
 
 **A way back to the configuration.** A scene sets a string property named
 `action`, the compositor takes it, and `sol.on("surface", function(name,
