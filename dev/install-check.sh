@@ -337,6 +337,25 @@ XDG_CONFIG_HOME="$broken" DESTDIR="$work/failed" "$install_sh" --uninstall --ses
     >"$work/failed-uninstall.log" 2>&1
 check "  which removes them" [ "$(count_files "$work/failed")" -eq 0 ]
 
+echo "--no-check"
+# For a package built from source, whose binary still finds its build tree
+# during %install and so would fail the asset check (dev/rpm/solium.spec). A
+# stand-in checkout whose binary fails anything it is asked.
+nc_root="$work/no-check-checkout"
+mkdir -p "$nc_root/dev" "$nc_root/crates/solium" "$nc_root/target/install/release"
+cp "$install_sh" "$nc_root/dev/install.sh"
+cp -R "$root/dev/session" "$nc_root/dev/session"
+cp -R "$root/crates/solium/qml" "$root/crates/solium/lua" "$nc_root/crates/solium/"
+printf '#!/bin/sh\nexit 1\n' >"$nc_root/target/install/release/solium"
+chmod +x "$nc_root/target/install/release/solium"
+DESTDIR="$work/no-check" "$nc_root/dev/install.sh" --no-build --no-check --prefix /usr \
+    >"$work/no-check.log" 2>&1
+check "install exits 0 without running the binary" [ $? -eq 0 -a -x "$work/no-check/usr/bin/solium" ]
+check "  and says the check was skipped" grep -q "^  check         skipped (--no-check)" "$work/no-check.log"
+DESTDIR="$work/no-check-control" "$nc_root/dev/install.sh" --no-build --prefix /usr \
+    >"$work/no-check-control.log" 2>&1
+check "  where the same install without it fails" [ $? -ne 0 ]
+
 echo "the user's own units and portal choice"
 # ~/.config is the user's. A portal choice edited by hand and a unit linked
 # from a dotfiles checkout are theirs, and survive an install and an uninstall;

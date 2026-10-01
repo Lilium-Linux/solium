@@ -45,6 +45,9 @@ usage: dev/install.sh [options]
                         printed sudo line installs the session file there.
                         Not with a system prefix
   --no-build          install the binary already built in target/install
+  --no-check          do not run the installed binary's --check (a package
+                        built from source, whose binary still finds its build
+                        tree during %install)
   --jobs N            cargo jobs for the build (default: 2)
   --image IMAGE       build container (default: localhost/solium-build:fc44)
   --uninstall         remove what an install with the same options put in place
@@ -71,6 +74,7 @@ prefix="$default_prefix"
 session_dir="$default_session_dir"
 session_dir_given=0
 build=1
+run_check=1
 uninstall=0
 jobs=2
 image="localhost/solium-build:fc44"
@@ -82,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --session-dir) session_dir="${2:?--session-dir needs a directory}"; session_dir_given=1; shift 2 ;;
         --session-dir=*) session_dir="${1#*=}"; session_dir_given=1; shift ;;
         --no-build) build=0; shift ;;
+        --no-check) run_check=0; shift ;;
         --jobs) jobs="${2:?--jobs needs a number}"; shift 2 ;;
         --jobs=*) jobs="${1#*=}"; shift ;;
         --image) image="${2:?--image needs a name}"; shift 2 ;;
@@ -409,28 +414,33 @@ out with:
 # installation is every user's, so what has to load is the shipped
 # configuration, not this user's. dev/install-check.sh's "a system prefix"
 # installs with a broken one.
-echo "checking $bin --check ..."
-check_log="$(mktemp -t solium-install-check-XXXXXX.log)"
-check_config="$config_home"
-if [[ $system -eq 1 ]]; then
-    check_config="$(mktemp -d -t solium-install-config-XXXXXX)"
-fi
-trap 'rm -f "$check_log"; [[ "$check_config" == "$config_home" ]] || rm -rf "$check_config"' EXIT
-if ! XDG_CONFIG_HOME="$check_config" RUST_LOG="info,solium::assets=debug" "$bin" --check \
-    >"$check_log" 2>&1; then
-    cat "$check_log" >&2
-    die "$bin --check failed. $not_checked"
-fi
-chosen="$(sed -n 's/.*shipped assets root=\([^ ]*\).*/\1/p' "$check_log" | head -1)"
-# Both sides resolved: the binary logs the path it was reached by, which goes
-# through a linked <prefix>/share, while $share is spelled by its real place.
-expected="$(realpath "$share")"
-if [[ -z "$chosen" || "$(realpath -m "$chosen")" != "$expected" ]]; then
-    cat "$check_log" >&2
-    die "the installed binary took its QML and Lua from '${chosen:-nowhere}', not \
+check_line="skipped (--no-check)"
+if [[ $run_check -eq 1 ]]; then
+    echo "checking $bin --check ..."
+    check_log="$(mktemp -t solium-install-check-XXXXXX.log)"
+    check_config="$config_home"
+    if [[ $system -eq 1 ]]; then
+        check_config="$(mktemp -d -t solium-install-config-XXXXXX)"
+    fi
+    trap 'rm -f "$check_log"; [[ "$check_config" == "$config_home" ]] || rm -rf "$check_config"' EXIT
+    if ! XDG_CONFIG_HOME="$check_config" RUST_LOG="info,solium::assets=debug" "$bin" --check \
+        >"$check_log" 2>&1; then
+        cat "$check_log" >&2
+        die "$bin --check failed. $not_checked"
+    fi
+    chosen="$(sed -n 's/.*shipped assets root=\([^ ]*\).*/\1/p' "$check_log" | head -1)"
+    # Both sides resolved: the binary logs the path it was reached by, which
+    # goes through a linked <prefix>/share, while $share is spelled by its real
+    # place.
+    expected="$(realpath "$share")"
+    if [[ -z "$chosen" || "$(realpath -m "$chosen")" != "$expected" ]]; then
+        cat "$check_log" >&2
+        die "the installed binary took its QML and Lua from '${chosen:-nowhere}', not \
 $expected. $not_checked"
+    fi
+    checked="$(grep -m1 '^  ok:' "$check_log" || true)"
+    check_line="$bin --check passed${checked:+ (${checked#  })}, using $chosen"
 fi
-checked="$(grep -m1 '^  ok:' "$check_log" || true)"
 
 config_note=""
 if [[ ${#config_kept[@]} -gt 0 ]]; then
@@ -509,7 +519,7 @@ Installed Solium into $dest
   units         $units/solium-session.target
                 $units/solium-autostart.target
   portals       $portals/lilium-portals.conf$config_note
-  check         $bin --check passed${checked:+ (${checked#  })}, using $chosen
+  check         $check_line
   $path_note
 $reload_note$session_note
 $login_note
