@@ -547,12 +547,18 @@ impl Solium {
     /// nothing put it back — `super+1` did not, because the fresh Lua state
     /// believed workspace 1 was already showing.
     pub(crate) fn reload(&mut self) {
-        let path = Scripts::config_path();
+        self.reload_from(&Scripts::config_path());
+    }
+
+    /// [`Self::reload`], from the file at `path`, which is how
+    /// `tests::real_client::a_reload_that_moves_the_primary_drops_the_old_primarys_scene`
+    /// reloads.
+    pub(crate) fn reload_from(&mut self, path: &std::path::Path) {
         // Collected before the new configuration is even read, because reading
         // it is what may fail, and the failure path has to leave the running
         // scripts -- and therefore their keep -- untouched.
         let carried = self.scripts.as_ref().map(Scripts::kept).unwrap_or_default();
-        match Scripts::load_carrying(&path, carried) {
+        match Scripts::load_carrying(path, carried) {
             Ok(scripts) => {
                 crate::qml::clear_cache();
                 let style = self.decorations.style().map(ToOwned::to_owned);
@@ -574,6 +580,10 @@ impl Solium {
                 self.trigger_restored();
                 self.trigger_monitors_changed();
                 self.trigger_relayout();
+                // As a hotplug does, after the handlers: a configuration that
+                // made another monitor primary may declare nothing differently
+                // (`a_reload_that_moves_the_primary_drops_the_old_primarys_scene`).
+                self.prune_surfaces();
                 self.redraw = true;
                 tracing::info!(config = %path.display(), "configuration reloaded");
                 // And then look at what that produced -- at where it *lands*,

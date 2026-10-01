@@ -232,8 +232,9 @@ sol.on("direction", function(verb, dir) end)       -- a direction key: "focus" o
 
 `surface` is how a `sol.surface` declared with `interactive = true` talks
 back: its scene sets an `action`, and you are told the surface's name and the
-action ([ricing.md](ricing.md#your-wallpaper) has an example). Seven of the
-rest are worth reading twice.
+action ([ricing.md](ricing.md#your-wallpaper) has an example). Declaring the
+same surface again with new `properties` writes them into the live scene rather
+than rebuilding it. Seven of the rest are worth reading twice.
 
 **`open` fires when the window opens, and for a launched window that is before
 its application exists.** A window started with `sol.spawn` begins its life
@@ -952,12 +953,12 @@ sol.on("layout", show_cramped)
 sol.on("close", show_cramped)
 ```
 
-Re-declaring a surface with the same properties changes nothing, so this costs
-a rebuild only when the list does; `cramped.qml` is any scene with a
-`required property string windows`. On the `top` layer the strip goes under a
-fullscreen window, as a bar does (`fullscreen.covers`); `overlay` keeps it
-over one. A window that is cramped and then has room
-again is named in the log again the next time it is short.
+Re-declaring a surface with the same properties changes nothing, and a changed
+list is written into the live scene rather than rebuilding it; `cramped.qml` is
+any scene with a `required property string windows`. On the `top` layer the
+strip goes under a fullscreen window, as a bar does (`fullscreen.covers`);
+`overlay` keeps it over one. A window that is cramped and then has room again
+is named in the log again the next time it is short.
 
 ## A whole mode
 

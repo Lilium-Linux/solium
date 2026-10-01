@@ -292,9 +292,15 @@ function sol.windows() end
 
 ---Draw a QML scene: a wallpaper, a bar, a dock, a heads-up display.
 ---
----Declaring a name again replaces what it declared, so running the
----configuration again is harmless. `false` or `nil` takes the surface away. A
----scene that cannot be found is logged and nothing is drawn.
+---Declaring a name again with the same `scene` changes the live scene: changed
+---`properties` are written into it, and on a monitor it was already on a new
+---`on`, `layer` or `interactive` keeps it, so what the scene holds survives (an
+---open popup, a running animation). A monitor it newly covers gets a scene
+---built from the current `properties`, and one it leaves drops its scene. Only
+---another `scene` file builds it again. A key left out of `properties` keeps
+---the value the scene last had. A dotted key (`["panel.open"] = true`) reaches
+---a grouped property. `false` or `nil` takes the surface away. A scene that
+---cannot be found is logged and nothing is drawn.
 ---@param name string
 ---@param options sol.SurfaceOptions|false|nil
 ---@return nil

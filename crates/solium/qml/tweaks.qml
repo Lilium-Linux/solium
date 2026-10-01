@@ -13,7 +13,8 @@ import Solium
 Item {
     id: panel
 
-    // Set once, when the panel is built: the entries the scripts declared.
+    // The entries the scripts declared, and written again in place when they
+    // change (scripted::tests::a_table_a_list_and_a_dotted_key_reach_the_live_scene).
     required property var entries
 
     // Read and cleared by the compositor, exactly like a window frame's.

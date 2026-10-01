@@ -1845,7 +1845,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // which is how the tweaks panel works and how a bar's buttons would.
     //
     // `sol.surface(name, false)` takes one away. Re-declaring the same name
-    // replaces it, so running the configuration again is idempotent.
+    // changes the surface in place, writing what changed into its live scene,
+    // and only a new scene file replaces it, so running the configuration
+    // again keeps what the scene holds
+    // (`scripted::tests::a_redeclared_property_is_written_into_the_live_scene`,
+    // `scripted::tests::a_new_scene_path_rebuilds_the_surface`).
     //
     // This is the primitive the wallpaper used to be a special case of. See
     // `scripted.rs` for why it is worth having rather than a `Command` each.
@@ -1905,8 +1909,10 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             };
 
             let properties = match options.get::<Option<Table>>("properties")? {
-                Some(table) => json_object(&table)?,
-                None => "{}".to_owned(),
+                Some(table) => {
+                    crate::scripted::Properties::new(crate::json::Json::object_from_lua(&table)?)
+                }
+                None => crate::scripted::Properties::default(),
             };
             let interactive = options.get::<Option<bool>>("interactive")?.unwrap_or(false);
 
@@ -3331,57 +3337,6 @@ fn with_pending(lua: &Lua, f: impl FnOnce(&mut Pending)) -> mlua::Result<()> {
             "sol functions may only be called from a handler",
         )),
     }
-}
-
-/// A Lua table as a JSON object, for a QML scene's properties.
-///
-/// Shallow on purpose. QML properties are scalars, lists and objects, and a
-/// deep converter would need to answer what a Lua table with both array and
-/// map keys means -- which is a question with no good answer and no caller
-/// asking it. One level of nesting covers every scene there is.
-fn json_object(table: &Table) -> mlua::Result<String> {
-    let mut out = String::from("{");
-    let mut first = true;
-    for pair in table.pairs::<String, Value>() {
-        let (key, value) = pair?;
-        let Some(rendered) = json_value(&value)? else {
-            continue;
-        };
-        if !first {
-            out.push(',');
-        }
-        first = false;
-        out.push_str(&crate::scripted::json_string(&key));
-        out.push(':');
-        out.push_str(&rendered);
-    }
-    out.push('}');
-    Ok(out)
-}
-
-/// One value, or `None` for something JSON has no word for.
-fn json_value(value: &Value) -> mlua::Result<Option<String>> {
-    Ok(match value {
-        Value::String(text) => Some(crate::scripted::json_string(&text.to_str()?)),
-        Value::Integer(number) => Some(number.to_string()),
-        // Infinities and NaN are not JSON, and a scene handed `Infinity` fails
-        // to parse the whole bag rather than that one property.
-        Value::Number(number) if number.is_finite() => Some(number.to_string()),
-        Value::Boolean(yes) => Some(yes.to_string()),
-        Value::Table(table) => {
-            let nested = table
-                .clone()
-                .sequence_values::<Value>()
-                .filter_map(|item| item.ok().and_then(|item| json_value(&item).ok().flatten()))
-                .collect::<Vec<_>>();
-            Some(if nested.is_empty() {
-                json_object(table)?
-            } else {
-                format!("[{}]", nested.join(","))
-            })
-        }
-        _ => None,
-    })
 }
 
 fn rect_from(options: &Table) -> mlua::Result<Option<Rect>> {
@@ -4870,6 +4825,59 @@ mod tests {
         );
     }
 
+    /// **`properties` arrive as values, keys sorted**, so a configuration
+    /// that declares the same table twice declares the same surface twice.
+    #[test]
+    fn a_surfaces_properties_reach_the_declaration_as_sorted_values() {
+        let directory = std::env::temp_dir().join("solium-script-test-properties");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.surface("bar", { scene = "/solium-fixture/bar.qml", properties = { b = 2, a = { y = 1, x = "s" } } })"#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let declared: Vec<String> = scripts
+            .startup()
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Surface(declared) => Some(declared.properties.render()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(declared, vec![r#"{"a":{"x":"s","y":1},"b":2}"#.to_owned()]);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A `properties` table with a list part keeps its named keys**: the
+    /// bag is always read as an object, so `{ "x", label = "y" }` loses
+    /// nothing, as it did not before properties became values.
+    #[test]
+    fn a_surfaces_properties_keep_their_named_keys_beside_a_list_part() {
+        let directory = std::env::temp_dir().join("solium-script-test-properties-list-part");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.surface("bar", { scene = "/solium-fixture/bar.qml", properties = { "x", label = "y" } })"#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let declared: Vec<String> = scripts
+            .startup()
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Surface(declared) => Some(declared.properties.render()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(declared, vec![r#"{"1":"x","label":"y"}"#.to_owned()]);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **`shell.scene` in `user.lua` hosts that scene**: once, over the
     /// windows, taking the pointer, on the primary monitor's area, with `~`
     /// expanded -- and `shell.scene` is a setting, not a typo.
@@ -4918,8 +4926,8 @@ mod tests {
             "the shell is not on the primary monitor's area"
         );
         assert!(
-            shell.properties.contains("\"screenInfo\""),
-            "the shell was not told which screen it is on: {}",
+            shell.properties.get("screenInfo").is_some(),
+            "the shell was not told which screen it is on: {:?}",
             shell.properties
         );
     }

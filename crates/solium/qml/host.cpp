@@ -55,6 +55,7 @@
 // headers. QObject brings the core types in the order Qt expects.
 #include <QtCore/QObject>
 
+#include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
@@ -646,6 +647,18 @@ extern "C" SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width,
 }
 
 /*
+ * Write one property of `object` by path, so `panel.open` reaches a grouped
+ * property. The one writer for a live scene (solium_qml_scene_set_json) and a
+ * scene being built (load_component), so a dotted key means the same in both:
+ * `scripted::tests::a_dotted_key_reaches_a_freshly_built_scene`.
+ */
+static bool write_property_path(QObject *object, const QString &path, const QVariant &value)
+{
+    QQmlProperty property(object, path);
+    return property.isValid() && property.write(value);
+}
+
+/*
  * Build the QML and hang it off the scene's window.
  *
  * Everything from the component to the dirty signals is identical whether the
@@ -681,12 +694,22 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
     // afterwards is too late, and the component simply fails to build. The
     // shell's dock declares `required property var screenInfo`, which is what
     // made it resolve and still refuse to exist.
+    //
+    // A dotted key is a path into a grouped property, which initial
+    // properties do not resolve: it is written once the root exists, before
+    // the first frame, the way a live scene takes it
+    // (`scripted::tests::a_dotted_key_reaches_a_freshly_built_scene`).
     QVariantMap initial;
+    QVariantMap paths;
     if (initial_json != nullptr) {
         QJsonParseError parsed{};
         const auto document = QJsonDocument::fromJson(QByteArray(initial_json), &parsed);
         if (parsed.error == QJsonParseError::NoError && document.isObject()) {
-            initial = document.object().toVariantMap();
+            const QVariantMap all = document.object().toVariantMap();
+            for (auto each = all.constBegin(); each != all.constEnd(); ++each) {
+                (each.key().contains(QLatin1Char('.')) ? paths : initial)
+                    .insert(each.key(), each.value());
+            }
         } else {
             qWarning("initial properties were not an object: %s",
                      qPrintable(parsed.errorString()));
@@ -706,6 +729,12 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
         return fail("the QML root is not an Item or a window with a contentItem, or the component could not be created — a required property left unset will do this");
     }
     scene->object = created;
+    for (auto each = paths.constBegin(); each != paths.constEnd(); ++each) {
+        if (!write_property_path(created, each.key(), each.value())) {
+            qWarning("the scene has no property %s, or refused the value",
+                     qPrintable(each.key()));
+        }
+    }
 
     scene->root->setParentItem(scene->window->contentItem());
     scene->root->setWidth(scene->width);
@@ -2284,6 +2313,27 @@ extern "C" void solium_qml_scene_set_int(SoliumQmlScene *scene, const char *name
         return;
     }
     scene->object->setProperty(name, QVariant(value));
+}
+
+extern "C" int solium_qml_scene_set_json(SoliumQmlScene *scene, const char *path,
+                                         const char *json_value)
+{
+    if (scene == nullptr || scene->object == nullptr || path == nullptr || json_value == nullptr) {
+        return 0;
+    }
+    /* In a list of one, because QJsonDocument parses only an object or an
+     * array, and a property is as often a number or a string. */
+    const QByteArray wrapped = QByteArray("[") + QByteArray(json_value) + QByteArray("]");
+    QJsonParseError parsed{};
+    const QJsonDocument document = QJsonDocument::fromJson(wrapped, &parsed);
+    if (parsed.error != QJsonParseError::NoError || !document.isArray()
+        || document.array().size() != 1) {
+        return 0;
+    }
+    return write_property_path(scene->object, QString::fromUtf8(path),
+                               document.array().at(0).toVariant())
+               ? 1
+               : 0;
 }
 
 /* How much of the window a decoration reserves is the decoration's decision,

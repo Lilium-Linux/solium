@@ -2552,6 +2552,334 @@ mod real_client {
     /// The name [`side_by_side`] gives the right-hand monitor.
     const RIGHT_SCREEN: &str = "right-test";
 
+    /// **A surface redeclared onto another monitor drops its scene on the
+    /// first**: `declare_surface` prunes what a changed placement no longer
+    /// covers, so `sol.surface` following `sol.monitor()` from screen to
+    /// screen does not leave a whole Qt scene behind on each. No client, so
+    /// the scene may be a real one (the #99 rule).
+    #[test]
+    fn a_surface_redeclared_onto_another_monitor_drops_its_scene_on_the_first() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-redeclared-surface");
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join("Scene.qml");
+            std::fs::write(&path, "import QtQuick\nItem {}\n").expect("writing the scene");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, _) = side_by_side(&mut state, "redeclared-left");
+            let mut declared = crate::scripted::Declaration::for_test(
+                "bar",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::Monitor("redeclared-left".to_owned()),
+            );
+            state.declare_surface(declared.clone());
+            let id = state.surfaces.named("bar").expect("declared");
+            assert!(
+                state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(|surface| surface.instance(&left))
+                    .is_some(),
+                "the scene builds"
+            );
+
+            declared.on = crate::scripted::On::Monitor(RIGHT_SCREEN.to_owned());
+            state.declare_surface(declared);
+            assert_eq!(
+                state
+                    .surfaces
+                    .get(id)
+                    .map(crate::scripted::Surface::instance_count),
+                Some(0),
+                "the monitor the surface left kept its scene"
+            );
+        });
+    }
+
+    /// A configuration whose `monitors` handler declares each of `names`
+    /// over the whole of [`RIGHT_SCREEN`], wherever that monitor now is, and
+    /// tells the scene where through `screenX`: what `shell.lua` does with
+    /// its canvas on the primary. The scene also holds a `kept` for a test
+    /// to write and read back.
+    fn declared_over_the_right_screen(directory: &str, names: &[&str]) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(directory);
+        let _ = std::fs::create_dir_all(&directory);
+        let scene = directory.join("Scene.qml");
+        std::fs::write(
+            &scene,
+            "import QtQuick\nItem { property int kept: 0; property int screenX: -1 }\n",
+        )
+        .expect("writing the scene");
+        let names = names
+            .iter()
+            .map(|name| format!("{name:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                r#"
+                sol.on("monitors", function()
+                    for _, m in ipairs(sol.monitors()) do
+                        if m.name == "{RIGHT_SCREEN}" then
+                            for _, name in ipairs({{ {names} }}) do
+                                sol.surface(name, {{
+                                    scene = "{scene}",
+                                    layer = "top",
+                                    on = {{ x = m.whole.x, y = m.whole.y, w = m.whole.w, h = m.whole.h }},
+                                    properties = {{ screenX = m.whole.x }},
+                                }})
+                            end
+                        end
+                    end
+                end)
+                "#,
+                scene = scene.display()
+            ),
+        )
+        .expect("writing the test script");
+        entry
+    }
+
+    /// The scene `name` draws on `output`, built there if it has none.
+    fn scene_on<'a>(
+        state: &'a mut Solium,
+        name: &str,
+        output: &Output,
+    ) -> &'a mut crate::qml::Scene {
+        let id = state.surfaces.named(name).expect("the surface is declared");
+        state
+            .surfaces
+            .get_mut(id)
+            .and_then(|surface| surface.instance(output))
+            .expect("the scene builds")
+            .scene_for_test()
+    }
+
+    /// **A monitor an unplug moves keeps the scene its `monitors` handler
+    /// declares there again.** With the left monitor gone the right one moves
+    /// to the origin, and the handler declares the surface over its new
+    /// rectangle, as `shell.lua` declares its canvas over the primary's
+    /// area. Judged by the rectangle it had before the handler ran, the
+    /// surface lost its scene and the handler had one built from nothing,
+    /// which restarted the bar on every hotplug. The new `screenX` is written
+    /// into the scene that was kept. No client, so the scene may be a real
+    /// one (the #99 rule).
+    #[test]
+    fn a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let entry = declared_over_the_right_screen("solium-state-unplug-moves", &["bar"]);
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "unplug-moves-left");
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            scene_on(&mut state, "bar", &right).set_int("kept", 7);
+
+            state.space.unmap_output(&left);
+            state.settle_monitors();
+            let scene = scene_on(&mut state, "bar", &right);
+            assert_eq!(
+                (scene.get_int("kept"), scene.get_int("screenX")),
+                (7, 0),
+                "(kept, screenX): the unplug built the scene again, or did not move it"
+            );
+        });
+    }
+
+    /// **Declaring one surface does not judge another by its old placement.**
+    /// One `monitors` handler declares two surfaces over the monitor an
+    /// unplug moved; declaring the first must leave the second's scene alone
+    /// until its own declaration says where it now is. No client (the #99
+    /// rule).
+    #[test]
+    fn one_handler_declaring_two_surfaces_again_keeps_both_their_scenes() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let names = ["panel", "bar"];
+            let entry = declared_over_the_right_screen("solium-state-unplug-two", &names);
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "unplug-two-left");
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            for name in names {
+                scene_on(&mut state, name, &right).set_int("kept", 7);
+            }
+
+            state.space.unmap_output(&left);
+            state.settle_monitors();
+            let kept: Vec<i32> = names
+                .iter()
+                .map(|name| scene_on(&mut state, name, &right).get_int("kept"))
+                .collect();
+            assert_eq!(
+                kept,
+                vec![7, 7],
+                "[panel, bar]: the unplug built a scene again"
+            );
+        });
+    }
+
+    /// **A reload that makes another monitor primary drops the old primary's
+    /// scene**, for a surface `on = "primary"` the new configuration declares
+    /// exactly as the old one did. Nothing about the surface changed, so only
+    /// the reload itself can see that its monitor did. No client (the #99
+    /// rule).
+    #[test]
+    fn a_reload_that_moves_the_primary_drops_the_old_primarys_scene() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-reload-primary");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(&scene, "import QtQuick\nItem {}\n").expect("writing the scene");
+            let surface = format!(
+                r#"sol.surface("bar", {{ scene = "{}", layer = "top", on = "primary" }})"#,
+                scene.display()
+            );
+            let before = directory.join("before.lua");
+            std::fs::write(&before, &surface).expect("writing the first configuration");
+            let after = directory.join("after.lua");
+            std::fs::write(
+                &after,
+                format!(
+                    "sol.monitors{{ {{ name = \"{RIGHT_SCREEN}\", primary = true }} }}\n{surface}"
+                ),
+            )
+            .expect("writing the second configuration");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, _) = side_by_side(&mut state, "reload-primary-left");
+            state.start_scripts(Some(
+                Scripts::load(&before).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            scene_on(&mut state, "bar", &left);
+
+            state.reload_from(&after);
+            let id = state.surfaces.named("bar").expect("still declared");
+            assert_eq!(
+                state
+                    .surfaces
+                    .get(id)
+                    .map(crate::scripted::Surface::instance_count),
+                Some(0),
+                "the monitor that stopped being primary kept its scene"
+            );
+        });
+    }
+
+    /// A strip a `layout` handler declares over the monitor an unplug moved
+    /// keeps its scene: docs/modes.md's cramped strip, and any bar declared
+    /// from `layout`. The prune runs after the `layout` handlers too.
+    #[test]
+    fn a_layout_declared_strip_keeps_its_scene_through_an_unplug() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-layout-strip-unplug");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(
+                &scene,
+                "import QtQuick\nItem { property int kept: 0; property int screenX: -1 }\n",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"
+                    sol.on("layout", function()
+                        for _, m in ipairs(sol.monitors()) do
+                            if m.name == "{RIGHT_SCREEN}" then
+                                sol.surface("strip", {{
+                                    scene = "{scene}",
+                                    layer = "top",
+                                    on = {{ x = m.whole.x, y = m.whole.y, w = m.whole.w, h = 24 }},
+                                    properties = {{ screenX = m.whole.x }},
+                                }})
+                            end
+                        end
+                    end)
+                    "#,
+                    scene = scene.display()
+                ),
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "review-r3-layout-left");
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            scene_on(&mut state, "strip", &right).set_int("kept", 7);
+
+            state.space.unmap_output(&left);
+            state.settle_monitors();
+            let scene = scene_on(&mut state, "strip", &right);
+            assert_eq!(
+                (scene.get_int("kept"), scene.get_int("screenX")),
+                (7, 0),
+                "(kept, screenX): the unplug rebuilt the layout-declared strip"
+            );
+        });
+    }
+
+    /// A monitor that goes still drops every scene on it at the hotplug, now
+    /// that the prune runs after the handlers: keeping a moved bar's scene
+    /// must not keep a gone monitor's.
+    #[test]
+    fn an_unplugged_monitor_still_loses_its_scene() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-unplugged-monitor-scene");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(&scene, "import QtQuick\nItem {}\n").expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"sol.surface("wall", {{ scene = "{}", layer = "background", on = "every-monitor" }})"#,
+                    scene.display()
+                ),
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "review-r3-gone-left");
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            scene_on(&mut state, "wall", &left);
+            scene_on(&mut state, "wall", &right);
+            state.space.unmap_output(&left);
+            state.settle_monitors();
+            let id = state.surfaces.named("wall").expect("declared");
+            assert_eq!(
+                state
+                    .surfaces
+                    .get(id)
+                    .map(crate::scripted::Surface::instance_count),
+                Some(1),
+                "the unplugged monitor kept its scene"
+            );
+        });
+    }
+
     /// The last size this toplevel was configured with, as the client saw it.
     fn last_configured(
         client: &Client,
@@ -19683,14 +20011,13 @@ end)
                 layer: Scripted,
                 rect: Rectangle<i32, Logical>,
             ) -> crate::scripted::SurfaceId {
-                desk.state.declare_surface(crate::scripted::Declaration {
-                    name: name.to_owned(),
-                    scene: std::path::PathBuf::from("/nonexistent/stacking-test.qml"),
-                    layer,
-                    on: crate::scripted::On::Rect(rect),
-                    properties: "{}".to_owned(),
-                    interactive: true,
-                });
+                desk.state
+                    .declare_surface(crate::scripted::Declaration::for_test(
+                        name,
+                        std::path::PathBuf::from("/nonexistent/stacking-test.qml"),
+                        layer,
+                        crate::scripted::On::Rect(rect),
+                    ));
                 desk.state
                     .surfaces
                     .named(name)

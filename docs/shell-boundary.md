@@ -100,6 +100,12 @@ while frames are being drawn.
 `false`, the default, hosts nothing, and taking the setting out takes
 the shell away on the next reload.
 
+A reload does not rebuild a hosted scene. `sol.surface` declared again with the
+same scene file writes the properties that changed into the live scene, so an
+open popup, a running animation or a half-typed query survives
+`super+shift+r`; only a different scene file builds the scene again
+(`scripted::tests::a_redeclared_property_is_written_into_the_live_scene`).
+
 `SOLIUM_SHELL_SCENE=<file>` overrides the setting for one run. It is how
 `dev/run-shell.sh` hosts a shell under development without touching the
 configuration you normally run; see `dev/README.md`.
@@ -129,8 +135,13 @@ prints `ok` or what Qt reported, which is the quick way through a chain of
 `top` layer: over the windows, under a layer-shell client's own `top` layer
 surfaces, and covered by a fullscreen window unless `fullscreen.covers` says
 otherwise. It gets pointer motion and presses, so a `MouseArea` works. It is
-given `screenInfo` as an initial property, which a scene reads by declaring
-`property var screenInfo`: `name`, `x`, `y`, `width`, `height` and `scale`.
+given `screenInfo` when it is built and kept current: a changed area of the
+primary monitor is written into the live scene without rebuilding it, even
+when unplugging the monitor beside it moves it
+(`state::tests::real_client::a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`), and
+another monitor made primary gets a scene built there. A scene reads it by
+declaring `property var screenInfo`: `name`, `x`, `y`, `width`, `height` and
+`scale`.
 
 **The compositor's clock and frames.** Its animations advance on the same
 clock as every window transform, a running animation asks for the next frame,

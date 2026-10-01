@@ -1728,14 +1728,33 @@ impl Solium {
         })
     }
 
-    /// Declare a surface, or replace one of the same name.
+    /// Declare a surface, or change the one of the same name in place; only a
+    /// new scene file replaces it
+    /// (`scripted::tests::a_redeclared_property_is_written_into_the_live_scene`,
+    /// `scripted::tests::a_new_scene_path_rebuilds_the_surface`).
     ///
     /// Re-declaring something identical keeps its rasterisations, because
     /// every reload re-runs the whole configuration and re-declares
     /// everything: without that check a `super+shift+r` that changed a gap
-    /// would re-decode every wallpaper on every monitor.
+    /// would re-decode every wallpaper on every monitor. A declaration that
+    /// moved a surface drops its scenes on the monitors it left
+    /// (`tests::real_client::a_surface_redeclared_onto_another_monitor_drops_its_scene_on_the_first`).
+    ///
+    /// Only that surface's: another surface a handler has yet to declare
+    /// again may still name where a monitor was before a hotplug, and judged
+    /// by that it would lose a scene its own declaration is about to keep
+    /// (`tests::real_client::one_handler_declaring_two_surfaces_again_keeps_both_their_scenes`).
     pub(crate) fn declare_surface(&mut self, declared: crate::scripted::Declaration) {
-        if self.surfaces.declare(declared) {
+        let name = declared.name.clone();
+        if self.surfaces.declare(declared) != crate::scripted::Declared::Same {
+            let (outputs, primary) = (self.monitor_rects(), self.primary_output());
+            if let Some(surface) = self
+                .surfaces
+                .named(&name)
+                .and_then(|id| self.surfaces.get_mut(id))
+            {
+                surface.keep_placed(&outputs, primary.as_ref());
+            }
             self.redraw = true;
         }
     }
@@ -1902,16 +1921,35 @@ impl Solium {
         }
     }
 
-    /// Drop the rasterisations belonging to monitors that are no longer there.
+    /// Drop the rasterisations belonging to monitors a surface is no longer
+    /// on: monitors that are no longer there, and monitors its placement or
+    /// the primary monitor has moved off
+    /// (`scripted::tests::a_surface_moved_to_another_monitor_drops_the_scene_it_left`).
     ///
     /// Each is a full-screen image held for a screen that has gone -- on a
     /// laptop docked and undocked all day that is a slow leak of exactly the
     /// largest thing the compositor allocates.
+    ///
+    /// Called once the scripts have answered the change, never before: after
+    /// both the `monitors` and the `layout` handlers. A surface either of them
+    /// declares over a monitor's rectangle names where that monitor was until
+    /// the handler runs, and judged by that it lost the scene the handler was
+    /// about to keep
+    /// (`tests::real_client::a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`,
+    /// `tests::real_client::a_layout_declared_strip_keeps_its_scene_through_an_unplug`).
     fn prune_surfaces(&mut self) {
-        let live: Vec<String> = self.space.outputs().map(Output::name).collect();
+        let (outputs, primary) = (self.monitor_rects(), self.primary_output());
         for surface in self.surfaces.iter_mut() {
-            surface.keep_only(&live);
+            surface.keep_placed(&outputs, primary.as_ref());
         }
+    }
+
+    /// Every monitor and its rectangle, as `Surface::keep_placed` takes them.
+    fn monitor_rects(&self) -> Vec<(Output, Rectangle<i32, Logical>)> {
+        self.space
+            .outputs()
+            .filter_map(|output| Some((output.clone(), self.space.output_geometry(output)?)))
+            .collect()
     }
 
     /// The window owning a surface, if any.

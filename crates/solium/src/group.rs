@@ -1138,7 +1138,7 @@ mod desk {
             for command in commands {
                 match command {
                     Command::Surface(declared) => {
-                        self.surfaces.declare(*declared);
+                        let _ = self.surfaces.declare(*declared);
                     }
                     Command::SurfaceGone(name) => {
                         self.surfaces.remove(&name);
