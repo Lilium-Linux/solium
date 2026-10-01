@@ -562,6 +562,18 @@ pub(crate) struct Solium {
     /// run another. See `Solium::apply`.
     retelling_cramped: bool,
 
+    /// Whether a `sol.monitors{}` was applied since the surfaces were last
+    /// placed, so they are placed once the dispatch that applied it is done.
+    /// `tests::real_client::a_runtime_primary_change_drops_the_old_primarys_scene`.
+    monitors_rearranged: bool,
+
+    /// How deep the dispatches running now are: an `apply` inside another, as
+    /// the layout pass a `sol.monitors{}` runs is, or inside a reload, which
+    /// places the surfaces itself once every handler it runs has run.
+    /// `tests::real_client::a_binding_that_moves_the_primary_and_its_surface_together_keeps_the_scene`,
+    /// `tests::real_client::a_reload_that_moves_a_monitor_keeps_the_scene_its_handler_declares_there`.
+    dispatching: u32,
+
     /// A resize asked for by an edge drag, not yet applied.
     ///
     /// Offered to layouts first: in a tiled or scrolling arrangement a window
@@ -949,6 +961,8 @@ impl Solium {
             pending_drop: None,
             pending_resize: None,
             retelling_cramped: false,
+            monitors_rearranged: false,
+            dispatching: 0,
             client_sizes: crate::script::ClientSizes::default(),
             resize_hold: None,
             resize_bridge: None,
@@ -1943,6 +1957,7 @@ impl Solium {
     /// (`tests::real_client::a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`,
     /// `tests::real_client::a_layout_declared_strip_keeps_its_scene_through_an_unplug`).
     fn prune_surfaces(&mut self) {
+        self.monitors_rearranged = false;
         let (outputs, primary) = (self.monitor_rects(), self.primary_output());
         for surface in self.surfaces.iter_mut() {
             surface.keep_placed(&outputs, primary.as_ref());

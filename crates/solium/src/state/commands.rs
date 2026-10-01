@@ -110,6 +110,7 @@ impl Solium {
 
     /// Apply what a script asked for.
     pub(super) fn apply(&mut self, outcome: Outcome) {
+        self.dispatching += 1;
         // Anything a script asked for changes what is on screen, and almost
         // all of it starts an animation. Damage-driven rendering only draws
         // when something says it must, and a transform created here says
@@ -477,6 +478,7 @@ impl Solium {
                     // different work area, which is why the layout is asked to
                     // run again.
                     self.place_outputs();
+                    self.monitors_rearranged = true;
                     self.trigger_relayout();
                     self.redraw = true;
                 }
@@ -499,6 +501,15 @@ impl Solium {
             self.retelling_cramped = true;
             self.trigger_relayout();
             self.retelling_cramped = false;
+        }
+        self.dispatching -= 1;
+        // Once the whole dispatch is done, every handler it ran included, and
+        // not when the layout pass inside it is: what follows `sol.monitors{}`
+        // may say where a surface now is.
+        // `real_client::a_runtime_primary_change_drops_the_old_primarys_scene`,
+        // `real_client::a_binding_that_moves_the_primary_and_its_surface_together_keeps_the_scene`.
+        if self.dispatching == 0 && self.monitors_rearranged {
+            self.prune_surfaces();
         }
     }
 
@@ -571,6 +582,11 @@ impl Solium {
                 // different `Decoration` built from the file as it now reads.
                 self.decorations.set_style(&mut self.panes, None);
                 self.decorations.set_style(&mut self.panes, style);
+                // Held as one dispatch, so a `sol.monitors{}` at the top of
+                // the new configuration places no surface before the handlers
+                // below have said where it now is
+                // (`a_reload_that_moves_a_monitor_keeps_the_scene_its_handler_declares_there`).
+                self.dispatching += 1;
                 self.start_scripts(Some(scripts));
                 // The re-announcement, in the order the doc comment states.
                 // Three dispatches and not one, each with its own snapshot,
@@ -580,6 +596,7 @@ impl Solium {
                 self.trigger_restored();
                 self.trigger_monitors_changed();
                 self.trigger_relayout();
+                self.dispatching -= 1;
                 // As a hotplug does, after the handlers: a configuration that
                 // made another monitor primary may declare nothing differently
                 // (`a_reload_that_moves_the_primary_drops_the_old_primarys_scene`).
