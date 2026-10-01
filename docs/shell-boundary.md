@@ -151,13 +151,14 @@ descriptor for — a socket, an answer from another thread — arrives when it
 is ready, with no frame drawn unless the scene changed. A `Timer` is on that
 same clock, so one beside an animation nothing draws still fires.
 
-**The `Solium` QML module.** `Solium.Theme` above all: the colours, fonts and
+**The `Solium` QML module.** `Theme` above all: the colours, fonts and
 metrics the frames are drawn with. Beside it, `import Solium` brings the
 attached `Solium` object, which any item can read: `Solium.monitor` is the
-monitor this instance of the scene is on (spike S2,
-`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
-So far it carries only the monitor's `name`. The module's types are written
-unqualified, as `Theme` is. A `Theme.qml` of your own in
+monitor this instance of the scene is on
+(`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
+So far it carries the monitor's `name`; `present` and `valid` read false until
+monitor rows are published. The module's types are written unqualified, as
+`Theme` is. A `Theme.qml` of your own in
 `~/.config/solium/qml/Solium/` is meant to override it, and does not yet: the
 shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).

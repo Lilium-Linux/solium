@@ -84,9 +84,10 @@ pub(crate) mod tests {
         (directory, scene)
     }
 
-    /// **Spike S2: the attached `Solium` type shares the URI `Solium` with
-    /// the shipped QML module.** `Theme` is the module's, `Solium.monitor` is
-    /// the C++ type's, and one `import Solium` reaches both. Ruling 1.
+    /// **The attached `Solium` type shares the URI `Solium` with the shipped
+    /// QML module.** `Theme` is the module's, `Solium.monitor` is the C++
+    /// type's, and one `import Solium` reaches both. A monitor no row was
+    /// published for is neither `present` nor `valid`.
     #[test]
     fn the_attached_type_shares_the_solium_uri_with_the_shipped_module() {
         on_the_qt_thread(|| {
@@ -99,6 +100,7 @@ pub(crate) mod tests {
                     readonly property int themed: Theme.accent !== undefined ? 1 : 0
                     readonly property int named: Solium.monitor.name === "s2-1" ? 1 : 0
                     readonly property int present: Solium.monitor.present ? 1 : 0
+                    readonly property int valid: Solium.monitor.valid ? 1 : 0
                 }
                 "#,
                 "s2-1",
@@ -117,6 +119,11 @@ pub(crate) mod tests {
                 scene.get_int("present"),
                 0,
                 "no row was published, so the monitor is not present yet"
+            );
+            assert_eq!(
+                scene.get_int("valid"),
+                0,
+                "no row was published, so the monitor is not valid yet"
             );
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);

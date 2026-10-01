@@ -2,7 +2,7 @@
  * The attached `Solium` object, and the rows it hands out.
  *
  * Every `Solium.<name>` a hosted scene writes or reads is a property of
- * SoliumAttached (Section 2, rule 8). A scene is "hosted" when the compositor
+ * SoliumAttached. A scene is "hosted" when the compositor
  * built it for one instance of a `sol.surface` on one monitor; it then carries
  * a SoliumHosting record, found from any object of its tree through its QML
  * context. `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
@@ -21,9 +21,8 @@
 
 class QQmlContext;
 
-/* The URI every native type is registered under. Ruling 1: "Solium", beside
- * the QML-only module of the same name, or "Solium.Native" if the two cannot
- * share it. `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
+/* The URI every native type is registered under: "Solium", the URI the
+ * QML-only module has too, so one `import Solium` reaches both. `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 #define SOLIUM_NATIVE_URI "Solium"
 
 /* One row of a model. Abstract: each kind of row declares its own typed
@@ -43,7 +42,7 @@ public:
     bool present = false;
 };
 
-/* A monitor's row: what `Solium.monitor` is. Task 3 adds the geometry.
+/* A monitor's row: what `Solium.monitor` is. So far it carries the name.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 class SoliumMonitor : public SoliumRow
 {
@@ -99,8 +98,8 @@ SoliumHosting *solium_hosting_of(QObject *object);
  * object created in it or in a context below it.
  * `qml::hosted::tests::every_object_of_a_hosted_scene_finds_its_monitor_after_the_build`. */
 void solium_hosting_mark(QQmlContext *context, SoliumHosting *hosting);
-/* The row for a connector name: until Task 3 publishes one, an absent row
- * carrying the name. Created on first ask and never freed (Ruling 4).
+/* The row for a connector name: until the compositor publishes one, an
+ * absent row carrying the name. Created on first ask and never freed.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 SoliumMonitor *solium_monitor_row(const QString &name);
 /* Register every native type, once, before the engine exists.
