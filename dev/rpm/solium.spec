@@ -17,6 +17,9 @@
 # The release profile has no debug information to put in a debuginfo package,
 # and rpmbuild fails on an empty one: dev/rpm.sh builds this.
 %global debug_package %{nil}
+# No %changelog: a snapshot's history is its commit's. rpmbuild would warn that
+# it has no date to take from one, and dev/rpm.sh repeats any warning.
+%global source_date_epoch_from_changelog 0
 
 Name:           solium
 Version:        0.0.0~git%{commitdate}.%{commit}
