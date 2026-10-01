@@ -23,12 +23,15 @@
 //! ## What is deliberately not here
 //!
 //! Most input. A surface is drawn and not clicked unless it is declared
-//! `interactive`, and then it gets plain pointer motion and presses, which is
-//! enough for the tweaks panel's buttons. Keyboard focus, grabs and everything
-//! else a real client gets are a bigger question than this — they need the
-//! scoped grab in #85. A hosted shell is one of these surfaces and has the
-//! same limits (`docs/shell-boundary.md`, "What it is not given"); until #85,
-//! a surface that needs a keyboard has to be a layer-shell client.
+//! `interactive`, and then it gets pointer motion, every button, the wheel and
+//! the modifiers held
+//! (`state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`,
+//! `state::tests::real_client::reflow_on_close::hosted::the_wheel_over_a_scene_reaches_it`).
+//! Keyboard focus, grabs and everything else a real client gets are a bigger
+//! question than this — they need the scoped grab in #85. A hosted shell is
+//! one of these surfaces and has the same limits (`docs/shell-boundary.md`,
+//! "What it is not given"); until #85, a surface that needs a keyboard has to
+//! be a layer-shell client.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},

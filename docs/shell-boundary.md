@@ -142,9 +142,17 @@ the `top` layer: over the windows, under a layer-shell client's own `top` layer
 surfaces, and covered by a fullscreen window unless `fullscreen.covers` says
 otherwise
 (`scripted::tests::a_surface_on_every_monitor_has_one_live_scene_per_monitor`).
-It gets pointer motion and presses, so a `MouseArea` works. A monitor that
-arrives gets its instance there and then, and one that goes takes its instance
-with it (`scripted::tests::an_instance_goes_with_its_monitor_and_comes_with_a_new_one`).
+It gets pointer motion, every mouse button as itself, the wheel, and the
+modifiers held, so a `MouseArea` or a `WheelHandler` works as it does anywhere
+(`qml::hosted::tests::a_right_press_reaches_a_mouse_area_as_the_right_button`,
+`qml::hosted::tests::the_wheel_reaches_a_wheel_handler_with_its_angle`);
+`super` with the wheel stays the compositor's
+(`state::tests::real_client::reflow_on_close::hosted::super_and_the_wheel_stay_the_compositors_over_a_scene`),
+and while the session is locked none of it reaches the scene
+(`state::tests::real_client::lock_focus::the_wheel_over_a_hosted_scene_is_not_the_scenes_while_locked`).
+A monitor that arrives gets its instance there and then, and one that goes
+takes its instance with it
+(`scripted::tests::an_instance_goes_with_its_monitor_and_comes_with_a_new_one`).
 It reads where it is from `Solium.monitor`, below; `screenInfo` is gone.
 
 **The compositor's clock and frames.** Its animations advance on the same
@@ -200,10 +208,8 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
 - **No reserved space, and no placement.** The scene fills its whole
   monitor, and a hosted bar does not take its strip out of the work area, so
   windows are placed under it.
-- **No keyboard, and every button is the left one.** Pointer motion and
-  presses — no keyboard focus, no grabs (#85), no wheel, and a right or middle
-  press arrives as a left press, so a right-click on a hosted button activates
-  it. A launcher's text field cannot be typed into.
+- **No keyboard.** No keyboard focus and no grabs (#85): a launcher's text
+  field cannot be typed into.
 - **No window list, and no icons.** Nothing tells a hosted scene which
   windows exist, and there is no `image://` provider for the icon theme.
   Driving the compositor goes through `action` and Lua.

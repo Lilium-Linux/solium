@@ -98,10 +98,9 @@ local defaults = {
     -- installing one and for what the compositor provides to a shell it
     -- hosts.
     --
-    -- What a hosted shell does not have yet: keyboard focus, or any button
-    -- but the left one -- a right or middle press arrives as a left one, and
-    -- the wheel not at all (#163); and room of its own, since a bar reserves
-    -- none and windows are placed under it (#162).
+    -- What a hosted shell does not have yet: keyboard focus (#163); and room
+    -- of its own, since a bar reserves none and windows are placed under it
+    -- (#162).
     --
     -- A layer-shell bar (Waybar and the like) needs nothing here: it is an
     -- ordinary client, and you start it as one.
