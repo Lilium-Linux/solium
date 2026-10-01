@@ -506,7 +506,9 @@ while IFS= read -r file; do
     id="$(sed -n 's/^SPDX-License-Identifier:[[:space:]]*//p' "$file")"
     check "  and ${file#"$sys"}'s, $id" [ -n "$id" -a -z "${license_tag##* "$id" *}" ]
 done < <(find "$sys" -name '*.license' | sort)
-requires() { grep -qE "^Requires:[[:space:]]+$1(%\{\?_isa\})?(%\{\?_qt6_version: >= %\{_qt6_version\}\})?$" "$spec"; }
+# A second argument is a version clause the line may end with.
+requires() { grep -qE "^Requires:[[:space:]]+$1(%\{\?_isa\})?${2:-}$" "$spec"; }
+qt_clause='(%\{\?_qt6_version: >= %\{_qt6_version\}\})?'
 recommends() { grep -qE "^Recommends:[[:space:]]+$1$" "$spec"; }
 # Which package has a file here, when one does.
 owner() { [[ -e "$1" ]] && rpm -qf --qf '%{name}\n' "$1" 2>/dev/null | head -1; }
@@ -516,7 +518,7 @@ mapfile -t modules < <(grep -rhoE '^[[:space:]]*import[[:space:]]+Qt[A-Za-z0-9.]
 check "the shipped QML imports Qt modules (${modules[*]})" [ "${#modules[@]}" -gt 0 ]
 for module in "${modules[@]}"; do
     if pkg="$(owner "$qml_dir/${module//.//}/qmldir")" && [[ -n "$pkg" ]]; then
-        check "Requires $pkg, which has the $module QML module" requires "$pkg"
+        check "Requires $pkg, which has the $module QML module" requires "$pkg" "$qt_clause"
     else
         echo "  skip  the $module QML module is not installed here"
     fi

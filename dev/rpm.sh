@@ -172,7 +172,8 @@ run it:
 
 On another Fedora $host_fedora machine, copy the file there and run the same line
 with its path, such as \`sudo dnf install ./${package##*/}\`. dnf installs
-the Qt, Xwayland and portals it needs; no Rust or build image is needed there.
+the Qt, Xwayland, portals and terminal (foot) it needs; no Rust or build
+image is needed there.
 Then log out and pick Solium from the session list, or log in on a text
 console (Ctrl+Alt+F3) and run \`solium --tty\`. \`solium --probe\`, safe inside
 a running desktop, says first what the hardware offers.
