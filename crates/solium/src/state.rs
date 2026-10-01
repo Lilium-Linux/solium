@@ -1930,11 +1930,13 @@ impl Solium {
     /// laptop docked and undocked all day that is a slow leak of exactly the
     /// largest thing the compositor allocates.
     ///
-    /// Called once the scripts have answered the change, never before: a
-    /// surface a `monitors` handler declares over a monitor's rectangle names
-    /// where that monitor was until the handler runs, and judged by that it
-    /// lost the scene the handler was about to keep
-    /// (`tests::real_client::a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`).
+    /// Called once the scripts have answered the change, never before: after
+    /// both the `monitors` and the `layout` handlers. A surface either of them
+    /// declares over a monitor's rectangle names where that monitor was until
+    /// the handler runs, and judged by that it lost the scene the handler was
+    /// about to keep
+    /// (`tests::real_client::a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`,
+    /// `tests::real_client::a_layout_declared_strip_keeps_its_scene_through_an_unplug`).
     fn prune_surfaces(&mut self) {
         let (outputs, primary) = (self.monitor_rects(), self.primary_output());
         for surface in self.surfaces.iter_mut() {

@@ -138,7 +138,7 @@ otherwise. It gets pointer motion and presses, so a `MouseArea` works. It is
 given `screenInfo` when it is built and kept current: a changed area of the
 primary monitor is written into the live scene without rebuilding it, even
 when unplugging the monitor beside it moves it
-(`a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`), and
+(`state::tests::real_client::a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`), and
 another monitor made primary gets a scene built there. A scene reads it by
 declaring `property var screenInfo`: `name`, `x`, `y`, `width`, `height` and
 `scale`.

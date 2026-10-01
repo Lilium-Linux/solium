@@ -468,10 +468,10 @@ impl Solium {
         self.settle_power();
         self.rescue_offscreen();
         self.trigger_monitors_changed();
+        self.trigger_relayout();
         // After the handlers, which may declare a surface where its monitor
         // now is: `a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`.
         self.prune_surfaces();
-        self.trigger_relayout();
         self.redraw = true;
         // A lock waiting for its monitors may have been waiting for the one
         // that went. See `Solium::confirm_lock`, and

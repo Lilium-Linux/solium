@@ -579,11 +579,11 @@ impl Solium {
                 // and arranges the windows on the one in view in the second.
                 self.trigger_restored();
                 self.trigger_monitors_changed();
+                self.trigger_relayout();
                 // As a hotplug does, after the handlers: a configuration that
                 // made another monitor primary may declare nothing differently
                 // (`a_reload_that_moves_the_primary_drops_the_old_primarys_scene`).
                 self.prune_surfaces();
-                self.trigger_relayout();
                 self.redraw = true;
                 tracing::info!(config = %path.display(), "configuration reloaded");
                 // And then look at what that produced -- at where it *lands*,

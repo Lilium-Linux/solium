@@ -2780,6 +2780,106 @@ mod real_client {
         });
     }
 
+    /// A strip a `layout` handler declares over the monitor an unplug moved
+    /// keeps its scene: docs/modes.md's cramped strip, and any bar declared
+    /// from `layout`. The prune runs after the `layout` handlers too.
+    #[test]
+    fn a_layout_declared_strip_keeps_its_scene_through_an_unplug() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-layout-strip-unplug");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(
+                &scene,
+                "import QtQuick\nItem { property int kept: 0; property int screenX: -1 }\n",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"
+                    sol.on("layout", function()
+                        for _, m in ipairs(sol.monitors()) do
+                            if m.name == "{RIGHT_SCREEN}" then
+                                sol.surface("strip", {{
+                                    scene = "{scene}",
+                                    layer = "top",
+                                    on = {{ x = m.whole.x, y = m.whole.y, w = m.whole.w, h = 24 }},
+                                    properties = {{ screenX = m.whole.x }},
+                                }})
+                            end
+                        end
+                    end)
+                    "#,
+                    scene = scene.display()
+                ),
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "review-r3-layout-left");
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            scene_on(&mut state, "strip", &right).set_int("kept", 7);
+
+            state.space.unmap_output(&left);
+            state.settle_monitors();
+            let scene = scene_on(&mut state, "strip", &right);
+            assert_eq!(
+                (scene.get_int("kept"), scene.get_int("screenX")),
+                (7, 0),
+                "REVIEW (kept, screenX): the unplug rebuilt the layout-declared strip"
+            );
+        });
+    }
+
+    /// A monitor that goes still drops every scene on it at the hotplug, now
+    /// that the prune runs after the handlers: keeping a moved bar's scene
+    /// must not keep a gone monitor's.
+    #[test]
+    fn an_unplugged_monitor_still_loses_its_scene() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-unplugged-monitor-scene");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(&scene, "import QtQuick\nItem {}\n").expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"sol.surface("wall", {{ scene = "{}", layer = "background", on = "every-monitor" }})"#,
+                    scene.display()
+                ),
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "review-r3-gone-left");
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            scene_on(&mut state, "wall", &left);
+            scene_on(&mut state, "wall", &right);
+            state.space.unmap_output(&left);
+            state.settle_monitors();
+            let id = state.surfaces.named("wall").expect("declared");
+            assert_eq!(
+                state
+                    .surfaces
+                    .get(id)
+                    .map(crate::scripted::Surface::instance_count),
+                Some(1),
+                "the unplugged monitor kept its scene"
+            );
+        });
+    }
+
     /// The last size this toplevel was configured with, as the client saw it.
     fn last_configured(
         client: &Client,
