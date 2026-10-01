@@ -179,4 +179,36 @@ pub(crate) mod tests {
             let _ = std::fs::remove_dir_all(&directory);
         });
     }
+
+    /// **A shell's own file is not shadowed by a row's type**: a `Monitor.qml`
+    /// beside a scene that imports `Solium` is still the scene's `Monitor`.
+    #[test]
+    fn a_shell_file_named_like_a_row_is_still_the_shells() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-hosted-shadow");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            std::fs::write(
+                directory.join("Monitor.qml"),
+                "import QtQuick\nItem { readonly property int mine: 1 }\n",
+            )
+            .expect("writing the shell's own file");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    Monitor { id: own }\n    readonly property int mine: own.mine\n}\n",
+            )
+            .expect("writing the scene");
+            let mut scene = Scene::for_monitor(&path, 16, 16, None, "shadow-1")
+                .expect("a scene using its own Monitor.qml builds");
+            assert_eq!(
+                scene.get_int("mine"),
+                1,
+                "Monitor is not the shell's own file"
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
 }

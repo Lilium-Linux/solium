@@ -78,7 +78,9 @@ void solium_qml_register_types()
     qmlRegisterUncreatableType<SoliumAttachedType>(
         SOLIUM_NATIVE_URI, 1, 0, "Solium",
         QStringLiteral("Solium is an attached object: write Solium.monitor on an item"));
-    qmlRegisterUncreatableType<SoliumMonitor>(
-        SOLIUM_NATIVE_URI, 1, 0, "Monitor",
-        QStringLiteral("a monitor's row comes from Solium.monitor"));
+    /* Known to QML, so a scene reads a row's properties, but with no name: a
+     * name in the URI `Solium` would shadow a file of the same name beside a
+     * shell's scene, a `Monitor.qml`, in every scene that imports `Solium`.
+     * `qml::hosted::tests::a_shell_file_named_like_a_row_is_still_the_shells`. */
+    qmlRegisterAnonymousType<SoliumMonitor>(SOLIUM_NATIVE_URI, 1);
 }
