@@ -134,7 +134,12 @@ given `screenInfo` as an initial property, which a scene reads by declaring
 
 **The compositor's clock and frames.** Its animations advance on the same
 clock as every window transform, a running animation asks for the next frame,
-and the scene is redrawn only when Qt says it changed.
+and the scene is redrawn only when Qt says it changed. Qt is served between
+frames too: a `Timer` fires on time on an idle desktop, and what Qt waits on a
+descriptor for — a `Process`'s output, a socket, an answer from another
+thread — arrives when it is ready, with no frame drawn unless the scene
+changed. A `Timer` is on that same clock, so one beside an animation nothing
+draws still fires.
 
 **The `Solium` QML module.** `Solium.Theme` above all: the colours, fonts and
 metrics the frames are drawn with, overridable by one file in
@@ -189,11 +194,6 @@ Said plainly, because a shim that loads is easy to mistake for one that works:
   presses — no keyboard focus, no grabs (#85), no wheel, and a right or middle
   press arrives as a left press, so a right-click on a hosted button activates
   it. A launcher's text field cannot be typed into.
-- **A `Timer` only fires on a frame something else asked for.** Qt's events
-  are drained when a frame is drawn, and a settled desktop draws none, so a
-  `SystemClock` stops until the pointer moves or a window changes. What that
-  wants is a wake-up deadline; `host.cpp` says why counting timers as
-  animation is the wrong fix.
 - **Windows can be read, not driven.** The list's entries are plain records,
   with no `activate()` or `close()`; `Hyprland.dispatch` logs that it has no
   mapping; `Hyprland.monitors` and `workspaces` are empty. Driving the
