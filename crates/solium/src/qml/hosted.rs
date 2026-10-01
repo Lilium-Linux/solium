@@ -29,6 +29,7 @@ mod ffi {
 }
 
 /// A model's number, as `host.h`'s `SOLIUM_QML_ROWS_*` say it.
+/// `tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Model {
     Monitors = 0,

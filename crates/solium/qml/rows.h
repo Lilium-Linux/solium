@@ -74,7 +74,8 @@ private:
     SoliumRow *m_absent = nullptr;
 };
 
-/* The store for a SOLIUM_QML_ROWS_* number, built on first use. */
+/* The store for a SOLIUM_QML_ROWS_* number, built on first use.
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 SoliumRows *solium_rows(int model);
 
 #endif /* SOLIUM_QML_ROWS_H */

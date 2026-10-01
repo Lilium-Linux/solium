@@ -400,7 +400,8 @@ const char *solium_qml_scene_string_at(const SoliumQmlScene *scene, const char *
 /* Pointer input, in scene coordinates. `pressed`: 1 down, 0 up, -1 motion. */
 void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed);
 
-/* The models hosted scenes read, by number. */
+/* The models hosted scenes read, by number.
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 #define SOLIUM_QML_ROWS_MONITORS 0
 #define SOLIUM_QML_ROWS_WINDOWS 1
 #define SOLIUM_QML_ROWS_WORKSPACES 2
