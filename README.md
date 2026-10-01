@@ -2,20 +2,98 @@
 
 # Solium
 
-The compositor of [Lilium DE](https://github.com/Lilium-Linux). Wayland, written
-in Rust on [Smithay](https://github.com/Smithay/smithay).
+Solium is the Wayland compositor of [Lilium DE](https://github.com/Lilium-Linux),
+written in Rust on [Smithay](https://github.com/Smithay/smithay) and configured
+in Lua. Its window frames, its wallpaper and the desktop shell it hosts are QML
+running inside the compositor, in one engine, so the desktop can be one design
+that you change without rebuilding anything.
 
-One compositor for phone, tablet, laptop and desktop — tiling, scrolling,
-floating and overview modes, all scriptable, all animated by the same engine.
+![Two windows on the Solium wallpaper: one in the compositor's own QML titlebar, focused, and one that draws its own](docs/desktop.png)
 
-![Two windows on the Solium wallpaper, one with a titlebar the compositor drew in QML](docs/desktop.png)
+Captured by the compositor reading back its own framebuffer, in a nested
+session with the shipped configuration and nothing else. The window on the left
+wears the default frame, a QML scene rendered in-process; the one on the right
+asked to draw its own and was let. The wallpaper is a QML file too.
+[docs/modes.md](docs/modes.md) has every mode, frame by frame.
 
-Captured by the compositor reading back its own framebuffer. The window on the
-right wears a titlebar that is QML rendered in-process and reloadable while the
-session runs; the one on the left asked to draw its own and was let. The
-wallpaper is drawn by the compositor too, and is a QML file you can replace.
-[docs/modes.md](docs/modes.md) has the same picture for every mode, frame by
-frame.
+## Status
+
+**Alpha, and not yet anyone's daily desktop.** It is being readied for daily
+use, and the trial on real hardware that decides whether it is ready has not
+happened yet. What stands in the way is the
+[`daily-drive` label][daily-drive], and the honest reasons are specific:
+
+- A hosted shell is not yet a whole desktop ([#169]). It gets no keyboard, and
+  every button reaches it as a left press ([#163]); a bar reserves no room, so
+  windows go under it ([#162]); and it is one scene on one monitor that sees no
+  windows, workspaces or other monitors ([#161], [#166]).
+- Suspend and resume have never been tested ([#64]), and a session on the
+  hardware sometimes starts with no input devices and stops itself ([#48]).
+- There is no explicit sync, so Vulkan and NVIDIA clients can stutter ([#59]).
+- There are no touchpad settings, so no tap-to-click ([#157]); no volume,
+  brightness, media or screenshot keys by default ([#151]); and logind's lock
+  and sleep requests are ignored ([#153]).
+- There are no packages: an install is built from a checkout ([#66]).
+
+And a bug in a compositor takes the session with it. The ones that get found
+are the ones real use finds, which is why the trial matters more than the test
+suite.
+
+## What works today
+
+- **Layouts.** Dwindle tiling, scrolling, floating and overview, each running
+  per monitor, with a workspace per monitor or one for the whole desk. A
+  minimum tile, with a new window overflowing to the next empty workspace
+  ([#134]); applications' own minimum and maximum sizes ([#115]); focus and
+  move by direction, and floating and fullscreen toggles ([#150]); and a reload
+  that keeps every layout as it was ([#116], [#118]).
+- **Windows.** A window exists from the keypress that launches it, and shows a
+  loading window until its application has drawn. Closing and quitting fade out
+  ([#126], [#127]); a resize follows the drag ([#113]); a modal dialog floats
+  over its parent ([#72]); a drag shows its icon ([#57]); and one stacking
+  order serves drawing and clicks, with a fullscreen window covering the bars
+  ([#141], [#142]) and getting its place back after ([#92]). X11 clients work
+  through XWayland, and menus and tooltips are placed, grabbed and kept on
+  screen.
+- **Chrome.** Eleven pane styles and per-corner rounding, QML on the GPU by
+  default with a software fallback ([#147]), and cursor themes and the shapes
+  clients ask for ([#81], [#24]).
+- **Shells.** `shell = { scene = … }` hosts one in the compositor's own QML
+  engine, and any layer-shell client works too. Both get frame callbacks
+  ([#149]), and a hosted scene's timers fire on an idle desktop ([#164]).
+- **Monitors.** Several at once, each at its own refresh rate, arranged from
+  the configuration or guessed; plugged in and unplugged while the session runs
+  ([#43]); scaled, worked out from the panel or set. Screens go dark after ten
+  minutes with nobody at the machine, and `wlopm` and `swayidle` can turn them
+  off too ([#54]).
+- **Input.** Keyboard layouts, with bindings that keep working under a
+  non-Latin one ([#132]) and on shifted keys ([#121]); touch screens.
+- **The lock and idle.** The lock fails safe: the session is locked before the
+  locker has drawn, and stays locked if the locker crashes. An idle inhibitor
+  counts only while its window is on screen, and a browser's D-Bus inhibitor
+  holds the screens on too ([#152]).
+- **The session.** Started from the login screen, Solium tells systemd and
+  D-Bus where its display is and starts `graphical-session.target` and XDG
+  autostart, and stops them when it ends ([#146]).
+- **Protocols.** `xdg-shell`, `xdg-decoration`, `xdg-output`,
+  `xdg-activation`, `xdg-dialog`, `wlr-layer-shell`, `wlr-screencopy`,
+  `wlr-output-power-management`, `ext-session-lock`, `ext-idle-notify`,
+  `idle-inhibit`, `cursor-shape`, `wp-viewporter`, `wp-fractional-scale`,
+  `wp-presentation`, `wp-single-pixel-buffer`, `linux-dmabuf`,
+  `relative-pointer`, `pointer-constraints`, `primary-selection` and
+  `xwayland-shell`. Both selections, copy and paste, cross the X11 boundary.
+
+## Not yet
+
+No input method, so no IME and no on-screen keyboard ([#26]); no clipboard
+manager, which wants `data-control` ([#52]); no window rules ([#56]); no night
+light ([#69]); a virtual machine or a remote desktop cannot have Super
+([#58]); and portal dialogs cannot be parented to the window that opened them
+([#67]). Screenshots and recording come from `wlr-screencopy`, so `grim` and
+`wf-recorder` should work, but the portals, screen sharing included, have never
+been tested end to end ([#83]). `--help`, and any flag Solium does not know,
+starts a compositor instead of answering ([#156]).
+[docs/gaps.md](docs/gaps.md) is everything not built yet, at length.
 
 ## Building
 
@@ -110,7 +188,9 @@ Three flags worth knowing:
 
 `super+shift+q` ends the session and `super+shift+r` reloads the configuration
 without ending it. The rest of the bindings come from `--check`, because they
-belong to a script rather than to the compositor.
+belong to a script rather than to the compositor, and
+[Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html)
+lists every one that ships.
 
 On the hardware, anything that goes wrong is also written to
 `~/.local/state/solium/session.log`, synchronously — that log exists for the
@@ -176,90 +256,34 @@ Still to come ([#66](https://github.com/Lilium-Linux/solium/issues/66)): a
 Fedora `.spec` and COPR, and an Arch `PKGBUILD`.
 [dev/README.md](dev/README.md#installing-it) has the details.
 
-## What works
-
-Windows open, tile, scroll, float and animate. Server-side decorations are QML
-and reload while the session runs. X11 clients work through XWayland. Copy and
-paste works, both selections. A window's life begins when the user asks for the
-application rather than when its client connects, so it takes its place in the
-layout immediately and the application appears inside it.
-
-Several monitors, each with its own display pipeline, refresh rate and layout —
-one global coordinate space, arranged from the configuration or guessed left to
-right. Every layout runs per screen, and the pointer crosses between them.
-
-Protocols: `xdg-shell`, `wlr-layer-shell`, `wlr-screencopy`, `ext-session-lock`,
-`ext-idle-notify`, `idle-inhibit`, `wlr-output-power-management`,
-`xdg-decoration`, `xdg-output`,
-`xdg-activation`, `wp-viewporter`, `wp-fractional-scale`, `wp-presentation`,
-`wp-single-pixel-buffer`, `linux-dmabuf`, `relative-pointer`,
-`pointer-constraints`, `primary-selection`, `xwayland-shell`.
-`_NET_WM_WINDOW_TYPE` is read on the X11 side, so menus and tooltips are not
-managed as windows.
-
-The desktop has a wallpaper before anything else is running, because a session
-whose first frame is flat grey looks the same as a broken one. It is
-`qml/wallpaper.qml` — a QML file, so it can be a gradient, a shader or a clock
-instead — and a layer surface on the background layer still wins, so `swaybg`
-and anything like it work unchanged.
-
-Screenshots, recording and screen sharing all come from `wlr-screencopy`, so
-`grim`, `wf-recorder` and `xdg-desktop-portal-wlr` work — which is what a
-conferencing application asks the portal for.
-
-The screen locks, through `ext-session-lock-v1`, and it fails safe: the session
-is locked before the locking program has drawn anything, so there is no moment
-where the desktop is still up; if that program then crashes, the screen stays
-locked and blank rather than falling open. While locked nothing of the session
-sees input — no bindings, no window under the pointer, no titlebars, and
-`Ctrl+Alt+Backspace` will not end the session. Switching virtual terminal still
-works, deliberately: whoever can press it is standing at the machine.
-
-`ext-idle-notify` is what makes that happen on its own rather than only when
-asked: `swayidle` and anything like it can run the locker after so long with
-nobody at the machine. `idle-inhibit` is the other half — a video player, a
-presentation or a game says "not now" and the screen stays up. An inhibitor
-counts only while its window is actually drawn, so one on a workspace you are
-not looking at stops holding the machine awake, and nothing at all holds it
-awake behind a lock screen.
-
-The screens go dark on their own after ten minutes with nobody at the machine
-(`idle.screens_off_after` in `config.lua`; 0 turns it off), unless something on
-screen is holding an inhibitor, or a browser holds one over D-Bus
-(`org.freedesktop.ScreenSaver`, which Solium owns while `idle.dbus_inhibit` is
-on) — a film does not go dark, the ten minutes start again when it lets go, and
-nothing holds a lock screen lit. Any key, click or motion turns every screen back on and is
-delivered as usual, so the first key typed at a lock screen that went dark is
-part of the password rather than lost. A monitor that is off keeps its place,
-its work area and its windows; nothing moves and no client is told it went.
-`wlr-output-power-management` is there too, so `wlopm` and `swayidle` driving it
-can do the same, and `sol.monitor_power` does it from a binding. The recipe is
-in [docs/ricing.md](docs/ricing.md#turning-screens-off).
-
-Menus behave. An X11 client that says what kind of window it is gets it: a menu
-or a tooltip is placed by the application rather than tiled like a window, a Wayland popup is grabbed so clicking outside dismisses
-it and constrained so it flips at a screen edge instead of running off, and a
-client that draws its own decorations is clicked where it is drawn rather than
-where its invisible resize shadow starts.
-
-Not yet: an input method, so no IME and no on-screen keyboard
-([#26](https://github.com/Lilium-Linux/solium/issues/26)); no clipboard manager,
-which wants `data-control`
-([#52](https://github.com/Lilium-Linux/solium/issues/52)); portals have never
-been tested end to end
-([#83](https://github.com/Lilium-Linux/solium/issues/83)). Everything known is
-on the issue tracker, prioritised by whether an application can be used at all
-without it rather than by how hard it is — the `daily-drive` label is that
-list.
-
-## Configuring it
+## A first configuration
 
 Everything is a file you write, and none of it needs the compositor rebuilt.
-`~/.config/solium/user.lua` holds only what you want changed; your own QML in
-`~/.config/solium/qml` shadows what ships, file by file. A single
-`Solium/Theme.qml` there is meant to restyle every frame and surface without
-copying the rest; until [#88](https://github.com/Lilium-Linux/solium/issues/88)
-is fixed, the shipped one still wins. See **[docs/ricing.md](docs/ricing.md)**.
+`~/.config/solium/user.lua` holds only what you want changed, and is merged
+over the defaults:
+
+```lua
+return {
+    pane = "left",
+}
+```
+
+Press `super+shift+r` and every open window is framed again, with its
+titlebar down the left side. `solium --check` says, without starting anything, whether
+the configuration would load, which bindings it made, and which settings it
+sets that nothing reads, with what you probably meant. A reload whose
+configuration fails to load keeps the session as it was, and says why in the
+log:
+`~/.local/state/solium/session.log` for a session from the login screen or
+`--tty`, and the terminal for a nested one.
+
+[docs/ricing.md](docs/ricing.md) goes on from there, and
+[Every setting](https://lilium-linux.github.io/solium/generated/reference/settings.html)
+lists what there is to set. Your own QML in `~/.config/solium/qml` shadows
+what ships, file by file. A single `Solium/Theme.qml` there is meant to
+restyle every frame without copying the rest; until
+[#88](https://github.com/Lilium-Linux/solium/issues/88) is fixed, the shipped
+one still wins.
 
 ## How it is built
 
@@ -268,13 +292,14 @@ is named.
 
 ### Chrome is QML, inside the compositor
 
-Titlebars, the pointer, the wallpaper and every pane style are QML, rendered
-in-process through `QQuickRenderControl` and drawn as ordinary render elements.
-Not a shell talking to a compositor over a protocol — the same process, the
-same frame. A shell can be hosted in that same engine too, as QML written
-against Solium's own API, through `shell = { scene = ... }` in the
-configuration: see [docs/shell-boundary.md](docs/shell-boundary.md).
-Quickshell support was removed (#172).
+Titlebars, the wallpaper, every pane style and the pointer Solium draws when
+no cursor theme is set are QML, rendered in-process through
+`QQuickRenderControl` and drawn as ordinary render elements. Not a shell
+talking to a compositor over a protocol — the same process, the same frame. A
+shell is hosted in that same engine, as QML written against Solium's own API,
+through `shell = { scene = ... }` in the configuration: see
+[docs/shell-boundary.md](docs/shell-boundary.md). Quickshell support was
+removed (#172).
 
 That is why a titlebar can be reloaded while the session runs, why a hosted
 shell can read the same theme as the window frames, and why a decoration can be
@@ -313,22 +338,26 @@ there. Which is why every mode animates identically and why a thumbnail in
 overview carries its own titlebar — the frame is part of the window's transform,
 not a thing drawn beside it.
 
-### Layouts are scripts, not features
+### The policy is Lua, the arithmetic is a crate
 
-Tiling, scrolling, floating and overview are Lua. `sol.present` hands a script
-the same transform the compositor uses, so a layout somebody writes is not a
-second-class one. Bindings, rules and the modes themselves live there too, and
+Tiling, scrolling, floating and overview are Lua scripts: when to split, where
+a new window goes, what a key does. The arithmetic they ask for — the dwindle
+tree and the scrolling strip — is `crates/layout`, which knows nothing of
+windows and also arranges the boxes in the preview page. `sol.present` hands a
+script the same transform the compositor uses, so a layout somebody writes is
+not a second-class one. Bindings and the modes themselves live in Lua too, and
 `--check` will tell you what actually loaded — because a configuration that
-fails to parse leaves a compositor with no layouts and no bindings at all, and
-that failure should cost a log line rather than a session.
+fails to parse at startup leaves a compositor with no layouts and no bindings
+at all, and that failure should cost a log line rather than a session.
 
 ### Effects are fragment programs with declared inputs
 
-An effect says what it needs — nothing, its own pixels, or what is behind it —
-and the compositor arranges the passes. Rounded corners are a shader over the
-window's own texture, which is why they apply to the pane rather than to the
-client, and why a corner radius can differ per corner so a titlebar and a window
-can meet more than one way.
+An effect says what it needs — nothing, or its own pixels — and the compositor
+arranges the passes. What is behind it is the third input, the one a blur
+needs, and it is declared and not built yet. Rounded corners are a shader over
+the window's own texture, which is why they apply to the pane rather than to
+the client, and why a corner radius can differ per corner so a titlebar and a
+window can meet more than one way.
 
 Drawing is GLES2, through Smithay's `GlesRenderer`, and the code says so
 rather than hiding behind Smithay's generic renderer traits: a window drawn
@@ -337,79 +366,48 @@ GLES or EGL, which those traits do not offer.
 
 ### And the parts that are deliberately not ours
 
-Solium does not manage sessions, draw a bar or own a notification. It blanks
+Solium does not draw a bar or own a notification of its own: it hosts the
+shell's QML as configuration, and layer-shell clients beside it. It tells the
+session where its display is and leaves starting the rest to systemd. It blanks
 its screens after ten minutes alone and no other idle policy is its own: it
 reports idleness and lets a policy daemon act on the rest; it exposes
-`wlr-screencopy` and lets a portal record; it hosts layer surfaces and lets a
-shell be a shell. [docs/shell-boundary.md](docs/shell-boundary.md) is where that
-line is drawn and defended.
+`wlr-screencopy` and lets a portal record.
+[docs/shell-boundary.md](docs/shell-boundary.md) is where that line is drawn
+and defended.
 
-## Why this stack
+### Why this stack
 
 **Smithay** is a Wayland compositor library, not a compositor. It hands over
 protocol plumbing, input and backends while leaving layout, rendering and
 policy to us — which is where a desktop environment's character actually lives.
 [niri](https://github.com/niri-wm/niri) is Rust-on-Smithay with working touch and
 gesture support, so the multi-form-factor path has a reference implementation
-rather than being a bet.
+rather than being a bet. **Rust** because a crash in a compositor takes the
+session with it, and memory safety removes an entire class of them.
 
-**Rust** because this codebase is meant to last. Memory safety removes an entire
-class of compositor crash, and a crash in a compositor takes the session with it.
-
-**GLES2**, through Smithay's GLES renderer. Smithay has no Vulkan renderer —
-its `backend::vulkan` is device enumeration only — and niri, the reference
-implementation we chose this stack for, uses GLES. Vulkan would have meant
-writing a renderer backend plus NVIDIA dmabuf import before a single window
-appeared. See
-[docs/spikes/2026-08-27-vulkan-on-smithay.md](docs/spikes/2026-08-27-vulkan-on-smithay.md).
-
-The price is that a Vulkan backend would be a port, not a swap. The render
-elements are typed on `GlesRenderer`, the four-corner warp calls GL directly,
-rounded corners are a GLSL ES program, and QML on the GPU shares its buffers
-through EGL. Each of those needs a Vulkan counterpart; the spike lists them.
-
-## Status
-
-Alpha. It runs on hardware and is used to develop itself, which is the only
-test that counts for a compositor. It is not something to depend on yet, and
-the honest reasons are specific: it has never run for a whole day
-([#65](https://github.com/Lilium-Linux/solium/issues/65)), suspend and resume
-have never been tested once
-([#64](https://github.com/Lilium-Linux/solium/issues/64)), there are no
-packaging recipes yet ([#66](https://github.com/Lilium-Linux/solium/issues/66) —
-an installed copy now finds its own files, but nothing builds a package), there
-is no input method at all
-([#26](https://github.com/Lilium-Linux/solium/issues/26)), and a bug in here
-takes the session with it.
-
-The bugs that get found are the ones real use finds. A recent afternoon of
-actually working in it turned up menus being placed by the tiling layout,
-a pointer whose clicks landed 45 pixels from the cursor on any GTK or Qt
-application, and windows reserving space for titlebars that were never drawn —
-none exotic, none caught by the test suite, all found by opening a browser.
-That is what alpha means here.
-
-[docs/gaps.md](docs/gaps.md) is the whole list rather than the flattering part
-of it.
+**GLES2**, because Smithay has no Vulkan renderer — its `backend::vulkan` is
+device enumeration only — and niri, the reference implementation this stack
+was chosen for, uses GLES. The price is that a Vulkan backend would be a port,
+not a swap: the render elements are typed on `GlesRenderer`, the four-corner
+warp calls GL directly, rounded corners are a GLSL ES program, and QML on the
+GPU shares its buffers through EGL.
+[The spike](docs/spikes/2026-08-27-vulkan-on-smithay.md) lists what each would
+need.
 
 ## Documentation
 
-| | |
+All of it is also a website, <https://lilium-linux.github.io/solium/>, with
+reference pages made from the code.
+
+| For | Read |
 |---|---|
-| [docs/ricing.md](docs/ricing.md) | configuring it — start here |
-| [docs/modes.md](docs/modes.md) | desktop modes, and how to write one — including per monitor |
-| [docs/animation.md](docs/animation.md) | the animation engine, and how to change the feel |
-| [docs/decorations.md](docs/decorations.md) | window frames and everything else drawn in QML |
-| [docs/architecture.md](docs/architecture.md) | how it is built, and why |
-| [docs/shell-boundary.md](docs/shell-boundary.md) | what belongs to the compositor and what to the shell |
-| [docs/roadmap.md](docs/roadmap.md) | epics, in dependency order |
-| [docs/beta.md](docs/beta.md) | what has to be true before a public preview |
-| [docs/gaps.md](docs/gaps.md) | everything not built yet, exhaustively |
-| [dev/README.md](dev/README.md) | the knobs and checks it is tested with |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | how to send a change, and the design rules it is judged by |
-| [SECURITY.md](SECURITY.md) | reporting a vulnerability privately |
-| [THIRD_PARTY.md](THIRD_PARTY.md) | what came from other projects, and every dependency's licence |
-| `docs/spikes/` | decisions, with the evidence that settled them |
+| using it | [docs/ricing.md](docs/ricing.md), configuring it — start here; [Every setting](https://lilium-linux.github.io/solium/generated/reference/settings.html) and the [configuration reference](crates/solium/lua/config.lua), the shipped [Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html), and [Flags and environment](crates/solium/environment.txt) |
+| scripting it in Lua | [docs/modes.md](docs/modes.md), desktop modes and how to write one; [docs/animation.md](docs/animation.md), the animation engine; the [Lua API](crates/solium/lua/meta/sol.lua) |
+| styling it in QML | [docs/decorations.md](docs/decorations.md), window frames and everything else drawn in QML; the [pane styles' README](crates/solium/qml/panes/README.md), the contract a style is written against |
+| writing a shell | [docs/shell-boundary.md](docs/shell-boundary.md), what a hosted shell is given and what belongs to the compositor |
+| working on it | [CONTRIBUTING.md](CONTRIBUTING.md), how to send a change and the rules it is judged by; [docs/architecture.md](docs/architecture.md), how it is built and why; [dev/README.md](dev/README.md), the build, the gate and the instruments it is tested with; [SECURITY.md](SECURITY.md); [THIRD_PARTY.md](THIRD_PARTY.md), what came from other projects |
+| where it stands | [docs/status.md](docs/status.md), with the [roadmap](docs/roadmap.md), [everything not built yet](docs/gaps.md) and [the road to a public preview](docs/beta.md) |
+| why it is the way it is | the decision records in `docs/spikes/` and `docs/design/`, each with the evidence that settled it |
 
 ## Thanks to
 
@@ -447,3 +445,49 @@ Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Each
 contributor agrees once to the [Contributor License Agreement](CLA.md); the
 pull request template carries the one sentence that does it. What came from
 other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
+
+[daily-drive]: https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20state%3Aopen%20label%3Adaily-drive
+[#24]: https://github.com/Lilium-Linux/solium/issues/24
+[#26]: https://github.com/Lilium-Linux/solium/issues/26
+[#43]: https://github.com/Lilium-Linux/solium/issues/43
+[#48]: https://github.com/Lilium-Linux/solium/issues/48
+[#52]: https://github.com/Lilium-Linux/solium/issues/52
+[#54]: https://github.com/Lilium-Linux/solium/issues/54
+[#56]: https://github.com/Lilium-Linux/solium/issues/56
+[#57]: https://github.com/Lilium-Linux/solium/issues/57
+[#58]: https://github.com/Lilium-Linux/solium/issues/58
+[#59]: https://github.com/Lilium-Linux/solium/issues/59
+[#64]: https://github.com/Lilium-Linux/solium/issues/64
+[#66]: https://github.com/Lilium-Linux/solium/issues/66
+[#67]: https://github.com/Lilium-Linux/solium/issues/67
+[#69]: https://github.com/Lilium-Linux/solium/issues/69
+[#72]: https://github.com/Lilium-Linux/solium/issues/72
+[#81]: https://github.com/Lilium-Linux/solium/issues/81
+[#83]: https://github.com/Lilium-Linux/solium/issues/83
+[#92]: https://github.com/Lilium-Linux/solium/issues/92
+[#113]: https://github.com/Lilium-Linux/solium/issues/113
+[#115]: https://github.com/Lilium-Linux/solium/issues/115
+[#116]: https://github.com/Lilium-Linux/solium/issues/116
+[#118]: https://github.com/Lilium-Linux/solium/issues/118
+[#121]: https://github.com/Lilium-Linux/solium/issues/121
+[#126]: https://github.com/Lilium-Linux/solium/issues/126
+[#127]: https://github.com/Lilium-Linux/solium/issues/127
+[#132]: https://github.com/Lilium-Linux/solium/issues/132
+[#134]: https://github.com/Lilium-Linux/solium/issues/134
+[#141]: https://github.com/Lilium-Linux/solium/issues/141
+[#142]: https://github.com/Lilium-Linux/solium/issues/142
+[#146]: https://github.com/Lilium-Linux/solium/issues/146
+[#147]: https://github.com/Lilium-Linux/solium/issues/147
+[#149]: https://github.com/Lilium-Linux/solium/issues/149
+[#150]: https://github.com/Lilium-Linux/solium/issues/150
+[#151]: https://github.com/Lilium-Linux/solium/issues/151
+[#152]: https://github.com/Lilium-Linux/solium/issues/152
+[#153]: https://github.com/Lilium-Linux/solium/issues/153
+[#156]: https://github.com/Lilium-Linux/solium/issues/156
+[#157]: https://github.com/Lilium-Linux/solium/issues/157
+[#161]: https://github.com/Lilium-Linux/solium/issues/161
+[#162]: https://github.com/Lilium-Linux/solium/issues/162
+[#163]: https://github.com/Lilium-Linux/solium/issues/163
+[#164]: https://github.com/Lilium-Linux/solium/issues/164
+[#166]: https://github.com/Lilium-Linux/solium/issues/166
+[#169]: https://github.com/Lilium-Linux/solium/issues/169
