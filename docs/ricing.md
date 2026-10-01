@@ -90,9 +90,10 @@ Three guides go deeper than the recipes below:
 `$XDG_STATE_HOME`.
 
 For the files you write, your directory is searched first in every case but
-your colours. A file you write shadows the one that ships, and everything you did not write still comes
-from the shipped set — including its later improvements. Your own `Theme.qml`
-does not shadow the shipped one yet: the shipped `Solium` module is found first
+your colours. A file you write shadows the one that ships, and everything you
+did not write still comes from the shipped set — including its later
+improvements. Your own `Theme.qml` does not shadow the shipped one yet: the
+shipped `Solium` module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)). Don't edit the
 shipped files in place: an install replaces them, and `user.lua` does the same
 job without being overwritten.
