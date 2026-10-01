@@ -95,6 +95,8 @@ if ! rpmbuild -bb --with prebuilt \
     tail -30 "$log" >&2
     die "rpmbuild failed; the whole log is $log"
 fi
+# rpmbuild's warnings, which a passing build buries in its log.
+warnings="$(sed -n '/^RPM build warnings:$/,$p' "$log")"
 shopt -s nullglob
 packages=("$topdir"/RPMS/*/solium-"$version"-*.rpm)
 shopt -u nullglob
@@ -151,7 +153,10 @@ Built $package ($(du -h "$package" | cut -f1))
   for       Fedora $host_fedora, $(rpm --eval '%{_arch}'): another Fedora release needs a package built for it
   checked   unpacked in $unpacked, solium --check passed${checked:+ (${checked#  })},
             using $chosen
-$leftover_note
+${warnings:+
+rpmbuild warned, in $log:
+$warnings
+}$leftover_note
 To install it here, run this one line. It needs root, so this script does not
 run it:
 
