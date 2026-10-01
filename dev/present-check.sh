@@ -4,10 +4,10 @@
 # pointer still land where it should?
 #
 # Four claims, none of which `cargo test` can reach. The `Command::Present` ->
-# `Frame` wiring in `state.rs` is the seam this exists for: reverting `z` and
-# `pivot` there to their defaults passes the whole unit suite, because every
-# test of them is a test of `script.rs` and of pure functions below it, and
-# nothing between the script and the screen is exercised by any of them.
+# `Frame` wiring in `state/commands.rs` is the seam this exists for: reverting
+# `z` and `pivot` there to their defaults passes the whole unit suite, because
+# every test of them is a test of `script.rs` and of pure functions below it,
+# and nothing between the script and the screen is exercised by any of them.
 #
 #   pivot   a pivot is the point the matrix leaves alone. One window is
 #           presented twice -- `rotate_z = 20` with the default pivot, and
@@ -25,9 +25,9 @@
 #
 #   rect    but they did follow the rect. A window presented somewhere else
 #           takes clicks at the rect it is *drawn* at and not at the one it
-#           lives at. This is the load-bearing half: `state.rs` tests
-#           `drawn_at(..).rect.contains(location)`, and a regression to
-#           `outer.contains` would pass the other three.
+#           lives at. This is the load-bearing half: `state/hit_test.rs`
+#           asks whether the pane as `drawn_at(..)` draws it owns the point,
+#           and a regression to `outer.contains` would pass the other three.
 #
 # A reverted `z` reads as "nothing sorts" and would be caught by looking. A
 # reverted `pivot` is not, and the strongest statement of that is measured:
