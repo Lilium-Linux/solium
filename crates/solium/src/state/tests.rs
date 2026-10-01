@@ -3172,6 +3172,82 @@ mod real_client {
         });
     }
 
+    /// **From the monitors settling to each scene reading its own monitor,
+    /// end to end**: `settle_monitors` builds an instance of an
+    /// `every-monitor` surface on each of two monitors, and once
+    /// `publish_models` has run, each reads its own row through
+    /// `Solium.monitor`: present, at its own place, with its own size and
+    /// work area. No client (the #99 rule), and monitor names of its own,
+    /// because the rows are process-wide.
+    #[test]
+    fn each_monitors_instance_reads_its_own_monitor_once_the_models_are_published() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-instance-rows");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(
+                &scene,
+                r"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property int present: Solium.monitor.present ? 1 : 0
+                    readonly property int wholeX: Solium.monitor.whole.x
+                    readonly property int wholeWidth: Solium.monitor.whole.width
+                    readonly property int areaWidth: Solium.monitor.area.width
+                    readonly property int areaHeight: Solium.monitor.area.height
+                }
+                ",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"sol.surface("shell", {{ scene = "{}", layer = "top", on = "every-monitor" }})"#,
+                    scene.display()
+                ),
+            )
+            .expect("writing the test script");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let left = a_screen(&mut state, "instance-rows-left", (0, 0));
+            let right = a_screen(&mut state, "instance-rows-right", (1920, 0));
+            right.change_current_state(
+                Some(Mode {
+                    size: (1280, 720).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                None,
+                None,
+            );
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            state.publish_models();
+
+            let mut read = |output: &Output| {
+                let scene = scene_on(&mut state, "shell", output);
+                ["present", "wholeX", "wholeWidth", "areaWidth", "areaHeight"]
+                    .map(|name| scene.get_int(name))
+            };
+            assert_eq!(
+                read(&left),
+                [1, 0, 1920, 1920, 1080],
+                "the left monitor's scene: [present, whole.x, whole.width, area.width, area.height]"
+            );
+            assert_eq!(
+                read(&right),
+                [1, 1920, 1280, 1280, 720],
+                "the right monitor's scene: [present, whole.x, whole.width, area.width, area.height]"
+            );
+        });
+    }
+
     /// The last size this toplevel was configured with, as the client saw it.
     fn last_configured(
         client: &Client,
