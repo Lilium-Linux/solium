@@ -262,6 +262,14 @@ int solium_qml_drain(long long elapsed_ms, int advance);
  */
 int solium_qml_scene_watch_for_test(SoliumQmlScene *scene, int fd, const char *name);
 
+/*
+ * For tests: which `Solium.Theme` an engine given `import_path` the way the
+ * compositor's own is given it resolves, read as the int property `mark` off
+ * that singleton; INT_MIN when nothing resolves. A fresh engine of its own,
+ * after Qt has started. `qml::hosting_tests::the_shipped_theme_is_found_before_a_users_own`.
+ */
+int solium_qml_theme_mark_for_test(const char *import_path);
+
 /* Returned by a render that was skipped because nothing had changed. */
 #define SOLIUM_QML_UNCHANGED 2
 

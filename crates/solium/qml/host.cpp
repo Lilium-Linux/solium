@@ -119,6 +119,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace {
@@ -246,9 +247,16 @@ CompositorAnimationDriver *g_driver = nullptr;
  * This is the difference between "the decorations happen to be QML" and "the
  * desktop is one design system". Sharing an engine means every scene sees the
  * same singletons, so a theme is a single object rather than a copy per
- * surface — and it is the prerequisite for an item ever moving from the dock
- * into a titlebar, which cannot happen across two scene graphs, let alone two
- * processes.
+ * surface.
+ *
+ * It is also what a planned move of an item from the dock into a titlebar
+ * would stand on. None of that is built, and it will not be a reparent: every
+ * scene has a QQuickWindow of its own (`solium_qml_scene_new_with` and
+ * `solium_qml_scene_new_gpu` each make one), so each is its own scene graph,
+ * and an item cannot move from one to another. The plan is a third, live
+ * instance of the same component, flown over both ends on the compositor's
+ * clock, and one engine is what lets that be the component itself, with the
+ * same theme, rather than a picture of it (docs/shell-boundary.md).
  */
 QQmlEngine *g_engine = nullptr;
 int g_argc = 1;
@@ -460,6 +468,29 @@ static void route_qt_diagnostics()
 }
 
 /*
+ * Hand `engine` the import path, one `addImportPath` per entry.
+ *
+ * Colon-separated, like a PATH, and built by `qml.rs` (or replaced whole by
+ * `SOLIUM_QML_PATH`). One entry is the compositor's own module, so a scene can
+ * `import Solium` and reach the theme. The user's QML directory comes before
+ * it in that string, but each `addImportPath` puts its path in front of the
+ * ones already added, so Qt searches the entries in the reverse order: the
+ * shipped `Solium` is found first, and a user's own `Solium/Theme.qml` is not
+ * the one that resolves (#88;
+ * `qml::hosting_tests::the_shipped_theme_is_found_before_a_users_own`).
+ */
+static void add_import_paths(QQmlEngine *engine, const char *import_path)
+{
+    if (import_path == nullptr) {
+        return;
+    }
+    const auto paths = QString::fromUtf8(import_path).split(QLatin1Char(':'), Qt::SkipEmptyParts);
+    for (const auto &path : paths) {
+        engine->addImportPath(path);
+    }
+}
+
+/*
  * Everything the two starters have in common.
  *
  * Which scene graph to use has to be decided *before* this runs — Qt reads that
@@ -499,18 +530,7 @@ static bool start_common(const char *import_path)
     always->start();
 
     g_engine = new QQmlEngine();
-    if (import_path != nullptr) {
-        // Colon-separated, like a PATH, and built by `qml.rs` (or replaced
-        // whole by `SOLIUM_QML_PATH`). One entry is the compositor's own
-        // module, so a scene can `import Solium` and reach the theme; the
-        // user's QML directory comes before it, so their own
-        // `Solium/Theme.qml` is the one that resolves.
-        const auto paths = QString::fromUtf8(import_path).split(QLatin1Char(':'),
-                                                                Qt::SkipEmptyParts);
-        for (const auto &path : paths) {
-            g_engine->addImportPath(path);
-        }
-    }
+    add_import_paths(g_engine, import_path);
     return true;
 }
 
@@ -1879,6 +1899,30 @@ extern "C" int solium_qml_scene_watch_for_test(SoliumQmlScene *scene, int fd, co
                          }
                      });
     return 1;
+}
+
+/* For tests: which `Solium.Theme` an engine given `import_path` the way the
+ * compositor's own is given it resolves, as the int property `mark` off that
+ * singleton. A fresh engine of its own, so the compositor's keeps its path, and
+ * INT_MIN when nothing resolves.
+ * `qml::hosting_tests::the_shipped_theme_is_found_before_a_users_own`. */
+extern "C" int solium_qml_theme_mark_for_test(const char *import_path)
+{
+    if (g_app == nullptr || import_path == nullptr) {
+        return std::numeric_limits<int>::min();
+    }
+    QQmlEngine engine;
+    add_import_paths(&engine, import_path);
+    QQmlComponent component(&engine);
+    component.setData("import QtQml\nimport Solium\nQtObject { property int mark: Theme.mark }\n",
+                      QUrl());
+    const std::unique_ptr<QObject> object(component.create());
+    if (object == nullptr) {
+        return std::numeric_limits<int>::min();
+    }
+    bool ok = false;
+    const int mark = object->property("mark").toInt(&ok);
+    return ok ? mark : std::numeric_limits<int>::min();
 }
 
 /* Whether Qt has asked for this scene to be drawn again. */

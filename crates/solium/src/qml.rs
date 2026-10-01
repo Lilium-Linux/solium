@@ -123,6 +123,8 @@ mod ffi {
             fd: c_int,
             name: *const c_char,
         ) -> c_int;
+        #[cfg(test)]
+        pub(super) fn solium_qml_theme_mark_for_test(import_path: *const c_char) -> c_int;
         pub(super) fn solium_qml_scene_render(scene: *mut Scene) -> c_int;
         pub(super) fn solium_qml_scene_pixels(scene: *const Scene, stride: *mut c_int)
         -> *const u8;
@@ -807,6 +809,20 @@ pub(crate) fn clear_cache() {
     unsafe { ffi::solium_qml_clear_cache() }
 }
 
+/// Which `Solium.Theme` an engine given `import_path` the way the
+/// compositor's own is given it resolves: the int property `mark` off that
+/// singleton, or `None` when nothing resolves. A fresh engine of its own, so
+/// the compositor's keeps its path; Qt has to have started. See
+/// `hosting_tests::the_shipped_theme_is_found_before_a_users_own`.
+#[cfg(test)]
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+fn theme_mark_for_test(import_path: &std::ffi::OsStr) -> Option<i32> {
+    let path = CString::new(import_path.as_encoded_bytes()).ok()?;
+    // SAFETY: `path` outlives the call, which keeps nothing of it.
+    let mark = unsafe { ffi::solium_qml_theme_mark_for_test(path.as_ptr()) };
+    (mark != c_int::MIN).then_some(mark)
+}
+
 /// Where QML modules are found, `Solium` among them.
 ///
 /// Colon-separated, like a `PATH`, because there are two roots: the user's
@@ -837,8 +853,12 @@ fn import_path() -> std::ffi::OsString {
 /// produced a search path with `U+FFFD` in it, pointing nowhere.
 fn search_path(user: Option<&Path>, shipped: &Path) -> std::ffi::OsString {
     // The user's directory first, for the same reason the Lua search path puts
-    // it first: dropping `Solium/Theme.qml` into ~/.config/solium/qml should
-    // restyle every frame and every surface, without copying the rest.
+    // it first: dropping `Solium/Theme.qml` into ~/.config/solium/qml is meant
+    // to restyle every frame and every surface, without copying the rest. It
+    // does not yet: `qml/host.cpp` hands the entries to Qt one `addImportPath`
+    // at a time, each of which goes in front of the ones before it, so Qt
+    // searches them in the reverse order and the shipped module is found
+    // first (#88; `hosting_tests::the_shipped_theme_is_found_before_a_users_own`).
     let mut path = std::ffi::OsString::new();
     for part in user
         .map(Path::to_path_buf)
@@ -1789,9 +1809,12 @@ mod search_path_tests {
             .collect()
     }
 
-    /// The property the whole design rests on: a `Solium/Theme.qml` dropped
-    /// into the user's directory is the one Qt resolves, with nothing else
-    /// copied.
+    /// The user's directory is in front of the shipped one in the string,
+    /// which is the order the design means Qt to search: a `Solium/Theme.qml`
+    /// dropped into the user's directory, with nothing else copied, would then
+    /// be the one that resolves. Qt searches it in the reverse order, so
+    /// today it is not (#88;
+    /// `hosting_tests::the_shipped_theme_is_found_before_a_users_own`).
     ///
     /// Asserted as a *position*, not as a path. The shipped half moved to
     /// `crate::assets` and could move again; what may not change is that the
@@ -1805,7 +1828,7 @@ mod search_path_tests {
         let shipped_at = parts.iter().position(|part| part == shipped);
         assert!(
             user_at < shipped_at,
-            "the user's directory must shadow the shipped one: {parts:?}"
+            "the user's directory must come before the shipped one: {parts:?}"
         );
     }
 
@@ -1875,6 +1898,50 @@ mod hosting_tests {
 
     fn write(path: &Path, text: impl AsRef<[u8]>) {
         std::fs::write(path, text).expect("writing a fixture");
+    }
+
+    /// **The shipped `Solium.Theme` is found before a user's own** (#88), so
+    /// a `Solium/Theme.qml` dropped into `~/.config/solium/qml` restyles
+    /// nothing yet.
+    ///
+    /// Two roots, each holding a `Solium` module whose `Theme` has a `mark` of
+    /// its own, are put on a search path by `search_path`, the user's first,
+    /// and handed to a fresh engine the way `qml/host.cpp` hands the
+    /// compositor's its path, one `addImportPath` per entry. Each of those
+    /// goes in front of the ones before it, so the shipped root is searched
+    /// first and its `Theme` is the one a scene gets. Fixing #88 turns this
+    /// round.
+    #[test]
+    fn the_shipped_theme_is_found_before_a_users_own() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-import-order");
+            let user = directory.join("user");
+            let shipped = directory.join("shipped");
+            for (root, mark) in [(&user, 1), (&shipped, 2)] {
+                let module = root.join("Solium");
+                std::fs::create_dir_all(&module).expect("a module directory");
+                write(
+                    &module.join("qmldir"),
+                    "module Solium\nsingleton Theme 1.0 Theme.qml\n",
+                );
+                write(
+                    &module.join("Theme.qml"),
+                    format!(
+                        "pragma Singleton\nimport QtQml\nQtObject {{ property int mark: {mark} }}\n"
+                    ),
+                );
+            }
+
+            super::start().expect("Qt starts");
+            let path = super::search_path(Some(&user), &shipped);
+            assert_eq!(
+                super::theme_mark_for_test(&path),
+                Some(2),
+                "the Theme that resolved is not the shipped one (1 is the user's): {path:?}"
+            );
+
+            let _ = std::fs::remove_dir_all(&directory);
+        });
     }
 
     /// **A root shaped like a window is drawn through its content item**, and

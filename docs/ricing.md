@@ -77,11 +77,13 @@ Three guides go deeper than the recipes below:
 | one module, replaced | `~/.config/solium/tiling.lua`, `scrolling.lua`, … |
 | your pane styles | `~/.config/solium/qml/panes/<name>/` |
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
-| your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml` |
+| your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml`, once [#88](https://github.com/Lilium-Linux/solium/issues/88) is fixed |
 
-Your directory is searched first in every case. A file you write shadows the
-one that ships, and everything you did not write still comes from the shipped
-set — including its later improvements.
+Your directory is searched first in every case but the last. A file you write
+shadows the one that ships, and everything you did not write still comes from
+the shipped set — including its later improvements. Your own `Theme.qml` does
+not shadow the shipped one yet: the shipped `Solium` module is found first
+([#88](https://github.com/Lilium-Linux/solium/issues/88)).
 
 ## Recipes
 
@@ -240,10 +242,10 @@ waiting window a titlebar, and therefore a close button for an application
 that is not coming.
 
 `fade` is the dissolve as the application appears underneath. It is the
-compositor's, not the scene's, and a scene **cannot** do it for itself — Qt's
-software renderer repaints only what it thinks changed, onto the pixels already
-there, so each half-transparent frame would land on its own opaque previous one
-and nothing would fade. Set `fade = 0` to cut straight to the application.
+compositor's, not the scene's: whether a window is see-through is a
+presentation transform, like where it is and how big, so the compositor applies
+it to the scene's picture as it draws it ([animation.md](animation.md#animations-you-should-not-write)).
+Set `fade = 0` to cut straight to the application.
 
 Your own scene goes in `~/.config/solium/qml/loading/`. It is handed the
 program's name and how long it has waited; the one that ships uses only the
@@ -661,10 +663,14 @@ and for both ways a shell attaches.
 
 ### Your own colours
 
-Copy `Solium/Theme.qml` into `~/.config/solium/qml/Solium/` and change it.
-Every frame reads it, and so does every other scene that imports `Solium` — a
-hosted shell among them, if it uses it — so one file restyles the desktop
-rather than the titlebars.
+`Solium.Theme` (`crates/solium/qml/Solium/Theme.qml`) is what every shipped
+frame and the loading window are drawn with, and a hosted shell that imports
+`Solium` can read it too. The fallback pointer and the default wallpaper do
+not: their colours are fixed. A copy of `Theme.qml` in
+`~/.config/solium/qml/Solium/` is meant to restyle the frames, the loading
+window and such a shell at once, and does not work yet: the shipped module is found first
+([#88](https://github.com/Lilium-Linux/solium/issues/88)). Until then, a
+frame of your own ([above](#your-own-frame)) can carry colours of its own.
 
 ### Your own animation feel
 
