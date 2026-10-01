@@ -7,6 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
+/// The headers moc runs on, in crates/solium/qml: the same list as
+/// `MOC_HEADERS` in crates/solium/build.rs.
+const MOC_HEADERS: &[&str] = &["attached.h"];
+
 /// The repository this harness belongs to: two levels up from `dev/wirecheck`.
 ///
 /// Derived rather than written down, so a worktree, a clone under another name
@@ -27,6 +31,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", qml.join("attached.cpp").display());
     println!("cargo:rerun-if-changed={}", qml.join("attached.h").display());
     println!("cargo:rerun-if-env-changed=WIRECHECK_HOST_CPP");
+    println!("cargo:rerun-if-env-changed=QT_MOC");
     // Our own C++ too. cc-rs does not always emit these, and a stale object
     // file here shows up as an undefined symbol at link time rather than as
     // anything to do with the file that was edited.
@@ -94,7 +99,7 @@ fn main() {
     // gate's wirecheck step builds only with it.
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     let moc = find_moc(&qt);
-    for header in [qml.join("attached.h")] {
+    for header in MOC_HEADERS.iter().map(|name| qml.join(name)) {
         let stem = header
             .file_stem()
             .and_then(|stem| stem.to_str())

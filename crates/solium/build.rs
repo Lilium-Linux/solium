@@ -17,6 +17,7 @@ fn main() {
     // old constant, and the symptom of that is an installed binary looking in
     // the previous prefix.
     println!("cargo:rerun-if-env-changed=SOLIUM_DATADIR");
+    println!("cargo:rerun-if-env-changed=QT_MOC");
     println!("cargo:rerun-if-changed=qml/host.cpp");
     println!("cargo:rerun-if-changed=qml/host.h");
     println!("cargo:rerun-if-changed=qml/attached.cpp");
