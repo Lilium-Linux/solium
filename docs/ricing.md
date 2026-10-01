@@ -668,7 +668,8 @@ file:
 return { shell = { scene = "~/.config/solium/shell/shell.qml" } }
 ```
 
-One scene, on the primary monitor, written against Solium's own QML API;
+One scene on every monitor, or on the one `shell.on` names, written against
+Solium's own QML API;
 [shell-boundary.md](shell-boundary.md) has how to install one and what it is
 and is not given.
 
