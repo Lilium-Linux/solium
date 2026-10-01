@@ -23,10 +23,13 @@ use, and the trial on real hardware that decides whether it is ready has not
 happened yet. What stands in the way is the
 [`daily-drive` label][daily-drive], and the honest reasons are specific:
 
-- A hosted shell is not yet a whole desktop ([#169]). It gets no keyboard, and
-  every button reaches it as a left press ([#163]); a bar reserves no room, so
-  windows go under it ([#162]); and it is one scene on one monitor that sees no
-  windows, workspaces or other monitors ([#161], [#166]).
+- A hosted shell is not yet a whole desktop ([#169]). It takes every click and
+  hover on its monitor, however little of it the shell draws on, so while one
+  is hosted the windows under it cannot be clicked, focused or dragged with the
+  mouse. It gets no keyboard, and every button reaches it as a left press
+  ([#163]); a bar reserves no room, so windows go under it ([#162]); and it is
+  one scene on one monitor that sees no windows, workspaces or other monitors
+  ([#161], [#166]).
 - Suspend and resume have never been tested ([#64]), and a session on the
   hardware sometimes starts with no input devices and stops itself ([#48]).
 - There is no explicit sync, so Vulkan and NVIDIA clients can stutter ([#59]).
@@ -34,6 +37,9 @@ happened yet. What stands in the way is the
   brightness, media or screenshot keys by default ([#151]); and logind's lock
   and sleep requests are ignored ([#153]).
 - There are no packages: an install is built from a checkout ([#66]).
+- Two tiling bugs found in use are fixed, and stay open until real use bears
+  that out: a window drawing past its tile over its neighbours ([#133]), and a
+  closing window keeping its tile until its client had gone ([#128]).
 
 And a bug in a compositor takes the session with it. The ones that get found
 are the ones real use finds, which is why the trial matters more than the test
@@ -59,8 +65,9 @@ suite.
   default with a software fallback ([#147]), and cursor themes and the shapes
   clients ask for ([#81], [#24]).
 - **Shells.** `shell = { scene = … }` hosts one in the compositor's own QML
-  engine, and any layer-shell client works too. Both get frame callbacks
-  ([#149]), and a hosted scene's timers fire on an idle desktop ([#164]).
+  engine, and any layer-shell client works too, with frame callbacks a bar or
+  a locker can rely on ([#149]); a hosted scene's timers fire on an idle
+  desktop ([#164]).
 - **Monitors.** Several at once, each at its own refresh rate, arranged from
   the configuration or guessed; plugged in and unplugged while the session runs
   ([#43]); scaled, worked out from the panel or set. Screens go dark after ten
@@ -299,7 +306,7 @@ talking to a compositor over a protocol — the same process, the same frame. A
 shell is hosted in that same engine, as QML written against Solium's own API,
 through `shell = { scene = ... }` in the configuration: see
 [docs/shell-boundary.md](docs/shell-boundary.md). Quickshell support was
-removed (#172).
+removed ([#172]).
 
 That is why a titlebar can be reloaded while the session runs, why a hosted
 shell can read the same theme as the window frames, and why a decoration can be
@@ -343,12 +350,13 @@ not a thing drawn beside it.
 Tiling, scrolling, floating and overview are Lua scripts: when to split, where
 a new window goes, what a key does. The arithmetic they ask for — the dwindle
 tree and the scrolling strip — is `crates/layout`, which knows nothing of
-windows and also arranges the boxes in the preview page. `sol.present` hands a
-script the same transform the compositor uses, so a layout somebody writes is
-not a second-class one. Bindings and the modes themselves live in Lua too, and
-`--check` will tell you what actually loaded — because a configuration that
-fails to parse at startup leaves a compositor with no layouts and no bindings
-at all, and that failure should cost a log line rather than a session.
+windows and also arranges the boxes in `dev/preview`'s animation page.
+`sol.present` hands a script the same transform the compositor uses, so a
+layout somebody writes is not a second-class one. Bindings and the modes
+themselves live in Lua too, and `--check` will tell you what actually loaded —
+because a configuration that fails to parse at startup leaves a compositor with
+no layouts and no bindings at all, and that failure should cost a log line
+rather than a session.
 
 ### Effects are fragment programs with declared inputs
 
@@ -401,7 +409,7 @@ reference pages made from the code.
 
 | For | Read |
 |---|---|
-| using it | [docs/ricing.md](docs/ricing.md), configuring it — start here; [Every setting](https://lilium-linux.github.io/solium/generated/reference/settings.html) and the [configuration reference](crates/solium/lua/config.lua), the shipped [Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html), and [Flags and environment](crates/solium/environment.txt) |
+| using it | [docs/ricing.md](docs/ricing.md), configuring it — start here; [Every setting](https://lilium-linux.github.io/solium/generated/reference/settings.html) and the [configuration reference](crates/solium/lua/config.lua), the shipped [Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html), and [Flags and environment](https://lilium-linux.github.io/solium/generated/reference/environment.html) |
 | scripting it in Lua | [docs/modes.md](docs/modes.md), desktop modes and how to write one; [docs/animation.md](docs/animation.md), the animation engine; the [Lua API](crates/solium/lua/meta/sol.lua) |
 | styling it in QML | [docs/decorations.md](docs/decorations.md), window frames and everything else drawn in QML; the [pane styles' README](crates/solium/qml/panes/README.md), the contract a style is written against |
 | writing a shell | [docs/shell-boundary.md](docs/shell-boundary.md), what a hosted shell is given and what belongs to the compositor |
@@ -472,7 +480,9 @@ other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 [#121]: https://github.com/Lilium-Linux/solium/issues/121
 [#126]: https://github.com/Lilium-Linux/solium/issues/126
 [#127]: https://github.com/Lilium-Linux/solium/issues/127
+[#128]: https://github.com/Lilium-Linux/solium/issues/128
 [#132]: https://github.com/Lilium-Linux/solium/issues/132
+[#133]: https://github.com/Lilium-Linux/solium/issues/133
 [#134]: https://github.com/Lilium-Linux/solium/issues/134
 [#141]: https://github.com/Lilium-Linux/solium/issues/141
 [#142]: https://github.com/Lilium-Linux/solium/issues/142
@@ -491,3 +501,4 @@ other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 [#164]: https://github.com/Lilium-Linux/solium/issues/164
 [#166]: https://github.com/Lilium-Linux/solium/issues/166
 [#169]: https://github.com/Lilium-Linux/solium/issues/169
+[#172]: https://github.com/Lilium-Linux/solium/issues/172
