@@ -19,9 +19,11 @@ crates/effects/preview/preview.html
 *.ppm
 *.log
 
-# Local build and tool state.
+# Local build and tool state. Python writes `__pycache__/` beside a module the
+# moment another script imports it, as dev/docs's scripts import `links.py`.
 build/
 .split-baseline/
+__pycache__/
 
 # Environment files and machine-local overrides, which may hold secrets or
 # one machine's paths.
