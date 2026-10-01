@@ -299,8 +299,13 @@ function sol.windows() end
 ---built from the current `properties`, and one it leaves drops its scene. Only
 ---another `scene` file builds it again. A key left out of `properties` keeps
 ---the value the scene last had. A dotted key (`["panel.open"] = true`) reaches
----a grouped property. `false` or `nil` takes the surface away. A scene that
----cannot be found is logged and nothing is drawn.
+---a grouped property. `false` or `nil` takes the surface away. Each monitor it
+---is on gets a scene of its own, built when the surface is declared or the
+---monitor arrives and dropped when the monitor goes; `Solium.monitor` inside it
+---is that monitor. A scene file that is not there is logged, and built once it
+---is there, at the next reload, change of monitors or changed declaration; a
+---scene that will not load is logged once per monitor and not tried again
+---until another `scene` is declared.
 ---@param name string
 ---@param options sol.SurfaceOptions|false|nil
 ---@return nil

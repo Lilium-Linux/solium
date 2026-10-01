@@ -471,7 +471,9 @@ impl Solium {
         self.trigger_relayout();
         // After the handlers, which may declare a surface where its monitor
         // now is: `a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`.
-        self.prune_surfaces();
+        // A monitor that arrived gets its scenes here rather than at its first
+        // frame: `scripted::tests::an_instance_goes_with_its_monitor_and_comes_with_a_new_one`.
+        self.sync_instances();
         self.redraw = true;
         // A lock waiting for its monitors may have been waiting for the one
         // that went. See `Solium::confirm_lock`, and

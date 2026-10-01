@@ -509,7 +509,7 @@ impl Solium {
         // `real_client::a_runtime_primary_change_drops_the_old_primarys_scene`,
         // `real_client::a_binding_that_moves_the_primary_and_its_surface_together_keeps_the_scene`.
         if self.dispatching == 0 && self.monitors_rearranged {
-            self.prune_surfaces();
+            self.sync_instances();
         }
     }
 
@@ -600,7 +600,7 @@ impl Solium {
                 // As a hotplug does, after the handlers: a configuration that
                 // made another monitor primary may declare nothing differently
                 // (`a_reload_that_moves_the_primary_drops_the_old_primarys_scene`).
-                self.prune_surfaces();
+                self.sync_instances();
                 self.redraw = true;
                 tracing::info!(config = %path.display(), "configuration reloaded");
                 // And then look at what that produced -- at where it *lands*,

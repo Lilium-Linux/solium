@@ -2553,8 +2553,8 @@ mod real_client {
     const RIGHT_SCREEN: &str = "right-test";
 
     /// **A surface redeclared onto another monitor drops its scene on the
-    /// first**: `declare_surface` prunes what a changed placement no longer
-    /// covers, so `sol.surface` following `sol.monitor()` from screen to
+    /// first and has one on the second**: `declare_surface` syncs that
+    /// surface, so `sol.surface` following `sol.monitor()` from screen to
     /// screen does not leave a whole Qt scene behind on each. No client, so
     /// the scene may be a real one (the #99 rule).
     #[test]
@@ -2568,7 +2568,7 @@ mod real_client {
 
             let display = Display::<Solium>::new().expect("creating a test wayland display");
             let mut state = Solium::new(display.handle());
-            let (left, _) = side_by_side(&mut state, "redeclared-left");
+            let (left, right) = side_by_side(&mut state, "redeclared-left");
             let mut declared = crate::scripted::Declaration::for_test(
                 "bar",
                 path,
@@ -2576,25 +2576,17 @@ mod real_client {
                 crate::scripted::On::Monitor("redeclared-left".to_owned()),
             );
             state.declare_surface(declared.clone());
-            let id = state.surfaces.named("bar").expect("declared");
-            assert!(
-                state
-                    .surfaces
-                    .get_mut(id)
-                    .and_then(|surface| surface.instance(&left))
-                    .is_some(),
-                "the scene builds"
-            );
+            assert!(has_scene(&mut state, "bar", &left), "the scene builds");
 
             declared.on = crate::scripted::On::Monitor(RIGHT_SCREEN.to_owned());
             state.declare_surface(declared);
-            assert_eq!(
-                state
-                    .surfaces
-                    .get(id)
-                    .map(crate::scripted::Surface::instance_count),
-                Some(0),
+            assert!(
+                !has_scene(&mut state, "bar", &left),
                 "the monitor the surface left kept its scene"
+            );
+            assert!(
+                has_scene(&mut state, "bar", &right),
+                "the monitor the surface moved to has no scene"
             );
         });
     }
@@ -2645,7 +2637,7 @@ mod real_client {
         entry
     }
 
-    /// The scene `name` draws on `output`, built there if it has none.
+    /// The scene surface `name` has on `output`.
     fn scene_on<'a>(
         state: &'a mut Solium,
         name: &str,
@@ -2655,9 +2647,19 @@ mod real_client {
         state
             .surfaces
             .get_mut(id)
-            .and_then(|surface| surface.instance(output))
-            .expect("the scene builds")
+            .and_then(|surface| surface.instance_mut(output))
+            .expect("the surface has a scene there")
             .scene_for_test()
+    }
+
+    /// Whether surface `name` has a scene on `output`.
+    fn has_scene(state: &mut Solium, name: &str, output: &Output) -> bool {
+        let id = state.surfaces.named(name).expect("the surface is declared");
+        state
+            .surfaces
+            .get_mut(id)
+            .and_then(|surface| surface.instance_mut(output))
+            .is_some()
     }
 
     /// **A monitor an unplug moves keeps the scene its `monitors` handler
@@ -2731,8 +2733,8 @@ mod real_client {
     }
 
     /// **A reload that makes another monitor primary drops the old primary's
-    /// scene**, for a surface `on = "primary"` the new configuration declares
-    /// exactly as the old one did. Nothing about the surface changed, so only
+    /// scene and builds one on the new**, for a surface `on = "primary"` the
+    /// new configuration declares exactly as the old one did. Nothing about the surface changed, so only
     /// the reload itself can see that its monitor did. No client (the #99
     /// rule).
     #[test]
@@ -2760,7 +2762,7 @@ mod real_client {
 
             let display = Display::<Solium>::new().expect("creating a test wayland display");
             let mut state = Solium::new(display.handle());
-            let (left, _) = side_by_side(&mut state, "reload-primary-left");
+            let (left, right) = side_by_side(&mut state, "reload-primary-left");
             state.start_scripts(Some(
                 Scripts::load(&before).expect("loading the test script"),
             ));
@@ -2768,21 +2770,20 @@ mod real_client {
             scene_on(&mut state, "bar", &left);
 
             state.reload_from(&after);
-            let id = state.surfaces.named("bar").expect("still declared");
-            assert_eq!(
-                state
-                    .surfaces
-                    .get(id)
-                    .map(crate::scripted::Surface::instance_count),
-                Some(0),
+            assert!(
+                !has_scene(&mut state, "bar", &left),
                 "the monitor that stopped being primary kept its scene"
+            );
+            assert!(
+                has_scene(&mut state, "bar", &right),
+                "the new primary has no scene"
             );
         });
     }
 
     /// **A `sol.monitors{}` at run time that makes another monitor primary
-    /// drops the old primary's scene**, once the dispatch that said it is
-    /// done. A binding is neither a reload nor a hotplug, and nothing about
+    /// drops the old primary's scene and builds one on the new**, once the
+    /// dispatch that said it is done. A binding is neither a reload nor a hotplug, and nothing about
     /// the surface changed, so only the dispatch can see that its monitor
     /// did. No client (the #99 rule).
     #[test]
@@ -2810,7 +2811,7 @@ mod real_client {
 
             let display = Display::<Solium>::new().expect("creating a test wayland display");
             let mut state = Solium::new(display.handle());
-            let (left, _) = side_by_side(&mut state, "runtime-primary-left");
+            let (left, right) = side_by_side(&mut state, "runtime-primary-left");
             state.start_scripts(Some(
                 Scripts::load(&entry).expect("loading the test script"),
             ));
@@ -2818,14 +2819,13 @@ mod real_client {
             scene_on(&mut state, "bar", &left);
 
             assert!(state.trigger("super+p"), "super+p is bound");
-            let id = state.surfaces.named("bar").expect("still declared");
-            assert_eq!(
-                state
-                    .surfaces
-                    .get(id)
-                    .map(crate::scripted::Surface::instance_count),
-                Some(0),
+            assert!(
+                !has_scene(&mut state, "bar", &left),
                 "the monitor that stopped being primary kept its scene"
+            );
+            assert!(
+                has_scene(&mut state, "bar", &right),
+                "the new primary has no scene"
             );
         });
     }

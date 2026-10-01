@@ -1727,6 +1727,7 @@ pub(crate) mod qt_test {
         let sender = QT.get_or_init(|| {
             let (sender, receiver) = std::sync::mpsc::channel::<Job>();
             std::thread::spawn(move || {
+                ON_IT.with(|on_it| on_it.set(true));
                 // Until the channel closes, which is when the process ends.
                 for job in receiver {
                     job();
@@ -1756,6 +1757,17 @@ pub(crate) mod qt_test {
                 "the Qt thread went without saying why: {gone}"
             ))),
         }
+    }
+
+    thread_local! {
+        /// Whether this is the thread [`on_the_qt_thread`] runs its work on.
+        static ON_IT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Whether the code running now is on the Qt thread.
+    /// `scripted::tests::a_surface_synced_off_the_qt_thread_builds_nothing`.
+    pub(crate) fn is_the_qt_thread() -> bool {
+        ON_IT.with(std::cell::Cell::get)
     }
 }
 

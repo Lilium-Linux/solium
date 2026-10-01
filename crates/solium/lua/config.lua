@@ -55,7 +55,8 @@ local defaults = {
     --
     --     wallpaper = { "~/Pictures/one.png", "~/Pictures/two.png" },
     --
-    -- Fewer pictures than workspaces cycles. It costs one screen-sized
+    -- Fewer pictures than workspaces cycles. It costs a scene per desk on
+    -- every monitor, built when it is declared, and one screen-sized
     -- rasterisation per desk you have actually visited, per monitor, which is
     -- why a single image stays a single static surface: every desk sharing one
     -- picture makes a wallpaper that slides pixel-identical to one that does
