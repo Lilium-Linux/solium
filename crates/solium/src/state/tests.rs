@@ -20312,6 +20312,65 @@ end)
                          genuine activation was not told as a request, or the view followed it"
                     );
                 }
+
+                /// **A window being closed is not brought into view or given
+                /// the keyboard by a relaunch**, in every mode, on the
+                /// workspace in view and on another. An application relaunched
+                /// in the moment its window is fading out brings that window
+                /// forward with the launch's token; the compositor refuses a
+                /// window being closed the keyboard whatever the token, and
+                /// the shipped `activate` handler must not hand it over anyway
+                /// or carry the view to a window that is going.
+                #[test]
+                fn relaunching_an_application_whose_window_is_being_closed_leaves_the_view_and_the_keyboard_where_they_were()
+                 {
+                    for (key, mode) in MODES {
+                        for away in [false, true] {
+                            let mode = format!("{mode}, {}", if away { "away" } else { "in view" });
+                            let (mut desk, app) = running(key);
+                            if away {
+                                sent_away(&mut desk, &app, &mode);
+                            }
+                            let other = desk.open_surface();
+                            desk.pump();
+                            desk.pump();
+                            if desk
+                                .state
+                                .panes
+                                .get(other.pane)
+                                .and_then(Pane::placed)
+                                .is_some()
+                            {
+                                desk.answer(&other);
+                            }
+                            settled(&mut desk);
+                            let other_window = window_of(&desk, other.pane);
+                            desk.state
+                                .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                            desk.state.close_pane(app.pane);
+                            frame(&mut desk);
+                            assert!(
+                                desk.state.panes.get(app.pane).is_some_and(Pane::leaving),
+                                "{mode}: the premise: the application's window is being closed"
+                            );
+                            let before = told(&desk).len();
+                            let _ = relaunched(&mut desk, &app, &mode);
+                            frame(&mut desk);
+                            let after = told(&desk)[before..].to_vec();
+                            assert!(
+                                after.contains(&format!("activate {} launch", app.pane.get())),
+                                "{mode}: the scripts were not told of the relaunch: {after:?}"
+                            );
+                            assert_eq!(
+                                (desk.state.focused_window(), showing(&desk)),
+                                (Some(other_window.clone()), "1".to_owned()),
+                                "{mode}: (the window with the keyboard, the workspace in view): a \
+                                 relaunch gave the keyboard to a window being closed, or carried \
+                                 the view to it: {after:?}"
+                            );
+                        }
+                    }
+                }
             }
         }
 
