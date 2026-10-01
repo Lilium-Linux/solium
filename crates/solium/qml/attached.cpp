@@ -1,6 +1,8 @@
 #include "attached.h"
 
-#include <QtCore/QHash>
+#include "host.h"
+#include "rows.h"
+
 #include <QtQml/QQmlContext>
 #include <QtQml/QQmlEngine>
 
@@ -10,13 +12,16 @@ namespace {
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 constexpr const char kHosting[] = "_soliumHosting";
 
-QHash<QString, SoliumMonitor *> &monitor_rows()
-{
-    static QHash<QString, SoliumMonitor *> rows;
-    return rows;
-}
-
 } // namespace
+
+QRectF solium_rect(const QVariant &value)
+{
+    const QVariantMap map = value.toMap();
+    return QRectF(map.value(QStringLiteral("x")).toDouble(),
+                  map.value(QStringLiteral("y")).toDouble(),
+                  map.value(QStringLiteral("width")).toDouble(),
+                  map.value(QStringLiteral("height")).toDouble());
+}
 
 QList<QByteArray> SoliumRow::assign(const QVariantMap &next)
 {
@@ -49,15 +54,17 @@ void solium_hosting_mark(QQmlContext *context, SoliumHosting *hosting)
 
 SoliumMonitor *solium_monitor_row(const QString &name)
 {
-    auto &rows = monitor_rows();
-    if (auto found = rows.constFind(name); found != rows.cend()) {
-        return found.value();
+    SoliumRows *rows = solium_rows(SOLIUM_QML_ROWS_MONITORS);
+    SoliumRow *row = rows != nullptr ? rows->row_for(name) : nullptr;
+    if (row != nullptr) {
+        return static_cast<SoliumMonitor *>(row);
     }
-    auto *row = new SoliumMonitor();
-    QQmlEngine::setObjectOwnership(row, QQmlEngine::CppOwnership);
-    row->values.insert(QStringLiteral("name"), name);
-    rows.insert(name, row);
-    return row;
+    static SoliumMonitor *absent = nullptr;
+    if (absent == nullptr) {
+        absent = new SoliumMonitor();
+        QQmlEngine::setObjectOwnership(absent, QQmlEngine::CppOwnership);
+    }
+    return absent;
 }
 
 SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item) {}

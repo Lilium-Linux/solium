@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// The headers moc runs on, in crates/solium/qml: the same list as
 /// `MOC_HEADERS` in crates/solium/build.rs.
-const MOC_HEADERS: &[&str] = &["attached.h"];
+const MOC_HEADERS: &[&str] = &["attached.h", "rows.h"];
 
 /// The repository this harness belongs to: two levels up from `dev/wirecheck`.
 ///
@@ -30,6 +30,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", qml.join("host.cpp").display());
     println!("cargo:rerun-if-changed={}", qml.join("attached.cpp").display());
     println!("cargo:rerun-if-changed={}", qml.join("attached.h").display());
+    println!("cargo:rerun-if-changed={}", qml.join("rows.cpp").display());
+    println!("cargo:rerun-if-changed={}", qml.join("rows.h").display());
     println!("cargo:rerun-if-env-changed=WIRECHECK_HOST_CPP");
     println!("cargo:rerun-if-env-changed=QT_MOC");
     // Our own C++ too. cc-rs does not always emit these, and a stale object
@@ -49,10 +51,12 @@ fn main() {
         // #include the real host.cpp verbatim. host.cpp is compiled exactly
         // once, from this checkout, unmodified.
         .file("src/host_tu.cpp")
-        // host.cpp includes attached.h and calls into attached.cpp, so the
-        // real one is compiled beside it, with its moc output below: the
-        // gate's wirecheck step links only with both.
-        .file(qml.join("attached.cpp"));
+        // host.cpp includes attached.h and calls into attached.cpp, which
+        // calls into rows.cpp, so the real ones are compiled beside it, with
+        // their moc output below: the gate's wirecheck step links only with
+        // all of them.
+        .file(qml.join("attached.cpp"))
+        .file(qml.join("rows.cpp"));
     // Overridable only so a deliberately broken copy can be compiled as a
     // negative control; the default is always the host.cpp beside this crate.
     let host = std::env::var_os("WIRECHECK_HOST_CPP")
@@ -95,7 +99,7 @@ fn main() {
         }
     }
 
-    // The same moc step as crates/solium/build.rs, on the same header; the
+    // The same moc step as crates/solium/build.rs, on the same headers; the
     // gate's wirecheck step builds only with it.
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     let moc = find_moc(&qt);

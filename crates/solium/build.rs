@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// The headers moc runs on: every one that declares a Q_OBJECT type.
 /// `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
-const MOC_HEADERS: &[&str] = &["qml/attached.h"];
+const MOC_HEADERS: &[&str] = &["qml/attached.h", "qml/rows.h"];
 
 fn main() {
     // The datadir a packager bakes in, read by `option_env!` in `assets.rs`.
@@ -22,6 +22,8 @@ fn main() {
     println!("cargo:rerun-if-changed=qml/host.h");
     println!("cargo:rerun-if-changed=qml/attached.cpp");
     println!("cargo:rerun-if-changed=qml/attached.h");
+    println!("cargo:rerun-if-changed=qml/rows.cpp");
+    println!("cargo:rerun-if-changed=qml/rows.h");
 
     let mut build = cc::Build::new();
     build
@@ -33,6 +35,7 @@ fn main() {
         .flag_if_supported("-Wno-unused-parameter")
         .file("qml/host.cpp")
         .file("qml/attached.cpp")
+        .file("qml/rows.cpp")
         .include("qml");
 
     // Qt6Quick pulls in Core, Gui and Qml transitively.
@@ -68,9 +71,11 @@ fn main() {
         }
     }
 
-    // attached.h declares Q_OBJECT types -- the attached `Solium` object and
-    // the rows it hands out -- so it needs moc, which host.cpp itself still
-    // does not. `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
+    // attached.h and rows.h declare Q_OBJECT types -- the attached `Solium`
+    // object, the rows it hands out and the store they are kept in -- so they
+    // need moc, which host.cpp itself still does not.
+    // `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
+    // `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
     let out: PathBuf = std::env::var_os("OUT_DIR")
         .map(PathBuf::from)
         .unwrap_or_default();

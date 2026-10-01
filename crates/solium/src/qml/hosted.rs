@@ -1,7 +1,7 @@
 //! The compositor's half of what a hosted scene and the compositor say to each
-//! other: properties written in place, the monitor it is on, and, from later
-//! tasks, pointer events, what it claims, what it reserves, its grabs, its
-//! keyboard wants and its actions.
+//! other: properties written in place, the monitor it is on, the models' rows,
+//! and, from later tasks, pointer events, what it claims, what it reserves, its
+//! grabs, its keyboard wants and its actions.
 
 use std::{
     ffi::{CString, c_char, c_int},
@@ -24,7 +24,33 @@ mod ffi {
             json_value: *const c_char,
         ) -> c_int;
         pub(super) fn solium_qml_host_next_on(monitor: *const c_char);
+        pub(super) fn solium_qml_rows_apply(model: c_int, ops_json: *const c_char) -> c_int;
     }
+}
+
+/// A model's number, as `host.h`'s `SOLIUM_QML_ROWS_*` say it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Model {
+    Monitors = 0,
+    #[expect(dead_code, reason = "host.h numbers it; nothing publishes windows yet")]
+    Windows = 1,
+    #[expect(
+        dead_code,
+        reason = "host.h numbers it; nothing publishes workspaces yet"
+    )]
+    Workspaces = 2,
+}
+
+/// Apply one batch of row operations, rendered by `models::diff::render`, to
+/// a model. False when Qt could not take it.
+/// `tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn apply_rows(model: Model, ops: &str) -> bool {
+    let Ok(ops) = CString::new(ops) else {
+        return false;
+    };
+    // SAFETY: `ops` outlives the call; the host copies what it keeps.
+    unsafe { ffi::solium_qml_rows_apply(model as c_int, ops.as_ptr()) != 0 }
 }
 
 impl Scene {
@@ -302,6 +328,140 @@ pub(crate) mod tests {
             );
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    fn monitor_row(name: &str, width: i32, scale: f64) -> crate::models::diff::Row {
+        crate::models::diff::Row {
+            key: name.to_owned(),
+            values: std::collections::BTreeMap::from([
+                ("name", crate::json::Json::Text(name.to_owned())),
+                (
+                    "whole",
+                    crate::models::monitors::rect(smithay::utils::Rectangle::new(
+                        (0, 0).into(),
+                        (1920, 1080).into(),
+                    )),
+                ),
+                (
+                    "area",
+                    crate::models::monitors::rect(smithay::utils::Rectangle::new(
+                        (0, 0).into(),
+                        (width, 1080).into(),
+                    )),
+                ),
+                ("scale", crate::json::Json::Number(scale)),
+                ("transform", crate::json::Json::Text("normal".to_owned())),
+                ("primary", crate::json::Json::Bool(true)),
+            ]),
+        }
+    }
+
+    /// **A published monitor is `Solium.monitor` in a scene on it**, every
+    /// batch is announced once however many values it changed, a monitor
+    /// that goes reads absent and keeps its name, and the same connector
+    /// coming back is the same row again.
+    #[test]
+    fn a_published_monitor_reaches_solium_monitor_in_its_scene() {
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-rows",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property int areaWidth: Solium.monitor.area.width
+                    readonly property int present: Solium.monitor.present ? 1 : 0
+                    readonly property int named: Solium.monitor.name === "rows-2" ? 1 : 0
+                    property int changes: 0
+                    Connections { target: Solium.monitor; function onChanged() { changes += 1 } }
+                }
+                "#,
+                "rows-2",
+            );
+            let first = vec![monitor_row("rows-2", 1820, 1.0)];
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&[], &first))
+            ));
+            assert_eq!(
+                (
+                    scene.get_int("present"),
+                    scene.get_int("areaWidth"),
+                    scene.get_int("changes")
+                ),
+                (1, 1820, 1)
+            );
+
+            let second = vec![monitor_row("rows-2", 1800, 2.0)];
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&first, &second))
+            ));
+            assert_eq!(scene.get_int("areaWidth"), 1800);
+            assert_eq!(
+                scene.get_int("changes"),
+                2,
+                "two values in one batch were announced more than once"
+            );
+
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&second, &[]))
+            ));
+            assert_eq!(
+                (scene.get_int("present"), scene.get_int("named")),
+                (0, 1),
+                "a gone monitor must read absent and keep its name"
+            );
+
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&[], &first))
+            ));
+            assert_eq!(
+                (scene.get_int("present"), scene.get_int("areaWidth")),
+                (1, 1820),
+                "the connector came back, and the scene's row did not"
+            );
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&first, &[]))
+            ));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A batch that does not match the rows held is refused**, and so is
+    /// text that is not a batch, so a publish that was not taken is sent
+    /// again rather than recorded as taken.
+    #[test]
+    fn a_batch_that_does_not_match_the_rows_held_is_refused() {
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let held = vec![monitor_row("refused-rows-1", 1920, 1.0)];
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&[], &held))
+            ));
+            let elsewhere = vec![monitor_row("refused-rows-2", 1920, 1.0)];
+            assert!(
+                !super::apply_rows(super::Model::Monitors, &render(&diff(&elsewhere, &[]))),
+                "a remove of a row that is not there was taken"
+            );
+            assert!(
+                !super::apply_rows(super::Model::Monitors, "not a batch"),
+                "text that is not a batch was taken"
+            );
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&held, &[]))
+            ));
         });
     }
 

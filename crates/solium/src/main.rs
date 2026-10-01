@@ -23,6 +23,7 @@ mod launch;
 mod layer;
 mod lock;
 mod mat4;
+mod models;
 mod monitor;
 mod offscreen;
 mod pacing;

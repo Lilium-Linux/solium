@@ -247,6 +247,10 @@ pub(crate) struct Solium {
     /// that. See `scripted.rs`.
     pub(crate) surfaces: crate::scripted::Surfaces,
 
+    /// What Qt last took of each model hosted scenes read, so a frame sends
+    /// only what changed since: `models::tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
+    pub(crate) published: crate::models::Published,
+
     /// Every selection a script has named, and where each is being carried.
     ///
     /// **Not a sixth table keyed by `PaneId`.** A group holds its own members
@@ -912,6 +916,7 @@ impl Solium {
             power_state: crate::power::PowerState::new::<Self>(&display_handle),
             power: crate::power::Power::default(),
             surfaces: crate::scripted::Surfaces::default(),
+            published: crate::models::Published::default(),
             groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),

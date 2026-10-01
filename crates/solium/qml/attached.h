@@ -14,6 +14,7 @@
 #include <QtCore/QObject>
 #include <QtCore/QByteArray>
 #include <QtCore/QList>
+#include <QtCore/QRectF>
 #include <QtCore/QString>
 #include <QtCore/QVariant>
 #include <QtCore/QVariantMap>
@@ -42,18 +43,34 @@ public:
     bool present = false;
 };
 
-/* A monitor's row: what `Solium.monitor` is. So far it carries the name.
- * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
+/* A rectangle a row carries, `{ x, y, width, height }`, as QML's `rect`.
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
+QRectF solium_rect(const QVariant &value);
+
+/* A monitor's row: what `Solium.monitor` is. Its name, its whole and work
+ * areas in the global space, its scale, its transform and whether it is the
+ * primary monitor, all announced by one `changed` per batch.
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 class SoliumMonitor : public SoliumRow
 {
     Q_OBJECT
     Q_PROPERTY(bool present READ isPresent NOTIFY changed)
     Q_PROPERTY(bool valid READ isPresent NOTIFY changed)
     Q_PROPERTY(QString name READ name NOTIFY changed)
+    Q_PROPERTY(QRectF whole READ whole NOTIFY changed)
+    Q_PROPERTY(QRectF area READ area NOTIFY changed)
+    Q_PROPERTY(double scale READ scale NOTIFY changed)
+    Q_PROPERTY(QString transform READ transform NOTIFY changed)
+    Q_PROPERTY(bool primary READ primary NOTIFY changed)
 public:
     using SoliumRow::SoliumRow;
     bool isPresent() const { return present; }
     QString name() const { return value("name").toString(); }
+    QRectF whole() const { return solium_rect(value("whole")); }
+    QRectF area() const { return solium_rect(value("area")); }
+    double scale() const { return value("scale").toDouble(); }
+    QString transform() const { return value("transform").toString(); }
+    bool primary() const { return value("primary").toBool(); }
     void announce() override { emit changed(); }
 signals:
     void changed();
@@ -99,8 +116,10 @@ SoliumHosting *solium_hosting_of(QObject *object);
  * `qml::hosted::tests::every_object_of_a_hosted_scene_finds_its_monitor_after_the_build`. */
 void solium_hosting_mark(QQmlContext *context, SoliumHosting *hosting);
 /* The row for a connector name: until the compositor publishes one, an
- * absent row carrying the name. Created on first ask and never freed.
- * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
+ * absent row carrying the name. Created on first ask and never freed, so a
+ * monitor that goes and comes back is the same row.
+ * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 SoliumMonitor *solium_monitor_row(const QString &name);
 /* Register every native type, once, before the engine exists.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */

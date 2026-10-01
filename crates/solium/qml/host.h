@@ -400,6 +400,20 @@ const char *solium_qml_scene_string_at(const SoliumQmlScene *scene, const char *
 /* Pointer input, in scene coordinates. `pressed`: 1 down, 0 up, -1 motion. */
 void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed);
 
+/* The models hosted scenes read, by number. */
+#define SOLIUM_QML_ROWS_MONITORS 0
+#define SOLIUM_QML_ROWS_WINDOWS 1
+#define SOLIUM_QML_ROWS_WORKSPACES 2
+
+/* Apply one batch of row operations, rendered by `crate::models::diff::render`,
+ * to a model: in order, every row's values written before any row is
+ * announced, and each row announced once.
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
+ * Returns 1 when Qt took the whole batch and 0 when it did not, as for a step
+ * that does not match the rows held or text that is not a batch.
+ * `qml::hosted::tests::a_batch_that_does_not_match_the_rows_held_is_refused`. */
+int solium_qml_rows_apply(int model, const char *ops_json);
+
 #ifdef __cplusplus
 }
 #endif
