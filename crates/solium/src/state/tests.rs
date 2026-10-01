@@ -3113,6 +3113,65 @@ mod real_client {
         );
     }
 
+    /// **A resize that brings a monitor under a surface gives the surface an
+    /// instance there**, as the nested window's resize does: its monitors
+    /// share its width, so every one right of the first moves, and a surface
+    /// declared over a fixed rectangle now covers one more of them. No
+    /// client (the #99 rule).
+    #[test]
+    fn a_resize_that_brings_a_monitor_under_a_surface_gives_it_an_instance_there() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-resized-monitors");
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join("Scene.qml");
+            std::fs::write(&path, "import QtQuick\nItem {}\n").expect("writing the scene");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "resized-left");
+            state.declare_surface(crate::scripted::Declaration::for_test(
+                "strip",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::Rect(Rectangle::new((1920, 0).into(), (1920, 30).into())),
+            ));
+            assert!(
+                !has_scene(&mut state, "strip", &left) && has_scene(&mut state, "strip", &right),
+                "the premise: the strip is on the right monitor only"
+            );
+
+            for output in [&left, &right] {
+                output.change_current_state(
+                    Some(Mode {
+                        size: (2560, 1080).into(),
+                        refresh: 60_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                );
+            }
+            state.outputs_resized();
+            assert_eq!(
+                state
+                    .space
+                    .output_geometry(&right)
+                    .map(|geometry| geometry.loc),
+                Some((2560, 0).into()),
+                "the premise: the resize moved the right monitor"
+            );
+            assert!(
+                has_scene(&mut state, "strip", &left),
+                "the monitor the resize brought under the strip has no scene"
+            );
+            assert!(
+                has_scene(&mut state, "strip", &right),
+                "the right monitor lost its scene"
+            );
+        });
+    }
+
     /// The last size this toplevel was configured with, as the client saw it.
     fn last_configured(
         client: &Client,

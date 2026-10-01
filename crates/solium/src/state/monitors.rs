@@ -460,6 +460,15 @@ impl Solium {
         self.settle_monitors();
     }
 
+    /// The monitors changed size without one coming or going, as the nested
+    /// window's do when it is resized: place them again, and give every
+    /// surface an instance on each monitor it now covers.
+    /// `tests::real_client::a_resize_that_brings_a_monitor_under_a_surface_gives_it_an_instance_there`.
+    pub(crate) fn outputs_resized(&mut self) {
+        self.place_outputs();
+        self.sync_instances();
+    }
+
     pub(crate) fn settle_monitors(&mut self) {
         self.place_outputs();
         // A monitor that has gone is not off, it is gone, and its power
