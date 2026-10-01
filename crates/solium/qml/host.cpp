@@ -155,17 +155,22 @@ namespace {
  * dev/wirecheck's appear case is that measurement, kept.
  *
  * So the origin is kept here: dragged along behind the clock for as long as the
- * driver is stopped, and brought up to it whenever the driver starts. So
- * `elapsed()` reads 0 at every start and counts from the animation that broke
- * the stillness, which is what Qt's own driver would have reported and what its
- * bookkeeping assumes.
+ * driver is stopped. Both paths that hand Qt its events, a frame's tick and the
+ * drain between frames, bring the clock to now before they deliver a single
+ * one, and Qt starts the driver from inside those events, since starting an
+ * animation queues its start (qtbase v6.11.2, qabstractanimation.cpp:659-663,
+ * and QQmlAnimationTimer::registerAnimation in qtdeclarative v6.11.2,
+ * src/qml/animations/qabstractanimationjob.cpp). So `elapsed()` reads 0 when
+ * an animation breaks the stillness and counts from the instant Qt saw it,
+ * which is what Qt's own driver would have reported and what its bookkeeping
+ * assumes
+ * (`qml::wake::tests::an_animation_started_beside_a_timer_runs_from_its_start`,
+ * `qml::wake::tests::an_animation_a_timer_starts_between_frames_starts_at_the_timer`).
  *
  * The caller says whether the driver is running; see `anything_animating`.
  *
- * Note what this deliberately does *not* do: it does not clamp the step, but
- * for the first one after nothing animated, which is at most a 60 Hz frame
- * (`qml::wake::tests::an_animation_started_after_an_idle_gap_takes_a_frame_first`).
- * While anything is animating the origin is frozen, so this clock advances
+ * Note what this deliberately does *not* do: it does not clamp the step. While
+ * anything is animating the origin is frozen, so this clock advances
  * exactly with `Clock::now()` and a frame that arrives late advances every
  * animation by however long it was late -- a 300ms stall moves a 260ms
  * animation straight to its end.
@@ -197,72 +202,41 @@ namespace {
 class CompositorAnimationDriver : public QAnimationDriver
 {
 public:
-    /* Whenever the driver starts, the origin comes up to the clock and the
-     * next step is a first one. Dragging it while stopped is not enough on
-     * its own: beside a Timer, which keeps QML's animation timer registered
-     * and paused, a new animation starts the driver from inside the events a
-     * frame delivers, before that frame's step. On the frame after another
-     * animation ended, the origin was still where that one started, and the
-     * new one was handed the old one's whole run as its first step
-     * (`qml::wake::tests::an_animation_started_as_another_ends_takes_a_frame_first`).
-     * A lambda on the base class's signal, so still no moc. */
-    CompositorAnimationDriver()
-    {
-        QObject::connect(this, &QAnimationDriver::started, this, [this] {
-            m_origin = m_elapsed;
-            m_measuring = false;
-        });
-    }
-
     qint64 elapsed() const override { return m_elapsed - m_origin; }
 
-    /* Bring the clock to `elapsed` and step nothing. The path between frames
-     * does this before it delivers a single Qt event: with no animation
-     * measuring from the origin the origin comes too, so an animation a Timer
-     * starts in those events is measured from that instant, and not from the
-     * last frame drawn, which on an idle desktop is seconds old
-     * (`qml::wake::tests::an_animation_a_timer_starts_between_frames_starts_at_the_timer`).
-     *
-     * "Measuring" is whether the last step had anything animating, not
-     * whether anything is running now: an animation started since the last
-     * step that reaches a drain before any step is measured from here too,
-     * rather than handed the time since the last one
-     * (`qml::wake::tests::an_animation_started_between_steps_starts_at_the_next`).
-     * One that no drain comes between -- input, then the frame it asks for --
-     * is bounded in advanceTo instead. */
+    /* Bring the clock to `elapsed` and step nothing. Both paths that deliver
+     * Qt's events do this before they deliver a single one, and with nothing
+     * animating the origin comes too. So an animation started in those events
+     * is measured from that instant, and not from the last step, which on an
+     * idle desktop is seconds old: between frames, a Timer's
+     * (`qml::wake::tests::an_animation_a_timer_starts_between_frames_starts_at_the_timer`);
+     * on a frame, input's beside a Timer, which keeps QML's animation timer
+     * registered and paused, so that the new animation starts the driver from
+     * inside the events the frame delivers
+     * (`qml::wake::tests::an_animation_started_beside_a_timer_runs_from_its_start`),
+     * and on the frame after another animation ended, when the origin was
+     * still where that one started
+     * (`qml::wake::tests::an_animation_started_as_another_ends_takes_a_frame_first`). */
     void moveTo(qint64 elapsed, bool anything_animating)
     {
         m_elapsed = elapsed;
-        if (!anything_animating || !m_measuring) {
+        if (!anything_animating) {
             m_origin = elapsed;
         }
     }
 
+    /* Bring the clock to `elapsed` and step every animation on it. With
+     * nothing animating, no animation can be measuring from the origin, so it
+     * comes up with the clock and `elapsed()` reads zero. */
     void advanceTo(qint64 elapsed, bool anything_animating)
     {
-        m_elapsed = elapsed;
-        /* Nothing is animating, so no animation can be measuring from here:
-         * move the origin up and report zero. */
-        if (!anything_animating) {
-            m_origin = elapsed;
-        } else if (!m_measuring) {
-            /* The first step after nothing animated is at most a 60 Hz frame,
-             * however old the last step is: a click after an idle gap starts
-             * its animation synchronously, and no drain comes before the
-             * frame it asks for.
-             * `qml::wake::tests::an_animation_started_after_an_idle_gap_takes_a_frame_first`. */
-            m_origin = std::max(m_origin, elapsed - kFirstStepMs);
-        }
-        m_measuring = anything_animating;
+        moveTo(elapsed, anything_animating);
         advanceAnimation();
     }
 
 private:
-    /* A 60 Hz frame in whole milliseconds, rounded up. */
-    static constexpr qint64 kFirstStepMs = 17;
     qint64 m_elapsed = 0;
     qint64 m_origin = 0;
-    bool m_measuring = false;
 };
 
 QGuiApplication *g_app = nullptr;
@@ -1721,7 +1695,14 @@ extern "C" void solium_qml_tick(long long elapsed_ms)
      * The 16ms throttle stays. Dropping it -- draining every frame -- was
      * measured against the same animation and changed nothing at 60Hz: the
      * queue is drained once per frame either way there, and the throttle only
-     * ever bites on a screen faster than 60Hz, where it is the whole point. */
+     * ever bites on a screen faster than 60Hz, where it is the whole point.
+     *
+     * The clock comes to this frame before the events, as it does in
+     * solium_qml_drain, so an animation they start is measured from here and
+     * not from the last step; see CompositorAnimationDriver::moveTo. */
+    if (g_driver != nullptr) {
+        g_driver->moveTo(static_cast<qint64>(elapsed_ms), anything_animating());
+    }
     if (g_app != nullptr) {
         static long long drained_at = 0;
         if (elapsed_ms - drained_at >= 16 || elapsed_ms < drained_at) {

@@ -773,7 +773,8 @@ mod tests {
     /// after the next drain must show it as far in as the time since that
     /// drain, to within half a frame: not over, and not a frame further on, as
     /// a start bounded to a frame after the gap would show it. With no drain
-    /// between: `an_animation_started_after_an_idle_gap_takes_a_frame_first`.
+    /// between: `an_animation_started_after_an_idle_gap_takes_a_frame_first`,
+    /// and beside a Timer, `an_animation_started_beside_a_timer_runs_from_its_start`.
     #[test]
     fn an_animation_started_between_steps_starts_at_the_next() {
         on_the_qt_thread(|| {
@@ -873,6 +874,80 @@ mod tests {
                 shown.iter().all(|permille| *permille < 200),
                 "the two frames after a write that started a 260 ms animation, 300 ms after the \
                  last step, showed it at {shown:?} permille: it was handed the gap"
+            );
+        });
+    }
+
+    /// **An animation started beside a `Timer` after an idle gap runs from its
+    /// start**, with no drain between.
+    ///
+    /// The ordinary desktop has a Timer running, as a shell's clock is one, and
+    /// a Timer keeps QML's animation timer registered and paused. Starting an
+    /// animation beside it brings that timer up to date on the spot
+    /// (qtdeclarative v6.11.2, src/qml/animations/qabstractanimationjob.cpp,
+    /// `QAbstractAnimationJob::setState` calling `ensureTimerUpdate`), and the
+    /// animation then starts the driver from inside the events the next frame
+    /// delivers, so whatever the driver reads there is added to its first step.
+    /// Here nothing has stepped the clock for 300 ms when a write starts a
+    /// 260 ms animation, and each of the two frames after it, 20 ms apart, must
+    /// show it as far in as the time since the write, to within half a frame.
+    /// With the clock measured from the last step, the first frame showed the
+    /// animation at its end; with that step bounded to a 60 Hz frame, a frame
+    /// further on than it was (36 ms in, 20 ms after the write).
+    #[test]
+    fn an_animation_started_beside_a_timer_runs_from_its_start() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-gap-timer",
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property bool go: false
+                    property real value: 0
+                    readonly property int permille: Math.round(root.value * 1000)
+                    NumberAnimation {
+                        target: root
+                        property: 'value'
+                        from: 0
+                        to: 1
+                        duration: 260
+                        running: root.go
+                    }
+                    Timer {
+                        interval: 60000
+                        running: true
+                    }
+                }
+                ",
+            );
+            // The Timer's start, delivered: QML's animation timer pauses on
+            // it. The last step, on a desktop with nothing animating.
+            crate::qml::tick(now());
+            std::thread::sleep(Duration::from_millis(300));
+            let wrote = now();
+            scene.set_bool("go", true);
+            let mut frames = Vec::new();
+            for _ in 0..2 {
+                // More than 16 ms, so that each frame's tick drains Qt's queue.
+                std::thread::sleep(Duration::from_millis(20));
+                let frame = now();
+                crate::qml::tick(frame);
+                let permille = scene.get_int("permille");
+                frames.push((millis_between(wrote, frame), into_260_ms(permille)));
+            }
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                frames
+                    .iter()
+                    .all(|(since, shown)| (shown - since).abs() <= HALF_FRAME_MS),
+                "the two frames after a write that started a 260 ms animation beside a Timer, \
+                 300 ms after the last step, were (ms since the write, ms shown) {frames:?}: a \
+                 start measured from the last step is the gap, one bounded to a frame is a frame \
+                 more"
             );
         });
     }
