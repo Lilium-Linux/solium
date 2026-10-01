@@ -97,7 +97,7 @@ public:
 SoliumHosting *solium_hosting_of(QObject *object);
 /* Mark `context` as `hosting`'s, so solium_hosting_of finds it from every
  * object created in it or in a context below it.
- * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
+ * `qml::hosted::tests::every_object_of_a_hosted_scene_finds_its_monitor_after_the_build`. */
 void solium_hosting_mark(QQmlContext *context, SoliumHosting *hosting);
 /* The row for a connector name: until Task 3 publishes one, an absent row
  * carrying the name. Created on first ask and never freed (Ruling 4).

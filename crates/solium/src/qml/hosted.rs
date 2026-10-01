@@ -46,7 +46,7 @@ impl Scene {
         let built = Self::for_host(qml_path, width, height, initial);
         // Cleared whether or not the scene was built, so no later scene is
         // hosted on this monitor by accident.
-        // `tests::a_scene_built_after_a_failed_hosted_one_is_not_hosted`.
+        // `tests::a_hosted_build_refused_before_the_host_leaves_the_next_scene_unhosted`.
         // SAFETY: null is the documented "none".
         unsafe { ffi::solium_qml_host_next_on(std::ptr::null()) };
         built
@@ -174,6 +174,124 @@ pub(crate) mod tests {
                 scene.get_int("unnamed"),
                 1,
                 "the failed build's monitor was inherited"
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **Every object of a hosted scene finds its monitor, whenever it asks**:
+    /// an item from another file, and one a `Loader` makes only after a second
+    /// scene was built on another monitor, both read their own scene's
+    /// monitor, so the record is the scene's and not the build's.
+    #[test]
+    fn every_object_of_a_hosted_scene_finds_its_monitor_after_the_build() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-hosted-late");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            std::fs::write(
+                directory.join("Inner.qml"),
+                "import QtQuick\nimport Solium\nItem { readonly property string seen: Solium.monitor.name }\n",
+            )
+            .expect("writing the inner item");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    property int go: 0
+                    Inner { id: inner }
+                    Loader { id: late; active: go === 1; sourceComponent: Inner {} }
+                    readonly property int nested: inner.seen === "late-a" ? 1 : 0
+                    readonly property int loaded: late.item !== null && late.item.seen === "late-a" ? 1 : 0
+                }
+                "#,
+            )
+            .expect("writing the scene");
+            let mut first =
+                Scene::for_monitor(&path, 16, 16, None, "late-a").expect("the scene builds");
+            let second =
+                Scene::for_monitor(&path, 16, 16, None, "late-b").expect("the scene builds");
+            assert_eq!(
+                first.get_int("nested"),
+                1,
+                "an item from another file does not find its monitor"
+            );
+            assert_eq!(
+                first.get_int("loaded"),
+                0,
+                "the Loader was active before it was asked"
+            );
+            first.set_int("go", 1);
+            assert_eq!(
+                first.get_int("loaded"),
+                1,
+                "an item made after the build does not find its scene's monitor"
+            );
+            drop(second);
+            drop(first);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A hosted build refused before the host is reached leaves the next
+    /// scene unhosted**: `for_monitor` takes the monitor back itself, so a
+    /// path the host never saw does not hand its monitor on.
+    #[test]
+    fn a_hosted_build_refused_before_the_host_leaves_the_next_scene_unhosted() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let refused = std::path::Path::new("solium-hosted-refused\0/Scene.qml");
+            assert!(Scene::for_monitor(refused, 16, 16, None, "refused-1").is_err());
+            let directory = std::env::temp_dir().join("solium-hosted-after-refused");
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem { readonly property int unnamed: Solium.monitor.name === \"\" ? 1 : 0 }\n",
+            )
+            .expect("writing the scene");
+            let mut scene = Scene::for_host(&path, 16, 16, None).expect("the scene builds");
+            assert_eq!(
+                scene.get_int("unnamed"),
+                1,
+                "the refused build's monitor was inherited"
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **The host takes the monitor with the build it is for**: a build the
+    /// host fails still consumes what `solium_qml_host_next_on` handed over,
+    /// so the scene after it is unhosted with nobody clearing it.
+    #[test]
+    #[expect(unsafe_code, reason = "handing the host a monitor directly")]
+    fn the_host_consumes_the_monitor_even_for_a_build_that_fails() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let name = std::ffi::CString::new("consumed-1").expect("no NUL in the name");
+            // SAFETY: `name` outlives the call; the host copies it.
+            unsafe { super::ffi::solium_qml_host_next_on(name.as_ptr()) };
+            let missing = std::env::temp_dir().join("solium-hosted-consumed-missing/Nothing.qml");
+            assert!(Scene::for_host(&missing, 16, 16, None).is_err());
+            let directory = std::env::temp_dir().join("solium-hosted-after-consumed");
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem { readonly property int unnamed: Solium.monitor.name === \"\" ? 1 : 0 }\n",
+            )
+            .expect("writing the scene");
+            let mut scene = Scene::for_host(&path, 16, 16, None).expect("the scene builds");
+            assert_eq!(
+                scene.get_int("unnamed"),
+                1,
+                "the failed build left its monitor for the next scene"
             );
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);

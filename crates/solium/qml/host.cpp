@@ -311,6 +311,7 @@ struct SoliumQmlScene
     QQuickItem *root = nullptr;
     /* For a scene hosted on a monitor: its own context, marked with its
      * hosting record so every object in it finds the record. Null otherwise.
+     * `qml::hosted::tests::every_object_of_a_hosted_scene_finds_its_monitor_after_the_build`,
      * `qml::hosted::tests::a_scene_hosted_on_no_monitor_reads_an_absent_monitor`. */
     QQmlContext *context = nullptr;
     SoliumHosting *hosting = nullptr;
@@ -702,7 +703,7 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
 
     /* Taken now, whatever happens below: a build that fails must not leave
      * its monitor for the next scene.
-     * `qml::hosted::tests::a_scene_built_after_a_failed_hosted_one_is_not_hosted`. */
+     * `qml::hosted::tests::the_host_consumes_the_monitor_even_for_a_build_that_fails`. */
     if (g_next_hosted) {
         scene->hosting = new SoliumHosting{g_next_monitor};
         scene->context = new QQmlContext(g_engine->rootContext());
