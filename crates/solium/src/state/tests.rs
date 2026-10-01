@@ -2552,6 +2552,53 @@ mod real_client {
     /// The name [`side_by_side`] gives the right-hand monitor.
     const RIGHT_SCREEN: &str = "right-test";
 
+    /// **A surface redeclared onto another monitor drops its scene on the
+    /// first**: `declare_surface` prunes what a changed placement no longer
+    /// covers, so `sol.surface` following `sol.monitor()` from screen to
+    /// screen does not leave a whole Qt scene behind on each. No client, so
+    /// the scene may be a real one (the #99 rule).
+    #[test]
+    fn a_surface_redeclared_onto_another_monitor_drops_its_scene_on_the_first() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-redeclared-surface");
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join("Scene.qml");
+            std::fs::write(&path, "import QtQuick\nItem {}\n").expect("writing the scene");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, _) = side_by_side(&mut state, "redeclared-left");
+            let mut declared = crate::scripted::Declaration::for_test(
+                "bar",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::Monitor("redeclared-left".to_owned()),
+            );
+            state.declare_surface(declared.clone());
+            let id = state.surfaces.named("bar").expect("declared");
+            assert!(
+                state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(|surface| surface.instance(&left))
+                    .is_some(),
+                "the scene builds"
+            );
+
+            declared.on = crate::scripted::On::Monitor(RIGHT_SCREEN.to_owned());
+            state.declare_surface(declared);
+            assert_eq!(
+                state
+                    .surfaces
+                    .get(id)
+                    .map(crate::scripted::Surface::instance_count),
+                Some(0),
+                "the monitor the surface left kept its scene"
+            );
+        });
+    }
+
     /// The last size this toplevel was configured with, as the client saw it.
     fn last_configured(
         client: &Client,

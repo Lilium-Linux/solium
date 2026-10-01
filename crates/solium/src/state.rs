@@ -1728,14 +1728,20 @@ impl Solium {
         })
     }
 
-    /// Declare a surface, or replace one of the same name.
+    /// Declare a surface, or change the one of the same name in place; only a
+    /// new scene file replaces it
+    /// (`scripted::tests::a_redeclared_property_is_written_into_the_live_scene`,
+    /// `scripted::tests::a_new_scene_path_rebuilds_the_surface`).
     ///
     /// Re-declaring something identical keeps its rasterisations, because
     /// every reload re-runs the whole configuration and re-declares
     /// everything: without that check a `super+shift+r` that changed a gap
-    /// would re-decode every wallpaper on every monitor.
+    /// would re-decode every wallpaper on every monitor. A declaration that
+    /// moved a surface drops its scenes on the monitors it left
+    /// (`tests::real_client::a_surface_redeclared_onto_another_monitor_drops_its_scene_on_the_first`).
     pub(crate) fn declare_surface(&mut self, declared: crate::scripted::Declaration) {
         if self.surfaces.declare(declared) != crate::scripted::Declared::Same {
+            self.prune_surfaces();
             self.redraw = true;
         }
     }
@@ -1902,15 +1908,23 @@ impl Solium {
         }
     }
 
-    /// Drop the rasterisations belonging to monitors that are no longer there.
+    /// Drop the rasterisations belonging to monitors a surface is no longer
+    /// on: monitors that are no longer there, and monitors its placement or
+    /// the primary monitor has moved off
+    /// (`scripted::tests::a_surface_moved_to_another_monitor_drops_the_scene_it_left`).
     ///
     /// Each is a full-screen image held for a screen that has gone -- on a
     /// laptop docked and undocked all day that is a slow leak of exactly the
     /// largest thing the compositor allocates.
     fn prune_surfaces(&mut self) {
-        let live: Vec<String> = self.space.outputs().map(Output::name).collect();
+        let outputs: Vec<(Output, Rectangle<i32, Logical>)> = self
+            .space
+            .outputs()
+            .filter_map(|output| Some((output.clone(), self.space.output_geometry(output)?)))
+            .collect();
+        let primary = self.primary_output();
         for surface in self.surfaces.iter_mut() {
-            surface.keep_only(&live);
+            surface.keep_placed(&outputs, primary.as_ref());
         }
     }
 

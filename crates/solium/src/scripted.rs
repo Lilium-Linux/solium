@@ -319,11 +319,31 @@ impl Surface {
         self.instances.get_mut(&name)
     }
 
-    /// Forget every rasterisation for a monitor that is no longer there.
-    pub(crate) fn keep_only(&mut self, live: &[String]) {
+    /// Forget every instance on a monitor this surface is no longer on: one
+    /// that has gone, one its placement has moved off, and the old primary
+    /// for a surface on the primary monitor. Each is a whole scene, kept
+    /// undrawn otherwise until that monitor is unplugged.
+    /// `tests::a_surface_moved_to_another_monitor_drops_the_scene_it_left`,
+    /// `tests::a_surface_on_the_primary_monitor_drops_its_scene_when_the_primary_moves`.
+    pub(crate) fn keep_placed(
+        &mut self,
+        outputs: &[(Output, Rectangle<i32, Logical>)],
+        primary: Option<&Output>,
+    ) {
+        let placed: Vec<String> = outputs
+            .iter()
+            .filter(|(output, geometry)| self.area_on(output, *geometry, primary).is_some())
+            .map(|(output, _)| output.name())
+            .collect();
         self.instances
-            .retain(|monitor, _| live.iter().any(|name| name == monitor));
+            .retain(|monitor, _| placed.iter().any(|name| name == monitor));
     }
+
+    #[cfg(test)]
+    pub(crate) fn instance_count(&self) -> usize {
+        self.instances.len()
+    }
+
 
     /// Take a declaration with the same scene: write its changed properties
     /// into every live instance, and keep everything else of the instances.
@@ -492,6 +512,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+    use smithay::utils::{Logical, Rectangle};
 
     use super::{Declaration, Declared, Layer, On, Properties, Surfaces};
     use crate::json::Json;
@@ -527,6 +548,26 @@ mod tests {
             None,
         );
         output
+    }
+
+    /// Every monitor and its rectangle, as `Surface::keep_placed` takes them.
+    type Monitors = Vec<(Output, Rectangle<i32, Logical>)>;
+
+    /// Two monitors side by side, and the placement `Surface::keep_placed`
+    /// is given for them.
+    fn side_by_side(left: &str, right: &str) -> (Output, Output, Monitors) {
+        let (left, right) = (output(left), output(right));
+        let outputs = vec![
+            (
+                left.clone(),
+                Rectangle::new((0, 0).into(), (1920, 1080).into()),
+            ),
+            (
+                right.clone(),
+                Rectangle::new((1920, 0).into(), (1920, 1080).into()),
+            ),
+        ];
+        (left, right, outputs)
     }
 
     /// `qml` written to `<temp>/<name>/<file>`, and its path.
@@ -674,6 +715,84 @@ mod tests {
                 .scene_for_test()
                 .get_int("kept");
             assert_eq!(kept, 0, "the old scene is still there");
+        });
+    }
+
+    /// **A surface moved to another monitor leaves nothing on the one it
+    /// left**, where its whole scene would otherwise sit undrawn until that
+    /// monitor is unplugged; the monitor it moved to builds a scene from the
+    /// current properties.
+    #[test]
+    fn a_surface_moved_to_another_monitor_drops_the_scene_it_left() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file("solium-scripted-moved", "Scene.qml", KEPT);
+            let (left, right, outputs) = side_by_side("moved-left", "moved-right");
+            let mut surfaces = Surfaces::default();
+            let mut declared = Declaration::for_test(
+                "bar",
+                path,
+                Layer::Top,
+                On::Monitor("moved-left".to_owned()),
+            );
+            declared.properties = properties(&[("label", Json::Text("one".to_owned()))]);
+            surfaces.declare(declared.clone());
+            let id = surfaces.named("bar").expect("declared");
+            surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&left))
+                .expect("the scene builds")
+                .scene_for_test()
+                .set_int("kept", 7);
+
+            declared.on = On::Monitor("moved-right".to_owned());
+            declared.properties = properties(&[("label", Json::Text("two".to_owned()))]);
+            assert_eq!(surfaces.declare(declared), Declared::InPlace);
+            let surface = surfaces.get_mut(id).expect("live");
+            surface.keep_placed(&outputs, Some(&left));
+            assert_eq!(
+                surface.instance_count(),
+                0,
+                "the monitor it left kept its scene"
+            );
+            let scene = surface
+                .instance(&right)
+                .expect("the scene builds where it moved to")
+                .scene_for_test();
+            assert_eq!(
+                (scene.get_int("labelIsTwo"), scene.get_int("kept")),
+                (1, 0),
+                "the new monitor's scene is built from the current properties"
+            );
+        });
+    }
+
+    /// **A surface on the primary monitor leaves nothing on the old one when
+    /// the primary moves**: the same leak, reached by a monitor change rather
+    /// than a declaration.
+    #[test]
+    fn a_surface_on_the_primary_monitor_drops_its_scene_when_the_primary_moves() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file("solium-scripted-primary-moved", "Scene.qml", KEPT);
+            let (left, right, outputs) = side_by_side("primary-left", "primary-right");
+            let mut surfaces = Surfaces::default();
+            surfaces.declare(Declaration::for_test("bar", path, Layer::Top, On::Primary));
+            let id = surfaces.named("bar").expect("declared");
+            let surface = surfaces.get_mut(id).expect("live");
+            assert!(surface.instance(&left).is_some(), "the scene builds");
+            surface.keep_placed(&outputs, Some(&left));
+            assert_eq!(
+                surface.instance_count(),
+                1,
+                "the primary monitor lost its scene"
+            );
+            surface.keep_placed(&outputs, Some(&right));
+            assert_eq!(
+                surface.instance_count(),
+                0,
+                "the monitor that stopped being primary kept its scene"
+            );
         });
     }
 
