@@ -43,7 +43,7 @@ Each of these is a day where somebody stops using the compositor.
 | | what breaks without it |
 |---|---|
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) `text-input-v3`, `input-method-v2` | no CJK, no emoji picker, no on-screen keyboard — and the on-screen keyboard is what a phone is. A compose key does work meanwhile: `keyboard = { options = "compose:ralt" }` |
-| [#50](https://github.com/Lilium-Linux/solium/issues/50) `ext-foreign-toplevel-list` | a shell cannot list windows, so it cannot have a task switcher; switching to one needs `zwlr_foreign_toplevel_management_v1` as well. A hosted shell reads the window list from the compositor instead |
+| [#50](https://github.com/Lilium-Linux/solium/issues/50) `ext-foreign-toplevel-list` | a shell cannot list windows, so it cannot have a task switcher; switching to one needs `zwlr_foreign_toplevel_management_v1` as well. A hosted shell has no window list either |
 | [#51](https://github.com/Lilium-Linux/solium/issues/51) `wlr-output-management` | monitors are arranged by the configuration: `sol.monitors` places and scales them, and `super+shift+r` applies a change. No client can do it, so `kanshi` and a settings panel cannot work, and a monitor's mode and rotation are read only when it is added |
 | [#52](https://github.com/Lilium-Linux/solium/issues/52) data-control | no clipboard manager can work |
 | [#55](https://github.com/Lilium-Linux/solium/issues/55) `zwp_virtual_keyboard_v1` | the other half of an on-screen keyboard. `input-method-v2` says what was typed; this is how anything types it |

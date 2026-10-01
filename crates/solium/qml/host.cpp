@@ -55,8 +55,6 @@
 // headers. QObject brings the core types in the order Qt expects.
 #include <QtCore/QObject>
 
-#include "compat.h"
-
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
@@ -293,9 +291,8 @@ struct SoliumQmlScene
     QQmlComponent *component = nullptr;
     /* What the QML file built, and what its properties are read from and
      * written to. The same object as `root` unless the file's root is shaped
-     * like a window -- Quickshell's PanelWindow is one -- in which case it is
-     * the window and `root` is its content item. See
-     * `a_panel_window_is_drawn_through_its_content_item`. */
+     * like a window, in which case it is the window and `root` is its content
+     * item. See `a_window_shaped_root_is_drawn_through_its_content_item`. */
     QObject *object = nullptr;
     /* What is drawn and sized. */
     QQuickItem *root = nullptr;
@@ -501,20 +498,13 @@ static bool start_common(const char *import_path)
     always->setLoopCount(-1);
     always->start();
 
-    // Shell types the compositor provides, registered before any scene can
-    // ask for them.
-    solium_qml_register_compat();
-
     g_engine = new QQmlEngine();
-    solium_qml_install_icons(g_engine);
     if (import_path != nullptr) {
         // Colon-separated, like a PATH, and built by `qml.rs` (or replaced
         // whole by `SOLIUM_QML_PATH`). One entry is the compositor's own
         // module, so a scene can `import Solium` and reach the theme; the
         // user's QML directory comes before it, so their own
-        // `Solium/Theme.qml` is the one that resolves; and the Quickshell
-        // compatibility layer comes last, for a hosted shell written against
-        // Quickshell's modules.
+        // `Solium/Theme.qml` is the one that resolves.
         const auto paths = QString::fromUtf8(import_path).split(QLatin1Char(':'),
                                                                 Qt::SkipEmptyParts);
         for (const auto &path : paths) {
@@ -1986,12 +1976,12 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
  * which sees every job, walked or not; see `anything_animating`.
  *
  * What it does not cover: a `Timer`. A scene whose next change is a timer
- * firing -- Quickshell.SystemClock is the one in the tree -- is not animating
- * by this answer, and counting running Timers here would pin the compositor at
- * full rate for as long as any clock exists. The Timer is served between
- * frames instead: at the deadline Qt itself reports when nothing else
- * animates, and on the shared clock, a frame's interval at a time, when
- * something does that no frame is drawing
+ * firing -- a clock's, usually -- is not animating by this answer, and
+ * counting running Timers here would pin the compositor at full rate for as
+ * long as any clock exists. The Timer is served between frames instead: at
+ * the deadline Qt itself reports when nothing else animates, and on the
+ * shared clock, a frame's interval at a time, when something does that no
+ * frame is drawing
  * (`qml::wake::tests::a_clock_scene_repaints_once_a_second_with_no_other_damage`,
  * `qml::wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`).
  */

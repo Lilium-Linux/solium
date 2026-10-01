@@ -8,8 +8,7 @@
 --
 -- It used to be a compositor feature -- an accessor on the state, its own
 -- pointer routing, its own render hook and an environment variable read in
--- Rust. It is `sol.surface` now, and the only thing left in the compositor is
--- the Quickshell compatibility layer, which is a different job.
+-- Rust. It is `sol.surface` now.
 --
 -- One scene, on the primary monitor. The primary monitor and not the active
 -- one, for the same reason a dock goes there: a bar that moves screens when
@@ -62,10 +61,7 @@ function shell.apply()
         layer = "top",
         on = { x = area.x, y = area.y, w = area.w, h = area.h },
         interactive = true,
-        -- What shell components ask about the screen they are on. The window
-        -- list is not here: it reaches QML through `ToplevelManager` and
-        -- `Hyprland`, which any scene can read; see
-        -- `a_hosted_shell_reads_the_window_list_the_compositor_publishes`.
+        -- What shell components ask about the screen they are on.
         properties = {
             screenInfo = {
                 name = "primary",

@@ -125,8 +125,6 @@ use placement::outer_of;
 #[cfg(test)]
 use snapshot::to_rect;
 pub(crate) use snapshot::{Limits, limits_of};
-#[cfg(test)]
-pub(crate) use snapshot::{Listed, window_list_json};
 use workspaces::nothing_on_stage;
 #[cfg(test)]
 use workspaces::{SETTLED, put_away, staged};
@@ -534,10 +532,6 @@ pub(crate) struct Solium {
     /// no pixels in it. See `crate::remains`.
     pub(crate) textures: Option<crate::remains::Textures>,
 
-    /// The last window list handed to the shell, so it is only sent again
-    /// when it differs.
-    published_windows: String,
-
     /// Set while a focus change is being reported to scripts.
     ///
     /// A script handling `focus` will often ask for focus itself — a scroller
@@ -943,7 +937,6 @@ impl Solium {
             pointer: crate::cursor::Pointer::default(),
             programs: crate::pass::Programs::default(),
             textures: None,
-            published_windows: String::new(),
             focusing: false,
             closing: None,
             pending_drop: None,

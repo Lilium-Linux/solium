@@ -133,7 +133,7 @@ SOLIUM_SESSION_BUS=<address>
 
 A shell is loaded as configuration, with `shell = { scene = ... }`; see
 [Where Solium ends and Lilium begins](../../docs/shell-boundary.md). These
-change that for one run, and `dev/run-shell.sh` sets all three.
+change that for one run, and `dev/run-shell.sh` sets both.
 
 SOLIUM_SHELL_SCENE=<file.qml>
     The QML file to host as the shell, over the configuration's
@@ -143,10 +143,6 @@ SOLIUM_SHELL_WATCH=<directory>
     Where to look for changed `.qml` files, down to four directories below
     it, before rebuilding a hosted scene, instead of the scene's own
     directory. For a shell whose files live in a tree of their own.
-
-SOLIUM_SHELL_DIR=<directory>
-    What `Quickshell.configDir` and `Quickshell.shellDir` answer in a hosted
-    shell. `~/.config/solium` when unset or empty.
 
 ## Development and testing
 

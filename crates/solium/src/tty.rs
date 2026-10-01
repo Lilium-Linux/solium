@@ -1316,7 +1316,7 @@ impl State {
         }
 
         // Once per frame and not once per screen: offscreen captures, the QML
-        // tick, the window list. See `render::prepare`. It also has to happen
+        // tick. See `render::prepare`. It also has to happen
         // before any output's buffer is bound, because it binds framebuffers
         // of its own.
         let prepared = if pictures {
