@@ -303,11 +303,14 @@ impl Solium {
         id.get()
     }
 
-    /// Start a program as a client of this compositor.
-    pub(super) fn spawn(&mut self, program: &str, args: &[String]) {
-        use std::process::{Command as Process, Stdio};
+    /// Start a program as a client of this compositor, from
+    /// [`crate::launch::command`]: with the environment Solium was started
+    /// with, and the session's own variables on top.
+    /// `launch::tests::a_spawned_program_gets_the_environment_solium_started_with`.
+    pub(crate) fn spawn(&mut self, program: &str, args: &[String]) {
+        use std::process::Stdio;
 
-        let mut process = Process::new(program);
+        let mut process = crate::launch::command(program);
         process
             .args(args)
             // Without this the child inherits the *host* display and opens its
