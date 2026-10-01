@@ -557,8 +557,8 @@ globals and leaves, for hunting what a client that never draws costs.
 
 Monitors arriving and leaving
 ([#43](https://github.com/Lilium-Linux/solium/issues/43)) work, and were
-checked on the hardware, with real cables, before #43 was closed. Two bugs came
-out of that testing and are fixed; how the first one failed is below.
+checked on the hardware, with real cables, before #43 was closed. What that
+testing found is fixed, and how the first hardware test failed is below.
 
 On the hardware there are two ways to exercise it, and the second does not
 involve reaching behind the desk:
