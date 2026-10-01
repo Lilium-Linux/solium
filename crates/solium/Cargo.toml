@@ -85,6 +85,12 @@ zbus = { version = "5", default-features = false, features = ["blocking-api", "a
 # `signals::tests::the_same_signal_twice_ends_a_process_that_cannot_stop`.
 signal-hook-registry = "1.4"
 
+# `close_range`, which no crate above wraps: a program Solium starts holds no
+# descriptor of the compositor's (#175), `src/launch.rs`. Already in the
+# lockfile through most of the crates above, and MIT OR Apache-2.0. Tested by
+# `launch::tests::a_spawned_program_holds_no_descriptor_beyond_stdio`.
+libc = "0.2"
+
 [build-dependencies]
 # Qt Quick is hosted in-process, so a small C++ shim is compiled in. See
 # crates/solium/qml/host.cpp for why in-process rather than over a protocol.

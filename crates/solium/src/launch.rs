@@ -1,17 +1,23 @@
 //! What a program Solium starts inherits from it (#175).
 //!
-//! Its environment is the one Solium was started with, and not what this
-//! process holds by the time it starts anything: Qt, EGL and the libraries
-//! they load write their own settings into its environment.
+//! Its environment is the one Solium was started with, and it holds no
+//! descriptor beyond stdio. Neither is what this process holds by the time it
+//! starts anything: Qt, EGL and the libraries they load write their own
+//! settings into its environment, and Qt's eglfs opens a socketpair that is
+//! not close-on-exec.
 //!
 //! The environment is taken whole, at the top of `main`, rather than scrubbed
 //! of names known to leak. Two of the names a child was measured inheriting
 //! are written by sdl2-compat's constructor, which no Solium code calls, and
 //! the next library can add more:
-//! `tests::a_spawned_program_gets_the_environment_solium_started_with`.
+//! `tests::a_spawned_program_gets_the_environment_solium_started_with`. The
+//! descriptors are all marked close-on-exec in the child, rather than chased
+//! one by one in the compositor:
+//! `tests::a_spawned_program_holds_no_descriptor_beyond_stdio`.
 
 use std::{
     ffi::{OsStr, OsString},
+    os::unix::process::CommandExt as _,
     process::Command,
     sync::OnceLock,
 };
@@ -31,23 +37,50 @@ fn started_with() -> &'static [(OsString, OsString)] {
     STARTED_WITH.get_or_init(|| std::env::vars_os().collect())
 }
 
-/// A program to start as a child of this compositor, with the environment
-/// Solium was started with.
+/// A program to start as a child of this compositor: with the environment
+/// Solium was started with, and every descriptor above stdio closed when it
+/// executes.
 pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     command
         .env_clear()
         .envs(started_with().iter().map(|(name, value)| (name, value)));
+    // SAFETY: the hook runs in the child, between fork and exec, where only
+    // async-signal-safe calls may be made. It makes one system call, reads
+    // errno and allocates nothing.
+    #[expect(unsafe_code, reason = "a hook that runs between fork and exec")]
+    unsafe {
+        command.pre_exec(close_on_exec_above_stdio);
+    }
     command
+}
+
+/// Mark every descriptor above stdio close-on-exec, in one system call.
+///
+/// Marked rather than closed, because in a child std reports a failed exec
+/// back to the parent through a pipe of its own, which is one of these. A
+/// child that closed it would be reported as started:
+/// `tests::a_program_that_does_not_exist_still_fails_to_start`.
+fn close_on_exec_above_stdio() -> std::io::Result<()> {
+    const CLOEXEC: libc::c_int = libc::CLOSE_RANGE_CLOEXEC as libc::c_int;
+    // SAFETY: takes no pointers, and changes only this process's descriptor
+    // flags.
+    #[expect(unsafe_code, reason = "calling libc")]
+    let marked = unsafe { libc::close_range(3, libc::c_uint::MAX, CLOEXEC) };
+    if marked == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     //! The tests that start a compositor run a child process: this test binary
     //! again, running only [`child`]. It plays a compositor that has come up --
-    //! its environment noted, then written to, and Qt started -- and then
-    //! starts `sh`, which writes what it was given into a directory the test
-    //! reads.
+    //! its environment noted, then written to, Qt started, and a descriptor
+    //! open without close-on-exec -- and then starts `sh`, which writes what it
+    //! was given into a directory the test reads.
 
     use std::{
         collections::HashMap,
@@ -56,7 +89,10 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use smithay::reexports::wayland_server::Display;
+    use smithay::reexports::{
+        rustix::net::{AddressFamily, SocketFlags, SocketType, socketpair},
+        wayland_server::Display,
+    };
 
     use super::*;
     use crate::state::Solium;
@@ -86,8 +122,10 @@ mod tests {
         ("SDL2_COMPAT", "1"),
     ];
 
-    /// `$1` is the directory.
-    const SCRIPT: &str = r#"env -0 > "$1/env"; : > "$1/done""#;
+    /// `$1` is the directory. `ls` runs in a process of its own and lists the
+    /// shell's descriptors, so its own reading of the directory is not among
+    /// them.
+    const SCRIPT: &str = r#"env -0 > "$1/env"; ls /proc/$$/fd > "$1/fd"; : > "$1/done""#;
 
     /// Not a test of its own: the child process the tests below start.
     /// Without `SOLIUM_LAUNCH_CHILD` it does nothing.
@@ -111,6 +149,14 @@ mod tests {
         // The real host, which writes `QT_QPA_PLATFORM=offscreen` and
         // `QT_QUICK_BACKEND=software` over whatever was there.
         crate::qml::start().expect("Qt starts");
+        // As Qt's eglfs makes one inside `QGuiApplication`.
+        let _pair = socketpair(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::empty(),
+            None,
+        )
+        .expect("a socketpair without close-on-exec");
 
         let arguments = [
             "-c".to_owned(),
@@ -138,6 +184,7 @@ mod tests {
     /// What `sh` was given.
     struct Given {
         environment: HashMap<String, String>,
+        descriptors: Vec<String>,
     }
 
     /// What `sh` was given, in a child compositor playing `role`, for the test
@@ -184,6 +231,10 @@ mod tests {
                 .filter_map(|entry| entry.split_once('='))
                 .map(|(name, value)| (name.to_owned(), value.to_owned()))
                 .collect(),
+            descriptors: read(&directory.join("fd"))
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
         };
         let _ = std::fs::remove_dir_all(&directory);
         given
@@ -227,5 +278,37 @@ mod tests {
             "and the session's own variables"
         );
         assert!(value("XDG_ACTIVATION_TOKEN").is_some());
+    }
+
+    /// **A program `sol.spawn` starts holds no descriptor beyond stdio.**
+    ///
+    /// Qt's eglfs makes a socketpair inside `QGuiApplication` without
+    /// close-on-exec, and one byte from a child holding it makes the
+    /// compositor `_exit(1)` or stop itself (#175). Nested, NVIDIA's EGL leaves
+    /// a render node open the same way, and anything Solium inherited from its
+    /// own launcher reaches every child too. The child here is given one such
+    /// descriptor to keep.
+    #[test]
+    fn a_spawned_program_holds_no_descriptor_beyond_stdio() {
+        assert_eq!(
+            started_in("spawn", "descriptors").descriptors,
+            ["0", "1", "2"]
+        );
+    }
+
+    /// **A program that does not exist still fails to start.**
+    ///
+    /// std reports a failed exec back to the parent through a pipe of its
+    /// own, which is one of the descriptors [`command`]'s hook deals with. A
+    /// child that closed it instead of marking it would be reported as
+    /// started, and a launch that can never arrive would keep its window open
+    /// for the whole of `patience`.
+    #[test]
+    fn a_program_that_does_not_exist_still_fails_to_start() {
+        let started = command("/nonexistent/solium-launch-test").spawn();
+        assert_eq!(
+            started.map(|_| ()).map_err(|err| err.kind()),
+            Err(std::io::ErrorKind::NotFound)
+        );
     }
 }

@@ -305,8 +305,9 @@ impl Solium {
 
     /// Start a program as a client of this compositor, from
     /// [`crate::launch::command`]: with the environment Solium was started
-    /// with, and the session's own variables on top.
-    /// `launch::tests::a_spawned_program_gets_the_environment_solium_started_with`.
+    /// with and no descriptor beyond stdio, and the session's own variables on
+    /// top. `launch::tests::a_spawned_program_gets_the_environment_solium_started_with`
+    /// and `launch::tests::a_spawned_program_holds_no_descriptor_beyond_stdio`.
     pub(crate) fn spawn(&mut self, program: &str, args: &[String]) {
         use std::process::Stdio;
 
