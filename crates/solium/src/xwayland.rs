@@ -187,6 +187,17 @@ pub(crate) fn start<D>(handle: &LoopHandle<'static, D>, display: &DisplayHandle)
 where
     D: HasSolium + XwmHandler + XWaylandShellHandler + 'static,
 {
+    // Smithay starts Xwayland with a `Command` of its own, which
+    // `launch::command`'s hook is not on. So what this process holds without
+    // close-on-exec by now, such as a descriptor its own launcher left open,
+    // is marked here instead:
+    // `launch::tests::a_descriptor_marked_in_the_parent_reaches_no_child_started_any_other_way`.
+    if let Err(err) = crate::launch::close_on_exec_above_stdio() {
+        tracing::warn!(
+            ?err,
+            "could not mark this process's descriptors close-on-exec; XWayland inherits them"
+        );
+    }
     let spawned = XWayland::spawn(
         display,
         None,
