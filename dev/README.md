@@ -189,7 +189,7 @@ itself.
 
 The ones used most. Every flag and every environment variable Solium reads,
 with where in the code each is read, is on the
-[Flags and environment](../crates/solium/environment.txt) page, made from
+[Flags and environment](https://lilium-linux.github.io/solium/generated/reference/environment.html) page, made from
 `crates/solium/environment.txt`; a test fails when the code reads one that file
 does not list.
 
