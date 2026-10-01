@@ -50,18 +50,7 @@ impl Json {
                 }
                 out.push(']');
             }
-            Self::Object(fields) => {
-                out.push('{');
-                for (index, (key, value)) in fields.iter().enumerate() {
-                    if index > 0 {
-                        out.push(',');
-                    }
-                    out.push_str(&crate::scripted::json_string(key));
-                    out.push(':');
-                    value.write(out);
-                }
-                out.push('}');
-            }
+            Self::Object(fields) => write_object(fields, out),
         }
     }
 
@@ -88,14 +77,7 @@ impl Json {
                     })
                     .collect::<Vec<_>>();
                 if items.is_empty() {
-                    let mut fields = BTreeMap::new();
-                    for pair in table.pairs::<String, mlua::Value>() {
-                        let (key, value) = pair?;
-                        if let Some(value) = Self::from_lua(&value)? {
-                            fields.insert(key, value);
-                        }
-                    }
-                    Some(Self::Object(fields))
+                    Some(Self::Object(Self::object_from_lua(table)?))
                 } else {
                     Some(Self::List(items))
                 }
@@ -103,12 +85,47 @@ impl Json {
             _ => None,
         })
     }
+
+    /// A Lua table's every key as an object's field, whether or not it also
+    /// has a list part, which is how a surface's top-level `properties` is
+    /// read: `crate::script::tests::a_surfaces_properties_keep_their_named_keys_beside_a_list_part`.
+    pub(crate) fn object_from_lua(table: &mlua::Table) -> mlua::Result<BTreeMap<String, Self>> {
+        let mut fields = BTreeMap::new();
+        for pair in table.pairs::<String, mlua::Value>() {
+            let (key, value) = pair?;
+            if let Some(value) = Self::from_lua(&value)? {
+                fields.insert(key, value);
+            }
+        }
+        Ok(fields)
+    }
 }
 
-/// A whole number without a fraction, as Lua wrote it: `48`, not `48.0`.
-/// `tests::an_integral_number_renders_without_a_fraction`.
+/// An object's fields as JSON text, from a borrowed map, so a bag is rendered
+/// without being copied into a [`Json::Object`] first.
+/// `tests::an_object_renders_its_keys_in_order`.
+pub(crate) fn write_object(fields: &BTreeMap<String, Json>, out: &mut String) {
+    out.push('{');
+    for (index, (key, value)) in fields.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&crate::scripted::json_string(key));
+        out.push(':');
+        value.write(out);
+    }
+    out.push('}');
+}
+
+/// A whole number without a fraction, as Lua wrote it: `48`, not `48.0`
+/// (`tests::an_integral_number_renders_without_a_fraction`), and one that is
+/// not finite as `null`, as `JSON.stringify` writes it
+/// (`tests::a_number_that_is_not_finite_renders_as_null`).
 fn render_number(value: f64) -> String {
     const EXACT: f64 = 9_007_199_254_740_992.0;
+    if !value.is_finite() {
+        return "null".to_owned();
+    }
     if value.fract() == 0.0 && value.abs() < EXACT {
         #[expect(
             clippy::cast_possible_truncation,
@@ -144,6 +161,20 @@ mod tests {
         assert_eq!(Json::Number(48.0).render(), "48");
         assert_eq!(Json::Number(-3.0).render(), "-3");
         assert_eq!(Json::Number(0.25).render(), "0.25");
+    }
+
+    /// **A number JSON has no word for is `null`**, as `JSON.stringify`
+    /// writes it, so one bad value costs that value and not the whole bag
+    /// the scene is built with.
+    #[test]
+    fn a_number_that_is_not_finite_renders_as_null() {
+        let value = Json::Object(BTreeMap::from([
+            ("a".to_owned(), Json::Number(f64::NAN)),
+            ("b".to_owned(), Json::Number(f64::INFINITY)),
+            ("c".to_owned(), Json::Number(f64::NEG_INFINITY)),
+            ("d".to_owned(), Json::Number(1.0)),
+        ]));
+        assert_eq!(value.render(), r#"{"a":null,"b":null,"c":null,"d":1}"#);
     }
 
     #[test]

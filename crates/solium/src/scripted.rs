@@ -155,7 +155,9 @@ impl Properties {
 
     /// The whole bag as one JSON object: what a scene is built with.
     pub(crate) fn render(&self) -> String {
-        Json::Object(self.0.clone()).render()
+        let mut out = String::new();
+        crate::json::write_object(&self.0, &mut out);
+        out
     }
 
     #[cfg(test)]

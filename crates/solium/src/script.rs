@@ -1845,7 +1845,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // which is how the tweaks panel works and how a bar's buttons would.
     //
     // `sol.surface(name, false)` takes one away. Re-declaring the same name
-    // replaces it, so running the configuration again is idempotent.
+    // changes the surface in place, writing what changed into its live scene,
+    // and only a new scene file replaces it, so running the configuration
+    // again keeps what the scene holds
+    // (`scripted::tests::a_redeclared_property_is_written_into_the_live_scene`,
+    // `scripted::tests::a_new_scene_path_rebuilds_the_surface`).
     //
     // This is the primitive the wallpaper used to be a special case of. See
     // `scripted.rs` for why it is worth having rather than a `Command` each.
@@ -1905,12 +1909,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             };
 
             let properties = match options.get::<Option<Table>>("properties")? {
-                Some(table) => match crate::json::Json::from_lua(&Value::Table(table))? {
-                    Some(crate::json::Json::Object(fields)) => {
-                        crate::scripted::Properties::new(fields)
-                    }
-                    _ => crate::scripted::Properties::default(),
-                },
+                Some(table) => {
+                    crate::scripted::Properties::new(crate::json::Json::object_from_lua(&table)?)
+                }
                 None => crate::scripted::Properties::default(),
             };
             let interactive = options.get::<Option<bool>>("interactive")?.unwrap_or(false);
@@ -4847,6 +4848,33 @@ mod tests {
             })
             .collect();
         assert_eq!(declared, vec![r#"{"a":{"x":"s","y":1},"b":2}"#.to_owned()]);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A `properties` table with a list part keeps its named keys**: the
+    /// bag is always read as an object, so `{ "x", label = "y" }` loses
+    /// nothing, as it did not before properties became values.
+    #[test]
+    fn a_surfaces_properties_keep_their_named_keys_beside_a_list_part() {
+        let directory = std::env::temp_dir().join("solium-script-test-properties-list-part");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.surface("bar", { scene = "/solium-fixture/bar.qml", properties = { "x", label = "y" } })"#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let declared: Vec<String> = scripts
+            .startup()
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Surface(declared) => Some(declared.properties.render()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(declared, vec![r#"{"1":"x","label":"y"}"#.to_owned()]);
         let _ = std::fs::remove_dir_all(&directory);
     }
 
