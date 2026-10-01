@@ -113,4 +113,42 @@ mod tests {
             "the only monitor is the primary one"
         );
     }
+
+    /// **A turned monitor's `transform` is Smithay's name in lower case**, as
+    /// `sol.monitors()` spells it, not as `sol.monitors{ ... }` takes it.
+    #[test]
+    fn a_turned_monitor_row_names_its_transform_as_smithay_does() {
+        use smithay::utils::Transform;
+
+        let display = Display::<Solium>::new().expect("a test display");
+        let mut state = Solium::new(display.handle());
+        let output = Output::new(
+            "rows-turned-1".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "solium".to_owned(),
+                model: "rows".to_owned(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: (1920, 1080).into(),
+                refresh: 60_000,
+            }),
+            Some(Transform::_90),
+            Some(Scale::Fractional(1.0)),
+            None,
+        );
+        state.space.map_output(&output, (0, 0));
+        let transform = |state: &Solium| {
+            super::rows(state)
+                .first()
+                .and_then(|row| row.values.get("transform").cloned())
+        };
+        assert_eq!(transform(&state), Some(Json::Text("_90".to_owned())));
+
+        output.change_current_state(None, Some(Transform::Flipped270), None, None);
+        assert_eq!(transform(&state), Some(Json::Text("flipped270".to_owned())));
+    }
 }

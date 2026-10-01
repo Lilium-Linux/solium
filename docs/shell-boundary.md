@@ -172,6 +172,10 @@ Until the compositor publishes a monitor, its row carries only the `name`, and
 `present` and `valid` read false
 (`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
 A scene that wants its own coordinates subtracts `whole.x` and `whole.y`.
+`transform` is spelled as `sol.monitors()` spells it: `"normal"`, `"_90"`,
+`"_180"`, `"_270"`, `"flipped"`, `"flipped90"`, `"flipped180"` or
+`"flipped270"`, and not `"90"` or `"flipped-90"` as `sol.monitors{ ... }` takes
+it (`models::monitors::tests::a_turned_monitor_row_names_its_transform_as_smithay_does`).
 
 **A way back to the configuration.** A scene sets a string property named
 `action`, the compositor takes it, and `sol.on("surface", function(name,
