@@ -132,4 +132,6 @@ when it changes.
 
 `docs/qml-bar.png` — the bar rendered by Qt inside Solium, showing live
 compositor state: window count, the focused window's xdg-shell title, and the
-compositor's own clock.
+compositor's own clock. It is a record of 2026-09-04, not a picture of Solium
+today: that compiled-in bar was removed the next day, and the white titlebars
+in it are the terminal's own, drawn before Solium had frames of its own.

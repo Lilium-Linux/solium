@@ -27,8 +27,9 @@ about a hundred lines of Lua.
 
 It has run real applications: Firefox, LibreOffice, Steam, Konsole, Dolphin,
 Okular, X11 clients through XWayland, with no protocol errors. Copy and paste
-works in both directions across the X11 boundary. It is used to develop itself,
-which is the only test that counts for a compositor.
+works in both directions across the X11 boundary. It is not yet anyone's daily
+desktop: real use is the only test that counts for a compositor, and the trial
+on real hardware that decides whether it is ready has not happened yet.
 
 The protocols it speaks, and every one it does not, are listed in
 [gaps.md](gaps.md#what-is-there-today).

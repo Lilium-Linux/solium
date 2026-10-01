@@ -1,8 +1,10 @@
 # Where it stands
 
-Solium is alpha: it runs on hardware and is used to develop itself, and it is
-not yet something to depend on. What is being worked on, and in what order,
-lives on GitHub rather than in these pages, because it changes daily:
+Solium is alpha. It runs on hardware and is being readied for daily use, but
+the trial on real hardware that decides whether it is ready has not happened
+yet, and it is not yet anyone's daily desktop. What is being worked on, and in
+what order, lives on GitHub rather than in these pages, because it changes
+daily:
 
 - The [`daily-drive` label](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20state%3Aopen%20label%3Adaily-drive)
   is the list of what matters most: the issues that stop an application being

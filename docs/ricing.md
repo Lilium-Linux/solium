@@ -58,7 +58,12 @@ It is merged over the defaults, key by key, through nested tables — so
 replaced whole, because a list of column widths with one entry changed is a
 different list, not a longer one.
 
-`crates/solium/lua/config.lua` is the list of everything you can put in there.
+[Every setting](https://lilium-linux.github.io/solium/generated/reference/settings.html)
+is the list of everything you can put in there, one row per section, and
+[the configuration reference](../crates/solium/lua/config.lua) explains each
+key. Both are made from `config.lua`, the file that sets the defaults, so they
+cannot drift from it. [Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html)
+is every key that ships, and what it does.
 
 Three guides go deeper than the recipes below:
 
@@ -78,12 +83,20 @@ Three guides go deeper than the recipes below:
 | your pane styles | `~/.config/solium/qml/panes/<name>/` |
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
 | your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml`, once [#88](https://github.com/Lilium-Linux/solium/issues/88) is fixed |
+| the shipped files, to copy from | `crates/solium/qml` and `crates/solium/lua` in a checkout; `share/solium/qml` and `share/solium/lua` under the prefix of an install, which for `dev/install.sh` is `~/.local` |
+| the log | `~/.local/state/solium/session.log`, for a session started with `solium --tty` or from the login screen. A nested run logs to the terminal it was started from |
 
-Your directory is searched first in every case but the last. A file you write
-shadows the one that ships, and everything you did not write still comes from
-the shipped set — including its later improvements. Your own `Theme.qml` does
-not shadow the shipped one yet: the shipped `Solium` module is found first
-([#88](https://github.com/Lilium-Linux/solium/issues/88)).
+`~/.config` is `$XDG_CONFIG_HOME` when that is set, and `~/.local/state` is
+`$XDG_STATE_HOME`.
+
+For the files you write, your directory is searched first in every case but
+your colours. A file you write shadows the one that ships, and everything you
+did not write still comes from the shipped set — including its later
+improvements. Your own `Theme.qml` does not shadow the shipped one yet: the
+shipped `Solium` module is found first
+([#88](https://github.com/Lilium-Linux/solium/issues/88)). Don't edit the
+shipped files in place: an install replaces them, and `user.lua` does the same
+job without being overwritten.
 
 ## Recipes
 
@@ -93,8 +106,10 @@ not shadow the shipped one yet: the shipped `Solium` module is found first
 return { pane = "left" }
 ```
 
-`top`, `left`, `bottom`, `border`, `reactive`, `proximity`, `reveal`, `pulse`,
-`rounded`. Reload and every open window is re-framed.
+Eleven styles ship, and
+[the pane styles' README](../crates/solium/qml/panes/README.md#what-is-here)
+lists them with what each one is for. Reload and every open window is
+re-framed.
 
 ### No frame at all
 
@@ -331,16 +346,19 @@ in `lua/tweaks.lua` — the compositor has no idea what a tweak is.
 **Place things on the `monitors` event, not at the top of your script.** Scripts
 load before the screens are known — on the hardware backend, before the GPU is
 even opened — so a rect computed at load time is computed against zeros. The
-event fires once when the monitors are first known and again on every hotplug,
-which is when a placement needs redoing anyway:
+event fires once when the monitors are first known, again on every hotplug and
+again on every reload, which is when a placement needs redoing anyway:
 
 ```lua
 sol.on("monitors", function()
-    local screen = sol.monitor()
+    local area = sol.monitor()   -- the active monitor's work area
     sol.surface("panel", { scene = "panel.qml", layer = "top",
-                           on = { x = screen.x, y = screen.y, w = screen.w, h = 40 } })
+                           on = { x = area.x, y = area.y, w = area.w, h = 40 } })
 end)
 ```
+
+`sol.monitors()` lists every monitor, with its name, its work area, its whole
+rect and whether it is `primary`, for a panel on a particular one.
 
 Copy `qml/wallpaper.qml` to `~/.config/solium/qml/wallpaper.qml` and the
 background becomes whatever QML can be:
@@ -405,8 +423,10 @@ keyboard = {
 },
 ```
 
-`sol.keyboard()` reads all of it back — the layout names, which is active, and
-the repeat settings — which is how a bar draws a layout indicator.
+`sol.keyboard()` reads all of it back to Lua — the layout names, which is
+active, and the repeat settings. Nothing tells a script when the layout
+changes, though, and a hosted shell's QML cannot call it, so a layout
+indicator can only be updated by the binding that switches the layout.
 
 ### Your monitors
 
@@ -446,7 +466,11 @@ does not exist here.
 | `primary = true` | where a dock, a bar, or any layer surface that named no output goes |
 | `scale` | device pixels per logical one. Left out, worked out from the panel |
 
-`super+shift+r` applies a change without ending the session.
+`super+shift+r` applies the placement keys (`right_of`, `left_of`, `above`,
+`below`, `align`, `x`, `y`), `scale`, `primary` and `enabled` without ending
+the session. `mode`, `vrr` and `transform` are read when a monitor is first
+lit, so on one that is already lit they wait until it is next plugged in —
+or until a reload with `enabled = false` and another with it back.
 
 **Refresh rate lives in `mode`.** `"2560x1440@165"`, the way every display tool
 on Linux writes one. Drop the `@` part and you get the fastest mode at that
@@ -473,9 +497,9 @@ A mode the monitor does not have warns and falls back rather than going black.
 `mode` takes — which is the whole reason to run it:
 
 ```
-DP-1         connected, 36 modes, best 2560x1440@260
-               2560x1440@260, 240, 200, 165, 144, 120, 100, 60  (preferred)
-               1920x1080@240, 120, 60, 50
+  DP-1         connected, 36 modes, best 2560x1440@260, 600x340mm, 108 dpi, scale 1
+                 2560x1440@260, 240, 200, 165, 144, 120, 100, 60  (preferred)
+                 1920x1080@240, 120, 60, 50
 ```
 
 **`scale` is worked out for you, and you can override it.** Left out, it comes
@@ -487,11 +511,9 @@ at 1x, and the second of those is genuinely a matter of taste, which is why it
 is settable. Fractional values work.
 
 `solium --probe` prints the dpi it measured and the scale it would choose, per
-monitor, which is the one number you need to decide whether to disagree:
-
-```
-DP-1  connected, 36 modes, best 2560x1440@260, 600x340mm, 108 dpi, scale 1
-```
+monitor, at the end of each monitor's first line above. That is the one number
+you need to decide whether to disagree. A monitor that reports no physical size
+says so there, and gets scale 1.
 
 Scaling is not a zoom. Everything the compositor draws itself — titlebars, the
 loading window, the pointer — is *rasterised* at the monitor's pixel count
@@ -525,9 +547,13 @@ fourth on a card with three.
 size, so every layout follows it without knowing anything about rotation, and
 the display pipeline does the turning.
 
-Everything is applied at startup. A monitor plugged in while the session is
-running is not picked up yet —
-[#43](https://github.com/Lilium-Linux/solium/issues/43).
+**Plugging in and unplugging work while the session runs.** A monitor that
+arrives is driven with its entry above, as it would have been at startup, and
+the `monitors` event fires so anything placed per screen can be placed again.
+One that goes takes no windows with it: a window left on no screen is moved
+onto one that remains, and the layouts run again.
+[dev/README.md](../dev/README.md#hotplug-and-how-to-test-it-without-a-cable)
+has how to try it without reaching behind the desk.
 
 ### Turning screens off
 
@@ -705,6 +731,9 @@ return {
 A string is a command line split on spaces; a list is one already split, for an
 argument with a space in it; a function is anything else, with the whole `sol`
 API in scope; `false` removes a shipped binding outright.
+[Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html)
+lists every shipped one, so you can see what a key does before you take it
+over — `super+g` above is a demonstration that tilts a window.
 
 **A binding here replaces a shipped one on the same combination.** On purpose:
 refusing a clash would let you add a binding and forbid you to change one, and
@@ -764,27 +793,32 @@ has what each layout does with a direction.
 
 ### Your own mode
 
-A mode is a Lua module that reacts to events — `open`, `close`, `focus`,
-`drop`, `resize`, `scroll` — and asks for placements. `tiling.lua` is Hyprland's
-dwindle in about a hundred lines; `scrolling.lua` is niri's model. Copy either
-into your own directory and it takes over.
+A mode is a Lua module that reacts to events — a window opening, closing or
+taking focus, a drag ending, the monitors changing, and the rest
+[modes.md lists](modes.md#what-a-mode-is-told) — and asks for placements.
+`tiling.lua` is Hyprland's dwindle and `scrolling.lua` is niri's model; each
+decides where windows go and when, and leaves the arithmetic of the tree and
+the strip to `crates/layout`. Copy either into your own directory and it takes
+over.
 
 **[modes.md](modes.md)** is the guide, with a whole working mode in forty lines
 and the two mistakes everyone makes first.
 
 ## Worth knowing
 
-A decoration is rasterised over the window's whole outer rect — on the GPU by
-default, and on the CPU where the GPU path is not available.
-Bars and borders are cheap because most of that rect is untouched, but a frame
-that paints across the entire window every frame will cost you — the animation
-only runs while the scene is actually changing, so favour transitions that
-settle over ones that loop forever.
+Each layer of a frame is drawn over its canvas: the window's outer rect, grown
+by whatever `bleed` the layer declares. On the hardware that is on the GPU by
+default; nested, or where the GPU trial at startup fails, it is in software on
+the CPU. Bars and borders are cheap because most of that canvas is untouched,
+but a frame that paints across the entire window every frame will cost you, so
+favour transitions that settle over ones that loop forever.
 
-Frames stop being driven a few identical renders after they stop moving, so an
-idle window costs a comparison rather than a rasterisation. A decoration that
-animates continuously (`pulse` does, while focused) opts out of that for as
-long as it animates.
+A layer is drawn again only when Qt marks its scene dirty — something it
+renders changed — or while an animation in it is running. So an idle window
+costs a flag read, not a rasterisation. A decoration that animates
+continuously (`pulse` does, while focused) is drawn on every frame for as long
+as it animates. The pane styles' README has the rest, under
+[What it costs](../crates/solium/qml/panes/README.md#what-it-costs).
 
 ## Editor completion
 

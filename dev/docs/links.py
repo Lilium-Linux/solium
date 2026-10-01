@@ -10,8 +10,11 @@ things:
   `docs/`, a file copied in, or the reference page generated from a source
   file (`config.lua` becomes the configuration reference);
 * a link to the file on GitHub, for anything else in the repository;
-* left alone, for a URL, an anchor on the same page, or a path that goes
-  nowhere -- which the link check then reports.
+* a page of the book again, for a link to one of its pages on the published
+  site -- which is how a doc on GitHub links a page only the book has, such as
+  the bindings reference -- so the link check reads that one too;
+* left alone, for any other URL, an anchor on the same page, or a path that
+  goes nowhere -- which the link check then reports.
 
 One module, used by `generate.py` for the pages it writes and by
 `preprocess.py` for every chapter mdBook reads, so the two cannot disagree.
@@ -24,6 +27,8 @@ import re
 
 REPOSITORY = "https://github.com/Lilium-Linux/solium"
 BRANCH = "stage"
+# Where the book is published, from `stage`: book.toml's `site-url`.
+SITE = "https://lilium-linux.github.io/solium/"
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -110,6 +115,14 @@ def target(link, origin, dest):
     `origin` is a path in the repository, `dest` a path in the book. Returns
     the link unchanged when it is not one to rewrite.
     """
+    if link and link.startswith(SITE):
+        path, _, fragment = link[len(SITE):].partition("#")
+        if not path.endswith(".html"):
+            return link
+        # mdBook writes `x.md` as `x.html`, and points a link at `x.md` there.
+        page = path[: -len(".html")] + ".md"
+        relative = posixpath.relpath(page, posixpath.dirname(dest) or ".")
+        return relative + (f"#{fragment}" if fragment else "")
     if not link or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", link) or link.startswith("//"):
         return link
     path, _, fragment = link.partition("#")

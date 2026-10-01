@@ -40,13 +40,14 @@ fi
 
 # Print the scripted-input list for a run of this many minutes and exit.
 #
-#   SOLIUM_TRIGGER_AT="$(dev/soak.sh --triggers 60)" ./target/debug/solium --tty
+#   SOLIUM_TRIGGER_AT="$(dev/soak.sh --triggers 60)" ./target/debug/solium
 #
 # Attach mode samples a compositor it did not start, so it cannot pass the
-# trigger list -- which means an attached soak had only the client spawner for
-# churn, and the window lifecycle is the thing worth churning. This closes
-# that: generate the list here, start the session on the VT with it, and
-# attach the sampler from another terminal.
+# trigger list itself: this is for a nested compositor started by hand and
+# then attached to. Only the nested backend reads SOLIUM_TRIGGER_AT. The TTY
+# backend reads none of the scripted knobs, so on a TTY the list does nothing
+# and only the client spawner churns; the window lifecycle there has to be
+# churned from outside until that backend reads the triggers.
 if [[ "${1:-}" == "--triggers" ]]; then
     minutes="${2:?--triggers needs a number of minutes}"
     read -r -a cycle <<< "${SOLIUM_SOAK_CYCLE:-super+return super+g super+m super+space super+ctrl+right super+q}"
@@ -130,7 +131,8 @@ else
     # screen; the sampling runs behind it instead. Nested there is nothing to
     # look at and a log is better.
     if [[ -n "$tty_flag" ]]; then
-        SOLIUM_TRIGGER_AT="$triggers" nice -n 5 "$binary" --tty 2>&1 | tee "$log" &
+        # No SOLIUM_TRIGGER_AT: the TTY backend does not read it.
+        nice -n 5 "$binary" --tty 2>&1 | tee "$log" &
     else
         SOLIUM_TRIGGER_AT="$triggers" nice -n 5 "$binary" >"$log" 2>&1 &
     fi

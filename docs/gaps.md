@@ -113,7 +113,7 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 | | |
 |---|---|
 | [#48](https://github.com/Lilium-Linux/solium/issues/48) the seat flake | three of forty-three logged sessions got no input devices. Devices arrive within a few seconds or not at all, so a longer watchdog would not have saved one; the cause is not known |
-| [#65](https://github.com/Lilium-Linux/solium/issues/65) a hardware soak | the compositor has never run unattended for hours on a real session. `SOLIUM_SOAK_TTY=1 dev/soak.sh` can do it; no run is recorded |
+| [#65](https://github.com/Lilium-Linux/solium/issues/65) a hardware soak | the compositor has never run unattended for hours on a real session. `SOLIUM_SOAK_TTY=1 dev/soak.sh` can do it, though only its clients churn there, since the TTY backend ignores the scripted key presses; no run is recorded |
 | [#38](https://github.com/Lilium-Linux/solium/issues/38) synthetic drags | they happen in one instant, so no timing-dependent test means anything |
 | [#40](https://github.com/Lilium-Linux/solium/issues/40) xwayland selection flush | a workaround waiting on Smithay |
 | [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | `dev/install.sh` installs from a checkout, but there are no packages: no Fedora `.spec` or COPR, no Arch `PKGBUILD`. `--config` ([#106](https://github.com/Lilium-Linux/solium/issues/106)) and the configuration directory's name ([#107](https://github.com/Lilium-Linux/solium/issues/107)) are worth settling first |

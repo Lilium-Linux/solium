@@ -1,45 +1,351 @@
-# Development knobs
+# Developing Solium
 
-Environment variables Solium reads. All of them exist so the compositor can be
-exercised and photographed without a human at the keyboard — that is what turns
-a demo into a regression test.
+How to build Solium, check a change, run it nested, drive and photograph it
+without a hand on the keyboard, run it on a TTY and install it.
+[CONTRIBUTING.md](../CONTRIBUTING.md) has how to send a change and the rules
+it is judged by; this file is the instruments.
 
 Where this file, or a comment in the source, quotes a measurement without
-saying where it was taken, it comes from the reference machine: an NVIDIA RTX
-3070 on the proprietary driver (610.x), Qt 6.11, Fedora 44.
+saying where it was taken, it was taken in September 2026 on one desktop: an
+NVIDIA RTX 3070 on the proprietary driver (610.x), Qt 6.11, Fedora 44. None of
+them has been taken again since, so read them as orders of magnitude.
+
+Settings are not here. [docs/ricing.md](../docs/ricing.md) is how to
+configure Solium with `~/.config/solium/user.lua`, and the
+[configuration reference](../crates/solium/lua/config.lua) has every setting.
+The keys that ship are the
+[Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html)
+page, made from what `solium --check` prints.
+
+## Building
+
+Natively, with the development packages the top-level README lists under
+*Building*:
+
+```sh
+cargo build
+```
+
+Or, on a Fedora host without the development packages, in the build image,
+which needs only podman and a rustup install. The image has the C toolchain and
+the system libraries; Rust comes from your own `CARGO_HOME` and `RUSTUP_HOME`,
+mounted at the same paths. Build the image for the Fedora release you run
+(`--build-arg FEDORA_VERSION=<n>`, 44 by default), for the reasons below; on
+another distribution, install the packages natively:
+
+```sh
+podman build -t solium-build:fc44 -f dev/Containerfile dev/
+podman run --rm --userns=keep-id --security-opt label=disable \
+    -v "$PWD:$PWD" -v "$HOME/.cargo:$HOME/.cargo" -v "$HOME/.rustup:$HOME/.rustup" \
+    -e CARGO_HOME="$HOME/.cargo" -e RUSTUP_HOME="$HOME/.rustup" \
+    -e PATH="$HOME/.cargo/bin:/usr/bin:/bin" \
+    -w "$PWD" localhost/solium-build:fc44 cargo build
+```
+
+**The build image matches the host's distribution on purpose.** Two things go
+wrong otherwise, and both were hit:
+
+* A vendored C dependency (Lua) is compiled by whatever toolchain builds the
+  project. A container with a newer C library produces a binary the host cannot
+  start at all — `GLIBC_2.44 not found`.
+* Working around *that* by running the compositor inside the container costs
+  hardware acceleration. The container has Mesa but no GPU driver, so
+  everything falls back to llvmpipe. Measured on 2026-09-05:
+
+  | | Renderer | Frame rate |
+  |---|---|---|
+  | In the container | `llvmpipe` | 55 fps |
+  | On the host | `NVIDIA RTX 3070` | 260 fps |
+
+  On a 260 Hz display, 55 fps puts a dragged window four frames behind the
+  cursor, which is exactly what it looks like.
+
+**Never glob `target/debug/build/solium-*/out/`.** The Qt host is compiled into
+`libsolium_qml_host.a` under that path, and there is more than one such
+directory: cargo makes a separate one per unit metadata, so `cargo build -p
+solium` and `cargo build` (or `cargo test`) each own one. A test harness or a
+script that links "the" archive by glob picks whichever the shell sorts first,
+which is not the newest, and there is no error — the link succeeds and you
+measure a build from an hour ago. It cost a full round of debugging a fix that
+was already in the tree.
+
+This is not something one commit introduced and another can remove; it is how
+cargo lays the directory out. Either pin the newest,
+
+```sh
+ls -td target/debug/build/solium-*/out | head -1
+```
+
+or compile `crates/solium/qml/host.cpp` from source in the harness's own
+`build.rs`, which is the only way to be certain that what runs is what is
+checked out.
+
+### The gate
+
+`dev/gate.sh` checks the formatting with `cargo fmt --check`, then runs clippy
+with warnings denied, the tests and a build, then two checks on the built
+binaries that nothing else reaches: `solium --check`, which loads the Lua
+configuration, and `dev/wirecheck`, which drives the QML GPU path against the
+machine's own render node. Run `cargo fmt --all` first if the formatting step
+fails. It runs cargo natively unless told otherwise:
 
 | Variable | Effect |
 |---|---|
-| `SOLIUM_CAPTURE=<path>` | Write one rendered frame to `<path>` as a binary PPM. |
-| `SOLIUM_CAPTURE_AT=<ms>` | Capture at this moment instead of "once a window has settled". Naming a moment is what makes capturing an *animation* possible. |
-| `SOLIUM_CAPTURE_FRAMES=<n>` | Capture a burst of `n` frames, numbered `frame-000.ppm`, `frame-001.ppm`, … One frame shows a pose; a burst shows whether the motion is smooth. |
-| `SOLIUM_CAPTURE_INTERVAL=<ms>` | Time between frames of a burst (default 16). |
-| `SOLIUM_TRIGGER_AT=` | Fire key bindings, as `<ms>:<combo>` separated by commas — e.g. `5200:super+space,6200:super+space`. Goes through the same path a keypress does. |
-| `SOLIUM_CLICK_AT=` | Fire pointer presses, as `<ms>:<x>,<y>` separated by semicolons. |
-| `SOLIUM_OUTPUTS=<n>` | Give the nested backend `n` monitors, side by side in its one window (1–4). Each gets its own layer map, work area and render pass, drawn into a texture of its own exactly as it would be into its own buffer. One is the default and takes the ordinary path unchanged. |
-| `SOLIUM_LUA_INIT=<path>` | Load this configuration instead of `~/.config/solium/init.lua` or the bundled one. |
-| `SOLIUM_QML_TOPBAR=`, `SOLIUM_QML_TITLEBAR=` | Load chrome from elsewhere, so it can be restyled without a rebuild. |
-| `SOLIUM_QML=<mode>` | Which scene graph QML renders on: `auto` (the default), `gpu` or `software`. Below `--qml <mode>`, above `SOLIUM_QML_GPU` and the configuration's `qml.renderer` — see *QML on the GPU*. |
-| `SOLIUM_QML_GPU=1` | The older spelling of `SOLIUM_QML=gpu`. Set to anything, it means `gpu`. |
-| `SOLIUM_DEV_IMAGE=` | The container `dev/run-nested.sh` runs in. |
-| `SOLIUM_SHELL_SCENE=<path>` | Host this QML file as the shell, over whatever `shell.scene` says. For one run; the configured way is `shell = { scene = ... }`. |
-| `SOLIUM_SHELL_WATCH=<dir>` | Rebuild a hosted scene when anything under `<dir>` changes, rather than anything under the scene's own directory. For a shell whose files live in a tree of their own. |
-| `SOLIUM_SHELL=<dir>` | Read by `dev/run-shell.sh`, not by the compositor: the shell checkout to use when none is named on the command line. |
-| `SOLIUM_FORM_FACTOR=` | `desktop` (default), `laptop`, `tablet`, `phone`. Selects the input profile. |
-| `SOLIUM_DRAG_MODIFIER=` | `logo` (default) or `alt`. Held to drag a window from anywhere in it. |
-| `SOLIUM_SESSION_BUS=<address>` | The D-Bus address to tell about the session (the environment export, and starting and stopping `solium-session.target` and `solium-autostart.target`), and to own `org.freedesktop.ScreenSaver` on (`idle.dbus_inhibit`, `screensaver.rs`), instead of the session bus. Nested, or `solium --tty` without `--session`, this is the only way anything is told: without it such a run leaves the session around it alone. For checking the calls against a private bus: `dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'`. See `session.rs`. |
+| `SOLIUM_GATE_IMAGE=<image>` | Build in this podman image, e.g. `localhost/solium-build:fc44`. If it does not exist, the gate prints the `podman build` line that makes it. Only the checkout, `CARGO_HOME` and `RUSTUP_HOME` are mounted. `solium --check` runs in the image too; `dev/wirecheck` runs on the host, on its render node, and is skipped with a message if the host cannot load what the image built. |
+| `SOLIUM_GATE_PODMAN_ARGS=<args>` | Extra `podman run` arguments, split on spaces — e.g. `"--memory=6g --memory-swap=6g"` to cap a build that would otherwise use all the memory there is. |
+| `SOLIUM_GATE_JOBS=<n>` | `cargo -j<n>`. Unset, cargo uses every CPU. |
+| `SOLIUM_GATE_CPUS=<list>` | Pin the build to these CPUs, as a `taskset` list such as `14,15`. |
+| `SOLIUM_GATE_NO_GPU=1` | Build the GPU check but do not run it. It is skipped anyway on a machine with no render node. |
+
+For example, capped and in the container:
+
+```sh
+SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 \
+SOLIUM_GATE_PODMAN_ARGS="--memory=6g --memory-swap=6g" SOLIUM_GATE_JOBS=2 \
+    dev/gate.sh
+```
+
+The cargo steps run under `nice -n 19` and, where it exists, `ionice -c 3`, so
+a gate in the background leaves the machine usable. `solium --check` and
+`dev/wirecheck` are short and run at normal priority.
+
+CI runs the formatting check, clippy, the build, the tests and
+`solium --check`, and not `dev/wirecheck`, which needs a GPU. A source tarball
+made with `git archive` leaves `dev/wirecheck` out, along with the other
+hardware harnesses and probes `.gitattributes` names, and the gate then skips
+that step and says so.
+
+## Running it nested
+
+```sh
+./target/debug/solium          # a window inside your session
+dev/run-nested.sh              # the same, logging to a file and printing the socket
+```
+
+Nested, Solium runs as a window inside the session you are using. That is how
+almost all of it is developed and checked. `dev/run-nested.sh` runs it **on the
+host**, on the host's own GPU driver, whether it was built natively or in the
+build image — the image only builds it, which is why it matches the host's
+distribution. It refuses to start without a `WAYLAND_DISPLAY`, because an empty
+one means the default socket, which is your real session.
+[host-window-rule.md](host-window-rule.md) keeps the nested window from taking
+focus or landing on the wrong monitor.
+
+Three things are different nested, and they matter for what a nested run
+proves:
+
+* QML renders in software: the nested backend hands the compositor no GBM
+  device, so there is no GPU path to take (see *QML on the GPU*).
+* The host draws a pointer over Solium's own, so a missing pointer does not
+  show (`dev/cursor-check.sh`).
+* The knobs below that drive and photograph a session are read by the nested
+  backend only.
+
+### Running programs inside Solium
+
+`Super`+`Return` starts a terminal: `SOLIUM_TERMINAL` names one, or else the
+shipped `init.lua` takes the first that is installed. A binding in `user.lua`
+starts anything else (`bindings = { ["super+b"] = "firefox" }`; see
+[docs/ricing.md](../docs/ricing.md#your-own-bindings)), and so does `sol.spawn`
+from a script:
+
+```lua
+sol.bind("super+e", function() sol.spawn("foot", "-e", "htop") end)
+```
+
+Programs start as clients of *this* compositor — `sol.spawn` overrides
+`WAYLAND_DISPLAY` in the child, or it would inherit the host's and open its
+window next to the nested compositor rather than inside it.
+
+Solium runs on the host, so `sol.spawn` can start anything installed there —
+with one family of exceptions:
+
+**Do not test with KDE's own applications.** They are launched through DBus
+activation, so the process that actually opens the window inherits the
+*session's* environment and connects to the session's compositor. The spawn
+succeeds, the program keeps running, its window appears on the host desktop,
+and nothing is logged anywhere — the most confusing failure available.
+
+`dev/foot` is the way round it: a terminal from the build image, connected to
+whichever compositor invoked it.
+
+```sh
+SOLIUM_TERMINAL=$PWD/dev/foot dev/run-nested.sh
+```
+
+Anything that is not DBus-activated can be pointed at the socket directly — the
+launcher prints its name:
+
+```sh
+WAYLAND_DISPLAY=wayland-1 <program>
+```
+
+To run something else from the build image the way `dev/foot` runs foot, add
+its package to the `dnf install` line in `dev/Containerfile` and rebuild the
+image — a `--rm` container throws anything installed into it by hand away with
+itself.
+
+## The knobs
+
+The ones used most. Every flag and every environment variable Solium reads,
+with where in the code each is read, is on the [Flags and
+environment](https://lilium-linux.github.io/solium/generated/reference/environment.html)
+page, made from `crates/solium/environment.txt`; a test fails when the code
+reads one that file does not list.
+
+| Variable | Effect | Nested only |
+|---|---|---|
+| `SOLIUM_CAPTURE=<path>` | Write one rendered frame to `<path>` as a binary PPM. See *Capturing a frame*. | yes |
+| `SOLIUM_CAPTURE_AT=<ms>` | Capture at this moment after startup instead of once a window has settled. Naming a moment is what makes capturing an *animation* possible. | yes |
+| `SOLIUM_CAPTURE_FRAMES=<n>`, `SOLIUM_CAPTURE_INTERVAL=<ms>` | A burst of `n` frames, `<ms>` apart (16 by default), written beside the path with a number on its stem: `/tmp/tile.ppm` gives `/tmp/tile-000.ppm`, `/tmp/tile-001.ppm`, … One frame shows a pose; a burst shows whether the motion is smooth. | yes |
+| `SOLIUM_TRIGGER_AT=<ms>:<combo>,...` | Run what these combinations are bound to, at these moments: `5200:super+space,6200:super+space`. Not a keypress: the binding is looked up by the name written, so it fires while the screen is locked, cannot press Ctrl+Alt+Backspace, and cannot show whether a binding works under another keyboard layout. | yes |
+| `SOLIUM_DRAG_AT=<ms>:<x1>,<y1>><x2>,<y2>;...` | Drag the pointer through the real input path: the real grab, hit-testing and layout scripts. A drag from a point to itself is a click. | yes |
+| `SOLIUM_CLICK_AT=<ms>:<x>,<y>;...` | Hand a press to the mode holding the pointer, such as overview. It never touches the input path; see *Driving it without a keyboard*. | yes |
+| `SOLIUM_OUTPUTS=<n>` | Give the nested backend `n` monitors, 1 to 4, side by side in its one window. See *Two monitors, without a second monitor*. | yes |
+| `SOLIUM_OUTPUTS_AT=<ms>:<n>,...` | Change how many nested monitors there are at these moments: hotplug without a cable. | yes |
+| `SOLIUM_LOADING_AT=<ms>:<program>,...` | Open a window for an application that never arrives, to exercise the loading window. | yes |
+| `SOLIUM_LUA_INIT=<path>` | Load this configuration instead of `~/.config/solium/init.lua` or the shipped one. | |
+| `SOLIUM_TERMINAL=<command line>` | The terminal `super+return` opens, split on spaces. | |
+| `SOLIUM_PANE=<name or path>` | The frame style for this run. | |
+| `SOLIUM_QML=<mode>` | `auto`, `gpu` or `software`; see *QML on the GPU*. | |
+| `SOLIUM_SESSION_BUS=<address>` | The D-Bus bus to tell about the session and to own `org.freedesktop.ScreenSaver` on, instead of the session bus. A nested run, or `solium --tty` without `--session`, tells nobody anything without it. To check the calls against a private bus: `dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'`. | |
+| `RUST_LOG=<filter>` | Log levels, `info` by default. `solium::qml` carries Qt's own messages. | |
+
+On the hardware there is no `SOLIUM_CAPTURE`. A screenshot there is a
+`wlr-screencopy` client such as `grim`, or `wl-probe`'s `WL_PROBE_SHOT`.
+
+## Capturing a frame
+
+```sh
+SOLIUM_CAPTURE=/tmp/frame.ppm dev/run-nested.sh
+```
+
+A compositor cannot be verified by looking at it: a desktop screenshot tool
+captures the *host* session, which proves nothing about what Solium composited,
+and using a shell's own capture to test that shell is circular. So Solium reads
+its own framebuffer back.
+
+The capture waits until a window has been mapped for 30 frames, which is half a
+second at 60 Hz and less on a faster host, because a capture of an empty
+compositor is exactly the misleading result the mechanism exists to avoid. A
+captured frame is not presented — reading the framebuffer back invalidates the
+bind, and the following `submit` would fail to reallocate its EGL surface.
+
+Under `timeout`, a nested run ends the way a quit binding ends it, so a capture
+can be scripted end to end:
+
+```sh
+SOLIUM_CAPTURE=/tmp/frame.ppm SOLIUM_CAPTURE_AT=3000 timeout -s TERM 5 ./target/debug/solium
+magick ppm:/tmp/frame.ppm /tmp/frame.png
+```
+
+## Driving it without a keyboard
+
+Because a mode that can only be checked by someone pressing a key is a mode
+nobody checks twice. Enter overview, click the top-right thumbnail, and
+photograph the result:
+
+```sh
+SOLIUM_TRIGGER_AT=5200:super+space SOLIUM_CLICK_AT=6000:1200,250 \
+    SOLIUM_CAPTURE=/tmp/frame.ppm SOLIUM_CAPTURE_AT=7000 dev/run-nested.sh
+```
+
+Enter and leave, then compare the frame with one taken at rest. With nothing
+but Solium on screen the whole frame must be identical, because leaving a mode
+restores the layout exactly:
+
+```sh
+SOLIUM_TRIGGER_AT="5200:super+space,6200:super+space" \
+    SOLIUM_CAPTURE=/tmp/after.ppm SOLIUM_CAPTURE_AT=7400 dev/run-nested.sh
+```
+
+`SOLIUM_DRAG_AT` performs a drag through the real input path — the real grab,
+the real hit-testing, the real layout scripts:
+
+```sh
+SOLIUM_DRAG_AT="8000:400,25>1200,500"    # at 8s, drag from (400,25) to (1200,500)
+```
+
+Aim the *start* at a titlebar. A press in a client's own area does not begin a
+move grab, so a drag that starts there proves nothing — which it did, the first
+time this was used. Solium's own frame starts the move itself; the drag
+modifier (`Super`, or `Alt` under `SOLIUM_DRAG_MODIFIER=alt`) works anywhere in
+the window.
+
+It exists because dragging was the one interaction that needed a hand on a
+mouse, and two bugs shipped there in three commits; the second froze the
+machine. Both are reproducible from a script now: restoring the deadlock and
+running the line above freezes the compositor on demand, CPU flat, which is how
+the fix was confirmed to be a fix rather than a rearrangement.
+
+`SOLIUM_CLICK_AT` and `SOLIUM_DRAG_AT` are not two spellings of the same thing,
+and the difference cost an hour. `SOLIUM_CLICK_AT` calls `trigger_click`, which
+is the *script* click handler — it never touches the input path. `SOLIUM_DRAG_AT`
+goes through `synth`, `input::handle` and the real pointer, so it is the one
+that exercises hit-testing, grabs and anything a surface does with a press. A
+drag from a point to itself is a click:
+
+    SOLIUM_DRAG_AT="6500:1436,472>1436,472"
+
+Testing the Developer Tweaks panel with `SOLIUM_CLICK_AT` showed nothing
+happening and looked exactly like the panel being broken, when the panel was
+fine and the instrument was measuring something else.
+
+`SOLIUM_TRIGGER_AT` has the same limit on the keyboard side: it runs the
+handler a combination is bound to, and skips what a real key goes through
+first. A binding under a Cyrillic layout, which answers to its key cap as well
+as its keysym, can only be checked with a real keyboard with the second layout
+active; `wl-probe`'s `WL_PROBE_KEYBOARD` shows which layout the client was told
+is live.
+
+## Checking an animation frame by frame
+
+```sh
+SOLIUM_TRIGGER_AT=9000:super+t SOLIUM_CAPTURE=/tmp/tile.ppm \
+  SOLIUM_CAPTURE_AT=9000 SOLIUM_CAPTURE_FRAMES=16 SOLIUM_CAPTURE_INTERVAL=20 \
+  dev/run-nested.sh
+```
+
+The frames land as `/tmp/tile-000.ppm` to `/tmp/tile-015.ppm`. The bounding box
+of what is drawn, per frame, is the animation's curve. A good ease-out moves
+most on the first frame and less on each one after, never jumps, and reaches
+zero at the end. Measured across the modes on 2026-09-05:
+
+| Mode | Per-frame movement (px) |
+|---|---|
+| window opens | 16, 12, 8, 4, 4, 0 |
+| overview enters | 108, 84, 76, 56, 44, 32, 20, 16, 4, 4, 4, 0 |
+| tiling arranges | 120, 92, 84, 56, 48, 32, 24, 16, 8, 4, 4, 4, 4, 4, 0 |
+| scrolling arranges | 224, 100, 72, 64, 44, 32, 20, 16, 8, 4, 4, 4, 4, 4, 0 |
+
+The window-open row predates `open.motion`, which is `outBack` now: it
+overshoots, so a correct open grows past its size and settles back rather than
+shrinking monotonically. A jump mid-sequence means a layout wrote geometry
+without animating it; a stall means something is being recomputed per frame
+that should not be.
 
 ## Checks
 
 | Script | What it asserts |
 |---|---|
-| `dev/gate.sh` | fmt, clippy, tests, build, that the Lua configuration loads, and the QML GPU path against a real driver (see *The gate*) |
+| `dev/gate.sh` | formatting, clippy, tests, build, that the Lua configuration loads, and the QML GPU path against a real driver (see *The gate*) |
 | `dev/app-check.sh <program>` | a client runs, draws, and provokes no protocol error |
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
 | `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone, and unsetting the variables after one that crashed before starting its target while no other desktop holds `graphical-session.target`) and refusing a second session while one runs, a reinstall saying when the login screen's session file is stale, and an uninstall that leaves nothing. See *Installing it* |
+
+And the tools that measure rather than assert:
+
+| Tool | What it is for |
+|---|---|
+| `dev/leak.sh <cycles> <windows>` | open and close windows in settled cycles, to tell a leak from a cache |
+| `dev/soak.sh <minutes>` | churn a session for a long time and sample its memory, threads, descriptors and CPU; see *Soaking on a TTY* |
+| `dev/bench.sh solium\|sway <seconds>` | what a nested compositor costs under a fixed client load, Solium and sway alike |
+| `dev/preview` | the animation and effects engines in a browser; see *Tuning animations without running the compositor* |
+| [`dev/wirecheck`](wirecheck/README.md) | the QML GPU path against a real driver, which the gate runs |
+| [`dev/qtprobe`](qtprobe/README.md) | whether this machine's Qt can render on the GPU at all, outside Solium |
 
 `cursor-check.sh` exists because the pointer was invisible for the whole life
 of the project and nothing noticed: nested, the host session draws a cursor
@@ -49,11 +355,11 @@ over the top, so the only place the failure shows is the hardware.
 the one part of a presentation transform that no unit test reaches. `z` and
 `pivot` are read in `script.rs`, carried through `present::Frame`, and spent in
 `render::by_depth` and `warp::mesh` — all of which are pure functions with tests
-of their own. What sits between them is two field initialisers in
-`state.rs`'s `Command::Present` arm, and reverting *both* of those to their
-defaults passes the entire suite. So this measures pixels instead: it places one
-window at a known rect, turns it twenty degrees about two different points, and
-reports where the corner went.
+of their own. What sits between them is two field initialisers in the
+`Command::Present` arm in `state/commands.rs`, and reverting *both* of those to
+their defaults passes the entire suite. So this measures pixels instead: it
+places one window at a known rect, turns it twenty degrees about two different
+points, and reports where the corner went.
 
 The corner is the whole difficulty, and "look at it" is not a weaker version of
 this check — it is not a check at all. A rotated window's top-left is not the
@@ -67,8 +373,9 @@ its home position, the marker travels with the corner, and
 `present-check/measure.py` names the quad vertex nearest it.
 
 The last two claims are the ones no screenshot can make, and they are two halves
-of the same rule. `Solium::window_under` walks panes in stacking order and tests
-`drawn_at(..).rect.contains(location)`:
+of the same rule. `Solium::window_under` (`state/hit_test.rs`) walks panes in
+stacking order and asks whether each one, as it is drawn at that moment
+(`drawn_at`), owns the point:
 
 * **`z` never enters the walk.** A window raised over the one covering it is
   drawn in front and still does not take its clicks. Checked with *three*
@@ -86,6 +393,13 @@ of the same rule. `Solium::window_under` walks panes in stacking order and tests
 Kept out of `gate.sh` deliberately: it needs a host compositor to nest in and a
 client to open, and a gate that cannot run headless is a gate that gets skipped.
 
+`clipboard-check.sh` runs its X11 half in a container, so the host needs no
+`xclip`. **Run it more than once.** The bug it was
+written for failed about one time in three, so a single green run proves
+nothing — which is exactly how it nearly shipped.
+
+### wl-probe
+
 `wl-probe` is a Wayland client, and exists because a compositor cannot test its
 own protocol support from the inside. "The global is advertised" is a different
 claim from "a client that uses it gets the right answers", and the gap between
@@ -98,8 +412,10 @@ whether presentation feedback worked at all.
     ./target/debug/solium &
     WAYLAND_DISPLAY=wayland-1 cargo run -p wl-probe
 
-It exits non-zero if anything it asked for went unanswered, so it can be a
-gate.
+The socket name is chosen when Solium starts, and `wayland-1` is only the usual
+answer: the log line with `socket=` says which, and `dev/run-nested.sh` prints
+it. `wl-probe` exits non-zero if anything it asked for went unanswered, so it
+can be a gate.
 
 It also anchors a bar to the top of every monitor with an exclusive zone and
 checks that each was configured to *that* monitor's width — a layer surface
@@ -165,10 +481,10 @@ locks the screen of whoever ran the gate. Two knobs:
 Without a lock client installed there is otherwise no way to exercise the
 protocol at all: a compositor cannot lock itself, and every
 question worth asking about a lock screen is a question about what a *second*
-process can see. Point `SOLIUM_CAPTURE` at a directory while it runs and the
-answer is in the frames — the desktop, then one frame of the compositor's own
-backdrop between the lock and the client's first buffer, then the client's
-colour, and nothing of the session anywhere in between.
+process can see. Capture a burst while it runs
+(`SOLIUM_CAPTURE=/tmp/lock.ppm SOLIUM_CAPTURE_FRAMES=<n>`) and read the frames:
+once the desktop has gone, nothing of the session may appear in any of them,
+before the client's colour or after it.
 
 The ordinary run also reports the keyboard: the layout names in group order,
 which one is active, and the repeat rate. That is the only way to check a
@@ -231,16 +547,21 @@ underneath it. The window was measured before the lock and after the unlock,
 which is the only way that bug is visible — while locked, nothing of it is on
 screen to see.
 
+Three more modes. `WL_PROBE_WINDOWS=<seconds>` maps two windows, one framed
+by the compositor and one that draws its own, and holds them up to be looked
+at; with `WL_PROBE_FULLSCREEN=1` the first asks for fullscreen a second in, so
+the change can be photographed. `WL_PROBE_CONNECT_ONLY=1` connects, counts the
+globals and leaves, for hunting what a client that never draws costs.
+
 ## Hotplug, and how to test it without a cable
 
-Monitors arriving and leaving ([#43](https://github.com/Lilium-Linux/solium/issues/43)) cannot be exercised here. The
-nested backend has no connectors, and a virtual one (`vkms`) needs a kernel
-module loaded as root. So the resync path is
-covered by unit tests on the part with reasoning in it -- `tty::gone`, which
-decides which screens went -- and the rest has never run.
+Monitors arriving and leaving
+([#43](https://github.com/Lilium-Linux/solium/issues/43)) work, and were
+checked on the hardware, with real cables, before #43 was closed. What that
+testing found is fixed, and how the first hardware test failed is below.
 
-**It needs testing on the hardware, and there are two ways.** The second does
-not involve reaching behind the desk:
+On the hardware there are two ways to exercise it, and the second does not
+involve reaching behind the desk:
 
 1. Turn a monitor off at its own power switch, or unplug it, with the session
    running. The log should say `monitor gone`, the remaining screen should
@@ -254,6 +575,20 @@ The second one existing is why the two share a path rather than each having
 their own: a configuration reload is something people do at a desk many times
 an evening, and unplugging a monitor is something they do once. The path that
 gets exercised is the one that works.
+
+Nested, the DRM half cannot run: the nested backend has no connectors, and a
+virtual one (`vkms`) needs a kernel module loaded as root. The half that broke
+on the hardware both times — what happens to a window whose monitor went —
+runs nested exactly as it does there, because both backends end in the same
+`settle_monitors`. `SOLIUM_OUTPUTS_AT` takes a nested monitor away and gives it
+back:
+
+```sh
+SOLIUM_OUTPUTS=2 SOLIUM_OUTPUTS_AT="5000:1,9000:2" dev/run-nested.sh
+```
+
+The part of the DRM half with reasoning in it, `tty::gone`, which decides which
+screens went, has unit tests of its own.
 
 The first hardware test failed, and how it failed is worth keeping: the uevent
 arrived three times, `the connectors changed` is in the log three times, and
@@ -270,24 +605,6 @@ left on a screen nobody can see; a bar that does not come back when the monitor
 does; and the second monitor failing to light when it is moved from one port to
 another, which is the case where dropping has to happen before adding because
 there are fewer CRTCs than connectors.
-
-`SOLIUM_CLICK_AT` and `SOLIUM_DRAG_AT` are not two spellings of the same thing,
-and the difference cost an hour. `SOLIUM_CLICK_AT` calls `trigger_click`, which
-is the *script* click handler — it never touches the input path. `SOLIUM_DRAG_AT`
-goes through `synth`, `input::handle` and the real pointer, so it is the one
-that exercises hit-testing, grabs and anything a surface does with a press. A
-drag from a point to itself is a click:
-
-    SOLIUM_DRAG_AT="6500:1436,472>1436,472"
-
-Testing the Developer Tweaks panel with `SOLIUM_CLICK_AT` showed nothing
-happening and looked exactly like the panel being broken, when the panel was
-fine and the instrument was measuring something else.
-
-`clipboard-check.sh` runs its X11 half in a container, so the host needs no
-`xclip`. **Run it more than once.** The bug it was
-written for failed about one time in three, so a single green run proves
-nothing — which is exactly how it nearly shipped.
 
 ### Two monitors, without a second monitor
 
@@ -306,14 +623,17 @@ pointer over the second monitor was answered with the first — a window opening
 on the screen you are not looking at. That would otherwise have been found on a
 TTY, where nothing can be read and each attempt costs a session.
 
-Give one of them a scale and you have a HiDPI screen to look at without owning
-one:
+The nested monitors are called `winit-1`, `winit-2` and so on. Give one of
+them a scale in `user.lua` and you have a HiDPI screen to look at without
+owning one:
 
 ```lua
-sol.monitors({
-    { name = "winit-1" },
-    { name = "winit-2", scale = 2, right_of = "winit-1" },
-})
+return {
+    monitors = {
+        { name = "winit-1" },
+        { name = "winit-2", scale = 2, right_of = "winit-1" },
+    },
+}
 ```
 
 Each monitor takes its share of the window's *pixels* and its logical size is
@@ -334,61 +654,18 @@ monitor is the one the pointer is on.
 
 Two windows tiled on each screen, in one capture, with no hands.
 
-### Soaking on a TTY, which is the only honest soak
+### Turning screens off
 
-A nested soak measures the nested backend as much as the compositor: Solium is
-a client of the host there, with its own EGL surface, its own cursor theme and
-its own client-side libraries, none of which exist on a real session. A leak
-found nested is a leak *somewhere*, and saying which needs the other backend.
-
-`--attach` samples a compositor it did not start, so it cannot pass the
-scripted input — which used to leave an attached soak with nothing but the
-client spawner for churn, and the window lifecycle is the thing worth
-churning. Generate the input separately:
-
-    # on the TTY
-    SOLIUM_TRIGGER_AT="$(dev/soak.sh --triggers 60)" ./target/debug/solium --tty
-
-    # from another VT or over ssh
-    dev/soak.sh 60 --attach wayland-1
-
-The trigger list is start-time only, which is why it has to be built before
-the session rather than sent to it.
-
-## Capturing a frame
-
-```sh
-SOLIUM_CAPTURE=/tmp/frame.ppm dev/run-nested.sh
-```
-
-A compositor cannot be verified by looking at it: a desktop screenshot tool
-captures the *host* session, which proves nothing about what Solium composited,
-and using a shell's own capture to test that shell is circular. So Solium reads
-its own framebuffer back.
-
-The capture waits until a window has been mapped for half a second, because a
-capture of an empty compositor is exactly the misleading result the mechanism
-exists to avoid. A captured frame is not presented — reading the framebuffer
-back invalidates the bind, and the following `submit` would fail to reallocate
-its EGL surface.
-
-## Driving a mode without a keyboard
-
-Because a mode that can only be checked by someone pressing a key is a mode
-nobody checks twice. Enter overview, click the top-right thumbnail, and
-photograph the result:
-
-```sh
-SOLIUM_TRIGGER_AT=5200:super+space SOLIUM_CLICK_AT=6000:1200,250   SOLIUM_CAPTURE=/tmp/frame.ppm SOLIUM_CAPTURE_AT=7000 dev/run-nested.sh
-```
-
-Enter and leave, then compare the frame with one taken at rest — the pixels
-below the bar must be identical, because leaving a mode restores the layout
-exactly:
-
-```sh
-SOLIUM_TRIGGER_AT="5200:super+space,6200:super+space"   SOLIUM_CAPTURE=/tmp/after.ppm SOLIUM_CAPTURE_AT=7400 dev/run-nested.sh
-```
+Screens can be turned off without being taken away
+([#54](https://github.com/Lilium-Linux/solium/issues/54)): by a client over
+`wlr-output-power-management` (`wlopm`, or `swayidle` driving it), by
+`sol.monitor_power` from a binding, and by the idle blank after
+`idle.screens_off_after`. Nested there is no display to power off, so a
+monitor's share of the window is drawn black once and then not drawn, its
+client is told `off`, and the log says it was blanked. All of it can be tried
+in a window that way. The DRM half — a black frame, then the CRTC cleared, and
+a modeset back on the next frame — has not yet been run on the hardware;
+[docs/beta.md](../docs/beta.md) tracks it.
 
 ## Tuning animations without running the compositor
 
@@ -398,69 +675,32 @@ xdg-open crates/animation/preview/preview.html
 ```
 
 Plain boxes animating through the scenarios the compositor actually has —
-opening, closing, overview entering and leaving, the app switcher, a drag, a
-maximise — on a mock output in Solium's own coordinates. Curve, duration,
-playback speed and the spring's stiffness, damping and throw are all live.
+tiling, scrolling, overview entering and leaving, a window opening and a window
+closing — on a mock output in Solium's own coordinates. Curve, duration,
+playback speed, the arrangement's own numbers (gap, split ratio, column width)
+and the spring's stiffness, damping and throw are all live. `dev/preview` also
+writes `crates/effects/preview/preview.html`, which shows where each vertex of
+a window goes for a named deformation, such as the genie.
 
 **Deliberately plain.** The page is a test harness, not a mockup: recreating the
 compositor's chrome here would be a second copy of its design, drifting from the
 real one, and motion reads more clearly without decoration anyway.
 
-**The engine is compiled to WebAssembly and called from the page**, so the curve
-tuned in a browser is the code that will move real windows. Verified rather than
-asserted: the same calls through wasm and through native Rust agree to six
-decimal places. A reimplementation of the curves in JavaScript would drift the
-first time either side changed, and the drift would be invisible — the page
-would still animate plausibly.
+**The engines are compiled to WebAssembly and called from the page**, so the
+curve tuned in a browser is the code that will move real windows. Verified
+rather than asserted: the same calls through wasm and through native Rust agree
+to six decimal places. A reimplementation of the curves in JavaScript would
+drift the first time either side changed, and the drift would be invisible —
+the page would still animate plausibly.
 
-What the page *does* own is geometry: where a window starts and ends in each
-scenario. That is layout, and it belongs to the compositor and its scripts. The
-engine only ever answers "how far along?".
+That includes the geometry. The tiling and scrolling scenarios are arranged by
+`crates/layout`, the same arrangements the compositor's scripts ask for, also
+compiled to WebAssembly. What the page still owns is where a window starts and
+ends in the overview and open and close scenarios.
 
 Curves live in `crates/animation`, which depends on nothing so it keeps building
 for the browser. Add one there and it is available to scripts by name
 (`sol.animate{ easing = "spring" }`) and to the preview at once.
-
-## Running programs inside Solium
-
-`Super`+`Return` starts one, and `sol.spawn` binds any other:
-
-```lua
-sol.bind("super+b", function() sol.spawn("firefox") end)
-sol.bind("super+e", function() sol.spawn("foot", "-e", "htop") end)
-```
-
-Programs start as clients of *this* compositor — `sol.spawn` overrides
-`WAYLAND_DISPLAY` in the child, or it would inherit the host's and open its
-window next to the nested compositor rather than inside it.
-
-Solium runs on the host, so `sol.spawn` can start anything installed there —
-with one family of exceptions:
-
-**Do not test with KDE's own applications.** They are launched through DBus
-activation, so the process that actually opens the window inherits the
-*session's* environment and connects to the session's compositor. The spawn
-succeeds, the program keeps running, its window appears on the host desktop,
-and nothing is logged anywhere — the most confusing failure available.
-
-`dev/foot` is the way round it: a terminal from the build image, connected to
-whichever compositor invoked it.
-
-```sh
-SOLIUM_TERMINAL=$PWD/dev/foot dev/run-nested.sh
-```
-
-Anything that is not DBus-activated can be pointed at the socket directly — the
-launcher prints its name:
-
-```sh
-WAYLAND_DISPLAY=wayland-1 <program>
-```
-
-To run something else from the build image the way `dev/foot` runs foot, add
-its package to the `dnf install` line in `dev/Containerfile` and rebuild the
-image — a `--rm` container throws anything installed into it by hand away with
-itself.
 
 ## Running a shell inside Solium
 
@@ -477,101 +717,12 @@ SOLIUM_SHELL=<shell-dir> dev/run-shell.sh
 The checkout is required and only ever read. The scene goes in as
 `SOLIUM_SHELL_SCENE`, so your own `shell.scene` is left alone, and editing
 anything in the checkout reloads the scene within half a second.
+`SOLIUM_SHELL` is read by the script, not by the compositor.
 
 `solium --check-qml <file>` loads one file without starting a compositor and
 prints `ok` or the errors Qt reported — the quick way through a chain of "type
 X unavailable" errors while writing a shell. It exits 0 either way, so read
 what it prints.
-
-## Building
-
-Natively, with the development packages the top-level README lists under
-*Building*:
-
-```sh
-cargo build
-```
-
-Or, on a Fedora host without the development packages, in the build image,
-which needs only podman and a rustup install. The image has the C toolchain and
-the system libraries; Rust comes from your own `CARGO_HOME` and `RUSTUP_HOME`,
-mounted at the same paths. Build the image for the Fedora release you run
-(`--build-arg FEDORA_VERSION=<n>`, 44 by default), for the reasons below; on
-another distribution, install the packages natively:
-
-```sh
-podman build -t solium-build:fc44 -f dev/Containerfile dev/
-podman run --rm --userns=keep-id --security-opt label=disable \
-    -v "$PWD:$PWD" -v "$HOME/.cargo:$HOME/.cargo" -v "$HOME/.rustup:$HOME/.rustup" \
-    -e CARGO_HOME="$HOME/.cargo" -e RUSTUP_HOME="$HOME/.rustup" \
-    -e PATH="$HOME/.cargo/bin:/usr/bin:/bin" \
-    -w "$PWD" localhost/solium-build:fc44 cargo build
-```
-
-### The gate
-
-`dev/gate.sh` runs `cargo fmt`, clippy with warnings denied, the tests and a
-build, then two checks on the built binaries that nothing else reaches:
-`solium --check`, which loads the Lua configuration, and `dev/wirecheck`, which
-drives the QML GPU path against the machine's own render node. It runs cargo
-natively unless told otherwise:
-
-| Variable | Effect |
-|---|---|
-| `SOLIUM_GATE_IMAGE=<image>` | Build in this podman image, e.g. `localhost/solium-build:fc44`. If it does not exist, the gate prints the `podman build` line that makes it. Only the checkout, `CARGO_HOME` and `RUSTUP_HOME` are mounted. `solium --check` runs in the image too; `dev/wirecheck` runs on the host, on its render node, and is skipped with a message if the host cannot load what the image built. |
-| `SOLIUM_GATE_PODMAN_ARGS=<args>` | Extra `podman run` arguments, split on spaces — e.g. `"--memory=6g --memory-swap=6g"` to cap a build that would otherwise use all the memory there is. |
-| `SOLIUM_GATE_JOBS=<n>` | `cargo -j<n>`. Unset, cargo uses every CPU. |
-| `SOLIUM_GATE_CPUS=<list>` | Pin the build to these CPUs, as a `taskset` list such as `14,15`. |
-| `SOLIUM_GATE_NO_GPU=1` | Build the GPU check but do not run it. It is skipped anyway on a machine with no render node. |
-
-For example, capped and in the container:
-
-```sh
-SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 \
-SOLIUM_GATE_PODMAN_ARGS="--memory=6g --memory-swap=6g" SOLIUM_GATE_JOBS=2 \
-    dev/gate.sh
-```
-
-Every step runs under `nice -n 19` and, where it exists, `ionice -c 3`, so a
-gate in the background leaves the machine usable.
-
-**The build image matches the host's distribution on purpose.** Two things go
-wrong otherwise, and both were hit:
-
-* A vendored C dependency (Lua) is compiled by whatever toolchain builds the
-  project. A container with a newer C library produces a binary the host cannot
-  start at all — `GLIBC_2.44 not found`.
-* Working around *that* by running the compositor inside the container costs
-  hardware acceleration. The container has Mesa but no GPU driver, so
-  everything falls back to llvmpipe:
-
-  | | Renderer | Frame rate |
-  |---|---|---|
-  | In the container | `llvmpipe` | 55 fps |
-  | On the host | `NVIDIA RTX 3070` | 260 fps |
-
-  On a 260 Hz display, 55 fps puts a dragged window four frames behind the
-  cursor, which is exactly what it looks like.
-
-**Never glob `target/debug/build/solium-*/out/`.** The Qt host is compiled into
-`libsolium_qml_host.a` under that path, and there is more than one such
-directory: cargo makes a separate one per unit metadata, so `cargo build -p
-solium` and `cargo build` (or `cargo test`) each own one. A test harness or a
-script that links "the" archive by glob picks whichever the shell sorts first,
-which is not the newest, and there is no error — the link succeeds and you
-measure a build from an hour ago. It cost a full round of debugging a fix that
-was already in the tree.
-
-This is not something one commit introduced and another can remove; it is how
-cargo lays the directory out. Either pin the newest,
-
-```sh
-ls -td target/debug/build/solium-*/out | head -1
-```
-
-or compile `crates/solium/qml/host.cpp` from source in the harness's own
-`build.rs`, which is the only way to be certain that what runs is what is
-checked out.
 
 ## QML on the GPU
 
@@ -661,9 +812,9 @@ gpu: Qt rendered QML into a buffer allocated on /dev/dri/renderD128, fenced
 ```
 
 Exit 0 and one line on stdout when the GPU path works here; non-zero and one
-line on stderr saying why when it does not. `RUST_LOG=info` shows its steps. On
-the RTX 3070 it takes 155–180 ms, once 456 ms on a cold first run, and that is
-what `auto` adds to a hardware session's startup.
+line on stderr saying why when it does not. `RUST_LOG=info` shows its steps.
+Measured on 2026-09-29 it took 155–180 ms, once 456 ms on a cold first run,
+and that is what `auto` adds to a hardware session's startup.
 
 `QML on the GPU: Qt rendered into a buffer we allocated`, and the probe's
 `fenced`, mean a buffer was allocated, imported into Qt's context as a texture,
@@ -672,7 +823,7 @@ drawn into by real QML, and fenced with a `sync_file` the driver exported.
 export a fence and the host waited with `glFinish` instead, which costs a stall
 and nothing else.
 
-Three things worth knowing about the GPU path on a TTY:
+Five things worth knowing about the GPU path on a TTY:
 
 * **Qt must be kept off the card node.** Solium writes
   `$XDG_RUNTIME_DIR/solium-eglfs-kms.json` naming the *render* node and
@@ -749,17 +900,18 @@ Three things worth knowing about the GPU path on a TTY:
   reads the buffer passes while every frame after it draws nothing.
 
   `clear_stale_current_context` in `host.cpp` is the fix: `doneCurrent()` on
-  whatever Qt believes is current, when EGL says otherwise. `surface.rs`'s
-  `restore` is the other half, and neither works without the other.
+  whatever Qt believes is current, when EGL says otherwise. `restore` in
+  `qml/paint.rs` is the other half, and neither works without the other.
 
 * **A GPU scene's buffer is not stored the way you would guess.** QRhi leaves an
   OpenGL texture render target in the framebuffer's own orientation, origin
   bottom-left, so the scene's *top* row lands in the buffer's *last* row. A
-  dmabuf is top-down unless it says otherwise and ours does not, so the shell
+  dmabuf is top-down unless it says otherwise and ours does not, so the scene
   comes out upside down. `host.cpp` calls
-  `QQuickRenderTarget::setMirrorVertically` on every GPU render target for that
-  reason — including the one rebuilt inside `solium_qml_scene_resize`, which is
-  easy to miss.
+  `QQuickRenderTarget::setMirrorVertically` (`mirror_for_the_compositor`) on
+  every GPU render target for that reason — the one a scene starts with, and
+  the ones `solium_qml_scene_resize` and `solium_qml_scene_rebind` build again,
+  which are easy to miss.
 
   Do not try to correct it on the compositor's side. Smithay's `y_inverted`
   texture flag negates the texture matrix's y row without the matching
@@ -767,33 +919,14 @@ Three things worth knowing about the GPU path on a TTY:
   within the element's *logical* size while its source rectangle is in device
   pixels — right at scale 1, wrong on every scaled monitor.
 
-## Checking an animation frame by frame
-
-```sh
-SOLIUM_TRIGGER_AT=9000:super+t SOLIUM_CAPTURE=/tmp/tile.ppm \
-  SOLIUM_CAPTURE_AT=9000 SOLIUM_CAPTURE_FRAMES=16 SOLIUM_CAPTURE_INTERVAL=20 \
-  dev/run-nested.sh
-```
-
-The bounding box of what is drawn, per frame, is the animation's curve. A good
-one moves most on the first frame and less on each one after, never jumps, and
-reaches zero at the end. Measured across the modes:
-
-| Mode | Per-frame movement (px) |
-|---|---|
-| window opens | 16, 12, 8, 4, 4, 0 |
-| overview enters | 108, 84, 76, 56, 44, 32, 20, 16, 4, 4, 4, 0 |
-| tiling arranges | 120, 92, 84, 56, 48, 32, 24, 16, 8, 4, 4, 4, 4, 4, 0 |
-| scrolling arranges | 224, 100, 72, 64, 44, 32, 20, 16, 8, 4, 4, 4, 4, 4, 0 |
-
-Monotonically decreasing and settling is what an ease-out looks like from the
-outside. A jump mid-sequence means a layout wrote geometry without animating it;
-a stall means something is being recomputed per frame that should not be.
-
 ## Running it on a TTY, as a real session
 
 The compositor picks its backend from the environment: nested when there is a
-compositor to nest in, on the hardware otherwise.
+compositor to nest in, on the hardware otherwise. Only the first argument
+chooses what Solium does, so write `solium --tty --debug-mode`, not the other
+way round, and don't pass a flag it does not know: anything else in first
+place, `--help` included, starts a compositor
+([#156](https://github.com/Lilium-Linux/solium/issues/156)).
 
 **First, from your desktop, check what the hardware offers.** This opens the
 card read-only and takes no DRM master, so it is safe to run inside a running
@@ -803,16 +936,20 @@ session:
 target/debug/solium --probe
 ```
 
-It should name the GPU and list the connected outputs with the mode it would
-choose. If it says it could not open the card for modesetting, that is expected
-while another compositor holds the display.
+It names the seat and the GPU, then lists each connector: for one that is
+connected, how many modes it offers, the one it would choose, its size, dpi and
+the scale it would pick, and then every mode, in the form the configuration's
+`mode` takes.
 
 **Then, on a free TTY.** `Ctrl`+`Alt`+`F3` (or any free one), log in, and:
 
 ```sh
 cd path/to/solium
-SOLIUM_TERMINAL=konsole ./target/debug/solium --tty
+./target/debug/solium --tty
 ```
+
+Leave `SOLIUM_TERMINAL` unset, or name kitty or foot: see *Terminals* below for
+why not konsole.
 
 No `sudo`: the session, the GPU and the input devices are all opened through
 libseat, and a compositor that needs root is one nobody should get used to
@@ -820,19 +957,19 @@ running.
 
 **Getting back.** `Ctrl`+`Alt`+`F1` or `F2` returns to your desktop session;
 Solium keeps running on its own VT until you switch back and stop it.
-`Ctrl`+`Alt`+`Backspace` stops it outright.
+`Ctrl`+`Alt`+`Backspace` stops it outright, unless the screen is locked.
 
 Both of those are Solium's own doing, and that is not a detail. Once libseat
 puts the VT into graphics mode the *kernel* stops acting on `Ctrl`+`Alt`+F-keys,
 so a compositor that does not handle them itself cannot be escaped from the
 keyboard at all — which is how the first run of this backend ended in a reboot.
 
-Two more things stand between you and that: if libinput reports no input devices
-within five seconds, Solium stops on its own rather than hold a display nobody
-can talk to; and from another VT, `pkill -x solium` always ends it. The first
-`SIGTERM` stops it cleanly. A Solium that cannot stop, because something inside
-it has stopped answering, ends itself five seconds later (`session.stop_timeout`),
-or at once on a second `pkill -x solium`.
+Two more things stand between you and that: if libinput reports no input
+devices within twenty seconds, Solium stops on its own rather than hold a
+display nobody can talk to; and from another VT, `pkill -x solium` always ends
+it. The first `SIGTERM` stops it cleanly. A Solium that cannot stop, because
+something inside it has stopped answering, ends itself five seconds later
+(`session.stop_timeout`), or at once on a second `pkill -x solium`.
 
 That second one is worth a qualification, because it is a last-resort escape
 and you are reading it before taking a VT. It holds because Solium's handlers
@@ -846,11 +983,13 @@ process then neither dies nor cleanly survives. See *QML on the GPU*. On a
 build that predates that, or one where `QT_QPA_PLATFORM` was set from outside,
 reach for `pkill -9 -x solium`.
 
-**Reading what happened.** A hardware session writes to
-`~/.local/state/solium/session.log` as well as to the terminal, because the
-terminal is underneath the compositor and cannot be read while it runs. It is
-appended to, so the log of a run that went wrong survives the run that was meant
-to fix it — and, being under `state`, it survives a reboot.
+**Reading what happened.** A session started with `--tty` as its first
+argument writes to `~/.local/state/solium/session.log` (under
+`$XDG_STATE_HOME` when that is set) as well as to the terminal, because the
+terminal is underneath the compositor and cannot be read while it runs. A bare
+`solium` on a VT also takes the hardware, and writes no log file. The log is
+appended to, so the log of a run that went wrong survives the run that was
+meant to fix it — and, being under `state`, it survives a reboot.
 
 **Terminals.** `SOLIUM_TERMINAL` picks one; otherwise `lua/init.lua` takes the
 first that is actually installed. That fallback exists because naming a
@@ -858,17 +997,36 @@ terminal that is not installed looks, from the keyboard, exactly like the
 binding being broken — which is how the first hardware session went.
 
 The order is deliberate: plain Wayland terminals (kitty, alacritty, wezterm,
-foot) come before konsole. A KDE app started under Solium sits for around
-twenty seconds before its window appears — close enough to the D-Bus
-activation timeout to be worth naming, since KDE apps ask for portal and
-session services that are not running here and wait for them to time out.
+foot) come before konsole, and xterm is last. A KDE app started under Solium
+sits for around twenty seconds before its window appears — close enough to
+the D-Bus activation timeout to be worth naming, since KDE apps ask for portal
+and session services that are not running here and wait for them to time out.
 `vkcube` and kitty both map in a second or two, so this is the app waiting,
 not the compositor failing to map it. konsole stays on the list as a fallback
 for a machine that has nothing else, never as a preference.
 
-**What is not there yet.** Monitors arriving and leaving have never been
-exercised on the hardware (see *Hotplug* above), and Solium cannot turn a
-monitor off itself: that wants `wlr-output-power-management`.
+**What the hardware has and has not been through.** Hotplug has (see
+*Hotplug* above). Turning a screen off has not; see *Turning screens off*.
+
+### Soaking on a TTY, which is the only honest soak
+
+A nested soak measures the nested backend as much as the compositor: Solium is
+a client of the host there, with its own EGL surface, its own cursor theme and
+its own client-side libraries, none of which exist on a real session. A leak
+found nested is a leak *somewhere*, and saying which needs the other backend.
+
+```sh
+SOLIUM_SOAK_TTY=1 dev/soak.sh 60       # on the TTY: start the session and soak it
+dev/soak.sh 60 --attach wayland-1      # from another VT or over ssh: sample one already running
+```
+
+On a TTY only half the workload runs. The hardware backend reads none of the
+scripted knobs, `SOLIUM_TRIGGER_AT` included, so the cycle of key presses
+`dev/soak.sh` hands the compositor does nothing there, and neither does a list
+made with `dev/soak.sh --triggers`. What churns is the client side: terminals
+opened and closed, and an X11 client now and then. Nested, the whole cycle
+runs. Until the hardware backend reads the triggers, a soak of the window
+lifecycle on a TTY needs the windows opened and closed from outside it.
 
 ## Installing it
 
@@ -988,100 +1146,22 @@ let log = matches!(backend.as_deref(), Some("--tty"))
     .flatten();
 ```
 
-and `open_log` puts it under `$XDG_STATE_HOME`, falling back to
-`~/.local/state`:
+and `open_log` puts it in `state_directory()`, which is `$XDG_STATE_HOME/solium`
+falling back to `~/.local/state/solium`, the directory the QML GPU marker files
+share:
 
 ```rust
-let base = std::env::var_os("XDG_STATE_HOME")
-    .map(PathBuf::from)
-    .or_else(|| {
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
-    })?;
-let directory = base.join("solium");
+fn state_directory() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+        })?;
+    Some(base.join("solium"))
+}
 ```
 
 So `~/.local/state/solium/session.log`, appended to by every session. Plasma
 Login also sends the session's stderr, which carries the same lines, to
 `~/.local/share/plasmalogin/wayland-session.log`, and truncates that at each
 login (`O_TRUNC` in its `src/helper/UserSession.cpp`).
-
-## Where it runs
-
-`dev/run-nested.sh` runs Solium **on the host**, on the host's own GPU driver,
-whether it was built natively or in the build image. The image only builds it,
-and it matches the host's distribution so that what it builds starts there: see
-*Building* for what goes wrong when the two differ.
-
-## Driving input without a mouse
-
-`SOLIUM_DRAG_AT` performs a drag through the real input path — the real grab,
-the real hit-testing, the real layout scripts:
-
-```sh
-SOLIUM_DRAG_AT="8000:400,25>1200,500"    # at 8s, drag from (400,25) to (1200,500)
-```
-
-Aim the *start* at a titlebar. A press in a client's own area does not begin a
-move grab, so a drag that starts there proves nothing — which it did, the first
-time this was used.
-
-It exists because dragging was the one interaction that needed a hand on a
-mouse, and two bugs shipped there in three commits; the second froze the
-machine. Both are reproducible from a script now: restoring the deadlock and
-running the line above freezes the compositor on demand, CPU flat, which is how
-the fix was confirmed to be a fix rather than a rearrangement.
-
-## Settings
-
-Every mode is a Lua script, not a compiled-in mode: `lua/tiling.lua`,
-`lua/scrolling.lua`, `lua/workspaces.lua`, `lua/overview.lua`. The compositor
-holds no opinion about any of them — it offers events and a layout engine, and
-the scripts decide what a layout *is*.
-
-Your own copies win. `~/.config/solium/` is searched before the bundled
-scripts, so dropping a single `config.lua` there overrides just that file, and
-a `tiling.lua` there replaces the whole layout without touching anything else.
-Copying the entire set to change one number is not configurability.
-
-`crates/solium/lua/config.lua` holds everything tunable — gaps, the master
-ratio, column width, animation durations and easings, and how workspaces are
-arranged. Editing it needs no rebuild.
-
-Workspaces come in three arrangements, and the arrangement is the only
-difference between them: `horizontal` puts them in a row that slides sideways,
-`vertical` in a column, `grid` in both with `columns` × `rows`. A workspace to
-the right enters from the right, because that is where it is.
-
-## Bindings
-
-| Input | Effect |
-|---|---|
-| `Super` + `Return` | Open a terminal (`SOLIUM_TERMINAL` picks which) |
-| `Super` + `Q` | Close the focused window |
-| `Super` + `T` | Tiling (`lua/tiling.lua`) — pressing it again returns to floating |
-| `Super` + `S` | Scrolling (`lua/scrolling.lua`) — one layout at a time, see `lua/modes.lua` |
-| `Super` + `[` / `]` | Focus the column left / right |
-| `Super`+`Ctrl` + `[` / `]` | Move the column left / right |
-| `Super`+`Shift` + `[` / `]` | Focus up / down within a column |
-| `Super` + `,` / `.` | Pull a window into this column / push it back out |
-| `Super` + `R` | Cycle the column through the preset widths |
-| `Super` + `-` / `=` | Move the seam a tiled window sits on |
-| Drag a window edge | Tiled: moves the seam. Scrolling: widens the column. Floating: resizes |
-| `Super` + right-drag | Resize from anywhere in the window, in any direction |
-| `Super` + `Space` | Overview on/off (bound in `lua/overview.lua`, not in Rust) |
-| `Super` + `1`…`9` | Go to that workspace |
-| `Super`+`Shift` + `1`…`9` | Send the focused window there |
-| `Super`+`Ctrl` + arrows | Step to the next workspace in that direction |
-| `Super` + wheel | Scroll the viewport (scrolling layout) |
-| Drag a window | In a tiled layout, drops it where you let go |
-| Hover a window | Focuses it (focus follows the pointer) |
-| `Ctrl`+`Alt`+`F1`…`F12` | Switch virtual terminal (hardware session only) |
-| `Super`+`Shift`+`Q` | Stop the compositor (`sol.quit`, rebindable) |
-| `Ctrl`+`Alt`+`Backspace` | Stop the compositor (built in, cannot be rebound) |
-
-The last two are taken before scripts see them, and cannot be rebound. They are
-the keys that have to work when everything else is broken.
-| `Escape` | Leave overview |
-| `Super` + drag | Move a window from anywhere in it |
-| Titlebar drag | Move a window (the client asks, via `xdg_toplevel.move`) |
-| Click | Focus and raise; in overview, focus that window and leave |

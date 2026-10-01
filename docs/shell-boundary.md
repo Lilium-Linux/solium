@@ -374,9 +374,9 @@ frames, importing the same `Solium.Theme`, reserving its own strip out of
 `work_area`. The morph was the whole argument made concrete: pressing an icon
 fired a `dock` event carrying **the rectangle that icon occupies**, a script
 spawned the program and handed that rectangle to `sol.present_from`, and the
-window grew out of it. Captured frame by frame in `docs/morph.png` — 460x208
-near the dock, then 928x504, 1192x672, settled at full size about a third of a
-second later.
+window grew out of it. Captured frame by frame in `docs/morph.png`, a record
+of 2026-09-06 and of a dock that no longer exists — 460x208 near the dock, then
+928x504, 1192x672, settled at full size about a third of a second later.
 
 `sol.present_from` is still there and still does that. What is missing is a
 dock to give it a rectangle. `config.lua` carried a `dock.morph` duration for

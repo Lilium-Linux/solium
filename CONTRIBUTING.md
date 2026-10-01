@@ -58,7 +58,8 @@ checks that need a running session.
 dev/gate.sh
 ```
 
-It runs `cargo fmt`, clippy with every warning denied, the tests, a build, then
+It checks the formatting (`cargo fmt --check`; `cargo fmt --all` fixes it),
+then runs clippy with every warning denied, the tests, a build, then
 `solium --check` (the Lua configuration loads) and `dev/wirecheck` (the QML GPU
 path against your machine's render node, skipped if there is none). It exits
 non-zero if anything fails, and a pull request is expected to pass it.

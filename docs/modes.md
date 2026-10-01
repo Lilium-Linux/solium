@@ -9,12 +9,19 @@ missing thing is the bug rather than your mode. Overview is about a hundred
 lines of Lua for exactly this reason: it was written to find out whether the
 claim was true.
 
-![Every mode, frame by frame, twenty milliseconds apart](modes-frame-by-frame.png)
+![Four rows of six frames: a window opening, overview entering, tiling arranging three windows, and scrolling arranging them](modes-frame-by-frame.png)
 
 Every mode above is captured by the compositor reading back its own
-framebuffer, twenty milliseconds apart. One engine drew all four rows, which is
-the whole argument on one page: a window opening, overview entering, and two
-layouts arranging are the same interpolation with different targets.
+framebuffer, in a nested session with the shipped configuration. Each row starts
+at the keypress and is every other frame of a burst taken twenty milliseconds
+apart, so the pictures are about forty milliseconds apart and a row covers the
+first fifth of a second. The first row is a window opening from `super+return`:
+what opens is the loading window, which the terminal fills once it has started,
+later than this row reaches. The other three start from three terminals on
+top of one another and press `super+space`, `super+t` and `super+s`. One engine
+drew all four rows, which is the whole argument on one page: a window opening,
+overview entering, and two layouts arranging are the same interpolation with
+different targets.
 
 ## The two ways to move a window
 
@@ -954,12 +961,14 @@ again is named in the log again the next time it is short.
 
 ## A whole mode
 
-![Overview entering and leaving, and the desktop coming back unchanged](overview-in-lua.png)
+![Three tiled windows, the same three in overview, and the desktop after leaving it, unchanged](overview-in-lua.png)
 
-Above: three windows at rest with their QML frames, `super+space` into overview,
-and `super+space` again. The last frame differs from the first by zero pixels,
-which is the property that matters — a mode that cannot put the desktop back
-exactly is a mode nobody will use twice. All of it is `lua/overview.lua`.
+Above: three tiled windows at rest with their QML frames, `super+space` into
+overview, and `super+space` again, each a second after the key. The last frame
+differs from the first by zero pixels (`magick compare -metric AE` on the two
+captures), which is the property that matters — a mode that cannot put the
+desktop back exactly is a mode nobody will use twice. All of it is
+`lua/overview.lua`.
 
 
 This is real and it works. Save it as `~/.config/solium/mymode.lua`. A mode is
