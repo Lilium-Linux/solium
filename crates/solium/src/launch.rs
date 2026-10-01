@@ -61,7 +61,7 @@ pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
 /// back to the parent through a pipe of its own, which is one of these. A
 /// child that closed it would be reported as started:
 /// `tests::a_program_that_does_not_exist_still_fails_to_start`.
-fn close_on_exec_above_stdio() -> std::io::Result<()> {
+pub(crate) fn close_on_exec_above_stdio() -> std::io::Result<()> {
     const CLOEXEC: libc::c_int = libc::CLOSE_RANGE_CLOEXEC as libc::c_int;
     // SAFETY: takes no pointers, and changes only this process's descriptor
     // flags.
@@ -99,7 +99,7 @@ mod tests {
 
     /// Where the child's `sh` writes; set only for the child.
     const DIRECTORY: &str = "SOLIUM_LAUNCH_CHILD";
-    /// How the child starts `sh`: `spawn`, as `sol.spawn` does.
+    /// How the child starts `sh`: `spawn` or `plain`.
     const ROLE: &str = "SOLIUM_LAUNCH_CHILD_ROLE";
     /// A variable of the user's, set before the compositor started.
     const USERS: &str = "SOLIUM_LAUNCH_USERS_OWN";
@@ -176,6 +176,17 @@ mod tests {
                     assert!(Instant::now() < deadline, "sh never finished");
                     std::thread::sleep(Duration::from_millis(20));
                 }
+            }
+            // Anything started without `command`, as smithay starts Xwayland,
+            // once this process has marked what it holds.
+            "plain" => {
+                close_on_exec_above_stdio().expect("marking this process's descriptors");
+                let status = Command::new("sh")
+                    .args(&arguments)
+                    .stdin(Stdio::null())
+                    .status()
+                    .expect("running sh");
+                assert!(status.success(), "sh failed: {status}");
             }
             other => panic!("no such role: {other}"),
         }
@@ -294,6 +305,15 @@ mod tests {
             started_in("spawn", "descriptors").descriptors,
             ["0", "1", "2"]
         );
+    }
+
+    /// **A descriptor marked by [`close_on_exec_above_stdio`] reaches no
+    /// child, however the child is started** -- which is how smithay starts
+    /// Xwayland: with a `Command` of its own, that [`command`]'s hook is not
+    /// on.
+    #[test]
+    fn a_descriptor_marked_in_the_parent_reaches_no_child_started_any_other_way() {
+        assert_eq!(started_in("plain", "marked").descriptors, ["0", "1", "2"]);
     }
 
     /// **A program that does not exist still fails to start.**
