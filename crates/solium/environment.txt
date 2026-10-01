@@ -148,42 +148,52 @@ SOLIUM_SHELL_WATCH=<directory>
 
 These exist so the compositor can be driven and photographed without a hand
 on the keyboard. [dev/README.md](../../dev/README.md) says how they are used.
+The ones marked **nested only** are read by the nested backend alone: on the
+hardware, with `--tty`, they do nothing.
 
 SOLIUM_CAPTURE=<path>
-    Write a rendered frame to `<path>` as a binary PPM.
+    **Nested only.** Write a rendered frame to `<path>` as a binary PPM.
 
 SOLIUM_CAPTURE_AT=<ms>
-    Capture at this many milliseconds after startup, instead of once a window
-    has settled.
+    **Nested only.** Capture at this many milliseconds after startup, instead
+    of once a window has settled.
 
 SOLIUM_CAPTURE_FRAMES=<n>
-    Capture a burst of `n` frames rather than one.
+    **Nested only.** Capture a burst of `n` frames rather than one, written
+    beside the path `SOLIUM_CAPTURE` names with a number added to its stem:
+    `/tmp/frame.ppm` gives `/tmp/frame-000.ppm`, `/tmp/frame-001.ppm`, ….
 
 SOLIUM_CAPTURE_INTERVAL=<ms>
-    The time between the frames of a burst. 16 by default.
+    **Nested only.** The time between the frames of a burst. 16 by default.
 
 SOLIUM_TRIGGER_AT=<ms>:<combo>,...
-    Press key bindings at these moments, through the same path a keypress
-    takes: `5200:super+space,6200:super+space`.
+    **Nested only.** Run what these key combinations are bound to, at these
+    moments: `5200:super+space,6200:super+space`. The binding is looked up by
+    the name written here, so this skips what a real key goes through first:
+    the Ctrl+Alt chords, the lock screen and the key-cap lookup that keeps
+    bindings working under another keyboard layout.
 
 SOLIUM_CLICK_AT=<ms>:<x>,<y>;...
-    Press the pointer at these moments and places, separated by semicolons.
+    **Nested only.** Hand a press at these moments and places, separated by
+    semicolons, to the mode that is holding the pointer, such as overview. It
+    goes to the scripts, not through the input path: for a real press, use
+    `SOLIUM_DRAG_AT` with the same point at both ends.
 
 SOLIUM_DRAG_AT=<ms>:<x1>,<y1>><x2>,<y2>;...
-    Drag the pointer from one place to another, through the real grab and the
-    real layout scripts.
+    **Nested only.** Drag the pointer from one place to another, through the
+    real input path, the real grab and the real layout scripts.
 
 SOLIUM_LOADING_AT=<ms>:<program>,...
-    Open a window for an application that will never arrive, to exercise the
-    loading window.
+    **Nested only.** Open a window for an application that will never arrive,
+    to exercise the loading window.
 
 SOLIUM_OUTPUTS=<n>
-    Give the nested backend `n` monitors, from 1 to 4, side by side in its one
-    window.
+    **Nested only.** Give the nested backend `n` monitors, from 1 to 4, side
+    by side in its one window.
 
 SOLIUM_OUTPUTS_AT=<ms>:<n>,...
-    Change the number of nested monitors at these moments: hotplug without a
-    cable.
+    **Nested only.** Change the number of nested monitors at these moments:
+    hotplug without a cable.
 
 SOLIUM_MEMDIAG
     Set to anything, report what the compositor is holding, once a second.
