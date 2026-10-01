@@ -209,8 +209,9 @@ check "solium-autostart.target wants XDG autostart" \
 check "  and stops with solium-session.target, after which it starts" \
     [ "$(grep -c -x -e "PartOf=solium-session.target" -e "After=solium-session.target" \
         "$units/solium-autostart.target")" = 2 ]
-check "the portals: gtk, and wlr for ScreenCast and Screenshot" \
+check "the portals: gtk, Inhibit to gtk by name, and wlr for ScreenCast and Screenshot" \
     diff <(grep -v '^#' "$portals/lilium-portals.conf") <(printf '%s\n' '[preferred]' default=gtk \
+        org.freedesktop.impl.portal.Inhibit=gtk \
         org.freedesktop.impl.portal.ScreenCast=wlr org.freedesktop.impl.portal.Screenshot=wlr)
 check "install.sh names the units and the portal choice" \
     grep -q "portals       $portals/lilium-portals.conf" "$work/install.log"
