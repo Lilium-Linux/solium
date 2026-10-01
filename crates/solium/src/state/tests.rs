@@ -12364,8 +12364,9 @@ mod real_client {
             const GROUPS: [(&str, usize); 2] = [("us", 1), ("ru", 2)];
 
             /// One window with the keyboard and the shipped `overview.lua`,
-            /// on `us,ru` with its `active`th layout locked.
-            fn overview(tag: &str, active: usize) -> Session {
+            /// on `us,ru` with its `active`th layout locked. The entry point
+            /// comes back so a test can read it again, which is a reload.
+            fn overview(tag: &str, active: usize) -> (Session, std::path::PathBuf) {
                 let mut session = Session::new();
                 session.app.open(&mut session.display, &mut session.state);
                 let directory = std::env::temp_dir().join(format!(
@@ -12398,7 +12399,7 @@ mod real_client {
                     session.app.client.keyboard_on.is_some(),
                     "the premise: the window has the keyboard"
                 );
-                session
+                (session, entry)
             }
 
             /// Press `keys` in order and let them go in reverse, through the
@@ -12432,12 +12433,35 @@ mod real_client {
                 session.state.script_grab && session.state.status == "overview"
             }
 
+            /// What `Solium::reload` does with the scripts, read from `entry`
+            /// rather than from the user's configuration: the keep carried
+            /// over, the scripts started, then `restore`, `monitors` and
+            /// `layout`.
+            fn reload(session: &mut Session, entry: &std::path::Path) {
+                let state = &mut session.state;
+                let carried = state
+                    .scripts
+                    .as_ref()
+                    .map(Scripts::kept)
+                    .unwrap_or_default();
+                state.start_scripts(Some(
+                    Scripts::load_carrying(entry, carried).expect("reloading the shipped overview"),
+                ));
+                let snapshot = state.snapshot();
+                let mut scripts = state.scripts.take().expect("the scripts reloaded");
+                let restored = scripts.restored(snapshot);
+                state.scripts = Some(scripts);
+                state.apply(restored);
+                state.trigger_monitors_changed();
+                state.trigger_relayout();
+            }
+
             /// **With the overview closed, Escape reaches the focused
             /// window.** Against `19a42c0`, fails at "kept from the window".
             #[test]
             fn escape_reaches_the_focused_window_while_the_overview_is_closed() {
                 for (name, active) in GROUPS {
-                    let mut session = overview("closed", active);
+                    let (mut session, _) = overview("closed", active);
                     assert_eq!(
                         chord(&mut session, &[ESCAPE]),
                         1,
@@ -12452,7 +12476,7 @@ mod real_client {
             #[test]
             fn escape_leaves_the_overview_and_only_then_reaches_the_window() {
                 for (name, active) in GROUPS {
-                    let mut session = overview("open", active);
+                    let (mut session, _) = overview("open", active);
                     chord(&mut session, &[SUPER, SPACE]);
                     assert!(up(&session), "{name}: the premise: super+space entered");
                     assert_eq!(
@@ -12461,6 +12485,38 @@ mod real_client {
                         "{name}: the window was sent the Escape that left the overview"
                     );
                     assert!(!up(&session), "{name}: Escape did not leave the overview");
+                    assert_eq!(
+                        chord(&mut session, &[ESCAPE]),
+                        1,
+                        "{name}: the overview has gone and Escape is still taken from the window"
+                    );
+                }
+            }
+
+            /// **A reload with the overview up leaves Escape able to leave
+            /// it.** The grab and the thumbnails outlive `super+shift+r`, and
+            /// the Lua state does not. Against `19a42c0`, fails at "after a
+            /// reload": the new `overview.lua` believed it was closed.
+            #[test]
+            fn escape_leaves_the_overview_after_a_reload() {
+                for (name, active) in GROUPS {
+                    let (mut session, entry) = overview("reload", active);
+                    chord(&mut session, &[SUPER, SPACE]);
+                    assert!(up(&session), "{name}: the premise: super+space entered");
+                    reload(&mut session, &entry);
+                    assert!(
+                        up(&session),
+                        "{name}: the premise: the overview is still up after the reload"
+                    );
+                    assert_eq!(
+                        chord(&mut session, &[ESCAPE]),
+                        0,
+                        "{name}: the window was sent the Escape that left the overview"
+                    );
+                    assert!(
+                        !up(&session),
+                        "{name}: Escape did not leave the overview after a reload"
+                    );
                     assert_eq!(
                         chord(&mut session, &[ESCAPE]),
                         1,

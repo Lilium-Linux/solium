@@ -12,7 +12,12 @@
 
 local monitors = require("monitors")
 
-local overview = { active = false }
+-- Kept across `super+shift+r`, because the grab and the thumbnails outlive a
+-- reload: a fresh `false` here left an overview Escape could not leave.
+-- `escape_leaves_the_overview_after_a_reload`.
+local kept = sol.keep("overview", { active = false })
+
+local overview = { active = kept.active }
 
 -- Escape is the overview's only while it is up. Bound for good, it was taken
 -- from every window, because a bound key never reaches a client (#174):
@@ -20,6 +25,7 @@ local overview = { active = false }
 -- `escape_leaves_the_overview_and_only_then_reaches_the_window`.
 local function showing(active)
     overview.active = active
+    kept.active = active
     if active then
         sol.bind("escape", overview.leave)
     else
@@ -126,6 +132,12 @@ function overview.toggle()
 end
 
 sol.bind("super+space", overview.toggle)
+
+-- Still up after a reload, so Escape is still the way out:
+-- `escape_leaves_the_overview_after_a_reload`.
+if overview.active then
+    showing(true)
+end
 
 -- Clicking a thumbnail focuses that window and leaves. `window_at` asks the
 -- compositor, which hit-tests against where windows are *drawn* -- so this
