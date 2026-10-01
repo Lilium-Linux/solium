@@ -318,9 +318,12 @@ void solium_qml_scene_set_int(SoliumQmlScene *scene, const char *name, int value
 /* Write one property of the scene's root from a JSON value: a number, a
  * string, a boolean, null, an array or an object (which a `var` property
  * receives as a JavaScript object). `path` is a property path, as
- * solium_qml_scene_get_int's is, so `panel.open` reaches a grouped property.
+ * solium_qml_scene_get_int's is, so `panel.open` reaches a grouped property,
+ * here and in the initial properties a scene is built with.
  * Returns 1 when the property exists and took the value, 0 otherwise.
- * `scripted::tests::a_redeclared_property_is_written_into_the_live_scene`. */
+ * `scripted::tests::a_redeclared_property_is_written_into_the_live_scene`,
+ * `scripted::tests::a_table_a_list_and_a_dotted_key_reach_the_live_scene`,
+ * `scripted::tests::a_dotted_key_reaches_a_freshly_built_scene`. */
 int solium_qml_scene_set_json(SoliumQmlScene *scene, const char *path, const char *json_value);
 
 /* Read a whole-number property.

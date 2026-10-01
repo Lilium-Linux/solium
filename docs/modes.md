@@ -953,12 +953,12 @@ sol.on("layout", show_cramped)
 sol.on("close", show_cramped)
 ```
 
-Re-declaring a surface with the same properties changes nothing, so this costs
-a rebuild only when the list does; `cramped.qml` is any scene with a
-`required property string windows`. On the `top` layer the strip goes under a
-fullscreen window, as a bar does (`fullscreen.covers`); `overlay` keeps it
-over one. A window that is cramped and then has room
-again is named in the log again the next time it is short.
+Re-declaring a surface with the same properties changes nothing, and a changed
+list is written into the live scene rather than rebuilding it; `cramped.qml` is
+any scene with a `required property string windows`. On the `top` layer the
+strip goes under a fullscreen window, as a bar does (`fullscreen.covers`);
+`overlay` keeps it over one. A window that is cramped and then has room again
+is named in the log again the next time it is short.
 
 ## A whole mode
 

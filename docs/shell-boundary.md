@@ -135,8 +135,11 @@ prints `ok` or what Qt reported, which is the quick way through a chain of
 `top` layer: over the windows, under a layer-shell client's own `top` layer
 surfaces, and covered by a fullscreen window unless `fullscreen.covers` says
 otherwise. It gets pointer motion and presses, so a `MouseArea` works. It is
-given `screenInfo` as an initial property, which a scene reads by declaring
-`property var screenInfo`: `name`, `x`, `y`, `width`, `height` and `scale`.
+given `screenInfo` when it is built and kept current: a changed area of the
+primary monitor is written into the live scene without rebuilding it, and
+another monitor made primary gets a scene built there. A scene reads it by
+declaring `property var screenInfo`: `name`, `x`, `y`, `width`, `height` and
+`scale`.
 
 **The compositor's clock and frames.** Its animations advance on the same
 clock as every window transform, a running animation asks for the next frame,

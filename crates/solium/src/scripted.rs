@@ -167,7 +167,8 @@ impl Properties {
 
     /// The keys whose value is new or different, with their values. A key
     /// `old` has and this does not is not a change: the scene keeps it
-    /// (Ruling 3). `tests::only_changed_and_added_keys_are_changes`.
+    /// (Ruling 3). `tests::only_changed_and_added_keys_are_changes`,
+    /// `tests::a_table_a_list_and_a_dotted_key_reach_the_live_scene`.
     pub(crate) fn changes_from(&self, old: &Self) -> Vec<(String, Json)> {
         self.0
             .iter()
@@ -344,16 +345,21 @@ impl Surface {
         self.instances.len()
     }
 
-
     /// Take a declaration with the same scene: write its changed properties
     /// into every live instance, and keep everything else of the instances.
+    /// Each instance's rebuild bag becomes the new one even when nothing was
+    /// written, as when a key was only dropped. Instances on a monitor the
+    /// new placement leaves are the caller's to drop ([`Self::keep_placed`]).
     /// `tests::a_redeclared_property_is_written_into_the_live_scene`,
-    /// `tests::a_changed_placement_keeps_the_live_scene`.
+    /// `tests::a_table_a_list_and_a_dotted_key_reach_the_live_scene`,
+    /// `tests::a_changed_placement_keeps_the_live_scene`,
+    /// `tests::a_redeclaration_that_only_drops_keys_still_updates_the_rebuild_bag`.
     fn update(&mut self, declared: Declaration) {
-        let changed = declared.properties.changes_from(&self.declared.properties);
-        if !changed.is_empty() {
+        if declared.properties != self.declared.properties {
+            let changed = declared.properties.changes_from(&self.declared.properties);
+            let bag = declared.properties.render();
             for instance in self.instances.values_mut() {
-                instance.set_properties(&declared.properties, &changed);
+                instance.set_properties(&bag, &changed);
             }
         }
         self.declared = declared;
@@ -550,6 +556,15 @@ mod tests {
         output
     }
 
+    fn object(pairs: &[(&str, Json)]) -> Json {
+        Json::Object(
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect(),
+        )
+    }
+
     /// Every monitor and its rectangle, as `Surface::keep_placed` takes them.
     type Monitors = Vec<(Output, Rectangle<i32, Logical>)>;
 
@@ -585,6 +600,28 @@ mod tests {
             property string label: ""
             property int kept: 0
             readonly property int labelIsTwo: label === "two" ? 1 : 0
+        }
+    "#;
+
+    /// A scene with one property of every kind a declaration writes.
+    const VALUES: &str = r#"
+        import QtQuick
+        Item {
+            property var info: ({})
+            property QtObject panel: QtObject {
+                property bool open: false
+                property int size: 0
+            }
+            property var list: []
+            property int count: 0
+            property var nothing: 1
+            readonly property int nothingIsNull: nothing === null ? 1 : 0
+            readonly property int infoWidth: info.width !== undefined ? info.width : -1
+            readonly property int infoHeight: info.height !== undefined ? info.height : -1
+            readonly property int infoDepth: info.inner !== undefined ? info.inner.depth : -1
+            readonly property int panelOpen: panel.open ? 1 : 0
+            readonly property int listLength: list.length
+            readonly property int listLast: list.length > 0 ? list[list.length - 1] : -1
         }
     "#;
 
@@ -718,6 +755,148 @@ mod tests {
         });
     }
 
+    /// **Every kind of value reaches the live scene** (Ruling 3): a number
+    /// into an `int`, a table written whole as a JavaScript object and never
+    /// merged into the old one, a list, `null`, and a dotted key into a
+    /// grouped property. A key the declaration drops keeps what the scene last had.
+    #[test]
+    fn a_table_a_list_and_a_dotted_key_reach_the_live_scene() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file("solium-scripted-values", "Scene.qml", VALUES);
+            let screen = output("values-1");
+            let mut surfaces = Surfaces::default();
+            let mut declared = Declaration::for_test("bar", path, Layer::Top, On::EveryMonitor);
+            declared.properties = properties(&[(
+                "info",
+                object(&[
+                    ("height", Json::Number(200.0)),
+                    ("width", Json::Number(320.0)),
+                ]),
+            )]);
+            surfaces.declare(declared.clone());
+            let id = surfaces.named("bar").expect("declared");
+            assert!(
+                surfaces
+                    .get_mut(id)
+                    .and_then(|surface| surface.instance(&screen))
+                    .is_some(),
+                "the scene builds"
+            );
+
+            declared.properties = properties(&[
+                ("count", Json::Number(5.0)),
+                (
+                    "info",
+                    object(&[
+                        ("inner", object(&[("depth", Json::Number(3.0))])),
+                        ("width", Json::Number(640.0)),
+                    ]),
+                ),
+                (
+                    "list",
+                    Json::List(vec![
+                        Json::Number(1.0),
+                        Json::Number(2.0),
+                        Json::Number(3.0),
+                    ]),
+                ),
+                ("nothing", Json::Null),
+                ("panel.open", Json::Bool(true)),
+                ("panel.size", Json::Number(9.0)),
+            ]);
+            assert_eq!(surfaces.declare(declared.clone()), Declared::InPlace);
+            let scene = surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&screen))
+                .expect("still there")
+                .scene_for_test();
+            assert_eq!(scene.get_int("count"), 5, "a number did not reach an int");
+            assert_eq!(scene.get_int("infoWidth"), 640, "the table did not arrive");
+            assert_eq!(
+                scene.get_int("infoHeight"),
+                -1,
+                "the table was merged into the old one rather than written whole"
+            );
+            assert_eq!(
+                scene.get_int("infoDepth"),
+                3,
+                "a nested table did not arrive as an object"
+            );
+            assert_eq!(
+                (scene.get_int("listLength"), scene.get_int("listLast")),
+                (3, 3),
+                "the list did not arrive"
+            );
+            assert_eq!(
+                (scene.get_int("panelOpen"), scene.get_int("panel.size")),
+                (1, 9),
+                "a dotted key did not reach the grouped property"
+            );
+            assert_eq!(scene.get_int("nothingIsNull"), 1, "null did not arrive");
+
+            declared.properties = properties(&[("count", Json::Number(6.0))]);
+            assert_eq!(surfaces.declare(declared), Declared::InPlace);
+            let scene = surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&screen))
+                .expect("still there")
+                .scene_for_test();
+            assert_eq!(scene.get_int("count"), 6);
+            assert_eq!(
+                (scene.get_int("infoWidth"), scene.get_int("panelOpen")),
+                (640, 1),
+                "a key the declaration dropped lost the value the scene had"
+            );
+        });
+    }
+
+    /// **A dotted key reaches a scene as it is built**, not only a live one:
+    /// the first instance, and one built later on another monitor, after a
+    /// redeclaration that left the dotted key as it was.
+    #[test]
+    fn a_dotted_key_reaches_a_freshly_built_scene() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file("solium-scripted-dotted", "Scene.qml", VALUES);
+            let (left, right, _) = side_by_side("dotted-left", "dotted-right");
+            let mut surfaces = Surfaces::default();
+            let mut declared = Declaration::for_test("bar", path, Layer::Top, On::EveryMonitor);
+            declared.properties = properties(&[
+                ("count", Json::Number(4.0)),
+                ("panel.open", Json::Bool(true)),
+            ]);
+            surfaces.declare(declared.clone());
+            let id = surfaces.named("bar").expect("declared");
+            let scene = surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&left))
+                .expect("the scene builds")
+                .scene_for_test();
+            assert_eq!(
+                (scene.get_int("count"), scene.get_int("panelOpen")),
+                (4, 1),
+                "the first instance was built without its dotted key"
+            );
+
+            declared.properties = properties(&[
+                ("count", Json::Number(5.0)),
+                ("panel.open", Json::Bool(true)),
+            ]);
+            assert_eq!(surfaces.declare(declared), Declared::InPlace);
+            let scene = surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&right))
+                .expect("the scene builds on the second monitor")
+                .scene_for_test();
+            assert_eq!(
+                (scene.get_int("count"), scene.get_int("panelOpen")),
+                (5, 1),
+                "the second monitor's instance was built without its dotted key"
+            );
+        });
+    }
+
     /// **A surface moved to another monitor leaves nothing on the one it
     /// left**, where its whole scene would otherwise sit undrawn until that
     /// monitor is unplugged; the monitor it moved to builds a scene from the
@@ -793,6 +972,43 @@ mod tests {
                 0,
                 "the monitor that stopped being primary kept its scene"
             );
+        });
+    }
+
+    /// **The bag a scene is rebuilt with is always the declaration's**, even
+    /// when a redeclaration only drops keys and writes nothing into the
+    /// scene: an edit to the QML builds from what is declared now.
+    #[test]
+    fn a_redeclaration_that_only_drops_keys_still_updates_the_rebuild_bag() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file("solium-scripted-dropped", "Scene.qml", KEPT);
+            let screen = output("dropped-1");
+            let mut surfaces = Surfaces::default();
+            let mut declared = Declaration::for_test("bar", path, Layer::Top, On::EveryMonitor);
+            declared.properties = properties(&[
+                ("kept", Json::Number(3.0)),
+                ("label", Json::Text("one".to_owned())),
+            ]);
+            surfaces.declare(declared.clone());
+            let id = surfaces.named("bar").expect("declared");
+            assert!(
+                surfaces
+                    .get_mut(id)
+                    .and_then(|surface| surface.instance(&screen))
+                    .is_some(),
+                "the scene builds"
+            );
+
+            declared.properties = properties(&[("label", Json::Text("one".to_owned()))]);
+            assert_eq!(surfaces.declare(declared), Declared::InPlace);
+            let bag = surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&screen))
+                .expect("still there")
+                .properties_for_test()
+                .to_owned();
+            assert_eq!(bag, r#"{"label":"one"}"#);
         });
     }
 

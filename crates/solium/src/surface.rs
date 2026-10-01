@@ -41,7 +41,6 @@ use crate::{
         paint::{Gpu, Placement},
     },
     render::{Drawn, Element},
-    scripted::Properties,
 };
 
 /// How often the QML is checked for edits.
@@ -173,10 +172,12 @@ impl ShellSurface {
         self.scene.take_string("action").filter(|it| !it.is_empty())
     }
 
-    /// Write `changed` into the live scene, and remember `properties` as the
-    /// bag a reload of the QML builds with.
-    /// `scripted::tests::a_redeclared_property_is_written_into_the_live_scene`.
-    pub(crate) fn set_properties(&mut self, properties: &Properties, changed: &[(String, Json)]) {
+    /// Write `changed` into the live scene, and remember `bag`, the whole
+    /// declaration rendered once by the caller, as what a reload of the QML
+    /// builds with.
+    /// `scripted::tests::a_redeclared_property_is_written_into_the_live_scene`,
+    /// `scripted::tests::a_redeclaration_that_only_drops_keys_still_updates_the_rebuild_bag`.
+    pub(crate) fn set_properties(&mut self, bag: &str, changed: &[(String, Json)]) {
         for (path, value) in changed {
             if !self.scene.set_json(path, value) {
                 tracing::debug!(
@@ -185,12 +186,17 @@ impl ShellSurface {
                 );
             }
         }
-        self.properties = properties.render();
+        bag.clone_into(&mut self.properties);
     }
 
     #[cfg(test)]
     pub(crate) fn scene_for_test(&mut self) -> &mut qml::Scene {
         &mut self.scene
+    }
+
+    #[cfg(test)]
+    pub(crate) fn properties_for_test(&self) -> &str {
+        &self.properties
     }
 
     /// Rebuild the scene if the QML changed on disk.
