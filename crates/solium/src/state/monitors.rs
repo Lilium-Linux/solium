@@ -467,8 +467,14 @@ impl Solium {
         // `the_power_protocol_is_advertised_answers_mode_on_bind_and_turns_a_monitor_off_and_on`.
         self.settle_power();
         self.rescue_offscreen();
+        // Held as one dispatch, as a reload holds its handlers, so a
+        // `sol.monitors{}` in a `monitors` handler places no surface before
+        // the `layout` handlers have run too: they are placed once, below.
+        // `a_hotplug_whose_handler_rearranges_the_monitors_places_the_surfaces_once`.
+        self.dispatching += 1;
         self.trigger_monitors_changed();
         self.trigger_relayout();
+        self.dispatching -= 1;
         // After the handlers, which may declare a surface where its monitor
         // now is: `a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`.
         // A monitor that arrived gets its scenes here rather than at its first

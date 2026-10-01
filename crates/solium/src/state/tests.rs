@@ -3070,6 +3070,49 @@ mod real_client {
         });
     }
 
+    /// **A hotplug places the surfaces once, after every handler it runs,
+    /// even when a `monitors` handler rearranges the monitors.** A
+    /// `sol.monitors{}` places the surfaces when the dispatch that ran it is
+    /// done, and a hotplug holds its `monitors` and `layout` handlers as one
+    /// dispatch, as a reload does
+    /// (`a_reload_that_moves_a_monitor_keeps_the_scene_its_handler_declares_there`).
+    /// Unheld, the `monitors` dispatch was done first, and the surfaces were
+    /// placed before the `layout` handlers had run as well as after. No
+    /// scene is needed to count them.
+    #[test]
+    fn a_hotplug_whose_handler_rearranges_the_monitors_places_the_surfaces_once() {
+        let directory = std::env::temp_dir().join("solium-state-hotplug-held");
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                r#"
+                sol.on("monitors", function()
+                    sol.monitors{{ {{ name = "{RIGHT_SCREEN}", primary = true }} }}
+                end)
+                "#
+            ),
+        )
+        .expect("writing the test script");
+        let display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        let (left, _) = side_by_side(&mut state, "hotplug-held-left");
+        state.start_scripts(Some(
+            Scripts::load(&entry).expect("loading the test script"),
+        ));
+        state.settle_monitors();
+
+        let before = state.instances_synced;
+        state.space.unmap_output(&left);
+        state.settle_monitors();
+        assert_eq!(
+            state.instances_synced - before,
+            1,
+            "the surfaces were placed between the hotplug's handlers too"
+        );
+    }
+
     /// The last size this toplevel was configured with, as the client saw it.
     fn last_configured(
         client: &Client,

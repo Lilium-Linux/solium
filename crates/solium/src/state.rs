@@ -569,11 +569,19 @@ pub(crate) struct Solium {
     monitors_rearranged: bool,
 
     /// How deep the dispatches running now are: an `apply` inside another, as
-    /// the layout pass a `sol.monitors{}` runs is, or inside a reload, which
-    /// places the surfaces itself once every handler it runs has run.
+    /// the layout pass a `sol.monitors{}` runs is, or inside a reload or a
+    /// hotplug, which places the surfaces itself once every handler it runs
+    /// has run.
     /// `tests::real_client::a_binding_that_moves_the_primary_and_its_surface_together_keeps_the_scene`,
-    /// `tests::real_client::a_reload_that_moves_a_monitor_keeps_the_scene_its_handler_declares_there`.
+    /// `tests::real_client::a_reload_that_moves_a_monitor_keeps_the_scene_its_handler_declares_there`,
+    /// `tests::real_client::a_hotplug_whose_handler_rearranges_the_monitors_places_the_surfaces_once`.
     dispatching: u32,
+
+    /// How many times the surfaces were placed on the monitors, for the tests
+    /// that say when they are:
+    /// `tests::real_client::a_hotplug_whose_handler_rearranges_the_monitors_places_the_surfaces_once`.
+    #[cfg(test)]
+    instances_synced: u32,
 
     /// A resize asked for by an edge drag, not yet applied.
     ///
@@ -964,6 +972,8 @@ impl Solium {
             retelling_cramped: false,
             monitors_rearranged: false,
             dispatching: 0,
+            #[cfg(test)]
+            instances_synced: 0,
             client_sizes: crate::script::ClientSizes::default(),
             resize_hold: None,
             resize_bridge: None,
@@ -1955,8 +1965,14 @@ impl Solium {
     /// the handler runs, and judged by that it lost the scene the handler was
     /// about to keep
     /// (`tests::real_client::a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`,
-    /// `tests::real_client::a_layout_declared_strip_keeps_its_scene_through_an_unplug`).
+    /// `tests::real_client::a_layout_declared_strip_keeps_its_scene_through_an_unplug`),
+    /// and once, even when a `monitors` handler rearranges the monitors
+    /// (`tests::real_client::a_hotplug_whose_handler_rearranges_the_monitors_places_the_surfaces_once`).
     pub(crate) fn sync_instances(&mut self) {
+        #[cfg(test)]
+        {
+            self.instances_synced += 1;
+        }
         self.monitors_rearranged = false;
         let (outputs, primary) = (self.monitor_rects(), self.primary_output());
         for surface in self.surfaces.iter_mut() {
