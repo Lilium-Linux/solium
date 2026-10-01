@@ -26,8 +26,9 @@
 //! `interactive`, and then it gets plain pointer motion and presses, which is
 //! enough for the tweaks panel's buttons. Keyboard focus, grabs and everything
 //! else a real client gets are a bigger question than this — they need the
-//! scoped grab in #85. A surface that wants them is a layer-shell client,
-//! which is the supported route and always was.
+//! scoped grab in #85. A hosted shell is one of these surfaces and has the
+//! same limits (`docs/shell-boundary.md`, "What it is not given"); until #85,
+//! a surface that needs a keyboard has to be a layer-shell client.
 
 use std::{collections::HashMap, path::PathBuf};
 

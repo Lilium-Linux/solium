@@ -38,8 +38,8 @@ conduct](CODE_OF_CONDUCT.md).
 
 The README's [Building](README.md#building) section lists the packages for
 each distribution. In short: Rust 1.88 or newer (edition 2024), a C++17
-compiler, Qt 6.5 or newer (Quick and Qml), and the Wayland, libinput, libudev,
-libseat, xkbcommon, GBM, EGL and libdrm development files.
+compiler, Qt 6.5 or newer (Quick, Qml and Network), and the Wayland,
+libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm development files.
 
 ```sh
 cargo build

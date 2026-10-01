@@ -1,15 +1,18 @@
-//! Layer surfaces: how a shell attaches to the compositor.
+//! Layer surfaces: how a shell that runs as its own program attaches to the
+//! compositor.
 //!
-//! This is the boundary between Solium and Lilium. A bar, a dock, a
-//! notification area and a wallpaper are **ordinary clients** that anchor
-//! themselves to an edge of an output and say how much room they need; the
-//! compositor honours that and keeps windows out of it. The protocol is
-//! `wlr-layer-shell`, so any existing panel works and the shell can be written
-//! in whatever its author likes.
+//! A bar, a dock, a notification area and a wallpaper can be **ordinary
+//! clients** that anchor themselves to an edge of an output and say how much
+//! room they need; the compositor honours that and keeps windows out of it.
+//! The protocol is `wlr-layer-shell`, so any existing panel works and the shell
+//! can be written in whatever its author likes. The other way in is a shell
+//! hosted inside the compositor as configuration, `shell = { scene = ... }`
+//! (`lua/shell.lua`; `script::tests::the_shell_scene_is_read_from_the_configuration`).
+//! `docs/shell-boundary.md` has both.
 //!
-//! ## Why the compositor does not draw the bar
+//! ## Why the compositor has no bar of its own
 //!
-//! It did, briefly, as the vehicle for getting QML rendering in-process — and
+//! It had one, briefly, as the vehicle for getting QML rendering in-process — and
 //! that was the wrong home for it. The rule the project already had says it
 //! plainly:
 //!
@@ -23,7 +26,10 @@
 //! workspace list — is the shell's business. Building it in meant the
 //! compositor owned a design, a font stack and a layout it had no reason to,
 //! and it made the interesting question — how does a *replaceable* shell attach
-//! — disappear rather than get answered.
+//! — disappear rather than get answered. A shell hosted in-process today is the
+//! answer to that question and not the old bar back: it is whatever the
+//! configuration names, and the shipped configuration names none
+//! (`script::tests::the_shipped_configuration_hosts_no_shell`).
 //!
 //! ## What the work area is now
 //!

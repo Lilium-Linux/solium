@@ -38,6 +38,11 @@ something** — that is the test.
 └──────────────────────────────────────────────┘
 ```
 
+Beside the stack, three crates hold the arithmetic and depend on nothing:
+`crates/animation` (curves and springs), `crates/effects` (deformations and
+fragment effects) and `crates/layout` (where windows go). Each is described
+below.
+
 ### A window is a pane, not a client's surface
 
 The compositor does not work with `smithay::desktop::Window` directly. It works
@@ -88,16 +93,21 @@ The design and the order the migration went in are recorded in
 
 ### Presentation transform
 
-Every window carries a target rect, opacity, corner radius and z-order that the
-renderer uses **instead of** its real geometry, plus an animation driving the
-current value toward the target.
+Every window carries a target rect, an opacity, a 4×4 matrix turned about a
+pivot, an optional deformation and a depth, which the renderer uses **instead
+of** its real geometry, plus an animation driving the current value toward the
+target. Rounded corners are not part of it: they belong to the pane style, and
+are drawn by a fragment pass (below).
 
 Rules:
 
 - **Transforms never change real geometry.** Leaving a mode restores the layout
   exactly, because the layout was never touched.
-- **Input hit-testing follows the transform**, or a window in overview is
-  clickable where it was, not where it is drawn.
+- **Input hit-testing follows the transform's rectangle and opacity**, or a
+  window in overview is clickable where it was, not where it is drawn. The
+  depth and the matrix are drawing only: a window raised over its neighbour, or
+  tilted, is still clicked where its rectangle is, and one faded to nothing is
+  not clicked at all.
 - **One animation clock**, ticked from the render loop. Not per window, not per
   subsystem, not per script.
 
@@ -145,22 +155,54 @@ unit tests, same wasm preview with live sliders, and the same reason.
 It has a second reason the animation engine does not, and it is the harder one:
 **the damage tracker needs a deformed window's bounding box before anything is
 drawn, and a shader cannot tell it one.** So a vertex function stays CPU-side
-and parametric — a name and some numbers, never user code — while a *fragment*
-effect can be arbitrary GLSL, because a bad one is a wrong picture and a bad
-damage rect is a corrupt screen. See
+and parametric — a name and some numbers, never user code. A *fragment* effect
+could one day be code a style supplies, because a bad one is a wrong picture
+and a bad damage rect is a corrupt screen; today there is one, rounded
+corners, and its shader is compiled into the crate. See
 `docs/design/2026-09-12-panes-and-effects-design.md`.
 
 The split with the compositor is the anchor. A deformation morphs between two
 rectangles, and the far one is named rather than given: `deform = { effect =
 "genie", to = { window = id } }` carries an *identity*, which `Solium::aimed_at`
-resolves on the frame that draws it. A rectangle read out of a Lua table when
-the binding was pressed aims at where the dock icon was half a second ago, which
-is the stale-copy failure `docs/shell-boundary.md` already rules out for
-everything else. `crates/effects` never sees the identity — it has no idea what
-a pane is, which is what keeps it testable without a session.
+resolves on the frame that draws it, and `to = { surface = name }` aims at a
+`sol.surface` scene the same way. A rectangle read out of a Lua table when the
+binding was pressed aims at where a dock icon was half a second ago, which is
+the stale-copy failure the anchors planned in `docs/shell-boundary.md` are meant
+to rule out for a hosted dock. `crates/effects` never sees the identity — it has
+no idea what a pane is, which is what keeps it testable without a session.
 
 `Deform::from_name` is what scripts bind to, exactly as `Curve::from_name` is,
 and `script::shipped` checks the shipped Lua against both.
+
+### Fragment passes
+
+A pane style can round the client itself, with `client.radius` in its
+`Pane.qml`. That is neither a transform nor QML: the client's pixels are the
+application's, so the compositor draws them through a fragment program of its
+own. `crates/effects/src/fragment.rs` says what an effect reads — nothing, the
+node's own pixels, or what is beneath it — and keeps the rounded-corner shader
+as source text. `pass.rs` compiles it, renders the client's surfaces into a
+texture kept on the pane, and draws that through the program in the client's
+place. An effect that reads nothing needs no pass at all.
+
+The texture is the cost. Every visible rounded window pays a pass every frame,
+which is why `render::prepare` captures no pane that no monitor shows. What is
+beneath a node, the input a blur would need, is named in `fragment.rs` and
+nothing constructs it yet; rounded corners are the one effect there is.
+
+### The arrangements are a crate too
+
+`crates/layout` is the third engine crate with nothing in `[dependencies]`:
+where each window goes, given how many there are and how much room. It holds
+master-stack, the tiling tree, the scrolling strip and the grid overview lays
+windows out on, and scripts reach them as `sol.layout.master_stack`, `.tree`,
+`.scroller`, `.strip`, `.scrolling`, `.scroll_to` and `.grid`. The preview page
+arranges its boxes with the same code.
+
+So "modes are scripts" has a precise meaning. The Lua decides which
+arrangement, when, and for which windows, and keeps what it decided; the
+arithmetic of each arrangement is Rust, tested without a session, and no
+script has to derive it again.
 
 ### And a transform names a selection
 
@@ -187,6 +229,21 @@ timers and its capture buffer.
 returns the frame it was given, and the first thing anything asks is whether any
 selection exists at all. A compositor that routed every window through new
 arithmetic to support a group nobody declared would have made every frame worse.
+
+### One stacking order, one hit test
+
+`stack.rs` is the one list of what is drawn over what on a monitor, topmost
+first: `overlay`, then a fullscreen window when one covers the bars, then
+`top`, the windows, `bottom` and `background`. At each layer a client's layer
+surfaces are over a script's `sol.surface` scenes, because the client was
+installed on purpose. The renderer draws in that order and every hit test above
+or below the windows asks in it, so what is on top is what is clicked (#141,
+#142). `fullscreen.covers = "none"` keeps the bars over a fullscreen window.
+
+Among the windows, one predicate says whether a window is under a point:
+`owns`, in `state/hit_test.rs` — on a screen that draws it, and inside what it
+paints there. `Solium::window_under` asks it from Rust and `sol.window_at` from
+Lua, and both look through what is left of a window whose client has gone.
 
 **The renderer is GLES, and the code says so.** Scaling and cross-fading
 textures is unremarkable work that GLES2 does well, and Smithay has no Vulkan
@@ -231,7 +288,8 @@ learns a window is a Wayland surface:
   reused, so a script holding one across frames cannot address a different
   window with it.
 - **The compositor does not know what modes exist.** A script names itself with
-  `sol.status`, and the bar shows whatever it says.
+  `sol.status`. Today that name is only kept and logged: nothing draws it, and a
+  shell has no way to read it yet.
 
 **No compositor config key per mode.** That is how a mode set becomes closed.
 
@@ -246,9 +304,11 @@ decoration.
 
 **Geometry the compositor animates against must arrive with the frame that shows
 it.** Never a side channel. A dock icon rect sent whenever the shell chooses and
-applied whenever it arrives is a mirror, and mirrors drift. If the dock is a
-layer-shell surface committing frames, its icon rects ride along with that
-commit and are applied atomically with it.
+applied whenever it arrives is a mirror, and mirrors drift. For a hosted dock
+the plan is that there is nothing to send: its QML names an icon, and the
+compositor reads where it is from the same engine after layout. If the dock is
+a layer-shell surface committing frames, its icon rects ride along with that
+commit and are applied atomically with it. Neither is built yet.
 
 **Commands are not state.** `focus_window` is a verb; the resulting focus change
 comes back through the event stream, not as a reply.
@@ -264,13 +324,19 @@ window geometry.
 ### One design system, one engine
 
 **Decided 2026-09-05.** The compositor hosts a single QML engine, and every
-surface the desktop draws is a scene in it: window decorations, and the shell's
-bar, dock and launcher. They import one `Solium.Theme` singleton.
+surface the desktop draws is a scene in it: window decorations, and a hosted
+shell's bar, dock and launcher. The ones that are themed import one
+`Solium.Theme` singleton; the fallback pointer and the default wallpaper keep
+fixed colours.
 
 The requirement that forces this is not "consistent styling" — it is that an
 object must be able to *move* from the dock into a titlebar. Two processes
 painting their own pixels cannot do that; the best available would be a fake.
-One engine makes it a reparent. See `docs/shell-boundary.md`.
+It is not built, and one engine does not make it a reparent: every scene has a
+`QQuickWindow` of its own, so each is its own scene graph. The plan is a flight
+or a morph, a third, live instance of the same component drawn over both ends
+while they are hidden; one engine is what lets that instance be the component
+itself. See `docs/shell-boundary.md`.
 
 ### Chrome is QML, hosted in-process
 
@@ -298,15 +364,23 @@ why it is made before Qt starts; `dev/README.md`, *QML on the GPU*, has how to
 force either one. See `docs/spikes/2026-09-04-qml-in-compositor.md` for the
 original measurement and the two Qt traps it hides.
 
-**The bar reserves its height.** `work_area` excludes it, so windows are placed
-below it, never under it. A bar windows slide beneath is a panel; a bar that
-owns its strip of screen is part of the desktop.
+**A bar reserves its height only as a layer-shell client.** The work area is
+what every layer surface's exclusive zone leaves of a monitor, so windows are
+placed beside a client bar, never under it. A hosted shell reserves nothing
+yet: windows are placed under a hosted bar (`docs/shell-boundary.md`, "No
+reserved space"). And a fullscreen window covers the `top` layer, bars
+included, unless `fullscreen.covers` says otherwise.
 
 ## Form factors
 
 One compositor, one layout engine, different input profiles and default modes.
+Only the input profile is chosen today: `SOLIUM_FORM_FACTOR` sets click and
+touch focus, focus-follows-mouse, the drag modifier and natural scrolling
+(`input/profile.rs`). Every form factor starts floating, and there is no app
+switcher, no peek and no compositor gesture yet. The table is the intent, for
+E7:
 
-| | Primary input | Default mode |
+| | Primary input | Default mode, intended |
 |---|---|---|
 | Desktop | pointer + keyboard | floating or tiling |
 | Laptop | trackpad gestures | tiling with overview |

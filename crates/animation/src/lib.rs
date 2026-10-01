@@ -48,8 +48,9 @@ pub struct Spring {
 
 impl Default for Spring {
     fn default() -> Self {
-        // Settles in a little over a third of a second with a small overshoot:
+        // Settles in a little under half a second with a small overshoot:
         // quick enough to feel responsive, soft enough not to look mechanical.
+        // `the_default_spring_settles_in_a_little_under_half_a_second`.
         Self {
             stiffness: 300.0,
             damping: 25.0,
@@ -463,6 +464,26 @@ mod tests {
             "implausible settling time: {settled:?}"
         );
         assert!((1.0 - spring.value_at(settled.as_secs_f64())).abs() <= spring.epsilon);
+    }
+
+    /// What `Spring::default` and `docs/animation.md` say of it: settled in
+    /// a little under half a second (445 ms), after a small overshoot (about
+    /// 4%).
+    #[test]
+    fn the_default_spring_settles_in_a_little_under_half_a_second() {
+        let spring = Spring::default();
+        let settled = spring.settle_time();
+        assert!(
+            settled > Duration::from_millis(400) && settled < Duration::from_millis(500),
+            "the default spring settled in {settled:?}"
+        );
+        let peak = (1..=500)
+            .map(|millis| spring.value_at(f64::from(millis) / 1000.0))
+            .fold(0.0_f64, f64::max);
+        assert!(
+            peak > 1.0 && peak < 1.05,
+            "the default spring's overshoot is not small: it peaks at {peak}"
+        );
     }
 
     #[test]

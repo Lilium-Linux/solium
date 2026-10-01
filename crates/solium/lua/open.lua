@@ -4,11 +4,12 @@
 -- that is the point: the animation a window plays when it opens is a script's
 -- decision, so changing it does not mean changing the compositor.
 --
--- The interesting version of this is the one that has not been built yet. When
--- the dock publishes its icon rectangles (see docs/shell-boundary.md), this
--- handler asks for the icon belonging to the window's application and passes
--- *that* to `sol.present_from` — and a window grows out of the icon that
--- launched it, macOS-style. Same function, same primitive, different rectangle.
+-- The interesting version of this is the one that has not been built yet. A
+-- hosted dock is drawn in the compositor's own QML engine, and the plan is for
+-- its QML to name each icon, so that this handler can aim at the icon belonging
+-- to the window's application instead of a rectangle -- and a window grows out
+-- of the icon that launched it, macOS-style. Nothing names an icon yet; see
+-- docs/shell-boundary.md. Same handler, same primitive, a different target.
 
 -- The numbers are `config.open`'s, and were not until #117.
 --

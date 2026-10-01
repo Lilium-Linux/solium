@@ -20,11 +20,13 @@ configuration is read again, the QML cache is dropped, and every pane is
 rebuilt. Windows keep their slots, and each client is resized to whatever the
 new style left it.
 
-Everything the layers draw with -- colours, fonts, spacing -- comes from
-`Solium.Theme`. Drop your own `Solium/Theme.qml` into `~/.config/solium/qml/`
-and every pane follows it, with every other scene that imports `Solium` -- the
-pointer, the loading window, the wallpaper and a hosted shell that uses it --
-without touching anything that ships.
+Everything the shipped layers draw with -- colours, fonts, spacing -- comes
+from `Solium.Theme`, the same singleton the loading window reads, and a hosted
+shell that imports `Solium` can read it too. The fallback pointer and the
+default wallpaper do not: their colours are fixed. A `Solium/Theme.qml` of
+your own in `~/.config/solium/qml/` is meant to restyle all of them without
+touching anything that ships, and does not yet, because the shipped module is
+found first ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
 
 ## The manifest
 
@@ -40,7 +42,7 @@ PaneStyle {
     insets.top: 32
     requires: []
 
-    Layer { depth: "behind"; bleed: 24;            Glow { anchors.fill: parent } }
+    Layer { depth: "behind"; bleed: 24;            Rectangle { anchors.fill: parent } }
     Layer { depth: "frame";  source: "Frame.qml" }
     Layer { depth: "above";  bleed: { "top": 48 }; source: "Spikes.qml" }
 }
@@ -49,7 +51,7 @@ PaneStyle {
 | on `PaneStyle` | |
 |---|---|
 | `insets.top`, `.right`, `.bottom`, `.left` | what the style reserves from the client, **once, for the whole style** |
-| `requires` | what the style needs from the machine. `["gpu"]` is the only term today, and a style naming one this build has never heard of is refused rather than drawn wrong |
+| `requires` | what the style needs from the machine. `["gpu"]` is the only term today: the software scene graph does not implement `ShaderEffect`, and `Canvas` does not appear to paint on it, so a style using either says so. A style whose terms this session cannot meet, or that names one this build has never heard of, is refused rather than drawn wrong: its windows are left bare, and the log names the term. A nested session renders in software under the default `qml.renderer = "auto"` |
 | `client.radius` | rounds the client's own surface, in logical pixels. A non-zero one is an offscreen pass per window per frame. `0` is no effect at all, and so is leaving the key out — which is what nine of the eleven bundles that ship do. The example fixture writes `0`, to show the key exists and costs nothing; `rounded/` and `flush/` are the two that ask for the pass |
 | `client.radiusTopLeft`, `.radiusTopRight`, `.radiusBottomLeft`, `.radiusBottomRight` | one corner each, in logical pixels. Every one of them defaults to `client.radius`, so a style that wants four the same writes one key and these never come up. **A `0` has to be written out**: squaring a corner is half of what these are for, so an absent corner follows `radius` rather than being square. `flush/` is the shipped example |
 | `client.shadow` | reserved for the shadow cast by the client's silhouette; declared, and read by nobody yet |
@@ -63,21 +65,28 @@ A folder without a `Pane.qml` is not a style. A bare name skips it and goes on
 to the next place it would have looked, so an empty `panes/top/` of your own
 does not quietly replace the shipped `top` with a window that has no frame.
 
-`crates/solium/tests/fixtures/panes/example/` is the format written out in
-full -- all three depths, both spellings of `bleed`, inline content and
-delegated content -- and
+In a checkout of the repository, `crates/solium/tests/fixtures/panes/example/`
+is the format written out in full -- all three depths, both spellings of
+`bleed`, inline content and delegated content -- and
 
     solium --check-qml crates/solium/tests/fixtures/panes/example/Pane.qml
 
-says whether it still parses. Run it on **each file** of a bundle you write:
-that is what catches a layer whose content will not build, which is otherwise a
-blank rectangle and a line in the log.
+says whether it still parses. It prints `ok` or what Qt reported, and exits 0
+either way, so read what it prints. It does not follow `source:`, so run it on
+**each file** of a bundle you write: that is what catches a layer whose content
+will not build.
+
+A style that cannot be loaded -- a layer that will not build, a `requires`
+that cannot be met, a name that is nowhere -- leaves each window it was for
+with no frame at all and no space reserved for one, and says so in the log
+(#90). Fixing it and pressing **super+shift+r** frames the windows opened after
+that; one already left bare stays bare until it is opened again.
 
 ## Layers
 
 | on `Layer` | |
 |---|---|
-| `depth` | `"behind"` the client, in the `"frame"`, or `"above"` the client. A string, so a fourth value added later does not break every style already written. An unknown word draws at `frame` and says so in the log |
+| `depth` | `"behind"` the client, in the `"frame"`, or `"above"` the frame. Both `frame` and `above` are drawn over the client, `above` over `frame`. A string, so a fourth value added later does not break every style already written. An unknown word draws at `frame` and says so in the log |
 | `bleed` | how far past the pane this layer may paint. `24` for every side, or `{ "top": 48 }` for one. Zero by default |
 | `source` | a QML file in this folder, when the content is not inline |
 | `name` | for diagnostics: which layer a warning is about |
@@ -88,8 +97,9 @@ becomes its own element in the frame, which is what lets the client's surface
 sit *between* two layers of one style -- the thing a single QML file can never
 do.
 
-Layers at one depth are drawn in declaration order, the later one on top. A
-press goes to the topmost layer that wants it.
+Layers at one depth are drawn in declaration order, the later one on top.
+Pointer input goes to every layer. When more than one layer sets `action` for
+the same press, the topmost is the one acted on.
 
 A delegated layer's root is an ordinary `Item`. It is its own scene, with no
 parent to read anything off, so it declares the properties it uses itself.
@@ -120,52 +130,73 @@ Read back by the compositor:
 | property | |
 |---|---|
 | `action` | set to `"close"` or `"maximize"` to ask for it; cleared once taken |
-| `hovered` | the name of the button under the pointer, or `""` |
+| `onButton` | `true` while the pointer is over a button. A press on the frame starts a window drag unless some layer says this |
 
 A layer declares only the ones it uses; one that positions nothing against the
 window declares no `bleedTop` and is handed a property it ignores.
 
-`hovered` decides whether a press starts a window drag, so a layer whose buttons
-do not set it will have its buttons dragging the window instead.
+A layer whose buttons do not declare `onButton` has them drag the window
+instead of pressing. The shipped `top` keeps the name of the button under the
+pointer in a `hovered` string of its own and derives the flag from it:
+
+    property string hovered: ""
+    readonly property bool onButton: hovered !== ""
+
+`hovered` on its own is read by nothing. `left`, `bottom`, `pulse`, `reactive`
+and `reveal` declare `hovered` and not `onButton`, so their buttons may not
+press ([#158](https://github.com/Lilium-Linux/solium/issues/158)).
 
 The pointer arrives as ordinary mouse events, in the layer's own coordinates,
 while it is anywhere over the window -- including over the client, which is how
 a border can follow the cursor. When it leaves, the layer is told with a
 position outside itself, so `MouseArea.containsMouse` goes false on its own. A
 layer with bleed is given the pointer in **its own canvas**, so a click lands on
-whatever that layer drew there.
+whatever that layer drew there. **Presses are narrower than hover**: they reach
+the layers only inside the band the insets reserve, so a button drawn over the
+client, out in the bleed, or in a style that reserves nothing cannot be
+pressed.
 
 ## What it costs
 
-`anchors.fill: parent` fills the **canvas**, which is the pane grown by the
-bleed this layer declared -- not the window. Bleed is a cost and not a
-permission: the canvas is that much larger, and every pixel of it is
-rasterised, uploaded and repainted when the layer changes. A bar throwing
-spikes upward should ask for `{ "top": 48 }` rather than `48`, and not pay for
-three sides it never touches. It is also a promise rather than a request: the
-layer is clipped to the canvas it asked for, so no one style can force a
-full-screen repaint every frame.
+QML renders on one of two paths: the GPU, the default on the hardware when a
+trial render at startup passes, or software, which is what a nested session,
+`qml.renderer = "software"` and a failed trial get. The log line that begins
+`QML renderer:` says which.
 
-A layer that stays inside the style's own insets has only those bands copied
-and uploaded when it changes -- a titlebar is about 4% of a window, and copying
-the other 96% every frame is most of what an animating decoration costs. A
-layer that reserves space **and** paints outside it must say so:
+On both, `anchors.fill: parent` fills the **canvas**, which is the pane grown
+by the bleed this layer declared -- not the window. Bleed is a cost and not a
+permission: the canvas is that much larger, and every pixel of it is drawn
+again when the layer changes. A bar throwing spikes upward should ask for
+`{ "top": 48 }` rather than `48`, and not pay for three sides it never touches.
+It is also a promise rather than a request: the layer is clipped to the canvas
+it asked for, so no one style can force a full-screen repaint every frame.
+
+On the GPU a layer is drawn straight into a buffer the compositor allocated,
+and nothing is copied or uploaded.
+
+In software a changed layer is rasterised on the CPU, copied and uploaded. A
+layer that stays inside the style's own insets has only those bands copied,
+and the upload is the one box around them: for a titlebar that is about 4% of
+a window, and for a style that reserves all four sides it is the whole window.
+A layer that reserves space **and** paints outside it must say so, or what it
+paints outside is not copied:
 
     property bool overlay: true
 
 Declare it only if you need it; the alternative is usually to reserve the
 couple of pixels you were painting over. A layer at `behind` or `above`, a
 layer with any bleed, and every layer of a style that reserves nothing are
-overlays already and need not say it.
+overlays already and need not say it. On the GPU the property changes nothing.
 
 Animations need nothing declared. Qt is asked each frame whether the scene has
 anything new to draw, and the compositor draws only then -- so an idle layer
 costs a flag read, a transition runs at the screen's refresh rate, and a loop
 with a pause in it survives the pause. Bear in mind only that a layer which
-never stops animating never stops costing anything: on the software path it is
-rasterised on the CPU, so a full-width gradient moving at 260Hz is about a
-tenth of a core. Bind an endless animation to `focused`, as the `wave`
-demonstration does, and an unfocused window costs nothing.
+never stops animating never stops costing anything. The one measurement, from
+2026-09-06 on the software path before the GPU one existed, is the whole
+compositor at about a tenth of a core with `pulse` animating at the screen's
+full rate. Bind an endless animation to `focused`, as `pulse` and the `wave`
+demonstration do, and an unfocused window costs nothing.
 
 ## What is here
 
@@ -180,6 +211,9 @@ demonstration does, and an unfocused window costs nothing.
 | `reveal/` | a bar that slides out of the window's edge on approach |
 | `pulse/` | a bar with an animation running in it |
 
+`none` is not a folder: `pane = "none"` draws no frame and builds no scene per
+window.
+
 Each of those eight is one `frame` layer, which is what every decoration was
 before styles had layers. The rest are here to show what layers add:
 
@@ -190,14 +224,15 @@ before styles had layers. The rest are here to show what layers add:
 | `shadow/` | `behind` plus `bleed`: stacked rectangles standing in for a blur |
 
 And four demonstrations, which are not shipped and are never offered by name.
-They live with the test fixtures in `crates/solium/tests/fixtures/panes/`, and
-`SOLIUM_PANE=<that path>/<name>` puts one on every window:
+They live with the test fixtures in a checkout, in
+`crates/solium/tests/fixtures/panes/`, and `SOLIUM_PANE=<that path>/<name>`
+puts one on every window:
 
 | folder | |
 |---|---|
 | `example/` | the format written out in full, and the fixture the tests build |
 | `sandwich/` | one layer behind the client and one above it, in colours that cannot be confused |
-| `wave/` | a border that physically waves, upward past the pane, using `bleed` |
+| `wave/` | sine waves flowing round the whole window, outside it, all `bleed` at `behind` and nothing reserved |
 | `bleedy/` | what bleed does to hit-testing, and to the window next door |
 
 ## One QML file is still a decoration

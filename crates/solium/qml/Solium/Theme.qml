@@ -1,13 +1,14 @@
-// The design system. One file, read by everything the compositor draws.
+// The design system: the colours, fonts and metrics the window frames, the
+// loading window and the tweaks panel are drawn with.
 //
-// Window decorations and the shell's own surfaces run in the *same* QML engine,
-// so they import this same singleton — change a colour here and the titlebars
-// and the dock change together, because there is only one of it. Two
-// stylesheets kept in step by hand is exactly what this exists to prevent.
+// Window decorations and a hosted shell run in the *same* QML engine, so a
+// shell scene that imports `Solium` gets this same singleton — change a colour
+// here and the titlebars and that shell change together, because there is only
+// one of it. Two stylesheets kept in step by hand is exactly what this exists
+// to prevent.
 //
-// It is also what makes an object able to travel between them: an item lifted
-// from the dock into a titlebar keeps its colours because it never left the
-// design system, only the scene it was parented to.
+// Two of the compositor's own scenes do not read it: `cursor.qml`, whose
+// colours are fixed and which says why, and `wallpaper.qml`.
 //
 // **This is not a design. It is a default.** Plain greys, a plain blue, a plain
 // red: what the compositor looks like with nobody having chosen anything. It is

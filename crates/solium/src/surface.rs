@@ -225,12 +225,12 @@ impl ShellSurface {
     /// Draw the surface across `area`, at `alpha`.
     ///
     /// The alpha is applied when the buffer reaches the screen, not inside the
-    /// scene. It cannot be done inside: Qt's software renderer repaints only
-    /// what it thinks changed, onto the pixels already there, so a scene fading
-    /// itself out paints each half-transparent frame over its own opaque
-    /// previous one and never fades at all. Whether a surface is see-through is
-    /// the compositor's business anyway — it is a presentation transform, the
-    /// same as where the surface is and how big.
+    /// scene. Whether a surface is see-through is the compositor's business —
+    /// it is a presentation transform, the same as where the surface is and how
+    /// big. On the software path it could not be done inside anyway: Qt's
+    /// software renderer repaints only what it thinks changed, onto the pixels
+    /// already there, so a scene fading itself out paints each half-transparent
+    /// frame over its own opaque previous one and never fades at all.
     ///
     /// Concrete on `GlesRenderer` rather than generic since the GPU path
     /// arrived. It has to be: taking the thread's EGL context back off Qt is

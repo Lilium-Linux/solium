@@ -256,9 +256,10 @@ list.
 
 Everything is a file you write, and none of it needs the compositor rebuilt.
 `~/.config/solium/user.lua` holds only what you want changed; your own QML in
-`~/.config/solium/qml` shadows what ships, file by file — drop in a single
-`Solium/Theme.qml` and every frame and surface restyles without copying the
-rest. See **[docs/ricing.md](docs/ricing.md)**.
+`~/.config/solium/qml` shadows what ships, file by file. A single
+`Solium/Theme.qml` there is meant to restyle every frame and surface without
+copying the rest; until [#88](https://github.com/Lilium-Linux/solium/issues/88)
+is fixed, the shipped one still wins. See **[docs/ricing.md](docs/ricing.md)**.
 
 ## How it is built
 
@@ -275,14 +276,15 @@ against Solium's own API, through `shell = { scene = ... }` in the
 configuration: see [docs/shell-boundary.md](docs/shell-boundary.md).
 Quickshell support was removed (#172).
 
-That is why a titlebar can be reloaded while the session runs, why the pointer
-belongs to the same theme as the window frames, and why a decoration can be a
-gradient, a shader or a clock without the compositor learning what any of those
-are. It is also why Qt is a hard dependency and why the compositor drives Qt by
-hand. There is no Qt event loop: each frame advances Qt's animations on the
-compositor's clock, and between frames the compositor's own event loop serves
-Qt's timers and the descriptors Qt waits on, on that same clock, so a `Timer`
-fires on an idle desktop and costs a frame only when it changes something.
+That is why a titlebar can be reloaded while the session runs, why a hosted
+shell can read the same theme as the window frames, and why a decoration can be
+a gradient, a shader or a clock without the compositor learning what any of
+those are. It is also why Qt is a hard dependency and why the compositor drives
+Qt by hand. There is no Qt event loop: each frame advances Qt's animations on
+the compositor's clock, and between frames the compositor's own event loop
+serves Qt's timers and the descriptors Qt waits on, on that same clock, so a
+`Timer` fires on an idle desktop and costs a frame only when it changes
+something.
 
 On the hardware, QML renders on the GPU: Qt draws into a buffer the compositor
 allocated, once a trial render in a short-lived child process has shown that
