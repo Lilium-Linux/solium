@@ -2734,9 +2734,9 @@ mod real_client {
 
     /// **A reload that makes another monitor primary drops the old primary's
     /// scene and builds one on the new**, for a surface `on = "primary"` the
-    /// new configuration declares exactly as the old one did. Nothing about the surface changed, so only
-    /// the reload itself can see that its monitor did. No client (the #99
-    /// rule).
+    /// new configuration declares exactly as the old one did. Nothing about
+    /// the surface changed, so only the reload itself can see that its
+    /// monitor did. No client (the #99 rule).
     #[test]
     fn a_reload_that_moves_the_primary_drops_the_old_primarys_scene() {
         crate::qml::qt_test::on_the_qt_thread(|| {
@@ -2783,9 +2783,9 @@ mod real_client {
 
     /// **A `sol.monitors{}` at run time that makes another monitor primary
     /// drops the old primary's scene and builds one on the new**, once the
-    /// dispatch that said it is done. A binding is neither a reload nor a hotplug, and nothing about
-    /// the surface changed, so only the dispatch can see that its monitor
-    /// did. No client (the #99 rule).
+    /// dispatch that said it is done. A binding is neither a reload nor a
+    /// hotplug, and nothing about the surface changed, so only the dispatch
+    /// can see that its monitor did. No client (the #99 rule).
     #[test]
     fn a_runtime_primary_change_drops_the_old_primarys_scene() {
         crate::qml::qt_test::on_the_qt_thread(|| {
