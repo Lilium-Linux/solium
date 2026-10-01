@@ -69,6 +69,12 @@ ${image_fedora:-unknown} and this machine is Fedora $host_fedora, so the package
 name the wrong release. Build an image for Fedora $host_fedora:
   podman build --build-arg FEDORA_VERSION=$host_fedora -t solium-build:fc$host_fedora -f dev/Containerfile dev/
 and pass it with --image localhost/solium-build:fc$host_fedora"
+# The Qt the binary is built against, the image's, which the spec Requires or
+# newer: rpm's own dependencies take any Qt 6 (dev/install-check.sh's "the
+# Fedora package").
+qt_version="$(podman run --rm "$image" rpm --eval '%{?_qt6_version}' 2>/dev/null || true)"
+[[ "$qt_version" =~ ^6\.[0-9.]+$ ]] || die "the build image $image has no Qt 6 version \
+(rpm --eval %_qt6_version says '$qt_version'); rebuild it from dev/Containerfile"
 
 "$root/dev/build-release.sh" "${build_args[@]}"
 built="$root/target/install/release/solium"
@@ -91,6 +97,7 @@ if ! rpmbuild -bb --with prebuilt \
     --define "_topdir $topdir" \
     --define "commit $commit" \
     --define "commitdate $commitdate" \
+    --define "_qt6_version $qt_version" \
     "$root/dev/rpm/solium.spec" >"$log" 2>&1; then
     tail -30 "$log" >&2
     die "rpmbuild failed; the whole log is $log"
@@ -151,6 +158,7 @@ cat <<EOF
 Built $package ($(du -h "$package" | cut -f1))
   version   $version-1.fc$host_fedora, a development snapshot of commit $commit
   for       Fedora $host_fedora, $(rpm --eval '%{_arch}'): another Fedora release needs a package built for it
+  needs     Qt $qt_version or newer, which dnf brings from updates where it is older
   checked   unpacked in $unpacked, solium --check passed${checked:+ (${checked#  })},
             using $chosen
 ${warnings:+

@@ -57,8 +57,11 @@ BuildRequires:  qt6-qtdeclarative-devel
 # rpm finds the libraries the binary links. These it cannot see, and
 # dev/install-check.sh's "the Fedora package" asserts each is the package that
 # provides it: the QML modules the shipped QML imports, Xwayland, and the
-# flock solium-session takes its lock with.
-Requires:       qt6-qtdeclarative%{?_isa}
+# flock solium-session takes its lock with. Qt's symbols are all versioned
+# Qt_6, so the Qt the binary was built against, or newer, is spelt out here:
+# dev/rpm.sh defines _qt6_version as the build image's, and a source build has
+# it from qt6-qtbase-devel. dev/install-check.sh asserts the version clause.
+Requires:       qt6-qtdeclarative%{?_isa}%{?_qt6_version: >= %{_qt6_version}}
 Requires:       xorg-x11-server-Xwayland
 Requires:       util-linux-core
 # What reads lilium-portals.conf, and each backend it names: the same check.

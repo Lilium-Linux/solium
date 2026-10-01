@@ -1218,7 +1218,10 @@ and two documents. rpmbuild fails on a file one has and the other does not, and
 `dev/install-check.sh`'s *the Fedora package* compares the two on every run,
 without building a package. It also checks what the spec adds to rpm's
 automatic library dependencies: `Requires` qt6-qtdeclarative (the QtQuick and
-QtQuick.Shapes modules the shipped QML imports), xorg-x11-server-Xwayland and
+QtQuick.Shapes modules the shipped QML imports), no older than the build
+image's Qt, since rpm's own dependencies take any Qt 6 (a Fedora 44 installed
+from the release image and never updated has 6.10, and dnf brings the newer
+one from updates), xorg-x11-server-Xwayland and
 util-linux-core (`solium-session`'s `flock`), each the package that has the
 file here, and `Recommends` xdg-desktop-portal and each backend
 `lilium-portals.conf` names, gtk and wlr, and foot: the shipped configuration

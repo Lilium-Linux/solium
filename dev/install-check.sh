@@ -506,7 +506,7 @@ while IFS= read -r file; do
     id="$(sed -n 's/^SPDX-License-Identifier:[[:space:]]*//p' "$file")"
     check "  and ${file#"$sys"}'s, $id" [ -n "$id" -a -z "${license_tag##* "$id" *}" ]
 done < <(find "$sys" -name '*.license' | sort)
-requires() { grep -qE "^Requires:[[:space:]]+$1(%\{\?_isa\})?$" "$spec"; }
+requires() { grep -qE "^Requires:[[:space:]]+$1(%\{\?_isa\})?(%\{\?_qt6_version: >= %\{_qt6_version\}\})?$" "$spec"; }
 recommends() { grep -qE "^Recommends:[[:space:]]+$1$" "$spec"; }
 # Which package has a file here, when one does.
 owner() { [[ -e "$1" ]] && rpm -qf --qf '%{name}\n' "$1" 2>/dev/null | head -1; }
@@ -544,6 +544,12 @@ if command -v rpmspec >/dev/null; then
     check "  and with them its version is 0.0.0~git<commitdate>.<commit>" \
         [ "$(rpmspec -q --with prebuilt --define 'commit abc1234' --define 'commitdate 20261001' \
             --qf '%{version}\n' "$spec" 2>/dev/null)" = "0.0.0~git20261001.abc1234" ]
+    # Qt's symbols are all versioned Qt_6, so rpm's own dependencies take any
+    # Qt 6; dev/rpm.sh defines _qt6_version as the build image's.
+    check "  and it Requires the Qt it was built against, or newer" \
+        grep -qE '^qt6-qtdeclarative(\([^)]*\))? >= 6\.11\.2$' \
+        <(rpmspec -q --requires --with prebuilt --define 'commit abc1234' \
+            --define 'commitdate 20261001' --define '_qt6_version 6.11.2' "$spec" 2>/dev/null)
 else
     echo "  skip  parsing the spec: no rpmspec here (it is in rpm-build)"
 fi
