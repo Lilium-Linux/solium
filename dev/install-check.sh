@@ -534,6 +534,9 @@ while IFS= read -r backend; do
     check "Recommends xdg-desktop-portal-$backend, which lilium-portals.conf names" \
         recommends "xdg-desktop-portal-$backend"
 done < <(sed -n 's/^[^#=]*=\([a-z]*\)$/\1/p' "$root/dev/session/lilium-portals.conf" | sort -u)
+check "Recommends foot, which super+return opens when no other terminal is installed" \
+    recommends foot
+check "  and init.lua still looks for it" grep -qx '    "foot",' "$root/crates/solium/lua/init.lua"
 if command -v rpmspec >/dev/null; then
     rpmspec -q "$spec" >"$work/rpmspec-bare.log" 2>&1
     check "the spec refuses to parse without commit and commitdate" [ $? -ne 0 ]

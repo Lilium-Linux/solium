@@ -1221,7 +1221,9 @@ automatic library dependencies: `Requires` qt6-qtdeclarative (the QtQuick and
 QtQuick.Shapes modules the shipped QML imports), xorg-x11-server-Xwayland and
 util-linux-core (`solium-session`'s `flock`), each the package that has the
 file here, and `Recommends` xdg-desktop-portal and each backend
-`lilium-portals.conf` names, gtk and wlr.
+`lilium-portals.conf` names, gtk and wlr, and foot: the shipped configuration
+has no launcher, so `super+return`'s terminal is how a program starts, and
+none of the terminals `init.lua` looks for is on Fedora Workstation.
 
 Without `--with prebuilt`, `%build` compiles the tarball with
 `cargo build --locked --release`, `SOLIUM_DATADIR` baked as

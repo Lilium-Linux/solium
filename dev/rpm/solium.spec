@@ -65,6 +65,10 @@ Requires:       util-linux-core
 Recommends:     xdg-desktop-portal
 Recommends:     xdg-desktop-portal-gtk
 Recommends:     xdg-desktop-portal-wlr
+# A terminal from init.lua's list, which super+return opens. The shipped
+# configuration has no launcher, and Fedora Workstation's ptyxis is not in the
+# list, so without one a session there can start no program: the same check.
+Recommends:     foot
 
 %description
 Solium is the Wayland compositor of Lilium DE, written in Rust on Smithay and
