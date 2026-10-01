@@ -1048,10 +1048,14 @@ impl XdgActivationHandler for Solium {
         data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
-        // Ours, from a launch: the window belongs in the one we opened for it.
-        if let Some(pane) = data.user_data.get::<LaunchedFor>().map(|it| it.0)
-            && self.claim_into(pane, &surface)
-        {
+        // Ours, from a launch: the window belongs in the one we opened for it
+        // -- unless it was there before the launch, which `claim_into` says
+        // as `Relaunched` once it has dissolved the launch's window (#177).
+        let claimed = match data.user_data.get::<LaunchedFor>() {
+            Some(launched) => self.claim_into(launched.0, &surface),
+            None => Claimed::Ordinary,
+        };
+        if claimed == Claimed::Arrived {
             self.activation_state.remove_token(&token);
             return;
         }
