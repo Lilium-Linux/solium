@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# fmt, clippy, tests, build, the Lua check and the QML GPU check. Exits
+# fmt --check, clippy, tests, build, the Lua check and the QML GPU check. Exits
 # non-zero if any of them complains.
 #
 # It exists because a clippy failure went into a commit three times in a row,
@@ -86,9 +86,11 @@ run() {
     fi
 }
 
+# Checked, not applied, as CI checks it: a gate that rewrote the files passed
+# a commit CI then failed, with the formatted version left uncommitted.
 echo "fmt..."
-run "$polite cargo fmt --all" \
-    || { echo "GATE FAILED: fmt" >&2; exit 1; }
+run "$polite cargo fmt --all --check" \
+    || { echo "GATE FAILED: fmt (cargo fmt --all fixes it)" >&2; exit 1; }
 echo "clippy..."
 run "$polite cargo clippy --all-targets $jobs -- -D warnings" \
     || { echo "GATE FAILED: clippy" >&2; exit 1; }
