@@ -2832,7 +2832,7 @@ mod real_client {
             assert_eq!(
                 (scene.get_int("kept"), scene.get_int("screenX")),
                 (7, 0),
-                "REVIEW (kept, screenX): the unplug rebuilt the layout-declared strip"
+                "(kept, screenX): the unplug rebuilt the layout-declared strip"
             );
         });
     }
