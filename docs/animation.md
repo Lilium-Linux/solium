@@ -27,13 +27,15 @@ had.
 
 ## Curves
 
-![The animation curves, sampled from the Rust engine rather than redrawn](animation-curves.png)
+![The six named curves, each plotted from start to end: linear, outCubic, outBack, inOutQuad, inOutCubic and spring](animation-curves.png)
 
 Sampled from the engine itself rather than drawn to illustrate it, so what is
-plotted is what runs — including the durations, which for a spring are an
-outcome rather than a setting. The picture predates `inOutCubic` and is the one
-curve below it does not show; `dev/preview` plots all of them live from the same
-engine and is the thing to reach for.
+plotted is what runs: each panel is `Curve::at` from `crates/animation`, for
+every curve `Curve::all()` names. The five with a fixed shape are drawn over
+400 ms, and would take whatever duration they are given; the spring is drawn
+over the 445 ms `Spring::settle_time` says it takes, which for a spring is an
+outcome rather than a setting. `dev/preview` plots any of them live from the
+same engine, one at a time, and is the thing to reach for.
 
 Six have names:
 
