@@ -409,9 +409,11 @@ void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pre
  * to a model: in order, every row's values written before any row is
  * announced, and each row announced once.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
- * Returns 1 when Qt took the whole batch and 0 when it did not, as for a step
- * that does not match the rows held or text that is not a batch.
- * `qml::hosted::tests::a_batch_that_does_not_match_the_rows_held_is_refused`. */
+ * Returns 1 when Qt took the whole batch and 0, having taken none of it, when
+ * it did not, as for a step that does not match the rows held or text that is
+ * not a batch.
+ * `qml::hosted::tests::a_batch_that_does_not_match_the_rows_held_is_refused`,
+ * `qml::hosted::tests::a_refused_batch_takes_none_of_its_steps`. */
 int solium_qml_rows_apply(int model, const char *ops_json);
 
 #ifdef __cplusplus

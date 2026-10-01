@@ -46,8 +46,10 @@ public:
      * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
     SoliumRow *row_for(const QString &key);
     Q_INVOKABLE QObject *get(const QVariant &key);
-    /* Apply one batch. False when a step does not match the rows held.
-     * `qml::hosted::tests::a_batch_that_does_not_match_the_rows_held_is_refused`. */
+    /* Apply one batch whole. False, with nothing applied, when any step does
+     * not match the rows held, as an insert of a row already held does not.
+     * `qml::hosted::tests::a_batch_that_does_not_match_the_rows_held_is_refused`,
+     * `qml::hosted::tests::a_refused_batch_takes_none_of_its_steps`. */
     bool apply(const QJsonArray &ops);
     const QVector<SoliumRow *> &rows() const { return m_rows; }
 
@@ -57,6 +59,10 @@ signals:
 
 private:
     QString key_of(const SoliumRow *row) const;
+    /* Whether every step matches the rows held, each step taken in turn on a
+     * copy of their keys.
+     * `qml::hosted::tests::a_refused_batch_takes_none_of_its_steps`. */
+    bool fits(const QJsonArray &ops) const;
     void retire(SoliumRow *row);
 
     QHash<int, QByteArray> m_roles;

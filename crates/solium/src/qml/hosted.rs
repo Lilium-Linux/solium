@@ -42,8 +42,10 @@ pub(crate) enum Model {
 }
 
 /// Apply one batch of row operations, rendered by `models::diff::render`, to
-/// a model. False when Qt could not take it.
-/// `tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
+/// a model: `tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
+/// False, with none of it taken, when Qt could not take it:
+/// `tests::a_batch_that_does_not_match_the_rows_held_is_refused`,
+/// `tests::a_refused_batch_takes_none_of_its_steps`.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
 pub(crate) fn apply_rows(model: Model, ops: &str) -> bool {
     let Ok(ops) = CString::new(ops) else {
@@ -467,6 +469,63 @@ pub(crate) mod tests {
                 super::Model::Monitors,
                 &render(&diff(&held, &[]))
             ));
+        });
+    }
+
+    /// **A refused batch takes none of its steps**: a batch whose last step
+    /// does not match leaves every row as it was, and a row already held is
+    /// never inserted again, so a batch sent again from what Qt last took
+    /// lands once.
+    #[test]
+    fn a_refused_batch_takes_none_of_its_steps() {
+        use crate::models::diff::{Op, diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-atomic",
+                r#"
+                import QtQuick
+                import Solium
+                Item { readonly property int present: Solium.monitor.present ? 1 : 0 }
+                "#,
+                "atomic-1",
+            );
+            let held = vec![monitor_row("atomic-1", 1920, 1.0)];
+            let refused = vec![
+                Op::Insert {
+                    at: 0,
+                    row: monitor_row("atomic-1", 1920, 1.0),
+                },
+                Op::Remove {
+                    at: 1,
+                    key: "atomic-none".to_owned(),
+                },
+            ];
+            assert!(!super::apply_rows(
+                super::Model::Monitors,
+                &render(&refused)
+            ));
+            assert_eq!(
+                scene.get_int("present"),
+                0,
+                "a refused batch's first step was taken"
+            );
+
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&[], &held))
+            ));
+            assert_eq!(scene.get_int("present"), 1);
+            assert!(
+                !super::apply_rows(super::Model::Monitors, &render(&diff(&[], &held))),
+                "a row already held was inserted again"
+            );
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&held, &[]))
+            ));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
         });
     }
 

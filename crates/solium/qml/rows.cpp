@@ -9,6 +9,7 @@
 #include <QtCore/QJsonValue>
 #include <QtCore/QList>
 #include <QtCore/QMetaProperty>
+#include <QtCore/QStringList>
 #include <QtCore/QTimer>
 #include <QtQml/QQmlEngine>
 
@@ -94,8 +95,53 @@ void SoliumRows::retire(SoliumRow *row)
     });
 }
 
+bool SoliumRows::fits(const QJsonArray &ops) const
+{
+    QStringList keys;
+    keys.reserve(m_rows.size());
+    for (const SoliumRow *row : m_rows) {
+        keys.append(key_of(row));
+    }
+    for (const QJsonValue &each : ops) {
+        const QJsonObject op = each.toObject();
+        const QString kind = op.value(QStringLiteral("op")).toString();
+        const QString key = op.value(QStringLiteral("key")).toString();
+        const int at = op.value(QStringLiteral("at")).toInt(-1);
+        const int size = static_cast<int>(keys.size());
+        if (kind == QStringLiteral("insert")) {
+            if (at < 0 || at > size || keys.contains(key)) {
+                return false;
+            }
+            keys.insert(at, key);
+        } else if (kind == QStringLiteral("change")) {
+            if (at < 0 || at >= size || keys.at(at) != key) {
+                return false;
+            }
+        } else if (kind == QStringLiteral("remove")) {
+            if (at < 0 || at >= size || keys.at(at) != key) {
+                return false;
+            }
+            keys.removeAt(at);
+        } else if (kind == QStringLiteral("move")) {
+            const int from = op.value(QStringLiteral("from")).toInt(-1);
+            const int to = op.value(QStringLiteral("to")).toInt(-1);
+            if (from < 0 || from >= size || to < 0 || to >= size || keys.at(from) != key) {
+                return false;
+            }
+            keys.move(from, to);
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool SoliumRows::apply(const QJsonArray &ops)
 {
+    if (!fits(ops)) {
+        qWarning("a model batch did not match the rows held, and none of it was applied");
+        return false;
+    }
     const int was = count();
     struct Touched
     {
