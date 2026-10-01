@@ -1,6 +1,7 @@
 //! The models hosted scenes read, built from the compositor's own state, so
 //! there is nothing to mirror. Each is diffed by key and sent to Qt as one
 //! batch, every row's values written before any row is announced:
+//! `tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
 //! `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
 
 pub(crate) mod diff;
@@ -15,7 +16,8 @@ pub(crate) struct Published {
 }
 
 impl crate::state::Solium {
-    /// Every model's changes since what Qt last took, one batch per model.
+    /// Every model's changes since what Qt last took, one batch per model:
+    /// `tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
     /// `tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
     pub(crate) fn publish_models(&mut self) {
         let monitors = monitors::rows(self);
@@ -110,5 +112,80 @@ mod tests {
             2,
             "nothing changed, so nothing is sent"
         );
+    }
+
+    /// **The compositor's monitors reach `Solium.monitor` through
+    /// `publish_models`**: where the space has a monitor, a move published as
+    /// a change, and an unplug as an absent row.
+    #[test]
+    fn publish_models_carries_the_compositors_monitors_to_their_scenes() {
+        use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+        use smithay::reexports::wayland_server::Display;
+
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let (directory, mut scene) = crate::qml::hosted::tests::hosted(
+                "solium-models-publish",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property int present: Solium.monitor.present ? 1 : 0
+                    readonly property int wholeX: Solium.monitor.whole.x
+                    readonly property int areaWidth: Solium.monitor.area.width
+                }
+                "#,
+                "publish-e2e-1",
+            );
+            let display = Display::<crate::state::Solium>::new().expect("a test display");
+            let mut state = crate::state::Solium::new(display.handle());
+            let output = Output::new(
+                "publish-e2e-1".to_owned(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "solium".to_owned(),
+                    model: "publish".to_owned(),
+                },
+            );
+            output.change_current_state(
+                Some(Mode {
+                    size: (1280, 720).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                Some(Scale::Fractional(1.0)),
+                None,
+            );
+            state.space.map_output(&output, (1920, 0));
+
+            state.publish_models();
+            assert_eq!(
+                (
+                    scene.get_int("present"),
+                    scene.get_int("wholeX"),
+                    scene.get_int("areaWidth")
+                ),
+                (1, 1920, 1280),
+                "the space's monitor did not reach the scene on it"
+            );
+
+            state.space.map_output(&output, (0, 0));
+            state.publish_models();
+            assert_eq!(
+                scene.get_int("wholeX"),
+                0,
+                "a moved monitor was not published"
+            );
+
+            state.space.unmap_output(&output);
+            state.publish_models();
+            assert_eq!(
+                scene.get_int("present"),
+                0,
+                "an unplugged monitor still reads present"
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
     }
 }
