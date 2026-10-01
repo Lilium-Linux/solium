@@ -336,6 +336,7 @@ impl Wake {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -354,6 +355,8 @@ mod tests {
         /// Wakes that turned a clean scene dirty.
         changed: u32,
         redraw: bool,
+        /// The clock the last wake served Qt at.
+        served: Cell<Option<Duration>>,
     }
 
     /// The compositor's clock, for every test here: one origin for the whole
@@ -362,6 +365,24 @@ mod tests {
         static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
         ORIGIN.get_or_init(Instant::now).elapsed()
     }
+
+    /// The whole milliseconds from one reading of the clock to a later one, as
+    /// `tick` and `drain` are handed them.
+    fn millis_between(from: Duration, to: Duration) -> i64 {
+        let millis = |at: Duration| i64::try_from(at.as_millis()).unwrap_or(i64::MAX);
+        millis(to) - millis(from)
+    }
+
+    /// How far into its run, in milliseconds, a linear 260 ms animation is
+    /// when it reads `permille`.
+    fn into_260_ms(permille: i32) -> i64 {
+        i64::from(permille) * 260 / 1000
+    }
+
+    /// How far an animation's first frame may be from the time since it
+    /// started: half a frame, against the frame's whole step that a start
+    /// measured from anywhere else adds or loses.
+    const HALF_FRAME_MS: i64 = 8;
 
     /// The compositor's loop with nothing in it but Qt's poll set: no clients,
     /// no input, and no frame coming, so nothing but a wake moves the
@@ -386,7 +407,11 @@ mod tests {
         let mut event_loop: EventLoop<Seen> = EventLoop::try_new().expect("an event loop");
         let mut wake = Wake::insert(
             &event_loop.handle(),
-            |_: &Seen| now(),
+            |seen: &Seen| {
+                let at = now();
+                seen.served.set(Some(at));
+                at
+            },
             |seen: &mut Seen, changed| {
                 seen.wakes += 1;
                 if changed {
@@ -668,11 +693,14 @@ mod tests {
     ///
     /// No frame is drawn for more than a second. Then a Timer fires between
     /// frames and starts a 260 ms animation, and the first frame after it is
-    /// drawn 16 ms later. That frame must show the animation a step in, not at
-    /// its end: an animation clock left at the last drawn frame hands the new
-    /// animation the whole idle gap as its first step, and a fade on a clock
-    /// that changes once a second would be over on its first frame, every
-    /// second.
+    /// drawn 16 ms later. That frame must show the animation as far in as the
+    /// time since the wake that fired the Timer, to within half a frame: an
+    /// animation clock left at the last drawn frame hands the new animation the
+    /// whole idle gap as its first step, and a fade on a clock that changes
+    /// once a second would be over on its first frame, every second. Measured
+    /// from anywhere but the wake, it is a step off: a start bounded to a frame
+    /// after the gap, rather than brought to the wake, shows a frame and a step
+    /// on the first frame (33 ms, not 16).
     #[test]
     fn an_animation_a_timer_starts_between_frames_starts_at_the_timer() {
         on_the_qt_thread(|| {
@@ -713,14 +741,19 @@ mod tests {
                 scene.get_bool("started"),
                 "the Timer never fired between frames: {seen:?}"
             );
+            // The wake that fired it is the last one, as the loop stops on it.
+            let fired = seen.served.get().expect("a wake served Qt");
             std::thread::sleep(Duration::from_millis(16));
             // The first frame after it.
-            crate::qml::tick(now());
+            let frame = now();
+            crate::qml::tick(frame);
             let permille = scene.get_int("permille");
+            let (since, shown) = (millis_between(fired, frame), into_260_ms(permille));
             assert!(
-                permille < 200,
-                "the first frame after the Timer showed a 260 ms animation {permille}/1000 of \
-                 the way through: it was handed the idle gap as its first step ({seen:?})"
+                (shown - since).abs() <= HALF_FRAME_MS,
+                "the first frame, {since} ms after the wake that fired the Timer, showed a 260 ms \
+                 animation {shown} ms in ({permille}/1000): a start at the last drawn frame is the \
+                 idle gap, one bounded to a frame before the wake is a frame more ({seen:?})"
             );
 
             drop(scene);
@@ -737,7 +770,9 @@ mod tests {
     /// already running by then. It has taken no step, though, and the last
     /// step can be long ago. Here nothing steps the clock for 300 ms, a
     /// property write starts a 260 ms animation, and the frame drawn 16 ms
-    /// after the next drain must show it a step in, not over. With no drain
+    /// after the next drain must show it as far in as the time since that
+    /// drain, to within half a frame: not over, and not a frame further on, as
+    /// a start bounded to a frame after the gap would show it. With no drain
     /// between: `an_animation_started_after_an_idle_gap_takes_a_frame_first`.
     #[test]
     fn an_animation_started_between_steps_starts_at_the_next() {
@@ -767,14 +802,18 @@ mod tests {
             crate::qml::tick(now());
             std::thread::sleep(Duration::from_millis(300));
             scene.set_bool("go", true);
-            crate::qml::drain(now(), true);
+            let drained = now();
+            crate::qml::drain(drained, true);
             std::thread::sleep(Duration::from_millis(16));
-            crate::qml::tick(now());
+            let frame = now();
+            crate::qml::tick(frame);
             let permille = scene.get_int("permille");
+            let (since, shown) = (millis_between(drained, frame), into_260_ms(permille));
             assert!(
-                permille < 200,
-                "the first frame showed a 260 ms animation, started between two steps, \
-                 {permille}/1000 of the way through: it was handed the time since the last step"
+                (shown - since).abs() <= HALF_FRAME_MS,
+                "the first frame, {since} ms after the drain, showed a 260 ms animation started \
+                 between two steps {shown} ms in ({permille}/1000): a start at the last step is \
+                 the time since it, one bounded to a frame before the drain is a frame more"
             );
 
             drop(scene);
