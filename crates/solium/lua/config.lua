@@ -1,11 +1,13 @@
--- Everything tunable, in one place.
+-- Every setting the configuration can reach, in one place.
 --
 -- Values were scattered across the layout scripts as local constants, which is
 -- hardcoding written in a scripting language. A setting nobody can find is not
--- a setting. Edit this file; nothing here needs the compositor rebuilt.
+-- a setting. Nothing here needs the compositor rebuilt.
 --
--- To change something without copying this file, write only what you want in
--- ~/.config/solium/user.lua and it is merged over these:
+-- Don't edit this file: an install replaces it, and it is also the defaults.
+-- Write only what you want changed in ~/.config/solium/user.lua
+-- ($XDG_CONFIG_HOME/solium/user.lua when that is set) and it is merged over
+-- these:
 --
 --     return {
 --         gap = 4,
@@ -16,6 +18,20 @@
 -- Nested tables merge key by key, so `tiling = { split = ... }` keeps the
 -- animations below it. Lists are replaced whole, because a list of widths with
 -- one entry changed is a different list, not a longer one.
+--
+-- Not here yet, because nothing reads them from this file
+-- ([#159](https://github.com/Lilium-Linux/solium/issues/159)):
+--
+--   * Whether focus follows the pointer, natural scrolling, and the key held
+--     to drag a window: SOLIUM_FORM_FACTOR picks all three, and
+--     SOLIUM_DRAG_MODIFIER the key alone.
+--   * The terminal `super+return` opens: SOLIUM_TERMINAL, or bind
+--     `super+return` yourself in `bindings` below.
+--   * The overview's animations, fixed in `lua/overview.lua` at 260 ms in and
+--     200 ms out.
+--   * How long a closing window takes to fade, fixed in the compositor at
+--     190 ms.
+--   * Your own fallback pointer: SOLIUM_QML_CURSOR; see `cursor` below.
 
 local defaults = {
     -- Space between windows and around the work area, in logical pixels.
@@ -50,11 +66,13 @@ local defaults = {
     --
     -- What actually draws it is `lua/wallpaper.lua` and `qml/wallpaper.qml`,
     -- and that is the more interesting part: there is no wallpaper code in the
-    -- compositor at all. It is nine lines of Lua calling `sol.surface`, which
-    -- draws any QML scene at any layer on any monitor -- so a bar, a dock or a
-    -- heads-up display is the same call with a different layer. Copy
+    -- compositor at all. It is a short script around one `sol.surface` call,
+    -- which draws any QML scene at any layer on any monitor -- so a bar, a
+    -- dock or a heads-up display is the same call with a different layer. Copy
     -- `qml/wallpaper.qml` to ~/.config/solium/qml/ and the background can be a
-    -- gradient, a shader or a clock. `super+shift+r` reloads it.
+    -- gradient, a shader or a clock. `super+shift+r` reloads it. A copy that
+    -- still shows `source` needs the picture named by its path here: the
+    -- shipped one is found beside the shipped QML, not beside yours.
     wallpaper = "solium",
 
     -- A shell: the bar, the dock, the launcher.
@@ -75,6 +93,12 @@ local defaults = {
     -- `super+shift+r` picks up a change. See docs/shell-boundary.md for
     -- installing one and for what the compositor provides to a shell it
     -- hosts.
+    --
+    -- What a hosted shell does not have yet: keyboard focus, or any button
+    -- but the left one -- a right or middle press arrives as a left one, and
+    -- the wheel not at all (#163); room of its own, since a bar reserves none
+    -- and windows are placed under it (#162); and a scene per monitor, or
+    -- what is on the others (#161).
     --
     -- A layer-shell bar (Waybar and the like) needs nothing here: it is an
     -- ordinary client, and you start it as one.
@@ -98,7 +122,7 @@ local defaults = {
     --     },
     --
     --   layout    a comma-separated list. The first is the one you start in;
-    --            `solium --check` prints what the session ended up with.
+    --            the log line `keyboard` says what the session ended up with.
     --   variant   one per layout, in the same order, and blank for "plain".
     --            "us,ua" with ",dvorak" is US ordinary and Ukrainian Dvorak.
     --   options   xkb options, comma separated. `grp:` ones switch layout and
@@ -107,6 +131,10 @@ local defaults = {
     --            key, which is the nearest thing to an input method until
     --            #26 lands.
     --   model     rarely worth setting; "pc105" is assumed by the rules.
+    --   rules     the xkb rules, rarer still. Blank, like the others, falls
+    --            back to the environment.
+    --   active    which of the layouts is live, counting from 1. A number past
+    --            the last layout is warned about and changes nothing.
     --
     -- The repeat rate is the compositor's own, not xkb's, so no environment
     -- variable reaches it and this is the only place it can be set:
@@ -114,15 +142,18 @@ local defaults = {
     --   repeat_rate    repeats per second after the delay. 25 is the default.
     --   repeat_delay   milliseconds held before repeating starts. 200.
     --
-    -- Switching layout from a binding is the same function:
+    -- `super+shift+k` cycles the layouts, and it is one call of the same
+    -- function, so a binding of your own can switch them the same way:
     --
-    --     sol.bind("super+space", function()
+    --     sol.bind("super+shift+k", function()
     --         local kb = sol.keyboard()
     --         sol.keyboard{ active = kb.active % #kb.layouts + 1 }
     --     end)
     --
-    -- and `sol.keyboard()` is also how a shell draws a layout indicator: it
-    -- returns the layout names, which one is active, and the repeat settings.
+    -- `sol.keyboard()` with no argument returns the layout names, which one is
+    -- active, and the repeat settings. Nothing tells a script when the layout
+    -- changes, and a hosted shell cannot call it, so a layout indicator can
+    -- only be updated by the binding that switches the layout.
     keyboard = {},
 
     -- The keys, and what they do.
@@ -161,9 +192,9 @@ local defaults = {
     --
     -- **A binding here replaces a shipped one on the same combination, rather
     -- than being an error.** Two reasons, the second deciding. The first is
-    -- consistency: `sol.bind` has always let the later call win -- that is how
-    -- `init.lua` and `scrolling.lua` coexist -- so a clash refusing *here*
-    -- would make this table alone behave unlike the primitive underneath it.
+    -- consistency: `sol.bind` has always let the later call win, so a clash
+    -- refusing *here* would make this table alone behave unlike the primitive
+    -- underneath it.
     -- The second is that refusing would permit adding a binding and forbid
     -- changing one, and changing one is what people come here to do: `super+q`
     -- closing a window is a choice, not a law, and "you may not rebind it"
@@ -185,7 +216,12 @@ local defaults = {
     -- there is no list of valid names to compare yours against. `super+whoops`
     -- binds successfully and never fires. `--check` prints what was bound,
     -- which is the only honest answer available -- read it and look for the
-    -- key you meant.
+    -- key you meant. The documentation's Key bindings page lists every
+    -- binding that ships, and what each does.
+    --
+    -- `super+return` opens SOLIUM_TERMINAL, or else the first terminal that
+    -- is installed. There is no setting for it yet (#159), so to choose one
+    -- here, bind the key: `["super+return"] = "foot"`.
     --
     -- The keys that get around a desktop by direction (#150) are replaced here
     -- like any other. They ship in `direction.lua` and `modes.lua`:
@@ -236,11 +272,13 @@ local defaults = {
     -- logical pixels and no theme at all.
     --
     -- **No theme is not a missing pointer.** Solium draws its own from
-    -- `qml/cursor.qml`, through the same design system as the window frames,
-    -- and that is what you get with nothing set here, with nothing in the
-    -- environment, or with a theme named that turns out not to be installed --
-    -- the log says which. Copy `qml/cursor.qml` into ~/.config/solium/qml/ to
-    -- change it.
+    -- `qml/cursor.qml`, and that is what you get with nothing set here, with
+    -- nothing in the environment, or with a theme named that turns out not to
+    -- be installed -- the log says which. It is a white arrow with a dark
+    -- outline, in fixed colours rather than the theme's, because a pointer
+    -- has to read over whatever a client drew. A copy of `cursor.qml` in
+    -- ~/.config/solium/qml/ is not read: SOLIUM_QML_CURSOR=<file> draws the
+    -- pointer from your own file, and a setting for it waits on #159.
     --
     -- A shape your theme does *not* have is the one case that does not reach
     -- it. Applications name the cursor they want -- an I-beam over text, a
@@ -403,10 +441,18 @@ local defaults = {
     --                                     measured.
     --
     --                                     Fractional values work; between 0.5
-    --                                     and 8. Anything else is refused as
+    --                                     and 8. Anything else is warned about
+    --                                     and the scale worked out instead, as
     --                                     far likelier a typo than a request.
     --
-    -- `super+shift+r` applies a change without ending the session.
+    -- `super+shift+r` applies a change to the placement keys, `scale`,
+    -- `primary` and `enabled` without ending the session. `mode`, `vrr` and
+    -- `transform` are read when a monitor is first lit, so on one already lit
+    -- they wait until it is next plugged in, or a reload with
+    -- `enabled = false` and another with it back.
+    --
+    -- A monitor plugged in while the session runs is driven with its entry
+    -- here, and one unplugged leaves its windows on the monitors that remain.
     --
     -- A monitor can also be turned *off* without being taken out: it keeps
     -- its place, its work area and its windows, and only the display goes
@@ -468,11 +514,13 @@ local defaults = {
     -- Portals, programs D-Bus starts on demand, ~/.config/autostart and user
     -- services written for "a graphical session" are all started by systemd
     -- or by D-Bus, and they find the display only if they are told where it
-    -- is. Read when the session starts. `systemd` and `autostart` count only
-    -- when Solium is started as the session (the session file's
-    -- `solium-session`); `solium --tty` by hand and a nested run leave the
-    -- session around them alone. The tests
-    -- are in `session.rs`: `a_reload_leaves_the_session_as_it_began`,
+    -- is. Read when the session starts, so a reload does not change it.
+    -- `systemd` and `autostart` count only when Solium is started as the
+    -- session: the session file's `solium-session`, which runs
+    -- `solium --tty --session`. `solium --tty` by hand and a nested run leave
+    -- the session around them alone, unless SOLIUM_SESSION_BUS names a bus to
+    -- tell instead. `stop_timeout` counts however Solium was started. The
+    -- tests are in `session.rs`: `a_reload_leaves_the_session_as_it_began`,
     -- `a_manual_tty_start_tells_nobody`,
     -- `a_nested_run_tells_nobody_unless_it_is_given_a_bus`,
     -- `the_target_is_stopped_and_the_variables_unset_on_exit`,
@@ -520,10 +568,22 @@ local defaults = {
     --   "proximity"  a border that answers the pointer arriving and leaving
     --   "reveal"     a bar that slides out of the window's edge on approach
     --   "pulse"      a bar with an animation running in it
+    --   "rounded"    the window's own corners cut round, with a bar that
+    --                fills the two notches at the top
+    --   "flush"      a window with a square top and a rounded bar sitting
+    --                flush on it
+    --   "shadow"     a drop shadow behind the window, from stacked
+    --                rectangles rather than a blur
     --   "none"       no frame at all: no bar, no border, and no QML scene
     --                built per window. For a desktop with no window furniture,
     --                or a tiling layout whose own bar makes a titlebar
     --                redundant.
+    --
+    -- "rounded" and "flush" cost one extra pass per window on every frame it
+    -- is drawn: the client is drawn into a texture first and back through a
+    -- fragment program that cuts its corners. The panes README,
+    -- `qml/panes/README.md`, has what each style is made of and costs.
+    -- SOLIUM_PANE overrides this, for one run.
     --
     -- A single QML file still works and is still called a decoration: drop one
     -- in ~/.config/solium/qml/decorations and name it here. It is one layer in
@@ -849,6 +909,9 @@ local defaults = {
         -- The arrangement decides which way a switch travels, and that is the
         -- whole difference between the three: a workspace to the right of this
         -- one enters from the right, because that is where it is.
+        --
+        -- It also decides how many there are: `columns` in a row, `rows` in a
+        -- column, `columns` times `rows` in a grid -- so four, as shipped.
         arrangement = "horizontal",
         columns = 4,
         rows = 2,
