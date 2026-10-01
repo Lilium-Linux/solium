@@ -87,11 +87,10 @@ local defaults = {
     -- `false`, the default, hosts none. `~` is expanded. It is drawn once on
     -- every monitor, over the windows, across the whole monitor, and each
     -- instance reads its own monitor as `Solium.monitor`. `on = "primary"`,
-    -- or a connector name, draws one instead. It takes the pointer: every
-    -- press and hover on its monitor is the shell's, however little of it
-    -- the shell draws on, so while one is hosted the windows there cannot be
-    -- clicked, focused or dragged with the mouse (#173). See
-    -- `the_shell_scene_is_read_from_the_configuration` and
+    -- or a connector name, draws one instead. It takes the pointer only
+    -- where its items take input, and the windows under it get the rest
+    -- (`a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`).
+    -- See `the_shell_scene_is_read_from_the_configuration` and
     -- `the_shell_is_on_every_monitor_unless_the_configuration_names_one`.
     -- SOLIUM_SHELL_SCENE overrides this, because that is set per run.
     -- `super+shift+r` picks up a change. See docs/shell-boundary.md for

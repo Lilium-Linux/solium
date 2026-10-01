@@ -329,8 +329,12 @@ scene of its own, built when the surface is declared or the monitor arrives and
 dropped when the monitor goes, and inside it `Solium.monitor` is that monitor.
 `sol.surface(name, false)` removes one.
 
-`interactive = true` lets the pointer reach it. The scene sets an `action`
-string, the compositor takes it, and whoever is listening is told:
+`interactive = true` lets the pointer reach it, where its items take input:
+a `MouseArea`, a pointer handler, or an item marked `Solium.input: true`.
+Everywhere else the pointer goes to what is under it
+(`state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`).
+The scene sets an `action` string, the compositor takes it, and whoever is
+listening is told:
 
 ```lua
 sol.surface("panel", { scene = "panel.qml", layer = "overlay",

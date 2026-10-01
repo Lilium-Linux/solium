@@ -155,6 +155,25 @@ takes its instance with it
 (`scripted::tests::an_instance_goes_with_its_monitor_and_comes_with_a_new_one`).
 It reads where it is from `Solium.monitor`, below; `screenInfo` is gone.
 
+**Clickable only where it takes input.** The compositor asks the live item
+tree under the pointer, so a point is the scene's only where a visible item
+takes input: a `MouseArea`, a pointer handler, or an item marked
+`Solium.input: true`. `Solium.input: "hover"` takes the pointer's motion and
+leaves presses to what is under it, which is how an edge strip reveals a
+hidden dock; `Solium.input: false` takes an item out. An item's shape counts,
+through its `containmentMask`, so a rounded popup's corners pass clicks
+through; a mask written in QML has to be typed,
+`function contains(point: point): bool`, or Qt ignores it, and it answers for
+the whole item, its bounds too. Everywhere else the window under the shell
+gets the press, and where the scene takes a press, the window under it does
+not have the pointer, nor the keyboard when focus follows the mouse. A press
+the scene took is its until every button is up, wherever the pointer goes
+meanwhile
+(`state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`,
+`state::tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`,
+`state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`,
+`qml::hosted::tests::the_item_tree_decides_what_a_point_claims`).
+
 **The compositor's clock and frames.** Its animations advance on the same
 clock as every window transform, a running animation asks for the next frame,
 and the scene is redrawn only when Qt says it changed. Qt is served between
@@ -198,13 +217,6 @@ workspaces, any binding — a hosted shell can ask for this way.
 
 Said plainly, because a shell that loads is easy to mistake for one that works:
 
-- **No input region: the scene takes every press and hover on its monitor.**
-  The pointer is claimed anywhere inside the scene's area, which is the whole
-  of its monitor, not only where the scene draws — a 36-pixel bar claims the
-  screen under it too. So while a shell is hosted, the windows on a monitor it
-  is on cannot be clicked, focused with the pointer or
-  dragged with `super`. What it wants is an input region: a point claimed only
-  where the scene has an item under it.
 - **No reserved space, and no placement.** The scene fills its whole
   monitor, and a hosted bar does not take its strip out of the work area, so
   windows are placed under it.
