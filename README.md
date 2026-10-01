@@ -32,6 +32,9 @@ happened yet. What stands in the way is the
   ([#161], [#166]).
 - Suspend and resume have never been tested ([#64]), and a session on the
   hardware sometimes starts with no input devices and stops itself ([#48]).
+- Nothing has run unattended for hours on the hardware ([#65]), and turning
+  screens off, which happens by default after ten minutes, has never been
+  tried there ([#54]).
 - There is no explicit sync, so Vulkan and NVIDIA clients can stutter ([#59]).
 - There are no touchpad settings, so no tap-to-click ([#157]); no volume,
   brightness, media or screenshot keys by default ([#151]); and logind's lock
@@ -65,14 +68,14 @@ suite.
   default with a software fallback ([#147]), and cursor themes and the shapes
   clients ask for ([#81], [#24]).
 - **Shells.** `shell = { scene = … }` hosts one in the compositor's own QML
-  engine, and any layer-shell client works too, with frame callbacks a bar or
-  a locker can rely on ([#149]); a hosted scene's timers fire on an idle
-  desktop ([#164]).
+  engine, and any layer-shell client works too; bars and lockers both get the
+  frame callbacks they rely on ([#149]), and a hosted scene's timers fire on an
+  idle desktop ([#164]).
 - **Monitors.** Several at once, each at its own refresh rate, arranged from
   the configuration or guessed; plugged in and unplugged while the session runs
   ([#43]); scaled, worked out from the panel or set. Screens go dark after ten
   minutes with nobody at the machine, and `wlopm` and `swayidle` can turn them
-  off too ([#54]).
+  off too ([#54]), though the hardware half of that has never been run.
 - **Input.** Keyboard layouts, with bindings that keep working under a
   non-Latin one ([#132]) and on shifted keys ([#121]); touch screens.
 - **The lock and idle.** The lock fails safe: the session is locked before the
@@ -276,9 +279,9 @@ return {
 ```
 
 Press `super+shift+r` and every open window is framed again, with its
-titlebar down the left side. `solium --check` says, without starting anything, whether
-the configuration would load, which bindings it made, and which settings it
-sets that nothing reads, with what you probably meant. A reload whose
+titlebar down the left side. `solium --check` says, without starting anything,
+whether the configuration would load, which bindings it made, and which
+settings it sets that nothing reads, with what you probably meant. A reload whose
 configuration fails to load keeps the session as it was, and says why in the
 log:
 `~/.local/state/solium/session.log` for a session from the login screen or
@@ -466,6 +469,7 @@ other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 [#58]: https://github.com/Lilium-Linux/solium/issues/58
 [#59]: https://github.com/Lilium-Linux/solium/issues/59
 [#64]: https://github.com/Lilium-Linux/solium/issues/64
+[#65]: https://github.com/Lilium-Linux/solium/issues/65
 [#66]: https://github.com/Lilium-Linux/solium/issues/66
 [#67]: https://github.com/Lilium-Linux/solium/issues/67
 [#69]: https://github.com/Lilium-Linux/solium/issues/69
