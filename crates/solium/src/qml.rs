@@ -26,6 +26,7 @@
 pub(crate) mod paint;
 pub(crate) mod renderer;
 mod target;
+pub(crate) mod wake;
 
 /// The largest a scene may be, per side.
 ///
@@ -111,6 +112,19 @@ mod ffi {
             scale: f64,
         );
         pub(super) fn solium_qml_tick(elapsed_ms: c_longlong);
+        pub(super) fn solium_qml_poll_set(
+            timeout_ms: *mut c_int,
+            fds: *mut super::PollFd,
+            capacity: c_int,
+        ) -> c_int;
+        pub(super) fn solium_qml_animating() -> c_int;
+        pub(super) fn solium_qml_drain(elapsed_ms: c_longlong, advance: c_int) -> c_int;
+        #[cfg(test)]
+        pub(super) fn solium_qml_scene_watch_for_test(
+            scene: *mut Scene,
+            fd: c_int,
+            name: *const c_char,
+        ) -> c_int;
         pub(super) fn solium_qml_scene_render(scene: *mut Scene) -> c_int;
         pub(super) fn solium_qml_scene_pixels(scene: *const Scene, stride: *mut c_int)
         -> *const u8;
@@ -731,15 +745,15 @@ fn keep_qt_off_the_hardware(node: &Path) -> Result<()> {
         // SIGTERM, SIGCONT and SIGTSTP. They do not exit; each writes a byte to
         // a socketpair, and the `_exit(1)` happens later, wherever Qt's event
         // queue is next drained — for us that is `qml::tick`'s
-        // `processEvents`, reached only from `render::prepare`, which both
-        // backends gate on `redraw || animating`. So a SIGTERM to a compositor
-        // with nothing to draw is not handled and not fatal; it just sits
-        // there, and the next thing that wants a frame turns it into an
-        // `_exit(1)` from inside a render. That skips every Rust destructor on
-        // the way out — the libseat session, the DRM master release, the VT
-        // restore — and whether it happens at all depends on whether anything
-        // asked for a frame afterwards. A compositor that dies without putting
-        // the VT back is how a TTY session ends in a reboot.
+        // `processEvents` on a drawn frame, or `qml::drain`, which the event
+        // loop runs between frames as soon as a descriptor Qt watches with a
+        // `QSocketNotifier` is ready
+        // (`wake::tests::a_ready_descriptor_reaches_its_scene_with_no_frame_drawn`),
+        // and QFbVtHandler watches that socketpair with one. So a SIGTERM
+        // would be an `_exit(1)` from inside the event loop. That skips every Rust destructor on the way
+        // out — the libseat session, the DRM master release, the VT restore.
+        // A compositor that dies without putting the VT back is how a TTY
+        // session ends in a reboot.
         //
         // Verified against libQt6EglFSDeviceIntegration.so.6.11.1: this string
         // is read at 0x12334 and gates the four `sigaction` calls at
@@ -891,6 +905,72 @@ pub(crate) fn tick(elapsed: Duration) {
     // SAFETY: the host is started before any scene exists, and this touches
     // only process-global state.
     unsafe { ffi::solium_qml_tick(millis) }
+}
+
+/// One descriptor Qt waits on, and for what. `SoliumQmlPollFd` in
+/// `qml/host.h`, which is GLib's `GPollFD`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PollFd {
+    pub(crate) fd: c_int,
+    /// `G_IO_IN`, `G_IO_PRI` and `G_IO_OUT`, which on Linux are `poll`'s bits.
+    /// `wake::tests::a_ready_descriptor_reaches_its_scene_with_no_frame_drawn`.
+    pub(crate) events: u16,
+    _revents: u16,
+}
+
+/// What Qt would wait for if it ran its own loop: the descriptors, written
+/// into `fds`, and how long until its next timer is due, `None` when none is.
+/// See `solium_qml_poll_set` in `qml/host.h`, and
+/// `wake::tests::a_ready_descriptor_reaches_its_scene_with_no_frame_drawn`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn poll_set(fds: &mut Vec<PollFd>) -> Option<Duration> {
+    let mut timeout: c_int = -1;
+    loop {
+        let capacity = c_int::try_from(fds.capacity()).unwrap_or(c_int::MAX);
+        // SAFETY: `fds` has room for `capacity` entries, and the host writes
+        // no more than that; touches only process-global state, as `tick`
+        // does.
+        let count =
+            unsafe { ffi::solium_qml_poll_set(&raw mut timeout, fds.as_mut_ptr(), capacity) };
+        let Ok(count) = usize::try_from(count) else {
+            fds.clear();
+            return None;
+        };
+        if count <= fds.capacity() {
+            // SAFETY: the host wrote the first `count` entries.
+            unsafe { fds.set_len(count) };
+            break;
+        }
+        fds.clear();
+        fds.reserve(count);
+    }
+    u64::try_from(timeout).ok().map(Duration::from_millis)
+}
+
+/// Whether anything in the process is on the animation clock, drawn or not
+/// and whoever holds it: whether Qt's animation driver is running. See
+/// `solium_qml_animating` in `qml/host.h`;
+/// `wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`,
+/// `wake::tests::a_singleton_timer_beside_a_parentless_animation_fires_with_no_frame_drawn`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn animating() -> bool {
+    // SAFETY: touches only process-global state, as `tick` does.
+    unsafe { ffi::solium_qml_animating() != 0 }
+}
+
+/// Serve Qt between frames, on the clock [`tick`] advances, and say whether
+/// that changed a scene: bring the clock to `elapsed`, deliver what Qt has
+/// due, and, when `advance`, step every animation as a frame would. Pass
+/// `false` while a frame is coming. See `solium_qml_drain` in `qml/host.h`;
+/// `wake::tests::a_timer_fires_while_no_frame_is_drawn`, and on the GPU path
+/// `dev/wirecheck`'s "a Timer on a GPU host, between frames".
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn drain(elapsed: Duration, advance: bool) -> bool {
+    no_frame_in_flight("qml::drain");
+    let millis = c_longlong::try_from(elapsed.as_millis()).unwrap_or(c_longlong::MAX);
+    // SAFETY: touches only process-global state, as `tick` does.
+    unsafe { ffi::solium_qml_drain(millis, c_int::from(advance)) != 0 }
 }
 
 /// Matches `SOLIUM_QML_UNCHANGED` in `qml/host.h`.
@@ -1342,10 +1422,10 @@ impl Scene {
     /// two nearby values spends several ticks landing on the number it already
     /// had. Both are clean ticks in the middle of a live animation.
     ///
-    /// Per scene, and deliberately not `QAnimationDriver::isRunning()` — which
-    /// is process-wide *and* reads true for ever once anything has animated.
-    /// `qml/host.cpp`'s `solium_qml_scene_animating` has the measurements and
-    /// the line of Qt that does it.
+    /// Per scene, and deliberately not `QAnimationDriver::isRunning()`, which
+    /// is process-wide: one animation anywhere would keep every scene drawing.
+    /// `qml/host.cpp`'s `solium_qml_scene_animating` has the measurements, and
+    /// `dev/wirecheck`'s scene case the proof.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn animation_in_flight(&self) -> bool {
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
@@ -1474,6 +1554,26 @@ impl Scene {
         };
         // SAFETY: `name` outlives the call.
         unsafe { ffi::solium_qml_scene_get_bool(self.scene, name.as_ptr()) != 0 }
+    }
+
+    /// Watch `fd` from inside Qt, with a `QSocketNotifier` this scene owns:
+    /// each read adds the bytes it got to the int property `name`. `fd` has
+    /// to stay open until the scene is dropped. See
+    /// `solium_qml_scene_watch_for_test` in `qml/host.h`, and
+    /// `wake::tests::a_ready_descriptor_reaches_its_scene_with_no_frame_drawn`.
+    #[cfg(test)]
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn watch_for_test(&mut self, fd: std::os::fd::BorrowedFd<'_>, name: &str) -> bool {
+        use std::os::fd::AsRawFd as _;
+
+        let Ok(name) = CString::new(name) else {
+            return false;
+        };
+        // SAFETY: the scene is live for as long as `self`, and `name` outlives
+        // the call; the host keeps only the descriptor's number.
+        unsafe {
+            ffi::solium_qml_scene_watch_for_test(self.scene, fd.as_raw_fd(), name.as_ptr()) != 0
+        }
     }
 
     /// How many layers the style at this scene's root declares.

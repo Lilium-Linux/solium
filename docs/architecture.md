@@ -284,6 +284,8 @@ with no visible window, and animations driven by **the compositor's clock**
 through an animation driver the render loop advances. That last part is not a
 detail — QML animating off Qt's own timer would drift against every window
 transform beside it, which is the same mistake as having two animation clocks.
+A QML `Timer` rides that clock too whenever anything else animates, so between
+frames the event loop that serves Qt advances it, rather than going around it.
 
 No Qt QPA plugin available here will adopt the compositor's EGL context, so
 the GPU route runs the other way round: the compositor allocates a buffer

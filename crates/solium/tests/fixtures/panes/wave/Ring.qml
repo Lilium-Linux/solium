@@ -73,11 +73,10 @@ Item {
     // branch, so with levels present it is not even a binding dependency and
     // the geometry is rebuilt when the music changes rather than every frame.
     //
-    // It runs anyway, for two reasons. It is what the sine falls back *to*
-    // when no helper is running. And a `Timer` in a settled scene never fires
-    // at all: the compositor drains Qt's event queue inside `solium_qml_tick`,
-    // which only runs on a frame it draws, so without something animating the
-    // poll below would stop and the audio with it.
+    // It runs anyway, because it is what the sine falls back *to* when no
+    // helper is running. The poll below does not need it: a `Timer` fires
+    // between frames on its own (`qml::wake`,
+    // `a_timer_fires_while_no_frame_is_drawn`).
     property real phase: 0
     NumberAnimation on phase {
         running: ring.focused

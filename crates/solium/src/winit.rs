@@ -116,6 +116,15 @@ pub(crate) fn run() -> Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("inserting the display source: {e}"))?;
 
+    // Qt's timers, between frames. See `qml::wake`.
+    let mut qt = crate::qml::wake::Wake::insert(
+        &event_loop.handle(),
+        |state: &Solium| state.clock.now(),
+        |state: &mut Solium, changed| {
+            state.redraw |= changed;
+        },
+    )?;
+
     // The app_id is stable and specific so the host compositor can be told
     // where to put this window and to leave the focus alone -- developing a
     // compositor should not steal focus from whatever is already running.
@@ -543,23 +552,10 @@ pub(crate) fn run() -> Result<()> {
         let size = backend.window_size();
         let damage = Rectangle::from_size(size);
 
-        // What each monitor does this frame, in `screens` order. Nested, a
-        // monitor never reports `Blanked`: the black frame is the whole of
-        // going off, so it goes from `Blank` straight to `Dark`.
+        // What each monitor does this frame, in `screens` order.
         let steps: Vec<(Option<Output>, Step)> = screens
             .iter()
-            .map(|screen| {
-                let output = state.output_for(*screen);
-                let step = output.as_ref().map_or(Step::Draw, |output| {
-                    let lit = if dark.contains(output) {
-                        Lit::Dark
-                    } else {
-                        Lit::On
-                    };
-                    state.power_step(output, lit)
-                });
-                (output, step)
-            })
+            .map(|screen| step_of(&state, &dark, *screen))
             .collect();
         // A monitor going black or coming back needs a frame whatever else
         // does, and one drawn in full; every one resting needs none at all.
@@ -996,6 +992,21 @@ pub(crate) fn run() -> Result<()> {
         } else {
             Duration::from_millis(16)
         };
+        // Whether the next frame will advance QML's clock, asked with this one
+        // done. `qml::wake::tests::a_frame_is_coming_only_if_a_monitor_will_draw_it`.
+        let next: Vec<Step> = screens
+            .iter()
+            .map(|screen| step_of(&state, &dark, *screen).1)
+            .collect();
+        let wanted = state.redraw
+            || state.animating
+            || next
+                .iter()
+                .any(|step| matches!(step, Step::Blank | Step::Wake));
+        qt.arm(crate::qml::wake::frame_coming(
+            wanted,
+            next.into_iter().map(Some),
+        ));
         if event_loop.dispatch(Some(timeout), &mut state).is_err() {
             break;
         }
@@ -1003,6 +1014,27 @@ pub(crate) fn run() -> Result<()> {
 
     state.session.end();
     Ok(())
+}
+
+/// What the monitor at `screen` does this frame, given the monitors this
+/// backend has made `dark`. Nested, a monitor never reports `Blanked`: the
+/// black frame is the whole of going off, so it goes from `Blank` straight to
+/// `Dark`.
+fn step_of(
+    state: &Solium,
+    dark: &[Output],
+    screen: Rectangle<i32, smithay::utils::Logical>,
+) -> (Option<Output>, Step) {
+    let output = state.output_for(screen);
+    let step = output.as_ref().map_or(Step::Draw, |output| {
+        let lit = if dark.contains(output) {
+            Lit::Dark
+        } else {
+            Lit::On
+        };
+        state.power_step(output, lit)
+    });
+    (output, step)
 }
 
 /// How long one frame of an output lasts. Refresh is in millihertz.

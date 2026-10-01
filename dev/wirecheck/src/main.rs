@@ -76,6 +76,9 @@ unsafe extern "C" {
     fn solium_qml_scene_free(scene: *mut c_void);
     fn solium_qml_scene_animating(scene: *const c_void) -> c_int;
     fn solium_qml_tick(elapsed_ms: i64);
+    fn solium_qml_next_due_ms() -> c_int;
+    fn solium_qml_drain(elapsed_ms: i64, advance: c_int) -> c_int;
+    fn solium_qml_animating() -> c_int;
 
     fn wirecheck_belief_names_scene(scene: *mut c_void) -> c_int;
     fn wirecheck_egl_agrees_with(scene: *mut c_void) -> c_int;
@@ -1022,21 +1025,22 @@ fn animating(scene: *mut c_void) -> bool {
 /// Qt's contract for `QAnimationDriver::elapsed()` is "the number of
 /// milliseconds since the animations was started" -- its own driver returns
 /// `d->running ? d->timer.elapsed() : 0`, restarted inside `start()`. It relies
-/// on that: when the process goes from no animations to one,
-/// `QUnifiedTimer::startTimers` zeroes `lastTick` and `driverStartTime` (qtbase
-/// v6.11.2, `src/corelib/animation/qabstractanimation.cpp:378-389`), so the
-/// first delta a brand new animation is given is whatever `elapsed()` reads
-/// right then. A driver reporting the compositor's uptime hands it the whole
-/// uptime, and any animation shorter than the session is over before its first
-/// drawn frame.
+/// on that: when the driver starts, `QUnifiedTimer::startAnimationDriver` takes
+/// `driverStartTime` from Qt's own clock and adds `elapsed()` to it from then
+/// on (qtbase v6.11.2, `src/corelib/animation/qabstractanimation.cpp:242-266`),
+/// so the first delta a brand new animation is given is whatever `elapsed()`
+/// reads right then. A driver reporting the compositor's uptime hands it the
+/// whole uptime, and any animation shorter than the session is over before its
+/// first drawn frame.
 ///
 /// Which is why this has to run **first**, before any other scene exists. The
-/// zeroing happens only on the empty-to-non-empty edge, and `quadrants.qml`'s
-/// `Animation.Infinite` holds the registry open from the moment it is built
-/// until the process exits -- so on any later line the reset never happens, the
-/// deltas are all 16ms, and this case would pass with the defect present. The
-/// precondition is asserted through `wirecheck_anything_animating` rather than
-/// left to this comment.
+/// driver starts only on the edge from nothing on the clock to something --
+/// host.cpp keeps a pause registered so that it stops at all -- and
+/// `quadrants.qml`'s `Animation.Infinite` keeps it running from the moment it
+/// is built until the process exits. On any later line the driver never
+/// starts, the deltas are all 16ms, and this case would pass with the defect
+/// present. The precondition, a stopped driver, is asserted through
+/// `wirecheck_anything_animating` rather than left to this comment.
 ///
 /// The assertion is that the value passes *through the middle*. Not that it
 /// reaches its end -- it does that either way, instantly, which is the bug --
@@ -1106,9 +1110,9 @@ fn appear_animation(
     if animating(scene) || unsafe { wirecheck_anything_animating() } != 0 {
         return Err(anyhow!(
             "something in this process is already animating before the appear case writes \
-             anything. Qt zeroes its animation reference only on the edge from no animations \
-             to one, so with the registry already open this case cannot fail however broken \
-             the clock is. A scene built ahead of this one is the way that happens"
+             anything. Qt takes the driver's clock into its own only when the driver starts, \
+             so with it already running this case cannot fail however broken the clock is. \
+             A scene built ahead of this one is the way that happens"
         ));
     }
 
@@ -1158,6 +1162,175 @@ fn appear_animation(
         ));
     }
     Ok((scene, buffer))
+}
+
+/// **A `Timer` on a GPU host fires between frames**, the way `qml::wake`
+/// serves one: Qt's own deadline from `solium_qml_next_due_ms`, then
+/// `solium_qml_drain` on the compositor's clock, with no `solium_qml_tick` and
+/// no render in between.
+///
+/// Three things are asserted. The Timer fires. The drain reports the scene it
+/// changed, so the compositor would draw it. And the compositor's EGL context
+/// is still current after every drain: the drain runs from the event loop with
+/// the compositor holding the thread, and a drain that took it would leave the
+/// next frame's GL going nowhere.
+///
+/// After the appear case, which needs a process with the driver stopped, and
+/// before `quadrants.qml`, whose endless animation puts every Timer on the
+/// animation driver for the rest of the run: `timer_beside_an_animation` runs
+/// this scene again there. The Timer is stopped again before returning, and
+/// the scene is kept for the same reason the appear case keeps its own.
+fn timer_between_frames(
+    gbm: &GbmDevice<DrmDeviceFd>,
+    renderer: &mut GlesRenderer,
+    clock: &mut i64,
+) -> Result<(*mut c_void, target::Target)> {
+    println!("\n=== a Timer on a GPU host, between frames ===");
+    const SIZE: i32 = 16;
+    let buffer = target::allocate(gbm, SIZE, SIZE).context("the timer scene's buffer")?;
+    let (fd, stride, modifier, fourcc) = buffer.as_ffi().context("as_ffi")?;
+    let path = CString::new(
+        repo()
+            .join("dev/wirecheck/timer.qml")
+            .as_os_str()
+            .as_encoded_bytes(),
+    )?;
+    let scene = unsafe {
+        solium_qml_scene_new_gpu(
+            path.as_ptr(),
+            SIZE,
+            SIZE,
+            fd,
+            stride,
+            modifier,
+            fourcc,
+            std::ptr::null(),
+        )
+    };
+    restore(renderer)?;
+    if scene.is_null() {
+        return Err(anyhow!("a GPU host could not build dev/wirecheck/timer.qml"));
+    }
+    // Drawn once, so the scene is clean and a change is a change.
+    let mut fence: c_int = -1;
+    if unsafe { solium_qml_scene_render_gpu(scene, &raw mut fence) } != 1 {
+        return Err(anyhow!("the timer scene's first render failed"));
+    }
+    restore(renderer)?;
+    if fence >= 0 {
+        wait_for(renderer, unsafe { OwnedFd::from_raw_fd(fence) })?;
+    }
+
+    let window = std::time::Duration::from_millis(600);
+    let started = std::time::Instant::now();
+    let from = *clock;
+    let (mut drains, mut changed) = (0_u32, 0_u32);
+    loop {
+        let left = window.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        let due = unsafe { solium_qml_next_due_ms() };
+        let wait = u64::try_from(due)
+            .map(std::time::Duration::from_millis)
+            .map_or(left, |due| due.min(left));
+        std::thread::sleep(wait);
+        *clock = from + i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        if unsafe { solium_qml_drain(*clock, 1) } != 0 {
+            changed += 1;
+        }
+        drains += 1;
+        if !renderer.egl_context().is_current() {
+            return Err(anyhow!(
+                "solium_qml_drain took the compositor's EGL context off the thread: the next \
+                 frame's GL would go to no context at all, which on EGL is not an error"
+            ));
+        }
+    }
+    let fired = unsafe { solium_qml_scene_get_int(scene, c"fired".as_ptr()) };
+    println!(
+        "  {drains} drains in {}ms, {changed} of them found the scene clean and changed it \
+         (nothing redraws it here); the 50ms Timer fired {fired} times; our context \
+         current after every one",
+        window.as_millis()
+    );
+    if fired < 6 {
+        return Err(anyhow!(
+            "a 50ms Timer fired {fired} times in {}ms with no frame drawn",
+            window.as_millis()
+        ));
+    }
+    if changed == 0 {
+        return Err(anyhow!(
+            "the Timer recoloured the scene {fired} times and no drain said so, so the \
+             compositor would never draw it"
+        ));
+    }
+
+    unsafe { solium_qml_scene_set_bool(scene, c"ticking".as_ptr(), 0) };
+    unsafe { solium_qml_drain(*clock, 1) };
+    restore(renderer)?;
+    Ok((scene, buffer))
+}
+
+/// **A `Timer` beside an animation no frame draws, on a GPU host**, served the
+/// way `qml::wake` serves it: while any animation runs, every Timer is on the
+/// animation driver, so between frames the wake advances the compositor's
+/// clock a frame at a time with `solium_qml_drain`, and nothing renders.
+///
+/// Run with `quadrants.qml`'s endless animation alive, which is asserted
+/// rather than assumed, on `timer_between_frames`' scene started again. The
+/// Timer must fire, and the compositor's EGL context must still be current
+/// after every drain: advancing animations is property writes and nothing
+/// else, and a drain that reached GL would leave the next frame's going
+/// nowhere. Stopped again before returning, for the cases after it.
+fn timer_beside_an_animation(
+    renderer: &mut GlesRenderer,
+    scene: *mut c_void,
+    clock: &mut i64,
+) -> Result<()> {
+    println!("\n=== a Timer beside an animation no frame draws, on a GPU host ===");
+    unsafe { solium_qml_scene_set_bool(scene, c"ticking".as_ptr(), 1) };
+    let before = unsafe { solium_qml_scene_get_int(scene, c"fired".as_ptr()) };
+    let window = std::time::Duration::from_millis(600);
+    let started = std::time::Instant::now();
+    let from = *clock;
+    let mut drains = 0_u32;
+    while started.elapsed() < window {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        *clock = from + i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        unsafe { solium_qml_drain(*clock, 1) };
+        drains += 1;
+        if !renderer.egl_context().is_current() {
+            return Err(anyhow!(
+                "advancing the animation clock between frames took the compositor's EGL context \
+                 off the thread"
+            ));
+        }
+        if unsafe { solium_qml_animating() } == 0 {
+            return Err(anyhow!(
+                "nothing is animating, so this proves nothing: quadrants.qml's endless \
+                 animation is meant to be running"
+            ));
+        }
+    }
+    let fired = unsafe { solium_qml_scene_get_int(scene, c"fired".as_ptr()) } - before;
+    println!(
+        "  {drains} drains in {}ms, the clock advanced by each; the 50ms Timer fired {fired} \
+         times; our context current after every one",
+        window.as_millis()
+    );
+    unsafe { solium_qml_scene_set_bool(scene, c"ticking".as_ptr(), 0) };
+    unsafe { solium_qml_drain(*clock, 1) };
+    restore(renderer)?;
+    if fired < 6 {
+        return Err(anyhow!(
+            "a 50ms Timer beside a running animation fired {fired} times in {}ms with no frame \
+             drawn",
+            window.as_millis()
+        ));
+    }
+    Ok(())
 }
 
 /// Advance that counter by one, and hand back what it now reads.
@@ -1312,6 +1485,7 @@ fn main() -> Result<()> {
     // buffer under it closes its dmabuf fd when it drops, so it has to outlive
     // the scene that is still pointed at it.
     let (_appearing, _appear_buffer) = appear_animation(&gbm, &renderer, &mut clock)?;
+    let (timing, _timer_buffer) = timer_between_frames(&gbm, &mut renderer, &mut clock)?;
 
     let scene_target = target::allocate(&gbm, pixels, pixels).context("target::allocate")?;
     let (fd, stride, modifier, fourcc) = scene_target.as_ffi().context("as_ffi")?;
@@ -1365,6 +1539,7 @@ fn main() -> Result<()> {
     } else {
         println!("  no fence: the host waited with glFinish");
     }
+    timer_beside_an_animation(&mut renderer, timing, &mut clock)?;
 
     // Control, before Qt's buffer is touched: allocate a second buffer of the
     // same size and modifier, fill it *with smithay* by binding the dmabuf and

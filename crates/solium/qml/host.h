@@ -202,6 +202,66 @@ void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int height, doubl
  */
 void solium_qml_tick(long long elapsed_ms);
 
+/*
+ * Milliseconds until Qt next has work of its own: a timer due, or 0 when
+ * events are already waiting. -1 when nothing is scheduled at all.
+ * `qml::wake::tests::an_idle_host_does_not_wake_repeatedly`.
+ */
+int solium_qml_next_due_ms(void);
+
+/*
+ * One descriptor Qt's event dispatcher waits on, and for what: GLib's GPollFD
+ * on every platform this builds for, field for field, so the query writes
+ * straight into it.
+ */
+typedef struct SoliumQmlPollFd {
+    int fd;
+    unsigned short events;
+    unsigned short revents;
+} SoliumQmlPollFd;
+
+/*
+ * Everything Qt's event dispatcher would wait for if it ran its own loop:
+ * `*timeout_ms` as solium_qml_next_due_ms answers it, and up to `capacity` of
+ * the descriptors it polls written into `fds`. Returns how many descriptors
+ * there are, which may be more than `capacity`; -1, with no descriptors and no
+ * timeout, when there is no dispatcher to ask.
+ * `qml::wake::tests::a_ready_descriptor_reaches_its_scene_with_no_frame_drawn`.
+ */
+int solium_qml_poll_set(int *timeout_ms, SoliumQmlPollFd *fds, int capacity);
+
+/*
+ * Whether anything in the process is on the animation clock, drawn or not and
+ * whoever holds it: whether the animation driver is running, which it is while
+ * a job that is not a pause is registered.
+ * `qml::wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`,
+ * `qml::wake::tests::a_singleton_timer_beside_a_parentless_animation_fires_with_no_frame_drawn`,
+ * `qml::wake::tests::an_idle_host_does_not_wake_repeatedly`.
+ */
+int solium_qml_animating(void);
+
+/*
+ * Serve Qt between frames, on the same clock solium_qml_tick advances.
+ *
+ * Brings the animation clock to `elapsed_ms` before any event is delivered, so
+ * an animation a Timer starts here starts here; then delivers Qt's due timers,
+ * posted events and ready descriptors; then, when `advance` is non-zero,
+ * advances every animation to `elapsed_ms` exactly as a frame's tick would.
+ * Pass 0 while a frame is pending or in flight: that frame's tick advances
+ * them. Returns 1 when any of it turned a clean scene dirty.
+ * `qml::wake::tests::an_animation_a_timer_starts_between_frames_starts_at_the_timer`.
+ */
+int solium_qml_drain(long long elapsed_ms, int advance);
+
+/*
+ * For tests: watch `fd` for reading from inside Qt, with a QSocketNotifier the
+ * scene's root owns, adding the bytes each read gets to the int property
+ * `name`; end of file stops the watch. `fd` must stay open until the scene is
+ * freed. Returns 0 when there is no scene to own the notifier.
+ * `qml::wake::tests::a_ready_descriptor_reaches_its_scene_with_no_frame_drawn`.
+ */
+int solium_qml_scene_watch_for_test(SoliumQmlScene *scene, int fd, const char *name);
+
 /* Returned by a render that was skipped because nothing had changed. */
 #define SOLIUM_QML_UNCHANGED 2
 

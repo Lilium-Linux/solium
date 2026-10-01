@@ -277,9 +277,11 @@ ones included, through `shell = { scene = ... }` in the configuration: see
 That is why a titlebar can be reloaded while the session runs, why the pointer
 belongs to the same theme as the window frames, and why a decoration can be a
 gradient, a shader or a clock without the compositor learning what any of those
-are. It is also why Qt is a hard dependency and why the render loop has to drive
-Qt's animations by hand: a `Timer` in a settled QML scene never fires, because
-nothing advances it but a frame the compositor decided to draw.
+are. It is also why Qt is a hard dependency and why the compositor drives Qt by
+hand. There is no Qt event loop: each frame advances Qt's animations on the
+compositor's clock, and between frames the compositor's own event loop serves
+Qt's timers and the descriptors Qt waits on, on that same clock, so a `Timer`
+fires on an idle desktop and costs a frame only when it changes something.
 
 On the hardware, QML renders on the GPU: Qt draws into a buffer the compositor
 allocated, once a trial render in a short-lived child process has shown that
