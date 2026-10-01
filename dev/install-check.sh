@@ -209,8 +209,9 @@ check "solium-autostart.target wants XDG autostart" \
 check "  and stops with solium-session.target, after which it starts" \
     [ "$(grep -c -x -e "PartOf=solium-session.target" -e "After=solium-session.target" \
         "$units/solium-autostart.target")" = 2 ]
-check "the portals: gtk, and wlr for ScreenCast and Screenshot" \
+check "the portals: gtk, Inhibit to gtk by name, and wlr for ScreenCast and Screenshot" \
     diff <(grep -v '^#' "$portals/lilium-portals.conf") <(printf '%s\n' '[preferred]' default=gtk \
+        org.freedesktop.impl.portal.Inhibit=gtk \
         org.freedesktop.impl.portal.ScreenCast=wlr org.freedesktop.impl.portal.Screenshot=wlr)
 check "install.sh names the units and the portal choice" \
     grep -q "portals       $portals/lilium-portals.conf" "$work/install.log"
@@ -336,6 +337,25 @@ XDG_CONFIG_HOME="$broken" DESTDIR="$work/failed" "$install_sh" --uninstall --ses
     >"$work/failed-uninstall.log" 2>&1
 check "  which removes them" [ "$(count_files "$work/failed")" -eq 0 ]
 
+echo "--no-check"
+# For a package built from source, whose binary still finds its build tree
+# during %install and so would fail the asset check (dev/rpm/solium.spec). A
+# stand-in checkout whose binary fails anything it is asked.
+nc_root="$work/no-check-checkout"
+mkdir -p "$nc_root/dev" "$nc_root/crates/solium" "$nc_root/target/install/release"
+cp "$install_sh" "$nc_root/dev/install.sh"
+cp -R "$root/dev/session" "$nc_root/dev/session"
+cp -R "$root/crates/solium/qml" "$root/crates/solium/lua" "$nc_root/crates/solium/"
+printf '#!/bin/sh\nexit 1\n' >"$nc_root/target/install/release/solium"
+chmod +x "$nc_root/target/install/release/solium"
+DESTDIR="$work/no-check" "$nc_root/dev/install.sh" --no-build --no-check --prefix /usr \
+    >"$work/no-check.log" 2>&1
+check "install exits 0 without running the binary" [ $? -eq 0 -a -x "$work/no-check/usr/bin/solium" ]
+check "  and says the check was skipped" grep -q "^  check         skipped (--no-check)" "$work/no-check.log"
+DESTDIR="$work/no-check-control" "$nc_root/dev/install.sh" --no-build --prefix /usr \
+    >"$work/no-check-control.log" 2>&1
+check "  where the same install without it fails" [ $? -ne 0 ]
+
 echo "the user's own units and portal choice"
 # ~/.config is the user's. A portal choice edited by hand and a unit linked
 # from a dotfiles checkout are theirs, and survive an install and an uninstall;
@@ -368,6 +388,179 @@ check "  removes the unit it wrote" [ ! -e "$own_units/solium-autostart.target" 
 check "  keeps the edited portal choice" grep -qx "default=kde" "$own_portals/lilium-portals.conf"
 check "  keeps the linked unit" [ -L "$own_units/solium-session.target" ]
 check "  and says so" grep -q "kept, because this script did not write them" "$work/own-uninstall.log"
+
+echo "a system prefix: the layout a package installs"
+# --prefix /usr, as the Fedora package's %install runs it (dev/rpm/solium.spec):
+# everything under the prefix, where systemd, xdg-desktop-portal and the
+# display manager read system files, and nothing in the user's configuration.
+# Into a DESTDIR with a ~ in it, as rpmbuild's buildroot has (the version is
+# 0.0.0~git...), and with the broken configuration above as XDG_CONFIG_HOME:
+# what is checked is the configuration every user gets, not this user's.
+sys="$work/BUILDROOT-0.0.0~git"
+sys_share="$sys/usr/share/solium"
+XDG_CONFIG_HOME="$broken" DESTDIR="$sys" "$install_sh" --no-build --prefix /usr \
+    >"$work/system.log" 2>&1
+status=$?
+check "install exits 0, with a ~ in DESTDIR and a broken XDG_CONFIG_HOME" [ "$status" -eq 0 ]
+[[ "$status" -eq 0 ]] || tail -20 "$work/system.log"
+check "bin/solium and bin/solium-session are in /usr/bin" \
+    [ -x "$sys/usr/bin/solium" -a -x "$sys/usr/bin/solium-session" ]
+check "the QML and Lua are copies in /usr/share/solium" \
+    diff -r "$root/crates/solium/qml" "$sys_share/qml"
+check "  both of them" diff -r "$root/crates/solium/lua" "$sys_share/lua"
+sys_session="$sys/usr/share/wayland-sessions/solium.desktop"
+check "the session file is in /usr/share/wayland-sessions" [ -f "$sys_session" ]
+check "  mode 644" [ "$(stat -c %a "$sys_session" 2>/dev/null)" = 644 ]
+check "  with Exec=/usr/bin/solium-session" grep -qx "Exec=/usr/bin/solium-session" "$sys_session"
+check "  the only line that differs from dev/session/solium.desktop" \
+    diff <(grep -v '^Exec=' "$root/dev/session/solium.desktop") <(grep -v '^Exec=' "$sys_session")
+for entry in "solium-session.target:lib/systemd/user" "solium-autostart.target:lib/systemd/user" \
+    "lilium-portals.conf:share/xdg-desktop-portal"; do
+    name="${entry%%:*}"
+    path="$sys/usr/${entry#*:}/$name"
+    check "/usr/${entry#*:}/$name is a copy of dev/session/$name" cmp -s "$root/dev/session/$name" "$path"
+    check "  mode 644" [ "$(stat -c %a "$path" 2>/dev/null)" = 644 ]
+done
+check "nothing went into XDG_CONFIG_HOME" [ ! -e "$sys$broken" ]
+check "share/solium has no session file and no checksums" \
+    [ ! -e "$sys_share/solium.desktop" -a ! -e "$sys_share/config.sha256" ]
+check "exactly those files ($(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua") + 6)))" \
+    [ "$(count_files "$sys")" -eq "$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua") + 6))" ]
+check "no sudo line is printed" [ -z "$(grep -E '^  sudo ' "$work/system.log")" ]
+check "--check passed, using the staged /usr/share/solium" \
+    grep -qF -- "--check passed (ok: " "$work/system.log"
+check "  as the asset root the binary logged" \
+    grep -qE -- "--check passed .*, using $(realpath "$sys_share")\$" "$work/system.log"
+DESTDIR="$work/system-local" "$install_sh" --no-build --prefix /usr/local >"$work/system-local.log" 2>&1
+check "--prefix /usr/local is a system prefix too" [ $? -eq 0 ]
+check "  its units in /usr/local/lib/systemd/user" \
+    [ -f "$work/system-local/usr/local/lib/systemd/user/solium-session.target" ]
+check "  its session file in /usr/local/share/wayland-sessions" \
+    grep -qx "Exec=/usr/local/bin/solium-session" "$work/system-local/usr/local/share/wayland-sessions/solium.desktop"
+DESTDIR="$work/system-local" "$install_sh" --uninstall --prefix /usr/local >/dev/null 2>&1
+DESTDIR="$work/system-refused" "$install_sh" --no-build --prefix /usr --session-dir "$sessions" \
+    >"$work/system-refused.log" 2>&1
+check "--session-dir is refused with a system prefix" [ $? -ne 0 ]
+check "  saying where the session file goes instead" \
+    grep -q "the session file goes in /usr/share/wayland-sessions" "$work/system-refused.log"
+check "  and nothing was written" [ ! -e "$work/system-refused" ]
+
+echo "the Fedora package (dev/rpm/solium.spec)"
+# Its %files against what the system install above put in place, both ways,
+# so neither can change without the other. rpmbuild fails on a difference too,
+# but only when a package is built. The macros are spelt out by this table,
+# which rpm is asked to confirm where it has systemd's macros.
+spec="$root/dev/rpm/solium.spec"
+spell() {
+    sed -e 's|%{_bindir}|/usr/bin|g' -e 's|%{_datadir}|/usr/share|g' \
+        -e 's|%{_userunitdir}|/usr/lib/systemd/user|g' -e 's|%{_prefix}|/usr|g'
+}
+macros='%{_bindir} %{_datadir} %{_userunitdir} %{_prefix}'
+if command -v rpm >/dev/null && [ "$(rpm --eval '%{_userunitdir}')" != '%{_userunitdir}' ]; then
+    check "rpm's macros are the table's" [ "$(rpm --eval "$macros")" = "$(spell <<<"$macros")" ]
+else
+    echo "  skip  rpm's macros: no rpm with systemd-rpm-macros here"
+fi
+entries=()
+dirs=()
+while IFS= read -r line; do
+    case "$line" in
+        "" | "#"* | "%license "* | "%doc "*) ;;
+        "%dir "*) dirs+=("${line#%dir }") ;;
+        *) entries+=("$line") ;;
+    esac
+done < <(awk '/^%files$/ { on = 1; next } on && /^%(changelog|package|files)/ { on = 0 } on' "$spec" | spell)
+check "%files lists something" [ "${#entries[@]}" -gt 0 ]
+uncovered=()
+while IFS= read -r file; do
+    covered=0
+    for entry in "${entries[@]}"; do
+        if [[ "$file" == "$entry" || ( "$entry" == */ && "$file" == "$entry"* ) ]]; then
+            covered=1
+            break
+        fi
+    done
+    [[ $covered -eq 1 ]] || uncovered+=("$file")
+done < <(cd "$sys" && find . -type f -printf '/%P\n' | sort)
+check "every file the system install put in place is in %files" [ "${#uncovered[@]}" -eq 0 ]
+[[ ${#uncovered[@]} -eq 0 ]] || printf '          not in %%files: %s\n' "${uncovered[@]}"
+absent=()
+for entry in "${entries[@]}"; do
+    if [[ "$entry" == */ ]]; then
+        [[ -d "$sys$entry" ]] || absent+=("$entry")
+    else
+        [[ -f "$sys$entry" ]] || absent+=("$entry")
+    fi
+done
+for dir in "${dirs[@]}"; do
+    [[ -d "$sys$dir" ]] || absent+=("%dir $dir")
+done
+check "every path in %files is one it put in place" [ "${#absent[@]}" -eq 0 ]
+[[ ${#absent[@]} -eq 0 ]] || printf '          not installed: %s\n' "${absent[@]}"
+check "%install is dev/install.sh --prefix %{_prefix}, built either way" \
+    [ "$(grep -c '^DESTDIR=%{buildroot} dev/install.sh --no-build .*--prefix %{_prefix}$' "$spec")" -eq 2 ]
+license_tag=" $(sed -n 's/^License:[[:space:]]*//p' "$spec") "
+code_license="$(sed -n 's/^license *= *"\(.*\)"$/\1/p' "$root/Cargo.toml")"
+check "License names the code's, $code_license" [ -n "$code_license" -a -z "${license_tag##* "$code_license" *}" ]
+while IFS= read -r file; do
+    id="$(sed -n 's/^SPDX-License-Identifier:[[:space:]]*//p' "$file")"
+    check "  and ${file#"$sys"}'s, $id" [ -n "$id" -a -z "${license_tag##* "$id" *}" ]
+done < <(find "$sys" -name '*.license' | sort)
+# A second argument is a version clause the line may end with.
+requires() { grep -qE "^Requires:[[:space:]]+$1(%\{\?_isa\})?${2:-}$" "$spec"; }
+qt_clause='(%\{\?_qt6_version: >= %\{_qt6_version\}\})?'
+recommends() { grep -qE "^Recommends:[[:space:]]+$1$" "$spec"; }
+# Which package has a file here, when one does.
+owner() { [[ -e "$1" ]] && rpm -qf --qf '%{name}\n' "$1" 2>/dev/null | head -1; }
+qml_dir="$(rpm --eval '%{_libdir}' 2>/dev/null)/qt6/qml"
+mapfile -t modules < <(grep -rhoE '^[[:space:]]*import[[:space:]]+Qt[A-Za-z0-9.]*' \
+    "$root/crates/solium/qml" | awk '{ print $2 }' | sort -u)
+check "the shipped QML imports Qt modules (${modules[*]})" [ "${#modules[@]}" -gt 0 ]
+for module in "${modules[@]}"; do
+    if pkg="$(owner "$qml_dir/${module//.//}/qmldir")" && [[ -n "$pkg" ]]; then
+        check "Requires $pkg, which has the $module QML module" requires "$pkg" "$qt_clause"
+    else
+        echo "  skip  the $module QML module is not installed here"
+    fi
+done
+check "solium-session takes its lock with flock" grep -q '^if ! flock ' "$root/dev/session/solium-session"
+for program in Xwayland flock; do
+    if pkg="$(owner "/usr/bin/$program")" && [[ -n "$pkg" ]]; then
+        check "Requires $pkg, which has /usr/bin/$program" requires "$pkg"
+    else
+        echo "  skip  /usr/bin/$program is not installed here"
+    fi
+done
+check "Recommends xdg-desktop-portal, which reads lilium-portals.conf" recommends xdg-desktop-portal
+while IFS= read -r backend; do
+    check "Recommends xdg-desktop-portal-$backend, which lilium-portals.conf names" \
+        recommends "xdg-desktop-portal-$backend"
+done < <(sed -n 's/^[^#=]*=\([a-z]*\)$/\1/p' "$root/dev/session/lilium-portals.conf" | sort -u)
+check "Recommends foot, which super+return opens when no other terminal is installed" \
+    recommends foot
+check "  and init.lua still looks for it" grep -qx '    "foot",' "$root/crates/solium/lua/init.lua"
+if command -v rpmspec >/dev/null; then
+    rpmspec -q "$spec" >"$work/rpmspec-bare.log" 2>&1
+    check "the spec refuses to parse without commit and commitdate" [ $? -ne 0 ]
+    check "  saying what to define" grep -q "define commit" "$work/rpmspec-bare.log"
+    check "  and with them its version is 0.0.0~git<commitdate>.<commit>" \
+        [ "$(rpmspec -q --with prebuilt --define 'commit abc1234' --define 'commitdate 20261001' \
+            --qf '%{version}\n' "$spec" 2>/dev/null)" = "0.0.0~git20261001.abc1234" ]
+    # Qt's symbols are all versioned Qt_6, so rpm's own dependencies take any
+    # Qt 6; dev/rpm.sh defines _qt6_version as the build image's.
+    check "  and it Requires the Qt it was built against, or newer" \
+        grep -qE '^qt6-qtdeclarative(\([^)]*\))? >= 6\.11\.2$' \
+        <(rpmspec -q --requires --with prebuilt --define 'commit abc1234' \
+            --define 'commitdate 20261001' --define '_qt6_version 6.11.2' "$spec" 2>/dev/null)
+else
+    echo "  skip  parsing the spec: no rpmspec here (it is in rpm-build)"
+fi
+XDG_CONFIG_HOME="$broken" DESTDIR="$sys" "$install_sh" --uninstall --prefix /usr \
+    >"$work/system-uninstall.log" 2>&1
+check "uninstall exits 0" [ $? -eq 0 ]
+check "  and leaves no file, the session file, units and portal choice included" \
+    [ "$(count_files "$sys")" -eq 0 ]
+check "  and prints no sudo line" [ -z "$(grep -E '^  sudo ' "$work/system-uninstall.log")" ]
 
 echo "solium-session, after a Solium that could not clean up"
 # A stand-in solium beside a copy of the script, as the prefix has them, and a

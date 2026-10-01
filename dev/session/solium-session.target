@@ -6,7 +6,8 @@
 # dev/install-check.sh). Starting it starts graphical-session.target. A unit of
 # your own that should start with Solium says WantedBy=solium-session.target.
 # XDG autostart is solium-autostart.target, started beside this one while
-# `session.autostart` is on. dev/install.sh puts both in ~/.config/systemd/user.
+# `session.autostart` is on. dev/install.sh puts both in ~/.config/systemd/user,
+# or, with a /usr or /usr/local prefix, in <prefix>/lib/systemd/user.
 [Unit]
 Description=Solium session
 Documentation=man:systemd.special(7) https://github.com/Lilium-Linux/solium/blob/stage/docs/shell-boundary.md
