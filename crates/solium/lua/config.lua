@@ -612,6 +612,13 @@ local defaults = {
         -- There is no application to ask, so there is nothing to wait for and
         -- nothing to refuse. A window whose scene would not load has nothing
         -- on screen to fade, and goes at once.
+        --
+        -- An application that was already running does not arrive either: it
+        -- answers the launch by bringing forward the window it has, and the
+        -- window opened for the launch goes the same way the moment it does,
+        -- without waiting this long. The view goes to the window it brought
+        -- forward, on its own workspace (`activate` in docs/modes.md, and
+        -- `relaunching_an_application_whose_window_is_on_another_workspace_keeps_it_there_and_brings_it_into_view`).
         patience = 8000,
         -- Whether it takes its place in the layout straight away. With this
         -- off, the other windows only move aside once the application is

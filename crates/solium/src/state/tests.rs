@@ -19883,8 +19883,9 @@ end)
                 use super::*;
 
                 /// The shipped layouts, as `init.lua` requires them, with
-                /// every `open`, `focus` and `close` the scripts hear written
-                /// down in `told`, as `"<event> <id>"`.
+                /// every `open`, `focus`, `close` and `activate` the scripts
+                /// hear written down in `told`, as `"<event> <id>"` and an
+                /// `activate`'s reason after its id.
                 const SHIPPED_TELLING: &str = "require(\"modes\")\n\
                      require(\"workspaces\")\n\
                      require(\"tiling\")\n\
@@ -19892,7 +19893,10 @@ end)
                      told = {}\n\
                      for _, name in ipairs({ \"open\", \"focus\", \"close\" }) do\n\
                          sol.on(name, function(id) told[#told + 1] = name .. \" \" .. id end)\n\
-                     end";
+                     end\n\
+                     sol.on(\"activate\", function(id, why)\n\
+                         told[#told + 1] = \"activate \" .. id .. \" \" .. tostring(why)\n\
+                     end)";
 
                 /// What the scripts were told, oldest first.
                 fn told(desk: &Desk) -> Vec<String> {
@@ -20005,6 +20009,113 @@ end)
                     launch
                 }
 
+                /// **On another workspace, the window stays there with its
+                /// id, and the view goes to it, focused**, in every mode.
+                /// Before, it was moved into the window opened for the
+                /// launch, on the workspace in view, under that window's id.
+                /// The view is `workspaces.lua`'s `activate` handler: the
+                /// compositor refuses to focus a window on a workspace
+                /// nobody is looking at, so dissolving the launch's window
+                /// alone left an empty screen and the application where it
+                /// was, by SVC-S9's frames.
+                #[test]
+                fn relaunching_an_application_whose_window_is_on_another_workspace_keeps_it_there_and_brings_it_into_view()
+                 {
+                    for (key, mode) in MODES {
+                        let (mut desk, app) = running(key);
+                        let window = window_of(&desk, app.pane);
+                        sent_away(&mut desk, &app, mode);
+
+                        let launch = relaunched(&mut desk, &app, mode);
+                        settled(&mut desk);
+                        assert_eq!(
+                            (
+                                desk.state.panes.id_of(&window),
+                                workspace_of(&desk, app.pane),
+                                showing(&desk)
+                            ),
+                            (Some(app.pane), "2".to_owned(), "2".to_owned()),
+                            "{mode}: (the window's pane, its workspace, the workspace in view) \
+                             after the relaunch: the window was moved into the one opened for \
+                             the launch, pane {}, or the view did not go to it",
+                            launch.get()
+                        );
+                        assert!(
+                            desk.state.panes.get(launch).is_none_or(Pane::leaving),
+                            "{mode}: the window opened for the launch is still there"
+                        );
+                        assert!(
+                            headed_on_stage(&desk.state, app.pane),
+                            "{mode}: the view went to workspace 2 and the window is still not \
+                             on screen"
+                        );
+                        assert_eq!(
+                            desk.state.focused_window(),
+                            Some(window.clone()),
+                            "{mode}: the relaunched application's window was brought into view \
+                             without the keyboard"
+                        );
+                        typed_into(
+                            &mut desk,
+                            &window,
+                            &format!("{mode}: a key typed after the relaunch went somewhere else"),
+                        );
+                    }
+                }
+
+                /// **On the other monitor's hidden workspace, that monitor
+                /// switches**, with workspaces per monitor as shipped: the
+                /// view goes to the window on its own screen, and the screen
+                /// the pointer is on goes on showing what it was.
+                #[test]
+                fn relaunching_an_application_whose_window_is_on_the_other_monitors_hidden_workspace_switches_that_monitor()
+                 {
+                    let (mut desk, app) = running_on(Desk::side_by_side(), None);
+                    let window = window_of(&desk, app.pane);
+                    desk.state.map_stacked(window.clone(), (2020, 100), false);
+                    frame(&mut desk);
+                    point_at(&mut desk.state, (500.0, 500.0));
+                    desk.state
+                        .focus_window(&window, SERIAL_COUNTER.next_serial());
+                    assert!(desk.state.trigger("super+shift+2"));
+                    settled(&mut desk);
+                    let right =
+                        format!("return tostring(require(\"workspaces\").on({RIGHT_SCREEN:?}))");
+                    assert_eq!(
+                        (
+                            workspace_of(&desk, app.pane),
+                            says(&desk, &right),
+                            showing(&desk)
+                        ),
+                        ("2".to_owned(), "1".to_owned(), "1".to_owned()),
+                        "the premise: the window is on the right monitor's workspace 2, and \
+                         both monitors show 1"
+                    );
+                    assert!(
+                        !headed_on_stage(&desk.state, app.pane),
+                        "the premise: the window is out of sight"
+                    );
+
+                    let _ = relaunched(&mut desk, &app, "floating");
+                    settled(&mut desk);
+                    assert_eq!(
+                        (
+                            desk.state.panes.id_of(&window),
+                            says(&desk, &right),
+                            showing(&desk)
+                        ),
+                        (Some(app.pane), "2".to_owned(), "1".to_owned()),
+                        "(the window's pane, what the right monitor shows, what the left one \
+                         shows) after the relaunch: the right monitor should have gone to the \
+                         window's workspace and the left one stayed"
+                    );
+                    assert_eq!(
+                        desk.state.focused_window(),
+                        Some(window.clone()),
+                        "the window was brought into view without the keyboard"
+                    );
+                }
+
                 /// Where `window` is drawn now, and the pane it is in.
                 fn drawn_in_its_pane(
                     desk: &Desk,
@@ -20097,7 +20208,8 @@ end)
                 /// and exits -- maps a window of its own after the launch
                 /// began, newer than the launch's, and `claim_into` moves it
                 /// into the window opened for the launch, as it always has.
-                /// The window that was already there is left alone.
+                /// The window that was already there is left alone, and an
+                /// arrival is not an activation: the scripts are not told one.
                 #[test]
                 fn a_window_opened_for_a_relaunch_still_arrives_in_the_window_opened_for_the_launch()
                  {
@@ -20111,6 +20223,7 @@ end)
                             launch < new.pane,
                             "{mode}: the premise: the new window is newer than the launch"
                         );
+                        let before = told(&desk).len();
                         let token = desk.state.launch_token(launch);
                         activates(&mut desk, &new.surface, &token);
                         settled(&mut desk);
@@ -20124,13 +20237,19 @@ end)
                              opened for the relaunch did not arrive in the one opened for the \
                              launch, or the one that was there was disturbed"
                         );
+                        let after = &told(&desk)[before..];
+                        assert!(
+                            !after.iter().any(|event| event.starts_with("activate")),
+                            "{mode}: an arrival was told as an activation: {after:?}"
+                        );
                     }
                 }
 
                 /// **No `close` reaches the scripts for a window that never
                 /// closed**, in every mode, with the window on the workspace
                 /// in view and on another. The launch's window is heard going
-                /// -- it has. Before, the scripts heard `close`
+                /// -- it has -- and the application's is heard as
+                /// `activate <id> launch`. Before, the scripts heard `close`
                 /// for the application's window as it was moved, under a new
                 /// id, into the launch's.
                 #[test]
@@ -20157,8 +20276,41 @@ end)
                                 "{mode}: the launch's window, {launch}, went and the scripts \
                                  were not told: {after:?}"
                             );
+                            assert!(
+                                after.contains(&format!("activate {id} launch")),
+                                "{mode}: the scripts were not told the application's window \
+                                 was brought forward for the launch: {after:?}"
+                            );
                         }
                     }
+                }
+
+                /// **An ordinary activation is told too, as `request`, and
+                /// the shipped scripts leave the view alone for it.** Nothing
+                /// checks where a token came from -- any client can make one
+                /// for itself -- so a view that followed every request would
+                /// be one any application could pull away. The compositor's
+                /// own answer is unchanged: a window on a workspace nobody is
+                /// looking at is refused, and stays out of sight.
+                #[test]
+                fn a_genuine_activation_is_told_as_a_request_and_the_view_stays_where_it_is() {
+                    let (mut desk, app) = running(Some("super+t"));
+                    sent_away(&mut desk, &app, "tiling");
+                    let before = told(&desk).len();
+                    let token = genuine_token(&mut desk);
+                    activates(&mut desk, &app.surface, &token);
+                    settled(&mut desk);
+                    let after = told(&desk)[before..].to_vec();
+                    assert_eq!(
+                        (after, showing(&desk), workspace_of(&desk, app.pane)),
+                        (
+                            vec![format!("activate {} request", app.pane.get())],
+                            "1".to_owned(),
+                            "2".to_owned()
+                        ),
+                        "(what the scripts were told, the workspace in view, the window's): a \
+                         genuine activation was not told as a request, or the view followed it"
+                    );
                 }
             }
         }

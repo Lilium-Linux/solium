@@ -220,6 +220,7 @@ sol.on("closing", function(id) end)                -- a close was asked for
 sol.on("refused", function(id) end)                -- ...and declined: it is back
 sol.on("close",  function(id) end)                 -- it is gone
 sol.on("focus",  function(id) end)                 -- the keyboard moved
+sol.on("activate", function(id, why) end)          -- a window asked to come forward: "launch" or "request"
 sol.on("drop",   function(id, x, y) end)           -- a drag finished
 sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side) end)
 sol.on("scroll", function(dx, dy) end)             -- a modified wheel turn
@@ -234,7 +235,7 @@ sol.on("direction", function(verb, dir) end)       -- a direction key: "focus" o
 back: its scene sets an `action`, and you are told the surface's name and the
 action ([ricing.md](ricing.md#your-wallpaper) has an example). Declaring the
 same surface again with new `properties` writes them into the live scene rather
-than rebuilding it. Seven of the rest are worth reading twice.
+than rebuilding it. Eight of the rest are worth reading twice.
 
 **`open` fires when the window opens, and for a launched window that is before
 its application exists.** A window started with `sol.spawn` begins its life
@@ -310,16 +311,40 @@ the last word and the compositor does not give it again. A window launched with
 `sol.spawn` gets it the same way when its application arrives; a `sol.focus`
 for it during `open` finds no application yet to give it to.
 
-An application asking to be brought forward -- with an activation token, such
-as a notification you clicked hands it -- is refused outright if it is on a
-workspace nobody is looking at, or is being closed: it is not focused, you hear
-no `focus`, and the keyboard stays where it was. Anywhere else it is focused
-first and asked afterwards: you hear `focus`, and if your handler brings the
-window into view (the scroller scrolls its column onto the screen) it keeps the
-keyboard. If it is still somewhere nobody can see once the layouts have had
-their say, the keyboard goes back to a window on screen. Nothing switches
-workspaces for it yet, and nothing checks where a token came from: any client
-can make one for itself.
+**`activate` says a window asked to be brought forward**, with an activation
+token such as a notification you clicked hands it, and it comes after the
+compositor has answered. That answer is the same whatever the token: a window
+on a workspace nobody is looking at, or one being closed, is refused outright
+-- it is not focused, you hear no `focus`, and the keyboard stays where it was.
+Anywhere else it is focused first and asked afterwards: you hear `focus`, and
+if your handler brings the window into view (the scroller scrolls its column
+onto the screen) it keeps the keyboard. If it is still somewhere nobody can see
+once the layouts have had their say, the keyboard goes back to a window on
+screen. Then you hear `activate(id, why)`, and `why` says who asked:
+
+| `why` | sent when | the shipped scripts |
+|---|---|---|
+| `"launch"` | you launched an application that was already running, and it answered by bringing forward a window it had | show the window's workspace on its own monitor, and focus it |
+| `"request"` | anything else | do nothing more |
+
+`"launch"` is Firefox, Telegram, any GTK or Qt application that keeps one
+instance: `sol.spawn` opens a window for the launch, the program passes the
+launch on to the instance running, and that instance brings forward the window
+it already has, with the launch's own token. That window is not the launch
+arriving. The window opened for the launch dissolves, as one whose application
+never came does, and you hear its `close`; the window brought forward keeps its
+id, its workspace and its tile -- a tile the launch's window split closes up
+again as that window goes -- and you hear no `open` or `close` for it. So
+the view going to it is yours to do, and `workspaces.lua` does it, as a dock
+does for an application that is running -- without that, a launch whose window
+is on another workspace shows nothing at all. A window the application opens
+*for* the launch, one per activation or from a launcher that forks, is the
+launch arriving as before: it appears in the window that was opened for it, and
+there is no `activate`.
+
+`"request"` is followed by nothing in the shipped scripts because nothing checks
+where a token came from: any client can make one for itself, and a view that
+followed every request would be one any application could pull away from you.
 
 **`resize` gives you where the dragged edge should go, not where the pointer
 is and not a delta.** `edge_x` and `edge_y` are in the same coordinates
@@ -561,6 +586,12 @@ Both are real desktops, and the difference is what you take a workspace to
 *be* — a screenful, or a whole desk. `workspaces.lua` shares every line
 between them: which workspace a monitor shows is looked up by monitor either
 way, and with the setting off every monitor looks up the same entry.
+
+Launching an application that is already running goes to its window where it
+is: `workspaces.lua` shows that window's workspace on the window's own monitor
+-- so with `per_monitor` on, the screen in front of you goes on showing what it
+was if the window is on the other -- and focuses it. That is its `activate`
+handler; see [What a mode is told](#what-a-mode-is-told).
 
 A workspace is a **selection**, one per monitor per workspace, named
 `desk-<n>@<connector>`. `workspaces.lua` declares it from the windows on that

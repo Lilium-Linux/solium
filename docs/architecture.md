@@ -78,8 +78,8 @@ from its process id second. The token is what survives a launcher that forks and
 exits; the process walk is the fast path for everything that does not. A window
 whose pane is older than the launch's is never matched by its token: that is an
 application keeping one instance, answering the launch with a window it already
-had. The launch's pane dissolves instead, and the window stays where it lives
-(#177).
+had. The launch's pane dissolves instead, the window stays where it lives, and
+the scripts hear `activate` (#177, and `docs/modes.md`).
 
 `Space` has not gone away and is not going to. It stays underneath as the
 authority on stacking and damage for a mapped client, because that bookkeeping

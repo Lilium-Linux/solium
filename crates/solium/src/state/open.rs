@@ -54,10 +54,22 @@ pub(super) enum Claimed {
     /// keeps one instance passed the launch on to the instance running, and
     /// that one brought forward the window it had. The launch's pane has
     /// dissolved; the window stays where it is, and the token is an
-    /// activation like any other.
+    /// activation, which the scripts hear as `activate(id, "launch")`.
     Relaunched,
     /// Neither: an ordinary request to be brought forward.
     Ordinary,
+}
+
+impl Claimed {
+    /// The reason `activate` gives the scripts for a token that did not
+    /// arrive anywhere. `relaunch::relaunching_an_application_tells_the_scripts_no_close_for_its_window`
+    /// and `relaunch::a_genuine_activation_is_told_as_a_request_and_the_view_stays_where_it_is`.
+    pub(super) const fn why(self) -> &'static str {
+        match self {
+            Self::Relaunched => "launch",
+            Self::Arrived | Self::Ordinary => "request",
+        }
+    }
 }
 
 /// What the scripts did with a window opening, as [`Solium::trigger_open`]
@@ -307,6 +319,19 @@ impl Solium {
         }
         self.redraw = true;
         Claimed::Arrived
+    }
+
+    /// Tell the scripts a window asked to be brought forward, once the
+    /// compositor has answered it, and why: see [`Claimed::why`]. Fired from
+    /// `request_activation` alone, for every token that did not arrive.
+    pub(super) fn trigger_activate(&mut self, pane: crate::pane::PaneId, claim: Claimed) {
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.activated(pane.get(), claim.why(), snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
     }
 
     /// Give a mapped client to the window that was opened for it, or open a

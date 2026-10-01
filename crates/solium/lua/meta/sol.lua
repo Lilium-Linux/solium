@@ -249,6 +249,7 @@
 ---@alias sol.Event
 ---| "open" # A window's life began: `(id)`.
 ---| "focus" # The keyboard moved to a window: `(id)`.
+---| "activate" # A window asked to be brought forward, after the compositor answered: `(id, why)`. `why` is `"launch"` when an application already running answered a launch with a window it had, and `"request"` for anything else.
 ---| "closing" # A close was asked for and the window is fading: `(id)`.
 ---| "refused" # Its application declined, and the window is back: `(id)`.
 ---| "close" # The window is gone: `(id)`.
@@ -627,6 +628,7 @@ function sol.unknown(key, meant) end
 ---Listen for an event. Listeners are added, never replaced, and one that fails
 ---is logged while the others still run.
 ---@overload fun(event: "open"|"focus"|"closing"|"refused"|"close", handler: fun(id: integer))
+---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
 ---@overload fun(event: "drop", handler: fun(id: integer, x: number, y: number))
 ---@overload fun(event: "resize", handler: fun(id: integer, edge_x: number, edge_y: number, horizontal_side: "left"|"right"|nil, vertical_side: "top"|"bottom"|nil))
 ---@overload fun(event: "scroll", handler: fun(dx: number, dy: number))

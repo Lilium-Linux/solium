@@ -1099,6 +1099,25 @@ impl Scripts {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "focus", id))
     }
 
+    /// A window asked to be brought forward, and the compositor has answered
+    /// as it does: focused it, or refused it on a workspace nobody is looking
+    /// at or while it is being closed. `(id, why)`.
+    ///
+    /// `why` is `"launch"` for an application that was already running and
+    /// answered a launch with a window it had, the launch's own window having
+    /// dissolved (#177), and `"request"` for anything else: a token nothing
+    /// was launched with, which any client can make for itself. Never for a
+    /// launch's window arriving, which is `open` and `focus`.
+    /// `relaunch::relaunching_an_application_tells_the_scripts_no_close_for_its_window`,
+    /// `relaunch::a_window_opened_for_a_relaunch_still_arrives_in_the_window_opened_for_the_launch`
+    /// and `relaunch::a_genuine_activation_is_told_as_a_request_and_the_view_stays_where_it_is`,
+    /// in `state/tests.rs`.
+    pub(crate) fn activated(&mut self, id: u64, why: &'static str, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| {
+            call_listeners(sol, "activate", (id, why))
+        })
+    }
+
     /// An edge was dragged.
     ///
     /// Offered to layouts before the compositor resizes anything, so a tiled
