@@ -1936,6 +1936,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "cc",
+ "libc",
  "mlua",
  "pkg-config",
  "signal-hook-registry",

@@ -19,6 +19,7 @@ mod idle;
 mod input;
 mod json;
 mod keymap;
+mod launch;
 mod layer;
 mod lock;
 mod mat4;
@@ -253,6 +254,10 @@ fn check_qml(path: Option<String>) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // First, before Qt, EGL or a library they load has written anything into
+    // the environment: it is what every program Solium starts is given. See
+    // `launch::tests::a_spawned_program_gets_the_environment_solium_started_with`.
+    launch::remember();
     let backend = std::env::args().nth(1);
     // Before logging starts: the probe's child answers in one line.
     if backend.as_deref() == Some(qml::renderer::PROBE) {

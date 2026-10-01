@@ -118,6 +118,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -613,6 +614,16 @@ extern "C" int solium_qml_start_gpu(const char *import_path)
 
     if (!start_common(import_path)) {
         return 0;
+    }
+
+    /* eglfs's QFbVtHandler has just made a socketpair without close-on-exec,
+     * and a child that writes one byte, 15, into its end makes this process
+     * _exit(1) at Qt's next drain (#175). A program the compositor starts
+     * never holds it (`launch::command`); this is for one started any other
+     * way, and marks everything above stdio, as `launch::command` does in a
+     * child. dev/wirecheck's `a_child_cannot_reach_qt`. */
+    if (close_range(3, ~0U, CLOSE_RANGE_CLOEXEC) != 0) {
+        qWarning("could not mark Qt's descriptors close-on-exec: %s", std::strerror(errno));
     }
     g_gpu_mode = true;
     return 1;

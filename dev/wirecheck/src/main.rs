@@ -1371,6 +1371,41 @@ fn differing(a: &[u8], b: &[u8]) -> (usize, Option<usize>) {
     (bad, first)
 }
 
+/// A child started once Qt is up holds none of Qt's descriptors (#175).
+///
+/// Started with a plain `Command`, as anything but `State::spawn` starts one --
+/// smithay's Xwayland, or Qt's own `QProcess` -- so what this checks is
+/// `host.cpp` marking Qt's descriptors close-on-exec, and not the hook
+/// `launch::command` puts in a child. Without the mark, the child holds the
+/// socketpair eglfs's `QFbVtHandler` made inside `QGuiApplication`, and one
+/// byte from it, 15, makes this process `_exit(1)` at the next drain of Qt's
+/// queue. So the child writes that byte into every descriptor above stdio it
+/// holds, and the check fails if it held any.
+fn a_child_cannot_reach_qt() -> Result<()> {
+    println!("\n=== a child started after Qt, the way smithay starts Xwayland ===");
+    // `ls` runs in a process of its own, and lists the shell's descriptors.
+    let script = r#"ls /proc/$$/fd; fd=3; while [ "$fd" -lt 1024 ]; do printf '\017' 2>/dev/null >&"$fd"; fd=$((fd + 1)); done"#;
+    let output = std::process::Command::new("sh")
+        .args(["-c", script])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .context("running sh")?;
+    let held: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter(|fd| fd.parse::<u32>().is_ok_and(|fd| fd > 2))
+        .map(str::to_owned)
+        .collect();
+    if !held.is_empty() {
+        return Err(anyhow!(
+            "a child started after Qt holds descriptors {held:?} beyond stdio, \
+             and has written byte 15 into each"
+        ));
+    }
+    println!("  it held no descriptor beyond stdio");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let node = std::env::args()
         .nth(1)
@@ -1472,14 +1507,15 @@ fn main() -> Result<()> {
             return Err(anyhow!("start_gpu refused"));
         }
     }
+    a_child_cannot_reach_qt()?;
     // ------------------------------------------------------------------
     // An appear animation, started on a desktop where nothing else is moving.
     //
-    // First in the run, and it has to be first: the defect it looks for exists
-    // only while the process has *no* animation registered at all, and the very
-    // next scene built below leaves one running for the rest of the run. See
-    // `appear_animation`, which asserts that precondition rather than trusting
-    // this comment to stay true.
+    // The first scene in the run, and it has to be: the defect it looks for
+    // exists only while the process has *no* animation registered at all, and
+    // the very next scene built below leaves one running for the rest of the
+    // run. See `appear_animation`, which asserts that precondition rather than
+    // trusting this comment to stay true.
     // Both bindings are held to the end of the run and neither is read again:
     // the scene is deliberately not freed (see `appear_animation`), and the
     // buffer under it closes its dmabuf fd when it drops, so it has to outlive
