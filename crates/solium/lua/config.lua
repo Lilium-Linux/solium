@@ -441,9 +441,12 @@ local defaults = {
     --                                     measured.
     --
     --                                     Fractional values work; between 0.5
-    --                                     and 8. Anything else is warned about
-    --                                     and the scale worked out instead, as
-    --                                     far likelier a typo than a request.
+    --                                     and 8. A fraction outside that is
+    --                                     warned about and the scale worked
+    --                                     out instead, as far likelier a typo
+    --                                     than a request; a whole number
+    --                                     outside it, such as 0 or 10, is
+    --                                     worked out instead with no warning.
     --
     -- `super+shift+r` applies a change to the placement keys, `scale`,
     -- `primary` and `enabled` without ending the session. `mode`, `vrr` and
