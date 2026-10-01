@@ -303,10 +303,6 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // the self-inflicted damage bought. This is before any cursor element is
     // built, so the shape this finds is the shape this frame draws.
     state.reassert_cursor();
-    // The models hosted scenes read, in one batch each, before Qt's tick, so
-    // the frame that shows a change is the frame QML first sees it in.
-    // `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
-    state.publish_models();
     // Every QML animation in the process, advanced once for this frame --
     // decorations, the cursor, the shell. Whether any scene then has something
     // new to draw is each scene's own answer.
@@ -316,6 +312,12 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // on monitors of different refresh rates by different amounts.
     {
         let _tick = crate::pacing::span(crate::pacing::Phase::Tick);
+        // The models hosted scenes read, one batch each, ahead of the tick
+        // and measured with it as Qt's, because applying a row runs every
+        // binding and handler on it:
+        // `models::tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
+        // `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
+        state.publish_models();
         crate::qml::tick(state.clock.now());
     }
 

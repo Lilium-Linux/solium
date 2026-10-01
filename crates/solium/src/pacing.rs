@@ -94,7 +94,10 @@ const REPORT_EVERY: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
     /// `qml::tick`: every animation in the process advanced by one step, and
-    /// Qt's event queue drained. Once per frame, never once per output.
+    /// Qt's event queue drained. Once per frame, never once per output. Also
+    /// the models' rows, applied just before it (`Solium::publish_models`),
+    /// because applying a row runs every binding and handler on it:
+    /// `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
     Tick,
     /// The rest of `render::prepare`, plus `screencopy::settle`: one
     /// offscreen render pass for every window whose transform is not a
