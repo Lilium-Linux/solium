@@ -277,8 +277,8 @@ local defaults = {
     -- be installed -- the log says which. It is a white arrow with a dark
     -- outline, in fixed colours rather than the theme's, because a pointer
     -- has to read over whatever a client drew. A copy of `cursor.qml` in
-    -- ~/.config/solium/qml/ is not read: SOLIUM_QML_CURSOR=<file> draws the
-    -- pointer from your own file, and a setting for it waits on #159.
+    -- ~/.config/solium/qml/ is not read: `SOLIUM_QML_CURSOR=<file>` draws
+    -- the pointer from your own file, and a setting for it waits on #159.
     --
     -- A shape your theme does *not* have is the one case that does not reach
     -- it. Applications name the cursor they want -- an I-beam over text, a
