@@ -205,7 +205,7 @@ and all of it decides whether the thing is trustworthy.
 |---|---|
 | [#48](https://github.com/Lilium-Linux/solium/issues/48) the seat flake | three of forty-three logged sessions got no input devices and were stopped by the watchdog; a longer watchdog would not have saved one, and the cause is not known |
 | [#65](https://github.com/Lilium-Linux/solium/issues/65) a hardware soak | the compositor has never run unattended for hours on a real session; `dev/soak.sh` can now do it on a TTY, though only its clients churn there, since the TTY backend ignores the scripted key presses |
-| [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | `dev/install.sh` installs from a checkout, but there are no packages, and a preview nobody can install is a preview nobody tries |
+| [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | `dev/install.sh` installs from a checkout and `dev/rpm.sh` builds a Fedora 44 package of one, but there are no packages in a repository, and a preview nobody can install is a preview nobody tries |
 | [#64](https://github.com/Lilium-Linux/solium/issues/64) suspend and resume | never tested once. A laptop that cannot be closed and opened is not a laptop |
 | [#83](https://github.com/Lilium-Linux/solium/issues/83) portals | screen sharing is reasoning, not evidence: nothing has been run end to end |
 

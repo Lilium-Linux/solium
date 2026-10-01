@@ -39,7 +39,8 @@ happened yet. What stands in the way is the
 - There are no touchpad settings, so no tap-to-click ([#157]); no volume,
   brightness, media or screenshot keys by default ([#151]); and logind's lock
   and sleep requests are ignored ([#153]).
-- There are no packages: an install is built from a checkout ([#66]).
+- There are no packages in a repository: a Fedora 44 package, or an install,
+  is built from a checkout ([#66]).
 - Two tiling bugs found in use are fixed, and stay open until real use bears
   that out: a window drawing past its tile over its neighbours ([#133]), and a
   closing window keeping its tile until its client had gone ([#128]).
@@ -208,8 +209,27 @@ case where the screen is gone and the power button is the only way out.
 
 ## Install
 
-There is no package yet. From a checkout, on Fedora 44 (or a Fedora with the
-same Qt), so the login screen offers Solium:
+On Fedora 44, either build a package of the checkout and install it with dnf,
+or install from the checkout into `~/.local`. The login screen offers Solium
+after either. Use one: with both, it lists Solium twice.
+
+**A Fedora package**, a development snapshot of the commit checked out:
+
+```sh
+podman build -t solium-build:fc44 -f dev/Containerfile dev/   # once
+dev/rpm.sh                                                     # prints the dnf line
+sudo dnf install ./target/rpm/RPMS/x86_64/solium-0.0.0~git*.rpm
+```
+
+`dev/rpm.sh` builds the release binary in the build container, packages it with
+this machine's `rpmbuild` (`sudo dnf install rpm-build`), checks the package
+unpacked, and prints the `dnf` line. It installs under `/usr`, so there is no
+other step, and `sudo dnf remove solium` takes it out. It is built for
+Fedora 44: copy the `.rpm` to another Fedora 44 machine and install it the
+same way, with no Rust or build image there. Another release needs a package
+built for it. [dev/README.md](dev/README.md#a-fedora-package) has the details.
+
+**From a checkout**, on Fedora 44 (or a Fedora with the same Qt):
 
 ```sh
 podman build -t solium-build:fc44 -f dev/Containerfile dev/   # once
@@ -251,7 +271,10 @@ programs in `~/.config/autostart`, and user services written for a graphical
 session then find Solium. A file there
 that you have edited, or linked, is left alone. The portal file sends screen
 capture to `xdg-desktop-portal-wlr`, which Fedora packages separately
-(`sudo dnf install xdg-desktop-portal-wlr`). A polkit agent, a keyring,
+(`sudo dnf install xdg-desktop-portal-wlr`). The Fedora package puts the
+units in `/usr/lib/systemd/user` and the portal file in
+`/usr/share/xdg-desktop-portal` instead, and recommends
+`xdg-desktop-portal-wlr`, so dnf installs it. A polkit agent, a keyring,
 applets and other separate programs start through XDG autostart or a user unit
 with `PartOf=graphical-session.target`.
 [docs/shell-boundary.md](docs/shell-boundary.md#how-the-rest-of-the-desktop-starts)
@@ -262,8 +285,9 @@ To remove it, `dev/install.sh --uninstall`, then the
 `sudo rm -f /usr/local/share/wayland-sessions/solium.desktop` it prints. Your
 `~/.config/solium` and the session log stay.
 
-Still to come ([#66](https://github.com/Lilium-Linux/solium/issues/66)): a
-Fedora `.spec` and COPR, and an Arch `PKGBUILD`.
+Still to come ([#66](https://github.com/Lilium-Linux/solium/issues/66)): COPR,
+so that dnf installs and updates Solium without a checkout, and an Arch
+`PKGBUILD`.
 [dev/README.md](dev/README.md#installing-it) has the details.
 
 ## A first configuration
