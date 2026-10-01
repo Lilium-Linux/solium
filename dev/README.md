@@ -1042,16 +1042,27 @@ dev/install.sh --uninstall     # remove it again; prints `sudo rm -f …` for th
 
 | | |
 |---|---|
-| `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/bin/solium-session` (what the session file starts: `solium --tty --session`, and the clean-up after a Solium that crashed), `DIR/share/solium/{qml,lua}`, and the generated `DIR/share/solium/solium.desktop` |
-| `XDG_CONFIG_HOME=` | where the session's other files go, default `~/.config`, whatever the prefix: `systemd/user/solium-session.target`, `systemd/user/solium-autostart.target` and `xdg-desktop-portal/lilium-portals.conf`, copied from `dev/session/` |
-| `--session-dir DIR` | where the display manager reads sessions, default `/usr/local/share/wayland-sessions`. Only the printed `sudo` line writes there |
+| `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/bin/solium-session` (what the session file starts: `solium --tty --session`, and the clean-up after a Solium that crashed), `DIR/share/solium/{qml,lua}`, and the generated `DIR/share/solium/solium.desktop`. `/usr` and `/usr/local` are system prefixes, below |
+| `XDG_CONFIG_HOME=` | where the session's other files go, default `~/.config`: `systemd/user/solium-session.target`, `systemd/user/solium-autostart.target` and `xdg-desktop-portal/lilium-portals.conf`, copied from `dev/session/` |
+| `--session-dir DIR` | where the display manager reads sessions, default `/usr/local/share/wayland-sessions`. Only the printed `sudo` line writes there. Refused with a system prefix |
 | `--no-build` | install the release binary already in `target/install` |
 | `--jobs N`, `--image IMAGE` | the build's cargo jobs (2) and container (`localhost/solium-build:fc44`) |
 | `--uninstall` | remove `bin/solium`, `bin/solium-session`, `share/solium/{qml,lua}` and the generated `solium.desktop` under the same `--prefix`, whatever put them there, and the three files in `XDG_CONFIG_HOME` only while they are what install wrote |
-| `DESTDIR=` | stage the prefix and `XDG_CONFIG_HOME` under this directory instead; the session file's `Exec` still names the real prefix. `--session-dir` is used as given, so a test can point it at `/tmp` |
+| `DESTDIR=` | stage the prefix and `XDG_CONFIG_HOME` under this directory instead; the session file's `Exec` still names the real prefix. `--session-dir` is used as given, so a test can point it at `/tmp`. It may contain a `~`, as rpmbuild's buildroot does |
 | `SOLIUM_BUILD_LOCK=`, `SOLIUM_BUILD_MEMORY=` | the lock the build takes (`~/.cache/solium-build.lock`) and the container's memory cap (`6g`) |
 
 `dev/install-check.sh` runs all of that into `/tmp` and checks every step.
+
+**A system prefix,** `--prefix /usr` or `--prefix /usr/local`, is the layout a
+package installs, and what the Fedora package's `%install` runs. Everything
+goes under the prefix and nothing into `XDG_CONFIG_HOME`: the units in
+`DIR/lib/systemd/user`, the portal choice in `DIR/share/xdg-desktop-portal`
+and the session file in `DIR/share/wayland-sessions`, where systemd,
+xdg-desktop-portal and the display manager read system files, so there is no
+`sudo` line. Those files are the installation's, like the binary, so there is
+no `config.sha256` and uninstall removes them whatever put them there. The
+check after installing runs with an empty configuration directory, because
+what every user gets is the shipped configuration, not yours.
 
 **The units and the portal configuration go beside your own configuration,**
 so they are treated as yours once you change them. Install records a

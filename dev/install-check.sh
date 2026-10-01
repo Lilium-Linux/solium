@@ -370,6 +370,68 @@ check "  keeps the edited portal choice" grep -qx "default=kde" "$own_portals/li
 check "  keeps the linked unit" [ -L "$own_units/solium-session.target" ]
 check "  and says so" grep -q "kept, because this script did not write them" "$work/own-uninstall.log"
 
+echo "a system prefix: the layout a package installs"
+# --prefix /usr, as the Fedora package's %install runs it (dev/rpm/solium.spec):
+# everything under the prefix, where systemd, xdg-desktop-portal and the
+# display manager read system files, and nothing in the user's configuration.
+# Into a DESTDIR with a ~ in it, as rpmbuild's buildroot has (the version is
+# 0.0.0~git...), and with the broken configuration above as XDG_CONFIG_HOME:
+# what is checked is the configuration every user gets, not this user's.
+sys="$work/BUILDROOT-0.0.0~git"
+sys_share="$sys/usr/share/solium"
+XDG_CONFIG_HOME="$broken" DESTDIR="$sys" "$install_sh" --no-build --prefix /usr \
+    >"$work/system.log" 2>&1
+status=$?
+check "install exits 0, with a ~ in DESTDIR and a broken XDG_CONFIG_HOME" [ "$status" -eq 0 ]
+[[ "$status" -eq 0 ]] || tail -20 "$work/system.log"
+check "bin/solium and bin/solium-session are in /usr/bin" \
+    [ -x "$sys/usr/bin/solium" -a -x "$sys/usr/bin/solium-session" ]
+check "the QML and Lua are copies in /usr/share/solium" \
+    diff -r "$root/crates/solium/qml" "$sys_share/qml"
+check "  both of them" diff -r "$root/crates/solium/lua" "$sys_share/lua"
+sys_session="$sys/usr/share/wayland-sessions/solium.desktop"
+check "the session file is in /usr/share/wayland-sessions" [ -f "$sys_session" ]
+check "  mode 644" [ "$(stat -c %a "$sys_session" 2>/dev/null)" = 644 ]
+check "  with Exec=/usr/bin/solium-session" grep -qx "Exec=/usr/bin/solium-session" "$sys_session"
+check "  the only line that differs from dev/session/solium.desktop" \
+    diff <(grep -v '^Exec=' "$root/dev/session/solium.desktop") <(grep -v '^Exec=' "$sys_session")
+for entry in "solium-session.target:lib/systemd/user" "solium-autostart.target:lib/systemd/user" \
+    "lilium-portals.conf:share/xdg-desktop-portal"; do
+    name="${entry%%:*}"
+    path="$sys/usr/${entry#*:}/$name"
+    check "/usr/${entry#*:}/$name is a copy of dev/session/$name" cmp -s "$root/dev/session/$name" "$path"
+    check "  mode 644" [ "$(stat -c %a "$path" 2>/dev/null)" = 644 ]
+done
+check "nothing went into XDG_CONFIG_HOME" [ ! -e "$sys$broken" ]
+check "share/solium has no session file and no checksums" \
+    [ ! -e "$sys_share/solium.desktop" -a ! -e "$sys_share/config.sha256" ]
+check "exactly those files ($(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua") + 6)))" \
+    [ "$(count_files "$sys")" -eq "$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua") + 6))" ]
+check "no sudo line is printed" [ -z "$(grep -E '^  sudo ' "$work/system.log")" ]
+check "--check passed, using the staged /usr/share/solium" \
+    grep -qF -- "--check passed (ok: " "$work/system.log"
+check "  as the asset root the binary logged" \
+    grep -qE -- "--check passed .*, using $(realpath "$sys_share")\$" "$work/system.log"
+DESTDIR="$work/system-local" "$install_sh" --no-build --prefix /usr/local >"$work/system-local.log" 2>&1
+check "--prefix /usr/local is a system prefix too" [ $? -eq 0 ]
+check "  its units in /usr/local/lib/systemd/user" \
+    [ -f "$work/system-local/usr/local/lib/systemd/user/solium-session.target" ]
+check "  its session file in /usr/local/share/wayland-sessions" \
+    grep -qx "Exec=/usr/local/bin/solium-session" "$work/system-local/usr/local/share/wayland-sessions/solium.desktop"
+DESTDIR="$work/system-local" "$install_sh" --uninstall --prefix /usr/local >/dev/null 2>&1
+DESTDIR="$work/system-refused" "$install_sh" --no-build --prefix /usr --session-dir "$sessions" \
+    >"$work/system-refused.log" 2>&1
+check "--session-dir is refused with a system prefix" [ $? -ne 0 ]
+check "  saying where the session file goes instead" \
+    grep -q "the session file goes in /usr/share/wayland-sessions" "$work/system-refused.log"
+check "  and nothing was written" [ ! -e "$work/system-refused" ]
+XDG_CONFIG_HOME="$broken" DESTDIR="$sys" "$install_sh" --uninstall --prefix /usr \
+    >"$work/system-uninstall.log" 2>&1
+check "uninstall exits 0" [ $? -eq 0 ]
+check "  and leaves no file, the session file, units and portal choice included" \
+    [ "$(count_files "$sys")" -eq 0 ]
+check "  and prints no sudo line" [ -z "$(grep -E '^  sudo ' "$work/system-uninstall.log")" ]
+
 echo "solium-session, after a Solium that could not clean up"
 # A stand-in solium beside a copy of the script, as the prefix has them, and a
 # stand-in systemctl on PATH that logs what it is asked and answers is-active

@@ -6,7 +6,8 @@
 # (`session::tests::session_autostart_false_starts_the_session_without_autostart`,
 # dev/install-check.sh). A unit of its own, so that turning autostart off leaves
 # what is attached to solium-session.target starting. dev/install.sh puts it in
-# ~/.config/systemd/user.
+# ~/.config/systemd/user, or, with a /usr or /usr/local prefix, in
+# <prefix>/lib/systemd/user.
 [Unit]
 Description=XDG autostart in a Solium session
 Documentation=man:systemd.special(7) https://github.com/Lilium-Linux/solium/blob/stage/docs/shell-boundary.md
