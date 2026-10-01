@@ -84,8 +84,13 @@ struct PollSet {
     /// GLib's descriptors, and what they were registered from: the query, and
     /// the file behind each descriptor.
     /// `tests::a_descriptor_qt_stops_watching_is_let_go_while_it_stays_open`.
-    glib: Option<(OwnedFd, Vec<(PollFd, Option<File>)>)>,
+    glib: Option<(OwnedFd, Watched)>,
 }
+
+/// What a set of GLib's descriptors was registered from: each entry of the
+/// query, and the file behind its descriptor when it has one.
+/// `tests::a_descriptor_number_reused_for_another_file_is_watched`.
+type Watched = Vec<(PollFd, Option<File>)>;
 
 /// Which file a descriptor is: its device and inode.
 ///
@@ -115,7 +120,7 @@ impl PollSet {
     /// `tests::a_descriptor_qt_stops_watching_is_let_go_while_it_stays_open`.
     #[expect(unsafe_code, reason = "borrowing descriptors GLib owns")]
     fn watch(&mut self, wanted: &[PollFd]) {
-        let wanted: Vec<(PollFd, Option<File>)> = wanted
+        let wanted: Watched = wanted
             .iter()
             .map(|poll| {
                 let file = (poll.fd >= 0).then(|| {
