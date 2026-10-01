@@ -76,6 +76,10 @@ pub(crate) struct ShellSurface {
     backing: Backing,
     source: PathBuf,
     properties: String,
+    /// The monitor the scene is hosted on, for a `sol.surface` instance; `None`
+    /// for the loading window's scene.
+    /// `scripted::tests::a_surface_instance_is_hosted_on_its_monitor`.
+    monitor: Option<String>,
     newest: Option<SystemTime>,
     checked: Duration,
 }
@@ -106,6 +110,18 @@ impl ShellSurface {
     /// `begin_loading` — with no frame in sight and nothing to restore *to*.
     /// See `Scene::gpu`.
     pub(crate) fn new(source: PathBuf, properties: &str) -> Result<Self> {
+        Self::with_monitor(source, properties, None)
+    }
+
+    /// Host the QML at `source` on one monitor: `Solium.monitor` inside it is
+    /// that monitor.
+    /// `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
+    /// `scripted::tests::a_surface_instance_is_hosted_on_its_monitor`.
+    pub(crate) fn hosted(source: PathBuf, properties: &str, monitor: &str) -> Result<Self> {
+        Self::with_monitor(source, properties, Some(monitor))
+    }
+
+    fn with_monitor(source: PathBuf, properties: &str, monitor: Option<&str>) -> Result<Self> {
         qml::start()?;
         // 1x1 and not the real size, which is not known until the first draw:
         // this is the same placeholder the software path has always built, and
@@ -113,7 +129,7 @@ impl ShellSurface {
         // rather than a scene that does not exist until something asks for a
         // frame. Loading is where a bad QML path is worth reporting, and a
         // surface that has not built anything cannot report it.
-        let scene = build(&source, properties, 1, 1)?;
+        let scene = build(&source, properties, monitor, 1, 1)?;
         let newest = newest_change(&source);
         Ok(Self {
             scene,
@@ -131,6 +147,7 @@ impl ShellSurface {
             },
             source,
             properties: properties.to_owned(),
+            monitor: monitor.map(str::to_owned),
             newest,
             checked: Duration::ZERO,
         })
@@ -230,7 +247,15 @@ impl ShellSurface {
             Backing::Memory { .. } => (1, 1),
             Backing::Gpu(_) => (wanted.0.max(1), wanted.1.max(1)),
         };
-        match build(&self.source, &self.properties, width, height) {
+        // On the monitor it was first built for:
+        // `tests::a_reloaded_scene_stays_hosted_on_its_monitor`.
+        match build(
+            &self.source,
+            &self.properties,
+            self.monitor.as_deref(),
+            width,
+            height,
+        ) {
             Ok(scene) => {
                 self.scene = scene;
                 self.backing = match self.backing {
@@ -411,8 +436,17 @@ impl ShellSurface {
 /// itself belongs to [`qml::Scene::for_host`], because it is the same choice
 /// the window frames and the pointer have to make and three modules each making
 /// it for themselves is the bug that sharing it fixed.
-fn build(source: &Path, properties: &str, width: i32, height: i32) -> Result<qml::Scene> {
-    qml::Scene::for_host(source, width, height, Some(properties))
+fn build(
+    source: &Path,
+    properties: &str,
+    monitor: Option<&str>,
+    width: i32,
+    height: i32,
+) -> Result<qml::Scene> {
+    match monitor {
+        Some(monitor) => qml::Scene::for_monitor(source, width, height, Some(properties), monitor),
+        None => qml::Scene::for_host(source, width, height, Some(properties)),
+    }
 }
 
 /// The newest modification time anywhere the scene's QML lives.
@@ -448,4 +482,50 @@ fn newest_change(source: &Path) -> Option<SystemTime> {
         newest_in(parent, &mut newest, 0);
     }
     newest
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::ShellSurface;
+    use crate::qml::qt_test::on_the_qt_thread;
+
+    /// **A scene rebuilt for an edit stays on its monitor**: the reload builds
+    /// it hosted on the same monitor it was first built for.
+    #[test]
+    fn a_reloaded_scene_stays_hosted_on_its_monitor() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-surface-reload-hosted");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            let scene = |edition: i32| {
+                format!(
+                    "import QtQuick\nimport Solium\nItem {{\n    readonly property int edition: {edition}\n    readonly property int named: Solium.monitor.name === \"reload-1\" ? 1 : 0\n}}\n"
+                )
+            };
+            std::fs::write(&path, scene(1)).expect("writing the scene");
+            let mut surface =
+                ShellSurface::hosted(path.clone(), "{}", "reload-1").expect("the scene builds");
+            assert_eq!(surface.scene_for_test().get_int("named"), 1);
+
+            std::fs::write(&path, scene(2)).expect("editing the scene");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(SystemTime::now() + Duration::from_secs(60)))
+                .expect("dating the edit");
+            surface.reload_if_changed(Duration::from_secs(60), (16, 16));
+            let scene = surface.scene_for_test();
+            assert_eq!(scene.get_int("edition"), 2, "the edit was not reloaded");
+            assert_eq!(
+                scene.get_int("named"),
+                1,
+                "the reloaded scene is no longer hosted on its monitor"
+            );
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
 }

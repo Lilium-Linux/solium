@@ -5,7 +5,8 @@
  * SoliumAttached (Section 2, rule 8). A scene is "hosted" when the compositor
  * built it for one instance of a `sol.surface` on one monitor; it then carries
  * a SoliumHosting record, found from any object of its tree through its QML
- * context. `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
+ * context. `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
+ * `scripted::tests::a_surface_instance_is_hosted_on_its_monitor`.
  */
 #ifndef SOLIUM_QML_ATTACHED_H
 #define SOLIUM_QML_ATTACHED_H

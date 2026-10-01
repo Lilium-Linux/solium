@@ -292,13 +292,15 @@ impl Surface {
         }
     }
 
-    /// The rasterisation for one monitor, built on first use.
+    /// The rasterisation for one monitor, built on first use and hosted on
+    /// that monitor. `tests::a_surface_instance_is_hosted_on_its_monitor`.
     pub(crate) fn instance(&mut self, output: &Output) -> Option<&mut ShellSurface> {
         let name = output.name();
         if !self.instances.contains_key(&name) {
-            match ShellSurface::new(
+            match ShellSurface::hosted(
                 self.declared.scene.clone(),
                 &self.declared.properties.render(),
+                &name,
             ) {
                 Ok(surface) => {
                     self.instances.insert(name.clone(), surface);
@@ -1009,6 +1011,46 @@ mod tests {
                 .properties_for_test()
                 .to_owned();
             assert_eq!(bag, r#"{"label":"one"}"#);
+        });
+    }
+
+    /// **A surface's instance is hosted on its monitor**: `Solium.monitor`
+    /// inside its scene names the monitor the instance was built for.
+    /// Primitive 2.
+    #[test]
+    fn a_surface_instance_is_hosted_on_its_monitor() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file(
+                "solium-scripted-hosted",
+                "Scene.qml",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property int named: Solium.monitor.name === "hosted-1" ? 1 : 0
+                }
+                "#,
+            );
+            let screen = output("hosted-1");
+            let mut surfaces = Surfaces::default();
+            surfaces.declare(Declaration::for_test(
+                "bar",
+                path,
+                Layer::Top,
+                On::EveryMonitor,
+            ));
+            let id = surfaces.named("bar").expect("declared");
+            let named = surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&screen))
+                .expect("the scene builds")
+                .scene_for_test()
+                .get_int("named");
+            assert_eq!(
+                named, 1,
+                "the instance's scene does not know the monitor it is on"
+            );
         });
     }
 
