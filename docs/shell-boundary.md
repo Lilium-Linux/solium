@@ -100,6 +100,12 @@ while frames are being drawn.
 `false`, the default, hosts nothing, and taking the setting out takes
 the shell away on the next reload.
 
+A reload does not rebuild a hosted scene. `sol.surface` declared again with the
+same scene file writes the properties that changed into the live scene, so an
+open popup, a running animation or a half-typed query survives
+`super+shift+r`; only a different scene file builds the scene again
+(`scripted::tests::a_redeclared_property_is_written_into_the_live_scene`).
+
 `SOLIUM_SHELL_SCENE=<file>` overrides the setting for one run. It is how
 `dev/run-shell.sh` hosts a shell under development without touching the
 configuration you normally run; see `dev/README.md`.

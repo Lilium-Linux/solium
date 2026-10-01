@@ -55,6 +55,7 @@
 // headers. QObject brings the core types in the order Qt expects.
 #include <QtCore/QObject>
 
+#include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
@@ -2273,6 +2274,28 @@ extern "C" void solium_qml_scene_set_int(SoliumQmlScene *scene, const char *name
         return;
     }
     scene->object->setProperty(name, QVariant(value));
+}
+
+extern "C" int solium_qml_scene_set_json(SoliumQmlScene *scene, const char *path,
+                                         const char *json_value)
+{
+    if (scene == nullptr || scene->object == nullptr || path == nullptr || json_value == nullptr) {
+        return 0;
+    }
+    /* In a list of one, because QJsonDocument parses only an object or an
+     * array, and a property is as often a number or a string. */
+    const QByteArray wrapped = QByteArray("[") + QByteArray(json_value) + QByteArray("]");
+    QJsonParseError parsed{};
+    const QJsonDocument document = QJsonDocument::fromJson(wrapped, &parsed);
+    if (parsed.error != QJsonParseError::NoError || !document.isArray()
+        || document.array().size() != 1) {
+        return 0;
+    }
+    QQmlProperty property(scene->object, QString::fromUtf8(path));
+    if (!property.isValid()) {
+        return 0;
+    }
+    return property.write(document.array().at(0).toVariant()) ? 1 : 0;
 }
 
 /* How much of the window a decoration reserves is the decoration's decision,

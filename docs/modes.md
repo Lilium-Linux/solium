@@ -232,8 +232,9 @@ sol.on("direction", function(verb, dir) end)       -- a direction key: "focus" o
 
 `surface` is how a `sol.surface` declared with `interactive = true` talks
 back: its scene sets an `action`, and you are told the surface's name and the
-action ([ricing.md](ricing.md#your-wallpaper) has an example). Seven of the
-rest are worth reading twice.
+action ([ricing.md](ricing.md#your-wallpaper) has an example). Declaring the
+same surface again with new `properties` writes them into the live scene rather
+than rebuilding it. Seven of the rest are worth reading twice.
 
 **`open` fires when the window opens, and for a launched window that is before
 its application exists.** A window started with `sol.spawn` begins its life

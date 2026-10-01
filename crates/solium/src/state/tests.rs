@@ -19498,14 +19498,13 @@ end)
                 layer: Scripted,
                 rect: Rectangle<i32, Logical>,
             ) -> crate::scripted::SurfaceId {
-                desk.state.declare_surface(crate::scripted::Declaration {
-                    name: name.to_owned(),
-                    scene: std::path::PathBuf::from("/nonexistent/stacking-test.qml"),
-                    layer,
-                    on: crate::scripted::On::Rect(rect),
-                    properties: "{}".to_owned(),
-                    interactive: true,
-                });
+                desk.state
+                    .declare_surface(crate::scripted::Declaration::for_test(
+                        name,
+                        std::path::PathBuf::from("/nonexistent/stacking-test.qml"),
+                        layer,
+                        crate::scripted::On::Rect(rect),
+                    ));
                 desk.state
                     .surfaces
                     .named(name)

@@ -23,6 +23,7 @@
 //! deliberately narrow: a handle, a render call, some setters. Everything Qt is
 //! behind the C ABI.
 
+pub(crate) mod hosted;
 pub(crate) mod paint;
 pub(crate) mod renderer;
 mod target;

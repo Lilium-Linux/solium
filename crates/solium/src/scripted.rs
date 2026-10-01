@@ -30,7 +30,10 @@
 //! same limits (`docs/shell-boundary.md`, "What it is not given"); until #85,
 //! a surface that needs a keyboard has to be a layer-shell client.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
 
 /// A surface's identity, as everything that is not a script holds it.
 ///
@@ -69,7 +72,7 @@ use smithay::{
     utils::{Logical, Rectangle},
 };
 
-use crate::surface::ShellSurface;
+use crate::{json::Json, surface::ShellSurface};
 
 /// Where a surface sits in the frame.
 ///
@@ -121,14 +124,14 @@ pub(crate) enum On {
 
 /// What a script asked for. Carried from Lua to the compositor, so it holds no
 /// rasterisations and can be cloned like every other command.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Declaration {
     pub(crate) name: String,
     pub(crate) scene: PathBuf,
     pub(crate) layer: Layer,
     pub(crate) on: On,
-    /// The property bag, already JSON.
-    pub(crate) properties: String,
+    /// The property bag.
+    pub(crate) properties: Properties,
     /// Whether the pointer reaches it.
     ///
     /// Off by default, and that is the safe default rather than the tidy one:
@@ -136,6 +139,68 @@ pub(crate) struct Declaration {
     /// every click on the desktop, and the symptom would be "windows stopped
     /// responding" rather than anything mentioning wallpapers.
     pub(crate) interactive: bool,
+}
+
+/// A surface's property bag, as values.
+///
+/// Sorted by key, so the same table declared twice is the same bag whatever
+/// order Lua walked it in: `tests::properties_render_in_key_order`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Properties(BTreeMap<String, Json>);
+
+impl Properties {
+    pub(crate) fn new(values: BTreeMap<String, Json>) -> Self {
+        Self(values)
+    }
+
+    /// The whole bag as one JSON object: what a scene is built with.
+    pub(crate) fn render(&self) -> String {
+        Json::Object(self.0.clone()).render()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self, key: &str) -> Option<&Json> {
+        self.0.get(key)
+    }
+
+    /// The keys whose value is new or different, with their values. A key
+    /// `old` has and this does not is not a change: the scene keeps it
+    /// (Ruling 3). `tests::only_changed_and_added_keys_are_changes`.
+    pub(crate) fn changes_from(&self, old: &Self) -> Vec<(String, Json)> {
+        self.0
+            .iter()
+            .filter(|(key, value)| old.0.get(*key) != Some(*value))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+}
+
+/// What a declaration did. `tests::a_redeclared_property_is_written_into_the_live_scene`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Declared {
+    /// Equal to what was declared: nothing to do.
+    Same,
+    /// The same scene: changed properties were written into the live scenes.
+    InPlace,
+    /// A different scene file: the old scenes are gone.
+    Rebuilt,
+    /// A name never declared before, or declared and removed.
+    Added,
+}
+
+impl Declaration {
+    /// A declaration with every option at its default, for tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(name: &str, scene: PathBuf, layer: Layer, on: On) -> Self {
+        Self {
+            name: name.to_owned(),
+            scene,
+            layer,
+            on,
+            properties: Properties::default(),
+            interactive: true,
+        }
+    }
 }
 
 /// A declaration, plus what has been rasterised for it.
@@ -228,7 +293,10 @@ impl Surface {
     pub(crate) fn instance(&mut self, output: &Output) -> Option<&mut ShellSurface> {
         let name = output.name();
         if !self.instances.contains_key(&name) {
-            match ShellSurface::new(self.declared.scene.clone(), &self.declared.properties) {
+            match ShellSurface::new(
+                self.declared.scene.clone(),
+                &self.declared.properties.render(),
+            ) {
                 Ok(surface) => {
                     self.instances.insert(name.clone(), surface);
                 }
@@ -253,6 +321,20 @@ impl Surface {
     pub(crate) fn keep_only(&mut self, live: &[String]) {
         self.instances
             .retain(|monitor, _| live.iter().any(|name| name == monitor));
+    }
+
+    /// Take a declaration with the same scene: write its changed properties
+    /// into every live instance, and keep everything else of the instances.
+    /// `tests::a_redeclared_property_is_written_into_the_live_scene`,
+    /// `tests::a_changed_placement_keeps_the_live_scene`.
+    fn update(&mut self, declared: Declaration) {
+        let changed = declared.properties.changes_from(&self.declared.properties);
+        if !changed.is_empty() {
+            for instance in self.instances.values_mut() {
+                instance.set_properties(&declared.properties, &changed);
+            }
+        }
+        self.declared = declared;
     }
 }
 
@@ -303,21 +385,27 @@ impl Surfaces {
             .map(SurfaceId)
     }
 
-    /// Declare a surface, or replace the one with that name.
+    /// Declare a surface, or change the one with that name.
     ///
-    /// Returns whether anything changed, so a configuration that is re-read
-    /// without being edited does not throw away every rasterisation it has.
-    pub(crate) fn declare(&mut self, declared: Declaration) -> bool {
+    /// Only a different scene file replaces a surface; anything else changes
+    /// the live scenes in place, so an open popup, a running animation and a
+    /// half-typed query survive a reload (primitive 1).
+    /// `tests::a_new_scene_path_rebuilds_the_surface`.
+    pub(crate) fn declare(&mut self, declared: Declaration) -> Declared {
         let id = self.intern(&declared.name);
         match self.live.iter_mut().find(|each| each.id == id) {
-            Some(existing) if existing.declared == declared => false,
-            Some(existing) => {
+            Some(existing) if existing.declared == declared => Declared::Same,
+            Some(existing) if existing.declared.scene != declared.scene => {
                 *existing = Surface::new(declared, id);
-                true
+                Declared::Rebuilt
+            }
+            Some(existing) => {
+                existing.update(declared);
+                Declared::InPlace
             }
             None => {
                 self.live.push(Surface::new(declared, id));
-                true
+                Declared::Added
             }
         }
     }
@@ -394,4 +482,209 @@ pub(crate) fn json_string(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+
+    use super::{Declaration, Declared, Layer, On, Properties, Surfaces};
+    use crate::json::Json;
+    use crate::qml::qt_test::on_the_qt_thread;
+
+    fn properties(pairs: &[(&str, Json)]) -> Properties {
+        Properties::new(
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    }
+
+    /// A 1920x1080 monitor at 1x, with no display behind it.
+    pub(super) fn output(name: &str) -> Output {
+        let output = Output::new(
+            name.to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "solium".to_owned(),
+                model: name.to_owned(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: (1920, 1080).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(Scale::Fractional(1.0)),
+            None,
+        );
+        output
+    }
+
+    /// `qml` written to `<temp>/<name>/<file>`, and its path.
+    pub(super) fn scene_file(name: &str, file: &str, qml: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(name);
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join(file);
+        std::fs::write(&path, qml).expect("writing the scene");
+        path
+    }
+
+    const KEPT: &str = r#"
+        import QtQuick
+        Item {
+            property string label: ""
+            property int kept: 0
+            readonly property int labelIsTwo: label === "two" ? 1 : 0
+        }
+    "#;
+
+    #[test]
+    fn properties_render_in_key_order() {
+        let bag = properties(&[
+            ("width", Json::Number(48.0)),
+            ("label", Json::Text("a".to_owned())),
+        ]);
+        assert_eq!(bag.render(), r#"{"label":"a","width":48}"#);
+    }
+
+    #[test]
+    fn only_changed_and_added_keys_are_changes() {
+        let old = properties(&[("a", Json::Number(1.0)), ("b", Json::Number(2.0))]);
+        let new = properties(&[
+            ("a", Json::Number(1.0)),
+            ("b", Json::Number(3.0)),
+            ("c", Json::Bool(true)),
+        ]);
+        assert_eq!(
+            new.changes_from(&old),
+            vec![
+                ("b".to_owned(), Json::Number(3.0)),
+                ("c".to_owned(), Json::Bool(true))
+            ]
+        );
+        assert!(new.changes_from(&new).is_empty());
+    }
+
+    /// **A redeclared property reaches the live scene, and the scene is the
+    /// same scene**: what it holds survives. Primitive 1.
+    #[test]
+    fn a_redeclared_property_is_written_into_the_live_scene() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file("solium-scripted-in-place", "Scene.qml", KEPT);
+            let screen = output("in-place-1");
+            let mut surfaces = Surfaces::default();
+            let mut declared = Declaration::for_test("bar", path, Layer::Top, On::EveryMonitor);
+            declared.properties = properties(&[("label", Json::Text("one".to_owned()))]);
+            assert_eq!(surfaces.declare(declared.clone()), Declared::Added);
+            let id = surfaces.named("bar").expect("declared");
+            surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&screen))
+                .expect("the scene builds")
+                .scene_for_test()
+                .set_int("kept", 7);
+
+            declared.properties = properties(&[("label", Json::Text("two".to_owned()))]);
+            assert_eq!(surfaces.declare(declared), Declared::InPlace);
+            let scene = surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&screen))
+                .expect("still there")
+                .scene_for_test();
+            assert_eq!(
+                scene.get_int("labelIsTwo"),
+                1,
+                "the new label did not reach the scene"
+            );
+            assert_eq!(
+                scene.get_int("kept"),
+                7,
+                "the scene was rebuilt: what it held is gone"
+            );
+        });
+    }
+
+    /// **A changed placement keeps the live scene**: `on`, `layer` and
+    /// `interactive` are the compositor's, and a scene does not hear of them.
+    #[test]
+    fn a_changed_placement_keeps_the_live_scene() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file("solium-scripted-placement", "Scene.qml", KEPT);
+            let screen = output("placement-1");
+            let mut surfaces = Surfaces::default();
+            let mut declared = Declaration::for_test("bar", path, Layer::Top, On::EveryMonitor);
+            surfaces.declare(declared.clone());
+            let id = surfaces.named("bar").expect("declared");
+            surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&screen))
+                .expect("the scene builds")
+                .scene_for_test()
+                .set_int("kept", 7);
+
+            declared.on = On::Monitor("placement-1".to_owned());
+            declared.layer = Layer::Overlay;
+            assert_eq!(surfaces.declare(declared), Declared::InPlace);
+            let kept = surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&screen))
+                .expect("still there")
+                .scene_for_test()
+                .get_int("kept");
+            assert_eq!(kept, 7, "a new placement rebuilt the scene");
+        });
+    }
+
+    /// **A new scene file rebuilds**, which is the one change that must.
+    #[test]
+    fn a_new_scene_path_rebuilds_the_surface() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let first = scene_file("solium-scripted-rebuild", "First.qml", KEPT);
+            let second = scene_file("solium-scripted-rebuild", "Second.qml", KEPT);
+            let screen = output("rebuild-1");
+            let mut surfaces = Surfaces::default();
+            let mut declared = Declaration::for_test("bar", first, Layer::Top, On::EveryMonitor);
+            surfaces.declare(declared.clone());
+            let id = surfaces.named("bar").expect("declared");
+            surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&screen))
+                .expect("the scene builds")
+                .scene_for_test()
+                .set_int("kept", 7);
+
+            declared.scene = second;
+            assert_eq!(surfaces.declare(declared), Declared::Rebuilt);
+            let kept = surfaces
+                .get_mut(id)
+                .and_then(|surface| surface.instance(&screen))
+                .expect("rebuilt")
+                .scene_for_test()
+                .get_int("kept");
+            assert_eq!(kept, 0, "the old scene is still there");
+        });
+    }
+
+    #[test]
+    fn an_identical_declaration_is_the_same() {
+        let mut surfaces = Surfaces::default();
+        let declared = Declaration::for_test(
+            "bar",
+            Path::new("/nonexistent/bar.qml").to_owned(),
+            Layer::Top,
+            On::EveryMonitor,
+        );
+        assert_eq!(surfaces.declare(declared.clone()), Declared::Added);
+        assert_eq!(surfaces.declare(declared), Declared::Same);
+    }
 }

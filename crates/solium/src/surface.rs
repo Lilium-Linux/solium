@@ -35,11 +35,13 @@ use smithay::{
 };
 
 use crate::{
+    json::Json,
     qml::{
         self,
         paint::{Gpu, Placement},
     },
     render::{Drawn, Element},
+    scripted::Properties,
 };
 
 /// How often the QML is checked for edits.
@@ -169,6 +171,26 @@ impl ShellSurface {
     /// compositor takes it and clears it, so a press is acted on once.
     pub(crate) fn taken_action(&mut self) -> Option<String> {
         self.scene.take_string("action").filter(|it| !it.is_empty())
+    }
+
+    /// Write `changed` into the live scene, and remember `properties` as the
+    /// bag a reload of the QML builds with.
+    /// `scripted::tests::a_redeclared_property_is_written_into_the_live_scene`.
+    pub(crate) fn set_properties(&mut self, properties: &Properties, changed: &[(String, Json)]) {
+        for (path, value) in changed {
+            if !self.scene.set_json(path, value) {
+                tracing::debug!(
+                    property = path,
+                    "the scene has no such property, or refused the value"
+                );
+            }
+        }
+        self.properties = properties.render();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scene_for_test(&mut self) -> &mut qml::Scene {
+        &mut self.scene
     }
 
     /// Rebuild the scene if the QML changed on disk.

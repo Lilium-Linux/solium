@@ -315,6 +315,14 @@ void solium_qml_scene_set_string(SoliumQmlScene *scene, const char *name, const 
 void solium_qml_scene_set_bool(SoliumQmlScene *scene, const char *name, int value);
 void solium_qml_scene_set_int(SoliumQmlScene *scene, const char *name, int value);
 
+/* Write one property of the scene's root from a JSON value: a number, a
+ * string, a boolean, null, an array or an object (which a `var` property
+ * receives as a JavaScript object). `path` is a property path, as
+ * solium_qml_scene_get_int's is, so `panel.open` reaches a grouped property.
+ * Returns 1 when the property exists and took the value, 0 otherwise.
+ * `scripted::tests::a_redeclared_property_is_written_into_the_live_scene`. */
+int solium_qml_scene_set_json(SoliumQmlScene *scene, const char *path, const char *json_value);
+
 /* Read a whole-number property.
  *
  * `name` is a property *path*, not only a property name: `insetTop` and

@@ -17,6 +17,7 @@ mod focus;
 mod group;
 mod idle;
 mod input;
+mod json;
 mod keymap;
 mod layer;
 mod lock;

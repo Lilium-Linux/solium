@@ -1735,7 +1735,7 @@ impl Solium {
     /// everything: without that check a `super+shift+r` that changed a gap
     /// would re-decode every wallpaper on every monitor.
     pub(crate) fn declare_surface(&mut self, declared: crate::scripted::Declaration) {
-        if self.surfaces.declare(declared) {
+        if self.surfaces.declare(declared) != crate::scripted::Declared::Same {
             self.redraw = true;
         }
     }
