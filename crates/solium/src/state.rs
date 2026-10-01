@@ -1819,10 +1819,17 @@ impl Solium {
             return false;
         };
         if !surface.pointer(&output, area, location.x, location.y, pressed) {
-            // The area contained the point — `surface_claiming` said so — so
-            // the only way back here is an instance that would not build, which
-            // is a scene that failed to load and logged as much. It draws
-            // nothing and it takes nothing.
+            // The area contained the point — `surface_claiming` said so — but
+            // no instance was built on that monitor: the scene file is not
+            // there (`scripted::tests::a_missing_scene_file_builds_nothing_until_it_is_there`),
+            // it would not load
+            // (`scripted::tests::a_scene_that_will_not_load_waits_for_another_scene_file`),
+            // the monitor was placed and the surfaces not yet synced to it, as
+            // a nested resize was until
+            // `tests::real_client::a_resize_that_brings_a_monitor_under_a_surface_gives_it_an_instance_there`,
+            // or, in a test binary, the sync ran off the Qt thread
+            // (`scripted::tests::a_surface_synced_off_the_qt_thread_builds_nothing`).
+            // Nothing is drawn there, so nothing is taken.
             return false;
         }
         self.redraw = true;
