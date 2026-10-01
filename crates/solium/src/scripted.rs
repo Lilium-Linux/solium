@@ -69,10 +69,10 @@ impl SurfaceId {
 
 use smithay::{
     output::Output,
-    utils::{Logical, Rectangle},
+    utils::{Logical, Point, Rectangle},
 };
 
-use crate::{json::Json, surface::ShellSurface};
+use crate::{json::Json, qml::hosted::ScenePointer, surface::ShellSurface};
 
 /// Where a surface sits in the frame.
 ///
@@ -228,6 +228,10 @@ pub(crate) struct Surface {
     failed: HashSet<String>,
     /// Whether the scene file not being there has been reported.
     missing_logged: bool,
+    /// What answers for its scene in a state test, which cannot build one
+    /// beside a real Wayland client: see [`Stand`].
+    #[cfg(test)]
+    stand: Option<Stand>,
 }
 
 impl Surface {
@@ -238,6 +242,8 @@ impl Surface {
             instances: HashMap::new(),
             failed: HashSet::new(),
             missing_logged: false,
+            #[cfg(test)]
+            stand: None,
         }
     }
 
@@ -257,20 +263,38 @@ impl Surface {
         self.declared.interactive
     }
 
-    /// Offer the pointer to this surface's instance on one monitor.
-    ///
-    /// Returns whether it was inside. A surface that takes the pointer stops
-    /// it reaching anything underneath, which is what makes a button a button.
-    pub(crate) fn pointer(
+    /// Deliver one pointer event to this surface's instance on one monitor.
+    /// True when there was one to take it.
+    /// `tests::a_delivered_press_reaches_the_instance_in_its_own_coordinates`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`.
+    pub(crate) fn deliver(
         &mut self,
         output: &Output,
         area: Rectangle<i32, Logical>,
-        x: f64,
-        y: f64,
-        pressed: Option<bool>,
+        location: Point<f64, Logical>,
+        event: ScenePointer,
     ) -> bool {
-        self.instance_mut(output)
-            .is_some_and(|instance| instance.pointer(area, x, y, pressed))
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_mut() {
+            stand.seen.push((location - area.loc.to_f64(), event));
+            return true;
+        }
+        self.instance_mut(output).is_some_and(|instance| {
+            instance.pointer(area, location, &event);
+            true
+        })
+    }
+
+    /// Stand `stand` in for this surface's scene on every monitor.
+    #[cfg(test)]
+    pub(crate) fn stand_in(&mut self, stand: Stand) {
+        self.stand = Some(stand);
+    }
+
+    /// What stands in for its scene, and what reached it.
+    #[cfg(test)]
+    pub(crate) fn stand(&self) -> Option<&Stand> {
+        self.stand.as_ref()
     }
 
     /// Whatever the scene asked for since it was last looked at.
@@ -406,6 +430,26 @@ impl Surface {
             }
         }
         self.declared = declared;
+    }
+}
+
+/// What stands in for a surface's scene in a state test, which cannot build a
+/// Qt scene beside a real Wayland client (the #99 test): what reached it. One
+/// stand answers for every instance of its surface.
+/// `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct Stand {
+    /// Every pointer event delivered, in the surface's own coordinates.
+    pub(crate) seen: Vec<(Point<f64, Logical>, ScenePointer)>,
+}
+
+#[cfg(test)]
+impl Stand {
+    /// A scene that takes everything in its area, as every surface did before
+    /// #173.
+    pub(crate) fn solid() -> Self {
+        Self::default()
     }
 }
 
@@ -577,6 +621,7 @@ mod tests {
 
     use super::{Declaration, Declared, Layer, On, Properties, Surfaces};
     use crate::json::Json;
+    use crate::qml::hosted::{PointerKind, ScenePointer};
     use crate::qml::qt_test::on_the_qt_thread;
 
     fn properties(pairs: &[(&str, Json)]) -> Properties {
@@ -1149,6 +1194,72 @@ mod tests {
             assert_eq!(
                 named, 1,
                 "the instance's scene does not know the monitor it is on"
+            );
+        });
+    }
+
+    /// **A pointer event reaches the instance in the instance's own
+    /// coordinates, as itself**: `Surface::deliver` is given the point in the
+    /// compositor's coordinates and the area the surface is drawn across on
+    /// that monitor, and the scene is told the point inside that area, with
+    /// the right button as the right button (#163). Primitive 4. The scene is
+    /// built 1x1 until its first frame, so the `MouseArea` has a size of its
+    /// own.
+    #[test]
+    fn a_delivered_press_reaches_the_instance_in_its_own_coordinates() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file(
+                "solium-scripted-delivered",
+                "Scene.qml",
+                r"
+                import QtQuick
+                Item {
+                    property int pressedX: -1
+                    property int pressedY: -1
+                    property int button: 0
+                    MouseArea {
+                        width: 400
+                        height: 30
+                        acceptedButtons: Qt.AllButtons
+                        onPressed: (mouse) => {
+                            parent.pressedX = mouse.x
+                            parent.pressedY = mouse.y
+                            parent.button = mouse.button
+                        }
+                    }
+                }
+                ",
+            );
+            let (_, right, monitors) = side_by_side("delivered-left", "delivered-right");
+            let area = Rectangle::new((1920, 0).into(), (400, 30).into());
+            let mut surfaces = Surfaces::default();
+            surfaces.declare(Declaration::for_test(
+                "bar",
+                path,
+                Layer::Top,
+                On::Rect(area),
+            ));
+            let id = surfaces.named("bar").expect("declared");
+            let surface = surfaces.get_mut(id).expect("live");
+            surface.sync(&monitors, Some(&right));
+            let press = ScenePointer {
+                kind: PointerKind::Press(0x2),
+                buttons: 0x2,
+                modifiers: 0,
+            };
+            assert!(
+                surface.deliver(&right, area, (1930.0, 15.0).into(), press),
+                "the instance on the right monitor did not take the press"
+            );
+            let scene = surface
+                .instance_mut(&right)
+                .expect("the scene builds")
+                .scene_for_test();
+            assert_eq!(
+                ["pressedX", "pressedY", "button"].map(|name| scene.get_int(name)),
+                [10, 15, 2],
+                "[x, y, button] the scene was told"
             );
         });
     }

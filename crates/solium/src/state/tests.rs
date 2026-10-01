@@ -3777,6 +3777,79 @@ mod real_client {
         output
     }
 
+    /// Make `state`'s keyboard `us,ru` with Russian the active group: every
+    /// input change is tested with the Cyrillic group active (#132).
+    fn russian(state: &mut Solium) {
+        use smithay::input::keyboard::{Layout, XkbConfig};
+        let keyboard = state.seat.get_keyboard().expect("the seat has a keyboard");
+        keyboard
+            .set_xkb_config(
+                state,
+                XkbConfig {
+                    layout: "us,ru",
+                    ..Default::default()
+                },
+            )
+            .expect("compiling us,ru; xkb data is missing, so this proves nothing");
+        let active = keyboard.with_xkb_state(state, |mut context| {
+            context.set_layout(Layout(1));
+            context
+                .xkb()
+                .lock()
+                .map(|xkb| xkb.active_layout().0)
+                .unwrap_or(0)
+        });
+        assert_eq!(
+            active, 1,
+            "Russian did not become the active group, so this would test `us`"
+        );
+    }
+
+    /// A script's interactive surface over `rect`, its scene stood in for by
+    /// `stand`: a Qt scene cannot be built beside a real client (the #99
+    /// test).
+    fn stand_in(
+        state: &mut Solium,
+        name: &str,
+        layer: crate::scripted::Layer,
+        rect: Rectangle<i32, Logical>,
+        stand: crate::scripted::Stand,
+    ) -> crate::scripted::SurfaceId {
+        state.declare_surface(crate::scripted::Declaration::for_test(
+            name,
+            std::path::PathBuf::from("/nonexistent/hosted-test.qml"),
+            layer,
+            crate::scripted::On::Rect(rect),
+        ));
+        let id = state.surfaces.named(name).expect("declared");
+        state.surfaces.get_mut(id).expect("live").stand_in(stand);
+        id
+    }
+
+    /// Every pointer event the stand-in for surface `id` was told.
+    fn scene_events(
+        state: &Solium,
+        id: crate::scripted::SurfaceId,
+    ) -> Vec<crate::qml::hosted::ScenePointer> {
+        state
+            .surfaces
+            .get(id)
+            .and_then(crate::scripted::Surface::stand)
+            .map(|stand| stand.seen.iter().map(|(_, event)| *event).collect())
+            .unwrap_or_default()
+    }
+
+    /// Move the pointer to `at`, through the real input path.
+    fn move_pointer(state: &mut Solium, at: (f64, f64), time: u64) {
+        let was = state
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location())
+            .unwrap_or_default();
+        let region = crate::monitor::union(&state.space).expect("a monitor");
+        crate::synth::send_motion(state, region, Point::from(at) - was, time);
+    }
+
     /// A bar across the top of the primary monitor, `height` pixels tall,
     /// holding them as its exclusive zone.
     ///
@@ -10330,6 +10403,47 @@ mod real_client {
             );
             let (app, _) = session.type_key();
             assert!(app, "unlocked, and typing does not reach the application");
+        }
+
+        /// **The wheel over a hosted scene is not the scene's while the
+        /// session is locked**, as the pointer's motion and presses are not:
+        /// nothing of the session's may notice the pointer going past.
+        /// Tested with the Cyrillic group active (#132); the scene is stood
+        /// in for, beside these real clients (the #99 test).
+        #[test]
+        fn the_wheel_over_a_hosted_scene_is_not_the_scenes_while_locked() {
+            use crate::qml::hosted::PointerKind;
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let bar = stand_in(
+                &mut session.state,
+                "bar",
+                crate::scripted::Layer::Top,
+                Rectangle::new((0, 0).into(), (1920, 30).into()),
+                crate::scripted::Stand::solid(),
+            );
+            let wheels = |state: &Solium| {
+                scene_events(state, bar)
+                    .into_iter()
+                    .filter(|event| matches!(event.kind, PointerKind::Wheel { .. }))
+                    .count()
+            };
+            move_pointer(&mut session.state, (100.0, 15.0), 1);
+            let region = crate::monitor::union(&session.state.space).expect("a monitor");
+            crate::synth::send_axis(&mut session.state, region, (0.0, 120.0), 2);
+            assert_eq!(
+                wheels(&session.state),
+                1,
+                "the premise: unlocked, the wheel over the scene is the scene's"
+            );
+
+            let _lock = session.lock();
+            crate::synth::send_axis(&mut session.state, region, (0.0, 120.0), 3);
+            assert_eq!(
+                wheels(&session.state),
+                1,
+                "the scene heard the wheel behind the lock"
+            );
         }
 
         /// **Nothing captures the screen while the session is locked.**
@@ -21524,6 +21638,137 @@ end)
                     "(on the right monitor's bar strip: the bar offered the press, the surface \
                      the pointer reaches; on the left one's over its window: the bar offered \
                      the press, what the press is)"
+                );
+            }
+        }
+
+        /// The compositor's routing to hosted scenes, with a stand-in for each
+        /// scene: a real Wayland client and a Qt scene cannot share a test
+        /// (the #99 test).
+        mod hosted {
+            use super::*;
+            use crate::qml::hosted::{PointerKind, ScenePointer};
+            use crate::scripted::{Layer as Scripted, Stand};
+            use smithay::backend::input::{ButtonState, KeyState};
+
+            const SHIFT_L: u32 = 50;
+            const SUPER_L: u32 = 133;
+            const BTN_RIGHT: u32 = 0x111;
+
+            /// A script's interactive surface over `rect`, its scene stood in for.
+            fn stood(
+                desk: &mut Desk,
+                name: &str,
+                layer: Scripted,
+                rect: Rectangle<i32, Logical>,
+                stand: Stand,
+            ) -> crate::scripted::SurfaceId {
+                stand_in(&mut desk.state, name, layer, rect, stand)
+            }
+
+            fn seen(desk: &Desk, id: crate::scripted::SurfaceId) -> Vec<ScenePointer> {
+                scene_events(&desk.state, id)
+            }
+
+            fn region(desk: &Desk) -> Rectangle<i32, Logical> {
+                crate::monitor::union(&desk.state.space).expect("a monitor")
+            }
+
+            /// Move the pointer to `at`, through the real input path.
+            fn to(desk: &mut Desk, at: (f64, f64), time: u64) {
+                move_pointer(&mut desk.state, at, time);
+            }
+
+            fn bar() -> Rectangle<i32, Logical> {
+                Rectangle::new((0, 0).into(), (1920, 30).into())
+            }
+
+            /// A desk whose keyboard is `us,ru` with Russian active: every input
+            /// change is tested with the Cyrillic group active (#132).
+            fn russian_desk() -> Desk {
+                let mut desk = Desk::new();
+                russian(&mut desk.state);
+                desk
+            }
+
+            /// **A right press on a scene reaches it as the right button, with
+            /// shift held** (#163).
+            #[test]
+            fn a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held() {
+                let mut desk = russian_desk();
+                let bar = stood(&mut desk, "bar", Scripted::Top, bar(), Stand::solid());
+                to(&mut desk, (100.0, 15.0), 1);
+                crate::input::key(&mut desk.state, SHIFT_L.into(), KeyState::Pressed, 2);
+                let region = region(&desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    BTN_RIGHT,
+                    ButtonState::Pressed,
+                    3,
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    BTN_RIGHT,
+                    ButtonState::Released,
+                    4,
+                );
+                let buttons: Vec<ScenePointer> = seen(&desk, bar)
+                    .into_iter()
+                    .filter(|event| !matches!(event.kind, PointerKind::Motion))
+                    .collect();
+                assert_eq!(
+                    buttons,
+                    vec![
+                        ScenePointer {
+                            kind: PointerKind::Press(0x2),
+                            buttons: 0x2,
+                            modifiers: crate::qml::keys::QT_SHIFT,
+                        },
+                        ScenePointer {
+                            kind: PointerKind::Release(0x2),
+                            buttons: 0,
+                            modifiers: crate::qml::keys::QT_SHIFT,
+                        },
+                    ]
+                );
+            }
+
+            #[test]
+            fn the_wheel_over_a_scene_reaches_it() {
+                let mut desk = russian_desk();
+                let bar = stood(&mut desk, "bar", Scripted::Top, bar(), Stand::solid());
+                to(&mut desk, (100.0, 15.0), 1);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 2);
+                assert!(
+                    seen(&desk, bar).iter().any(|event| event.kind
+                        == PointerKind::Wheel {
+                            angle: (0.0, -120.0),
+                            pixels: (0.0, 0.0),
+                        }),
+                    "a notch down is a negative angle in Qt's terms: {:?}",
+                    seen(&desk, bar)
+                );
+            }
+
+            /// **`super` and the wheel stay the compositor's over a scene**: a
+            /// scrolling layout's viewport is not a shell's to take.
+            #[test]
+            fn super_and_the_wheel_stay_the_compositors_over_a_scene() {
+                let mut desk = russian_desk();
+                desk.install(r#"sol.on("scroll", function(dx, dy) sol.status("scrolled") end)"#);
+                let bar = stood(&mut desk, "bar", Scripted::Top, bar(), Stand::solid());
+                to(&mut desk, (100.0, 15.0), 1);
+                crate::input::key(&mut desk.state, SUPER_L.into(), KeyState::Pressed, 2);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 3);
+                assert_eq!(desk.state.status, "scrolled");
+                assert!(
+                    !seen(&desk, bar)
+                        .iter()
+                        .any(|event| matches!(event.kind, PointerKind::Wheel { .. }))
                 );
             }
         }

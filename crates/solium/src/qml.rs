@@ -24,6 +24,7 @@
 //! behind the C ABI.
 
 pub(crate) mod hosted;
+pub(crate) mod keys;
 pub(crate) mod paint;
 pub(crate) mod renderer;
 mod target;

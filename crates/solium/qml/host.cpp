@@ -79,6 +79,7 @@
 #include <QtGui/QImage>
 #include <QtCore/QString>
 #include <QtGui/QMouseEvent>
+#include <QtGui/QWheelEvent>
 #include <QtGui/QOpenGLContext>
 #include <QtGui/QOpenGLFunctions>
 #include <QtGui/QSurface>
@@ -2540,5 +2541,32 @@ extern "C" void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double
     }
 
     QMouseEvent event(type, at, at, button, buttons, Qt::NoModifier);
+    QCoreApplication::sendEvent(scene->window, &event);
+}
+
+extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, double x, double y,
+                                               unsigned button, unsigned buttons,
+                                               unsigned modifiers, double angle_x, double angle_y,
+                                               double pixel_x, double pixel_y)
+{
+    if (scene == nullptr || scene->window == nullptr) {
+        return;
+    }
+    const QPointF at(x, y);
+    const auto held = Qt::MouseButtons::fromInt(static_cast<int>(buttons));
+    const auto mods = Qt::KeyboardModifiers::fromInt(static_cast<int>(modifiers));
+    if (kind == 3) {
+        QWheelEvent event(at, at, QPoint(qRound(pixel_x), qRound(pixel_y)),
+                          QPoint(qRound(angle_x), qRound(angle_y)), held, mods, Qt::NoScrollPhase,
+                          false);
+        QCoreApplication::sendEvent(scene->window, &event);
+        return;
+    }
+    const QEvent::Type type = kind == 1   ? QEvent::MouseButtonPress
+                              : kind == 2 ? QEvent::MouseButtonRelease
+                                          : QEvent::MouseMove;
+    const auto which =
+        (kind == 1 || kind == 2) ? static_cast<Qt::MouseButton>(button) : Qt::NoButton;
+    QMouseEvent event(type, at, at, which, held, mods);
     QCoreApplication::sendEvent(scene->window, &event);
 }

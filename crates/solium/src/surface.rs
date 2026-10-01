@@ -31,13 +31,14 @@ use smithay::{
             gles::GlesRenderer,
         },
     },
-    utils::{Logical, Rectangle, Transform},
+    utils::{Logical, Point, Rectangle, Transform},
 };
 
 use crate::{
     json::Json,
     qml::{
         self,
+        hosted::ScenePointer,
         paint::{Gpu, Placement},
     },
     render::{Drawn, Element},
@@ -153,27 +154,19 @@ impl ShellSurface {
         })
     }
 
-    /// Pointer input, in compositor coordinates.
-    ///
-    /// Everything reaches the scene. A shell surface that hides itself — a
-    /// dock against an edge, a panel that slides — has to watch the whole
-    /// screen to know when to appear, so filtering by what is currently drawn
-    /// would mean it could only be revealed by a pointer that was already
-    /// over it.
+    /// Deliver one pointer event, in compositor coordinates, to the scene
+    /// drawn across `area`. Whether the scene should have it is the caller's
+    /// question.
+    /// `scripted::tests::a_delivered_press_reaches_the_instance_in_its_own_coordinates`,
+    /// `qml::hosted::tests::a_right_press_reaches_a_mouse_area_as_the_right_button`.
     pub(crate) fn pointer(
         &mut self,
         area: Rectangle<i32, Logical>,
-        x: f64,
-        y: f64,
-        pressed: Option<bool>,
-    ) -> bool {
-        let surface = area.to_f64();
-        if !surface.contains((x, y)) {
-            return false;
-        }
-        self.scene
-            .pointer(x - surface.loc.x, y - surface.loc.y, pressed);
-        true
+        location: Point<f64, Logical>,
+        event: &ScenePointer,
+    ) {
+        let local = location - area.loc.to_f64();
+        self.scene.pointer_event(local.x, local.y, event);
     }
 
     /// Set a whole-number property on the scene.

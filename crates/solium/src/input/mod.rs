@@ -36,6 +36,7 @@ use smithay::{
 use crate::{
     decoration::Decoration,
     pane::Pane,
+    qml::hosted::{PointerKind, ScenePointer},
     script,
     state::{Chrome, Request, Solium},
 };
@@ -446,9 +447,10 @@ fn pointer_motion<B: InputBackend>(
         // Scripted surfaces above the windows see the pointer first, so a
         // button on a bar lights up on hover. Then frames, then the ones
         // below.
-        if !state.surface_pointer(true, location, None) {
+        let motion = scene_event(state, PointerKind::Motion);
+        if !state.surface_pointer(true, location, motion) {
             hover_frame(state, location);
-            state.surface_pointer(false, location, None);
+            state.surface_pointer(false, location, motion);
         }
         follow_pointer(state, location, pointer.is_grabbed());
     }
@@ -527,9 +529,10 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
         // existed only on the nested path would be a lock screen that leaked
         // on the hardware and nowhere else.
         if state.lock.is_none() {
-            if !state.surface_pointer(true, location, None) {
+            let motion = scene_event(state, PointerKind::Motion);
+            if !state.surface_pointer(true, location, motion) {
                 hover_frame(state, location);
-                state.surface_pointer(false, location, None);
+                state.surface_pointer(false, location, motion);
             }
             follow_pointer(state, location, pointer.is_grabbed());
         }
@@ -738,6 +741,20 @@ fn release_cursor(state: &mut Solium, unclaimed: bool, grabbed: bool) {
     state.pointer.show(CursorImageStatus::default_named());
 }
 
+/// A pointer event as a scene is told it: the Qt buttons held now, and the
+/// keyboard's modifiers.
+/// `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`.
+fn scene_event(state: &Solium, kind: PointerKind) -> ScenePointer {
+    let modifiers = state.seat.get_keyboard().map_or(0, |keyboard| {
+        crate::qml::keys::qt_modifiers(&keyboard.modifier_state())
+    });
+    ScenePointer {
+        kind,
+        buttons: state.pointer_buttons,
+        modifiers,
+    }
+}
+
 /// Focus whatever the pointer is over, if the profile says so.
 ///
 /// Skipped while a grab is running: a window being dragged is under the
@@ -809,6 +826,27 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     let button = event.button_code();
     let button_state = event.state();
     let location = pointer.current_location();
+    // The buttons held, before the lock's check, so they are right after it.
+    // `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`.
+    let pressed = button_state == ButtonState::Pressed;
+    let qt = crate::qml::keys::qt_button(button);
+    if let Some(bit) = qt {
+        if pressed {
+            state.pointer_buttons |= bit;
+        } else {
+            state.pointer_buttons &= !bit;
+        }
+    }
+    let scene = qt.map(|bit| {
+        scene_event(
+            state,
+            if pressed {
+                PointerKind::Press(bit)
+            } else {
+                PointerKind::Release(bit)
+            },
+        )
+    });
 
     // Locked: the press is the lock screen's, and the compositor does not get
     // to interpret it. Everything between here and the plain forward below is
@@ -858,7 +896,8 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // dragged. A bar, a panel, an overlay: all the same path, and the
     // compositor knows what none of them are for.
     if !pointer.is_grabbed()
-        && state.surface_pointer(true, location, Some(button_state == ButtonState::Pressed))
+        && let Some(scene) = scene
+        && state.surface_pointer(true, location, scene)
     {
         return;
     }
@@ -1090,7 +1129,8 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // wanted it.
     if !pointer.is_grabbed()
         && !on_a_client
-        && state.surface_pointer(false, location, Some(button_state == ButtonState::Pressed))
+        && let Some(scene) = scene
+        && state.surface_pointer(false, location, scene)
     {
         return;
     }
@@ -1154,6 +1194,39 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
     } else {
         1.0
     };
+
+    // Over a scene, the wheel is the scene's, in Qt's terms (Ruling 9): a
+    // notch away from the user is +120, which Wayland calls -1.
+    // `state::tests::real_client::reflow_on_close::hosted::the_wheel_over_a_scene_reaches_it`.
+    let location = pointer.current_location();
+    let continuous = matches!(event.source(), AxisSource::Finger | AxisSource::Continuous);
+    let angle = |axis| {
+        -event
+            .amount_v120(axis)
+            .unwrap_or_else(|| event.amount(axis).unwrap_or_default() * 8.0)
+            * direction
+    };
+    let pixels = |axis| {
+        if continuous {
+            -event.amount(axis).unwrap_or_default() * direction
+        } else {
+            0.0
+        }
+    };
+    let wheel = scene_event(
+        state,
+        PointerKind::Wheel {
+            angle: (angle(Axis::Horizontal), angle(Axis::Vertical)),
+            pixels: (pixels(Axis::Horizontal), pixels(Axis::Vertical)),
+        },
+    );
+    if !pointer.is_grabbed()
+        && (state.surface_pointer(true, location, wheel)
+            || (pointer.current_focus().is_none() && state.surface_pointer(false, location, wheel)))
+    {
+        return;
+    }
+
     let mut frame = AxisFrame::new(event.time_msec()).source(AxisSource::Wheel);
 
     for axis in [Axis::Horizontal, Axis::Vertical] {

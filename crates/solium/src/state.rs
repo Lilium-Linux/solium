@@ -368,6 +368,10 @@ pub(crate) struct Solium {
     /// told. QML hover is positional: a frame never told the pointer left
     /// stays lit forever.
     pub(crate) hovered_frame: Option<crate::pane::PaneId>,
+    /// The mouse buttons held, as Qt's `MouseButtons`, which every pointer
+    /// event a hosted scene is told carries.
+    /// `tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`.
+    pub(crate) pointer_buttons: u32,
     // A window on its way out, and one that has been asked to close and not
     // gone, used to be two `HashMap<PaneId, Duration>` here. They are
     // `Pane::closing_at` and `Pane::asked_at` now: a timer about one window is
@@ -903,6 +907,7 @@ impl Solium {
             dnd_icon: None,
             loading: crate::script::Loading::default(),
             hovered_frame: None,
+            pointer_buttons: 0,
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
@@ -1805,20 +1810,26 @@ impl Solium {
     /// on the desktop, and the symptom would be "windows stopped responding"
     /// rather than anything mentioning wallpapers.
     ///
-    /// Returns whether one took it.
+    /// Returns whether one took it. None does while the session is locked:
+    /// the pointer is the lock screen's, and nothing of the session's may
+    /// notice it going past
+    /// (`tests::real_client::lock_focus::the_wheel_over_a_hosted_scene_is_not_the_scenes_while_locked`).
     pub(crate) fn surface_pointer(
         &mut self,
         above_windows: bool,
         location: Point<f64, Logical>,
-        pressed: Option<bool>,
+        event: crate::qml::hosted::ScenePointer,
     ) -> bool {
+        if self.lock.is_some() {
+            return false;
+        }
         let Some((output, id, area)) = self.surface_claiming(above_windows, location) else {
             return false;
         };
         let Some(surface) = self.surfaces.get_mut(id) else {
             return false;
         };
-        if !surface.pointer(&output, area, location.x, location.y, pressed) {
+        if !surface.deliver(&output, area, location, event) {
             // The area contained the point — `surface_claiming` said so — but
             // no instance was built on that monitor: the scene file is not
             // there (`scripted::tests::a_missing_scene_file_builds_nothing_until_it_is_there`),

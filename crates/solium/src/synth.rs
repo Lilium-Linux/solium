@@ -109,9 +109,52 @@ impl PointerButtonEvent<Synthetic> for Button {
     }
 }
 
+/// One wheel turn, in v120 steps on each axis, as a mouse wheel sends it.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct Axis {
+    v120: (f64, f64),
+    time: u64,
+}
+
+#[cfg(test)]
+impl Event<Synthetic> for Axis {
+    fn time(&self) -> u64 {
+        self.time
+    }
+    fn device(&self) -> SynthDevice {
+        SynthDevice
+    }
+}
+
+#[cfg(test)]
+impl smithay::backend::input::PointerAxisEvent<Synthetic> for Axis {
+    fn amount(&self, axis: smithay::backend::input::Axis) -> Option<f64> {
+        self.amount_v120(axis).map(|v120| v120 / 8.0)
+    }
+    fn amount_v120(&self, axis: smithay::backend::input::Axis) -> Option<f64> {
+        Some(match axis {
+            smithay::backend::input::Axis::Horizontal => self.v120.0,
+            smithay::backend::input::Axis::Vertical => self.v120.1,
+        })
+    }
+    fn source(&self) -> smithay::backend::input::AxisSource {
+        smithay::backend::input::AxisSource::Wheel
+    }
+    fn relative_direction(
+        &self,
+        _axis: smithay::backend::input::Axis,
+    ) -> smithay::backend::input::AxisRelativeDirection {
+        smithay::backend::input::AxisRelativeDirection::Identical
+    }
+}
+
 impl InputBackend for Synthetic {
     type Device = SynthDevice;
     type KeyboardKeyEvent = UnusedEvent;
+    #[cfg(test)]
+    type PointerAxisEvent = Axis;
+    #[cfg(not(test))]
     type PointerAxisEvent = UnusedEvent;
     type PointerButtonEvent = Button;
     type PointerMotionEvent = Motion;
@@ -230,6 +273,24 @@ pub(crate) fn send_button(
                 state: button_state,
                 time,
             },
+        },
+    );
+}
+
+/// One wheel turn, through the real input path, in v120 steps.
+/// `state::tests::real_client::reflow_on_close::hosted::the_wheel_over_a_scene_reaches_it`.
+#[cfg(test)]
+pub(crate) fn send_axis(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    v120: (f64, f64),
+    time: u64,
+) {
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::PointerAxis {
+            event: Axis { v120, time },
         },
     );
 }

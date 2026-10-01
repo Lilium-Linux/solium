@@ -1,6 +1,6 @@
 //! The compositor's half of what a hosted scene and the compositor say to each
 //! other: properties written in place, the monitor it is on, the models' rows,
-//! and, from later tasks, pointer events, what it claims, what it reserves, its
+//! pointer events, and, from later tasks, what it claims, what it reserves, its
 //! grabs, its keyboard wants and its actions.
 
 use std::{
@@ -25,6 +25,19 @@ mod ffi {
         ) -> c_int;
         pub(super) fn solium_qml_host_next_on(monitor: *const c_char);
         pub(super) fn solium_qml_rows_apply(model: c_int, ops_json: *const c_char) -> c_int;
+        pub(super) fn solium_qml_scene_pointer_event(
+            scene: *mut super::super::ffi::Scene,
+            kind: c_int,
+            x: f64,
+            y: f64,
+            button: u32,
+            buttons: u32,
+            modifiers: u32,
+            angle_x: f64,
+            angle_y: f64,
+            pixel_x: f64,
+            pixel_y: f64,
+        );
     }
 }
 
@@ -92,13 +105,144 @@ impl Scene {
         // outlive the call.
         unsafe { ffi::solium_qml_scene_set_json(self.scene, path.as_ptr(), value.as_ptr()) != 0 }
     }
+
+    /// Deliver one pointer event at a point in scene coordinates.
+    /// `tests::a_right_press_reaches_a_mouse_area_as_the_right_button`,
+    /// `tests::a_side_button_reaches_the_scene_as_back`,
+    /// `tests::the_wheel_reaches_a_wheel_handler_with_its_angle`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn pointer_event(&mut self, x: f64, y: f64, event: &ScenePointer) {
+        let still = ((0.0, 0.0), (0.0, 0.0));
+        let (kind, button, (angle, pixels)) = match event.kind {
+            PointerKind::Motion => (0, 0, still),
+            PointerKind::Press(button) => (1, button, still),
+            PointerKind::Release(button) => (2, button, still),
+            PointerKind::Wheel { angle, pixels } => (3, 0, (angle, pixels)),
+        };
+        // SAFETY: the scene is live for as long as `self`.
+        unsafe {
+            ffi::solium_qml_scene_pointer_event(
+                self.scene,
+                kind,
+                x,
+                y,
+                button,
+                event.buttons,
+                event.modifiers,
+                angle.0,
+                angle.1,
+                pixels.0,
+                pixels.1,
+            );
+        }
+    }
+}
+
+/// What a pointer event is, for a scene.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PointerKind {
+    Motion,
+    /// A press of this Qt button.
+    Press(u32),
+    /// A release of this Qt button.
+    Release(u32),
+    /// Qt's `angleDelta` and `pixelDelta` (Ruling 9).
+    Wheel {
+        angle: (f64, f64),
+        pixels: (f64, f64),
+    },
+}
+
+/// One pointer event as a scene is told it: what it is, the Qt buttons held
+/// after it, and the keyboard modifiers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScenePointer {
+    pub(crate) kind: PointerKind,
+    pub(crate) buttons: u32,
+    pub(crate) modifiers: u32,
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use std::path::PathBuf;
 
+    use super::{PointerKind, ScenePointer};
     use crate::qml::{Scene, qt_test::on_the_qt_thread};
+
+    const BUTTONS: &str = r"
+        import QtQuick
+        Item {
+            property int pressed: 0
+            property int shifted: 0
+            property int angle: 0
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.AllButtons
+                onPressed: (mouse) => {
+                    parent.pressed = mouse.button
+                    parent.shifted = (mouse.modifiers & Qt.ShiftModifier) ? 1 : 0
+                }
+            }
+            WheelHandler { onWheel: (event) => parent.angle = event.angleDelta.y }
+        }
+    ";
+
+    /// **A right press reaches the scene as the right button, with the
+    /// modifiers held** (#163). It used to arrive as a left press.
+    #[test]
+    fn a_right_press_reaches_a_mouse_area_as_the_right_button() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted("solium-hosted-right", BUTTONS, "right-1");
+            let press = ScenePointer {
+                kind: PointerKind::Press(0x2),
+                buttons: 0x2,
+                modifiers: crate::qml::keys::QT_SHIFT,
+            };
+            scene.pointer_event(10.0, 10.0, &press);
+            assert_eq!(scene.get_int("pressed"), 2, "Qt.RightButton is 2");
+            assert_eq!(scene.get_int("shifted"), 1, "shift was held");
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    #[test]
+    fn a_side_button_reaches_the_scene_as_back() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted("solium-hosted-back", BUTTONS, "back-1");
+            scene.pointer_event(
+                10.0,
+                10.0,
+                &ScenePointer {
+                    kind: PointerKind::Press(0x8),
+                    buttons: 0x8,
+                    modifiers: 0,
+                },
+            );
+            assert_eq!(scene.get_int("pressed"), 8, "Qt.BackButton is 8");
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    #[test]
+    fn the_wheel_reaches_a_wheel_handler_with_its_angle() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted("solium-hosted-wheel", BUTTONS, "wheel-1");
+            let wheel = ScenePointer {
+                kind: PointerKind::Wheel {
+                    angle: (0.0, 120.0),
+                    pixels: (0.0, 0.0),
+                },
+                buttons: 0,
+                modifiers: 0,
+            };
+            scene.pointer_event(10.0, 10.0, &wheel);
+            assert_eq!(scene.get_int("angle"), 120, "one notch away from the user");
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
 
     /// `qml` written to `<temp>/<name>/Scene.qml`, built hosted on `monitor`.
     /// Monitor rows are process-wide, so every test names a monitor of its own.

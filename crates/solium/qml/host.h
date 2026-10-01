@@ -400,6 +400,19 @@ const char *solium_qml_scene_string_at(const SoliumQmlScene *scene, const char *
 /* Pointer input, in scene coordinates. `pressed`: 1 down, 0 up, -1 motion. */
 void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed);
 
+/* Pointer input, in scene coordinates, with everything a scene can be told.
+ * `kind`: 0 motion, 1 press, 2 release, 3 wheel. `button` is the Qt button a
+ * press or release is of; `buttons` the Qt buttons held after it;
+ * `modifiers` Qt's keyboard modifiers. The wheel's deltas are Qt's
+ * `angleDelta` (eighths of a degree, 120 a notch, positive away from the
+ * user) and `pixelDelta`.
+ * `qml::hosted::tests::a_right_press_reaches_a_mouse_area_as_the_right_button`,
+ * `qml::hosted::tests::the_wheel_reaches_a_wheel_handler_with_its_angle`. */
+void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, double x, double y,
+                                    unsigned button, unsigned buttons, unsigned modifiers,
+                                    double angle_x, double angle_y, double pixel_x,
+                                    double pixel_y);
+
 /* The models hosted scenes read, by number.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 #define SOLIUM_QML_ROWS_MONITORS 0
