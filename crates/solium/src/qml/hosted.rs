@@ -340,6 +340,21 @@ pub(crate) mod tests {
         });
     }
 
+    /// **The Tweaks panel keeps a press on its empty part**: its background
+    /// takes input, so a press between its entries is the panel's, not the
+    /// window's under it.
+    #[test]
+    fn the_tweaks_panel_keeps_a_press_on_its_empty_part() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/tweaks.qml"));
+            let scene = Scene::for_monitor(path, 64, 32, Some(r#"{"entries":[]}"#), "tweaks-1")
+                .expect("the panel builds");
+            assert_eq!(scene.hit(60.0, 30.0), Hit::Press);
+            drop(scene);
+        });
+    }
+
     /// **A scene told the pointer left un-hovers what it hovered.**
     #[test]
     fn a_left_scene_drops_its_hover() {

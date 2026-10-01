@@ -20,10 +20,14 @@ Item {
     // Read and cleared by the compositor, exactly like a window frame's.
     property string action: ""
 
+    // The panel's own, empty parts too: a press between its entries does not
+    // fall through to the window under it
+    // (qml::hosted::tests::the_tweaks_panel_keeps_a_press_on_its_empty_part).
     Rectangle {
         anchors.fill: parent
         color: Theme.surface
         opacity: 0.94
+        Solium.input: true
 
         Rectangle {
             anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
