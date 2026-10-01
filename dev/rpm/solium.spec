@@ -14,8 +14,9 @@
 %{!?commit:%{error:define commit, the short hash of the commit packaged (dev/rpm.sh does)}}
 %{!?commitdate:%{error:define commitdate, that commit's date as YYYYMMDD (dev/rpm.sh does)}}
 
-# The release profile has no debug information to put in a debuginfo package,
-# and rpmbuild fails on an empty one: dev/rpm.sh builds this.
+# The prebuilt binary, from the release profile, has no debug information to
+# put in a debuginfo package, and rpmbuild fails on an empty one: dev/rpm.sh
+# builds this.
 %global debug_package %{nil}
 # No %changelog: a snapshot's history is its commit's. rpmbuild would warn that
 # it has no date to take from one, and dev/rpm.sh repeats any warning.
