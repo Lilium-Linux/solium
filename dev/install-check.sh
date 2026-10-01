@@ -444,6 +444,106 @@ check "--session-dir is refused with a system prefix" [ $? -ne 0 ]
 check "  saying where the session file goes instead" \
     grep -q "the session file goes in /usr/share/wayland-sessions" "$work/system-refused.log"
 check "  and nothing was written" [ ! -e "$work/system-refused" ]
+
+echo "the Fedora package (dev/rpm/solium.spec)"
+# Its %files against what the system install above put in place, both ways,
+# so neither can change without the other. rpmbuild fails on a difference too,
+# but only when a package is built. The macros are spelt out by this table,
+# which rpm is asked to confirm where it has systemd's macros.
+spec="$root/dev/rpm/solium.spec"
+spell() {
+    sed -e 's|%{_bindir}|/usr/bin|g' -e 's|%{_datadir}|/usr/share|g' \
+        -e 's|%{_userunitdir}|/usr/lib/systemd/user|g' -e 's|%{_prefix}|/usr|g'
+}
+macros='%{_bindir} %{_datadir} %{_userunitdir} %{_prefix}'
+if command -v rpm >/dev/null && [ "$(rpm --eval '%{_userunitdir}')" != '%{_userunitdir}' ]; then
+    check "rpm's macros are the table's" [ "$(rpm --eval "$macros")" = "$(spell <<<"$macros")" ]
+else
+    echo "  skip  rpm's macros: no rpm with systemd-rpm-macros here"
+fi
+entries=()
+dirs=()
+while IFS= read -r line; do
+    case "$line" in
+        "" | "#"* | "%license "* | "%doc "*) ;;
+        "%dir "*) dirs+=("${line#%dir }") ;;
+        *) entries+=("$line") ;;
+    esac
+done < <(awk '/^%files$/ { on = 1; next } on && /^%(changelog|package|files)/ { on = 0 } on' "$spec" | spell)
+check "%files lists something" [ "${#entries[@]}" -gt 0 ]
+uncovered=()
+while IFS= read -r file; do
+    covered=0
+    for entry in "${entries[@]}"; do
+        if [[ "$file" == "$entry" || ( "$entry" == */ && "$file" == "$entry"* ) ]]; then
+            covered=1
+            break
+        fi
+    done
+    [[ $covered -eq 1 ]] || uncovered+=("$file")
+done < <(cd "$sys" && find . -type f -printf '/%P\n' | sort)
+check "every file the system install put in place is in %files" [ "${#uncovered[@]}" -eq 0 ]
+[[ ${#uncovered[@]} -eq 0 ]] || printf '          not in %%files: %s\n' "${uncovered[@]}"
+absent=()
+for entry in "${entries[@]}"; do
+    if [[ "$entry" == */ ]]; then
+        [[ -d "$sys$entry" ]] || absent+=("$entry")
+    else
+        [[ -f "$sys$entry" ]] || absent+=("$entry")
+    fi
+done
+for dir in "${dirs[@]}"; do
+    [[ -d "$sys$dir" ]] || absent+=("%dir $dir")
+done
+check "every path in %files is one it put in place" [ "${#absent[@]}" -eq 0 ]
+[[ ${#absent[@]} -eq 0 ]] || printf '          not installed: %s\n' "${absent[@]}"
+check "%install is dev/install.sh --prefix %{_prefix}, built either way" \
+    [ "$(grep -c '^DESTDIR=%{buildroot} dev/install.sh --no-build .*--prefix %{_prefix}$' "$spec")" -eq 2 ]
+license_tag=" $(sed -n 's/^License:[[:space:]]*//p' "$spec") "
+code_license="$(sed -n 's/^license *= *"\(.*\)"$/\1/p' "$root/Cargo.toml")"
+check "License names the code's, $code_license" [ -n "$code_license" -a -z "${license_tag##* "$code_license" *}" ]
+while IFS= read -r file; do
+    id="$(sed -n 's/^SPDX-License-Identifier:[[:space:]]*//p' "$file")"
+    check "  and ${file#"$sys"}'s, $id" [ -n "$id" -a -z "${license_tag##* "$id" *}" ]
+done < <(find "$sys" -name '*.license' | sort)
+requires() { grep -qE "^Requires:[[:space:]]+$1(%\{\?_isa\})?$" "$spec"; }
+recommends() { grep -qE "^Recommends:[[:space:]]+$1$" "$spec"; }
+# Which package has a file here, when one does.
+owner() { [[ -e "$1" ]] && rpm -qf --qf '%{name}\n' "$1" 2>/dev/null | head -1; }
+qml_dir="$(rpm --eval '%{_libdir}' 2>/dev/null)/qt6/qml"
+mapfile -t modules < <(grep -rhoE '^[[:space:]]*import[[:space:]]+Qt[A-Za-z0-9.]*' \
+    "$root/crates/solium/qml" | awk '{ print $2 }' | sort -u)
+check "the shipped QML imports Qt modules (${modules[*]})" [ "${#modules[@]}" -gt 0 ]
+for module in "${modules[@]}"; do
+    if pkg="$(owner "$qml_dir/${module//.//}/qmldir")" && [[ -n "$pkg" ]]; then
+        check "Requires $pkg, which has the $module QML module" requires "$pkg"
+    else
+        echo "  skip  the $module QML module is not installed here"
+    fi
+done
+check "solium-session takes its lock with flock" grep -q '^if ! flock ' "$root/dev/session/solium-session"
+for program in Xwayland flock; do
+    if pkg="$(owner "/usr/bin/$program")" && [[ -n "$pkg" ]]; then
+        check "Requires $pkg, which has /usr/bin/$program" requires "$pkg"
+    else
+        echo "  skip  /usr/bin/$program is not installed here"
+    fi
+done
+check "Recommends xdg-desktop-portal, which reads lilium-portals.conf" recommends xdg-desktop-portal
+while IFS= read -r backend; do
+    check "Recommends xdg-desktop-portal-$backend, which lilium-portals.conf names" \
+        recommends "xdg-desktop-portal-$backend"
+done < <(sed -n 's/^[^#=]*=\([a-z]*\)$/\1/p' "$root/dev/session/lilium-portals.conf" | sort -u)
+if command -v rpmspec >/dev/null; then
+    rpmspec -q "$spec" >"$work/rpmspec-bare.log" 2>&1
+    check "the spec refuses to parse without commit and commitdate" [ $? -ne 0 ]
+    check "  saying what to define" grep -q "define commit" "$work/rpmspec-bare.log"
+    check "  and with them its version is 0.0.0~git<commitdate>.<commit>" \
+        [ "$(rpmspec -q --with prebuilt --define 'commit abc1234' --define 'commitdate 20261001' \
+            --qf '%{version}\n' "$spec" 2>/dev/null)" = "0.0.0~git20261001.abc1234" ]
+else
+    echo "  skip  parsing the spec: no rpmspec here (it is in rpm-build)"
+fi
 XDG_CONFIG_HOME="$broken" DESTDIR="$sys" "$install_sh" --uninstall --prefix /usr \
     >"$work/system-uninstall.log" 2>&1
 check "uninstall exits 0" [ $? -eq 0 ]
