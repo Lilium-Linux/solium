@@ -1739,9 +1739,22 @@ impl Solium {
     /// would re-decode every wallpaper on every monitor. A declaration that
     /// moved a surface drops its scenes on the monitors it left
     /// (`tests::real_client::a_surface_redeclared_onto_another_monitor_drops_its_scene_on_the_first`).
+    ///
+    /// Only that surface's: another surface a handler has yet to declare
+    /// again may still name where a monitor was before a hotplug, and judged
+    /// by that it would lose a scene its own declaration is about to keep
+    /// (`tests::real_client::one_handler_declaring_two_surfaces_again_keeps_both_their_scenes`).
     pub(crate) fn declare_surface(&mut self, declared: crate::scripted::Declaration) {
+        let name = declared.name.clone();
         if self.surfaces.declare(declared) != crate::scripted::Declared::Same {
-            self.prune_surfaces();
+            let (outputs, primary) = (self.monitor_rects(), self.primary_output());
+            if let Some(surface) = self
+                .surfaces
+                .named(&name)
+                .and_then(|id| self.surfaces.get_mut(id))
+            {
+                surface.keep_placed(&outputs, primary.as_ref());
+            }
             self.redraw = true;
         }
     }
@@ -1916,16 +1929,25 @@ impl Solium {
     /// Each is a full-screen image held for a screen that has gone -- on a
     /// laptop docked and undocked all day that is a slow leak of exactly the
     /// largest thing the compositor allocates.
+    ///
+    /// Called once the scripts have answered the change, never before: a
+    /// surface a `monitors` handler declares over a monitor's rectangle names
+    /// where that monitor was until the handler runs, and judged by that it
+    /// lost the scene the handler was about to keep
+    /// (`tests::real_client::a_monitor_an_unplug_moves_keeps_the_scene_its_handler_declares_there`).
     fn prune_surfaces(&mut self) {
-        let outputs: Vec<(Output, Rectangle<i32, Logical>)> = self
-            .space
-            .outputs()
-            .filter_map(|output| Some((output.clone(), self.space.output_geometry(output)?)))
-            .collect();
-        let primary = self.primary_output();
+        let (outputs, primary) = (self.monitor_rects(), self.primary_output());
         for surface in self.surfaces.iter_mut() {
             surface.keep_placed(&outputs, primary.as_ref());
         }
+    }
+
+    /// Every monitor and its rectangle, as `Surface::keep_placed` takes them.
+    fn monitor_rects(&self) -> Vec<(Output, Rectangle<i32, Logical>)> {
+        self.space
+            .outputs()
+            .filter_map(|output| Some((output.clone(), self.space.output_geometry(output)?)))
+            .collect()
     }
 
     /// The window owning a surface, if any.
