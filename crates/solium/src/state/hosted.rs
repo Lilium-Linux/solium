@@ -153,12 +153,15 @@ impl Solium {
     /// where its scene is drawn now, and a scene that is gone, with its
     /// surface, its monitor or its placement there, lets go of it. A scene
     /// still there that can hold it no longer, its surface declared out of
-    /// the pointer's reach, hears it dismissed.
+    /// the pointer's reach, hears it dismissed. A grab that ends here gives
+    /// the pointer back to what is under it at once.
     /// `state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_lets_go_of_its_grab`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_grab_follows_its_scene_to_where_it_is_drawn`,
-    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_declared_again_out_of_the_pointers_reach_dismisses_the_grab_it_held`.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_declared_again_out_of_the_pointers_reach_dismisses_the_grab_it_held`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_popup_that_closes_by_itself_gives_the_pointer_back_to_the_window_under_it`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_pointer_back_to_the_window_under_it`.
     fn settle_grabs(&mut self) {
         // Behind the lock the pointer is the lock screen's: what a scene
         // says of its grabs is read once the lock is gone.
@@ -203,18 +206,22 @@ impl Solium {
                         }
                     }
                 }
-                GrabReport::Released if ours => self.hosted_grab = None,
+                GrabReport::Released if ours => {
+                    self.hosted_grab = None;
+                    self.repoint_clients();
+                }
                 GrabReport::Released | GrabReport::Unchanged => {}
             }
         }
         if let Some(held) = self.hosted_grab.take() {
             let (id, output) = (held.surface, held.output.clone());
             self.hosted_grab = self.hosted_grab_for(id, &output.name(), held.name);
-            if self.hosted_grab.is_none()
-                && let Some(surface) = self.surfaces.get_mut(id)
-            {
-                surface.dismiss(&output);
-                self.redraw = true;
+            if self.hosted_grab.is_none() {
+                if let Some(surface) = self.surfaces.get_mut(id) {
+                    surface.dismiss(&output);
+                    self.redraw = true;
+                }
+                self.repoint_clients();
             }
         }
     }
@@ -275,6 +282,34 @@ impl Solium {
         pointer.motion(
             self,
             None,
+            &MotionEvent {
+                location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        pointer.frame(self);
+    }
+
+    /// Give the pointer back once a grab is over, as a motion that does not
+    /// move it would: the window under a still pointer has it at once, so
+    /// the next press, with no motion before it, reaches that window. While
+    /// the grab was held no client had the pointer, and nothing else gives
+    /// it back before the pointer moves.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_swallowed_outside_press_gives_the_pointer_back_to_the_window_under_it`,
+    /// `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_popup_that_closes_by_itself_gives_the_pointer_back_to_the_window_under_it`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_pointer_back_to_the_window_under_it`.
+    fn repoint_clients(&mut self) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        let location = pointer.current_location();
+        let under = self.surface_under(location);
+        let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
+        pointer.motion(
+            self,
+            under,
             &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
@@ -382,31 +417,18 @@ impl Solium {
             .map(|surface| surface.declared.outside_click.for_grab(&grab.name))
             .unwrap_or_default();
         self.dismiss_hosted_grab();
+        // The pointer was the grab's: it goes back to what is under it,
+        // whatever becomes of the press, so a press that goes on reaches that
+        // client, and so does the next one after a press swallowed.
+        // `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`,
+        // `state::tests::real_client::reflow_on_close::hosted::a_swallowed_outside_press_gives_the_pointer_back_to_the_window_under_it`.
+        self.repoint_clients();
         match policy {
             Outside::Swallow => {
                 self.swallowed.insert(code);
                 GrabRoute::Taken
             }
-            Outside::Pass => {
-                // The pointer was the grab's: it goes back to what is under
-                // it, so the press that goes on reaches that client.
-                // `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`.
-                if let Some(pointer) = self.seat.get_pointer() {
-                    let under = self.surface_under(location);
-                    let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
-                    pointer.motion(
-                        self,
-                        under,
-                        &MotionEvent {
-                            location,
-                            serial: SERIAL_COUNTER.next_serial(),
-                            time,
-                        },
-                    );
-                    pointer.frame(self);
-                }
-                GrabRoute::Passed
-            }
+            Outside::Pass => GrabRoute::Passed,
         }
     }
 

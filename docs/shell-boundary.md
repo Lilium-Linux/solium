@@ -229,6 +229,12 @@ and the press is then swallowed, its release with it, or passed on to
 whatever is under it when `outside_click` says `"pass"`
 (`state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
 `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`).
+However a grab ends, swallowed, passed, or let go of by its scene, the window
+under the pointer has the pointer back at once, so a click there with no
+motion before it reaches it
+(`state::tests::real_client::reflow_on_close::hosted::a_swallowed_outside_press_gives_the_pointer_back_to_the_window_under_it`,
+`state::tests::real_client::reflow_on_close::hosted::a_popup_that_closes_by_itself_gives_the_pointer_back_to_the_window_under_it`,
+`state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_pointer_back_to_the_window_under_it`).
 `shell.outside_click` in `config.lua` is the hosted shell's, `"swallow"` by
 default, and a table names grabs, `{ default = "swallow", ["tray-menu"] =
 "pass" }`

@@ -23465,6 +23465,121 @@ end)
                 );
             }
 
+            /// The surface the seat's pointer is on, the one told `enter`
+            /// last, by its protocol id.
+            fn pointer_focus(desk: &Desk) -> Option<u32> {
+                desk.state
+                    .seat
+                    .get_pointer()
+                    .and_then(|pointer| pointer.current_focus())
+                    .map(|surface| surface.id().protocol_id())
+            }
+
+            /// Press and let go of the left button where the pointer is, with
+            /// no motion before it.
+            fn click_here(desk: &mut Desk, time: u64) {
+                let region = region(desk);
+                for (button_state, at) in [
+                    (ButtonState::Pressed, time),
+                    (ButtonState::Released, time + 1),
+                ] {
+                    crate::synth::send_button(&mut desk.state, region, 0x110, button_state, at);
+                }
+            }
+
+            /// **A swallowed outside press gives the pointer back to the
+            /// window under it at once** (Ruling 12): the window has the
+            /// pointer while the button is still down, and the next click
+            /// there, with no motion before it, reaches it, as a second click
+            /// after the one that closed a menu does.
+            #[test]
+            fn a_swallowed_outside_press_gives_the_pointer_back_to_the_window_under_it() {
+                let (mut desk, opened, menu) = grabbing(crate::scripted::OutsideClick::default());
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                move_pointer(&mut desk.state, (630.0, 530.0), 10);
+                let held = pointer_focus(&desk);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                let swallowed = pointer_focus(&desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    12,
+                );
+                click_here(&mut desk, 13);
+                desk.pump();
+                assert_eq!(
+                    (
+                        held,
+                        dismissed(&desk, menu),
+                        swallowed,
+                        desk.client.buttons.clone()
+                    ),
+                    (
+                        None,
+                        1,
+                        Some(window_id(&opened)),
+                        vec![(0x110, true), (0x110, false)]
+                    ),
+                    "(the pointer's surface while the grab was held, the grab's dismissals, \
+                     its surface once the press was swallowed, the buttons the window was told)"
+                );
+            }
+
+            /// **A popup that closes by itself gives the pointer back to the
+            /// window under it at once** (Ruling 12): with the pointer resting
+            /// over the window, the scene letting go of its grab, as Escape or
+            /// a timer closing the popup does, gives the window the pointer,
+            /// and the next click there, with no motion before it, reaches it.
+            #[test]
+            fn a_popup_that_closes_by_itself_gives_the_pointer_back_to_the_window_under_it() {
+                let (mut desk, opened, menu) = grabbing(crate::scripted::OutsideClick::default());
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                move_pointer(&mut desk.state, (630.0, 530.0), 10);
+                let held = pointer_focus(&desk);
+                report(&mut desk, menu, crate::qml::hosted::GrabReport::Released);
+                let closed = pointer_focus(&desk);
+                click_here(&mut desk, 11);
+                desk.pump();
+                assert_eq!(
+                    (
+                        held,
+                        closed,
+                        dismissed(&desk, menu),
+                        desk.client.buttons.clone()
+                    ),
+                    (
+                        None,
+                        Some(window_id(&opened)),
+                        0,
+                        vec![(0x110, true), (0x110, false)]
+                    ),
+                    "(the pointer's surface while the grab was held, its surface once the \
+                     scene let go, the grab's dismissals, the buttons the window was told)"
+                );
+            }
+
+            /// **A surface taken away gives the pointer back to the window
+            /// under it at once**, with the grab it held, before the pointer
+            /// moves.
+            #[test]
+            fn a_surface_taken_away_gives_the_pointer_back_to_the_window_under_it() {
+                let (mut desk, opened, _) = grabbing(crate::scripted::OutsideClick::default());
+                move_pointer(&mut desk.state, (630.0, 530.0), 10);
+                let held = pointer_focus(&desk);
+                desk.state.remove_surface("menu");
+                assert_eq!(
+                    (held, desk.state.hosted_grab.is_none(), pointer_focus(&desk)),
+                    (None, true, Some(window_id(&opened))),
+                    "(the pointer's surface while the grab was held, the grab let go, its \
+                     surface after)"
+                );
+            }
+
             fn window(desk: &Desk, opened: &Opened) -> Window {
                 desk.state
                     .panes
