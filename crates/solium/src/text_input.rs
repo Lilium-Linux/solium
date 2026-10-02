@@ -216,6 +216,11 @@ impl Dispatch<ZwpTextInputV3, ()> for Solium {
                 if instance.enabled && pending.cursor.is_some() {
                     instance.cursor = pending.cursor;
                 }
+                tracing::debug!(
+                    enabled = instance.enabled,
+                    cursor = ?instance.cursor,
+                    "a text field committed"
+                );
                 let changed = was != (instance.enabled, instance.cursor);
                 let enabled = pending.enable == Some(true) && instance.enabled;
                 state.text_field_changed(changed, enabled);
