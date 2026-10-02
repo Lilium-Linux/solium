@@ -228,6 +228,12 @@ impl Properties {
         self.0.get(key)
     }
 
+    /// Every value, for `scenario`.
+    #[cfg(test)]
+    pub(crate) const fn fields(&self) -> &BTreeMap<String, Json> {
+        &self.0
+    }
+
     /// The keys whose value is new or different, with their values. A key
     /// `old` has and this does not is not a change: the scene keeps it
     /// (Ruling 3). `tests::only_changed_and_added_keys_are_changes`,

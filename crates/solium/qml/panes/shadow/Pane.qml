@@ -32,4 +32,9 @@ PaneStyle {
         bleed: 30
         source: "Shadow.qml"
     }
+
+    // The keyboard pill at the focused text field's caret, when the
+    // configuration says so (`keyboard.indicator.show = "pane"`). Delete the
+    // line and this style draws none. See `Solium/KeyboardPillLayer.qml`.
+    KeyboardPillLayer {}
 }

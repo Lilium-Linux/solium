@@ -44,6 +44,9 @@ sol.cursor_theme(config.cursor)
 -- file, and nothing in the compositor knows what a wallpaper is.
 require("wallpaper")
 require("shell")
+-- The keyboard pill near the text field: `keyboard.indicator` in config.lua.
+-- Configuration on the data the compositor publishes, like the two above.
+require("keyboard_indicator")
 
 require("tweaks")
 

@@ -3,6 +3,12 @@ singleton Theme 1.0 Theme.qml
 PaneStyle 1.0 PaneStyle.qml
 Layer 1.0 Layer.qml
 
+# The keyboard pill the shipped configuration draws: the capsule, and the
+# pane layer that puts it at the caret. Plain QML that reads `Keyboard`,
+# `caret` and `values`; `lua/keyboard_indicator.lua` is its policy.
+KeyboardPill 1.0 KeyboardPill.qml
+KeyboardPillLayer 1.0 KeyboardPillLayer.qml
+
 # The groups inside a PaneStyle. Internal because a style writes `insets.top`
 # and `client.shadow.blur` and never names these -- they exist so QML can
 # resolve those paths against a declared type, which is the only reason they

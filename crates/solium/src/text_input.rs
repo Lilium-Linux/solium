@@ -390,4 +390,4 @@ fn surface_in_window(state: &Solium, surface: &WlSurface) -> Option<(Window, Poi
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

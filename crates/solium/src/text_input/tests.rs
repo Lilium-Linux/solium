@@ -133,10 +133,10 @@ wayland_client::delegate_noop!(Client: ignore xdg_positioner::XdgPositioner);
 wayland_client::delegate_noop!(Client: ignore zwp_text_input_manager_v3::ZwpTextInputManagerV3);
 
 /// A compositor and a client of it, with every global in the client's
-/// registry.
-struct Desk {
+/// registry. Also what `scenario` drives the shipped configuration with.
+pub(crate) struct Desk {
     display: Display<Solium>,
-    state: Solium,
+    pub(crate) state: Solium,
     conn: Connection,
     queue: EventQueue<Client>,
     qh: QueueHandle<Client>,
@@ -144,7 +144,7 @@ struct Desk {
 }
 
 impl Desk {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut display = Display::<Solium>::new().expect("a test display");
         let mut state = Solium::new(display.handle());
         // No frames: a Qt scene built in a process that holds a raw
@@ -180,7 +180,7 @@ impl Desk {
     }
 
     /// One round trip, made safe to block on by a `sync`.
-    fn pump(&mut self) {
+    pub(crate) fn pump(&mut self) {
         self.conn.display().sync(&self.qh, ());
         self.conn.flush().expect("flushing the round trip");
         self.display
@@ -193,7 +193,7 @@ impl Desk {
     }
 
     /// A window, 200 by 100, with the server's `Window` for it.
-    fn window(&mut self) -> (Window, wl_surface::WlSurface, xdg_surface::XdgSurface) {
+    pub(crate) fn window(&mut self) -> (Window, wl_surface::WlSurface, xdg_surface::XdgSurface) {
         let compositor = self.client.compositor.clone().expect("wl_compositor bound");
         let wm_base = self.client.wm_base.clone().expect("xdg_wm_base bound");
         let before: Vec<Window> = self.state.space.elements().cloned().collect();
@@ -225,7 +225,7 @@ impl Desk {
     }
 
     /// Attach a buffer of this size and commit it.
-    fn buffer(&self, surface: &wl_surface::WlSurface, width: i32, height: i32) {
+    pub(crate) fn buffer(&self, surface: &wl_surface::WlSurface, width: i32, height: i32) {
         let shm = self.client.shm.clone().expect("wl_shm bound");
         let bytes = width * height * 4;
         let fd = anon_file(bytes);
@@ -245,7 +245,7 @@ impl Desk {
     }
 
     /// The client's text input on its seat.
-    fn text_input(&mut self) -> zwp_text_input_v3::ZwpTextInputV3 {
+    pub(crate) fn text_input(&mut self) -> zwp_text_input_v3::ZwpTextInputV3 {
         let manager = self
             .client
             .manager
@@ -258,14 +258,14 @@ impl Desk {
     }
 
     /// Give `window` the keyboard, as a click on it would.
-    fn focus(&mut self, window: &Window) {
+    pub(crate) fn focus(&mut self, window: &Window) {
         self.state
             .focus_window(window, SERIAL_COUNTER.next_serial());
         self.pump();
     }
 
     /// The configuration, loaded.
-    fn configure(&mut self, name: &str, script: &str) {
+    pub(crate) fn configure(&mut self, name: &str, script: &str) {
         let directory = std::env::temp_dir().join(format!("solium-text-input-{name}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a temporary directory");
@@ -277,7 +277,7 @@ impl Desk {
     }
 
     /// What the configuration has recorded in `seen`, and cleared.
-    fn seen(&self) -> String {
+    pub(crate) fn seen(&self) -> String {
         self.state
             .scripts
             .as_ref()
@@ -288,7 +288,7 @@ impl Desk {
 }
 
 /// Enable a field with its caret at `caret`, and commit.
-fn enable(text_input: &zwp_text_input_v3::ZwpTextInputV3, caret: (i32, i32, i32, i32)) {
+pub(crate) fn enable(text_input: &zwp_text_input_v3::ZwpTextInputV3, caret: (i32, i32, i32, i32)) {
     text_input.enable();
     text_input.set_cursor_rectangle(caret.0, caret.1, caret.2, caret.3);
     text_input.commit();

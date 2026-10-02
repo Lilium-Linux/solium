@@ -36,6 +36,8 @@ mod qml;
 mod remains;
 mod render;
 mod resizing;
+#[cfg(test)]
+mod scenario;
 mod screencopy;
 mod screensaver;
 mod script;

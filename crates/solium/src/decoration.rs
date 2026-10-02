@@ -824,14 +824,6 @@ impl Decoration {
             caret,
             values,
         } = *look;
-        // The configuration's values the same way, once per change:
-        // `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
-        if self.shown.values != values.generation {
-            for layer in &mut self.layers {
-                layer.scene.set_json("values", &values.object);
-            }
-            self.shown.values = values.generation;
-        }
         // The caret on its own, written in place whenever it moves, comes or
         // goes, and not on the frames in between:
         // `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
@@ -841,6 +833,18 @@ impl Decoration {
                 layer.scene.set_json("caret", &value);
             }
             self.shown.caret = caret;
+        }
+        // The configuration's values the same way, once per change:
+        // `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
+        // After the caret, so a layer handed both in one frame reads the
+        // values with the caret they came with: the layout step of
+        // `tests/scenarios/keyboard-pane-drawn.lua`, through
+        // `scenario::tests::every_scenario_on_the_qt_thread_passes`.
+        if self.shown.values != values.generation {
+            for layer in &mut self.layers {
+                layer.scene.set_json("values", &values.object);
+            }
+            self.shown.values = values.generation;
         }
         if self.shown.title == title
             && self.shown.focused == focused
@@ -1016,6 +1020,36 @@ fn caret_json(caret: Option<Rectangle<i32, Logical>>) -> crate::json::Json {
         .map(|(key, value)| (key.to_owned(), value))
         .collect(),
     )
+}
+
+/// What `scenario` asks of a decoration, which no frame does: to be told
+/// without being drawn, and each layer's own picture.
+#[cfg(test)]
+impl Decoration {
+    /// Tell every layer what a frame tells it.
+    pub(crate) fn tell_as_a_frame_would(&mut self, look: &Look<'_>, width: i32, height: i32) {
+        self.tell(look, width, height);
+    }
+
+    /// Every layer rendered in software, by name: its pixels, premultiplied
+    /// ARGB32 (`B G R A` in memory), and the stride. Nothing on the GPU path,
+    /// whose scenes have no image to read.
+    pub(crate) fn rendered_layers(&mut self) -> Vec<(String, Vec<u8>, usize)> {
+        if qml::on_gpu() {
+            return Vec::new();
+        }
+        self.layers
+            .iter_mut()
+            .filter_map(|layer| {
+                let rendered = layer.scene.render().ok()?;
+                Some((
+                    layer.name.clone(),
+                    rendered.pixels.to_vec(),
+                    rendered.stride,
+                ))
+            })
+            .collect()
+    }
 }
 
 impl Backing {
@@ -1435,6 +1469,12 @@ pub(crate) struct Values {
 }
 
 impl Values {
+    /// The values as the object a layer is handed, for `scenario`.
+    #[cfg(test)]
+    pub(crate) const fn object(&self) -> &crate::json::Json {
+        &self.object
+    }
+
     /// Merge `fields` in; whether anything changed.
     /// `tests::pane_values_merge_by_key_and_count_only_changes`.
     pub(crate) fn merge(
@@ -3522,8 +3562,16 @@ mod tests {
         }
         on_the_qt_thread(|| {
             let plain = build(Some("top"), 300, 200).expect("the shipped default builds");
-            assert_eq!(plain.layers.len(), 1, "a titlebar is one layer");
-            assert_eq!(plain.layers[0].depth, Depth::Frame);
+            // A titlebar is one layer, at `frame`; the shipped configuration's
+            // keyboard layer above the client is the other, and a style of
+            // one's own has it only by asking for it:
+            // `tests/scenarios/keyboard-pane-drawn.lua`.
+            assert_eq!(plain.layers_at(Depth::Frame).collect::<Vec<_>>(), ["bar"]);
+            assert_eq!(
+                plain.layers_at(Depth::Above).collect::<Vec<_>>(),
+                ["keyboard"]
+            );
+            assert_eq!(plain.layers.len(), 2);
             assert_eq!(
                 plain.insets().top,
                 TITLEBAR_HEIGHT,
