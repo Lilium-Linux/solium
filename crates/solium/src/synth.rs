@@ -109,11 +109,16 @@ impl PointerButtonEvent<Synthetic> for Button {
     }
 }
 
-/// One wheel turn, in v120 steps on each axis, as a mouse wheel sends it.
+/// One scroll: a wheel's turn, in v120 steps on each axis, or a touchpad's,
+/// which has no steps.
 #[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct Axis {
-    v120: (f64, f64),
+    /// The steps on each axis, from a wheel; a touchpad sends none.
+    v120: Option<(f64, f64)>,
+    /// How far it scrolled on each axis, in Wayland's units.
+    amount: (f64, f64),
+    source: smithay::backend::input::AxisSource,
     time: u64,
 }
 
@@ -130,16 +135,19 @@ impl Event<Synthetic> for Axis {
 #[cfg(test)]
 impl smithay::backend::input::PointerAxisEvent<Synthetic> for Axis {
     fn amount(&self, axis: smithay::backend::input::Axis) -> Option<f64> {
-        self.amount_v120(axis).map(|v120| v120 / 8.0)
+        Some(match axis {
+            smithay::backend::input::Axis::Horizontal => self.amount.0,
+            smithay::backend::input::Axis::Vertical => self.amount.1,
+        })
     }
     fn amount_v120(&self, axis: smithay::backend::input::Axis) -> Option<f64> {
-        Some(match axis {
-            smithay::backend::input::Axis::Horizontal => self.v120.0,
-            smithay::backend::input::Axis::Vertical => self.v120.1,
+        self.v120.map(|(horizontal, vertical)| match axis {
+            smithay::backend::input::Axis::Horizontal => horizontal,
+            smithay::backend::input::Axis::Vertical => vertical,
         })
     }
     fn source(&self) -> smithay::backend::input::AxisSource {
-        smithay::backend::input::AxisSource::Wheel
+        self.source
     }
     fn relative_direction(
         &self,
@@ -343,7 +351,37 @@ pub(crate) fn send_axis(
         state,
         region,
         InputEvent::PointerAxis {
-            event: Axis { v120, time },
+            event: Axis {
+                v120: Some(v120),
+                amount: (v120.0 / 8.0, v120.1 / 8.0),
+                source: smithay::backend::input::AxisSource::Wheel,
+                time,
+            },
+        },
+    );
+}
+
+/// One touchpad scroll, through the real input path: `amount` on each axis,
+/// in Wayland's units, with no steps, as libinput reports two fingers moving.
+/// The fingers lifting are a scroll of `(0.0, 0.0)`.
+/// `state::tests::real_client::reflow_on_close::hosted::a_touchpad_scroll_reaches_a_scene_in_pixels_and_its_end_does_not`.
+#[cfg(test)]
+pub(crate) fn send_finger_scroll(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    amount: (f64, f64),
+    time: u64,
+) {
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::PointerAxis {
+            event: Axis {
+                v120: None,
+                amount,
+                source: smithay::backend::input::AxisSource::Finger,
+                time,
+            },
         },
     );
 }

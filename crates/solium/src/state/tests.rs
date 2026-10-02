@@ -21928,6 +21928,35 @@ end)
                 );
             }
 
+            /// **A touchpad scroll reaches a scene in pixels, and its end does
+            /// not** (Ruling 9): three units of two fingers moving are an
+            /// `angleDelta` of 24 and a `pixelDelta` of 3, both towards the
+            /// user; the fingers lifting move nothing, and a scene is not told
+            /// of that as a wheel turn, which its handlers would read as one
+            /// the other way.
+            #[test]
+            fn a_touchpad_scroll_reaches_a_scene_in_pixels_and_its_end_does_not() {
+                let mut desk = russian_desk();
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let region = region(&desk);
+                crate::synth::send_finger_scroll(&mut desk.state, region, (0.0, 3.0), 2);
+                crate::synth::send_finger_scroll(&mut desk.state, region, (0.0, 0.0), 3);
+                let wheels: Vec<PointerKind> = scene_events(&desk.state, bar)
+                    .into_iter()
+                    .map(|event| event.kind)
+                    .filter(|kind| matches!(kind, PointerKind::Wheel { .. }))
+                    .collect();
+                assert_eq!(
+                    wheels,
+                    vec![PointerKind::Wheel {
+                        angle: (0.0, -24.0),
+                        pixels: (0.0, -3.0),
+                    }],
+                    "the scroll, and nothing for the fingers lifting"
+                );
+            }
+
             /// **`super` and the wheel stay the compositor's over a scene**: a
             /// scrolling layout's viewport is not a shell's to take.
             #[test]

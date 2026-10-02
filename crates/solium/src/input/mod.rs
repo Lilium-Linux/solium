@@ -1232,17 +1232,23 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
             0.0
         }
     };
-    let wheel = scene_event(
-        state,
-        PointerKind::Wheel {
-            angle: (angle(Axis::Horizontal), angle(Axis::Vertical)),
-            pixels: (pixels(Axis::Horizontal), pixels(Axis::Vertical)),
-        },
+    let (angle, pixels) = (
+        (angle(Axis::Horizontal), angle(Axis::Vertical)),
+        (pixels(Axis::Horizontal), pixels(Axis::Vertical)),
     );
+    // A touchpad's scroll ends, as the fingers lift, with one that moves
+    // nothing. That is no wheel turn to a scene, whose handlers would read
+    // it as one the other way, so no scene is told of it.
+    // `state::tests::real_client::reflow_on_close::hosted::a_touchpad_scroll_reaches_a_scene_in_pixels_and_its_end_does_not`.
+    let moves = [angle.0, angle.1, pixels.0, pixels.1]
+        .iter()
+        .any(|delta| *delta != 0.0);
+    let wheel = scene_event(state, PointerKind::Wheel { angle, pixels });
     // A press a scene holds has the wheel too, through a grab smithay started
     // during it, as `pointer_button` gives it the buttons:
     // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
-    if (state.scene_press.is_some() || !pointer.is_grabbed())
+    if moves
+        && (state.scene_press.is_some() || !pointer.is_grabbed())
         && (state.surface_pointer(true, location, Some(wheel))
             || (pointer.current_focus().is_none()
                 && state.surface_pointer(false, location, Some(wheel))))
