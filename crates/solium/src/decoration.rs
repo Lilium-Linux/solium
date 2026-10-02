@@ -837,9 +837,8 @@ impl Decoration {
         // The configuration's values the same way, once per change:
         // `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
         // After the caret, so a layer handed both in one frame reads the
-        // values with the caret they came with: the layout step of
-        // `tests/scenarios/keyboard-pane-drawn.lua`, through
-        // `scenario::tests::every_scenario_on_the_qt_thread_passes`.
+        // values with the caret they came with:
+        // `tests::values_handed_with_a_caret_are_read_with_that_caret`.
         if self.shown.values != values.generation {
             for layer in &mut self.layers {
                 layer.scene.set_json("values", &values.object);
@@ -3148,6 +3147,72 @@ mod tests {
         });
     }
 
+    /// **Values handed in the same frame as a caret are read with that
+    /// caret**: a layer that acts when `values` change finds the `caret` of
+    /// the frame they came in, not the one before it.
+    #[test]
+    fn values_handed_with_a_caret_are_read_with_that_caret() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "told-caret-then-values",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property var caret: ({ valid: false })
+                            property var values: ({})
+                            property int caretAtValues: -2
+                            onValuesChanged: caretAtValues = caret.valid ? caret.x : -1
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            let mut values = Values::default();
+            values.merge(std::collections::BTreeMap::from([(
+                "level".to_owned(),
+                crate::json::Json::Number(1.0),
+            )]));
+            decoration.tell(
+                &Look {
+                    title: "",
+                    focused: true,
+                    pointer_inside: false,
+                    caret: Some(Rectangle::new((25, 7).into(), (2, 16).into())),
+                    values: &values,
+                },
+                60,
+                88,
+            );
+            let [layer] = &mut decoration.layers[..] else {
+                panic!("one layer")
+            };
+            assert_eq!(
+                layer.scene.get_int("caretAtValues"),
+                25,
+                "the values were read with the caret of their own frame"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
     /// **Pane values merge by key, and count only changes**: a second call
     /// keeps the first call's keys, the same values again are no change, and
     /// `sol.pane_values{ ... }` from a configuration is what reaches them.
@@ -3562,16 +3627,11 @@ mod tests {
         }
         on_the_qt_thread(|| {
             let plain = build(Some("top"), 300, 200).expect("the shipped default builds");
-            // A titlebar is one layer, at `frame`; the shipped configuration's
-            // keyboard layer above the client is the other, and a style of
-            // one's own has it only by asking for it:
-            // `tests/scenarios/keyboard-pane-drawn.lua`.
-            assert_eq!(plain.layers_at(Depth::Frame).collect::<Vec<_>>(), ["bar"]);
             assert_eq!(
-                plain.layers_at(Depth::Above).collect::<Vec<_>>(),
-                ["keyboard"]
+                plain.layers_at(Depth::Frame).collect::<Vec<_>>(),
+                ["bar"],
+                "a titlebar, at `frame`"
             );
-            assert_eq!(plain.layers.len(), 2);
             assert_eq!(
                 plain.insets().top,
                 TITLEBAR_HEIGHT,
