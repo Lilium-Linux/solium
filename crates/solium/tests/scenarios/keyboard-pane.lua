@@ -17,6 +17,9 @@ local function surface(world)
     return declared, declared.properties.cue
 end
 
+-- The cue the panes held once the pill was hidden.
+local hidden = nil
+
 return {
     init = [[ require("keyboard_indicator") ]],
     steps = {
@@ -57,7 +60,17 @@ return {
         { key = "caps_lock" },
         {
             expect = function(world)
-                assert(handed(world).what == "", "hidden as Caps goes off")
+                hidden = handed(world)
+                assert(hidden.what == "", "hidden as Caps goes off")
+            end,
+        },
+
+        -- Nothing showing, and the keyboard moves on: nothing is sent, so a
+        -- focus change costs the panes nothing.
+        { focus = 1 },
+        {
+            expect = function(world)
+                assert(handed(world).serial == hidden.serial, "no cue to hide a pill already hidden")
             end,
         },
 

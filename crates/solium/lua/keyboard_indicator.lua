@@ -23,8 +23,9 @@
 -- Played, key by key with `us,ru` and Russian live, by the scenarios in
 -- `crates/solium/tests/scenarios/`: `keyboard-surface.lua` (placed at the
 -- caret, and on screen with none), `keyboard-pane.lua` (what the panes are
--- handed, Caps again on focus) and `keyboard-off.lua` (`show = false`),
--- through `scenario::tests::every_scenario_with_a_client_passes`.
+-- handed, Caps again on focus), `keyboard-off.lua` (`show = false`) and
+-- `keyboard-indicator-false.lua` (`indicator = false`), through
+-- `scenario::tests::every_scenario_with_a_client_passes`.
 
 local config = require("config")
 
@@ -45,10 +46,16 @@ local PILL_H, GAP = 24, 6
 local kept = sol.keep("keyboard_indicator", { serial = 0 })
 
 -- `keyboard.indicator`, or the defaults when a configuration from before it
--- existed leaves it out.
+-- existed leaves it out. `indicator = false` is `show = false`
+-- (`keyboard-indicator-false.lua`).
 local function settings()
     local keyboard = type(config.keyboard) == "table" and config.keyboard or {}
-    local found = type(keyboard.indicator) == "table" and keyboard.indicator or {}
+    local found = {}
+    if type(keyboard.indicator) == "table" then
+        found = keyboard.indicator
+    elseif keyboard.indicator == false then
+        found = { show = false }
+    end
     local on = type(found.on) == "table" and found.on or {}
     return {
         show = found.show == nil and "pane" or found.show,
@@ -109,6 +116,11 @@ end
 -- Where the overlay surface was last put, so hiding it leaves it there.
 local placed = nil
 
+-- What the last cue was for, "" once one hid the pill. A hide with nothing
+-- showing sends nothing, so a focus change costs the panes nothing
+-- (`keyboard-pane.lua`, "nothing showing").
+local showing = ""
+
 -- Declare the overlay surface showing `cue`, at `rect` or where it already
 -- is. The same scene each time, so the live one takes the new place and the
 -- new cue in place, and is built again only on a monitor it newly reaches.
@@ -139,6 +151,10 @@ function indicator.show(what)
     if s.show ~= "pane" and s.show ~= "surface" then
         return
     end
+    if what == "" and showing == "" then
+        return
+    end
+    showing = what
     kept.serial = kept.serial + 1
     local cue = {
         what = what,
@@ -167,6 +183,7 @@ end
 -- Apply `keyboard.indicator`: build what it needs and drop what it does not.
 function indicator.apply()
     local s = settings()
+    showing = ""
     if s.show ~= "pane" and s.show ~= "surface" then
         if s.show then
             sol.log("keyboard.indicator.show is \"pane\", \"surface\" or false, not " .. tostring(s.show))
