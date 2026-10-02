@@ -6,8 +6,11 @@
 -- software. The capsule is 24 high and at least 42 wide, centred: its middle
 -- row is y = 24, and (40, 24) is on it, clear of the glyph in its middle.
 
+-- `Theme.accent`, opaque, whatever it is set to -- #0060c0 today, #936DFF
+-- once the theme turns violet: blue the strongest channel by a clear
+-- margin, which neither the white glyph nor the shadow is.
 local function accent(r, g, b, a)
-    return r < 8 and math.abs(g - 0x60) < 8 and math.abs(b - 0xc0) < 8 and a == 255
+    return a == 255 and b > r + 24 and b > g + 24
 end
 
 return {
