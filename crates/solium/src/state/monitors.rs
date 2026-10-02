@@ -38,19 +38,26 @@ pub(crate) fn within(
 ) -> Rectangle<i32, Logical> {
     // `min` then `max` rather than `clamp`, which panics on a monitor with
     // no size yet: `tests::a_monitor_with_no_size_yet_is_reserved_on_without_a_panic`.
-    let top = (zone.loc.y - whole.loc.y + reserved.top)
+    // Saturating, because a reserve is whatever a scene or a script says:
+    // `tests::a_reserve_too_large_for_any_monitor_leaves_one_pixel`.
+    let top = (zone.loc.y - whole.loc.y)
+        .saturating_add(reserved.top)
         .min(whole.size.h - 1)
         .max(0);
-    let left = (zone.loc.x - whole.loc.x + reserved.left)
+    let left = (zone.loc.x - whole.loc.x)
+        .saturating_add(reserved.left)
         .min(whole.size.w - 1)
         .max(0);
-    let bottom = (whole.loc.y + whole.size.h) - (zone.loc.y + zone.size.h) + reserved.bottom;
-    let right = (whole.loc.x + whole.size.w) - (zone.loc.x + zone.size.w) + reserved.right;
+    let bottom =
+        ((whole.loc.y + whole.size.h) - (zone.loc.y + zone.size.h)).saturating_add(reserved.bottom);
+    let right =
+        ((whole.loc.x + whole.size.w) - (zone.loc.x + zone.size.w)).saturating_add(reserved.right);
+    let (width, height) = (whole.size.w, whole.size.h);
     Rectangle::new(
         (whole.loc.x + left, whole.loc.y + top).into(),
         (
-            (whole.size.w - left - right).max(1),
-            (whole.size.h - top - bottom).max(1),
+            width.saturating_sub(left).saturating_sub(right).max(1),
+            height.saturating_sub(top).saturating_sub(bottom).max(1),
         )
             .into(),
     )
@@ -657,6 +664,27 @@ mod tests {
             },
         );
         assert!(area.size.h >= 1 && area.size.w == 1920, "{area:?}");
+    }
+
+    /// **A reserve too large for any monitor leaves one pixel**, beside a
+    /// layer-shell bar on the same edge and with two of them added
+    /// together, rather than overflowing (Ruling 10).
+    #[test]
+    fn a_reserve_too_large_for_any_monitor_leaves_one_pixel() {
+        let whole = rect(0, 0, 1920, 1080);
+        let zone = rect(0, 0, 1920, 1050);
+        let huge = Edges {
+            bottom: i32::MAX,
+            right: i32::MAX,
+            ..Edges::default()
+        };
+        assert_eq!(
+            (
+                within(whole, zone, huge),
+                within(whole, whole, huge.add(huge))
+            ),
+            (rect(0, 0, 1, 1), rect(0, 0, 1, 1))
+        );
     }
 
     /// **A monitor with no size yet still has a work area**, and reserving

@@ -167,12 +167,13 @@ pub(crate) struct Edges {
 impl Edges {
     /// Both, edge by edge: two bars on one edge reserve the two together.
     /// `state::tests::real_client::reflow_on_close::hosted::two_surfaces_reserving_one_edge_take_both`.
+    /// Saturating: `state::monitors::tests::a_reserve_too_large_for_any_monitor_leaves_one_pixel`.
     pub(crate) fn add(self, other: Self) -> Self {
         Self {
-            top: self.top + other.top,
-            right: self.right + other.right,
-            bottom: self.bottom + other.bottom,
-            left: self.left + other.left,
+            top: self.top.saturating_add(other.top),
+            right: self.right.saturating_add(other.right),
+            bottom: self.bottom.saturating_add(other.bottom),
+            left: self.left.saturating_add(other.left),
         }
     }
 }
