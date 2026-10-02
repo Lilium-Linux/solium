@@ -6585,51 +6585,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
-    /// **`keyboard.indicator` is known to `--check`**, setting by setting:
-    /// every one the shipped `config.lua` documents is accepted beside the xkb
-    /// names, and a misspelt one inside it is reported by its whole path, with
-    /// the setting it was near.
-    #[test]
-    fn the_keyboard_indicator_settings_are_known_to_check() {
-        let Some((directory, scripts)) = shipped_init_with_user(
-            "solium-script-test-keyboard-indicator",
-            r#"
-            return {
-                keyboard = {
-                    layout = "us,ru",
-                    indicator = {
-                        show = "surface",
-                        on = { layout = true, caps = false, num = true },
-                        caps_on_focus = false,
-                        fallback = false,
-                        position = "top",
-                        durration = 900,
-                    },
-                },
-            }
-            "#,
-        ) else {
-            return;
-        };
-
-        let reported: Vec<(String, Option<String>)> = scripts
-            .unknown_settings()
-            .into_iter()
-            .map(|setting| (setting.key, setting.meant))
-            .collect();
-        assert_eq!(
-            reported,
-            vec![(
-                "keyboard.indicator.durration".to_owned(),
-                Some("keyboard.indicator.duration".to_owned())
-            )],
-            "every documented `keyboard.indicator` setting is one `--check` knows, and \
-             only the misspelt one is reported"
-        );
-
-        let _ = std::fs::remove_dir_all(&directory);
-    }
-
     /// **What `sol.keyboard()` reads, handed back to `sol.keyboard{ ... }`,
     /// compiles no keymap**, with `us,ru` and Russian live: the live layout's
     /// names come back as `layout_name` and `layout_short`, and `layout` is

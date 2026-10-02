@@ -47,10 +47,11 @@
 //! raising an error, `assert` included. `world` holds what the compositor holds:
 //! `surfaces` (by name: `x`, `y`, `w`, `h` for one placed at a rect, and its
 //! `properties`), `panes` (what `sol.pane_values` handed every pane), `field`
-//! (what `sol.text_input()` answers) and `windows` (each window opened: `id`,
-//! `x`, `y`); or, on the Qt thread, `pixel(layer, x, y)`, the frame's layer of
-//! that name rendered, answering `r, g, b, a` -- the scene is the layer
-//! `"scene"`.
+//! (what `sol.text_input()` answers), `windows` (each window opened: `id`,
+//! `x`, `y`) and `unknown` (each setting `solium --check` would report: `key`,
+//! and the `meant` it suggests); or, on the Qt thread, `pixel(layer, x, y)`,
+//! the frame's layer of that name rendered, answering `r, g, b, a` -- the
+//! scene is the layer `"scene"`.
 //! `tests::every_scenario_with_a_client_passes`,
 //! `tests::every_scenario_on_the_qt_thread_passes`.
 
@@ -235,6 +236,19 @@ fn world(lua: &Lua, desk: &Desk, windows: &[Window]) -> mlua::Result<Table> {
         opened.set(index + 1, entry)?;
     }
     world.set("windows", opened)?;
+    // What `solium --check` would call a setting nothing reads, which a
+    // scenario's own `user` can be checked against:
+    // `tests::every_scenario_with_a_client_passes`.
+    let unknown = lua.create_table()?;
+    if let Some(scripts) = state.scripts.as_ref() {
+        for (index, setting) in scripts.unknown_settings().into_iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("key", setting.key)?;
+            entry.set("meant", setting.meant)?;
+            unknown.set(index + 1, entry)?;
+        }
+    }
+    world.set("unknown", unknown)?;
     Ok(world)
 }
 
