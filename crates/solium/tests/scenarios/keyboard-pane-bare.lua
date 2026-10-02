@@ -52,7 +52,8 @@ return {
                     string.format("the caret at %s,%s", world.field.x, world.field.y))
                 assert(handed(world).what == "", "no pane draws it")
                 local surface, cue = pill(world)
-                assert(cue.what == "caps" and cue.hold == true, "the Caps pill, held, on the surface")
+                assert(cue.what == "caps" and cue.hold == false,
+                    "the Caps pill on the surface, timed, as it cannot follow the caret")
                 assert(surface.x == 345 and surface.y == 250,
                     string.format("at the caret: %s,%s", surface.x, surface.y))
             end,

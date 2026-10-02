@@ -28,14 +28,16 @@ return {
             end,
         },
 
-        -- Caps Lock on: the Caps pill at the caret, held.
+        -- Caps Lock on: the Caps pill at the caret, for `duration` -- placed
+        -- once, it cannot follow the caret as you type.
         { key = "caps_lock" },
         {
             expect = function(world)
                 local surface, cue = pill(world)
                 assert(surface.x == 345 and surface.y == 250 and surface.w == 112 and surface.h == 48,
                     string.format("placed at %s,%s %sx%s", surface.x, surface.y, surface.w, surface.h))
-                assert(cue.what == "caps" and cue.hold == true, "the Caps pill, held")
+                assert(cue.what == "caps" and cue.hold == false and cue.duration == 1200,
+                    "the Caps pill, timed")
                 assert(world.panes.keyboard_indicator.show == false, "and no pane draws one")
             end,
         },
@@ -49,16 +51,31 @@ return {
             end,
         },
 
-        -- A layout switch with Caps Lock on: the layout's pill, which hands
-        -- back to Caps Lock's when it goes.
+        -- A layout switch with Caps Lock on: the layout's pill, handing back
+        -- to nothing at a caret it cannot follow.
         { key = "shift+alt_l" },
         {
             expect = function(world)
                 local _, cue = pill(world)
-                assert(cue.what == "layout" and cue.after == "caps",
-                    "the layout's pill, handing back to Caps Lock's")
+                assert(cue.what == "layout" and cue.after == nil,
+                    "the layout's pill, handing back to nothing here")
             end,
         },
+
+        -- On screen, with no caret to follow, the layout's pill hands back
+        -- to Caps Lock's, held, when it goes.
+        { field = true },
+        { key = "shift+alt_l" },
+        {
+            expect = function(world)
+                local surface, cue = pill(world)
+                assert(cue.what == "layout" and cue.after == "caps",
+                    "the layout's pill, handing back to Caps Lock's")
+                assert(surface.x == 904 and surface.y == 946,
+                    string.format("on screen at %s,%s", surface.x, surface.y))
+            end,
+        },
+        { field = { 100, 40, 2, 16 } },
 
         -- Caps Lock off: hidden at once.
         { key = "caps_lock" },

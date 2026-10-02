@@ -466,7 +466,8 @@ doing the same thing, so you can see both:
   its caret instead: `sol.text_input()` says which, as `framed`.
 - **On a surface of its own** (`show = "surface"`): an overlay `sol.surface`
   that `lua/keyboard_indicator.lua` places at the caret in the global space,
-  from `sol.text_input()`.
+  from `sol.text_input()`. Placed once, it cannot follow the caret as you
+  type, so there Caps Lock's pill goes after `duration` like a layout's.
 
 The policy is the Lua file: it listens to `sol.on("keyboard")` and
 `sol.on("text_input")` and decides what shows and where. The look is QML,

@@ -18,7 +18,9 @@
 --              own decorations -- has no pane style around it to draw one,
 --              so it gets the surface below at its caret instead.
 --   "surface"  on an overlay `sol.surface` of its own, at the caret in the
---              global space (`qml/indicator/keyboard.qml`).
+--              global space (`qml/indicator/keyboard.qml`). Placed once, it
+--              cannot follow the caret as you type, so a lock's pill there
+--              goes after `duration` like a layout's.
 --
 -- Either way, a window that says nothing about a caret gets the pill on its
 -- screen instead, when `fallback = "surface"`.
@@ -160,14 +162,6 @@ function indicator.show(what, after)
     end
     showing = what
     kept.serial = kept.serial + 1
-    local cue = {
-        what = what,
-        serial = kept.serial,
-        -- A lock's pill stays while the lock is on; a layout's goes.
-        hold = what == "caps" or what == "num",
-        duration = s.duration,
-        after = after,
-    }
     local field = sol.text_input()
     local caret = field and field.x and field or nil
     local area = sol.monitor(field and field.window or focused())
@@ -176,10 +170,23 @@ function indicator.show(what, after)
     -- has no pane style to draw it, so the surface goes to its caret instead
     -- (`keyboard-pane-bare.lua`).
     local in_pane = s.show == "pane" and caret ~= nil and field.framed == true
-    panes(s.show == "pane", in_pane and cue or { what = "", serial = kept.serial })
-
     local on_surface = what ~= ""
         and ((caret ~= nil and not in_pane) or (caret == nil and s.fallback == "surface"))
+
+    -- A lock's pill stays while the lock is on, and a layout's goes. Except
+    -- on the surface at a caret: placed once, it cannot follow the caret as
+    -- you type, so a lock's goes too rather than sit on the next line, and
+    -- nothing is handed back to after a layout's (`keyboard-surface.lua`).
+    local stays = not (on_surface and caret ~= nil)
+    local cue = {
+        what = what,
+        serial = kept.serial,
+        hold = (what == "caps" or what == "num") and stays,
+        duration = s.duration,
+        after = stays and after or nil,
+    }
+    panes(s.show == "pane", in_pane and cue or { what = "", serial = kept.serial })
+
     if on_surface then
         surface(caret and at_caret(caret, area) or on_screen(s.position, area), cue)
     else
