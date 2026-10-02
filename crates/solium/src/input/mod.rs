@@ -892,8 +892,8 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // A button Qt has no name for, while a scene holds a press, is none of
     // the compositor's to interpret either: the pointer is the scene's until
     // every button is up (Ruling 7), and no scene is told of such a button
-    // (Ruling 9), so it goes on as it is, to no client, since none has the
-    // pointer meanwhile.
+    // (Ruling 9), so it goes on to smithay as it is, as it does behind the
+    // lock.
     // `state::tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_during_a_scenes_press_is_not_the_compositors`,
     // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
     if scene.is_none() && state.scene_press.is_some() {

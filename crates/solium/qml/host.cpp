@@ -2595,7 +2595,7 @@ extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, 
 
     // The double-click is made here, by the rule
     // QGuiApplicationPrivate::processMouseEvent applies (Qt 6.11,
-    // qguiapplication.cpp:2405-2425 and 2533-2541): a press is a double-click
+    // qguiapplication.cpp:2407-2427 and 2533-2542): a press is a double-click
     // when it is of the button the last press was of, sooner than
     // mouseDoubleClickInterval after it; the pointer straying further than
     // mouseDoubleClickDistance, on either axis, from where that press was
@@ -2603,7 +2603,7 @@ extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, 
     // event follows the press, as Qt sends it. That function is not reached
     // by an event sent straight to the window, and is not used for this:
     // routing through QWindowSystemInterface would hand every press to the
-    // platform's cursor (qguiapplication.cpp:2441-2455), which on the GPU
+    // platform's cursor (qguiapplication.cpp:2451-2466), which on the GPU
     // host is eglfs_kms moving a DRM cursor on a device the compositor is
     // master of (qeglfskmsgbmcursor.cpp:119-122), and it keeps the last
     // press process-wide, beside the frames' scenes, which still send
@@ -2631,7 +2631,7 @@ extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, 
     QCoreApplication::sendEvent(scene->window, &event);
     // A release that leaves no button held takes the press's grabs off
     // whatever holds them, as processMouseEvent does after every such release
-    // (qguiapplication.cpp:2548-2553). After the last button's own release Qt
+    // (qguiapplication.cpp:2543-2549). After the last button's own release Qt
     // Quick has already done it. After a release of no button, which is the
     // compositor saying the buttons went up where the scene could not see
     // (QtWayland says the same when a drag ends, qwaylandinputdevice.cpp:885-889),
