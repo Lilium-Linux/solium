@@ -187,9 +187,28 @@ impl Solium {
             pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
         }
         // A scene's press hold and its hover go too: behind the lock nothing
-        // of the session's may notice the pointer.
-        // `state::tests::real_client::lock_focus::the_lock_lets_go_of_a_hosted_scenes_press_and_its_hover`.
-        self.scene_press = None;
+        // of the session's may notice the pointer. The press is ended inside
+        // the scene first, by telling it the buttons went up unseen -- a
+        // release of no button, with none held -- so whatever held it is
+        // cancelled rather than clicked, and does not wake after the unlock
+        // still pressed.
+        // `state::tests::real_client::lock_focus::the_lock_lets_go_of_a_hosted_scenes_press_and_its_hover`,
+        // `qml::hosted::tests::a_press_let_go_of_unseen_is_cancelled_not_clicked`.
+        if let Some(held) = self.scene_press.take() {
+            let location = self
+                .seat
+                .get_pointer()
+                .map(|pointer| pointer.current_location())
+                .unwrap_or_default();
+            let let_go = crate::qml::hosted::ScenePointer {
+                buttons: 0,
+                ..crate::input::scene_event(self, crate::qml::hosted::PointerKind::Release(0))
+            };
+            if let Some(surface) = self.surfaces.get_mut(held.surface) {
+                surface.deliver(&held.output, held.area, location, let_go);
+            }
+            self.redraw = true;
+        }
         self.scene_hover_seen = None;
         if let Some((id, output)) = self.scene_hovered.take()
             && let Some(surface) = self.surfaces.get_mut(id)

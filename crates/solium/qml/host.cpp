@@ -2618,6 +2618,19 @@ extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, 
     QMouseEvent event(type, at, at, which, held, mods);
     event.setTimestamp(time);
     QCoreApplication::sendEvent(scene->window, &event);
+    // A release that leaves no button held takes the press's grabs off
+    // whatever holds them, as processMouseEvent does after every such release
+    // (qguiapplication.cpp:2548-2553). After the last button's own release Qt
+    // Quick has already done it. After a release of no button, which is the
+    // compositor saying the buttons went up where the scene could not see
+    // (QtWayland says the same when a drag ends, qwaylandinputdevice.cpp:885-889),
+    // it is what ends the press: the item holding it hears its grab go, so a
+    // pressed MouseArea is canceled, not clicked.
+    // `qml::hosted::tests::a_press_let_go_of_unseen_is_cancelled_not_clicked`.
+    if (kind == 2 && held == Qt::NoButton) {
+        event.setExclusiveGrabber(event.point(0), nullptr);
+        event.clearPassiveGrabbers(event.point(0));
+    }
     if (twice && scene->window != nullptr) {
         scene->press_button = Qt::NoButton;
         QMouseEvent again(QEvent::MouseButtonDblClick, at, at, which, held, mods);

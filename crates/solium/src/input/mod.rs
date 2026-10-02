@@ -752,7 +752,7 @@ fn release_cursor(state: &mut Solium, unclaimed: bool, grabbed: bool) {
 /// backend and every event the compositor makes up itself share.
 /// `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`,
 /// `state::tests::real_client::reflow_on_close::hosted::a_scene_is_told_when_each_event_happened_on_the_compositors_clock`.
-fn scene_event(state: &Solium, kind: PointerKind) -> ScenePointer {
+pub(crate) fn scene_event(state: &Solium, kind: PointerKind) -> ScenePointer {
     let modifiers = state.seat.get_keyboard().map_or(0, |keyboard| {
         crate::qml::keys::qt_modifiers(&keyboard.modifier_state())
     });

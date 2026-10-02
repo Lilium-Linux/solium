@@ -475,6 +475,53 @@ pub(crate) mod tests {
         });
     }
 
+    /// **A press let go of where the scene could not see is cancelled, not
+    /// clicked**: told of a release of no button with none held, as the
+    /// session locking tells it, the `MouseArea` that took the press is no
+    /// longer pressed and hears `canceled`, and no `clicked`.
+    #[test]
+    fn a_press_let_go_of_unseen_is_cancelled_not_clicked() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-cancel",
+                r"
+                import QtQuick
+                Item {
+                    readonly property int down: area.pressed ? 1 : 0
+                    property int clicks: 0
+                    property int cancels: 0
+                    MouseArea {
+                        id: area
+                        anchors.fill: parent
+                        onClicked: parent.clicks += 1
+                        onCanceled: parent.cancels += 1
+                    }
+                }
+                ",
+                "cancel-1",
+            );
+            for (kind, buttons, time) in [
+                (PointerKind::Press(0x1), 0x1, 1000),
+                (PointerKind::Release(0), 0, 1500),
+            ] {
+                scene.pointer_event(
+                    10.0,
+                    10.0,
+                    &ScenePointer {
+                        kind,
+                        buttons,
+                        modifiers: 0,
+                        time,
+                    },
+                );
+            }
+            let got = ["down", "clicks", "cancels"].map(|name| scene.get_int(name));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(got, [0, 0, 1], "[still pressed, clicked, canceled]");
+        });
+    }
+
     /// **A scene told the pointer left un-hovers what it hovered.**
     #[test]
     fn a_left_scene_drops_its_hover() {

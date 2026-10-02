@@ -10504,7 +10504,11 @@ mod real_client {
         /// **The lock lets go of a hosted scene's press and its hover**:
         /// behind the lock nothing of the session's may notice the pointer,
         /// so a press a scene held (Ruling 7) is not still held when the
-        /// session unlocks, and the scene is told the pointer left. Tested
+        /// session unlocks: the scene is told the buttons went up, as a
+        /// release of no button with none held, which cancels the press
+        /// inside it rather than clicking it
+        /// (`qml::hosted::tests::a_press_let_go_of_unseen_is_cancelled_not_clicked`),
+        /// and that the pointer left. Tested
         /// with the Cyrillic group active (#132); the scene is stood in for,
         /// beside these real clients (the #99 test).
         #[test]
@@ -10539,10 +10543,18 @@ mod real_client {
                 .get(bar)
                 .and_then(crate::scripted::Surface::stand)
                 .map(|stand| stand.left);
+            let last = scene_events(&session.state, bar)
+                .last()
+                .map(|event| (event.kind, event.buttons));
             assert_eq!(
-                (session.state.scene_press.is_none(), left),
-                (true, Some(1)),
-                "(the hold let go, how many times the scene heard the pointer leave)"
+                (session.state.scene_press.is_none(), last, left),
+                (
+                    true,
+                    Some((crate::qml::hosted::PointerKind::Release(0), 0)),
+                    Some(1)
+                ),
+                "(the hold let go, the last the scene was told, which ends its press as Qt \
+                 ends one let go of unseen, how many times it heard the pointer leave)"
             );
         }
 
