@@ -447,6 +447,11 @@ mod tests {
     }
 
     /// **Every scenario with a client passes.**
+    ///
+    /// Not on a machine whose own `~/.config/solium` holds Lua: that comes
+    /// first on `package.path`, so `require("user")` would find the
+    /// developer's settings and not the scenario's. Skipped there, as
+    /// `script::tests::shipped_init_with_user` skips.
     #[test]
     fn every_scenario_with_a_client_passes() {
         let found: Vec<_> = super::scenarios()
@@ -454,6 +459,17 @@ mod tests {
             .filter(|path| !on_qt(path))
             .collect();
         assert!(!found.is_empty(), "no scenarios found; the walk is broken");
+        let own = crate::script::Scripts::user_config_dir()
+            .and_then(|own| std::fs::read_dir(own).ok())
+            .is_some_and(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.path().extension().is_some_and(|kind| kind == "lua"))
+            });
+        if own {
+            eprintln!("skipped: ~/.config/solium holds Lua of its own, which a scenario would load");
+            return;
+        }
         for path in found {
             super::with_a_client(&path);
         }
