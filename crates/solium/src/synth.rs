@@ -149,6 +149,53 @@ impl smithay::backend::input::PointerAxisEvent<Synthetic> for Axis {
     }
 }
 
+/// One finger on a touchscreen, at a point of the region it is glued to.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct Touch {
+    at: Point<f64, Logical>,
+    time: u64,
+}
+
+#[cfg(test)]
+impl Event<Synthetic> for Touch {
+    fn time(&self) -> u64 {
+        self.time
+    }
+    fn device(&self) -> SynthDevice {
+        SynthDevice
+    }
+}
+
+#[cfg(test)]
+impl smithay::backend::input::TouchEvent<Synthetic> for Touch {
+    fn slot(&self) -> smithay::backend::input::TouchSlot {
+        Some(0).into()
+    }
+}
+
+#[cfg(test)]
+impl smithay::backend::input::AbsolutePositionEvent<Synthetic> for Touch {
+    fn x(&self) -> f64 {
+        self.at.x
+    }
+    fn y(&self) -> f64 {
+        self.at.y
+    }
+    fn x_transformed(&self, _width: i32) -> f64 {
+        self.at.x
+    }
+    fn y_transformed(&self, _height: i32) -> f64 {
+        self.at.y
+    }
+}
+
+#[cfg(test)]
+impl smithay::backend::input::TouchDownEvent<Synthetic> for Touch {}
+
+#[cfg(test)]
+impl smithay::backend::input::TouchUpEvent<Synthetic> for Touch {}
+
 impl InputBackend for Synthetic {
     type Device = SynthDevice;
     type KeyboardKeyEvent = UnusedEvent;
@@ -167,7 +214,13 @@ impl InputBackend for Synthetic {
     type GesturePinchEndEvent = UnusedEvent;
     type GestureHoldBeginEvent = UnusedEvent;
     type GestureHoldEndEvent = UnusedEvent;
+    #[cfg(test)]
+    type TouchDownEvent = Touch;
+    #[cfg(not(test))]
     type TouchDownEvent = UnusedEvent;
+    #[cfg(test)]
+    type TouchUpEvent = Touch;
+    #[cfg(not(test))]
     type TouchUpEvent = UnusedEvent;
     type TouchMotionEvent = UnusedEvent;
     type TouchCancelEvent = UnusedEvent;
@@ -291,6 +344,33 @@ pub(crate) fn send_axis(
         region,
         InputEvent::PointerAxis {
             event: Axis { v120, time },
+        },
+    );
+}
+
+/// A tap on a touchscreen at `at`, a point in the global space: the finger
+/// down, then up, through the real input path.
+/// `state::tests::real_client::reflow_on_close::hosted::a_touch_on_a_shell_button_neither_reaches_nor_focuses_the_window_under_it`.
+#[cfg(test)]
+pub(crate) fn send_touch(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    at: (f64, f64),
+    time: u64,
+) {
+    let at = Point::from(at) - region.loc.to_f64();
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::TouchDown {
+            event: Touch { at, time },
+        },
+    );
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::TouchUp {
+            event: Touch { at, time: time + 1 },
         },
     );
 }

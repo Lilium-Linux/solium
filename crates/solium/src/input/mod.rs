@@ -1283,11 +1283,15 @@ fn touch_down<B: InputBackend>(
         return;
     };
     let location = absolute_location(region, &event);
-    let under = state.surface_under(location);
+    let under = state.touch_under(location);
     let serial = SERIAL_COUNTER.next_serial();
 
+    // Not the window under something over the windows: a client's layer
+    // surface, or a shell where it takes a press, which the touch did not
+    // reach either (`Solium::touch_under`).
+    // `state::tests::real_client::reflow_on_close::hosted::a_touch_on_a_shell_button_neither_reaches_nor_focuses_the_window_under_it`.
     if state.profile.touch_to_focus
-        && !state.client_above(location)
+        && !state.pointed_above(location)
         && let Some((window, _)) = state.window_under(location)
     {
         state.focus_window(&window, serial);
@@ -1314,7 +1318,7 @@ fn touch_motion<B: InputBackend>(
         return;
     };
     let location = absolute_location(region, &event);
-    let under = state.surface_under(location);
+    let under = state.touch_under(location);
 
     touch.motion(
         state,

@@ -770,6 +770,15 @@ impl Solium {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        self.surface_at(location, true)
+    }
+
+    /// [`Self::surface_under`], for the pointer, or [`Self::touch_under`].
+    fn surface_at(
+        &self,
+        location: Point<f64, Logical>,
+        pointer: bool,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
         // Locked: the only surface anyone may point at is the lock screen's,
         // and on a monitor it has not covered, none at all. Returning early
         // rather than filtering afterwards is deliberate -- a later `return`
@@ -790,7 +799,7 @@ impl Solium {
         // A press a hosted scene took holds the pointer for that scene until
         // every button is up (Ruling 7), so no client has it meanwhile.
         // `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`.
-        if self.scene_press.is_some() {
+        if pointer && self.scene_press.is_some() {
             return None;
         }
 
@@ -821,6 +830,19 @@ impl Solium {
         }
 
         None
+    }
+
+    /// The surface a touch at `location` lands on: the pointer's answer, but
+    /// for a press a hosted scene holds, which is the pointer's and keeps no
+    /// touch from a client. Where a scene takes a press, a touch reaches no
+    /// client, as the pointer does not (Ruling 8), and a scene takes no
+    /// touch, so it is nobody's.
+    /// `tests::real_client::reflow_on_close::hosted::a_touch_on_a_shell_button_neither_reaches_nor_focuses_the_window_under_it`.
+    pub(crate) fn touch_under(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        self.surface_at(location, false)
     }
 
     /// What one pane makes of a point, for the pointer: [`Self::surface_under`]'s

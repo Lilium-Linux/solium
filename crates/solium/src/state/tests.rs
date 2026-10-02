@@ -22194,6 +22194,53 @@ end)
                 );
             }
 
+            /// **A touch neither reaches nor focuses the window under a shell
+            /// button** (Ruling 8, as for the pointer): a scene takes no
+            /// touch, so a touch where the shell takes a press is nobody's,
+            /// and the window with the keyboard keeps it. Beside the button
+            /// the touch lands on the window under the shell and focuses it,
+            /// even while the shell holds a press of the mouse's, which is the
+            /// pointer's and not the touch's.
+            #[test]
+            fn a_touch_on_a_shell_button_neither_reaches_nor_focuses_the_window_under_it() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let other = desk.open_surface();
+                let other_window = desk
+                    .state
+                    .panes
+                    .get(other.pane)
+                    .and_then(crate::pane::Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(other_window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                desk.state
+                    .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                desk.state.profile.touch_to_focus = true;
+                let region = region(&desk);
+                let lands = |desk: &Desk, at: (f64, f64)| {
+                    desk.state
+                        .touch_under(at.into())
+                        .map(|(surface, _)| surface.id().protocol_id())
+                };
+
+                crate::synth::send_touch(&mut desk.state, region, (630.0, 520.0), 10);
+                let on_the_button = (lands(&desk, (630.0, 520.0)), desk.focused());
+                move_pointer(&mut desk.state, (630.0, 520.0), 20);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 21);
+                let beside_while_held = lands(&desk, (630.0, 555.0));
+                crate::synth::send_touch(&mut desk.state, region, (630.0, 555.0), 22);
+                assert_eq!(
+                    (on_the_button, beside_while_held, desk.focused()),
+                    ((None, other.pane), Some(window_id(&opened)), opened.pane),
+                    "((where a touch on the shell button lands, the window with the keyboard \
+                     after it), where one beside the button lands while the shell holds a mouse \
+                     press, the window with the keyboard after that touch)"
+                );
+            }
+
             /// **A scene hears the pointer leave when it moves off its
             /// items**, so what it hovered is hovered no longer.
             #[test]
