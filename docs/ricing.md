@@ -487,9 +487,14 @@ The caret comes only from applications that say where it is through
 `text-input-v3`; for the others, `fallback = "surface"` shows the pill on the
 focused window's monitor instead. To try it nested, `SOLIUM_KEY_AT` presses
 Caps Lock and a layout switch for you ([`dev/README.md`](../dev/README.md)).
-To change it, copy `lua/keyboard_indicator.lua` or `KeyboardPill.qml` next to
-your configuration; to have none, take `require("keyboard_indicator")` out of
-your `init.lua`.
+To change the policy, copy `lua/keyboard_indicator.lua` next to your
+configuration, where it is found first. To change the on-screen pill's look,
+copy `qml/indicator/keyboard.qml` to `~/.config/solium/qml/indicator/`; a
+pane style of your own can draw a pill of its own at `caret` in place of
+`KeyboardPillLayer {}`. `KeyboardPill` itself is in the shipped `Solium`
+module, which a copy cannot replace yet
+([#88](https://github.com/Lilium-Linux/solium/issues/88)). To have none, take
+`require("keyboard_indicator")` out of your `init.lua`.
 
 ### Your monitors
 
