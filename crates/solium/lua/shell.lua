@@ -52,6 +52,9 @@ function shell.apply()
         -- What a press outside an open popup does is the user's: see
         -- `the_shell_takes_its_outside_click_from_the_configuration`.
         outside_click = settings.outside_click,
+        -- And which bindings still work while it holds the keyboard: see
+        -- `the_shell_takes_its_keyboard_bindings_from_the_configuration`.
+        keyboard = settings.keyboard,
     })
 end
 

@@ -1877,6 +1877,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
     // `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`).
     //
+    // `keyboard = { bindings = "except_claimed" }` says which compositor
+    // bindings still work while an item of its scene holds the keyboard:
+    // every one but the keys the item claims (the default), `"all"`, or
+    // `"none"`, which leaves the scene every key but the escape hatches
+    // (`tests::sol_surface_reads_its_keyboard_bindings`,
+    // `input::tests::a_claimed_key_reaches_the_scene_and_not_its_binding`,
+    // `input::tests::with_bindings_none_even_super_bindings_reach_the_scene`).
+    //
     // `sol.surface(name, false)` takes one away. Re-declaring the same name
     // changes the surface in place, writing what changed into its live scene,
     // and only a new scene file replaces it, so running the configuration
@@ -2006,6 +2014,30 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 }
             };
 
+            // `tests::sol_surface_reads_its_keyboard_bindings`,
+            // `tests::an_unknown_keyboard_bindings_is_refused`.
+            let keyboard = match options.get::<Option<Table>>("keyboard")? {
+                Some(keyboard) => match keyboard.get::<Value>("bindings")? {
+                    Value::Nil => crate::scripted::KeyPolicy::ExceptClaimed,
+                    Value::String(word) => match word.to_str()?.as_ref() {
+                        "except_claimed" => crate::scripted::KeyPolicy::ExceptClaimed,
+                        "all" => crate::scripted::KeyPolicy::All,
+                        "none" => crate::scripted::KeyPolicy::NoBindings,
+                        other => {
+                            return Err(mlua::Error::runtime(format!(
+                                "keyboard.bindings is \"except_claimed\", \"all\" or \"none\", not {other:?}"
+                            )));
+                        }
+                    },
+                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "keyboard.bindings is \"except_claimed\", \"all\" or \"none\"",
+                        ));
+                    }
+                },
+                None => crate::scripted::KeyPolicy::ExceptClaimed,
+            };
+
             with_pending(lua, |pending| {
                 pending
                     .commands
@@ -2018,6 +2050,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                         interactive,
                         reserve,
                         outside_click: outside_click.clone(),
+                        keyboard,
                     })));
             })?;
             Ok(Value::Nil)
@@ -5043,6 +5076,80 @@ mod tests {
         );
     }
 
+    /// **`keyboard.bindings` says which bindings still work while the scene
+    /// holds the keyboard** (Q3, Ruling 14): every one but the claimed keys
+    /// when it says nothing, as when it says `"except_claimed"`.
+    #[test]
+    fn sol_surface_reads_its_keyboard_bindings() {
+        let directory = std::env::temp_dir().join("solium-script-test-keyboard-bindings");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.surface("a", { scene = "/solium-fixture/a.qml", keyboard = { bindings = "all" } })
+            sol.surface("b", { scene = "/solium-fixture/b.qml", keyboard = { bindings = "none" } })
+            sol.surface("c", { scene = "/solium-fixture/c.qml", keyboard = { bindings = "except_claimed" } })
+            sol.surface("d", { scene = "/solium-fixture/d.qml", keyboard = {} })
+            sol.surface("e", { scene = "/solium-fixture/e.qml" })
+            "#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let policies: Vec<crate::scripted::KeyPolicy> = scripts
+            .startup()
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Surface(declared) => Some(declared.keyboard),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        use crate::scripted::KeyPolicy;
+        assert_eq!(
+            policies,
+            [
+                KeyPolicy::All,
+                KeyPolicy::NoBindings,
+                KeyPolicy::ExceptClaimed,
+                KeyPolicy::ExceptClaimed,
+                KeyPolicy::ExceptClaimed,
+            ],
+            "[all, none, except_claimed, an empty table, nothing said]"
+        );
+    }
+
+    /// **A `keyboard.bindings` that is none of the three fails the load**, as
+    /// an unknown `outside_click` does.
+    #[test]
+    fn an_unknown_keyboard_bindings_is_refused() {
+        let directory = std::env::temp_dir().join("solium-script-test-keyboard-unknown");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        let mut refused = Vec::new();
+        for options in [
+            r#"keyboard = { bindings = "some" }"#,
+            r#"keyboard = "all""#,
+            "keyboard = { bindings = true }",
+        ] {
+            std::fs::write(
+                &config,
+                format!(
+                    r#"sol.surface("bar", {{ scene = "/solium-fixture/bar.qml", {options} }})"#
+                ),
+            )
+            .expect("writing the test script");
+            refused.push(Scripts::load(&config).is_err());
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            refused,
+            [true, true, true],
+            "[a word it does not know, a word, a bool]"
+        );
+    }
+
     /// **An `outside_click` that is neither word fails the load**, as a
     /// negative reserve does, rather than quietly swallowing.
     #[test]
@@ -5237,6 +5344,48 @@ mod tests {
             assert!(
                 !policies.is_empty()
                     && policies.iter().all(|policy| *policy == (tray_menu, search)),
+                "{user}: {policies:?}"
+            );
+        }
+    }
+
+    /// **Which bindings still work while the hosted shell holds the keyboard
+    /// is the user's to configure** (Q3): `shell.keyboard.bindings` in
+    /// `config.lua` is the shell's `keyboard.bindings`, and every binding but
+    /// the claimed keys works by default.
+    #[test]
+    fn the_shell_takes_its_keyboard_bindings_from_the_configuration() {
+        if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
+            return;
+        }
+        use crate::scripted::KeyPolicy;
+        for (user, expected) in [
+            (
+                r#"return { shell = { scene = "/solium-fixture/shell.qml" } }"#,
+                KeyPolicy::ExceptClaimed,
+            ),
+            (
+                r#"return { shell = { scene = "/solium-fixture/shell.qml", keyboard = { bindings = "none" } } }"#,
+                KeyPolicy::NoBindings,
+            ),
+            (
+                r#"return { shell = { scene = "/solium-fixture/shell.qml", keyboard = { bindings = "all" } } }"#,
+                KeyPolicy::All,
+            ),
+        ] {
+            let Some((scripts, commands)) =
+                shell_after_monitors("solium-script-test-shell-keyboard", user)
+            else {
+                return;
+            };
+            assert!(
+                scripts.unknown_settings().is_empty(),
+                "`shell.keyboard.bindings` was reported as unrecognised"
+            );
+            let (declared, _) = shell_surfaces(&commands);
+            let policies: Vec<KeyPolicy> = declared.iter().map(|shell| shell.keyboard).collect();
+            assert!(
+                !policies.is_empty() && policies.iter().all(|policy| *policy == expected),
                 "{user}: {policies:?}"
             );
         }

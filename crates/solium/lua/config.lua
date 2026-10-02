@@ -118,6 +118,7 @@ local defaults = {
         scene = false,
         on = "every-monitor",
         outside_click = "swallow",
+        keyboard = { bindings = "except_claimed" },
     },
 
     -- The keyboard.

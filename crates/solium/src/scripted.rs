@@ -159,6 +159,24 @@ pub(crate) struct Declaration {
     /// dismissed it (Ruling 13).
     /// `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
     pub(crate) outside_click: OutsideClick,
+    /// Which compositor bindings still work while its scene holds the
+    /// keyboard (Q3, Ruling 14).
+    /// `input::tests::a_claimed_key_reaches_the_scene_and_not_its_binding`.
+    pub(crate) keyboard: KeyPolicy,
+}
+
+/// Which compositor bindings still work while a scene holds the keyboard:
+/// every one but the keys the holding item claims (the default), every one,
+/// or none, so the scene has every key but the escape hatches (Q3).
+/// `input::tests::a_claimed_key_reaches_the_scene_and_not_its_binding`,
+/// `input::tests::with_bindings_all_a_claimed_binding_wins`,
+/// `input::tests::with_bindings_none_even_super_bindings_reach_the_scene`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum KeyPolicy {
+    #[default]
+    ExceptClaimed,
+    All,
+    NoBindings,
 }
 
 /// What a press outside a grab does after dismissing it: swallowed, as macOS
@@ -304,6 +322,7 @@ impl Declaration {
             interactive: true,
             reserve: Edges::default(),
             outside_click: OutsideClick::default(),
+            keyboard: KeyPolicy::default(),
         }
     }
 }
