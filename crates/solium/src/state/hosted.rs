@@ -150,11 +150,14 @@ impl Solium {
     /// another instance reports dismisses the one held, and the instance
     /// holding it letting go of it ends it. The one held is then placed
     /// where its scene is drawn now, and a scene that is gone, with its
-    /// surface, its monitor or its placement there, lets go of it.
+    /// surface, its monitor or its placement there, lets go of it. A scene
+    /// still there that can hold it no longer, its surface declared out of
+    /// the pointer's reach, hears it dismissed.
     /// `state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_lets_go_of_its_grab`,
-    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_follows_its_scene_to_where_it_is_drawn`.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_follows_its_scene_to_where_it_is_drawn`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_declared_again_out_of_the_pointers_reach_dismisses_the_grab_it_held`.
     fn settle_grabs(&mut self) {
         // Behind the lock the pointer is the lock screen's: what a scene
         // says of its grabs is read once the lock is gone.
@@ -204,8 +207,14 @@ impl Solium {
             }
         }
         if let Some(held) = self.hosted_grab.take() {
-            let monitor = held.output.name();
-            self.hosted_grab = self.hosted_grab_for(held.surface, &monitor, held.name);
+            let (id, output) = (held.surface, held.output.clone());
+            self.hosted_grab = self.hosted_grab_for(id, &output.name(), held.name);
+            if self.hosted_grab.is_none()
+                && let Some(surface) = self.surfaces.get_mut(id)
+            {
+                surface.dismiss(&output);
+                self.redraw = true;
+            }
         }
     }
 

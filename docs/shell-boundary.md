@@ -238,7 +238,9 @@ One grab is held at a time, and one another scene takes dismisses it
 (`state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`).
 A surface the pointer does not reach, declared `interactive = false`, holds
 no grab, and its scene's grabs dismiss none
-(`state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_grab`).
+(`state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_grab`);
+one declared so while it holds a grab hears it dismissed
+(`state::tests::real_client::reflow_on_close::hosted::a_surface_declared_again_out_of_the_pointers_reach_dismisses_the_grab_it_held`).
 A press the scene already held when its grab began keeps the pointer until
 its release, so a button whose press opens a menu is let go of as usual
 (`state::tests::real_client::reflow_on_close::hosted::a_press_held_when_a_grab_begins_keeps_the_pointer_until_its_release`).

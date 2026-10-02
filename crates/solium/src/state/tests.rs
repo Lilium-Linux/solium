@@ -24052,6 +24052,30 @@ end)
                 );
             }
 
+            /// **A surface declared again out of the pointer's reach dismisses
+            /// the grab it held**: the menu is closed, not left open in a
+            /// scene whose grab the compositor no longer holds and that will
+            /// not be told of again, which a later press outside it would then
+            /// not close.
+            #[test]
+            fn a_surface_declared_again_out_of_the_pointers_reach_dismisses_the_grab_it_held() {
+                let (mut desk, _, menu) = grabbing(crate::scripted::OutsideClick::default());
+                let mut declared = desk
+                    .state
+                    .surfaces
+                    .get(menu)
+                    .expect("live")
+                    .declared
+                    .clone();
+                declared.interactive = false;
+                desk.state.declare_surface(declared);
+                assert_eq!(
+                    (desk.state.hosted_grab.is_none(), dismissed(&desk, menu)),
+                    (true, 1),
+                    "(the grab let go, the menu's dismissals)"
+                );
+            }
+
             /// A surface on every monitor reserving `reserve`, its scene stood
             /// in for by `stand`.
             fn reserving(
