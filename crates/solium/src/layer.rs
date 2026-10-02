@@ -35,7 +35,9 @@
 //!
 //! Not a constant. Windows are placed in whatever is left after every anchored
 //! surface has taken its exclusive zone, which is a number the shell chooses
-//! and can change at runtime. `Solium::work_area` reads it.
+//! and can change at runtime, and every hosted surface its `reserve`
+//! (`state::tests::real_client::reflow_on_close::hosted::a_declared_reserve_takes_its_edge_out_of_the_work_area`).
+//! `Solium::work_area` reads it.
 
 use smithay::{
     desktop::{LayerMap, LayerSurface, layer_map_for_output},

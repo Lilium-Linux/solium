@@ -4932,6 +4932,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **A negative reserve fails the load**, as a half rect does (Ruling 10).
     #[test]
     fn a_negative_reserve_is_refused() {
         let directory = std::env::temp_dir().join("solium-script-test-reserve-negative");

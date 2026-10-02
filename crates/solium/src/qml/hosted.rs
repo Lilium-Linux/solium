@@ -838,6 +838,36 @@ pub(crate) mod tests {
         });
     }
 
+    /// **A negative scene reserve gives the edge back to the declaration**:
+    /// an edge the scene set and then set to `-1` is reported unset again
+    /// (Ruling 10).
+    #[test]
+    fn a_negative_scene_reserve_gives_the_edge_back_to_the_declaration() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-reserve-negative",
+                "import QtQuick\nimport Solium\nItem { property bool given: false\n Solium.surface.reserve.bottom: given ? -1 : 48 }\n",
+                "reserve-negative-1",
+            );
+            let first = scene.take_reserve();
+            scene.set_bool("given", true);
+            let given = scene.take_reserve();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (first, given),
+                (
+                    Some(SceneReserve {
+                        bottom: Some(48),
+                        ..SceneReserve::default()
+                    }),
+                    Some(SceneReserve::default()),
+                ),
+                "(the first take, the take after the scene gave the edge back)"
+            );
+        });
+    }
+
     /// **A scene hosted on no monitor may bind a reserve, and reserves
     /// nothing**: a window frame or the loading scene that writes
     /// `Solium.surface.reserve` builds, and says nothing to take.

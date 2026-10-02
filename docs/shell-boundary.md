@@ -247,6 +247,8 @@ size. Lua declares it, `reserve = { bottom = 48 }` on `sol.surface`, and the
 scene can say it too, `Solium.surface.reserve.bottom: bar.hidden ? 0 : 48`,
 which wins for each edge it sets
 (`state::tests::real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`).
+A negative value, such as `-1`, gives that edge back to the declaration
+(`qml::hosted::tests::a_negative_scene_reserve_gives_the_edge_back_to_the_declaration`).
 Each edge of the work area loses its layer-shell zone and every reserve on it,
 added together
 (`state::tests::real_client::reflow_on_close::hosted::two_surfaces_reserving_one_edge_take_both`),
