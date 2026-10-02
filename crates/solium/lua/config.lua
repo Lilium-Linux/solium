@@ -1031,6 +1031,10 @@ local open_sections = {
         -- Which of several layouts is live. `sol.keyboard{ active = 2 }` is
         -- also how the cycle binding in `init.lua` switches it.
         active = true,
+        -- Caps Lock and Num Lock, on or off. `sol.keyboard{ caps = false }`
+        -- from a binding turns Caps Lock off.
+        caps = true,
+        num = true,
     },
     cursor = { theme = true, size = true },
     -- `true` rather than a set of names: everything is accepted.

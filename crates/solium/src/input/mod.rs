@@ -207,6 +207,10 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
         },
     );
 
+    // A layout or a lock the key changed is told before any binding runs:
+    // `keyboard_change::tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
+    state.keyboard_changed();
+
     match bound {
         Some(Some(Action::Bound(combo))) => {
             state.trigger(&combo);

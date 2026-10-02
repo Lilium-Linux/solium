@@ -88,6 +88,10 @@
 ---@class sol.KeyboardState
 ---@field layouts string[] The layout names, in order.
 ---@field active integer Which of them is live, counting from 1.
+---@field layout string The live layout's name, such as `"Russian"`; `""` before the keymap is known.
+---@field short string The live layout's short name, such as `"RU"`: the `shortDescription` xkb's rules give it, upper-cased, or its first two letters.
+---@field caps boolean Whether Caps Lock is on.
+---@field num boolean Whether Num Lock is on.
 ---@field repeat_rate integer Repeats per second.
 ---@field repeat_delay integer Milliseconds a key is held before it repeats.
 
@@ -104,6 +108,8 @@
 ---@field repeat_rate? integer Repeats per second.
 ---@field repeat_delay? integer Milliseconds before repeating starts.
 ---@field active? integer Which layout is live, counting from 1.
+---@field caps? boolean Caps Lock on or off. Done by pressing the keymap's own Caps Lock key inside the compositor, so the window with the keyboard is told and the layout stays; a keymap with no such key cannot have it, and the log says so.
+---@field num? boolean Num Lock on or off, the same way.
 
 ---A QML scene for `sol.surface` to draw.
 ---@class sol.SurfaceOptions
@@ -263,6 +269,7 @@
 ---| "layout" # Arrange the windows you already hold again: `()`.
 ---| "monitors" # The monitors changed, or were announced at startup or after a reload: `()`.
 ---| "restore" # These scripts replaced a running session's, after a reload and never at startup: `()`.
+---| "keyboard" # The live layout, Caps Lock or Num Lock changed, by a key or by `sol.keyboard{ ... }`: `(state, changed)`, `state` being what `sol.keyboard()` answers now and `changed` `"layout"`, `"caps"` or `"num"`. Never for ordinary typing, a new keymap or a configuration starting; a change a `keyboard` listener makes is not told back to it.
 
 -- sol ------------------------------------------------------------------------
 
@@ -315,9 +322,11 @@ function sol.surface(name, options) end
 
 ---Read the keyboard, or change it.
 ---
----With no argument, answers the layouts, which one is live and how keys
----repeat. With a table, changes what it names and leaves the rest alone, so a
----binding that switches layout does not reset the repeat rate.
+---With no argument, answers the layouts, which one is live, its short name,
+---whether Caps Lock and Num Lock are on, and how keys repeat. With a table,
+---changes what it names and leaves the rest alone, so a binding that switches
+---layout does not reset the repeat rate. `sol.on("keyboard", ...)` hears the
+---layout and the locks change.
 ---@overload fun(): sol.KeyboardState
 ---@param options? sol.KeyboardOptions
 ---@return sol.KeyboardState|nil
@@ -642,6 +651,7 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "surface", handler: fun(name: string, action: string))
 ---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
 ---@overload fun(event: "layout"|"monitors"|"restore", handler: fun())
+---@overload fun(event: "keyboard", handler: fun(state: sol.KeyboardState, changed: "layout"|"caps"|"num"))
 ---@param event sol.Event
 ---@param handler function
 ---@return nil

@@ -1099,6 +1099,21 @@ impl Scripts {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "focus", id))
     }
 
+    /// The keyboard's layout, Caps Lock or Num Lock changed: `(state,
+    /// changed)`, `state` being what `sol.keyboard()` answers and `changed`
+    /// `"layout"`, `"caps"` or `"num"`.
+    /// `keyboard_change::tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
+    pub(crate) fn keyboard_changed(
+        &mut self,
+        changed: &'static str,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        self.dispatch(snapshot, move |sol| {
+            let state: Value = sol.get::<mlua::Function>("keyboard")?.call(())?;
+            call_listeners(sol, "keyboard", (state, changed))
+        })
+    }
+
     /// A window asked to be brought forward, and the compositor has answered
     /// as it does: focused it, or refused it on a workspace nobody is looking
     /// at or while it is being closed. `(id, why)`.
@@ -2003,6 +2018,12 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 }
                 table.set("layouts", layouts)?;
                 table.set("active", keyboard.active)?;
+                // `keymap::tests::sol_keyboard_names_the_live_layout_and_its_short_name`,
+                // `keyboard_change::tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
+                table.set("layout", keyboard.layout())?;
+                table.set("short", keyboard.short_name())?;
+                table.set("caps", keyboard.caps)?;
+                table.set("num", keyboard.num)?;
                 table.set("repeat_rate", keyboard.repeat_rate)?;
                 table.set("repeat_delay", keyboard.repeat_delay)?;
                 return Ok(Value::Table(table));
@@ -2050,6 +2071,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 keymap,
                 repeat,
                 active: options.get::<Option<usize>>("active")?,
+                // `keymap::tests::sol_keyboard_turns_the_locks_on_and_off_and_leaves_russian_live`.
+                caps: options.get::<Option<bool>>("caps")?,
+                num: options.get::<Option<bool>>("num")?,
             };
             if request == crate::keymap::Request::default() {
                 return Ok(Value::Nil);

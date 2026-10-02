@@ -109,7 +109,7 @@ impl Solium {
     }
 
     /// Apply what a script asked for.
-    pub(super) fn apply(&mut self, outcome: Outcome) {
+    pub(crate) fn apply(&mut self, outcome: Outcome) {
         self.dispatching += 1;
         // Anything a script asked for changes what is on screen, and almost
         // all of it starts an animation. Damage-driven rendering only draws
@@ -415,6 +415,7 @@ impl Solium {
                 Command::Spawn { program, args } => self.spawn(&program, &args),
                 Command::Reload => self.request = Some(Request::Reload),
                 Command::Keyboard(request) => {
+                    let keymap = self.keymap.clone();
                     if crate::keymap::apply(self, &request) {
                         let now = crate::keymap::describe(self);
                         tracing::info!(
@@ -424,6 +425,14 @@ impl Solium {
                             "keyboard"
                         );
                     }
+                    // A new keymap is a new keyboard and not a switch, and is
+                    // told nothing; a switch or a lock is told:
+                    // `keyboard_change::tests::a_new_keymap_and_a_starting_configuration_are_told_nothing`,
+                    // `keyboard_change::tests::sol_keyboard_active_is_told_as_a_layout_change`.
+                    if self.keymap != keymap {
+                        self.keyboard_told.forget();
+                    }
+                    self.keyboard_changed();
                 }
                 Command::Surface(surface) => self.declare_surface(*surface),
                 Command::SurfaceGone(name) => self.remove_surface(&name),
@@ -653,7 +662,12 @@ impl Solium {
         };
         let outcome = scripts.startup();
         self.scripts = Some(scripts);
+        // What the configuration does to the keyboard as it starts is told
+        // nothing, and what the keys do after it is:
+        // `keyboard_change::tests::a_new_keymap_and_a_starting_configuration_are_told_nothing`.
+        self.keyboard_told.forget();
         self.apply(outcome);
+        self.keyboard_changed();
     }
 
     pub(crate) fn trigger_monitors_changed(&mut self) {
