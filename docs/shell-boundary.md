@@ -173,9 +173,11 @@ under the scene's root
 Everywhere else the window under the shell gets the press, and where the
 scene takes a press, the window under it does not have the pointer, nor the
 keyboard when focus follows the mouse. A press the scene took is its until
-every button is up, wherever the pointer goes meanwhile
+every button is up, wherever the pointer goes meanwhile, and the pointer keeps
+the shape it had at the press
 (`state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`,
 `state::tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`,
+`state::tests::real_client::reflow_on_close::hosted::a_press_a_scene_holds_keeps_its_shape_over_a_resize_border`,
 `state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`,
 `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`).
 

@@ -22142,6 +22142,29 @@ end)
                     .map(|stand| stand.left);
                 assert_eq!(left, Some(1));
             }
+
+            /// **The pointer keeps the shape of a press a scene holds**
+            /// (Ruling 8, #108): dragged off a shell button onto a window's
+            /// resize border, the press is still the scene's, so the pointer
+            /// does not offer a resize.
+            #[test]
+            fn a_press_a_scene_holds_keeps_its_shape_over_a_resize_border() {
+                let (mut desk, _, _) = window_under_a_scene(button_over_the_window);
+                let corner = Point::<f64, Logical>::from((663.0, 563.0));
+                assert!(
+                    desk.state.claim_under(corner).cursor().is_some(),
+                    "the premise: the window's corner offers a resize, got {:?}",
+                    desk.state.claim_under(corner)
+                );
+                to(&mut desk, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                to(&mut desk, (corner.x, corner.y), 12);
+                assert!(
+                    !desk.state.pointer.assert(None),
+                    "the pointer offered a resize for a press the scene holds"
+                );
+            }
         }
     }
 
