@@ -8,6 +8,7 @@ use smithay::{
     output::Output,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{IsAlive as _, Logical, Point, Rectangle, SERIAL_COUNTER},
+    wayland::pointer_constraints::with_pointer_constraint,
 };
 
 use crate::{
@@ -247,14 +248,27 @@ impl Solium {
     /// pointer lock or confinement goes with it, as smithay lets one go when
     /// its surface loses the pointer; the motion after the one that brings
     /// the pointer back grants it again, as it grants every constraint
-    /// (Ruling 12).
-    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`.
+    /// (Ruling 12). A client a press of its own still keeps the pointer on,
+    /// through the grab smithay started for it, has its lock let go of here,
+    /// at once, and not at the release, so it is told no motion while it
+    /// thinks itself locked.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_begun_during_a_press_on_a_locked_window_lets_go_of_the_lock_at_once`.
     fn unpoint_clients(&mut self) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
-        if pointer.current_focus().is_none() {
+        let Some(focus) = pointer.current_focus() else {
             return;
+        };
+        if pointer.is_grabbed() {
+            with_pointer_constraint(&focus, &pointer, |constraint| {
+                if let Some(constraint) = constraint
+                    && constraint.is_active()
+                {
+                    constraint.deactivate();
+                }
+            });
         }
         let location = pointer.current_location();
         let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);

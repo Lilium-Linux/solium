@@ -244,8 +244,10 @@ one declared so while it holds a grab hears it dismissed
 A press the scene already held when its grab began keeps the pointer until
 its release, so a button whose press opens a menu is let go of as usual
 (`state::tests::real_client::reflow_on_close::hosted::a_press_held_when_a_grab_begins_keeps_the_pointer_until_its_release`).
-A game's pointer lock is let go while a grab is held and comes back after it
-(`state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`),
+A game's pointer lock is let go while a grab is held, at once even while a
+press of the game's own still keeps the pointer on it, and comes back after it
+(`state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`,
+`state::tests::real_client::reflow_on_close::hosted::a_grab_begun_during_a_press_on_a_locked_window_lets_go_of_the_lock_at_once`),
 and locking the session dismisses it
 (`state::tests::real_client::reflow_on_close::hosted::locking_the_session_dismisses_a_hosted_grab`).
 No grab is held behind the lock; one a scene takes there is held once the
