@@ -114,6 +114,7 @@
 ---@field interactive? boolean Whether the pointer reaches it at all, so a `Grab` in a scene it does not reach holds nothing. Where it does, the scene's items decide which points are its (`Solium.input`), and the rest go to what is under it. An interactive scene sets its `action` property, and `sol.on("surface", ...)` hears it.
 ---@field reserve? { top?: integer, right?: integer, bottom?: integer, left?: integer } Logical pixels taken out of the work area on those edges of every monitor the surface is on, whatever its size or placement; never negative. A scene's own `Solium.surface.reserve.<edge>` wins for an edge it sets. A change re-flows the windows once.
 ---@field outside_click? "swallow"|"pass"|table<string, "swallow"|"pass"> What a press outside an open `Grab` of the scene does once it has dismissed it: swallowed with its release (the default), or passed on to what is under it. A table names grabs, with `default` for the rest. Any other value fails the load.
+---@field keyboard? { bindings?: "except_claimed"|"all"|"none" } While an item of the scene holds the keyboard (`Solium.keyboard.wants`): `"except_claimed"` (the default) keeps every binding but the keys the holding item claims (`Solium.keyboard.claims`), `"all"` keeps every binding, and `"none"` gives the scene every key but the Ctrl+Alt escapes. Any other value fails the load.
 
 ---@alias sol.Layer
 ---| "background" # Under everything, including client background surfaces.

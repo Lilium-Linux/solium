@@ -110,7 +110,12 @@ local defaults = {
     -- See `the_shell_takes_its_outside_click_from_the_configuration` and
     -- `a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
     --
-    -- What a hosted shell does not have yet: keyboard focus (#163).
+    -- `keyboard.bindings`: while the shell holds the keyboard (a search
+    -- field, a password), which compositor bindings still work:
+    -- "except_claimed" (the default; every binding but the keys the field
+    -- claims), "all", or "none" (every key but the Ctrl+Alt escapes goes to
+    -- the shell). See `the_shell_takes_its_keyboard_bindings_from_the_configuration`
+    -- and `a_claimed_key_reaches_the_scene_and_not_its_binding`.
     --
     -- A layer-shell bar (Waybar and the like) needs nothing here: it is an
     -- ordinary client, and you start it as one.

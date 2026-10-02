@@ -250,6 +250,49 @@ No grab is held behind the lock; one a scene takes there is held once the
 lock is gone
 (`state::tests::real_client::lock_focus::a_grab_a_scene_takes_behind_the_lock_is_held_once_it_is_gone`).
 
+**The keyboard, when an item asks.** `TextField { Solium.keyboard.wants:
+activeFocus; Solium.keyboard.claims: [ "Escape", "Return", "Up", "Down" ] }`
+takes the keyboard while it is visible and wants it
+(`qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`,
+`qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`). Every
+hosted scene's window is active from the start, so `focus: true` gives a
+field `activeFocus`; bind `wants` to it, because the compositor takes the
+keyboard back by taking that focus away. The
+window that had the keyboard loses it meanwhile, still reads as the focused
+window and is drawn focused, and gets it back when the field lets go
+(`state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`).
+Text comes from the compositor's own keyboard state, so typing works with any
+layout active, Russian included
+(`input::tests::russian_typed_through_the_compositor_reaches_a_hosted_text_field`,
+`input::tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`),
+and a key held repeats at the keyboard's own rate
+(`input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`).
+The compositor's bindings keep working, `super+q` on Russian among them,
+except the keys the item claims, which are the field's
+(`input::tests::an_unclaimed_super_binding_still_fires_on_russian_while_the_shell_holds_the_keyboard`,
+`input::tests::a_claimed_key_reaches_the_scene_and_not_its_binding`); a claim
+is spelled as `sol.bind` spells a key. `shell.keyboard.bindings` in
+`config.lua` changes that: `"all"` keeps every binding, claimed or not, and
+`"none"` gives the shell every key
+(`input::tests::with_bindings_all_a_claimed_binding_wins`,
+`input::tests::with_bindings_none_even_super_bindings_reach_the_scene`,
+`script::tests::the_shell_takes_its_keyboard_bindings_from_the_configuration`).
+The Ctrl+Alt escapes always work
+(`input::tests::the_escape_hatches_beat_a_shell_that_holds_the_keyboard`).
+Clicking a window or `sol.focus` takes the keyboard back
+(`state::tests::real_client::reflow_on_close::hosted::clicking_a_window_ends_the_shells_hold`,
+`state::tests::real_client::reflow_on_close::hosted::sol_focus_ends_the_shells_hold`),
+and so does locking the session; no scene holds it behind the lock, and one
+that asks there has it once the lock is gone
+(`state::tests::real_client::lock_focus::no_scene_holds_the_keyboard_while_the_session_is_locked`).
+One scene holds it at a time
+(`state::tests::real_client::reflow_on_close::hosted::a_hold_another_scene_takes_returns_to_the_window_the_first_took_it_from`).
+The compositor's own Qt loads no input method from your session, so IBus and
+the like do not run inside it
+(`launch::tests::the_compositors_qt_takes_no_input_method_from_the_session`);
+the programs it starts still get yours
+(`launch::tests::a_spawned_program_gets_the_input_method_the_compositors_qt_does_not`).
+
 **The compositor's clock and frames.** Its animations advance on the same
 clock as every window transform, a running animation asks for the next frame,
 and the scene is redrawn only when Qt says it changed. Qt is served between
@@ -325,8 +368,8 @@ workspaces, any binding — a hosted shell can ask for this way.
 
 Said plainly, because a shell that loads is easy to mistake for one that works:
 
-- **No keyboard.** No keyboard focus (#163): a launcher's text field cannot
-  be typed into.
+- **No compose or dead keys** in a hosted field, and no input method: a
+  field types what the key types.
 - **No window list, and no icons.** Nothing tells a hosted scene which
   windows exist, and there is no `image://` provider for the icon theme.
   Driving the compositor goes through `action` and Lua.
