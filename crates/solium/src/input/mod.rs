@@ -899,8 +899,10 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // top there -- not under a client's surface, nor under a fullscreen
     // window, in `crate::stack`'s order -- and only when nothing is being
     // dragged. A bar, a panel, an overlay: all the same path, and the
-    // compositor knows what none of them are for.
-    if !pointer.is_grabbed()
+    // compositor knows what none of them are for. A press a scene holds goes
+    // first, even through a grab smithay started during it (Ruling 7):
+    // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
+    if (state.scene_press.is_some() || !pointer.is_grabbed())
         && let Some(scene) = scene
         && state.surface_pointer(true, location, scene)
     {
@@ -1225,7 +1227,10 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
             pixels: (pixels(Axis::Horizontal), pixels(Axis::Vertical)),
         },
     );
-    if !pointer.is_grabbed()
+    // A press a scene holds has the wheel too, through a grab smithay started
+    // during it, as `pointer_button` gives it the buttons:
+    // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
+    if (state.scene_press.is_some() || !pointer.is_grabbed())
         && (state.surface_pointer(true, location, wheel)
             || (pointer.current_focus().is_none() && state.surface_pointer(false, location, wheel)))
     {

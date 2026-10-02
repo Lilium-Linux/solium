@@ -22165,6 +22165,48 @@ end)
                     "the pointer offered a resize for a press the scene holds"
                 );
             }
+
+            /// **A grab smithay starts during a scene's press leaves the scene
+            /// its wheel and its release** (Ruling 7): a button Qt has no name
+            /// for, pressed during the hold, starts a click grab, and the
+            /// hold still has the pointer.
+            #[test]
+            fn a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                to(&mut desk, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                crate::synth::send_button(&mut desk.state, region, 0x120, ButtonState::Pressed, 12);
+                assert!(
+                    desk.state
+                        .seat
+                        .get_pointer()
+                        .is_some_and(|pointer| pointer.is_grabbed()),
+                    "the premise: smithay grabbed the pointer"
+                );
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 13);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    14,
+                );
+                let events = seen(&desk, shell);
+                assert_eq!(
+                    (
+                        events
+                            .iter()
+                            .any(|event| matches!(event.kind, PointerKind::Wheel { .. })),
+                        events
+                            .iter()
+                            .any(|event| matches!(event.kind, PointerKind::Release(0x1))),
+                        desk.state.scene_press.is_none(),
+                    ),
+                    (true, true, true),
+                    "(the scene heard the wheel, it heard the release, the hold let go)"
+                );
+            }
         }
     }
 
