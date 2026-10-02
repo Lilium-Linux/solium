@@ -22215,6 +22215,50 @@ end)
                 );
             }
 
+            /// **A scene pressed over another one the pointer was hovering
+            /// takes the hover from it**: the hover strip under it hears the
+            /// pointer leave at the press, and the scene pressed hears it
+            /// leave when the pointer moves off after the release.
+            #[test]
+            fn a_scene_pressed_over_another_hovered_one_takes_the_hover() {
+                let mut desk = russian_desk();
+                let strip = stand_in(
+                    &mut desk.state,
+                    "strip",
+                    Scripted::Top,
+                    bar(),
+                    Stand {
+                        hit: hover_everywhere,
+                        ..Stand::solid()
+                    },
+                );
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let panel = stand_in(
+                    &mut desk.state,
+                    "panel",
+                    Scripted::Overlay,
+                    bar(),
+                    Stand::solid(),
+                );
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 2);
+                move_pointer(&mut desk.state, (100.0, 500.0), 3);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Released, 4);
+                move_pointer(&mut desk.state, (100.0, 501.0), 5);
+                let left = |id| {
+                    desk.state
+                        .surfaces
+                        .get(id)
+                        .and_then(crate::scripted::Surface::stand)
+                        .map(|stand| stand.left)
+                };
+                assert_eq!(
+                    (presses(&desk, panel), left(strip), left(panel)),
+                    (1, Some(1), Some(1)),
+                    "(the presses the panel took, the strip heard the pointer leave, the panel heard it leave)"
+                );
+            }
+
             /// **The pointer keeps the shape of a press a scene holds**
             /// (Ruling 8, #108): dragged off a shell button onto a window's
             /// resize border, the press is still the scene's, so the pointer
