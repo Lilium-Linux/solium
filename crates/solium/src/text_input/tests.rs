@@ -476,6 +476,36 @@ fn a_field_whose_window_loses_the_keyboard_is_gone() {
     );
 }
 
+/// **A field whose window leaves the keyboard on nothing is gone**, and the
+/// client is told `leave`, then `enter` again when the keyboard comes back.
+/// Smithay tells `focus_changed` of a new surface and never of none, which is
+/// what the keyboard is left on when the last window on screen closes and as
+/// the session locks.
+#[test]
+fn a_field_whose_window_leaves_the_keyboard_on_nothing_is_gone() {
+    let mut desk = Desk::new();
+    let (window, surface, _xdg) = desk.window();
+    desk.focus(&window);
+    let text_input = desk.text_input();
+    enable(&text_input, (10, 20, 2, 16));
+    desk.pump();
+    assert!(desk.state.text_field().is_some(), "entered, then enabled");
+
+    let id = wayland_client::Proxy::id(&surface).protocol_id();
+    desk.client.told.clear();
+    desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+    desk.pump();
+    assert_eq!(desk.state.text_field(), None, "the keyboard is on nothing");
+    assert_eq!(desk.client.told, [(false, id)], "and the field was told so");
+
+    desk.focus(&window);
+    assert_eq!(
+        desk.client.told,
+        [(false, id), (true, id)],
+        "and told again when the keyboard comes back"
+    );
+}
+
 /// **`text_input` is told when a field is enabled and when it is focused**:
 /// once for the enable, nothing for a caret that only moves, and once more
 /// when its window gets the keyboard back and the client enables it again,

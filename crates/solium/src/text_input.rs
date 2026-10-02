@@ -247,9 +247,11 @@ impl Solium {
     /// Text-input focus follows the keyboard: `leave` for the surface it is
     /// leaving, which takes every field there away, and `enter` for every
     /// text input of the client it arrives at. Called from the seat's
-    /// `focus_changed`, so wherever the keyboard goes, this goes.
+    /// `focus_changed`, and from `give_keyboard` for the keyboard left on
+    /// nothing, which smithay never tells `focus_changed` of; so wherever the
+    /// keyboard goes, this goes.
     /// `tests::a_field_whose_window_loses_the_keyboard_is_gone`,
-    /// `tests::a_field_focused_again_is_told_again`.
+    /// `tests::a_field_whose_window_leaves_the_keyboard_on_nothing_is_gone`.
     pub(crate) fn text_input_focus(&mut self, focused: Option<&WlSurface>) {
         if self.text_inputs.focus.as_ref() == focused {
             return;

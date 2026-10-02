@@ -120,6 +120,14 @@ impl Solium {
         }
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_focus(self, surface.clone(), serial);
+            // Text-input focus is wherever the keyboard now is. Smithay 0.7
+            // tells `SeatHandler::focus_changed` of a new surface and never
+            // of none, so the keyboard left on nothing -- the last window on
+            // screen closing, the session locking -- is told here, and the
+            // text field gets its `leave`. A grab that ignored the
+            // `set_focus` leaves the keyboard where it was, and this nothing.
+            // `text_input::tests::a_field_whose_window_leaves_the_keyboard_on_nothing_is_gone`.
+            self.text_input_focus(keyboard.current_focus().as_ref());
         }
         let client = surface.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, &self.seat, client.clone());
