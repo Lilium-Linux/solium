@@ -1298,6 +1298,7 @@ mod tests {
                 kind: PointerKind::Press(0x2),
                 buttons: 0x2,
                 modifiers: 0,
+                time: 0,
             };
             assert!(
                 surface.deliver(&right, area, (1930.0, 15.0).into(), press),

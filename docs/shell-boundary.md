@@ -145,8 +145,13 @@ otherwise
 It gets pointer motion, every mouse button as itself, the wheel, and the
 modifiers held, so a `MouseArea` or a `WheelHandler` works as it does anywhere
 (`qml::hosted::tests::a_right_press_reaches_a_mouse_area_as_the_right_button`,
-`qml::hosted::tests::the_wheel_reaches_a_wheel_handler_with_its_angle`);
-`super` with the wheel stays the compositor's
+`qml::hosted::tests::the_wheel_reaches_a_wheel_handler_with_its_angle`).
+Each event carries its time, so a double press is a double-click and a
+`TapHandler` counts its taps, by Qt's own double-click interval and distance
+(`qml::hosted::tests::a_double_press_on_a_mouse_area_is_one_double_click`,
+`qml::hosted::tests::a_tap_handler_counts_taps_by_when_they_happened`,
+`qml::hosted::tests::two_presses_further_apart_than_the_interval_are_two_single_clicks`).
+The wheel with `super` held stays the compositor's
 (`state::tests::real_client::reflow_on_close::hosted::super_and_the_wheel_stay_the_compositors_over_a_scene`),
 and while the session is locked none of it reaches the scene
 (`state::tests::real_client::lock_focus::the_wheel_over_a_hosted_scene_is_not_the_scenes_while_locked`).

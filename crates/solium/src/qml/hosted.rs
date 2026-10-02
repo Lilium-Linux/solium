@@ -34,6 +34,7 @@ mod ffi {
             button: u32,
             buttons: u32,
             modifiers: u32,
+            time: u64,
             angle_x: f64,
             angle_y: f64,
             pixel_x: f64,
@@ -114,10 +115,12 @@ impl Scene {
         unsafe { ffi::solium_qml_scene_set_json(self.scene, path.as_ptr(), value.as_ptr()) != 0 }
     }
 
-    /// Deliver one pointer event at a point in scene coordinates.
+    /// Deliver one pointer event at a point in scene coordinates. A press
+    /// that doubles the one before it is a double-click, by Qt's own rule.
     /// `tests::a_right_press_reaches_a_mouse_area_as_the_right_button`,
     /// `tests::a_side_button_reaches_the_scene_as_back`,
-    /// `tests::the_wheel_reaches_a_wheel_handler_with_its_angle`.
+    /// `tests::the_wheel_reaches_a_wheel_handler_with_its_angle`,
+    /// `tests::a_double_press_on_a_mouse_area_is_one_double_click`.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn pointer_event(&mut self, x: f64, y: f64, event: &ScenePointer) {
         touched();
@@ -138,6 +141,7 @@ impl Scene {
                 button,
                 event.buttons,
                 event.modifiers,
+                event.time,
                 angle.0,
                 angle.1,
                 pixels.0,
@@ -240,12 +244,17 @@ pub(crate) enum PointerKind {
 }
 
 /// One pointer event as a scene is told it: what it is, the Qt buttons held
-/// after it, and the keyboard modifiers.
+/// after it, the keyboard modifiers, and when it happened, in milliseconds on
+/// the compositor's clock, which is what Qt counts a double-click and a
+/// `TapHandler`'s taps by.
+/// `state::tests::real_client::reflow_on_close::hosted::a_scene_is_told_when_each_event_happened_on_the_compositors_clock`,
+/// `tests::a_double_press_on_a_mouse_area_is_one_double_click`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ScenePointer {
     pub(crate) kind: PointerKind,
     pub(crate) buttons: u32,
     pub(crate) modifiers: u32,
+    pub(crate) time: u64,
 }
 
 #[cfg(test)]
@@ -482,6 +491,7 @@ pub(crate) mod tests {
                     kind: PointerKind::Motion,
                     buttons: 0,
                     modifiers: 0,
+                    time: 0,
                 },
             );
             assert_eq!(scene.get_int("hovered"), 1);
@@ -524,6 +534,7 @@ pub(crate) mod tests {
                 kind: PointerKind::Press(0x2),
                 buttons: 0x2,
                 modifiers: crate::qml::keys::QT_SHIFT,
+                time: 0,
             };
             scene.pointer_event(10.0, 10.0, &press);
             assert_eq!(scene.get_int("pressed"), 2, "Qt.RightButton is 2");
@@ -544,6 +555,7 @@ pub(crate) mod tests {
                     kind: PointerKind::Press(0x8),
                     buttons: 0x8,
                     modifiers: 0,
+                    time: 0,
                 },
             );
             assert_eq!(scene.get_int("pressed"), 8, "Qt.BackButton is 8");
@@ -563,11 +575,164 @@ pub(crate) mod tests {
                 },
                 buttons: 0,
                 modifiers: 0,
+                time: 0,
             };
             scene.pointer_event(10.0, 10.0, &wheel);
             assert_eq!(scene.get_int("angle"), 120, "one notch away from the user");
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// A left click at `(x, y)`: the press at `time`, the release 20 ms on.
+    fn click(scene: &mut Scene, (x, y): (f64, f64), time: u64) {
+        for (kind, buttons, time) in [
+            (PointerKind::Press(0x1), 0x1, time),
+            (PointerKind::Release(0x1), 0, time + 20),
+        ] {
+            scene.pointer_event(
+                x,
+                y,
+                &ScenePointer {
+                    kind,
+                    buttons,
+                    modifiers: 0,
+                    time,
+                },
+            );
+        }
+    }
+
+    /// **A double press on a `MouseArea` is one double-click**, by Qt's own
+    /// rule: a second press of the same button, sooner than
+    /// `QStyleHints::mouseDoubleClickInterval` after the first and no
+    /// further than `mouseDoubleClickDistance` from it. A press far from the
+    /// one before is a click of its own, and so is a third press right after
+    /// a double-click.
+    #[test]
+    fn a_double_press_on_a_mouse_area_is_one_double_click() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-double",
+                r"
+                import QtQuick
+                Item {
+                    property int clicks: 0
+                    property int doubles: 0
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: parent.clicks += 1
+                        onDoubleClicked: parent.doubles += 1
+                    }
+                }
+                ",
+                "double-1",
+            );
+            click(&mut scene, (10.0, 10.0), 1000);
+            click(&mut scene, (40.0, 10.0), 1100);
+            click(&mut scene, (41.0, 10.0), 1200);
+            click(&mut scene, (41.0, 10.0), 1300);
+            let got = (scene.get_int("clicks"), scene.get_int("doubles"));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                got,
+                (3, 1),
+                "(clicks, double-clicks) of a press, one far from it, one that doubles that, and a third"
+            );
+        });
+    }
+
+    /// **A `TapHandler` counts taps by when they happened**: two quick taps
+    /// are a double tap, and a tap long after them is a single one again.
+    #[test]
+    fn a_tap_handler_counts_taps_by_when_they_happened() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-taps",
+                r"
+                import QtQuick
+                Item {
+                    property int count: 0
+                    property int singles: 0
+                    property int doubles: 0
+                    TapHandler {
+                        onTapped: parent.count = tapCount
+                        onSingleTapped: parent.singles += 1
+                        onDoubleTapped: parent.doubles += 1
+                    }
+                }
+                ",
+                "taps-1",
+            );
+            click(&mut scene, (10.0, 10.0), 1000);
+            click(&mut scene, (10.0, 10.0), 1100);
+            let quick = scene.get_int("count");
+            click(&mut scene, (10.0, 10.0), 5000);
+            let got = (
+                quick,
+                scene.get_int("count"),
+                scene.get_int("singles"),
+                scene.get_int("doubles"),
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                got,
+                (2, 1, 2, 1),
+                "(tapCount after two quick taps, after a slow one, singleTapped, doubleTapped)"
+            );
+        });
+    }
+
+    /// **Two presses further apart than the double-click interval are two
+    /// single clicks**, to a `MouseArea` and to a `TapHandler` alike.
+    #[test]
+    fn two_presses_further_apart_than_the_interval_are_two_single_clicks() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-slow",
+                r"
+                import QtQuick
+                Item {
+                    id: root
+                    property int clicks: 0
+                    property int doubles: 0
+                    property int singles: 0
+                    property int doubleTaps: 0
+                    MouseArea {
+                        width: 30; height: 32
+                        onClicked: root.clicks += 1
+                        onDoubleClicked: root.doubles += 1
+                    }
+                    Item {
+                        x: 32; width: 32; height: 32
+                        TapHandler {
+                            onSingleTapped: root.singles += 1
+                            onDoubleTapped: root.doubleTaps += 1
+                        }
+                    }
+                }
+                ",
+                "slow-1",
+            );
+            for (at, time) in [
+                ((10.0, 10.0), 1000),
+                ((10.0, 10.0), 3000),
+                ((50.0, 10.0), 5000),
+                ((50.0, 10.0), 7000),
+            ] {
+                click(&mut scene, at, time);
+            }
+            let got =
+                ["clicks", "doubles", "singles", "doubleTaps"].map(|name| scene.get_int(name));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                got,
+                [2, 0, 2, 0],
+                "[MouseArea clicks, its double-clicks, TapHandler single taps, its double taps]"
+            );
         });
     }
 

@@ -2739,6 +2739,7 @@ mod real_client {
                 kind,
                 buttons,
                 modifiers: 0,
+                time: 0,
             };
             assert!(
                 state.surface_pointer(true, at, event(PointerKind::Press(0x1), 0x1)),
@@ -21755,7 +21756,7 @@ end)
         /// (the #99 test).
         mod hosted {
             use super::*;
-            use crate::qml::hosted::{PointerKind, ScenePointer};
+            use crate::qml::hosted::PointerKind;
             use crate::scripted::{Layer as Scripted, Stand};
             use smithay::backend::input::{ButtonState, KeyState};
 
@@ -21802,24 +21803,45 @@ end)
                     ButtonState::Released,
                     4,
                 );
-                let buttons: Vec<ScenePointer> = scene_events(&desk.state, bar)
+                let buttons: Vec<(PointerKind, u32, u32)> = scene_events(&desk.state, bar)
                     .into_iter()
                     .filter(|event| !matches!(event.kind, PointerKind::Motion))
+                    .map(|event| (event.kind, event.buttons, event.modifiers))
                     .collect();
                 assert_eq!(
                     buttons,
                     vec![
-                        ScenePointer {
-                            kind: PointerKind::Press(0x2),
-                            buttons: 0x2,
-                            modifiers: crate::qml::keys::QT_SHIFT,
-                        },
-                        ScenePointer {
-                            kind: PointerKind::Release(0x2),
-                            buttons: 0,
-                            modifiers: crate::qml::keys::QT_SHIFT,
-                        },
-                    ]
+                        (PointerKind::Press(0x2), 0x2, crate::qml::keys::QT_SHIFT),
+                        (PointerKind::Release(0x2), 0, crate::qml::keys::QT_SHIFT),
+                    ],
+                    "(what, the buttons held after it, the modifiers)"
+                );
+            }
+
+            /// **A scene is told when each event happened, on the compositor's
+            /// clock**, which is what Qt counts a double-click and a
+            /// `TapHandler`'s taps by: a press a second after the motion
+            /// before it is told it came a second later.
+            #[test]
+            fn a_scene_is_told_when_each_event_happened_on_the_compositors_clock() {
+                let mut desk = russian_desk();
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                desk.state.clock.advance(Duration::from_secs(1));
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 2);
+                let now = u64::try_from(desk.state.clock.now().as_millis()).unwrap_or(u64::MAX);
+                let times: Vec<u64> = scene_events(&desk.state, bar)
+                    .iter()
+                    .map(|event| event.time)
+                    .collect();
+                assert!(
+                    matches!(
+                        (times.first(), times.last()),
+                        (Some(motion), Some(press)) if press.saturating_sub(*motion) >= 1000 && *press <= now
+                    ),
+                    "the times the scene was told, the last a press a second after the first: \
+                     {times:?}, now {now}"
                 );
             }
 

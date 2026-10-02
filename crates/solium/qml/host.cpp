@@ -76,6 +76,7 @@
 #include <QtCore/QUrl>
 #include <QtCore/QVariant>
 #include <QtGui/QGuiApplication>
+#include <QtGui/QStyleHints>
 #include <QtGui/QImage>
 #include <QtCore/QString>
 #include <QtGui/QMouseEvent>
@@ -326,6 +327,14 @@ struct SoliumQmlScene
     bool dirty = true;
     /* Backing store for the last value handed out by take_string. */
     QByteArray taken;
+    /* The last press, as Qt keeps it to make a double-click of the next one:
+     * its button (none once it has made one), its time on the compositor's
+     * clock, and where it was, in scene coordinates. See
+     * solium_qml_scene_pointer_event.
+     * `qml::hosted::tests::a_double_press_on_a_mouse_area_is_one_double_click`. */
+    Qt::MouseButton press_button = Qt::NoButton;
+    unsigned long long press_time = 0;
+    QPointF press_at;
 
     /* GPU scenes only. `image` is null on those and `texture` is zero on
      * software ones, so either could stand in for this flag — but "which path
@@ -2546,8 +2555,9 @@ extern "C" void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double
 
 extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, double x, double y,
                                                unsigned button, unsigned buttons,
-                                               unsigned modifiers, double angle_x, double angle_y,
-                                               double pixel_x, double pixel_y)
+                                               unsigned modifiers, unsigned long long time,
+                                               double angle_x, double angle_y, double pixel_x,
+                                               double pixel_y)
 {
     if (scene == nullptr || scene->window == nullptr) {
         return;
@@ -2555,10 +2565,14 @@ extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, 
     const QPointF at(x, y);
     const auto held = Qt::MouseButtons::fromInt(static_cast<int>(buttons));
     const auto mods = Qt::KeyboardModifiers::fromInt(static_cast<int>(modifiers));
+    // Every event carries its time: a TapHandler counts taps, and Qt Quick
+    // measures velocity, by the event's timestamp.
+    // `qml::hosted::tests::a_tap_handler_counts_taps_by_when_they_happened`.
     if (kind == 3) {
         QWheelEvent event(at, at, QPoint(qRound(pixel_x), qRound(pixel_y)),
                           QPoint(qRound(angle_x), qRound(angle_y)), held, mods, Qt::NoScrollPhase,
                           false);
+        event.setTimestamp(time);
         QCoreApplication::sendEvent(scene->window, &event);
         return;
     }
@@ -2567,8 +2581,49 @@ extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, 
                                           : QEvent::MouseMove;
     const auto which =
         (kind == 1 || kind == 2) ? static_cast<Qt::MouseButton>(button) : Qt::NoButton;
+
+    // The double-click is made here, by the rule
+    // QGuiApplicationPrivate::processMouseEvent applies (Qt 6.11,
+    // qguiapplication.cpp:2405-2425 and 2533-2541): a press is a double-click
+    // when it is of the button the last press was of, sooner than
+    // mouseDoubleClickInterval after it; the pointer straying further than
+    // mouseDoubleClickDistance, on either axis, from where that press was
+    // undoes it, and so does a double-click being made. The double-click
+    // event follows the press, as Qt sends it. That function is not reached
+    // by an event sent straight to the window, and is not used for this:
+    // routing through QWindowSystemInterface would hand every press to the
+    // platform's cursor (qguiapplication.cpp:2441-2455), which on the GPU
+    // host is eglfs_kms moving a DRM cursor on a device the compositor is
+    // master of (qeglfskmsgbmcursor.cpp:119-122), and it keeps the last
+    // press process-wide, beside the frames' scenes, which still send
+    // straight to their windows. So the rule is kept per scene.
+    // `qml::hosted::tests::a_double_press_on_a_mouse_area_is_one_double_click`,
+    // `qml::hosted::tests::two_presses_further_apart_than_the_interval_are_two_single_clicks`.
+    const QStyleHints *hints = QGuiApplication::styleHints();
+    const qreal distance = hints->mouseDoubleClickDistance();
+    if (qAbs(at.x() - scene->press_at.x()) > distance
+        || qAbs(at.y() - scene->press_at.y()) > distance) {
+        scene->press_button = Qt::NoButton;
+    }
+    bool twice = false;
+    if (kind == 1) {
+        const auto interval = static_cast<unsigned long long>(hints->mouseDoubleClickInterval());
+        twice = which == scene->press_button && time > scene->press_time
+                && time - scene->press_time < interval;
+        scene->press_button = which;
+        scene->press_time = time;
+        scene->press_at = at;
+    }
+
     QMouseEvent event(type, at, at, which, held, mods);
+    event.setTimestamp(time);
     QCoreApplication::sendEvent(scene->window, &event);
+    if (twice && scene->window != nullptr) {
+        scene->press_button = Qt::NoButton;
+        QMouseEvent again(QEvent::MouseButtonDblClick, at, at, which, held, mods);
+        again.setTimestamp(time);
+        QCoreApplication::sendEvent(scene->window, &again);
+    }
 }
 
 extern "C" int solium_qml_scene_hit(const SoliumQmlScene *scene, double x, double y)

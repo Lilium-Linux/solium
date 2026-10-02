@@ -743,9 +743,11 @@ fn release_cursor(state: &mut Solium, unclaimed: bool, grabbed: bool) {
     state.pointer.show(CursorImageStatus::default_named());
 }
 
-/// A pointer event as a scene is told it: the Qt buttons held now, and the
-/// keyboard's modifiers.
-/// `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`.
+/// A pointer event as a scene is told it: the Qt buttons held now, the
+/// keyboard's modifiers, and the time on the compositor's clock, which every
+/// backend and every event the compositor makes up itself share.
+/// `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`,
+/// `state::tests::real_client::reflow_on_close::hosted::a_scene_is_told_when_each_event_happened_on_the_compositors_clock`.
 fn scene_event(state: &Solium, kind: PointerKind) -> ScenePointer {
     let modifiers = state.seat.get_keyboard().map_or(0, |keyboard| {
         crate::qml::keys::qt_modifiers(&keyboard.modifier_state())
@@ -754,6 +756,7 @@ fn scene_event(state: &Solium, kind: PointerKind) -> ScenePointer {
         kind,
         buttons: state.pointer_buttons,
         modifiers,
+        time: u64::try_from(state.clock.now().as_millis()).unwrap_or(u64::MAX),
     }
 }
 

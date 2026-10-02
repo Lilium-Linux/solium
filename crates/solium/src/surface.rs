@@ -569,6 +569,7 @@ mod tests {
                     kind: PointerKind::Press(0x1),
                     buttons: 0x1,
                     modifiers: 0,
+                    time: 0,
                 },
             );
             assert_eq!(

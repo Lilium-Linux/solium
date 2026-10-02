@@ -403,15 +403,19 @@ void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pre
 /* Pointer input, in scene coordinates, with everything a scene can be told.
  * `kind`: 0 motion, 1 press, 2 release, 3 wheel. `button` is the Qt button a
  * press or release is of; `buttons` the Qt buttons held after it;
- * `modifiers` Qt's keyboard modifiers. The wheel's deltas are Qt's
- * `angleDelta` (eighths of a degree, 120 a notch, positive away from the
+ * `modifiers` Qt's keyboard modifiers; `time` when it happened, in
+ * milliseconds on the compositor's clock. A press that doubles the one before
+ * it, by Qt's rule, is followed by a double-click. The wheel's deltas are
+ * Qt's `angleDelta` (eighths of a degree, 120 a notch, positive away from the
  * user) and `pixelDelta`.
  * `qml::hosted::tests::a_right_press_reaches_a_mouse_area_as_the_right_button`,
- * `qml::hosted::tests::the_wheel_reaches_a_wheel_handler_with_its_angle`. */
+ * `qml::hosted::tests::the_wheel_reaches_a_wheel_handler_with_its_angle`,
+ * `qml::hosted::tests::a_double_press_on_a_mouse_area_is_one_double_click`,
+ * `qml::hosted::tests::a_tap_handler_counts_taps_by_when_they_happened`. */
 void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, double x, double y,
                                     unsigned button, unsigned buttons, unsigned modifiers,
-                                    double angle_x, double angle_y, double pixel_x,
-                                    double pixel_y);
+                                    unsigned long long time, double angle_x, double angle_y,
+                                    double pixel_x, double pixel_y);
 
 /* What the scene's items, and its open popups, claim at a point in scene
  * coordinates: 0 nothing, 1 hover, 2 a press.
