@@ -2825,6 +2825,49 @@ end)"#,
         });
     }
 
+    /// **A scene built on a monitor that arrives has its reserve read in the
+    /// hotplug's own dispatch**: a bar that binds
+    /// `Solium.surface.reserve.bottom` and declares no reserve in Lua leaves
+    /// its strip of the new monitor as soon as the hotplug is done, so
+    /// windows sent there are not laid out under the bar first and moved a
+    /// frame later. No client, so the scene is a real one (the #99 rule).
+    #[test]
+    fn a_scene_built_on_a_monitor_that_arrives_reserves_in_the_hotplugs_dispatch() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-hosted-hotplug-reserve");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem { Solium.surface.reserve.bottom: 48 }\n",
+            )
+            .expect("writing the scene");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let left = one_screen(&mut state);
+            state.declare_surface(crate::scripted::Declaration::for_test(
+                "bar",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::EveryMonitor,
+            ));
+            let right = a_screen(&mut state, RIGHT_SCREEN, (1920, 0));
+            state.settle_monitors();
+            let heights = (
+                state.work_area_on(&left).map(|area| area.size.h),
+                state.work_area_on(&right).map(|area| area.size.h),
+            );
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                heights,
+                (Some(1032), Some(1032)),
+                "(the first monitor's work area height, the one that arrived)"
+            );
+        });
+    }
+
     /// **Declaring one surface does not judge another by its old placement.**
     /// One `monitors` handler declares two surfaces over the monitor an
     /// unplug moved; declaring the first must leave the second's scene alone

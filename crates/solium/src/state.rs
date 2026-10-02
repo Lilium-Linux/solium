@@ -2131,6 +2131,10 @@ impl Solium {
         for surface in self.surfaces.iter_mut() {
             surface.sync(&outputs, primary.as_ref());
         }
+        // A scene built just now says what it reserves, and that is read in
+        // this dispatch, not at the next frame:
+        // `tests::real_client::a_scene_built_on_a_monitor_that_arrives_reserves_in_the_hotplugs_dispatch`.
+        self.settle_scenes_once_dispatched();
     }
 
     /// Every monitor and its rectangle, as `Surface::sync` takes them.
