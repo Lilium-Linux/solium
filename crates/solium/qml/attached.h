@@ -17,6 +17,7 @@
 #include <QtCore/QPointer>
 #include <QtCore/QRectF>
 #include <QtCore/QString>
+#include <QtCore/QStringList>
 #include <QtCore/QVariant>
 #include <QtCore/QVariantMap>
 #include <QtQml/QQmlParserStatus>
@@ -187,6 +188,42 @@ private:
     SoliumHosting *m_hosting = nullptr;
 };
 
+/* `Solium.keyboard`, on one item: whether it wants the keyboard, and the
+ * keys it claims while it holds it, as `sol.bind` spells them. The scene
+ * holds the keyboard while any visible item wants it. Ruling 14.
+ * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`,
+ * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`. */
+class SoliumKeyboard : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(bool wants READ wants WRITE setWants NOTIFY wantsChanged)
+    Q_PROPERTY(QStringList claims READ claims WRITE setClaims NOTIFY claimsChanged)
+public:
+    SoliumKeyboard(QQuickItem *item, SoliumHosting *hosting);
+    ~SoliumKeyboard() override;
+    bool wants() const { return m_wants; }
+    void setWants(bool wants);
+    QStringList claims() const { return m_claims; }
+    void setClaims(const QStringList &claims);
+    QQuickItem *item() const { return m_item; }
+    /* When it last came to want the keyboard, by a counter that only goes up.
+     * `qml::hosted::tests::the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last`. */
+    quint64 wantedAt() const { return m_wanted_at; }
+    /* Its scene's hosting record is going, before it is. */
+    void detach() { m_hosting = nullptr; }
+signals:
+    void wantsChanged();
+    void claimsChanged();
+
+private:
+    void mark();
+    QPointer<QQuickItem> m_item;
+    SoliumHosting *m_hosting;
+    bool m_wants = false;
+    QStringList m_claims;
+    quint64 m_wanted_at = 0;
+};
+
 /* What one hosted scene carries beside its object tree.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
  * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
@@ -206,6 +243,13 @@ struct SoliumHosting
      * lets go of the grab the one before it held.
      * `qml::hosted::tests::a_scene_with_no_active_grab_says_so_once`. */
     bool grab_dirty = true;
+    /* Every item of the scene that has a `Solium.keyboard`.
+     * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
+    QList<QPointer<SoliumKeyboard>> keyboards;
+    /* Whether who wants the keyboard changed since the last take: true from
+     * the start, so a scene says what it has at its first take.
+     * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
+    bool keyboard_dirty = true;
 };
 
 /* What every item reads as `Solium.<name>`.
@@ -221,6 +265,9 @@ class SoliumAttached : public QObject
     /* `Solium.surface`: the instance this scene is, its reserve above all.
      * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
     Q_PROPERTY(SoliumSurfaceInfo *surface READ surface CONSTANT)
+    /* `Solium.keyboard`: whether this item wants the keyboard, and the keys
+     * it claims. `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
+    Q_PROPERTY(SoliumKeyboard *keyboard READ keyboard CONSTANT)
 public:
     explicit SoliumAttached(QObject *item);
     SoliumMonitor *monitor() const;
@@ -230,6 +277,7 @@ public:
     /* -1 unset, 0 opted out, 1 hover, 2 press, as solium_claim_at reads it.
      * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
     int inputClaim() const { return m_input; }
+    SoliumKeyboard *keyboard();
 
 signals:
     void inputChanged();
@@ -237,6 +285,7 @@ signals:
 private:
     QObject *m_item;
     int m_input = -1;
+    SoliumKeyboard *m_keyboard = nullptr;
 };
 
 /* The name `Solium` in QML. It exists only to carry the attached object.
@@ -263,6 +312,12 @@ void solium_hosting_mark(QQmlContext *context, SoliumHosting *hosting);
  * lets an item that takes no press leave it to one below. Ruling 6.
  * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
 int solium_claim_at(QQuickItem *item, const QPointF &scene_point);
+/* The item of a hosted scene holding the keyboard: of the visible items
+ * that want it, the one with active focus, else the one that came to want it
+ * last; null when none does. Ruling 14.
+ * `qml::hosted::tests::the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last`,
+ * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`. */
+SoliumKeyboard *solium_keyboard_holder(SoliumHosting *hosting);
 /* The row for a connector name: until the compositor publishes one, an
  * absent row carrying the name. Created on first ask and never freed, so a
  * monitor that goes and comes back is the same row.

@@ -464,6 +464,27 @@ int solium_qml_scene_grab_contains(const SoliumQmlScene *scene, double x, double
  * `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`. */
 void solium_qml_scene_dismiss(SoliumQmlScene *scene);
 
+/* Who in the scene wants the keyboard, when that changed since the last
+ * take: 1, with the holding item's claims in `*claims`, one per line, as the
+ * scene spells them (a combination never holds a newline; valid until the
+ * next call), 0 when no visible item wants it, -1 when nothing changed. A
+ * scene says what it has at its first take. Ruling 14.
+ * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`,
+ * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`. */
+int solium_qml_scene_take_keyboard(SoliumQmlScene *scene, const char **claims);
+
+/* One key, to the scene's focused item: `qt_key` a Qt::Key, `modifiers`
+ * Qt's, `text` what it types (UTF-8, from the compositor's xkb state),
+ * `scan_code` the xkb keycode.
+ * `qml::hosted::tests::text_typed_on_russian_reaches_the_field`. */
+void solium_qml_scene_key(SoliumQmlScene *scene, int pressed, int qt_key, unsigned modifiers,
+                          const char *text, int autorepeat, unsigned scan_code);
+
+/* The compositor has taken the keyboard back: the holding item loses its
+ * focus, so a `wants: activeFocus` binding lets go.
+ * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
+void solium_qml_scene_let_go_keyboard(SoliumQmlScene *scene);
+
 /* The models hosted scenes read, by number.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 #define SOLIUM_QML_ROWS_MONITORS 0

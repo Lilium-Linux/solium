@@ -38,7 +38,7 @@ use crate::{
     json::Json,
     qml::{
         self,
-        hosted::{GrabReport, Hit, ScenePointer},
+        hosted::{GrabReport, Hit, KeyboardReport, SceneKey, ScenePointer},
         paint::{Gpu, Placement},
     },
     render::{Drawn, Element},
@@ -251,6 +251,23 @@ impl ShellSurface {
     /// Dismiss the scene's grabs. `a_cached_hit_follows_a_dismissal`.
     pub(crate) fn dismiss(&mut self) {
         self.scene.dismiss();
+    }
+
+    /// What the scene says of its keyboard wants since it was last asked.
+    /// `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`.
+    pub(crate) fn take_keyboard(&mut self) -> KeyboardReport {
+        self.scene.take_keyboard()
+    }
+
+    /// Tell the scene one key. `qml::hosted::tests::text_typed_on_russian_reaches_the_field`.
+    pub(crate) fn key(&mut self, key: &SceneKey) {
+        self.scene.key(key);
+    }
+
+    /// The compositor took the keyboard back.
+    /// `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`.
+    pub(crate) fn let_go_keyboard(&mut self) {
+        self.scene.let_go_keyboard();
     }
 
     /// Set a whole-number property on the scene.

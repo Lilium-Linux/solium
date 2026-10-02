@@ -79,6 +79,8 @@
 #include <QtGui/QStyleHints>
 #include <QtGui/QImage>
 #include <QtCore/QString>
+#include <QtGui/QFocusEvent>
+#include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QWheelEvent>
 #include <QtGui/QOpenGLContext>
@@ -793,6 +795,15 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
     scene->root->setParentItem(scene->window->contentItem());
     scene->root->setWidth(scene->width);
     scene->root->setHeight(scene->height);
+
+    /* A hosted scene's window is active from the start, so an item with
+     * `focus: true` has active focus and `Solium.keyboard.wants: activeFocus`
+     * works; which scene holds the keyboard is the compositor's to decide.
+     * Ruling 14. `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
+    if (scene->hosting != nullptr) {
+        QFocusEvent focus(QEvent::FocusIn, Qt::OtherFocusReason);
+        QCoreApplication::sendEvent(scene->window, &focus);
+    }
 
     // Qt tells us when the scene needs redrawing, so an idle bar costs one
     // comparison per frame instead of a rasterisation and an upload.
@@ -2444,6 +2455,48 @@ extern "C" void solium_qml_scene_dismiss(SoliumQmlScene *scene)
         if (grab != nullptr) {
             emit grab->dismissed();
         }
+    }
+}
+
+extern "C" int solium_qml_scene_take_keyboard(SoliumQmlScene *scene, const char **claims)
+{
+    if (scene == nullptr || scene->hosting == nullptr || !scene->hosting->keyboard_dirty) {
+        return -1;
+    }
+    scene->hosting->keyboard_dirty = false;
+    SoliumKeyboard *holder = solium_keyboard_holder(scene->hosting);
+    if (holder == nullptr) {
+        return 0;
+    }
+    static QByteArray held;
+    held = holder->claims().join(QLatin1Char('\n')).toUtf8();
+    if (claims != nullptr) {
+        *claims = held.constData();
+    }
+    return 1;
+}
+
+extern "C" void solium_qml_scene_key(SoliumQmlScene *scene, int pressed, int qt_key,
+                                     unsigned modifiers, const char *text, int autorepeat,
+                                     unsigned scan_code)
+{
+    if (scene == nullptr || scene->window == nullptr) {
+        return;
+    }
+    QKeyEvent event(pressed != 0 ? QEvent::KeyPress : QEvent::KeyRelease, qt_key,
+                    Qt::KeyboardModifiers::fromInt(static_cast<int>(modifiers)), scan_code, 0, 0,
+                    QString::fromUtf8(text != nullptr ? text : ""), autorepeat != 0, 1);
+    QCoreApplication::sendEvent(scene->window, &event);
+}
+
+extern "C" void solium_qml_scene_let_go_keyboard(SoliumQmlScene *scene)
+{
+    if (scene == nullptr) {
+        return;
+    }
+    SoliumKeyboard *holder = solium_keyboard_holder(scene->hosting);
+    if (holder != nullptr && holder->item() != nullptr) {
+        holder->item()->setFocus(false);
     }
 }
 

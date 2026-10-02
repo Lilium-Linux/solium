@@ -78,6 +78,11 @@ SoliumHosting::~SoliumHosting()
             grab->detach();
         }
     }
+    for (const QPointer<SoliumKeyboard> &keyboard : keyboards) {
+        if (keyboard != nullptr) {
+            keyboard->detach();
+        }
+    }
 }
 
 namespace {
@@ -154,7 +159,103 @@ void SoliumGrab::setActive(bool active)
     }
 }
 
+namespace {
+
+/* How many times an item has come to want the keyboard, so the one that did
+ * last is known.
+ * `qml::hosted::tests::the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last`. */
+quint64 g_wants = 0;
+
+} // namespace
+
+SoliumKeyboard::SoliumKeyboard(QQuickItem *item, SoliumHosting *hosting)
+    : QObject(item), m_item(item), m_hosting(hosting)
+{
+    if (m_hosting != nullptr) {
+        m_hosting->keyboards.append(this);
+    }
+    /* Whether it holds the keyboard follows whether it is visible and
+     * whether it has active focus.
+     * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`. */
+    if (item != nullptr) {
+        QObject::connect(item, &QQuickItem::visibleChanged, this, [this]() { mark(); });
+        QObject::connect(item, &QQuickItem::activeFocusChanged, this, [this]() { mark(); });
+    }
+}
+
+SoliumKeyboard::~SoliumKeyboard()
+{
+    if (m_hosting != nullptr) {
+        m_hosting->keyboards.removeAll(this);
+        m_hosting->keyboard_dirty = true;
+    }
+}
+
+void SoliumKeyboard::mark()
+{
+    if (m_hosting != nullptr) {
+        m_hosting->keyboard_dirty = true;
+    }
+}
+
+void SoliumKeyboard::setWants(bool wants)
+{
+    if (wants != m_wants) {
+        m_wants = wants;
+        if (wants) {
+            m_wanted_at = ++g_wants;
+        }
+        mark();
+        emit wantsChanged();
+    }
+}
+
+void SoliumKeyboard::setClaims(const QStringList &claims)
+{
+    if (claims != m_claims) {
+        m_claims = claims;
+        mark();
+        emit claimsChanged();
+    }
+}
+
+SoliumKeyboard *solium_keyboard_holder(SoliumHosting *hosting)
+{
+    SoliumKeyboard *holder = nullptr;
+    if (hosting == nullptr) {
+        return holder;
+    }
+    for (const QPointer<SoliumKeyboard> &each : hosting->keyboards) {
+        if (each == nullptr || !each->wants() || each->item() == nullptr
+            || !each->item()->isVisible()) {
+            continue;
+        }
+        if (each->item()->hasActiveFocus()) {
+            return each.data();
+        }
+        if (holder == nullptr || each->wantedAt() > holder->wantedAt()) {
+            holder = each.data();
+        }
+    }
+    return holder;
+}
+
 SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item) {}
+
+SoliumKeyboard *SoliumAttached::keyboard()
+{
+    /* On an item of a scene that is not hosted, or on an object that is no
+     * item, one nothing reads.
+     * `qml::hosted::tests::an_unhosted_scene_may_bind_the_keyboard_and_holds_nothing`. */
+    if (m_keyboard == nullptr) {
+        auto *item = qobject_cast<QQuickItem *>(m_item);
+        m_keyboard = new SoliumKeyboard(item, item != nullptr ? solium_hosting_of(item) : nullptr);
+        if (item == nullptr) {
+            m_keyboard->setParent(this);
+        }
+    }
+    return m_keyboard;
+}
 
 SoliumMonitor *SoliumAttached::monitor() const
 {
@@ -366,6 +467,9 @@ void solium_qml_register_types()
      * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
     qmlRegisterAnonymousType<SoliumSurfaceInfo>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumReserve>(SOLIUM_NATIVE_URI, 1);
+    /* `Solium.keyboard`'s group, nameless for the same reason.
+     * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
+    qmlRegisterAnonymousType<SoliumKeyboard>(SOLIUM_NATIVE_URI, 1);
     /* Named, since a scene writes one: `Grab { ... }`.
      * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`. */
     qmlRegisterType<SoliumGrab>(SOLIUM_NATIVE_URI, 1, 0, "Grab");
