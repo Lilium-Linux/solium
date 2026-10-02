@@ -208,6 +208,43 @@ and the pointer keeps the shape it had at the press
 `state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`,
 `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`).
 
+**Popups that hold the pointer.** `Grab { name: "tray-menu"; target: menu;
+active: menu.visible; onDismissed: menu.close() }` holds the pointer for the
+scene while it is active
+(`qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`):
+motion and the wheel go to it wherever the pointer is, and no window has the
+pointer, nor its frame, nor the keyboard when focus follows the mouse
+(`state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`,
+`state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_wheel_is_the_scenes`,
+`state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_no_window_takes_focus_frame_or_cursor_from_the_pointer`).
+A press inside its target is the scene's, even where no item there takes
+input
+(`state::tests::real_client::reflow_on_close::hosted::a_press_inside_the_grab_target_reaches_the_scene`).
+A press outside it dismisses it: every active `Grab` of the scene hears
+`dismissed`, newest first
+(`qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`),
+and the press is then swallowed, its release with it, or passed on to
+whatever is under it when `outside_click` says `"pass"`
+(`state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
+`state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`).
+`shell.outside_click` in `config.lua` is the hosted shell's, `"swallow"` by
+default, and a table names grabs, `{ default = "swallow", ["tray-menu"] =
+"pass" }`
+(`script::tests::the_shell_takes_its_outside_click_from_the_configuration`,
+`state::tests::real_client::reflow_on_close::hosted::a_policy_named_for_the_grab_beats_the_default`).
+One grab is held at a time, and one another scene takes dismisses it
+(`state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`).
+A press the scene already held when its grab began keeps the pointer until
+its release, so a button whose press opens a menu is let go of as usual
+(`state::tests::real_client::reflow_on_close::hosted::a_press_held_when_a_grab_begins_keeps_the_pointer_until_its_release`).
+A game's pointer lock is let go while a grab is held and comes back after it
+(`state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`),
+and locking the session dismisses it
+(`state::tests::real_client::reflow_on_close::hosted::locking_the_session_dismisses_a_hosted_grab`).
+No grab is held behind the lock; one a scene takes there is held once the
+lock is gone
+(`state::tests::real_client::lock_focus::a_grab_a_scene_takes_behind_the_lock_is_held_once_it_is_gone`).
+
 **The compositor's clock and frames.** Its animations advance on the same
 clock as every window transform, a running animation asks for the next frame,
 and the scene is redrawn only when Qt says it changed. Qt is served between
@@ -283,8 +320,8 @@ workspaces, any binding — a hosted shell can ask for this way.
 
 Said plainly, because a shell that loads is easy to mistake for one that works:
 
-- **No keyboard.** No keyboard focus and no grabs (#85): a launcher's text
-  field cannot be typed into.
+- **No keyboard.** No keyboard focus (#163): a launcher's text field cannot
+  be typed into.
 - **No window list, and no icons.** Nothing tells a hosted scene which
   windows exist, and there is no `image://` provider for the icon theme.
   Driving the compositor goes through `action` and Lua.
