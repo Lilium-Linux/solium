@@ -2628,19 +2628,42 @@ extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, 
 
     QMouseEvent event(type, at, at, which, held, mods);
     event.setTimestamp(time);
-    QCoreApplication::sendEvent(scene->window, &event);
+    // A release of no button with none held is the compositor saying the
+    // buttons went up where the scene could not see. It is not sent: a Qt
+    // Quick Controls button takes any release its grab gets as its own, and
+    // would be clicked. The press's grabs are cancelled instead, below.
+    // `qml::hosted::tests::a_press_let_go_of_unseen_is_cancelled_not_clicked`.
+    const bool unseen = kind == 2 && which == Qt::NoButton && held == Qt::NoButton;
+    if (!unseen) {
+        QCoreApplication::sendEvent(scene->window, &event);
+    }
     // A release that leaves no button held takes the press's grabs off
     // whatever holds them, as processMouseEvent does after every such release
     // (qguiapplication.cpp:2543-2549). After the last button's own release Qt
-    // Quick has already done it. After a release of no button, which is the
-    // compositor saying the buttons went up where the scene could not see
-    // (QtWayland says the same when a drag ends, qwaylandinputdevice.cpp:885-889),
-    // it is what ends the press: the item holding it hears its grab go, so a
-    // pressed MouseArea is canceled, not clicked.
+    // Quick has already done it. After a release unseen it is what ends the
+    // press: a handler holding it is told its grab was cancelled, as Qt tells
+    // one whose grab is taken from it, so a TapHandler is no longer pressed
+    // and taps nothing; and an item holding it hears its grab go, so a pressed
+    // MouseArea or Button is canceled, not clicked.
     // `qml::hosted::tests::a_press_let_go_of_unseen_is_cancelled_not_clicked`.
     if (kind == 2 && held == Qt::NoButton) {
-        event.setExclusiveGrabber(event.point(0), nullptr);
-        event.clearPassiveGrabbers(event.point(0));
+        QEventPoint &point = event.point(0);
+        if (unseen) {
+            const QPointingDevice *device = event.pointingDevice();
+            for (const QPointer<QObject> &grabber : event.passiveGrabbers(point)) {
+                if (grabber != nullptr) {
+                    emit device->grabChanged(grabber, QPointingDevice::CancelGrabPassive, &event,
+                                             point);
+                }
+            }
+            QObject *exclusive = event.exclusiveGrabber(point);
+            if (exclusive != nullptr && !exclusive->isQuickItemType()) {
+                emit device->grabChanged(exclusive, QPointingDevice::CancelGrabExclusive, &event,
+                                         point);
+            }
+        }
+        event.setExclusiveGrabber(point, nullptr);
+        event.clearPassiveGrabbers(point);
     }
     if (twice && scene->window != nullptr) {
         scene->press_button = Qt::NoButton;

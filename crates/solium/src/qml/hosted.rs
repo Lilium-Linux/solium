@@ -524,8 +524,9 @@ pub(crate) mod tests {
 
     /// **A press let go of where the scene could not see is cancelled, not
     /// clicked**: told of a release of no button with none held, as the
-    /// session locking tells it, the `MouseArea` that took the press is no
-    /// longer pressed and hears `canceled`, and no `clicked`.
+    /// session locking tells it, whatever took the press, a `MouseArea`, a
+    /// Qt Quick Controls `Button` or a `TapHandler`, is no longer pressed and
+    /// hears `canceled`, and none of them is clicked.
     #[test]
     fn a_press_let_go_of_unseen_is_cancelled_not_clicked() {
         on_the_qt_thread(|| {
@@ -533,39 +534,63 @@ pub(crate) mod tests {
                 "solium-hosted-cancel",
                 r"
                 import QtQuick
+                import QtQuick.Controls
                 Item {
-                    readonly property int down: area.pressed ? 1 : 0
-                    property int clicks: 0
-                    property int cancels: 0
+                    id: root
+                    readonly property int down:
+                        (area.pressed ? 1 : 0) | (button.pressed ? 2 : 0) | (tap.pressed ? 4 : 0)
+                    property int clicked: 0
+                    property int canceled: 0
                     MouseArea {
                         id: area
-                        anchors.fill: parent
-                        onClicked: parent.clicks += 1
-                        onCanceled: parent.cancels += 1
+                        width: 20; height: 32
+                        onClicked: root.clicked |= 1
+                        onCanceled: root.canceled |= 1
+                    }
+                    Button {
+                        id: button
+                        x: 22; width: 20; height: 32
+                        onClicked: root.clicked |= 2
+                        onCanceled: root.canceled |= 2
+                    }
+                    Item {
+                        x: 44; width: 20; height: 32
+                        TapHandler {
+                            id: tap
+                            onTapped: root.clicked |= 4
+                            onCanceled: root.canceled |= 4
+                        }
                     }
                 }
                 ",
                 "cancel-1",
             );
-            for (kind, buttons, time) in [
-                (PointerKind::Press(0x1), 0x1, 1000),
-                (PointerKind::Release(0), 0, 1500),
-            ] {
-                scene.pointer_event(
-                    10.0,
-                    10.0,
-                    &ScenePointer {
-                        kind,
-                        buttons,
-                        modifiers: 0,
-                        time,
-                    },
-                );
+            for (x, time) in [(10.0, 1000), (32.0, 3000), (54.0, 5000)] {
+                for (kind, buttons, time) in [
+                    (PointerKind::Motion, 0, time),
+                    (PointerKind::Press(0x1), 0x1, time + 10),
+                    (PointerKind::Release(0), 0, time + 500),
+                ] {
+                    scene.pointer_event(
+                        x,
+                        10.0,
+                        &ScenePointer {
+                            kind,
+                            buttons,
+                            modifiers: 0,
+                            time,
+                        },
+                    );
+                }
             }
-            let got = ["down", "clicks", "cancels"].map(|name| scene.get_int(name));
+            let got = ["down", "clicked", "canceled"].map(|name| scene.get_int(name));
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
-            assert_eq!(got, [0, 0, 1], "[still pressed, clicked, canceled]");
+            assert_eq!(
+                got,
+                [0, 0, 0b111],
+                "[still pressed, clicked, canceled], one bit each for a MouseArea, a Button and a TapHandler"
+            );
         });
     }
 
