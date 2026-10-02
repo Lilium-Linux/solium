@@ -21763,28 +21763,8 @@ end)
             const SUPER_L: u32 = 133;
             const BTN_RIGHT: u32 = 0x111;
 
-            /// A script's interactive surface over `rect`, its scene stood in for.
-            fn stood(
-                desk: &mut Desk,
-                name: &str,
-                layer: Scripted,
-                rect: Rectangle<i32, Logical>,
-                stand: Stand,
-            ) -> crate::scripted::SurfaceId {
-                stand_in(&mut desk.state, name, layer, rect, stand)
-            }
-
-            fn seen(desk: &Desk, id: crate::scripted::SurfaceId) -> Vec<ScenePointer> {
-                scene_events(&desk.state, id)
-            }
-
             fn region(desk: &Desk) -> Rectangle<i32, Logical> {
                 crate::monitor::union(&desk.state.space).expect("a monitor")
-            }
-
-            /// Move the pointer to `at`, through the real input path.
-            fn to(desk: &mut Desk, at: (f64, f64), time: u64) {
-                move_pointer(&mut desk.state, at, time);
             }
 
             fn bar() -> Rectangle<i32, Logical> {
@@ -21804,8 +21784,8 @@ end)
             #[test]
             fn a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held() {
                 let mut desk = russian_desk();
-                let bar = stood(&mut desk, "bar", Scripted::Top, bar(), Stand::solid());
-                to(&mut desk, (100.0, 15.0), 1);
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
                 crate::input::key(&mut desk.state, SHIFT_L.into(), KeyState::Pressed, 2);
                 let region = region(&desk);
                 crate::synth::send_button(
@@ -21822,7 +21802,7 @@ end)
                     ButtonState::Released,
                     4,
                 );
-                let buttons: Vec<ScenePointer> = seen(&desk, bar)
+                let buttons: Vec<ScenePointer> = scene_events(&desk.state, bar)
                     .into_iter()
                     .filter(|event| !matches!(event.kind, PointerKind::Motion))
                     .collect();
@@ -21846,18 +21826,18 @@ end)
             #[test]
             fn the_wheel_over_a_scene_reaches_it() {
                 let mut desk = russian_desk();
-                let bar = stood(&mut desk, "bar", Scripted::Top, bar(), Stand::solid());
-                to(&mut desk, (100.0, 15.0), 1);
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
                 let region = region(&desk);
                 crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 2);
                 assert!(
-                    seen(&desk, bar).iter().any(|event| event.kind
+                    scene_events(&desk.state, bar).iter().any(|event| event.kind
                         == PointerKind::Wheel {
                             angle: (0.0, -120.0),
                             pixels: (0.0, 0.0),
                         }),
                     "a notch down is a negative angle in Qt's terms: {:?}",
-                    seen(&desk, bar)
+                    scene_events(&desk.state, bar)
                 );
             }
 
@@ -21867,14 +21847,14 @@ end)
             fn super_and_the_wheel_stay_the_compositors_over_a_scene() {
                 let mut desk = russian_desk();
                 desk.install(r#"sol.on("scroll", function(dx, dy) sol.status("scrolled") end)"#);
-                let bar = stood(&mut desk, "bar", Scripted::Top, bar(), Stand::solid());
-                to(&mut desk, (100.0, 15.0), 1);
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
                 crate::input::key(&mut desk.state, SUPER_L.into(), KeyState::Pressed, 2);
                 let region = region(&desk);
                 crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 3);
                 assert_eq!(desk.state.status, "scrolled");
                 assert!(
-                    !seen(&desk, bar)
+                    !scene_events(&desk.state, bar)
                         .iter()
                         .any(|event| matches!(event.kind, PointerKind::Wheel { .. }))
                 );
@@ -21927,8 +21907,8 @@ end)
                 let now = desk.state.clock.now();
                 desk.state.settle(now);
                 desk.pump();
-                let scene = stood(
-                    &mut desk,
+                let scene = stand_in(
+                    &mut desk.state,
                     "shell",
                     Scripted::Top,
                     screen_wide(),
@@ -21958,14 +21938,14 @@ end)
             }
 
             fn presses(desk: &Desk, id: crate::scripted::SurfaceId) -> usize {
-                seen(desk, id)
+                scene_events(&desk.state, id)
                     .iter()
                     .filter(|event| matches!(event.kind, PointerKind::Press(_)))
                     .count()
             }
 
             fn click(desk: &mut Desk, at: (f64, f64), time: u64) {
-                to(desk, at, time);
+                move_pointer(&mut desk.state, at, time);
                 let region = region(desk);
                 crate::synth::send_button(
                     &mut desk.state,
@@ -22037,7 +22017,7 @@ end)
                 let (mut desk, opened, shell) = window_under_a_scene(hover_everywhere);
                 click(&mut desk, (630.0, 530.0), 10);
                 assert!(
-                    seen(&desk, shell)
+                    scene_events(&desk.state, shell)
                         .iter()
                         .any(|event| event.kind == PointerKind::Motion),
                     "the strip heard no motion"
@@ -22053,10 +22033,10 @@ end)
             #[test]
             fn a_release_after_dragging_off_a_shell_button_reaches_the_scene() {
                 let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
-                to(&mut desk, (630.0, 520.0), 10);
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
                 let region = region(&desk);
                 crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
-                to(&mut desk, (630.0, 555.0), 12);
+                move_pointer(&mut desk.state, (630.0, 555.0), 12);
                 assert_eq!(
                     pointer_on(&desk),
                     None,
@@ -22070,7 +22050,7 @@ end)
                     13,
                 );
                 assert!(
-                    seen(&desk, shell)
+                    scene_events(&desk.state, shell)
                         .iter()
                         .any(|event| matches!(event.kind, PointerKind::Release(0x1))),
                     "the release went elsewhere"
@@ -22105,11 +22085,11 @@ end)
                     .focus_window(&other_window, SERIAL_COUNTER.next_serial());
                 desk.state.profile.focus_follows_mouse = true;
 
-                to(&mut desk, (630.0, 520.0), 10);
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
                 let on_the_button = desk.focused();
                 let region = region(&desk);
                 crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
-                to(&mut desk, (630.0, 555.0), 12);
+                move_pointer(&mut desk.state, (630.0, 555.0), 12);
                 let dragged_off = desk.focused();
                 crate::synth::send_button(
                     &mut desk.state,
@@ -22118,7 +22098,7 @@ end)
                     ButtonState::Released,
                     13,
                 );
-                to(&mut desk, (630.0, 556.0), 14);
+                move_pointer(&mut desk.state, (630.0, 556.0), 14);
                 assert_eq!(
                     (on_the_button, dragged_off, desk.focused()),
                     (other.pane, other.pane, opened.pane),
@@ -22132,8 +22112,8 @@ end)
             #[test]
             fn the_scene_hears_the_pointer_leave_when_it_moves_off_its_items() {
                 let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
-                to(&mut desk, (630.0, 520.0), 10);
-                to(&mut desk, (630.0, 555.0), 11);
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                move_pointer(&mut desk.state, (630.0, 555.0), 11);
                 let left = desk
                     .state
                     .surfaces
@@ -22150,13 +22130,13 @@ end)
             #[test]
             fn a_scene_pressed_under_a_still_pointer_hears_it_leave() {
                 let mut desk = russian_desk();
-                to(&mut desk, (100.0, 15.0), 1);
-                let bar = stood(&mut desk, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
                 let region = region(&desk);
                 crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 2);
-                to(&mut desk, (100.0, 500.0), 3);
+                move_pointer(&mut desk.state, (100.0, 500.0), 3);
                 crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Released, 4);
-                to(&mut desk, (100.0, 501.0), 5);
+                move_pointer(&mut desk.state, (100.0, 501.0), 5);
                 let left = desk
                     .state
                     .surfaces
@@ -22183,10 +22163,10 @@ end)
                     "the premise: the window's corner offers a resize, got {:?}",
                     desk.state.claim_under(corner)
                 );
-                to(&mut desk, (630.0, 520.0), 10);
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
                 let region = region(&desk);
                 crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
-                to(&mut desk, (corner.x, corner.y), 12);
+                move_pointer(&mut desk.state, (corner.x, corner.y), 12);
                 assert!(
                     !desk.state.pointer.assert(None),
                     "the pointer offered a resize for a press the scene holds"
@@ -22200,7 +22180,7 @@ end)
             #[test]
             fn a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release() {
                 let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
-                to(&mut desk, (630.0, 520.0), 10);
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
                 let region = region(&desk);
                 crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
                 crate::synth::send_button(&mut desk.state, region, 0x120, ButtonState::Pressed, 12);
@@ -22219,7 +22199,7 @@ end)
                     ButtonState::Released,
                     14,
                 );
-                let events = seen(&desk, shell);
+                let events = scene_events(&desk.state, shell);
                 assert_eq!(
                     (
                         events
