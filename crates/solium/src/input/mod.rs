@@ -189,7 +189,7 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
                 // The release of a key whose press went to a scene goes to
                 // no window, which never saw the press, whether or not the
                 // scene still holds the keyboard.
-                // `tests::a_release_follows_its_press_to_the_scene`.
+                // `tests::a_release_whose_press_went_to_a_scene_reaches_no_window`.
                 if state.keys_to_scene.remove(&code.raw()) && !sealed {
                     return FilterResult::Intercept(Some(Action::Scene(scene_key(
                         &handle, modifiers, false,
@@ -2605,7 +2605,7 @@ mod tests {
     /// hold is over, so no window hears the release of a key it never saw
     /// pressed.
     #[test]
-    fn a_release_follows_its_press_to_the_scene() {
+    fn a_release_whose_press_went_to_a_scene_reaches_no_window() {
         with_keyboard("held-release", "us,ru", 1, "", |state| {
             holding(state, &[], KeyPolicy::ExceptClaimed);
             super::keyboard(

@@ -374,7 +374,7 @@ pub(crate) struct SceneKey {
     /// `input::tests::a_held_group_toggle_does_not_repeat_into_the_scene`.
     pub(crate) repeats: bool,
     /// The xkb keycode, so a release finds its press and a repeat its key.
-    /// `input::tests::a_release_follows_its_press_to_the_scene`.
+    /// `input::tests::a_release_whose_press_went_to_a_scene_reaches_no_window`.
     pub(crate) code: u32,
 }
 

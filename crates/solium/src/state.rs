@@ -421,7 +421,7 @@ pub(crate) struct Solium {
     pub(crate) hosted_keyboard: Option<HostedKeyboard>,
     /// The keys whose press went to a scene, by xkb keycode, so their
     /// release does too and never reaches a window.
-    /// `crate::input::tests::a_release_follows_its_press_to_the_scene`.
+    /// `crate::input::tests::a_release_whose_press_went_to_a_scene_reaches_no_window`.
     pub(crate) keys_to_scene: std::collections::HashSet<u32>,
     /// The key held for the scene holding the keyboard, and when it repeats
     /// next. `crate::input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
