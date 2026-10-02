@@ -182,7 +182,9 @@ local defaults = {
             --              shipped pane style draws it with one line,
             --              `KeyboardPillLayer {}`, and moves, scales and fades
             --              it with the window. A style of your own without
-            --              that line draws none.
+            --              that line draws none. A window drawn with no frame
+            --              -- fullscreen, or one drawing its own decorations --
+            --              gets the "surface" pill at its caret instead.
             --   "surface"  on a surface of its own over everything, at the
             --              caret on screen.
             --   false      nowhere; `indicator = false` says the same.

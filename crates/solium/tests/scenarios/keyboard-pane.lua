@@ -3,7 +3,8 @@
 -- the screen; `keyboard-pane-drawn.lua` is the QML's half.
 --
 -- Played by `scenario::tests::every_scenario_with_a_client_passes`, with
--- `us,ru` and Russian live.
+-- `us,ru` and Russian live. Both windows are framed, as a window under a
+-- pane style is; `keyboard-pane-bare.lua` is a window with no frame.
 
 local function handed(world)
     local values = world.panes.keyboard_indicator
@@ -25,6 +26,8 @@ return {
     steps = {
         { open = true },
         { open = true },
+        { framed = 1 },
+        { framed = 2 },
         { focus = 1 },
         { field = { 100, 40, 2, 16 } },
 

@@ -2105,10 +2105,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // The focused text field: the window it is in, and its caret in the
-    // global space once the client has said where that is. Nothing when no
-    // window has a text field enabled.
-    // `text_input::tests::an_enabled_field_has_its_caret_in_the_global_space`.
+    // The focused text field: the window it is in, whether that window is
+    // framed, and its caret in the global space once the client has said where
+    // that is. Nothing when no window has a text field enabled.
+    // `text_input::tests::an_enabled_field_has_its_caret_in_the_global_space`,
+    // `text_input::tests::a_field_says_whether_its_window_is_framed`.
     sol.set(
         "text_input",
         lua.create_function(|lua, ()| {
@@ -2117,6 +2118,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             };
             let table = lua.create_table()?;
             table.set("window", field.window)?;
+            table.set("framed", field.framed)?;
             if let Some(caret) = field.caret {
                 table.set("x", caret.loc.x)?;
                 table.set("y", caret.loc.y)?;

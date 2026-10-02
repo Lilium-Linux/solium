@@ -461,7 +461,9 @@ doing the same thing, so you can see both:
   that draws the pill at the pane's `caret` — where the focused text field's
   caret is, in the pane's own space. Because it is part of the pane, it moves,
   scales and fades with its window. Your own style gets it by adding the same
-  line.
+  line. A window drawn with no frame — fullscreen, or one that draws its own
+  decorations — has no pane style around it, so it gets the surface below at
+  its caret instead: `sol.text_input()` says which, as `framed`.
 - **On a surface of its own** (`show = "surface"`): an overlay `sol.surface`
   that `lua/keyboard_indicator.lua` places at the caret in the global space,
   from `sol.text_input()`.

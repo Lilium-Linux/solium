@@ -91,6 +91,13 @@ struct Pending {
 pub(crate) struct Field {
     pub(crate) window: u64,
     pub(crate) caret: Option<Rectangle<f64, Logical>>,
+    /// Whether the window is drawn in a frame of the compositor's, or will be
+    /// once its frame is built; false for a window drawn bare -- fullscreen,
+    /// one that draws its own decorations, every window under the style
+    /// `"none"`. A pane style's layers are drawn only around a framed window,
+    /// so what draws at the caret from a pane asks this first.
+    /// `tests::a_field_says_whether_its_window_is_framed`.
+    pub(crate) framed: bool,
 }
 
 impl TextInputs {
@@ -334,6 +341,7 @@ impl Solium {
         Some(Field {
             window: id.get(),
             caret,
+            framed: !matches!(pane.frame(), crate::pane::Frame::None),
         })
     }
 

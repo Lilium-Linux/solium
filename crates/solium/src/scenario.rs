@@ -31,6 +31,8 @@
 //! | `field = { x, y, w, h }` | the client enables a text field with its caret there, in its surface |
 //! | `field = true` | the client enables a text field and says nothing about a caret |
 //! | `disable = true` | the client disables it |
+//! | `framed = n` | the n-th window opened may have a frame again, as one leaving fullscreen may: its frame is on its way, and no Qt here builds it |
+//! | `bare = n` | the n-th window opened is drawn bare, as a fullscreen window and one drawing its own decorations are; every window opens bare here, under the style `"none"` |
 //! | `key = "combo"` | keys pressed by name through the real input path, as `SOLIUM_KEY_AT` presses them |
 //!
 //! On the Qt thread:
@@ -47,11 +49,11 @@
 //! raising an error, `assert` included. `world` holds what the compositor holds:
 //! `surfaces` (by name: `x`, `y`, `w`, `h` for one placed at a rect, and its
 //! `properties`), `panes` (what `sol.pane_values` handed every pane), `field`
-//! (what `sol.text_input()` answers), `windows` (each window opened: `id`,
-//! `x`, `y`) and `unknown` (each setting `solium --check` would report: `key`,
-//! and the `meant` it suggests); or, on the Qt thread, `pixel(layer, x, y)`,
-//! the frame's layer of that name rendered, answering `r, g, b, a` -- the
-//! scene is the layer `"scene"`.
+//! (what `sol.text_input()` answers, `framed` included), `windows` (each
+//! window opened: `id`, `x`, `y`) and `unknown` (each setting `solium --check`
+//! would report: `key`, and the `meant` it suggests); or, on the Qt thread,
+//! `pixel(layer, x, y)`, the frame's layer of that name rendered, answering
+//! `r, g, b, a` -- the scene is the layer `"scene"`.
 //! `tests::every_scenario_with_a_client_passes`,
 //! `tests::every_scenario_on_the_qt_thread_passes`.
 
@@ -211,6 +213,7 @@ fn world(lua: &Lua, desk: &Desk, windows: &[Window]) -> mlua::Result<Table> {
     if let Some(field) = state.text_field() {
         let entry = lua.create_table()?;
         entry.set("window", field.window)?;
+        entry.set("framed", field.framed)?;
         if let Some(caret) = field.caret {
             entry.set("x", caret.loc.x)?;
             entry.set("y", caret.loc.y)?;
@@ -252,6 +255,14 @@ fn world(lua: &Lua, desk: &Desk, windows: &[Window]) -> mlua::Result<Table> {
     Ok(world)
 }
 
+/// The pane of the n-th window a scenario opened, counted from 1.
+fn pane_of(desk: &Desk, windows: &[Window], n: usize) -> crate::pane::PaneId {
+    windows
+        .get(n.saturating_sub(1))
+        .and_then(|window| desk.state.panes.id_of(window))
+        .expect("that window, with a pane")
+}
+
 /// Play a scenario with a real client.
 fn with_a_client(path: &Path) {
     let lua = Lua::new();
@@ -288,6 +299,12 @@ fn with_a_client(path: &Path) {
                 }
             }
             desk.pump();
+        } else if let Ok(Some(n)) = step.get::<Option<usize>>("framed") {
+            let id = pane_of(&desk, &windows, n);
+            desk.state.decorations.unset_bare(&mut desk.state.panes, id);
+        } else if let Ok(Some(n)) = step.get::<Option<usize>>("bare") {
+            let id = pane_of(&desk, &windows, n);
+            desk.state.decorations.set_bare(&mut desk.state.panes, id);
         } else if step.get::<Option<bool>>("disable").ok().flatten() == Some(true) {
             if let Some(input) = text_input.as_ref() {
                 input.disable();

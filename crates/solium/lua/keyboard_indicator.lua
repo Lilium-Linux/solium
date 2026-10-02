@@ -14,6 +14,9 @@
 --   "pane"     inside the window, at the caret: every shipped pane style has
 --              a `KeyboardPillLayer`, which reads the pane's `caret` and the
 --              `values` this file hands every pane with `sol.pane_values`.
+--              A window drawn with no frame -- fullscreen, or one drawing its
+--              own decorations -- has no pane style around it to draw one,
+--              so it gets the surface below at its caret instead.
 --   "surface"  on an overlay `sol.surface` of its own, at the caret in the
 --              global space (`qml/indicator/keyboard.qml`).
 --
@@ -23,7 +26,8 @@
 -- Played, key by key with `us,ru` and Russian live, by the scenarios in
 -- `crates/solium/tests/scenarios/`: `keyboard-surface.lua` (placed at the
 -- caret, and on screen with none), `keyboard-pane.lua` (what the panes are
--- handed, Caps again on focus), `keyboard-off.lua` (`show = false`) and
+-- handed, Caps again on focus), `keyboard-pane-bare.lua` (a window with no
+-- frame), `keyboard-off.lua` (`show = false`) and
 -- `keyboard-indicator-false.lua` (`indicator = false`), through
 -- `scenario::tests::every_scenario_with_a_client_passes`.
 
@@ -167,11 +171,14 @@ function indicator.show(what)
     local caret = field and field.x and field or nil
     local area = sol.monitor(field and field.window or focused())
 
-    local in_pane = s.show == "pane" and caret ~= nil
+    -- In the pane only where a frame is drawn around it: a window drawn bare
+    -- has no pane style to draw it, so the surface goes to its caret instead
+    -- (`keyboard-pane-bare.lua`).
+    local in_pane = s.show == "pane" and caret ~= nil and field.framed == true
     panes(s.show == "pane", in_pane and cue or { what = "", serial = kept.serial })
 
     local on_surface = what ~= ""
-        and ((s.show == "surface" and caret ~= nil) or (caret == nil and s.fallback == "surface"))
+        and ((caret ~= nil and not in_pane) or (caret == nil and s.fallback == "surface"))
     if on_surface then
         surface(caret and at_caret(caret, area) or on_screen(s.position, area), cue)
     else
@@ -194,15 +201,11 @@ function indicator.apply()
         return
     end
     panes(s.show == "pane", { what = "" })
-    if s.show == "surface" or s.fallback == "surface" then
-        -- Built now, hidden, so the first pill appears at once rather than
-        -- after its scene has loaded.
-        local area = sol.monitor(focused())
-        surface(on_screen(s.position, area), { what = "", serial = kept.serial })
-    else
-        sol.surface(SURFACE, false)
-        placed = nil
-    end
+    -- Built now, hidden, so the first pill appears at once rather than after
+    -- its scene has loaded. Whatever `show` and `fallback` say: with "pane",
+    -- a window drawn bare still gets the surface at its caret.
+    local area = sol.monitor(focused())
+    surface(on_screen(s.position, area), { what = "", serial = kept.serial })
 end
 
 sol.on("keyboard", function(state, changed)

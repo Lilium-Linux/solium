@@ -267,7 +267,9 @@ when the pane has no room below. It shows what the configuration hands it,
 `values.keyboard_indicator`, and nothing when that says not to: the policy is
 `lua/keyboard_indicator.lua`, set by `keyboard.indicator` in `config.lua`,
 and `docs/ricing.md` has the whole of it. A style of your own gets the pill by
-adding the same line, and a style without it has none.
+adding the same line, and a style without it has none. A window drawn bare --
+fullscreen, or one drawing its own decorations -- has no style around it at
+all, and the configuration draws its pill on a surface instead.
 
 It is a layer of its own because it draws over the client, and in software a
 `frame` layer that reserves a band copies only that band. So it costs one more

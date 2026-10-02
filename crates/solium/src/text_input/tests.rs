@@ -365,6 +365,45 @@ fn an_enabled_field_has_its_caret_in_the_global_space() {
     assert_eq!(read, Some(format!("{id}:310,220,2,16")));
 }
 
+/// **A field says whether its window is framed**: bare under the style
+/// `"none"` the desk runs with, framed once its pane may have a frame again --
+/// as a window leaving fullscreen may -- and bare again as a window going
+/// fullscreen is left. `sol.text_input()` says the same, as `framed`.
+#[test]
+fn a_field_says_whether_its_window_is_framed() {
+    let mut desk = Desk::new();
+    let (window, _surface, _xdg) = desk.window();
+    desk.focus(&window);
+    let text_input = desk.text_input();
+    enable(&text_input, (10, 20, 2, 16));
+    desk.pump();
+    let framed = |desk: &Desk| desk.state.text_field().map(|field| field.framed);
+    assert_eq!(framed(&desk), Some(false), "bare under the style \"none\"");
+
+    let id = desk.state.panes.id_of(&window).expect("a pane");
+    desk.state.decorations.unset_bare(&mut desk.state.panes, id);
+    assert_eq!(framed(&desk), Some(true), "a frame on its way is a frame");
+
+    desk.configure(
+        "framed",
+        "function framed() local f = sol.text_input(); return tostring(f and f.framed) end",
+    );
+    let snapshot = desk.state.snapshot();
+    let read = desk
+        .state
+        .scripts
+        .as_ref()
+        .map(|scripts| scripts.evaluate_in(snapshot, "return framed()"));
+    assert_eq!(
+        read.as_deref(),
+        Some("true"),
+        "and the configuration is told"
+    );
+
+    desk.state.decorations.set_bare(&mut desk.state.panes, id);
+    assert_eq!(framed(&desk), Some(false), "bare, as fullscreen leaves it");
+}
+
 /// **A text input made after the keyboard arrived is entered at once**: a
 /// client binding text-input late is told which surface has the focus.
 #[test]

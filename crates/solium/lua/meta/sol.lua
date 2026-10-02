@@ -96,11 +96,13 @@
 ---@field repeat_delay integer Milliseconds a key is held before it repeats.
 
 ---The focused text field, as `sol.text_input()` answers: the window it is
----in, and its caret in the global space. The four numbers are there only once
----the application has said where its caret is, through `text-input-v3`;
----an application that never does has a field and no caret.
+---in, whether that window is framed, and its caret in the global space. The
+---four numbers are there only once the application has said where its caret
+---is, through `text-input-v3`; an application that never does has a field and
+---no caret.
 ---@class sol.TextField
 ---@field window integer The window's id, as `sol.windows()` gives it.
+---@field framed boolean Whether the window is drawn in a frame of the compositor's, or will be once its frame is built, so its pane style's layers are drawn with it. False for a window drawn bare: fullscreen, one drawing its own decorations, every window under the pane style `"none"`.
 ---@field x? number The caret's rectangle, where it is drawn: its window's place and scale on screen are in it, presentation transforms included.
 ---@field y? number
 ---@field w? number
