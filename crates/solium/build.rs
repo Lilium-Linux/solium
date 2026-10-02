@@ -144,9 +144,10 @@ fn main() {
 }
 
 /// Where moc is: `QT_MOC`, then the `libexecdir` Qt6Core's pkg-config file
-/// names, where Fedora puts moc, since its library directory has no
-/// qt6/libexec, then beside the libraries, then the usual distribution paths, then whatever `moc` is on the
-/// path. The crate builds only once it is found:
+/// names, so moc is found the way the rest of this script finds Qt, then
+/// `qt6/libexec` or `qt6/bin` beside the libraries, then the usual
+/// distribution paths, then whatever `moc` is on the path. The crate builds
+/// only once it is found:
 /// `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
 fn find_moc(qt: &pkg_config::Library) -> PathBuf {
     if let Some(path) = std::env::var_os("QT_MOC") {

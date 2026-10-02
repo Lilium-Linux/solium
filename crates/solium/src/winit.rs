@@ -455,7 +455,7 @@ pub(crate) fn run() -> Result<()> {
 
         if resized {
             resized = false;
-            state.place_outputs();
+            state.outputs_resized();
         }
 
         screens.clear();

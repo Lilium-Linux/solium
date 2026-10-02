@@ -109,9 +109,107 @@ impl PointerButtonEvent<Synthetic> for Button {
     }
 }
 
+/// One scroll: a wheel's turn, in v120 steps on each axis, or a touchpad's,
+/// which has no steps.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct Axis {
+    /// The steps on each axis, from a wheel; a touchpad sends none.
+    v120: Option<(f64, f64)>,
+    /// How far it scrolled on each axis, in Wayland's units.
+    amount: (f64, f64),
+    source: smithay::backend::input::AxisSource,
+    time: u64,
+}
+
+#[cfg(test)]
+impl Event<Synthetic> for Axis {
+    fn time(&self) -> u64 {
+        self.time
+    }
+    fn device(&self) -> SynthDevice {
+        SynthDevice
+    }
+}
+
+#[cfg(test)]
+impl smithay::backend::input::PointerAxisEvent<Synthetic> for Axis {
+    fn amount(&self, axis: smithay::backend::input::Axis) -> Option<f64> {
+        Some(match axis {
+            smithay::backend::input::Axis::Horizontal => self.amount.0,
+            smithay::backend::input::Axis::Vertical => self.amount.1,
+        })
+    }
+    fn amount_v120(&self, axis: smithay::backend::input::Axis) -> Option<f64> {
+        self.v120.map(|(horizontal, vertical)| match axis {
+            smithay::backend::input::Axis::Horizontal => horizontal,
+            smithay::backend::input::Axis::Vertical => vertical,
+        })
+    }
+    fn source(&self) -> smithay::backend::input::AxisSource {
+        self.source
+    }
+    fn relative_direction(
+        &self,
+        _axis: smithay::backend::input::Axis,
+    ) -> smithay::backend::input::AxisRelativeDirection {
+        smithay::backend::input::AxisRelativeDirection::Identical
+    }
+}
+
+/// One finger on a touchscreen, at a point of the region it is glued to.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct Touch {
+    at: Point<f64, Logical>,
+    time: u64,
+}
+
+#[cfg(test)]
+impl Event<Synthetic> for Touch {
+    fn time(&self) -> u64 {
+        self.time
+    }
+    fn device(&self) -> SynthDevice {
+        SynthDevice
+    }
+}
+
+#[cfg(test)]
+impl smithay::backend::input::TouchEvent<Synthetic> for Touch {
+    fn slot(&self) -> smithay::backend::input::TouchSlot {
+        Some(0).into()
+    }
+}
+
+#[cfg(test)]
+impl smithay::backend::input::AbsolutePositionEvent<Synthetic> for Touch {
+    fn x(&self) -> f64 {
+        self.at.x
+    }
+    fn y(&self) -> f64 {
+        self.at.y
+    }
+    fn x_transformed(&self, _width: i32) -> f64 {
+        self.at.x
+    }
+    fn y_transformed(&self, _height: i32) -> f64 {
+        self.at.y
+    }
+}
+
+#[cfg(test)]
+impl smithay::backend::input::TouchDownEvent<Synthetic> for Touch {}
+
+#[cfg(test)]
+impl smithay::backend::input::TouchUpEvent<Synthetic> for Touch {}
+
 impl InputBackend for Synthetic {
     type Device = SynthDevice;
     type KeyboardKeyEvent = UnusedEvent;
+    #[cfg(test)]
+    type PointerAxisEvent = Axis;
+    #[cfg(not(test))]
     type PointerAxisEvent = UnusedEvent;
     type PointerButtonEvent = Button;
     type PointerMotionEvent = Motion;
@@ -124,7 +222,13 @@ impl InputBackend for Synthetic {
     type GesturePinchEndEvent = UnusedEvent;
     type GestureHoldBeginEvent = UnusedEvent;
     type GestureHoldEndEvent = UnusedEvent;
+    #[cfg(test)]
+    type TouchDownEvent = Touch;
+    #[cfg(not(test))]
     type TouchDownEvent = UnusedEvent;
+    #[cfg(test)]
+    type TouchUpEvent = Touch;
+    #[cfg(not(test))]
     type TouchUpEvent = UnusedEvent;
     type TouchMotionEvent = UnusedEvent;
     type TouchCancelEvent = UnusedEvent;
@@ -230,6 +334,81 @@ pub(crate) fn send_button(
                 state: button_state,
                 time,
             },
+        },
+    );
+}
+
+/// One wheel turn, through the real input path, in v120 steps.
+/// `state::tests::real_client::reflow_on_close::hosted::the_wheel_over_a_scene_reaches_it`.
+#[cfg(test)]
+pub(crate) fn send_axis(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    v120: (f64, f64),
+    time: u64,
+) {
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::PointerAxis {
+            event: Axis {
+                v120: Some(v120),
+                amount: (v120.0 / 8.0, v120.1 / 8.0),
+                source: smithay::backend::input::AxisSource::Wheel,
+                time,
+            },
+        },
+    );
+}
+
+/// One touchpad scroll, through the real input path: `amount` on each axis,
+/// in Wayland's units, with no steps, as libinput reports two fingers moving.
+/// The fingers lifting are a scroll of `(0.0, 0.0)`.
+/// `state::tests::real_client::reflow_on_close::hosted::a_touchpad_scroll_reaches_a_scene_in_pixels_and_its_end_does_not`.
+#[cfg(test)]
+pub(crate) fn send_finger_scroll(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    amount: (f64, f64),
+    time: u64,
+) {
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::PointerAxis {
+            event: Axis {
+                v120: None,
+                amount,
+                source: smithay::backend::input::AxisSource::Finger,
+                time,
+            },
+        },
+    );
+}
+
+/// A tap on a touchscreen at `at`, a point in the global space: the finger
+/// down, then up, through the real input path.
+/// `state::tests::real_client::reflow_on_close::hosted::a_touch_on_a_shell_button_neither_reaches_nor_focuses_the_window_under_it`.
+#[cfg(test)]
+pub(crate) fn send_touch(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    at: (f64, f64),
+    time: u64,
+) {
+    let at = Point::from(at) - region.loc.to_f64();
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::TouchDown {
+            event: Touch { at, time },
+        },
+    );
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::TouchUp {
+            event: Touch { at, time: time + 1 },
         },
     );
 }

@@ -5,6 +5,10 @@
 
 #include <QtQml/QQmlContext>
 #include <QtQml/QQmlEngine>
+#include <QtCore/QMetaObject>
+#include <QtQuick/QQuickItem>
+
+#include <algorithm>
 
 namespace {
 
@@ -73,6 +77,173 @@ SoliumMonitor *SoliumAttached::monitor() const
 {
     const SoliumHosting *hosting = solium_hosting_of(m_item);
     return solium_monitor_row(hosting != nullptr ? hosting->monitor : QString());
+}
+
+QVariant SoliumAttached::input() const
+{
+    switch (m_input) {
+    case 0:
+        return false;
+    case 1:
+        return QStringLiteral("hover");
+    case 2:
+        return true;
+    default:
+        return {};
+    }
+}
+
+void SoliumAttached::setInput(const QVariant &value)
+{
+    int next = -1;
+    if (value.typeId() == QMetaType::Bool) {
+        next = value.toBool() ? 2 : 0;
+    } else if (value.toString() == QStringLiteral("hover")) {
+        next = 1;
+    } else {
+        qWarning("Solium.input takes true, false or \"hover\"");
+    }
+    if (next != m_input) {
+        m_input = next;
+        emit inputChanged();
+    }
+}
+
+namespace {
+
+/* Whether an item takes presses itself, whatever handlers it has: the
+ * Qt Quick types that do.
+ * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
+bool takes_presses_itself(const QQuickItem *item)
+{
+    for (const char *type : {"QQuickMouseArea", "QQuickControl", "QQuickFlickable",
+                             "QQuickPathView", "QQuickMultiPointTouchArea", "QQuickTextInput",
+                             "QQuickTextEdit"}) {
+        if (item->inherits(type)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* What `Solium.input` says of an item: -1 unset, else its claim. A Qt Quick
+ * Controls `Popup` is not an item, and Qt draws it with an item of its own,
+ * the popup's child, so what a scene writes on the `Popup` is read there.
+ * `qml::hosted::tests::solium_input_on_a_controls_popup_is_its_items`. */
+int declared_input(QQuickItem *item)
+{
+    QObject *popup = item->inherits("QQuickPopupItem") ? item->parent() : nullptr;
+    for (QObject *owner : {static_cast<QObject *>(item), popup}) {
+        if (owner == nullptr) {
+            continue;
+        }
+        auto *attached = qobject_cast<SoliumAttached *>(
+            qmlAttachedPropertiesObject<SoliumAttachedType>(owner, false));
+        if (attached != nullptr && attached->inputClaim() >= 0) {
+            return attached->inputClaim();
+        }
+    }
+    return -1;
+}
+
+/* Whether something hears `object`'s `signal`, a normalized signature, a
+ * handler in QML included. QObject::isSignalConnected is protected; a
+ * pointer to it formed through a class derived from QObject may be called
+ * on any QObject.
+ * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
+struct SignalPeek : QObject {
+    static bool heard(const QObject *object, const char *signal)
+    {
+        const QMetaObject *meta = object->metaObject();
+        const int index = meta->indexOfSignal(signal);
+        return index >= 0 && (object->*(&SignalPeek::isSignalConnected))(meta->method(index));
+    }
+};
+
+/* Whether `item` is a Text with a link at `local`, a point in its own
+ * coordinates, that something hears activated. Qt gives every Text the left
+ * button (QQuickTextPrivate::init) and lets a press go unless linkActivated
+ * has a receiver and a link is under it (QQuickText::mousePressEvent,
+ * qquicktext.cpp:2975-2979, asks isLinkActivatedConnected, then the
+ * anchorAt that linkAt asks too, :3268), so a Text takes a press there and
+ * nowhere else.
+ * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
+bool on_a_link(QQuickItem *item, const QPointF &local)
+{
+    if (!item->inherits("QQuickText") || !SignalPeek::heard(item, "linkActivated(QString)")) {
+        return false;
+    }
+    QString link;
+    QMetaObject::invokeMethod(item, "linkAt", Qt::DirectConnection, Q_RETURN_ARG(QString, link),
+                              Q_ARG(qreal, local.x()), Q_ARG(qreal, local.y()));
+    return !link.isEmpty();
+}
+
+/* What one item claims for itself at `local`, a point in its own
+ * coordinates, before its children are asked. Its handlers first: Qt gives
+ * an item with any pointer handler every mouse button, to hand presses on to
+ * the handlers, so an item with only a HoverHandler accepts every button and
+ * still takes no press itself, and neither does one whose handlers are all
+ * disabled, since Qt hands a disabled handler nothing. A Text takes a press
+ * only on a link it handles.
+ * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`,
+ * `qml::hosted::tests::a_disabled_handler_claims_nothing`,
+ * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
+int own_claim(QQuickItem *item, const QPointF &local)
+{
+    const int declared = declared_input(item);
+    if (declared >= 0) {
+        return declared;
+    }
+    bool handlers = false;
+    bool hover_handler = false;
+    for (QObject *child : item->children()) {
+        if (!child->inherits("QQuickPointerHandler")) {
+            continue;
+        }
+        handlers = true;
+        if (!child->property("enabled").toBool()) {
+            continue;
+        }
+        if (child->inherits("QQuickHoverHandler")) {
+            hover_handler = true;
+        } else {
+            return 2;
+        }
+    }
+    if (handlers) {
+        if (takes_presses_itself(item) || on_a_link(item, local)) {
+            return 2;
+        }
+        return hover_handler ? 1 : 0;
+    }
+    if (on_a_link(item, local)
+        || (!item->inherits("QQuickText") && item->acceptedMouseButtons() != Qt::NoButton)) {
+        return 2;
+    }
+    return item->acceptHoverEvents() ? 1 : 0;
+}
+
+} // namespace
+
+int solium_claim_at(QQuickItem *item, const QPointF &scene_point)
+{
+    if (item == nullptr || !item->isVisible() || item->opacity() <= 0.0 || !item->isEnabled()) {
+        return 0;
+    }
+    const QPointF local = item->mapFromScene(scene_point);
+    const bool inside = item->contains(local);
+    if (item->clip() && !inside) {
+        return 0;
+    }
+    int claim = inside ? own_claim(item, local) : 0;
+    for (QQuickItem *child : item->childItems()) {
+        if (claim == 2) {
+            break;
+        }
+        claim = std::max(claim, solium_claim_at(child, scene_point));
+    }
+    return claim;
 }
 
 SoliumAttached *SoliumAttachedType::qmlAttachedProperties(QObject *object)

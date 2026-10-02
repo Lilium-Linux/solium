@@ -142,10 +142,71 @@ the `top` layer: over the windows, under a layer-shell client's own `top` layer
 surfaces, and covered by a fullscreen window unless `fullscreen.covers` says
 otherwise
 (`scripted::tests::a_surface_on_every_monitor_has_one_live_scene_per_monitor`).
-It gets pointer motion and presses, so a `MouseArea` works. A monitor that
-arrives gets its instance there and then, and one that goes takes its instance
-with it (`scripted::tests::an_instance_goes_with_its_monitor_and_comes_with_a_new_one`).
+It gets pointer motion, every mouse button as itself, the wheel, and the
+modifiers held, so a `MouseArea` or a `WheelHandler` works as it does anywhere
+(`qml::hosted::tests::a_right_press_reaches_a_mouse_area_as_the_right_button`,
+`qml::hosted::tests::the_wheel_reaches_a_wheel_handler_with_its_angle`).
+Each event carries its time, so a double press is a double-click and a
+`TapHandler` counts its taps, by Qt's own double-click interval and distance
+(`qml::hosted::tests::a_double_press_on_a_mouse_area_is_one_double_click`,
+`qml::hosted::tests::a_tap_handler_counts_taps_by_when_they_happened`,
+`qml::hosted::tests::two_presses_further_apart_than_the_interval_are_two_single_clicks`).
+The wheel with `super` held stays the compositor's
+(`state::tests::real_client::reflow_on_close::hosted::super_and_the_wheel_stay_the_compositors_over_a_scene`),
+and while the session is locked none of it reaches the scene
+(`state::tests::real_client::lock_focus::the_wheel_over_a_hosted_scene_is_not_the_scenes_while_locked`,
+`state::tests::real_client::lock_focus::a_button_let_go_behind_the_lock_is_not_held_after_it`).
+A press the scene held when the session locked is cancelled, not clicked: a
+`MouseArea`, a `Button` or a `TapHandler` holding it hears `canceled`
+(`state::tests::real_client::lock_focus::the_lock_lets_go_of_a_hosted_scenes_press_and_its_hover`,
+`qml::hosted::tests::a_press_let_go_of_unseen_is_cancelled_not_clicked`).
+A monitor that arrives gets its instance there and then, and one that goes
+takes its instance with it
+(`scripted::tests::an_instance_goes_with_its_monitor_and_comes_with_a_new_one`).
 It reads where it is from `Solium.monitor`, below; `screenInfo` is gone.
+
+**Clickable only where it takes input.** The compositor asks the live item
+tree under the pointer, so a point is the scene's only where a visible,
+enabled item that is not fully transparent takes input: a `MouseArea`, a
+pointer handler, a link in a `Text` with an `onLinkActivated` handler, or an
+item marked `Solium.input: true`.
+An item at opacity 0, itself or through an ancestor, takes nothing, though Qt
+would still deliver to it
+(`qml::hosted::tests::the_item_tree_decides_what_a_point_claims`). The rest of
+a `Text` takes no press, nor does a link nothing handles, and a plain
+label takes nothing at all
+(`qml::hosted::tests::a_text_takes_a_press_only_on_a_link`).
+`Solium.input: "hover"` takes the pointer's motion and
+leaves presses to what is under it, which is how an edge strip reveals a
+hidden dock; `Solium.input: false` takes an item out. An item's shape counts,
+through its `containmentMask`, so a rounded popup's corners pass clicks
+through; a mask written in QML has to be typed,
+`function contains(point: point): bool`, or Qt ignores it, and it answers for
+the whole item, its bounds too. A disabled handler takes nothing
+(`qml::hosted::tests::a_disabled_handler_claims_nothing`), and an open Qt
+Quick Controls popup, a `Popup`, a `Menu` or a `ComboBox`'s list, takes the
+points it is drawn on, though Qt draws it in the window's overlay rather than
+under the scene's root
+(`qml::hosted::tests::an_open_controls_popup_claims_its_press`), and
+`Solium.input` written on the `Popup` is that item's
+(`qml::hosted::tests::solium_input_on_a_controls_popup_is_its_items`). A
+popup is laid out against the whole scene, so a `Menu` opens where it is
+asked to
+(`qml::hosted::tests::a_controls_popup_is_laid_out_against_the_whole_scene`),
+and a modal one takes every point of its scene while it is open, as Qt's own
+modality does
+(`qml::hosted::tests::a_modal_popup_takes_every_point_of_its_scene_while_it_is_open`).
+Everywhere else the window under the shell gets the press and the wheel
+(`state::tests::real_client::reflow_on_close::hosted::the_wheel_where_the_shell_draws_nothing_is_the_windows_under_it`),
+and where the scene takes a press, the window under it does not have the
+pointer, nor the keyboard when focus follows the mouse. A press the scene
+took is its until every button is up, wherever the pointer goes meanwhile,
+and the pointer keeps the shape it had at the press
+(`state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`,
+`state::tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`,
+`state::tests::real_client::reflow_on_close::hosted::a_press_a_scene_holds_keeps_its_shape_over_a_resize_border`,
+`state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`,
+`qml::hosted::tests::the_item_tree_decides_what_a_point_claims`).
 
 **The compositor's clock and frames.** Its animations advance on the same
 clock as every window transform, a running animation asks for the next frame,
@@ -190,20 +251,11 @@ workspaces, any binding — a hosted shell can ask for this way.
 
 Said plainly, because a shell that loads is easy to mistake for one that works:
 
-- **No input region: the scene takes every press and hover on its monitor.**
-  The pointer is claimed anywhere inside the scene's area, which is the whole
-  of its monitor, not only where the scene draws — a 36-pixel bar claims the
-  screen under it too. So while a shell is hosted, the windows on a monitor it
-  is on cannot be clicked, focused with the pointer or
-  dragged with `super`. What it wants is an input region: a point claimed only
-  where the scene has an item under it.
 - **No reserved space, and no placement.** The scene fills its whole
   monitor, and a hosted bar does not take its strip out of the work area, so
   windows are placed under it.
-- **No keyboard, and every button is the left one.** Pointer motion and
-  presses — no keyboard focus, no grabs (#85), no wheel, and a right or middle
-  press arrives as a left press, so a right-click on a hosted button activates
-  it. A launcher's text field cannot be typed into.
+- **No keyboard.** No keyboard focus and no grabs (#85): a launcher's text
+  field cannot be typed into.
 - **No window list, and no icons.** Nothing tells a hosted scene which
   windows exist, and there is no `image://` provider for the icon theme.
   Driving the compositor goes through `action` and Lua.

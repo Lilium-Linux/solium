@@ -2696,6 +2696,61 @@ mod real_client {
         });
     }
 
+    /// **A click on a hosted button is acted on at its release**: the press
+    /// holds the pointer for the scene (Ruling 7), the release that clicks the
+    /// button reaches it through the hold, and the action the click set is
+    /// heard in that same dispatch. Tested with the Cyrillic group active
+    /// (#132). No client, so the scene is a real one (the #99 rule).
+    #[test]
+    fn a_click_on_a_hosted_button_is_acted_on_at_its_release() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            use crate::qml::hosted::{PointerKind, ScenePointer};
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-hosted-click");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nItem {\n    property string action: \"\"\n    MouseArea { width: 100; height: 30; onClicked: parent.action = \"clicked\" }\n}\n",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                r#"sol.on("surface", function(name, action) sol.status(name .. " " .. action) end)"#,
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            one_screen(&mut state);
+            russian(&mut state);
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.declare_surface(crate::scripted::Declaration::for_test(
+                "bar",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::Rect(Rectangle::new((0, 0).into(), (1920, 30).into())),
+            ));
+            let at = Point::<f64, Logical>::from((50.0, 15.0));
+            let event = |kind, buttons| ScenePointer {
+                kind,
+                buttons,
+                modifiers: 0,
+                time: 0,
+            };
+            assert!(
+                state.surface_pointer(true, at, Some(event(PointerKind::Press(0x1), 0x1))),
+                "the premise: the button takes the press"
+            );
+            assert!(state.surface_pointer(true, at, Some(event(PointerKind::Release(0x1), 0))));
+            assert_eq!(state.status, "bar clicked");
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
     /// **Declaring one surface does not judge another by its old placement.**
     /// One `monitors` handler declares two surfaces over the monitor an
     /// unplug moved; declaring the first must leave the second's scene alone
@@ -3066,6 +3121,184 @@ mod real_client {
                     .map(crate::scripted::Surface::instance_count),
                 Some(1),
                 "the unplugged monitor kept its scene"
+            );
+        });
+    }
+
+    /// **A hotplug places the surfaces once, after every handler it runs,
+    /// even when a `monitors` handler rearranges the monitors.** A
+    /// `sol.monitors{}` places the surfaces when the dispatch that ran it is
+    /// done, and a hotplug holds its `monitors` and `layout` handlers as one
+    /// dispatch, as a reload does
+    /// (`a_reload_that_moves_a_monitor_keeps_the_scene_its_handler_declares_there`).
+    /// Unheld, the `monitors` dispatch was done first, and the surfaces were
+    /// placed before the `layout` handlers had run as well as after. No
+    /// scene is needed to count them.
+    #[test]
+    fn a_hotplug_whose_handler_rearranges_the_monitors_places_the_surfaces_once() {
+        let directory = std::env::temp_dir().join("solium-state-hotplug-held");
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                r#"
+                sol.on("monitors", function()
+                    sol.monitors{{ {{ name = "{RIGHT_SCREEN}", primary = true }} }}
+                end)
+                "#
+            ),
+        )
+        .expect("writing the test script");
+        let display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        let (left, _) = side_by_side(&mut state, "hotplug-held-left");
+        state.start_scripts(Some(
+            Scripts::load(&entry).expect("loading the test script"),
+        ));
+        state.settle_monitors();
+
+        let before = state.instances_synced;
+        state.space.unmap_output(&left);
+        state.settle_monitors();
+        assert_eq!(
+            state.instances_synced - before,
+            1,
+            "the surfaces were placed between the hotplug's handlers too"
+        );
+    }
+
+    /// **A resize that brings a monitor under a surface gives the surface an
+    /// instance there**, as the nested window's resize does: its monitors
+    /// share its width, so every one right of the first moves, and a surface
+    /// declared over a fixed rectangle now covers one more of them. No
+    /// client (the #99 rule).
+    #[test]
+    fn a_resize_that_brings_a_monitor_under_a_surface_gives_it_an_instance_there() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-resized-monitors");
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join("Scene.qml");
+            std::fs::write(&path, "import QtQuick\nItem {}\n").expect("writing the scene");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "resized-left");
+            state.declare_surface(crate::scripted::Declaration::for_test(
+                "strip",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::Rect(Rectangle::new((1920, 0).into(), (1920, 30).into())),
+            ));
+            assert!(
+                !has_scene(&mut state, "strip", &left) && has_scene(&mut state, "strip", &right),
+                "the premise: the strip is on the right monitor only"
+            );
+
+            for output in [&left, &right] {
+                output.change_current_state(
+                    Some(Mode {
+                        size: (2560, 1080).into(),
+                        refresh: 60_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                );
+            }
+            state.outputs_resized();
+            assert_eq!(
+                state
+                    .space
+                    .output_geometry(&right)
+                    .map(|geometry| geometry.loc),
+                Some((2560, 0).into()),
+                "the premise: the resize moved the right monitor"
+            );
+            assert!(
+                has_scene(&mut state, "strip", &left),
+                "the monitor the resize brought under the strip has no scene"
+            );
+            assert!(
+                has_scene(&mut state, "strip", &right),
+                "the right monitor lost its scene"
+            );
+        });
+    }
+
+    /// **From the monitors settling to each scene reading its own monitor,
+    /// end to end**: `settle_monitors` builds an instance of an
+    /// `every-monitor` surface on each of two monitors, and once
+    /// `publish_models` has run, each reads its own row through
+    /// `Solium.monitor`: present, at its own place, with its own size and
+    /// work area. No client (the #99 rule), and monitor names of its own,
+    /// because the rows are process-wide.
+    #[test]
+    fn each_monitors_instance_reads_its_own_monitor_once_the_models_are_published() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-instance-rows");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = directory.join("Scene.qml");
+            std::fs::write(
+                &scene,
+                r"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property int present: Solium.monitor.present ? 1 : 0
+                    readonly property int wholeX: Solium.monitor.whole.x
+                    readonly property int wholeWidth: Solium.monitor.whole.width
+                    readonly property int areaWidth: Solium.monitor.area.width
+                    readonly property int areaHeight: Solium.monitor.area.height
+                }
+                ",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"sol.surface("shell", {{ scene = "{}", layer = "top", on = "every-monitor" }})"#,
+                    scene.display()
+                ),
+            )
+            .expect("writing the test script");
+
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let left = a_screen(&mut state, "instance-rows-left", (0, 0));
+            let right = a_screen(&mut state, "instance-rows-right", (1920, 0));
+            right.change_current_state(
+                Some(Mode {
+                    size: (1280, 720).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                None,
+                None,
+            );
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            state.publish_models();
+
+            let mut read = |output: &Output| {
+                let scene = scene_on(&mut state, "shell", output);
+                ["present", "wholeX", "wholeWidth", "areaWidth", "areaHeight"]
+                    .map(|name| scene.get_int(name))
+            };
+            assert_eq!(
+                read(&left),
+                [1, 0, 1920, 1920, 1080],
+                "the left monitor's scene: [present, whole.x, whole.width, area.width, area.height]"
+            );
+            assert_eq!(
+                read(&right),
+                [1, 1920, 1280, 1280, 720],
+                "the right monitor's scene: [present, whole.x, whole.width, area.width, area.height]"
             );
         });
     }
@@ -3597,6 +3830,79 @@ mod real_client {
         );
         state.space.map_output(&output, at);
         output
+    }
+
+    /// Make `state`'s keyboard `us,ru` with Russian the active group: every
+    /// input change is tested with the Cyrillic group active (#132).
+    fn russian(state: &mut Solium) {
+        use smithay::input::keyboard::{Layout, XkbConfig};
+        let keyboard = state.seat.get_keyboard().expect("the seat has a keyboard");
+        keyboard
+            .set_xkb_config(
+                state,
+                XkbConfig {
+                    layout: "us,ru",
+                    ..Default::default()
+                },
+            )
+            .expect("compiling us,ru; xkb data is missing, so this proves nothing");
+        let active = keyboard.with_xkb_state(state, |mut context| {
+            context.set_layout(Layout(1));
+            context
+                .xkb()
+                .lock()
+                .map(|xkb| xkb.active_layout().0)
+                .unwrap_or(0)
+        });
+        assert_eq!(
+            active, 1,
+            "Russian did not become the active group, so this would test `us`"
+        );
+    }
+
+    /// A script's interactive surface over `rect`, its scene stood in for by
+    /// `stand`: a Qt scene cannot be built beside a real client (the #99
+    /// test).
+    fn stand_in(
+        state: &mut Solium,
+        name: &str,
+        layer: crate::scripted::Layer,
+        rect: Rectangle<i32, Logical>,
+        stand: crate::scripted::Stand,
+    ) -> crate::scripted::SurfaceId {
+        state.declare_surface(crate::scripted::Declaration::for_test(
+            name,
+            std::path::PathBuf::from("/nonexistent/hosted-test.qml"),
+            layer,
+            crate::scripted::On::Rect(rect),
+        ));
+        let id = state.surfaces.named(name).expect("declared");
+        state.surfaces.get_mut(id).expect("live").stand_in(stand);
+        id
+    }
+
+    /// Every pointer event the stand-in for surface `id` was told.
+    fn scene_events(
+        state: &Solium,
+        id: crate::scripted::SurfaceId,
+    ) -> Vec<crate::qml::hosted::ScenePointer> {
+        state
+            .surfaces
+            .get(id)
+            .and_then(crate::scripted::Surface::stand)
+            .map(|stand| stand.seen.iter().map(|(_, event)| *event).collect())
+            .unwrap_or_default()
+    }
+
+    /// Move the pointer to `at`, through the real input path.
+    fn move_pointer(state: &mut Solium, at: (f64, f64), time: u64) {
+        let was = state
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location())
+            .unwrap_or_default();
+        let region = crate::monitor::union(&state.space).expect("a monitor");
+        crate::synth::send_motion(state, region, Point::from(at) - was, time);
     }
 
     /// A bar across the top of the primary monitor, `height` pixels tall,
@@ -10152,6 +10458,157 @@ mod real_client {
             );
             let (app, _) = session.type_key();
             assert!(app, "unlocked, and typing does not reach the application");
+        }
+
+        /// **The wheel over a hosted scene is not the scene's while the
+        /// session is locked**, as the pointer's motion and presses are not:
+        /// nothing of the session's may notice the pointer going past.
+        /// Tested with the Cyrillic group active (#132); the scene is stood
+        /// in for, beside these real clients (the #99 test).
+        #[test]
+        fn the_wheel_over_a_hosted_scene_is_not_the_scenes_while_locked() {
+            use crate::qml::hosted::PointerKind;
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let bar = stand_in(
+                &mut session.state,
+                "bar",
+                crate::scripted::Layer::Top,
+                Rectangle::new((0, 0).into(), (1920, 30).into()),
+                crate::scripted::Stand::solid(),
+            );
+            let wheels = |state: &Solium| {
+                scene_events(state, bar)
+                    .into_iter()
+                    .filter(|event| matches!(event.kind, PointerKind::Wheel { .. }))
+                    .count()
+            };
+            move_pointer(&mut session.state, (100.0, 15.0), 1);
+            let region = crate::monitor::union(&session.state.space).expect("a monitor");
+            crate::synth::send_axis(&mut session.state, region, (0.0, 120.0), 2);
+            assert_eq!(
+                wheels(&session.state),
+                1,
+                "the premise: unlocked, the wheel over the scene is the scene's"
+            );
+
+            let _lock = session.lock();
+            crate::synth::send_axis(&mut session.state, region, (0.0, 120.0), 3);
+            assert_eq!(
+                wheels(&session.state),
+                1,
+                "the scene heard the wheel behind the lock"
+            );
+        }
+
+        /// **The lock lets go of a hosted scene's press and its hover**:
+        /// behind the lock nothing of the session's may notice the pointer,
+        /// so a press a scene held (Ruling 7) is not still held when the
+        /// session unlocks: the scene is told the buttons went up, as a
+        /// release of no button with none held, which cancels the press
+        /// inside it rather than clicking it
+        /// (`qml::hosted::tests::a_press_let_go_of_unseen_is_cancelled_not_clicked`),
+        /// and that the pointer left. Tested
+        /// with the Cyrillic group active (#132); the scene is stood in for,
+        /// beside these real clients (the #99 test).
+        #[test]
+        fn the_lock_lets_go_of_a_hosted_scenes_press_and_its_hover() {
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let bar = stand_in(
+                &mut session.state,
+                "bar",
+                crate::scripted::Layer::Top,
+                Rectangle::new((0, 0).into(), (1920, 30).into()),
+                crate::scripted::Stand::solid(),
+            );
+            move_pointer(&mut session.state, (100.0, 15.0), 1);
+            let region = crate::monitor::union(&session.state.space).expect("a monitor");
+            crate::synth::send_button(
+                &mut session.state,
+                region,
+                0x110,
+                smithay::backend::input::ButtonState::Pressed,
+                2,
+            );
+            assert!(
+                session.state.scene_press.is_some(),
+                "the premise: the scene holds the press"
+            );
+
+            let _lock = session.lock();
+            let left = session
+                .state
+                .surfaces
+                .get(bar)
+                .and_then(crate::scripted::Surface::stand)
+                .map(|stand| stand.left);
+            let last = scene_events(&session.state, bar)
+                .last()
+                .map(|event| (event.kind, event.buttons));
+            assert_eq!(
+                (session.state.scene_press.is_none(), last, left),
+                (
+                    true,
+                    Some((crate::qml::hosted::PointerKind::Release(0), 0)),
+                    Some(1)
+                ),
+                "(the hold let go, the last the scene was told, which ends its press as Qt \
+                 ends one let go of unseen, how many times it heard the pointer leave)"
+            );
+        }
+
+        /// **A button let go of behind the lock is not held after it**: the
+        /// buttons held are counted whether or not the session is locked, so
+        /// a scene pressed after the unlock is told only what is held then;
+        /// and behind the lock the scene hears nothing of the release, the
+        /// motion and the right click there. Tested with the Cyrillic group
+        /// active (#132); the scene is stood in for, beside these real
+        /// clients (the #99 test).
+        #[test]
+        fn a_button_let_go_behind_the_lock_is_not_held_after_it() {
+            use crate::qml::hosted::PointerKind;
+            use smithay::backend::input::ButtonState;
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let bar = stand_in(
+                &mut session.state,
+                "bar",
+                crate::scripted::Layer::Top,
+                Rectangle::new((0, 0).into(), (1920, 30).into()),
+                crate::scripted::Stand::solid(),
+            );
+            move_pointer(&mut session.state, (100.0, 15.0), 1);
+            let region = crate::monitor::union(&session.state.space).expect("a monitor");
+            crate::synth::send_button(&mut session.state, region, 0x110, ButtonState::Pressed, 2);
+
+            let lock = session.lock();
+            let at_the_lock = scene_events(&session.state, bar).len();
+            crate::synth::send_button(&mut session.state, region, 0x110, ButtonState::Released, 3);
+            move_pointer(&mut session.state, (200.0, 15.0), 4);
+            crate::synth::send_button(&mut session.state, region, 0x111, ButtonState::Pressed, 5);
+            crate::synth::send_button(&mut session.state, region, 0x111, ButtonState::Released, 6);
+            let behind = scene_events(&session.state, bar).len() - at_the_lock;
+
+            lock.unlock_and_destroy();
+            session
+                .locker
+                .pump(&mut session.display, &mut session.state);
+            session.app.pump(&mut session.display, &mut session.state);
+            assert!(
+                session.state.lock.is_none(),
+                "the premise: the lock client unlocked and the session did too"
+            );
+            crate::synth::send_button(&mut session.state, region, 0x111, ButtonState::Pressed, 7);
+            let last = scene_events(&session.state, bar)
+                .last()
+                .map(|event| (event.kind, event.buttons));
+            assert_eq!(
+                (behind, last),
+                (0, Some((PointerKind::Press(0x2), 0x2))),
+                "(what the scene heard behind the lock, what it was told of the right press \
+                 after it, and the buttons held then)"
+            );
         }
 
         /// **Nothing captures the screen while the session is locked.**
@@ -20699,7 +21156,9 @@ end)
                     .map(|(surface, _)| surface.id().protocol_id())
             }
 
-            /// A script's interactive surface at `layer`, over `rect`.
+            /// A script's interactive surface at `layer`, over `rect`, its
+            /// scene stood in for by one that takes every press there: these
+            /// tests are about the order, not about what a scene claims.
             fn scripted(
                 desk: &mut Desk,
                 name: &str,
@@ -20713,16 +21172,23 @@ end)
                         layer,
                         crate::scripted::On::Rect(rect),
                     ));
-                desk.state
+                let id = desk
+                    .state
                     .surfaces
                     .named(name)
-                    .expect("the surface was declared")
+                    .expect("the surface was declared");
+                desk.state
+                    .surfaces
+                    .get_mut(id)
+                    .expect("live")
+                    .stand_in(crate::scripted::Stand::solid());
+                id
             }
 
             /// The script's surface a press at a point is offered to.
             fn claimed(desk: &Desk, x: f64, y: f64) -> Option<crate::scripted::SurfaceId> {
                 desk.state
-                    .surface_claiming(true, (x, y).into())
+                    .surface_claiming(true, (x, y).into(), crate::qml::hosted::Asking::Press)
                     .map(|(_, id, _)| id)
             }
 
@@ -20905,7 +21371,7 @@ end)
             /// offered to.
             fn claimed_below(desk: &Desk, x: f64, y: f64) -> Option<crate::scripted::SurfaceId> {
                 desk.state
-                    .surface_claiming(false, (x, y).into())
+                    .surface_claiming(false, (x, y).into(), crate::qml::hosted::Asking::Press)
                     .map(|(_, id, _)| id)
             }
 
@@ -21346,6 +21812,747 @@ end)
                     "(on the right monitor's bar strip: the bar offered the press, the surface \
                      the pointer reaches; on the left one's over its window: the bar offered \
                      the press, what the press is)"
+                );
+            }
+        }
+
+        /// The compositor's routing to hosted scenes, with a stand-in for each
+        /// scene: a real Wayland client and a Qt scene cannot share a test
+        /// (the #99 test).
+        mod hosted {
+            use super::*;
+            use crate::qml::hosted::PointerKind;
+            use crate::scripted::{Layer as Scripted, Stand};
+            use smithay::backend::input::{ButtonState, KeyState};
+
+            const SHIFT_L: u32 = 50;
+            const SUPER_L: u32 = 133;
+            const BTN_RIGHT: u32 = 0x111;
+
+            fn region(desk: &Desk) -> Rectangle<i32, Logical> {
+                crate::monitor::union(&desk.state.space).expect("a monitor")
+            }
+
+            fn bar() -> Rectangle<i32, Logical> {
+                Rectangle::new((0, 0).into(), (1920, 30).into())
+            }
+
+            /// A desk whose keyboard is `us,ru` with Russian active: every input
+            /// change is tested with the Cyrillic group active (#132).
+            fn russian_desk() -> Desk {
+                let mut desk = Desk::new();
+                russian(&mut desk.state);
+                desk
+            }
+
+            /// **A right press on a scene reaches it as the right button, with
+            /// shift held** (#163).
+            #[test]
+            fn a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held() {
+                let mut desk = russian_desk();
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                crate::input::key(&mut desk.state, SHIFT_L.into(), KeyState::Pressed, 2);
+                let region = region(&desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    BTN_RIGHT,
+                    ButtonState::Pressed,
+                    3,
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    BTN_RIGHT,
+                    ButtonState::Released,
+                    4,
+                );
+                let buttons: Vec<(PointerKind, u32, u32)> = scene_events(&desk.state, bar)
+                    .into_iter()
+                    .filter(|event| !matches!(event.kind, PointerKind::Motion))
+                    .map(|event| (event.kind, event.buttons, event.modifiers))
+                    .collect();
+                assert_eq!(
+                    buttons,
+                    vec![
+                        (PointerKind::Press(0x2), 0x2, crate::qml::keys::QT_SHIFT),
+                        (PointerKind::Release(0x2), 0, crate::qml::keys::QT_SHIFT),
+                    ],
+                    "(what, the buttons held after it, the modifiers)"
+                );
+            }
+
+            /// **A scene is told when each event happened, on the compositor's
+            /// clock**, which is what Qt counts a double-click and a
+            /// `TapHandler`'s taps by: a press a second after the motion
+            /// before it is told it came a second later.
+            #[test]
+            fn a_scene_is_told_when_each_event_happened_on_the_compositors_clock() {
+                let mut desk = russian_desk();
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                desk.state.clock.advance(Duration::from_secs(1));
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 2);
+                let now = u64::try_from(desk.state.clock.now().as_millis()).unwrap_or(u64::MAX);
+                let times: Vec<u64> = scene_events(&desk.state, bar)
+                    .iter()
+                    .map(|event| event.time)
+                    .collect();
+                assert!(
+                    matches!(
+                        (times.first(), times.last()),
+                        (Some(motion), Some(press)) if press.saturating_sub(*motion) >= 1000 && *press <= now
+                    ),
+                    "the times the scene was told, the last a press a second after the first: \
+                     {times:?}, now {now}"
+                );
+            }
+
+            #[test]
+            fn the_wheel_over_a_scene_reaches_it() {
+                let mut desk = russian_desk();
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 2);
+                assert!(
+                    scene_events(&desk.state, bar).iter().any(|event| event.kind
+                        == PointerKind::Wheel {
+                            angle: (0.0, -120.0),
+                            pixels: (0.0, 0.0),
+                        }),
+                    "a notch down is a negative angle in Qt's terms: {:?}",
+                    scene_events(&desk.state, bar)
+                );
+            }
+
+            /// **A touchpad scroll reaches a scene in pixels, and its end does
+            /// not** (Ruling 9): three units of two fingers moving are an
+            /// `angleDelta` of 24 and a `pixelDelta` of 3, both towards the
+            /// user; the fingers lifting move nothing, and a scene is not told
+            /// of that as a wheel turn, which its handlers would read as one
+            /// the other way.
+            #[test]
+            fn a_touchpad_scroll_reaches_a_scene_in_pixels_and_its_end_does_not() {
+                let mut desk = russian_desk();
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let region = region(&desk);
+                crate::synth::send_finger_scroll(&mut desk.state, region, (0.0, 3.0), 2);
+                crate::synth::send_finger_scroll(&mut desk.state, region, (0.0, 0.0), 3);
+                let wheels: Vec<PointerKind> = scene_events(&desk.state, bar)
+                    .into_iter()
+                    .map(|event| event.kind)
+                    .filter(|kind| matches!(kind, PointerKind::Wheel { .. }))
+                    .collect();
+                assert_eq!(
+                    wheels,
+                    vec![PointerKind::Wheel {
+                        angle: (0.0, -24.0),
+                        pixels: (0.0, -3.0),
+                    }],
+                    "the scroll, and nothing for the fingers lifting"
+                );
+            }
+
+            /// **`super` and the wheel stay the compositor's over a scene**: a
+            /// scrolling layout's viewport is not a shell's to take.
+            #[test]
+            fn super_and_the_wheel_stay_the_compositors_over_a_scene() {
+                let mut desk = russian_desk();
+                desk.install(r#"sol.on("scroll", function(dx, dy) sol.status("scrolled") end)"#);
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                crate::input::key(&mut desk.state, SUPER_L.into(), KeyState::Pressed, 2);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 3);
+                assert_eq!(desk.state.status, "scrolled");
+                assert!(
+                    !scene_events(&desk.state, bar)
+                        .iter()
+                        .any(|event| matches!(event.kind, PointerKind::Wheel { .. }))
+                );
+            }
+
+            /// A button over 600..664 x 500..540 of the screen, nothing elsewhere.
+            fn button_over_the_window(at: Point<f64, Logical>) -> crate::qml::hosted::Hit {
+                if (600.0..664.0).contains(&at.x) && (500.0..540.0).contains(&at.y) {
+                    crate::qml::hosted::Hit::Press
+                } else {
+                    crate::qml::hosted::Hit::Nothing
+                }
+            }
+
+            /// A panel over the window, rounded by 20 at its top-left corner.
+            fn rounded_over_the_window(at: Point<f64, Logical>) -> crate::qml::hosted::Hit {
+                let (dx, dy) = (20.0 - (at.x - 600.0), 20.0 - (at.y - 500.0));
+                let in_corner = dx > 0.0 && dy > 0.0 && dx * dx + dy * dy > 400.0;
+                if (600.0..664.0).contains(&at.x) && (500.0..564.0).contains(&at.y) && !in_corner {
+                    crate::qml::hosted::Hit::Press
+                } else {
+                    crate::qml::hosted::Hit::Nothing
+                }
+            }
+
+            fn hover_everywhere(_: Point<f64, Logical>) -> crate::qml::hosted::Hit {
+                crate::qml::hosted::Hit::Hover
+            }
+
+            fn screen_wide() -> Rectangle<i32, Logical> {
+                Rectangle::new((0, 0).into(), (1920, 1080).into())
+            }
+
+            /// A window at 600,500, and a full-screen scene over it.
+            fn window_under_a_scene(
+                hit: fn(Point<f64, Logical>) -> crate::qml::hosted::Hit,
+            ) -> (Desk, Opened, crate::scripted::SurfaceId) {
+                let mut desk = russian_desk();
+                let opened = desk.open_surface();
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(crate::pane::Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state.space.map_element(window, (600, 500), false);
+                desk.state.space.refresh();
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.pump();
+                let scene = stand_in(
+                    &mut desk.state,
+                    "shell",
+                    Scripted::Top,
+                    screen_wide(),
+                    Stand {
+                        hit,
+                        ..Stand::solid()
+                    },
+                );
+                (desk, opened, scene)
+            }
+
+            /// The surface the pointer is on, by its protocol id.
+            fn pointer_on(desk: &Desk) -> Option<u32> {
+                desk.state
+                    .surface_under(
+                        desk.state
+                            .seat
+                            .get_pointer()
+                            .map(|pointer| pointer.current_location())
+                            .unwrap_or_default(),
+                    )
+                    .map(|(surface, _)| surface.id().protocol_id())
+            }
+
+            fn window_id(opened: &Opened) -> u32 {
+                wayland_client::Proxy::id(&opened.surface).protocol_id()
+            }
+
+            fn presses(desk: &Desk, id: crate::scripted::SurfaceId) -> usize {
+                scene_events(&desk.state, id)
+                    .iter()
+                    .filter(|event| matches!(event.kind, PointerKind::Press(_)))
+                    .count()
+            }
+
+            fn click(desk: &mut Desk, at: (f64, f64), time: u64) {
+                move_pointer(&mut desk.state, at, time);
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Pressed,
+                    time + 1,
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    time + 2,
+                );
+            }
+
+            /// **#173: a press where the shell draws nothing reaches the
+            /// window under it.**
+            #[test]
+            fn a_press_where_the_shell_draws_nothing_reaches_the_window_under_it() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                click(&mut desk, (630.0, 555.0), 10);
+                assert_eq!(
+                    pointer_on(&desk),
+                    Some(window_id(&opened)),
+                    "the window does not have the pointer"
+                );
+                assert_eq!(
+                    presses(&desk, shell),
+                    0,
+                    "the shell took a press where it draws nothing"
+                );
+            }
+
+            /// **The wheel where the shell draws nothing is the window's**: the
+            /// scene is not told of it, and the window under it has the
+            /// pointer the wheel goes to.
+            #[test]
+            fn the_wheel_where_the_shell_draws_nothing_is_the_windows_under_it() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                move_pointer(&mut desk.state, (630.0, 555.0), 10);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 11);
+                let wheels = scene_events(&desk.state, shell)
+                    .iter()
+                    .filter(|event| matches!(event.kind, PointerKind::Wheel { .. }))
+                    .count();
+                assert_eq!(
+                    (wheels, pointer_on(&desk)),
+                    (0, Some(window_id(&opened))),
+                    "(the wheel turns the shell was told, the surface the pointer is on)"
+                );
+            }
+
+            /// **#173: a press on a shell button does not reach the window.**
+            #[test]
+            fn a_press_on_a_shell_button_does_not_reach_the_window() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                click(&mut desk, (630.0, 520.0), 10);
+                assert_eq!(
+                    pointer_on(&desk),
+                    None,
+                    "a window under a shell button has the pointer (Ruling 8)"
+                );
+                assert_eq!(presses(&desk, shell), 1);
+            }
+
+            /// **#173: a press on a rounded corner's transparent part falls
+            /// through.**
+            #[test]
+            fn a_press_on_a_rounded_corners_transparent_part_falls_through() {
+                let (mut desk, opened, shell) = window_under_a_scene(rounded_over_the_window);
+                click(&mut desk, (601.0, 501.0), 10);
+                assert_eq!(pointer_on(&desk), Some(window_id(&opened)));
+                assert_eq!(presses(&desk, shell), 0);
+                click(&mut desk, (630.0, 530.0), 20);
+                assert_eq!(
+                    presses(&desk, shell),
+                    1,
+                    "inside the rounded shape the press is the shell's"
+                );
+            }
+
+            /// **A hover strip hears the pointer and leaves the window its
+            /// press** (Ruling 8).
+            #[test]
+            fn a_hover_strip_hears_the_motion_and_leaves_the_window_its_press() {
+                let (mut desk, opened, shell) = window_under_a_scene(hover_everywhere);
+                click(&mut desk, (630.0, 530.0), 10);
+                assert!(
+                    scene_events(&desk.state, shell)
+                        .iter()
+                        .any(|event| event.kind == PointerKind::Motion),
+                    "the strip heard no motion"
+                );
+                assert_eq!(presses(&desk, shell), 0, "a hover strip took a press");
+                assert_eq!(pointer_on(&desk), Some(window_id(&opened)));
+            }
+
+            /// **A press a scene took holds the pointer until the buttons are
+            /// up** (Ruling 7): dragged off the button onto the window, the
+            /// pointer is still nobody else's, and the release reaches the
+            /// scene.
+            #[test]
+            fn a_release_after_dragging_off_a_shell_button_reaches_the_scene() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                move_pointer(&mut desk.state, (630.0, 555.0), 12);
+                assert_eq!(
+                    pointer_on(&desk),
+                    None,
+                    "the window under the drag has the pointer while the scene holds it"
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    13,
+                );
+                assert!(
+                    scene_events(&desk.state, shell)
+                        .iter()
+                        .any(|event| matches!(event.kind, PointerKind::Release(0x1))),
+                    "the release went elsewhere"
+                );
+                assert!(
+                    desk.state.scene_press.is_none(),
+                    "the hold outlived the buttons"
+                );
+            }
+
+            /// **Focus follows the pointer through a shell only where the
+            /// shell takes no press** (Ruling 8, as under a client's bar): on
+            /// a shell button over a window, and dragging off it, the pointer
+            /// is the shell's and the window under it does not take the
+            /// keyboard; off the button it does.
+            #[test]
+            fn focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let other = desk.open_surface();
+                let other_window = desk
+                    .state
+                    .panes
+                    .get(other.pane)
+                    .and_then(crate::pane::Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(other_window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                desk.state
+                    .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                desk.state.profile.focus_follows_mouse = true;
+
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let on_the_button = desk.focused();
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                move_pointer(&mut desk.state, (630.0, 555.0), 12);
+                let dragged_off = desk.focused();
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    13,
+                );
+                move_pointer(&mut desk.state, (630.0, 556.0), 14);
+                assert_eq!(
+                    (on_the_button, dragged_off, desk.focused()),
+                    (other.pane, other.pane, opened.pane),
+                    "(the window with the keyboard with the pointer on the shell button, \
+                     dragged off it onto the window, and moved on the window after the release)"
+                );
+            }
+
+            /// **A touch neither reaches nor focuses the window under a shell
+            /// button** (Ruling 8, as for the pointer): a scene takes no
+            /// touch, so a touch where the shell takes a press is nobody's,
+            /// and the window with the keyboard keeps it. Beside the button
+            /// the touch lands on the window under the shell and focuses it,
+            /// even while the shell holds a press of the mouse's, which is the
+            /// pointer's and not the touch's.
+            #[test]
+            fn a_touch_on_a_shell_button_neither_reaches_nor_focuses_the_window_under_it() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let other = desk.open_surface();
+                let other_window = desk
+                    .state
+                    .panes
+                    .get(other.pane)
+                    .and_then(crate::pane::Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(other_window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                desk.state
+                    .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                desk.state.profile.touch_to_focus = true;
+                let region = region(&desk);
+                let lands = |desk: &Desk, at: (f64, f64)| {
+                    desk.state
+                        .touch_under(at.into())
+                        .map(|(surface, _)| surface.id().protocol_id())
+                };
+
+                crate::synth::send_touch(&mut desk.state, region, (630.0, 520.0), 10);
+                let on_the_button = (lands(&desk, (630.0, 520.0)), desk.focused());
+                move_pointer(&mut desk.state, (630.0, 520.0), 20);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 21);
+                let beside_while_held = lands(&desk, (630.0, 555.0));
+                crate::synth::send_touch(&mut desk.state, region, (630.0, 555.0), 22);
+                assert_eq!(
+                    (on_the_button, beside_while_held, desk.focused()),
+                    ((None, other.pane), Some(window_id(&opened)), opened.pane),
+                    "((where a touch on the shell button lands, the window with the keyboard \
+                     after it), where one beside the button lands while the shell holds a mouse \
+                     press, the window with the keyboard after that touch)"
+                );
+            }
+
+            /// **A scene hears the pointer leave when it moves off its
+            /// items**, so what it hovered is hovered no longer.
+            #[test]
+            fn the_scene_hears_the_pointer_leave_when_it_moves_off_its_items() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                move_pointer(&mut desk.state, (630.0, 555.0), 11);
+                let left = desk
+                    .state
+                    .surfaces
+                    .get(shell)
+                    .and_then(crate::scripted::Surface::stand)
+                    .map(|stand| stand.left);
+                assert_eq!(left, Some(1));
+            }
+
+            /// **A window's frame is kept from the pointer only where a shell
+            /// takes a press over it, or holds one** (Ruling 8): on a shell
+            /// button over the window and while a press the shell took is
+            /// held, the frame under it is not what the pointer is on, as the
+            /// window is not; beside the button, or under a scene that takes
+            /// only hover, it is.
+            #[test]
+            fn the_frames_are_kept_from_the_pointer_only_where_a_shell_takes_a_press() {
+                let (mut desk, _, _) = window_under_a_scene(button_over_the_window);
+                let kept = |desk: &Desk, at: (f64, f64)| desk.state.frames_kept_from(at.into());
+                let on_the_button = kept(&desk, (630.0, 520.0));
+                let beside_it = kept(&desk, (630.0, 555.0));
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                let held = kept(&desk, (630.0, 555.0));
+                let (strip, _, _) = window_under_a_scene(hover_everywhere);
+                assert_eq!(
+                    (on_the_button, beside_it, held, kept(&strip, (630.0, 530.0))),
+                    (true, false, true, false),
+                    "(on a shell button over the window, beside it, beside it while the shell \
+                     holds a press, under a hover strip)"
+                );
+            }
+
+            /// **A frame the pointer hovered is told it left when the pointer
+            /// moves onto a shell button drawn over it**: the shell takes that
+            /// motion, and the frame under it still hears that it is no longer
+            /// what the pointer is on. A built frame needs Qt, which cannot
+            /// run beside this real client (the #99 test), so the frame's
+            /// hover is set by hand, as the pointer over its titlebar sets it.
+            #[test]
+            fn a_hovered_frame_hears_the_pointer_leave_onto_a_shell_button_over_it() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                move_pointer(&mut desk.state, (630.0, 555.0), 10);
+                desk.state.hovered_frame = Some(opened.pane);
+                move_pointer(&mut desk.state, (630.0, 520.0), 11);
+                assert_eq!(
+                    desk.state.hovered_frame, None,
+                    "the frame under the shell button is still hovered"
+                );
+            }
+
+            /// **A scene pressed under a pointer that has not moved still
+            /// hears it leave**: the scene came under a still pointer, took
+            /// the press, and was dragged off and let go of; the next motion
+            /// off it tells it.
+            #[test]
+            fn a_scene_pressed_under_a_still_pointer_hears_it_leave() {
+                let mut desk = russian_desk();
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 2);
+                move_pointer(&mut desk.state, (100.0, 500.0), 3);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Released, 4);
+                move_pointer(&mut desk.state, (100.0, 501.0), 5);
+                let left = desk
+                    .state
+                    .surfaces
+                    .get(bar)
+                    .and_then(crate::scripted::Surface::stand)
+                    .map(|stand| stand.left);
+                assert_eq!(
+                    (presses(&desk, bar), left),
+                    (1, Some(1)),
+                    "(the presses the scene took, how many times it heard the pointer leave)"
+                );
+            }
+
+            /// **A scene pressed over another one the pointer was hovering
+            /// takes the hover from it**: the hover strip under it hears the
+            /// pointer leave at the press, and the scene pressed hears it
+            /// leave when the pointer moves off after the release.
+            #[test]
+            fn a_scene_pressed_over_another_hovered_one_takes_the_hover() {
+                let mut desk = russian_desk();
+                let strip = stand_in(
+                    &mut desk.state,
+                    "strip",
+                    Scripted::Top,
+                    bar(),
+                    Stand {
+                        hit: hover_everywhere,
+                        ..Stand::solid()
+                    },
+                );
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let panel = stand_in(
+                    &mut desk.state,
+                    "panel",
+                    Scripted::Overlay,
+                    bar(),
+                    Stand::solid(),
+                );
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 2);
+                move_pointer(&mut desk.state, (100.0, 500.0), 3);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Released, 4);
+                move_pointer(&mut desk.state, (100.0, 501.0), 5);
+                let left = |id| {
+                    desk.state
+                        .surfaces
+                        .get(id)
+                        .and_then(crate::scripted::Surface::stand)
+                        .map(|stand| stand.left)
+                };
+                assert_eq!(
+                    (presses(&desk, panel), left(strip), left(panel)),
+                    (1, Some(1), Some(1)),
+                    "(the presses the panel took, the strip heard the pointer leave, the panel heard it leave)"
+                );
+            }
+
+            /// **The pointer keeps the shape of a press a scene holds**
+            /// (Ruling 8, #108): dragged off a shell button onto a window's
+            /// resize border, the press is still the scene's, so the pointer
+            /// does not offer a resize.
+            #[test]
+            fn a_press_a_scene_holds_keeps_its_shape_over_a_resize_border() {
+                let (mut desk, _, _) = window_under_a_scene(button_over_the_window);
+                let corner = Point::<f64, Logical>::from((663.0, 563.0));
+                assert!(
+                    desk.state.claim_under(corner).cursor().is_some(),
+                    "the premise: the window's corner offers a resize, got {:?}",
+                    desk.state.claim_under(corner)
+                );
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                move_pointer(&mut desk.state, (corner.x, corner.y), 12);
+                assert!(
+                    !desk.state.pointer.assert(None),
+                    "the pointer offered a resize for a press the scene holds"
+                );
+            }
+
+            /// A window at 600,500 under a shell with a button over it, and
+            /// another window, which has the keyboard; click-to-focus on and
+            /// focus-follows-mouse off, so only a press moves the keyboard.
+            fn the_keyboard_beside_a_shell_button()
+            -> (Desk, Opened, Opened, crate::scripted::SurfaceId) {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                let other = desk.open_surface();
+                let other_window = desk
+                    .state
+                    .panes
+                    .get(other.pane)
+                    .and_then(crate::pane::Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(other_window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                desk.state
+                    .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                desk.state.profile.click_to_focus = true;
+                desk.state.profile.focus_follows_mouse = false;
+                (desk, opened, other, shell)
+            }
+
+            /// **A button Qt has no name for, pressed on a shell button, is
+            /// swallowed** (Ruling 9): the scene is not told of it, and it
+            /// does not pass through the scene to the window under it, which
+            /// is neither focused nor sent it.
+            #[test]
+            fn a_button_qt_has_no_name_for_is_swallowed_where_a_shell_takes_a_press() {
+                let (mut desk, opened, other, shell) = the_keyboard_beside_a_shell_button();
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x100, ButtonState::Pressed, 11);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x100,
+                    ButtonState::Released,
+                    12,
+                );
+                assert_eq!(
+                    (desk.focused(), presses(&desk, shell), pointer_on(&desk)),
+                    (other.pane, 0, None),
+                    "(the window with the keyboard, the presses the scene was told, the surface \
+                     the pointer is on) after BTN_0 on a shell button over window {}",
+                    window_id(&opened)
+                );
+            }
+
+            /// **A button Qt has no name for, pressed while a scene holds a
+            /// press, is none of the compositor's** (Ruling 7): dragged off
+            /// the shell button onto the window, a side button there neither
+            /// focuses the window nor starts a drag of it; it goes on as it
+            /// is, as the pointer is nobody else's until every button is up.
+            #[test]
+            fn a_button_qt_has_no_name_for_during_a_scenes_press_is_not_the_compositors() {
+                let (mut desk, _, other, shell) = the_keyboard_beside_a_shell_button();
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                move_pointer(&mut desk.state, (630.0, 545.0), 12);
+                crate::synth::send_button(&mut desk.state, region, 0x120, ButtonState::Pressed, 13);
+                assert_eq!(
+                    (desk.focused(), presses(&desk, shell)),
+                    (other.pane, 1),
+                    "(the window with the keyboard, the presses the scene was told)"
+                );
+            }
+
+            /// **A grab smithay starts during a scene's press leaves the scene
+            /// its wheel and its release** (Ruling 7): a button Qt has no name
+            /// for, pressed during the hold, starts a click grab, and the
+            /// hold still has the pointer.
+            #[test]
+            fn a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                crate::synth::send_button(&mut desk.state, region, 0x120, ButtonState::Pressed, 12);
+                assert!(
+                    desk.state
+                        .seat
+                        .get_pointer()
+                        .is_some_and(|pointer| pointer.is_grabbed()),
+                    "the premise: smithay grabbed the pointer"
+                );
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 13);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    14,
+                );
+                let events = scene_events(&desk.state, shell);
+                assert_eq!(
+                    (
+                        events
+                            .iter()
+                            .any(|event| matches!(event.kind, PointerKind::Wheel { .. })),
+                        events
+                            .iter()
+                            .any(|event| matches!(event.kind, PointerKind::Release(0x1))),
+                        desk.state.scene_press.is_none(),
+                    ),
+                    (true, true, true),
+                    "(the scene heard the wheel, it heard the release, the hold let go)"
                 );
             }
         }

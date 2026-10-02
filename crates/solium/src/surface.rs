@@ -31,13 +31,14 @@ use smithay::{
             gles::GlesRenderer,
         },
     },
-    utils::{Logical, Rectangle, Transform},
+    utils::{Logical, Point, Rectangle, Transform},
 };
 
 use crate::{
     json::Json,
     qml::{
         self,
+        hosted::{Hit, ScenePointer},
         paint::{Gpu, Placement},
     },
     render::{Drawn, Element},
@@ -82,6 +83,19 @@ pub(crate) struct ShellSurface {
     monitor: Option<String>,
     newest: Option<SystemTime>,
     checked: Duration,
+    /// The last hit asked of the scene.
+    /// `tests::a_cached_hit_follows_the_scene_once_qt_has_run`.
+    hit_cache: std::cell::Cell<Option<CachedHit>>,
+}
+
+/// One hit the scene answered: the point in the scene's own coordinates, the
+/// generation it was asked at, and the answer.
+/// `tests::a_cached_hit_follows_the_scene_once_qt_has_run`.
+#[derive(Clone, Copy, Debug)]
+struct CachedHit {
+    at: (f64, f64),
+    generation: u64,
+    hit: Hit,
 }
 
 /// A hosted scene animates on a clock of its own and damages nothing the
@@ -150,30 +164,52 @@ impl ShellSurface {
             monitor: monitor.map(str::to_owned),
             newest,
             checked: Duration::ZERO,
+            hit_cache: std::cell::Cell::new(None),
         })
     }
 
-    /// Pointer input, in compositor coordinates.
-    ///
-    /// Everything reaches the scene. A shell surface that hides itself — a
-    /// dock against an edge, a panel that slides — has to watch the whole
-    /// screen to know when to appear, so filtering by what is currently drawn
-    /// would mean it could only be revealed by a pointer that was already
-    /// over it.
+    /// Deliver one pointer event, in compositor coordinates, to the scene
+    /// drawn across `area`. Whether the scene should have it is the caller's
+    /// question.
+    /// `scripted::tests::a_delivered_press_reaches_the_instance_in_its_own_coordinates`,
+    /// `qml::hosted::tests::a_right_press_reaches_a_mouse_area_as_the_right_button`.
     pub(crate) fn pointer(
         &mut self,
         area: Rectangle<i32, Logical>,
-        x: f64,
-        y: f64,
-        pressed: Option<bool>,
-    ) -> bool {
-        let surface = area.to_f64();
-        if !surface.contains((x, y)) {
-            return false;
+        location: Point<f64, Logical>,
+        event: &ScenePointer,
+    ) {
+        let local = location - area.loc.to_f64();
+        self.scene.pointer_event(local.x, local.y, event);
+    }
+
+    /// What the scene claims at a point in compositor coordinates. One item
+    /// walk per point until Qt next runs: the press, the pointer's shape and
+    /// the cursor's every-frame check all ask, and a still pointer is walked
+    /// once. `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`,
+    /// `tests::a_cached_hit_follows_the_scene_once_qt_has_run`.
+    pub(crate) fn hit(&self, area: Rectangle<i32, Logical>, location: Point<f64, Logical>) -> Hit {
+        let local = location - area.loc.to_f64();
+        let at = (local.x, local.y);
+        let generation = qml::hosted::generation();
+        if let Some(cached) = self.hit_cache.get()
+            && cached.at == at
+            && cached.generation == generation
+        {
+            return cached.hit;
         }
-        self.scene
-            .pointer(x - surface.loc.x, y - surface.loc.y, pressed);
-        true
+        let hit = self.scene.hit(local.x, local.y);
+        self.hit_cache.set(Some(CachedHit {
+            at,
+            generation,
+            hit,
+        }));
+        hit
+    }
+
+    /// The pointer left this scene. `qml::hosted::tests::a_left_scene_drops_its_hover`.
+    pub(crate) fn leave(&mut self) {
+        self.scene.leave();
     }
 
     /// Set a whole-number property on the scene.
@@ -258,6 +294,7 @@ impl ShellSurface {
         ) {
             Ok(scene) => {
                 self.scene = scene;
+                self.hit_cache.set(None);
                 self.backing = match self.backing {
                     Backing::Memory { .. } => Backing::Memory {
                         buffer: None,
@@ -489,7 +526,144 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::ShellSurface;
+    use crate::qml::hosted::{Hit, PointerKind, ScenePointer};
     use crate::qml::qt_test::on_the_qt_thread;
+
+    /// **A hit is cached only until Qt next runs**: asked again at the same
+    /// point, it is what the scene's items say now, after a property write
+    /// that moved the button away, after a press that hid it, and after an
+    /// edit that rebuilt the scene with the button elsewhere.
+    #[test]
+    fn a_cached_hit_follows_the_scene_once_qt_has_run() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-surface-cached-hit");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            let scene = |x: i32| {
+                format!(
+                    "import QtQuick\nItem {{\n    property int at: {x}\n    MouseArea {{ x: parent.at; width: 20; height: 20; onPressed: visible = false }}\n}}\n"
+                )
+            };
+            std::fs::write(&path, scene(0)).expect("writing the scene");
+            let mut surface =
+                ShellSurface::hosted(path.clone(), "{}", "cached-1").expect("the scene builds");
+            let area = smithay::utils::Rectangle::new((100, 0).into(), (400, 30).into());
+            let point = smithay::utils::Point::from((110.0, 10.0));
+            assert_eq!(surface.hit(area, point), Hit::Press, "the premise");
+
+            let at = |x: f64| [("at".to_owned(), crate::json::Json::Number(x))];
+            surface.set_properties("{}", &at(40.0));
+            assert_eq!(
+                surface.hit(area, point),
+                Hit::Nothing,
+                "a property write moved the button away, and the hit did not follow"
+            );
+            surface.set_properties("{}", &at(0.0));
+            assert_eq!(surface.hit(area, point), Hit::Press);
+            surface.pointer(
+                area,
+                point,
+                &ScenePointer {
+                    kind: PointerKind::Press(0x1),
+                    buttons: 0x1,
+                    modifiers: 0,
+                    time: 0,
+                },
+            );
+            assert_eq!(
+                surface.hit(area, point),
+                Hit::Nothing,
+                "a press hid the button, and the hit did not follow"
+            );
+
+            std::fs::write(&path, scene(0)).expect("writing the scene");
+            let mut rebuilt =
+                ShellSurface::hosted(path.clone(), "{}", "cached-2").expect("the scene builds");
+            assert_eq!(rebuilt.hit(area, point), Hit::Press, "the premise");
+            std::fs::write(&path, scene(40)).expect("editing the scene");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(SystemTime::now() + Duration::from_secs(60)))
+                .expect("dating the edit");
+            rebuilt.reload_if_changed(Duration::from_secs(60), (400, 30));
+            assert_eq!(
+                rebuilt.hit(area, point),
+                Hit::Nothing,
+                "the edit rebuilt the scene with the button elsewhere, and the hit did not follow"
+            );
+            drop(surface);
+            drop(rebuilt);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A cached hit follows what moves the scene's items without a write
+    /// from the compositor**: a monitor row published, which a binding in the
+    /// scene reads, and an `action` taken, whose clearing runs the scene's
+    /// own handler.
+    #[test]
+    fn a_cached_hit_follows_published_rows_and_a_taken_action() {
+        use crate::models::diff::{Row, diff, render};
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-surface-cached-rows");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    property string action: "go"
+                    MouseArea { x: Solium.monitor.present ? 40 : 0; width: 20; height: 20 }
+                    MouseArea { id: second; x: 100; width: 20; height: 20 }
+                    onActionChanged: if (action === "") second.x = 140
+                }
+                "#,
+            )
+            .expect("writing the scene");
+            let mut surface =
+                ShellSurface::hosted(path, "{}", "cached-rows-1").expect("the scene builds");
+            let area = smithay::utils::Rectangle::new((0, 0).into(), (400, 30).into());
+            let at = |x: f64| smithay::utils::Point::from((x, 10.0));
+            let first = surface.hit(area, at(10.0));
+
+            let row = Row {
+                key: "cached-rows-1".to_owned(),
+                values: std::collections::BTreeMap::from([(
+                    "name",
+                    crate::json::Json::Text("cached-rows-1".to_owned()),
+                )]),
+            };
+            assert!(crate::qml::hosted::apply_rows(
+                crate::qml::hosted::Model::Monitors,
+                &render(&diff(&[], &[row]))
+            ));
+            let published = surface.hit(area, at(10.0));
+            let second = surface.hit(area, at(110.0));
+            let taken = surface.taken_action();
+            let after_the_action = surface.hit(area, at(110.0));
+            drop(surface);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (first, published, second, taken.as_deref(), after_the_action),
+                (
+                    Hit::Press,
+                    Hit::Nothing,
+                    Hit::Press,
+                    Some("go"),
+                    Hit::Nothing
+                ),
+                "(the first button, there again once its monitor was published, the second, \
+                 the action taken, the second's place after that)"
+            );
+        });
+    }
 
     /// **A scene rebuilt for an edit stays on its monitor**: the reload builds
     /// it hosted on the same monitor it was first built for.

@@ -400,6 +400,33 @@ const char *solium_qml_scene_string_at(const SoliumQmlScene *scene, const char *
 /* Pointer input, in scene coordinates. `pressed`: 1 down, 0 up, -1 motion. */
 void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pressed);
 
+/* Pointer input, in scene coordinates, with everything a scene can be told.
+ * `kind`: 0 motion, 1 press, 2 release, 3 wheel. `button` is the Qt button a
+ * press or release is of; `buttons` the Qt buttons held after it;
+ * `modifiers` Qt's keyboard modifiers; `time` when it happened, in
+ * milliseconds on the compositor's clock. A press that doubles the one before
+ * it, by Qt's rule, is followed by a double-click. The wheel's deltas are
+ * Qt's `angleDelta` (eighths of a degree, 120 a notch, positive away from the
+ * user) and `pixelDelta`.
+ * `qml::hosted::tests::a_right_press_reaches_a_mouse_area_as_the_right_button`,
+ * `qml::hosted::tests::the_wheel_reaches_a_wheel_handler_with_its_angle`,
+ * `qml::hosted::tests::a_double_press_on_a_mouse_area_is_one_double_click`,
+ * `qml::hosted::tests::a_tap_handler_counts_taps_by_when_they_happened`. */
+void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, double x, double y,
+                                    unsigned button, unsigned buttons, unsigned modifiers,
+                                    unsigned long long time, double angle_x, double angle_y,
+                                    double pixel_x, double pixel_y);
+
+/* What the scene's items, and its open popups, claim at a point in scene
+ * coordinates: 0 nothing, 1 hover, 2 a press.
+ * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`,
+ * `qml::hosted::tests::an_open_controls_popup_claims_its_press`. */
+int solium_qml_scene_hit(const SoliumQmlScene *scene, double x, double y);
+
+/* The pointer has left the scene: whatever it hovered is hovered no longer.
+ * `qml::hosted::tests::a_left_scene_drops_its_hover`. */
+void solium_qml_scene_pointer_leave(SoliumQmlScene *scene);
+
 /* The models hosted scenes read, by number.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 #define SOLIUM_QML_ROWS_MONITORS 0

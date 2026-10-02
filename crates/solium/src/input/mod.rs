@@ -36,6 +36,7 @@ use smithay::{
 use crate::{
     decoration::Decoration,
     pane::Pane,
+    qml::hosted::{PointerKind, ScenePointer},
     script,
     state::{Chrome, Request, Solium},
 };
@@ -444,13 +445,18 @@ fn pointer_motion<B: InputBackend>(
     // it going past.
     if state.lock.is_none() {
         // Scripted surfaces above the windows see the pointer first, so a
-        // button on a bar lights up on hover. Then frames, then the ones
-        // below.
-        if !state.surface_pointer(true, location, None) {
-            hover_frame(state, location);
-            state.surface_pointer(false, location, None);
+        // button on a bar lights up on hover. Then frames, every time, so one
+        // a shell's button came over hears the pointer leave it
+        // (`state::tests::real_client::reflow_on_close::hosted::a_hovered_frame_hears_the_pointer_leave_onto_a_shell_button_over_it`).
+        // Then the ones below, if none above took it.
+        let motion = scene_event(state, PointerKind::Motion);
+        let above = state.surface_pointer(true, location, Some(motion));
+        hover_frame(state, location);
+        if !above {
+            state.surface_pointer(false, location, Some(motion));
         }
         follow_pointer(state, location, pointer.is_grabbed());
+        state.finish_scene_motion();
     }
 
     let under = state.surface_under(location);
@@ -527,11 +533,14 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
         // existed only on the nested path would be a lock screen that leaked
         // on the hardware and nowhere else.
         if state.lock.is_none() {
-            if !state.surface_pointer(true, location, None) {
-                hover_frame(state, location);
-                state.surface_pointer(false, location, None);
+            let motion = scene_event(state, PointerKind::Motion);
+            let above = state.surface_pointer(true, location, Some(motion));
+            hover_frame(state, location);
+            if !above {
+                state.surface_pointer(false, location, Some(motion));
             }
             follow_pointer(state, location, pointer.is_grabbed());
+            state.finish_scene_motion();
         }
         pointer.motion(
             state,
@@ -738,6 +747,23 @@ fn release_cursor(state: &mut Solium, unclaimed: bool, grabbed: bool) {
     state.pointer.show(CursorImageStatus::default_named());
 }
 
+/// A pointer event as a scene is told it: the Qt buttons held now, the
+/// keyboard's modifiers, and the time on the compositor's clock, which every
+/// backend and every event the compositor makes up itself share.
+/// `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`,
+/// `state::tests::real_client::reflow_on_close::hosted::a_scene_is_told_when_each_event_happened_on_the_compositors_clock`.
+pub(crate) fn scene_event(state: &Solium, kind: PointerKind) -> ScenePointer {
+    let modifiers = state.seat.get_keyboard().map_or(0, |keyboard| {
+        crate::qml::keys::qt_modifiers(&keyboard.modifier_state())
+    });
+    ScenePointer {
+        kind,
+        buttons: state.pointer_buttons,
+        modifiers,
+        time: u64::try_from(state.clock.now().as_millis()).unwrap_or(u64::MAX),
+    }
+}
+
 /// Focus whatever the pointer is over, if the profile says so.
 ///
 /// Skipped while a grab is running: a window being dragged is under the
@@ -746,12 +772,15 @@ fn release_cursor(state: &mut Solium, unclaimed: bool, grabbed: bool) {
 ///
 /// And over a client's layer surface on top of a window, which is what the
 /// pointer is on there, as it is for a press (`pointer_button`'s
-/// `on_a_client`). `focus_follows_mouse_does_not_reach_through_a_bar`.
+/// `on_a_client`), and over a hosted scene where it takes a press, or while
+/// it holds one (Rulings 7 and 8). `focus_follows_mouse_does_not_reach_through_a_bar`,
+/// `state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`.
 pub(crate) fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
     if !state.profile.focus_follows_mouse
         || grabbed
         || state.script_grab
-        || state.client_above(location)
+        || state.scene_press.is_some()
+        || state.pointed_above(location)
     {
         return;
     }
@@ -766,16 +795,17 @@ pub(crate) fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, 
 
 /// Let a window frame see the pointer, so its buttons light up on hover.
 ///
-/// The callers offer the pointer to a script's surfaces above the windows
-/// first. A client's layer surface on top here is asked through
-/// `client_above`, the predicate `follow_pointer` asks and
-/// `focus_follows_mouse_does_not_reach_through_a_bar` drives: under one, no
-/// frame is hovered. A built frame needs Qt, which this binary's tests cannot
-/// start, so this call itself is not driven by a test.
+/// Called on every motion while the session is unlocked, after a script's
+/// surfaces above the windows were offered it, whether or not one took it.
+/// Where `Solium::frames_kept_from` says the pointer is on something over the
+/// windows, or a scene holds a press, no frame is hovered, and the one that
+/// was is told it left
+/// (`state::tests::real_client::reflow_on_close::hosted::a_hovered_frame_hears_the_pointer_leave_onto_a_shell_button_over_it`,
+/// `state::tests::real_client::reflow_on_close::hosted::the_frames_are_kept_from_the_pointer_only_where_a_shell_takes_a_press`).
 fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
     // The whole window, not just the frame band: a decoration that reacts to
     // the cursor wants to know where it is while it crosses the client too.
-    let under = if state.client_above(location) {
+    let under = if state.frames_kept_from(location) {
         None
     } else {
         state.decorated_under(location)
@@ -809,6 +839,28 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     let button = event.button_code();
     let button_state = event.state();
     let location = pointer.current_location();
+    // The buttons held, before the lock's check, so they are right after it.
+    // `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`,
+    // `state::tests::real_client::lock_focus::a_button_let_go_behind_the_lock_is_not_held_after_it`.
+    let pressed = button_state == ButtonState::Pressed;
+    let qt = crate::qml::keys::qt_button(button);
+    if let Some(bit) = qt {
+        if pressed {
+            state.pointer_buttons |= bit;
+        } else {
+            state.pointer_buttons &= !bit;
+        }
+    }
+    let scene = qt.map(|bit| {
+        scene_event(
+            state,
+            if pressed {
+                PointerKind::Press(bit)
+            } else {
+                PointerKind::Release(bit)
+            },
+        )
+    });
 
     // Locked: the press is the lock screen's, and the compositor does not get
     // to interpret it. Everything between here and the plain forward below is
@@ -826,18 +878,26 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // lock guard covers the border too, which makes this the second of two
     // rather than the only one -- and it stays, because everything below it is
     // an interpretation and not all of it goes through `chrome_under`.
+    let forward = ButtonEvent {
+        button,
+        state: button_state,
+        serial,
+        time: event.time_msec(),
+    };
     if state.lock.is_some() {
-        pointer.button(
-            state,
-            &ButtonEvent {
-                button,
-                state: button_state,
-                serial,
-                time: event.time_msec(),
-            },
-        );
-        pointer.frame(state);
-        state.redraw = true;
+        forward_button(state, &pointer, &forward);
+        return;
+    }
+
+    // A button Qt has no name for, while a scene holds a press, is none of
+    // the compositor's to interpret either: the pointer is the scene's until
+    // every button is up (Ruling 7), and no scene is told of such a button
+    // (Ruling 9), so it goes on to smithay as it is, as it does behind the
+    // lock.
+    // `state::tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_during_a_scenes_press_is_not_the_compositors`,
+    // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
+    if scene.is_none() && state.scene_press.is_some() {
+        forward_button(state, &pointer, &forward);
         return;
     }
 
@@ -856,9 +916,14 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // top there -- not under a client's surface, nor under a fullscreen
     // window, in `crate::stack`'s order -- and only when nothing is being
     // dragged. A bar, a panel, an overlay: all the same path, and the
-    // compositor knows what none of them are for.
-    if !pointer.is_grabbed()
-        && state.surface_pointer(true, location, Some(button_state == ButtonState::Pressed))
+    // compositor knows what none of them are for. A press a scene holds goes
+    // first, even through a grab smithay started during it (Ruling 7):
+    // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
+    // A button Qt has no name for is swallowed where a scene takes a press,
+    // and the scene is not told of it:
+    // `state::tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_is_swallowed_where_a_shell_takes_a_press`.
+    if (state.scene_press.is_some() || !pointer.is_grabbed())
+        && state.surface_pointer(true, location, scene)
     {
         return;
     }
@@ -1088,33 +1153,27 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // Scripted surfaces *below* the windows, which is where a dock or a
     // desktop menu lives: they get the press only because nothing above
     // wanted it.
-    if !pointer.is_grabbed()
-        && !on_a_client
-        && state.surface_pointer(false, location, Some(button_state == ButtonState::Pressed))
-    {
+    if !pointer.is_grabbed() && !on_a_client && state.surface_pointer(false, location, scene) {
         return;
     }
 
-    pointer.button(
-        state,
-        &ButtonEvent {
-            button,
-            state: button_state,
-            serial,
-            time: event.time_msec(),
-        },
-    );
-    pointer.frame(state);
-    // The compositor draws the cursor, so the cursor moving is the screen
-    // changing. Without this the pointer only moved when something else
-    // happened to want a frame -- which on a still screen is never.
-    state.redraw = true;
+    forward_button(state, &pointer, &forward);
 
     // Outside the grab now: the pointer's lock is released, so a script may
     // ask where the pointer is without stopping the compositor.
     if let Some((window, x, y)) = state.pending_drop.take() {
         state.trigger_drop(&window, x, y);
     }
+}
+
+/// A button, on to whoever has the pointer, as it is.
+fn forward_button(state: &mut Solium, pointer: &PointerHandle<Solium>, event: &ButtonEvent) {
+    pointer.button(state, event);
+    pointer.frame(state);
+    // The compositor draws the cursor, so the cursor moving is the screen
+    // changing. Without this the pointer only moved when something else
+    // happened to want a frame -- which on a still screen is never.
+    state.redraw = true;
 }
 
 fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEvent<B>) {
@@ -1154,6 +1213,49 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
     } else {
         1.0
     };
+
+    // Over a scene, the wheel is the scene's, in Qt's terms (Ruling 9): a
+    // notch away from the user is +120, which Wayland calls -1.
+    // `state::tests::real_client::reflow_on_close::hosted::the_wheel_over_a_scene_reaches_it`.
+    let location = pointer.current_location();
+    let continuous = matches!(event.source(), AxisSource::Finger | AxisSource::Continuous);
+    let angle = |axis| {
+        -event
+            .amount_v120(axis)
+            .unwrap_or_else(|| event.amount(axis).unwrap_or_default() * 8.0)
+            * direction
+    };
+    let pixels = |axis| {
+        if continuous {
+            -event.amount(axis).unwrap_or_default() * direction
+        } else {
+            0.0
+        }
+    };
+    let (angle, pixels) = (
+        (angle(Axis::Horizontal), angle(Axis::Vertical)),
+        (pixels(Axis::Horizontal), pixels(Axis::Vertical)),
+    );
+    // A touchpad's scroll ends, as the fingers lift, with one that moves
+    // nothing. That is no wheel turn to a scene, whose handlers would read
+    // it as one the other way, so no scene is told of it.
+    // `state::tests::real_client::reflow_on_close::hosted::a_touchpad_scroll_reaches_a_scene_in_pixels_and_its_end_does_not`.
+    let moves = [angle.0, angle.1, pixels.0, pixels.1]
+        .iter()
+        .any(|delta| *delta != 0.0);
+    let wheel = scene_event(state, PointerKind::Wheel { angle, pixels });
+    // A press a scene holds has the wheel too, through a grab smithay started
+    // during it, as `pointer_button` gives it the buttons:
+    // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
+    if moves
+        && (state.scene_press.is_some() || !pointer.is_grabbed())
+        && (state.surface_pointer(true, location, Some(wheel))
+            || (pointer.current_focus().is_none()
+                && state.surface_pointer(false, location, Some(wheel))))
+    {
+        return;
+    }
+
     let mut frame = AxisFrame::new(event.time_msec()).source(AxisSource::Wheel);
 
     for axis in [Axis::Horizontal, Axis::Vertical] {
@@ -1191,11 +1293,15 @@ fn touch_down<B: InputBackend>(
         return;
     };
     let location = absolute_location(region, &event);
-    let under = state.surface_under(location);
+    let under = state.touch_under(location);
     let serial = SERIAL_COUNTER.next_serial();
 
+    // Not the window under something over the windows: a client's layer
+    // surface, or a shell where it takes a press, which the touch did not
+    // reach either (`Solium::touch_under`).
+    // `state::tests::real_client::reflow_on_close::hosted::a_touch_on_a_shell_button_neither_reaches_nor_focuses_the_window_under_it`.
     if state.profile.touch_to_focus
-        && !state.client_above(location)
+        && !state.pointed_above(location)
         && let Some((window, _)) = state.window_under(location)
     {
         state.focus_window(&window, serial);
@@ -1222,7 +1328,7 @@ fn touch_motion<B: InputBackend>(
         return;
     };
     let location = absolute_location(region, &event);
-    let under = state.surface_under(location);
+    let under = state.touch_under(location);
 
     touch.motion(
         state,

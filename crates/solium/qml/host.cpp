@@ -76,9 +76,11 @@
 #include <QtCore/QUrl>
 #include <QtCore/QVariant>
 #include <QtGui/QGuiApplication>
+#include <QtGui/QStyleHints>
 #include <QtGui/QImage>
 #include <QtCore/QString>
 #include <QtGui/QMouseEvent>
+#include <QtGui/QWheelEvent>
 #include <QtGui/QOpenGLContext>
 #include <QtGui/QOpenGLFunctions>
 #include <QtGui/QSurface>
@@ -325,6 +327,14 @@ struct SoliumQmlScene
     bool dirty = true;
     /* Backing store for the last value handed out by take_string. */
     QByteArray taken;
+    /* The last press, as Qt keeps it to make a double-click of the next one:
+     * its button (none once it has made one), its time on the compositor's
+     * clock, and where it was, in scene coordinates. See
+     * solium_qml_scene_pointer_event.
+     * `qml::hosted::tests::a_double_press_on_a_mouse_area_is_one_double_click`. */
+    Qt::MouseButton press_button = Qt::NoButton;
+    unsigned long long press_time = 0;
+    QPointF press_at;
 
     /* GPU scenes only. `image` is null on those and `texture` is zero on
      * software ones, so either could stand in for this flag — but "which path
@@ -691,6 +701,17 @@ static bool write_property_path(QObject *object, const QString &path, const QVar
  * for the caller to free — the caller allocated it and knows what else it has
  * attached by now, which is not a decision to make from in here.
  */
+/* The scene's window, and its content item with it: a window that is never
+ * shown gets no resize event, so Qt leaves the content item at 0x0, and the
+ * Qt Quick Controls overlay, which takes the content item's size and centres
+ * itself on the window, lays every popup out against a point in the middle
+ * of the scene. `qml::hosted::tests::a_controls_popup_is_laid_out_against_the_whole_scene`. */
+static void size_window(SoliumQmlScene *scene, int width, int height)
+{
+    scene->window->setGeometry(0, 0, width, height);
+    scene->window->contentItem()->setSize(QSizeF(width, height));
+}
+
 static bool load_component(SoliumQmlScene *scene, const char *qml_path,
                            const char *initial_json, const char **error)
 {
@@ -840,7 +861,7 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
     // Transparent, because the scene is composited over the desktop rather
     // than being a window in its own right.
     scene->window->setColor(Qt::transparent);
-    scene->window->setGeometry(0, 0, scene->width, scene->height);
+    size_window(scene, scene->width, scene->height);
 
     // initialize() is not called at all. It sets up RHI resources, returns
     // false under the software adaptation, and — worse — makes a GL context
@@ -1295,7 +1316,7 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int wi
     scene->control = new QQuickRenderControl();
     scene->window = new QQuickWindow(scene->control);
     scene->window->setColor(Qt::transparent);
-    scene->window->setGeometry(0, 0, scene->width, scene->height);
+    size_window(scene, scene->width, scene->height);
 
     // The RHI path *requires* initialize(); the software path forbids it. This
     // is the one line where the two genuinely diverge, and it also has the side
@@ -1526,7 +1547,7 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
         scene->scale = scale;
         const int logical_width = qMax(1, qRound(width / scale));
         const int logical_height = qMax(1, qRound(height / scale));
-        scene->window->setGeometry(0, 0, logical_width, logical_height);
+        size_window(scene, logical_width, logical_height);
         if (scene->root != nullptr) {
             scene->root->setWidth(logical_width);
             scene->root->setHeight(logical_height);
@@ -1561,7 +1582,7 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
     // real pixels as that monitor has.
     const int logical_width = qMax(1, qRound(width / scale));
     const int logical_height = qMax(1, qRound(height / scale));
-    scene->window->setGeometry(0, 0, logical_width, logical_height);
+    size_window(scene, logical_width, logical_height);
     if (scene->root != nullptr) {
         scene->root->setWidth(logical_width);
         scene->root->setHeight(logical_height);
@@ -1698,7 +1719,7 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
     // comment there for why it is that way round.
     const int logical_width = qMax(1, qRound(width / scale));
     const int logical_height = qMax(1, qRound(height / scale));
-    scene->window->setGeometry(0, 0, logical_width, logical_height);
+    size_window(scene, logical_width, logical_height);
     if (scene->root != nullptr) {
         scene->root->setWidth(logical_width);
         scene->root->setHeight(logical_height);
@@ -2541,4 +2562,162 @@ extern "C" void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double
 
     QMouseEvent event(type, at, at, button, buttons, Qt::NoModifier);
     QCoreApplication::sendEvent(scene->window, &event);
+}
+
+extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, double x, double y,
+                                               unsigned button, unsigned buttons,
+                                               unsigned modifiers, unsigned long long time,
+                                               double angle_x, double angle_y, double pixel_x,
+                                               double pixel_y)
+{
+    if (scene == nullptr || scene->window == nullptr) {
+        return;
+    }
+    const QPointF at(x, y);
+    const auto held = Qt::MouseButtons::fromInt(static_cast<int>(buttons));
+    const auto mods = Qt::KeyboardModifiers::fromInt(static_cast<int>(modifiers));
+    // Every event carries its time: a TapHandler counts taps, and Qt Quick
+    // measures velocity, by the event's timestamp.
+    // `qml::hosted::tests::a_tap_handler_counts_taps_by_when_they_happened`.
+    if (kind == 3) {
+        QWheelEvent event(at, at, QPoint(qRound(pixel_x), qRound(pixel_y)),
+                          QPoint(qRound(angle_x), qRound(angle_y)), held, mods, Qt::NoScrollPhase,
+                          false);
+        event.setTimestamp(time);
+        QCoreApplication::sendEvent(scene->window, &event);
+        return;
+    }
+    const QEvent::Type type = kind == 1   ? QEvent::MouseButtonPress
+                              : kind == 2 ? QEvent::MouseButtonRelease
+                                          : QEvent::MouseMove;
+    const auto which =
+        (kind == 1 || kind == 2) ? static_cast<Qt::MouseButton>(button) : Qt::NoButton;
+
+    // The double-click is made here, by the rule
+    // QGuiApplicationPrivate::processMouseEvent applies (Qt 6.11,
+    // qguiapplication.cpp:2407-2427 and 2533-2542): a press is a double-click
+    // when it is of the button the last press was of, sooner than
+    // mouseDoubleClickInterval after it; the pointer straying further than
+    // mouseDoubleClickDistance, on either axis, from where that press was
+    // undoes it, and so does a double-click being made. The double-click
+    // event follows the press, as Qt sends it. That function is not reached
+    // by an event sent straight to the window, and is not used for this:
+    // routing through QWindowSystemInterface would hand every mouse event
+    // that is not synthetic to whatever cursor the platform has
+    // (qguiapplication.cpp:2451-2466), and it keeps the pointer's position,
+    // the last press's button and time and the window a press holds
+    // process-wide (:2408, :2416-2426, :2430-2446), state the frames'
+    // scenes, which still send straight to their windows, would share. So
+    // the rule is kept per scene.
+    // `qml::hosted::tests::a_double_press_on_a_mouse_area_is_one_double_click`,
+    // `qml::hosted::tests::two_presses_further_apart_than_the_interval_are_two_single_clicks`.
+    const QStyleHints *hints = QGuiApplication::styleHints();
+    const qreal distance = hints->mouseDoubleClickDistance();
+    if (qAbs(at.x() - scene->press_at.x()) > distance
+        || qAbs(at.y() - scene->press_at.y()) > distance) {
+        scene->press_button = Qt::NoButton;
+    }
+    bool twice = false;
+    if (kind == 1) {
+        const auto interval = static_cast<unsigned long long>(hints->mouseDoubleClickInterval());
+        twice = which == scene->press_button && time > scene->press_time
+                && time - scene->press_time < interval;
+        scene->press_button = which;
+        scene->press_time = time;
+        scene->press_at = at;
+    }
+
+    QMouseEvent event(type, at, at, which, held, mods);
+    event.setTimestamp(time);
+    // A release of no button with none held is the compositor saying the
+    // buttons went up where the scene could not see. It is not sent: a Qt
+    // Quick Controls button takes any release its grab gets as its own, and
+    // would be clicked. The press's grabs are cancelled instead, below.
+    // `qml::hosted::tests::a_press_let_go_of_unseen_is_cancelled_not_clicked`.
+    const bool unseen = kind == 2 && which == Qt::NoButton && held == Qt::NoButton;
+    if (!unseen) {
+        QCoreApplication::sendEvent(scene->window, &event);
+    }
+    // A release that leaves no button held takes the press's grabs off
+    // whatever holds them, as processMouseEvent does after every such release
+    // (qguiapplication.cpp:2543-2549). After the last button's own release Qt
+    // Quick has already done it. After a release unseen it is what ends the
+    // press: a handler holding it is told its grab was cancelled, as Qt tells
+    // one whose grab is taken from it, so a TapHandler is no longer pressed
+    // and taps nothing; and an item holding it hears its grab go, so a pressed
+    // MouseArea or Button is canceled, not clicked.
+    // `qml::hosted::tests::a_press_let_go_of_unseen_is_cancelled_not_clicked`.
+    if (kind == 2 && held == Qt::NoButton) {
+        QEventPoint &point = event.point(0);
+        if (unseen) {
+            const QPointingDevice *device = event.pointingDevice();
+            for (const QPointer<QObject> &grabber : event.passiveGrabbers(point)) {
+                if (grabber != nullptr) {
+                    emit device->grabChanged(grabber, QPointingDevice::CancelGrabPassive, &event,
+                                             point);
+                }
+            }
+            QObject *exclusive = event.exclusiveGrabber(point);
+            if (exclusive != nullptr && !exclusive->isQuickItemType()) {
+                emit device->grabChanged(exclusive, QPointingDevice::CancelGrabExclusive, &event,
+                                         point);
+            }
+        }
+        event.setExclusiveGrabber(point, nullptr);
+        event.clearPassiveGrabbers(point);
+    }
+    if (twice && scene->window != nullptr) {
+        scene->press_button = Qt::NoButton;
+        QMouseEvent again(QEvent::MouseButtonDblClick, at, at, which, held, mods);
+        again.setTimestamp(time);
+        QCoreApplication::sendEvent(scene->window, &again);
+    }
+}
+
+extern "C" int solium_qml_scene_hit(const SoliumQmlScene *scene, double x, double y)
+{
+    if (scene == nullptr || scene->root == nullptr) {
+        return 0;
+    }
+    const QPointF at(x, y);
+    int claim = solium_claim_at(scene->root, at);
+    if (scene->window == nullptr) {
+        return claim;
+    }
+    // A Qt Quick Controls popup (a Popup, a Menu, a ComboBox's list) is drawn
+    // in the window's overlay, beside the root rather than under it. The
+    // overlay itself takes every button, to close popups on a press outside
+    // them, so only what is in it is asked: its popups, a modal popup's dim,
+    // which covers the scene and so takes every point of it while the popup
+    // is open, and anything a scene put there.
+    // `qml::hosted::tests::an_open_controls_popup_claims_its_press`,
+    // `qml::hosted::tests::a_modal_popup_takes_every_point_of_its_scene_while_it_is_open`.
+    for (QQuickItem *beside : scene->window->contentItem()->childItems()) {
+        if (claim == 2) {
+            break;
+        }
+        if (beside == scene->root) {
+            continue;
+        }
+        if (!beside->inherits("QQuickOverlay")) {
+            claim = std::max(claim, solium_claim_at(beside, at));
+            continue;
+        }
+        for (QQuickItem *popup : beside->childItems()) {
+            if (claim == 2) {
+                break;
+            }
+            claim = std::max(claim, solium_claim_at(popup, at));
+        }
+    }
+    return claim;
+}
+
+extern "C" void solium_qml_scene_pointer_leave(SoliumQmlScene *scene)
+{
+    if (scene == nullptr || scene->window == nullptr) {
+        return;
+    }
+    QEvent leave(QEvent::Leave);
+    QCoreApplication::sendEvent(scene->window, &leave);
 }
