@@ -165,7 +165,7 @@ struct SignalPeek : QObject {
  * button (QQuickTextPrivate::init) and lets a press go unless linkActivated
  * has a receiver and a link is under it (QQuickText::mousePressEvent,
  * qquicktext.cpp:2975-2979, asks isLinkActivatedConnected, then the
- * anchorAt that linkAt asks too, :3082), so a Text takes a press there and
+ * anchorAt that linkAt asks too, :3268), so a Text takes a press there and
  * nowhere else.
  * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
 bool on_a_link(QQuickItem *item, const QPointF &local)

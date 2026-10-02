@@ -534,8 +534,10 @@ pub(crate) mod tests {
     /// **A press let go of where the scene could not see is cancelled, not
     /// clicked**: told of a release of no button with none held, as the
     /// session locking tells it, whatever took the press, a `MouseArea`, a
-    /// Qt Quick Controls `Button` or a `TapHandler`, is no longer pressed and
-    /// hears `canceled`, and none of them is clicked.
+    /// Qt Quick Controls `Button` or a `TapHandler`, one that grabs the
+    /// press only passively and one that grabs it for itself
+    /// (`TapHandler.WithinBounds`), is no longer pressed and hears
+    /// `canceled`, and none of them is clicked.
     #[test]
     fn a_press_let_go_of_unseen_is_cancelled_not_clicked() {
         on_the_qt_thread(|| {
@@ -546,8 +548,8 @@ pub(crate) mod tests {
                 import QtQuick.Controls
                 Item {
                     id: root
-                    readonly property int down:
-                        (area.pressed ? 1 : 0) | (button.pressed ? 2 : 0) | (tap.pressed ? 4 : 0)
+                    readonly property int down: (area.pressed ? 1 : 0) | (button.pressed ? 2 : 0)
+                        | (tap.pressed ? 4 : 0) | (within.pressed ? 8 : 0)
                     property int clicked: 0
                     property int canceled: 0
                     MouseArea {
@@ -563,18 +565,32 @@ pub(crate) mod tests {
                         onCanceled: root.canceled |= 2
                     }
                     Item {
-                        x: 44; width: 20; height: 32
+                        x: 44; width: 20; height: 16
                         TapHandler {
                             id: tap
                             onTapped: root.clicked |= 4
                             onCanceled: root.canceled |= 4
                         }
                     }
+                    Item {
+                        x: 44; y: 16; width: 20; height: 16
+                        TapHandler {
+                            id: within
+                            gesturePolicy: TapHandler.WithinBounds
+                            onTapped: root.clicked |= 8
+                            onCanceled: root.canceled |= 8
+                        }
+                    }
                 }
                 ",
                 "cancel-1",
             );
-            for (x, time) in [(10.0, 1000), (32.0, 3000), (54.0, 5000)] {
+            for (x, y, time) in [
+                (10.0, 10.0, 1000),
+                (32.0, 10.0, 3000),
+                (54.0, 8.0, 5000),
+                (54.0, 24.0, 7000),
+            ] {
                 for (kind, buttons, time) in [
                     (PointerKind::Motion, 0, time),
                     (PointerKind::Press(0x1), 0x1, time + 10),
@@ -582,7 +598,7 @@ pub(crate) mod tests {
                 ] {
                     scene.pointer_event(
                         x,
-                        10.0,
+                        y,
                         &ScenePointer {
                             kind,
                             buttons,
@@ -597,8 +613,8 @@ pub(crate) mod tests {
             let _ = std::fs::remove_dir_all(&directory);
             assert_eq!(
                 got,
-                [0, 0, 0b111],
-                "[still pressed, clicked, canceled], one bit each for a MouseArea, a Button and a TapHandler"
+                [0, 0, 0b1111],
+                "[still pressed, clicked, canceled], one bit each for a MouseArea, a Button, a TapHandler and one that grabs exclusively"
             );
         });
     }
