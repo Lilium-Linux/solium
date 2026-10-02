@@ -186,9 +186,9 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
             let sealed = locked && !state.keys_may_pass();
 
             if !pressed {
-                // The release of a key whose press went to a scene is the
-                // scene's, held or not by now, and no window's, which never
-                // saw the press.
+                // The release of a key whose press went to a scene goes to
+                // no window, which never saw the press, whether or not the
+                // scene still holds the keyboard.
                 // `tests::a_release_follows_its_press_to_the_scene`.
                 if state.keys_to_scene.remove(&code.raw()) && !sealed {
                     return FilterResult::Intercept(Some(Action::Scene(scene_key(
@@ -2571,8 +2571,9 @@ mod tests {
         });
     }
 
-    /// **A release follows its press to the scene**, even once the hold is
-    /// over, so no window hears the release of a key it never saw pressed.
+    /// **A release follows its press away from the windows**, even once the
+    /// hold is over, so no window hears the release of a key it never saw
+    /// pressed.
     #[test]
     fn a_release_follows_its_press_to_the_scene() {
         with_keyboard("held-release", "us,ru", 1, "", |state| {
