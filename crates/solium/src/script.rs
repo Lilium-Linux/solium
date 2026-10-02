@@ -6631,7 +6631,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(requests.len(), 1, "what was read is handed back as a request");
+        assert_eq!(
+            requests.len(),
+            1,
+            "what was read is handed back as a request"
+        );
         assert_eq!(
             requests[0].keymap, None,
             "and it names no keymap to compile: `layout` is not the live layout's name"

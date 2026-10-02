@@ -481,7 +481,9 @@ mod tests {
                     .any(|entry| entry.path().extension().is_some_and(|kind| kind == "lua"))
             });
         if own {
-            eprintln!("skipped: ~/.config/solium holds Lua of its own, which a scenario would load");
+            eprintln!(
+                "skipped: ~/.config/solium holds Lua of its own, which a scenario would load"
+            );
             return;
         }
         for path in found {
