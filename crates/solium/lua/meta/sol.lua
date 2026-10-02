@@ -95,6 +95,17 @@
 ---@field repeat_rate integer Repeats per second.
 ---@field repeat_delay integer Milliseconds a key is held before it repeats.
 
+---The focused text field, as `sol.text_input()` answers: the window it is
+---in, and its caret in the global space. The four numbers are there only once
+---the application has said where its caret is, through `text-input-v3`;
+---an application that never does has a field and no caret.
+---@class sol.TextField
+---@field window integer The window's id, as `sol.windows()` gives it.
+---@field x? number The caret's rectangle, where it is drawn: its window's place and scale on screen are in it, presentation transforms included.
+---@field y? number
+---@field w? number
+---@field h? number
+
 ---What `sol.keyboard{ ... }` may change. Every key is optional and one left
 ---out is left as it is. The first five are xkb names; setting any of them
 ---compiles a new keymap, and one left blank falls back to the matching
@@ -269,6 +280,7 @@
 ---| "layout" # Arrange the windows you already hold again: `()`.
 ---| "monitors" # The monitors changed, or were announced at startup or after a reload: `()`.
 ---| "restore" # These scripts replaced a running session's, after a reload and never at startup: `()`.
+---| "text_input" # A text field was enabled, or focused again by its window getting the keyboard back: `(field)`, what `sol.text_input()` answers at that moment.
 ---| "keyboard" # The live layout, Caps Lock or Num Lock changed, by a key or by `sol.keyboard{ ... }`: `(state, changed)`, `state` being what `sol.keyboard()` answers now and `changed` `"layout"`, `"caps"` or `"num"`. Never for ordinary typing, a new keymap or a configuration starting; a change a `keyboard` listener makes is not told back to it.
 
 -- sol ------------------------------------------------------------------------
@@ -331,6 +343,16 @@ function sol.surface(name, options) end
 ---@param options? sol.KeyboardOptions
 ---@return sol.KeyboardState|nil
 function sol.keyboard(options) end
+
+---The focused text field and where its caret is, or `nil` when the window
+---with the keyboard has no text field enabled.
+---
+---Kept by the `text-input-v3` protocol: an application with a text field
+---focused says so, and says where its caret is. Applications that do not
+---speak it, and X11 ones, never have one. `sol.on("text_input", ...)` hears a
+---field being enabled or focused.
+---@return sol.TextField|nil
+function sol.text_input() end
 
 ---Read the monitors, or arrange them.
 ---
@@ -651,6 +673,7 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "surface", handler: fun(name: string, action: string))
 ---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
 ---@overload fun(event: "layout"|"monitors"|"restore", handler: fun())
+---@overload fun(event: "text_input", handler: fun(field: sol.TextField))
 ---@overload fun(event: "keyboard", handler: fun(state: sol.KeyboardState, changed: "layout"|"caps"|"num"))
 ---@param event sol.Event
 ---@param handler function

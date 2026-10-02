@@ -624,7 +624,10 @@ pub(crate) mod tests {
         tap(&mut state, &[CAPS]);
         tap(&mut state, &[NUM]);
         assert_eq!(live(&mut state), (2, false, false), "both pressed again");
-        assert!(!describe(&mut state).caps, "the cached keyboard says Caps is off");
+        assert!(
+            !describe(&mut state).caps,
+            "the cached keyboard says Caps is off"
+        );
     }
 
     /// **`sol.keyboard{ caps = true }` turns Caps Lock on, and `false` off

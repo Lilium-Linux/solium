@@ -185,6 +185,10 @@ pub(crate) struct Look<'a> {
     pub(crate) focused: bool,
     /// Whether the pointer is anywhere over the window, frame or client.
     pub(crate) pointer_inside: bool,
+    /// The focused text field's caret, when this pane's window has it, in the
+    /// pane's own space: `caret` on every layer.
+    /// `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
+    pub(crate) caret: Option<Rectangle<i32, Logical>>,
 }
 
 /// What a frame shows.
@@ -205,6 +209,8 @@ struct Shown {
     /// keeps the sizes it had when its title last changed, which
     /// `panes/reactive/Frame.qml` reads to size its own content.
     size: (i32, i32),
+    /// The caret last written, `None` once it was taken away.
+    caret: Option<Rectangle<i32, Logical>>,
 }
 
 /// How a rasterised frame reaches the screen.
@@ -810,7 +816,18 @@ impl Decoration {
             title,
             focused,
             pointer_inside,
+            caret,
         } = *look;
+        // The caret on its own, written in place whenever it moves, comes or
+        // goes, and not on the frames in between:
+        // `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
+        if self.shown.caret != caret {
+            let value = caret_json(caret);
+            for layer in &mut self.layers {
+                layer.scene.set_json("caret", &value);
+            }
+            self.shown.caret = caret;
+        }
         if self.shown.title == title
             && self.shown.focused == focused
             && self.shown.pointer_inside == pointer_inside
@@ -965,6 +982,26 @@ impl Decoration {
         });
         asked.first().copied()
     }
+}
+
+/// The caret as a layer reads it: `{ valid, x, y, width, height }`, in the
+/// pane's own space, all zero and not `valid` when there is none.
+/// `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
+fn caret_json(caret: Option<Rectangle<i32, Logical>>) -> crate::json::Json {
+    use crate::json::Json;
+    let rect = caret.unwrap_or_default();
+    Json::Object(
+        [
+            ("valid", Json::Bool(caret.is_some())),
+            ("x", Json::Number(f64::from(rect.loc.x))),
+            ("y", Json::Number(f64::from(rect.loc.y))),
+            ("width", Json::Number(f64::from(rect.size.w))),
+            ("height", Json::Number(f64::from(rect.size.h))),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect(),
+    )
 }
 
 impl Backing {
@@ -2264,6 +2301,7 @@ mod tests {
                     title: "",
                     focused: false,
                     pointer_inside: false,
+                    caret: None,
                 },
                 60,
                 120,
@@ -2803,6 +2841,89 @@ mod tests {
             assert_eq!(layer.scene.get_int("sawRight"), 110);
             assert_eq!(layer.scene.get_int("sawBottom"), 130);
             assert_eq!(layer.scene.get_int("sawLeft"), 170);
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A layer is told the caret, and told again when it goes**: the
+    /// focused field's caret, in the pane's own space, reaches a delegated
+    /// layer's root and an inline layer's `PaneStyle` as `caret`, moves in
+    /// place, and reads `valid: false` once there is none. Read through
+    /// bindings, for the reason `a_delegated_layer_is_told_the_styles_insets`
+    /// gives.
+    #[test]
+    fn a_layer_is_told_the_caret_and_told_again_when_it_goes() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "told-caret",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            readonly property int sawX: caret.valid ? caret.x : -1
+                            readonly property int sawHeight: caret.valid ? caret.height : -1
+
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                            Layer { depth: "above"; name: "inline"; Item {} }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property var caret: ({ valid: false })
+                            readonly property int sawX: caret.valid ? caret.x : -1
+                            readonly property int sawY: caret.valid ? caret.y : -1
+                            readonly property int sawWidth: caret.valid ? caret.width : -1
+                            readonly property int sawHeight: caret.valid ? caret.height : -1
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            let look = |caret| Look {
+                title: "",
+                focused: true,
+                pointer_inside: false,
+                caret,
+            };
+            let read = |decoration: &mut Decoration| {
+                let [delegated, inline] = &mut decoration.layers[..] else {
+                    panic!("two layers")
+                };
+                (
+                    ["sawX", "sawY", "sawWidth", "sawHeight"]
+                        .map(|name| delegated.scene.get_int(name)),
+                    ["sawX", "sawHeight"].map(|name| inline.scene.get_int(name)),
+                )
+            };
+
+            decoration.tell(
+                &look(Some(Rectangle::new((5, 7).into(), (2, 16).into()))),
+                60,
+                88,
+            );
+            assert_eq!(read(&mut decoration), ([5, 7, 2, 16], [5, 16]));
+
+            decoration.tell(
+                &look(Some(Rectangle::new((25, 7).into(), (2, 16).into()))),
+                60,
+                88,
+            );
+            assert_eq!(read(&mut decoration), ([25, 7, 2, 16], [25, 16]), "moved");
+
+            decoration.tell(&look(None), 60, 88);
+            assert_eq!(read(&mut decoration), ([-1, -1, -1, -1], [-1, -1]), "gone");
 
             let _ = std::fs::remove_dir_all(&dir);
         });
@@ -3720,6 +3841,7 @@ mod tests {
                         title: "before the reload",
                         focused: true,
                         pointer_inside: false,
+                        caret: None,
                     },
                     300,
                     200,

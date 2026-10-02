@@ -565,6 +565,8 @@ fn chrome(
         title: &title,
         focused: state.looks_focused(pane),
         pointer_inside: state.pointer_over(pane),
+        // `text_input::tests::only_the_pane_whose_window_has_the_caret_is_given_it`.
+        caret: state.caret_in(pane),
     };
     let mut animating = false;
     if let Some(decoration) = state.panes.get_mut(pane).and_then(Pane::decoration_mut) {

@@ -48,6 +48,7 @@ mod state;
 mod style;
 mod surface;
 mod synth;
+mod text_input;
 mod tty;
 mod warp;
 mod winit;

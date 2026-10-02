@@ -86,8 +86,11 @@ suite.
   `wlr-output-power-management`, `ext-session-lock`, `ext-idle-notify`,
   `idle-inhibit`, `cursor-shape`, `wp-viewporter`, `wp-fractional-scale`,
   `wp-presentation`, `wp-single-pixel-buffer`, `linux-dmabuf`,
-  `relative-pointer`, `pointer-constraints`, `primary-selection` and
-  `xwayland-shell`. Both selections, copy and paste, cross the X11 boundary.
+  `relative-pointer`, `pointer-constraints`, `primary-selection`,
+  `text-input-v3` and `xwayland-shell`. Both selections, copy and paste, cross
+  the X11 boundary. `text-input-v3` tells the compositor where the focused
+  text field's caret is; with no input method yet, no text is sent back
+  ([#26]).
 
 ## Not yet
 

@@ -254,6 +254,9 @@ pub(crate) struct Snapshot {
     /// to be nowhere", as the compositor's own walk does.
     /// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
     pub(crate) screens: Vec<Rectangle<i32, Logical>>,
+    /// The focused text field and its caret, for `sol.text_input()`:
+    /// `text_input::tests::an_enabled_field_has_its_caret_in_the_global_space`.
+    pub(crate) text_input: Option<crate::text_input::Field>,
 }
 
 /// How a batch of transforms should animate.
@@ -1111,6 +1114,16 @@ impl Scripts {
         self.dispatch(snapshot, move |sol| {
             let state: Value = sol.get::<mlua::Function>("keyboard")?.call(())?;
             call_listeners(sol, "keyboard", (state, changed))
+        })
+    }
+
+    /// A text field was enabled, or focused again: `(field)`, what
+    /// `sol.text_input()` answers.
+    /// `text_input::tests::text_input_is_told_when_a_field_is_enabled_and_when_it_is_focused`.
+    pub(crate) fn text_input(&mut self, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| {
+            let field: Value = sol.get::<mlua::Function>("text_input")?.call(())?;
+            call_listeners(sol, "text_input", field)
         })
     }
 
@@ -2082,6 +2095,28 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 pending.commands.push(Command::Keyboard(request.clone()));
             })?;
             Ok(Value::Nil)
+        })?,
+    )?;
+
+    // The focused text field: the window it is in, and its caret in the
+    // global space once the client has said where that is. Nothing when no
+    // window has a text field enabled.
+    // `text_input::tests::an_enabled_field_has_its_caret_in_the_global_space`.
+    sol.set(
+        "text_input",
+        lua.create_function(|lua, ()| {
+            let Some(field) = snapshot(lua)?.text_input else {
+                return Ok(Value::Nil);
+            };
+            let table = lua.create_table()?;
+            table.set("window", field.window)?;
+            if let Some(caret) = field.caret {
+                table.set("x", caret.loc.x)?;
+                table.set("y", caret.loc.y)?;
+                table.set("w", caret.size.w)?;
+                table.set("h", caret.size.h)?;
+            }
+            Ok(Value::Table(table))
         })?,
     )?;
 
@@ -4330,6 +4365,7 @@ mod tests {
             },
             cursor: (0.0, 0.0),
             screens: Vec::new(),
+            text_input: None,
         };
 
         let outcome = scripts.key("super+space", snapshot);
@@ -5737,6 +5773,7 @@ mod tests {
             work_area: Rect::default(),
             cursor: (0.0, 0.0),
             screens: Vec::new(),
+            text_input: None,
         }
     }
 
@@ -6217,6 +6254,7 @@ mod tests {
             },
             cursor: (0.0, 0.0),
             screens: Vec::new(),
+            text_input: None,
         }
     }
 

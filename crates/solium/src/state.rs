@@ -284,6 +284,9 @@ pub(crate) struct Solium {
     /// The layout and the locks as the configuration and the scenes were last
     /// told them: `keyboard_change::tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
     pub(crate) keyboard_told: crate::keyboard_change::Told,
+    /// Registers `zwp_text_input_manager_v3`, and holds every text field and
+    /// its caret: `text_input::tests::an_enabled_field_has_its_caret_in_the_global_space`.
+    pub(crate) text_inputs: crate::text_input::TextInputs,
 
     /// Registers `ext_session_lock_manager_v1`: the lock screen. See `lock.rs`.
     pub(crate) session_lock_state: SessionLockManagerState,
@@ -988,6 +991,7 @@ impl Solium {
             keymap: None,
             keyboard: crate::keymap::State::initial(),
             keyboard_told: crate::keyboard_change::Told::default(),
+            text_inputs: crate::text_input::TextInputs::new(&display_handle),
             session_lock_state: crate::lock::state(&display_handle),
             lock: None,
             rescan_outputs: false,

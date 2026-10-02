@@ -164,6 +164,14 @@ Item {
     property int contentWidth: 0
     property int contentHeight: 0
 
+    // The focused text field's caret, when this pane's window has it, in the
+    // pane's own space: `{ valid, x, y, width, height }`, written in place as
+    // the caret moves and with `valid: false` when the field goes. A layer
+    // drawing at the caret is drawn with its window, so whatever the window
+    // is doing -- moving, scaling, fading -- the drawing does too.
+    // `decoration::tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
+    property var caret: ({ valid: false, x: 0, y: 0, width: 0, height: 0 })
+
     // Where the window's own rectangle is inside this scene.
     //
     // A layer is laid out on its **canvas** — the pane's outer rect grown by

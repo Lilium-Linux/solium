@@ -402,6 +402,7 @@ impl Solium {
             work_area: self.work_area().map(to_rect).unwrap_or_default(),
             cursor: (cursor.x, cursor.y),
             screens: self.screens(),
+            text_input: self.text_field(),
         }
     }
 
