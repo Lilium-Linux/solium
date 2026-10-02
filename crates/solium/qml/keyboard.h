@@ -12,10 +12,11 @@
 #ifndef SOLIUM_QML_KEYBOARD_H
 #define SOLIUM_QML_KEYBOARD_H
 
-#include <QtCore/QJsonObject>
 #include <QtCore/QObject>
 #include <QtCore/QString>
 #include <QtCore/QStringList>
+
+class QJsonObject;
 
 class SoliumKeyboard : public QObject
 {
