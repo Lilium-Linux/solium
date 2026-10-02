@@ -662,6 +662,67 @@ pub(crate) mod tests {
         });
     }
 
+    /// **A field in a Qt Quick Controls `Popup` that wants the keyboard
+    /// takes the keys** (Ruling 14): `Solium.keyboard` written on the
+    /// `Popup`, which is no item, is the item's Qt draws it as, so the open
+    /// search popup wants the keyboard with its claims, the field in it
+    /// types Russian, and the closed popup lets go. A `QtObject` beside it
+    /// that writes `Solium.keyboard` holds nothing.
+    #[test]
+    fn a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-popup-keyboard",
+                r#"
+                import QtQuick
+                import QtQuick.Controls
+                import Solium
+                Item {
+                    id: root
+                    property bool open: false
+                    readonly property string typed: field.text
+                    QtObject { Solium.keyboard.wants: true }
+                    Popup {
+                        x: 0; y: 0; width: 40; height: 20; padding: 0
+                        visible: root.open
+                        focus: true
+                        enter: null; exit: null
+                        closePolicy: Popup.NoAutoClose
+                        Solium.keyboard.wants: activeFocus
+                        Solium.keyboard.claims: [ "Escape" ]
+                        TextField { id: field; anchors.fill: parent; focus: true }
+                    }
+                }
+                "#,
+                "popup-keyboard-1",
+            );
+            let closed = scene.take_keyboard();
+            scene.set_bool("open", true);
+            let opened = scene.take_keyboard();
+            for (code, text) in [(41_u32, "п"), (27, "р")] {
+                let qt_key =
+                    crate::qml::keys::qt_key(smithay::input::keyboard::Keysym::NoSymbol, text);
+                tap(&mut scene, code, qt_key, text);
+            }
+            let typed = scene.get_string_for_test("typed");
+            scene.set_bool("open", false);
+            let closed_again = scene.take_keyboard();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (closed, opened, typed.as_str(), closed_again),
+                (
+                    KeyboardReport::LetGo,
+                    KeyboardReport::Wanted(vec!["Escape".to_owned()]),
+                    "пр",
+                    KeyboardReport::LetGo,
+                ),
+                "(the take with the popup closed, once it is open, what the field typed, \
+                 the take once it is closed again)"
+            );
+        });
+    }
+
     /// **A key the scene hears moves its items for the next hit**: Escape
     /// hides the button beside the field, and the point it covered claims
     /// nothing once the key is told.

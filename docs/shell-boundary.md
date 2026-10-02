@@ -267,7 +267,13 @@ takes the keyboard while it is visible and wants it
 `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`). Every
 hosted scene's window is active from the start, so `focus: true` gives a
 field `activeFocus`; bind `wants` to it, because the compositor takes the
-keyboard back by taking that focus away. The
+keyboard back by taking that focus away. Written on a Qt Quick Controls
+`Popup`, which is no item, `Solium.keyboard` is the popup's own, its
+`activeFocus` and its being open, so a search popup is `Popup { focus: true;
+Solium.keyboard.wants: activeFocus; TextField { focus: true } }`
+(`qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`);
+on anything that is neither an item nor a `Popup` it holds nothing, and the
+log says so. The
 window that had the keyboard loses it meanwhile, still reads as the focused
 window and is drawn focused, and gets it back when the field lets go
 (`state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`).

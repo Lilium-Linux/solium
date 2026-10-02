@@ -166,6 +166,24 @@ namespace {
  * `qml::hosted::tests::the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last`. */
 quint64 g_wants = 0;
 
+/* The item Qt draws a Qt Quick Controls `Popup` as: its child of type
+ * QQuickPopupItem, which the popup makes with itself, so it is there from
+ * the popup's first binding, before any content item is; null for any
+ * other object.
+ * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`. */
+QQuickItem *popup_item_of(QObject *object)
+{
+    if (object == nullptr || !object->inherits("QQuickPopup")) {
+        return nullptr;
+    }
+    for (QObject *child : object->children()) {
+        if (child->inherits("QQuickPopupItem")) {
+            return qobject_cast<QQuickItem *>(child);
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
 SoliumKeyboard::SoliumKeyboard(QQuickItem *item, SoliumHosting *hosting)
@@ -244,12 +262,27 @@ SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item) {}
 
 SoliumKeyboard *SoliumAttached::keyboard()
 {
-    /* On an item of a scene that is not hosted, or on an object that is no
-     * item, one nothing reads.
-     * `qml::hosted::tests::an_unhosted_scene_may_bind_the_keyboard_and_holds_nothing`. */
+    /* On an item, the item's. On a Qt Quick Controls `Popup`, which is no
+     * item, the item Qt draws it as, whose visibility and active focus are
+     * the popup's own, as `Solium.input` and a `Grab`'s target read a popup.
+     * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`.
+     * In a scene that is not hosted, one nothing reads.
+     * `qml::hosted::tests::an_unhosted_scene_may_bind_the_keyboard_and_holds_nothing`.
+     * On any other object of a hosted scene, one nothing reads either, and
+     * the log says so, once for the object.
+     * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`. */
     if (m_keyboard == nullptr) {
-        auto *item = qobject_cast<QQuickItem *>(m_item);
-        m_keyboard = new SoliumKeyboard(item, item != nullptr ? solium_hosting_of(item) : nullptr);
+        QQuickItem *item = qobject_cast<QQuickItem *>(m_item);
+        if (item == nullptr) {
+            item = popup_item_of(m_item);
+        }
+        SoliumHosting *hosting = solium_hosting_of(m_item);
+        if (item == nullptr && hosting != nullptr) {
+            qWarning("Solium.keyboard holds the keyboard only on an item or a Popup; "
+                     "this %s will hold nothing",
+                     m_item != nullptr ? m_item->metaObject()->className() : "object");
+        }
+        m_keyboard = new SoliumKeyboard(item, item != nullptr ? hosting : nullptr);
         if (item == nullptr) {
             m_keyboard->setParent(this);
         }
