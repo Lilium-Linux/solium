@@ -33,10 +33,12 @@
 //! grab's target dismisses it and is swallowed or passed on as the surface's
 //! `outside_click` says
 //! (`state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`).
-//! Keyboard focus is a bigger question than this (#163). A hosted shell is
-//! one of these surfaces and has the same limits (`docs/shell-boundary.md`,
-//! "What it is not given"); until #163, a surface that needs a keyboard has
-//! to be a layer-shell client.
+//! An item of its scene that asks for the keyboard holds it, and the keys
+//! reach it as its surface's `keyboard.bindings` says
+//! (`input::tests::a_claimed_key_reaches_the_scene_and_not_its_binding`,
+//! `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`).
+//! A hosted shell is one of these surfaces and has the same limits
+//! (`docs/shell-boundary.md`, "What it is not given").
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -82,7 +84,7 @@ use smithay::{
 
 use crate::{
     json::Json,
-    qml::hosted::{GrabReport, Hit, ScenePointer},
+    qml::hosted::{GrabReport, Hit, KeyboardReport, SceneKey, ScenePointer},
     surface::ShellSurface,
 };
 
@@ -517,6 +519,54 @@ impl Surface {
             .collect()
     }
 
+    /// What each instance's scene says of its keyboard wants since it was
+    /// last asked, by the name of its monitor, leaving out those with
+    /// nothing new. `on` is every monitor the surface is on, which a
+    /// stand-in reports for the first of.
+    /// `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`.
+    pub(crate) fn take_keyboards(&mut self, on: &[String]) -> Vec<(String, KeyboardReport)> {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_mut() {
+            return match (stand.keyboard.take(), on.first()) {
+                (Some(report), Some(monitor)) => vec![(monitor.clone(), report)],
+                _ => Vec::new(),
+            };
+        }
+        #[cfg(not(test))]
+        let _ = on;
+        self.instances
+            .iter_mut()
+            .map(|(monitor, instance)| (monitor.clone(), instance.take_keyboard()))
+            .filter(|(_, report)| *report != KeyboardReport::Unchanged)
+            .collect()
+    }
+
+    /// Tell this surface's scene on one monitor one key.
+    /// `input::tests::russian_typed_through_the_compositor_reaches_a_hosted_text_field`.
+    pub(crate) fn key(&mut self, output: &Output, key: &SceneKey) {
+        #[cfg(test)]
+        if self.stand.is_some() {
+            return;
+        }
+        if let Some(instance) = self.instance_mut(output) {
+            instance.key(key);
+        }
+    }
+
+    /// Tell this surface's scene on one monitor that the compositor took the
+    /// keyboard back.
+    /// `state::tests::real_client::reflow_on_close::hosted::clicking_a_window_ends_the_shells_hold`.
+    pub(crate) fn let_go_keyboard(&mut self, output: &Output) {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_mut() {
+            stand.let_go += 1;
+            return;
+        }
+        if let Some(instance) = self.instance_mut(output) {
+            instance.let_go_keyboard();
+        }
+    }
+
     /// Whether a point in compositor coordinates is inside an active grab's
     /// target of this surface's scene on one monitor, drawn across `area`.
     /// `state::tests::real_client::reflow_on_close::hosted::a_press_inside_the_grab_target_reaches_the_scene`.
@@ -719,6 +769,10 @@ pub(crate) struct Stand {
     pub(crate) dismissed: u32,
     /// Whether it has a scene on the monitors it is on.
     pub(crate) hosts: bool,
+    /// The keyboard wants the scene reports at the next settle, taken once.
+    pub(crate) keyboard: Option<KeyboardReport>,
+    /// How many times the compositor took the keyboard back from it.
+    pub(crate) let_go: u32,
 }
 
 #[cfg(test)]
@@ -735,6 +789,8 @@ impl Stand {
             inside: |_| false,
             dismissed: 0,
             hosts: true,
+            keyboard: None,
+            let_go: 0,
         }
     }
 }

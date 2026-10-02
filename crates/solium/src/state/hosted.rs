@@ -1,19 +1,41 @@
 //! The compositor's side of hosted scenes: reading what they report, and what
 //! that changes.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use smithay::{
     input::pointer::MotionEvent,
     output::Output,
-    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{IsAlive as _, Logical, Point, Rectangle, SERIAL_COUNTER},
 };
 
 use crate::{
-    qml::hosted::{GrabReport, PointerKind, ScenePointer},
-    scripted::{Edges, Outside, SurfaceId},
+    qml::hosted::{GrabReport, KeyboardReport, PointerKind, SceneKey, ScenePointer},
+    scripted::{Edges, KeyPolicy, Outside, SurfaceId},
     state::{ScenePress, Solium},
 };
+
+/// The scene holding the keyboard (Ruling 14): whose, on which monitor, the
+/// keys its holding item claims, its surface's policy for the bindings, and
+/// the surface to give the keyboard back to.
+/// `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`.
+#[derive(Clone, Debug)]
+pub(crate) struct HostedKeyboard {
+    pub(crate) surface: SurfaceId,
+    pub(crate) output: Output,
+    pub(crate) claims: Vec<String>,
+    pub(crate) policy: KeyPolicy,
+    pub(crate) returns_to: Option<WlSurface>,
+}
+
+/// A key held for the scene, and when it repeats next.
+/// `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
+#[derive(Clone, Debug)]
+pub(crate) struct SceneRepeat {
+    pub(crate) key: SceneKey,
+    pub(crate) next: Duration,
+}
 
 /// The one grab a hosted scene holds the pointer with (Ruling 12): whose,
 /// on which monitor, where that instance is drawn now, and its name, which
@@ -56,8 +78,9 @@ const SETTLE_ROUNDS: usize = 4;
 impl Solium {
     /// Read what every hosted scene reports, reserves first, then grabs
     /// (`state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`),
-    /// then (a later task) keyboard wants, and then the actions they asked
-    /// for.
+    /// then keyboard wants
+    /// (`state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`),
+    /// and then the actions they asked for.
     /// Called after anything that can run QML code in a dispatch -- the end
     /// of an input dispatch and a frame's settle among them -- once a
     /// declaration has been applied, and once the surfaces are placed on
@@ -92,6 +115,7 @@ impl Solium {
                 self.trigger_relayout();
             }
             self.settle_grabs();
+            self.settle_keyboard();
             self.settle_surfaces();
             if !self.scenes_to_settle {
                 break;
@@ -358,6 +382,194 @@ impl Solium {
                 }
                 GrabRoute::Passed
             }
+        }
+    }
+
+    /// Read every scene's keyboard wants (Ruling 14). One scene holds the
+    /// keyboard at a time: an instance that comes to want it takes it from
+    /// the window that had it, or from the scene that held it, which is told
+    /// to let go and whose window it will be given back to; the instance
+    /// holding it letting go gives the keyboard back. The one held is then
+    /// let go of if its scene is gone, with its surface or its monitor.
+    /// `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_hold_another_scene_takes_returns_to_the_window_the_first_took_it_from`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_keyboard_back`.
+    fn settle_keyboard(&mut self) {
+        // Behind the lock the keyboard is the lock screen's: what a scene
+        // says of it is read once the lock is gone, as its grabs are.
+        // `state::tests::real_client::lock_focus::no_scene_holds_the_keyboard_while_the_session_is_locked`.
+        if self.lock.is_some() {
+            return;
+        }
+        let (outputs, primary) = (self.monitor_rects(), self.primary_output());
+        let mut reports = Vec::new();
+        for surface in self.surfaces.iter_mut() {
+            let on: Vec<String> = outputs
+                .iter()
+                .filter(|(output, geometry)| {
+                    surface
+                        .area_on(output, *geometry, primary.as_ref())
+                        .is_some()
+                })
+                .map(|(output, _)| output.name())
+                .collect();
+            let policy = surface.declared.keyboard;
+            for (monitor, report) in surface.take_keyboards(&on) {
+                reports.push((surface.id(), policy, monitor, report));
+            }
+        }
+        for (id, policy, monitor, report) in reports {
+            let ours = self
+                .hosted_keyboard
+                .as_ref()
+                .is_some_and(|held| held.surface == id && held.output.name() == monitor);
+            match report {
+                KeyboardReport::Wanted(claims) if ours => {
+                    if let Some(held) = self.hosted_keyboard.as_mut() {
+                        held.claims = claims;
+                    }
+                }
+                KeyboardReport::Wanted(claims) => {
+                    let Some(output) = self
+                        .space
+                        .outputs()
+                        .find(|output| output.name() == monitor)
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    // The surface to give the keyboard back to: the one that
+                    // had it, or, from another scene's hold, the one that
+                    // scene was going to give it back to.
+                    let returns_to = match self.hosted_keyboard.as_ref() {
+                        Some(held) => held.returns_to.clone(),
+                        None => self
+                            .seat
+                            .get_keyboard()
+                            .and_then(|keyboard| keyboard.current_focus()),
+                    };
+                    self.end_keyboard_hold(false);
+                    self.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                    self.hosted_keyboard = Some(HostedKeyboard {
+                        surface: id,
+                        output,
+                        claims,
+                        policy,
+                        returns_to,
+                    });
+                    self.redraw = true;
+                }
+                KeyboardReport::LetGo if ours => self.end_keyboard_hold(true),
+                KeyboardReport::LetGo | KeyboardReport::Unchanged => {}
+            }
+        }
+        let gone = self.hosted_keyboard.as_ref().is_some_and(|held| {
+            !self.space.outputs().any(|output| *output == held.output)
+                || self
+                    .surfaces
+                    .get(held.surface)
+                    .is_none_or(|surface| !surface.hosts_on(&held.output))
+        });
+        if gone {
+            self.end_keyboard_hold(true);
+        }
+    }
+
+    /// One key for the scene holding the keyboard, and the repeat of a key
+    /// held for it.
+    /// `input::tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`,
+    /// `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
+    pub(crate) fn deliver_scene_key(&mut self, key: SceneKey) {
+        #[cfg(test)]
+        self.scene_keys.push(key.clone());
+        if let Some(held) = self.hosted_keyboard.clone()
+            && let Some(surface) = self.surfaces.get_mut(held.surface)
+        {
+            surface.key(&held.output, &key);
+        }
+        // Shift, Control, Alt, the locks and Super do not repeat.
+        // `input::tests::a_held_modifier_does_not_repeat_into_the_scene`.
+        let modifier = matches!(
+            key.qt_key,
+            0x0100_0020..=0x0100_0026 | 0x0100_0053 | 0x0100_0054
+        );
+        if key.pressed && !modifier && self.hosted_keyboard.is_some() {
+            let delay =
+                Duration::from_millis(u64::try_from(self.keyboard.repeat_delay).unwrap_or(600));
+            self.scene_repeat = Some(SceneRepeat {
+                next: self.clock.now() + delay,
+                key: SceneKey {
+                    autorepeat: true,
+                    ..key
+                },
+            });
+        } else if !key.pressed
+            && self
+                .scene_repeat
+                .as_ref()
+                .is_some_and(|repeat| repeat.key.code == key.code)
+        {
+            self.scene_repeat = None;
+        }
+        self.redraw = true;
+    }
+
+    /// A key held for the scene holding the keyboard repeats at the
+    /// keyboard's rate after its delay, checked once per loop iteration, as
+    /// idleness is (Ruling 14).
+    /// `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
+    pub(crate) fn repeat_scene_key(&mut self, now: Duration) {
+        let Some(repeat) = self.scene_repeat.as_mut() else {
+            return;
+        };
+        let rate = u64::try_from(self.keyboard.repeat_rate).unwrap_or(0);
+        if self.hosted_keyboard.is_none() || rate == 0 {
+            self.scene_repeat = None;
+            return;
+        }
+        if now < repeat.next {
+            return;
+        }
+        repeat.next = now + Duration::from_millis(1000 / rate);
+        let key = repeat.key.clone();
+        #[cfg(test)]
+        self.scene_keys.push(key.clone());
+        if let Some(held) = self.hosted_keyboard.clone()
+            && let Some(surface) = self.surfaces.get_mut(held.surface)
+        {
+            surface.key(&held.output, &key);
+        }
+        self.redraw = true;
+    }
+
+    /// End a scene's hold on the keyboard, and tell the scene. With
+    /// `give_back`, the surface it came from gets the keyboard again, through
+    /// the gate, or, when that has gone, wherever the keyboard goes when a
+    /// window goes; otherwise the caller is about to give it to someone.
+    /// `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`,
+    /// `state::tests::real_client::reflow_on_close::hosted::clicking_a_window_ends_the_shells_hold`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_window_closed_while_the_shell_holds_the_keyboard_is_not_given_it_back`.
+    pub(crate) fn end_keyboard_hold(&mut self, give_back: bool) {
+        let Some(held) = self.hosted_keyboard.take() else {
+            return;
+        };
+        self.scene_repeat = None;
+        if let Some(surface) = self.surfaces.get_mut(held.surface) {
+            surface.let_go_keyboard(&held.output);
+        }
+        self.redraw = true;
+        if !give_back {
+            return;
+        }
+        match held
+            .returns_to
+            .filter(|surface| surface.alive() && self.may_hold_keyboard(surface))
+        {
+            Some(surface) => {
+                self.give_keyboard(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+                crate::xwayland::activate(self, Some(&surface));
+            }
+            None => self.settle_focus(),
         }
     }
 

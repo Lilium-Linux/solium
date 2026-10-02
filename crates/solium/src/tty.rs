@@ -701,6 +701,11 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // a notification that arrives up to one frame late is a notification
             // about somebody having left the room.
             crate::idle::settle(&mut state.solium);
+            // And a key held for the scene holding the keyboard repeats, on
+            // the same once-a-loop check (Ruling 14).
+            // `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
+            let now = state.solium.clock.now();
+            state.solium.repeat_scene_key(now);
             // A screen that is off has no vblank to pace its windows, so they
             // are told here instead, throttled. See `power.rs`.
             state.solium.send_dark_frames(wall_clock());

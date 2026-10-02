@@ -10871,6 +10871,73 @@ end)"#,
             );
         }
 
+        /// **No scene holds the keyboard while the session is locked**: a hold
+        /// ends at the lock, the scene is told to let go, none is taken
+        /// behind it, and one a scene asked for there is taken once the lock
+        /// is gone, as a grab is (Ruling 14). Tested with the Cyrillic group
+        /// active (#132); the scene is stood in for, beside these real
+        /// clients (the #99 test).
+        #[test]
+        fn no_scene_holds_the_keyboard_while_the_session_is_locked() {
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let shell = stand_in(
+                &mut session.state,
+                "shell",
+                crate::scripted::Layer::Top,
+                Rectangle::new((0, 0).into(), (1920, 1080).into()),
+                crate::scripted::Stand {
+                    hit: |_| crate::qml::hosted::Hit::Nothing,
+                    ..crate::scripted::Stand::solid()
+                },
+            );
+            let want = |session: &mut Session| {
+                if let Some(stand) = session
+                    .state
+                    .surfaces
+                    .get_mut(shell)
+                    .and_then(crate::scripted::Surface::stand_mut)
+                {
+                    stand.keyboard = Some(crate::qml::hosted::KeyboardReport::Wanted(Vec::new()));
+                }
+                session.state.settle_scenes();
+            };
+            want(&mut session);
+            let before = session.state.hosted_keyboard.is_some();
+            let lock = session.lock();
+            let at_the_lock = session.state.hosted_keyboard.is_none();
+            let told = session
+                .state
+                .surfaces
+                .get(shell)
+                .and_then(crate::scripted::Surface::stand)
+                .map_or(0, |stand| stand.let_go);
+            want(&mut session);
+            let behind = (
+                session.state.hosted_keyboard.is_some(),
+                session.keyboard_on_lock(),
+            );
+            lock.unlock_and_destroy();
+            session
+                .locker
+                .pump(&mut session.display, &mut session.state);
+            session.app.pump(&mut session.display, &mut session.state);
+            session.state.settle_scenes();
+            assert_eq!(
+                (
+                    before,
+                    at_the_lock,
+                    told,
+                    behind,
+                    session.state.lock.is_none(),
+                    session.state.hosted_keyboard.is_some()
+                ),
+                (true, true, 1, (false, true), true, true),
+                "(held before the lock, let go at it, the scene told so, (held behind the \
+                 lock, the keyboard on the lock), unlocked, held after it)"
+            );
+        }
+
         /// **No hosted grab is held behind the lock, and one a scene took
         /// there is held once the lock is gone** (Ruling 12): behind the lock
         /// the pointer is the lock screen's, and a popup the shell opened
@@ -23395,6 +23462,241 @@ end)
                     (desk.state.hosted_grab.is_none(), focused),
                     (true, Some(window_id(&opened))),
                     "(the grab let go, the window the click focused)"
+                );
+            }
+
+            fn window(desk: &Desk, opened: &Opened) -> Window {
+                desk.state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(crate::pane::Pane::client)
+                    .cloned()
+                    .expect("a client")
+            }
+
+            /// The surface the keyboard is on, by its protocol id.
+            fn keyboard_on(desk: &Desk) -> Option<u32> {
+                desk.state
+                    .seat
+                    .get_keyboard()
+                    .and_then(|keyboard| keyboard.current_focus())
+                    .map(|surface| surface.id().protocol_id())
+            }
+
+            /// Report `wants` from the stand-in for surface `id`, and settle.
+            fn want(
+                desk: &mut Desk,
+                id: crate::scripted::SurfaceId,
+                wants: crate::qml::hosted::KeyboardReport,
+            ) {
+                if let Some(stand) = desk
+                    .state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(crate::scripted::Surface::stand_mut)
+                {
+                    stand.keyboard = Some(wants);
+                }
+                desk.state.settle_scenes();
+            }
+
+            fn let_go(desk: &Desk, id: crate::scripted::SurfaceId) -> u32 {
+                desk.state
+                    .surfaces
+                    .get(id)
+                    .and_then(crate::scripted::Surface::stand)
+                    .map_or(0, |stand| stand.let_go)
+            }
+
+            /// **The window loses the keyboard while the shell holds it, still
+            /// reads as focused, and gets the keyboard back when the shell lets
+            /// go** (Ruling 14).
+            #[test]
+            fn the_window_gets_the_keyboard_back_when_the_shell_lets_go() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                want(
+                    &mut desk,
+                    shell,
+                    crate::qml::hosted::KeyboardReport::Wanted(vec!["Escape".to_owned()]),
+                );
+                let held = (
+                    keyboard_on(&desk),
+                    desk.state.focused_window() == Some(window.clone()),
+                    desk.state.looks_focused(opened.pane),
+                );
+                want(&mut desk, shell, crate::qml::hosted::KeyboardReport::LetGo);
+                assert_eq!(
+                    (
+                        held,
+                        keyboard_on(&desk),
+                        desk.state.hosted_keyboard.is_none()
+                    ),
+                    ((None, true, true), Some(window_id(&opened)), true),
+                    "((the keyboard while held, the window read as focused, drawn focused), \
+                     the keyboard after, the hold over)"
+                );
+            }
+
+            /// **Clicking a window ends the shell's hold** (Ruling 14): the
+            /// scene is told to let go, and the window clicked has the
+            /// keyboard.
+            #[test]
+            fn clicking_a_window_ends_the_shells_hold() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                desk.state.profile.focus_follows_mouse = false;
+                want(
+                    &mut desk,
+                    shell,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                let held = desk.state.hosted_keyboard.is_some();
+                click(&mut desk, (630.0, 555.0), 10);
+                assert_eq!(
+                    (
+                        held,
+                        desk.state.hosted_keyboard.is_none(),
+                        let_go(&desk, shell),
+                        keyboard_on(&desk)
+                    ),
+                    (true, true, 1, Some(window_id(&opened))),
+                    "(held, the hold over, the times the scene was told to let go, the keyboard)"
+                );
+            }
+
+            /// **`sol.focus` ends the shell's hold**, as every explicit focus
+            /// does (Ruling 14), and the window it focuses has the keyboard.
+            #[test]
+            fn sol_focus_ends_the_shells_hold() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"sol.bind("super+f", function() sol.focus(sol.windows()[1].id) end)"#,
+                );
+                want(
+                    &mut desk,
+                    shell,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                assert!(desk.state.trigger("super+f"), "the binding was not handled");
+                assert_eq!(
+                    (
+                        desk.state.hosted_keyboard.is_none(),
+                        let_go(&desk, shell),
+                        keyboard_on(&desk)
+                    ),
+                    (true, 1, Some(window_id(&opened))),
+                    "(the hold over, the times the scene was told to let go, the keyboard)"
+                );
+            }
+
+            /// **A scene that takes the keyboard from another gives it back to
+            /// the window the first took it from**: the first scene is told to
+            /// let go, and the window is not forgotten on the way.
+            #[test]
+            fn a_hold_another_scene_takes_returns_to_the_window_the_first_took_it_from() {
+                let (mut desk, opened, menu) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let search = stand_in(
+                    &mut desk.state,
+                    "search",
+                    Scripted::Top,
+                    screen_wide(),
+                    Stand {
+                        hit: |_| crate::qml::hosted::Hit::Nothing,
+                        ..Stand::solid()
+                    },
+                );
+                want(
+                    &mut desk,
+                    menu,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                want(
+                    &mut desk,
+                    search,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                let holder = desk.state.hosted_keyboard.as_ref().map(|held| held.surface);
+                want(&mut desk, search, crate::qml::hosted::KeyboardReport::LetGo);
+                assert_eq!(
+                    (holder, let_go(&desk, menu), keyboard_on(&desk)),
+                    (Some(search), 1, Some(window_id(&opened))),
+                    "(the holder, the first scene told to let go, the keyboard at the end)"
+                );
+            }
+
+            /// **Nothing settles the keyboard onto a window while the shell
+            /// holds it**: with no window to give it back to, the keyboard is
+            /// the scene's until it lets go, whatever looks for a window to
+            /// focus meanwhile; then the window under the pointer has it.
+            #[test]
+            fn nothing_settles_the_keyboard_onto_a_window_while_the_shell_holds_it() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                move_pointer(&mut desk.state, (630.0, 555.0), 10);
+                desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                want(
+                    &mut desk,
+                    shell,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                desk.state.settle_focus();
+                let held = (desk.state.hosted_keyboard.is_some(), keyboard_on(&desk));
+                want(&mut desk, shell, crate::qml::hosted::KeyboardReport::LetGo);
+                assert_eq!(
+                    (held, keyboard_on(&desk)),
+                    ((true, None), Some(window_id(&opened))),
+                    "((held after the settle, the keyboard then), the keyboard once let go)"
+                );
+            }
+
+            /// **A surface taken away while its scene holds the keyboard gives
+            /// it back**: the window it came from has it again.
+            #[test]
+            fn a_surface_taken_away_gives_the_keyboard_back() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                want(
+                    &mut desk,
+                    shell,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                desk.state.remove_surface("shell");
+                assert_eq!(
+                    (desk.state.hosted_keyboard.is_none(), keyboard_on(&desk)),
+                    (true, Some(window_id(&opened))),
+                    "(the hold over, the keyboard)"
+                );
+            }
+
+            /// **A window that leaves while the shell holds the keyboard is not
+            /// given it back**: its close was asked for, and when the shell
+            /// lets go the keyboard goes where it would have gone at the close,
+            /// to nothing, since no other window is open.
+            #[test]
+            fn a_window_closed_while_the_shell_holds_the_keyboard_is_not_given_it_back() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                want(
+                    &mut desk,
+                    shell,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                desk.state.close_pane(opened.pane);
+                let _ = desk.ask();
+                want(&mut desk, shell, crate::qml::hosted::KeyboardReport::LetGo);
+                assert_eq!(
+                    (desk.state.hosted_keyboard.is_none(), keyboard_on(&desk)),
+                    (true, None),
+                    "(the hold over, the keyboard)"
                 );
             }
 
