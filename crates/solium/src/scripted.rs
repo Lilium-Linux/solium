@@ -530,11 +530,12 @@ impl Surface {
     }
 
     /// Whether it has a scene on one monitor to hold a grab with.
-    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_lets_go_of_its_grab`.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_lets_go_of_its_grab`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_scene_that_goes_from_a_monitor_lets_go_of_its_grab`.
     pub(crate) fn hosts_on(&self, output: &Output) -> bool {
         #[cfg(test)]
-        if self.stand.is_some() {
-            return true;
+        if let Some(stand) = self.stand.as_ref() {
+            return stand.hosts;
         }
         self.instances.contains_key(&output.name())
     }
@@ -697,6 +698,8 @@ pub(crate) struct Stand {
     pub(crate) inside: fn(Point<f64, Logical>) -> bool,
     /// How many times its grabs were dismissed.
     pub(crate) dismissed: u32,
+    /// Whether it has a scene on the monitors it is on.
+    pub(crate) hosts: bool,
 }
 
 #[cfg(test)]
@@ -712,6 +715,7 @@ impl Stand {
             grab: None,
             inside: |_| false,
             dismissed: 0,
+            hosts: true,
         }
     }
 }

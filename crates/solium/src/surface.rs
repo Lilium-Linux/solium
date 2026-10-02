@@ -237,6 +237,7 @@ impl ShellSurface {
 
     /// Whether a point in compositor coordinates is inside an active grab's
     /// target of the scene drawn across `area`.
+    /// `tests::a_grab_target_is_asked_about_where_its_scene_is_drawn`,
     /// `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`.
     pub(crate) fn grab_contains(
         &self,
@@ -597,6 +598,37 @@ mod tests {
                 (open, dismissed),
                 (Hit::Press, Hit::Nothing),
                 "(the open menu, the place it was once dismissed)"
+            );
+        });
+    }
+
+    /// **A grab's target is asked about in the scene's own coordinates**: a
+    /// scene drawn on a second monitor, from 1920,0, has the point 1935,15
+    /// inside a menu at 10,10 of it, and 15,15 of the first monitor outside.
+    #[test]
+    fn a_grab_target_is_asked_about_where_its_scene_is_drawn() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-surface-grab-drawn-at");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    Rectangle { id: menu; x: 10; y: 10; width: 20; height: 10 }\n    Grab { target: menu; active: true }\n}\n",
+            )
+            .expect("writing the scene");
+            let surface =
+                ShellSurface::hosted(path, "{}", "grab-drawn-at-1").expect("the scene builds");
+            let area = smithay::utils::Rectangle::new((1920, 0).into(), (400, 30).into());
+            let inside = surface.grab_contains(area, smithay::utils::Point::from((1935.0, 15.0)));
+            let outside = surface.grab_contains(area, smithay::utils::Point::from((15.0, 15.0)));
+            drop(surface);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (inside, outside),
+                (true, false),
+                "(the menu, drawn on the second monitor; the same place of the first)"
             );
         });
     }

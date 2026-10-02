@@ -23552,6 +23552,35 @@ end)
                 );
             }
 
+            /// **A grab is let go of once no scene of its surface is on its
+            /// monitor** (Ruling 12), though the surface is still declared
+            /// there: the window under where the menu was is clicked again.
+            #[test]
+            fn a_scene_that_goes_from_a_monitor_lets_go_of_its_grab() {
+                let (mut desk, opened, menu) = grabbing(crate::scripted::OutsideClick::default());
+                if let Some(stand) = desk
+                    .state
+                    .surfaces
+                    .get_mut(menu)
+                    .and_then(crate::scripted::Surface::stand_mut)
+                {
+                    stand.hosts = false;
+                }
+                desk.state.settle_scenes();
+                desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                click(&mut desk, (630.0, 530.0), 10);
+                let focused = desk.state.focused_window().and_then(|window| {
+                    window
+                        .wl_surface()
+                        .map(|surface| surface.id().protocol_id())
+                });
+                assert_eq!(
+                    (desk.state.hosted_grab.is_none(), focused),
+                    (true, Some(window_id(&opened))),
+                    "(the grab let go, the window the click focused)"
+                );
+            }
+
             /// **A surface the pointer does not reach holds no grab**, nor
             /// does its grab dismiss the one held: `interactive = false` is
             /// "the pointer reaches it not at all", a `Grab` in its scene too.
