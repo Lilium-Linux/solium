@@ -6631,9 +6631,9 @@ mod tests {
     }
 
     /// **What `sol.keyboard()` reads, handed back to `sol.keyboard{ ... }`,
-    /// compiles no keymap**: the live layout's names come back as
-    /// `layout_name` and `layout_short`, and `layout` is only ever the xkb
-    /// names a keymap is compiled from.
+    /// compiles no keymap**, with `us,ru` and Russian live: the live layout's
+    /// names come back as `layout_name` and `layout_short`, and `layout` is
+    /// only ever the xkb names a keymap is compiled from.
     #[test]
     fn sol_keyboard_handed_back_what_it_read_compiles_no_keymap() {
         let directory = std::env::temp_dir().join("solium-script-test-keyboard-round-trip");
@@ -6642,12 +6642,31 @@ mod tests {
         let config = directory.join("init.lua");
         std::fs::write(
             &config,
-            r#"sol.bind("Super+P", function() sol.keyboard(sol.keyboard()) end)"#,
+            r#"
+            sol.bind("Super+P", function()
+                local read = sol.keyboard()
+                sol.status(tostring(read.layout_name) .. " " .. tostring(read.layout_short))
+                sol.keyboard(read)
+            end)
+            "#,
         )
         .expect("writing the test script");
+        let mut snapshot = empty_snapshot();
+        snapshot.keyboard = crate::keymap::State {
+            layouts: vec!["English (US)".to_owned(), "Russian".to_owned()],
+            short: vec!["EN".to_owned(), "RU".to_owned()],
+            active: 2,
+            ..crate::keymap::State::initial()
+        };
         let mut scripts = Scripts::load(&config).expect("loading the test script");
-        let outcome = scripts.key("super+p", empty_snapshot());
+        let outcome = scripts.key("super+p", snapshot);
         let _ = std::fs::remove_dir_all(&directory);
+
+        assert_eq!(
+            outcome.status.as_deref(),
+            Some("Russian RU"),
+            "the live layout's names"
+        );
 
         let requests: Vec<&crate::keymap::Request> = outcome
             .commands
