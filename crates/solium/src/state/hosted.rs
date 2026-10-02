@@ -16,16 +16,18 @@ pub(crate) type Reserves = BTreeMap<String, Edges>;
 /// How many times one settle reads the scenes again for what its own layout
 /// pass and action handlers declared, before it leaves the rest to the next
 /// settle, so handlers that keep changing a reserve cannot hold a dispatch.
-/// `state::tests::real_client::a_reserve_an_action_handler_changes_reflows_the_windows_in_the_clicks_dispatch`.
+/// `state::tests::real_client::a_reserve_an_action_handler_changes_reflows_the_windows_in_the_clicks_dispatch`,
+/// `state::tests::real_client::handlers_that_keep_changing_a_reserve_cannot_hold_the_clicks_dispatch`.
 const SETTLE_ROUNDS: usize = 4;
 
 impl Solium {
     /// Read what every hosted scene reports, reserves first, then (later
     /// tasks) grabs and keyboard wants, and then the actions they asked for.
     /// Called after anything that can run QML code in a dispatch -- the end
-    /// of an input dispatch and a frame's settle among them -- and once a
-    /// declaration has been applied, and never from inside itself
-    /// (Ruling 11).
+    /// of an input dispatch and a frame's settle among them -- once a
+    /// declaration has been applied, and once the surfaces are placed on
+    /// the monitors (`state::tests::real_client::a_scene_built_on_a_monitor_that_arrives_reserves_in_the_hotplugs_dispatch`),
+    /// and never from inside itself (Ruling 11).
     ///
     /// When what hosted surfaces reserve is no longer what the last layout
     /// pass was laid out against, the layout runs once, here, in the
@@ -69,6 +71,11 @@ impl Solium {
     /// places the same pass asked for after it.
     /// `state::tests::real_client::reflow_on_close::hosted::a_property_a_layout_handler_writes_reflows_the_windows_against_the_reserve_it_moved`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_reserve_declared_again_or_taken_away_reflows_the_windows_once_each`.
+    /// While a settle is running, in that settle's next round instead,
+    /// dispatch or none: the surfaces placed once a handler's dispatch is
+    /// applied inside the settle are read there too.
+    /// `state::tests::real_client::a_reserve_an_action_handler_changes_reflows_the_windows_in_the_clicks_dispatch`,
+    /// `state::tests::real_client::a_scene_an_action_moves_to_the_new_primary_reserves_in_the_clicks_dispatch`.
     pub(crate) fn settle_scenes_once_dispatched(&mut self) {
         if self.dispatching == 0 && !self.settling_scenes {
             self.settle_scenes();

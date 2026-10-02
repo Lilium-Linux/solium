@@ -2825,6 +2825,152 @@ end)"#,
         });
     }
 
+    /// **Handlers that keep changing a reserve cannot hold a dispatch**
+    /// (Ruling 11): a scene that answers every change of `hidden` with
+    /// another action, and a handler that flips `hidden` at each one, are
+    /// read again in the click's dispatch for `SETTLE_ROUNDS` rounds and no
+    /// more, and the next settle carries on from there rather than losing
+    /// what was left. The handler stops by itself after 20 flips, so a
+    /// settle without the bound fails here instead of hanging. Tested with
+    /// the Cyrillic group active (#132). No client, so the scene is a real
+    /// one (the #99 rule).
+    #[test]
+    fn handlers_that_keep_changing_a_reserve_cannot_hold_the_clicks_dispatch() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            use smithay::backend::input::ButtonState;
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-hosted-reserve-ping-pong");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    property string action: \"\"\n    property bool hidden: false\n    onHiddenChanged: action = \"flip\"\n    Solium.surface.reserve.top: hidden ? 0 : 30\n    MouseArea { width: 100; height: 30; onClicked: parent.action = \"flip\" }\n}\n",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"layouts = 0
+flips = 0
+sol.on("layout", function() layouts = layouts + 1 end)
+sol.on("surface", function(name, action)
+    if flips < 20 then
+        flips = flips + 1
+        sol.surface("bar", {{ scene = "{}", layer = "top", on = {{ x = 0, y = 0, w = 1920, h = 30 }}, interactive = true, properties = {{ hidden = flips % 2 == 1 }} }})
+    end
+end)"#,
+                    path.display()
+                ),
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let _output = one_screen(&mut state);
+            russian(&mut state);
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.declare_surface(crate::scripted::Declaration::for_test(
+                "bar",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::Rect(Rectangle::new((0, 0).into(), (1920, 30).into())),
+            ));
+            let said = |state: &Solium, what: &str| -> u32 {
+                state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate(&format!("return tostring({what})")))
+                    .and_then(|said| said.parse().ok())
+                    .unwrap_or(0)
+            };
+            let passes = said(&state, "layouts");
+            move_pointer(&mut state, (50.0, 15.0), 1);
+            let region = crate::monitor::union(&state.space).expect("a monitor");
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Pressed, 2);
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Released, 3);
+            let at_the_click = (said(&state, "flips"), said(&state, "layouts") - passes);
+            state.settle_scenes();
+            let at_the_next_settle = (said(&state, "flips"), said(&state, "layouts") - passes);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (at_the_click, at_the_next_settle),
+                ((4, 3), (8, 7)),
+                "((the flips, the layout passes) once the click's dispatch was done, and once \
+                 the next settle was)"
+            );
+        });
+    }
+
+    /// **A scene an action's handler moves to the new primary reserves in
+    /// the click's dispatch** (Ruling 11): a bar on the primary monitor that
+    /// binds `Solium.surface.reserve.top`, and a button on it whose handler
+    /// makes the other monitor primary. The surfaces are placed once that
+    /// handler's dispatch is applied, inside the click's settle, and the
+    /// scene built there is read in that settle's next round, so the new
+    /// primary's work area loses the bar at the release, not a frame later.
+    /// Tested with the Cyrillic group active (#132). No client, so the scene
+    /// is a real one (the #99 rule).
+    #[test]
+    fn a_scene_an_action_moves_to_the_new_primary_reserves_in_the_clicks_dispatch() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            use smithay::backend::input::ButtonState;
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-hosted-action-primary");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let scene = directory.join("Scene.qml");
+            std::fs::write(
+                &scene,
+                "import QtQuick\nimport Solium\nItem {\n    property string action: \"\"\n    Solium.surface.reserve.top: 30\n    MouseArea { width: 100; height: 30; onClicked: parent.action = \"move\" }\n}\n",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"
+                    sol.surface("bar", {{ scene = "{scene}", layer = "top", on = "primary", interactive = true }})
+                    sol.on("surface", function(name, action)
+                        sol.monitors{{ {{ name = "{RIGHT_SCREEN}", primary = true }} }}
+                    end)
+                    "#,
+                    scene = scene.display()
+                ),
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "action-primary-left");
+            russian(&mut state);
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            let tops = |state: &Solium| {
+                (
+                    state.work_area_on(&left).map(|area| area.loc.y),
+                    state.work_area_on(&right).map(|area| area.loc.y),
+                )
+            };
+            let before = tops(&state);
+            move_pointer(&mut state, (50.0, 15.0), 1);
+            let region = crate::monitor::union(&state.space).expect("a monitor");
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Pressed, 2);
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Released, 3);
+            let after = tops(&state);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (before, after),
+                ((Some(30), Some(0)), (Some(0), Some(30))),
+                "((the left and right work areas' tops) before the click, and once its \
+                 handler made the right monitor primary)"
+            );
+        });
+    }
+
     /// **A scene built on a monitor that arrives has its reserve read in the
     /// hotplug's own dispatch**: a bar that binds
     /// `Solium.surface.reserve.bottom` and declares no reserve in Lua leaves
