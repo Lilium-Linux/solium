@@ -55,7 +55,7 @@
 ---@field shown boolean Whether its application has shown its first frame yet.
 
 ---One row of `sol.monitors()`. `x`, `y`, `w` and `h` are the work area: the
----monitor less the room layer-shell clients have reserved.
+---monitor less what layer-shell bars and hosted surfaces reserve.
 ---@class sol.Monitor: sol.Rect
 ---@field name string The connector name, such as `"DP-1"`.
 ---@field scale number Device pixels per logical pixel.
@@ -112,6 +112,7 @@
 ---@field on? "primary"|"every-monitor"|string|sol.Rect `"every-monitor"` (the default) draws one instance per monitor, filling it; `"primary"` one on the primary monitor; a monitor's name one there; a rect one at that rect.
 ---@field properties? table Values for the scene's properties, handed over as JSON: strings, numbers, booleans and tables of those. A function, userdata or non-finite number is left out.
 ---@field interactive? boolean Whether the pointer reaches it at all. Where it does, the scene's items decide which points are its (`Solium.input`), and the rest go to what is under it. An interactive scene sets its `action` property, and `sol.on("surface", ...)` hears it.
+---@field reserve? { top?: integer, right?: integer, bottom?: integer, left?: integer } Logical pixels taken out of the work area on those edges of every monitor the surface is on, whatever its size or placement; never negative. A scene's own `Solium.surface.reserve.<edge>` wins for an edge it sets. A change re-flows the windows once.
 
 ---@alias sol.Layer
 ---| "background" # Under everything, including client background surfaces.

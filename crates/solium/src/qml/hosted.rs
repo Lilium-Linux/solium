@@ -1,8 +1,9 @@
 //! The compositor's half of what a hosted scene and the compositor say to each
 //! other: properties written in place, the monitor it is on, the models' rows,
-//! pointer events, and what its items claim of the pointer
-//! (`tests::the_item_tree_decides_what_a_point_claims`). What it reserves
-//! (#162), its grabs and its keyboard wants (#163) are still to come.
+//! pointer events, what its items claim of the pointer
+//! (`tests::the_item_tree_decides_what_a_point_claims`), and what it reserves
+//! (`tests::a_scene_reserve_is_reported_once_per_change`). Its grabs and its
+//! keyboard wants (#163) are still to come.
 
 use std::{
     ffi::{CString, c_char, c_int},
@@ -47,6 +48,10 @@ mod ffi {
             y: f64,
         ) -> c_int;
         pub(super) fn solium_qml_scene_pointer_leave(scene: *mut super::super::ffi::Scene);
+        pub(super) fn solium_qml_scene_take_reserve(
+            scene: *mut super::super::ffi::Scene,
+            edges: *mut c_int,
+        ) -> c_int;
     }
 }
 
@@ -237,6 +242,25 @@ impl Scene {
         // SAFETY: the scene is live for as long as `self`.
         unsafe { ffi::solium_qml_scene_pointer_leave(self.scene) }
     }
+
+    /// The scene's reserve, when it changed since it was last asked.
+    /// `tests::a_scene_reserve_is_reported_once_per_change`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn take_reserve(&mut self) -> Option<crate::scripted::SceneReserve> {
+        let mut edges: [c_int; 4] = [-1; 4];
+        // SAFETY: the scene is live for as long as `self`, and `edges` has
+        // room for the four the host writes.
+        if unsafe { ffi::solium_qml_scene_take_reserve(self.scene, edges.as_mut_ptr()) } == 0 {
+            return None;
+        }
+        let edge = |value: c_int| (value >= 0).then_some(value);
+        Some(crate::scripted::SceneReserve {
+            top: edge(edges[0]),
+            right: edge(edges[1]),
+            bottom: edge(edges[2]),
+            left: edge(edges[3]),
+        })
+    }
 }
 
 /// What a pointer event is, for a scene.
@@ -274,6 +298,7 @@ pub(crate) mod tests {
 
     use super::{Hit, PointerKind, ScenePointer};
     use crate::qml::{Scene, qt_test::on_the_qt_thread};
+    use crate::scripted::SceneReserve;
 
     const CLAIMS: &str = r#"
         import QtQuick
@@ -776,6 +801,137 @@ pub(crate) mod tests {
             );
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A scene's reserve is reported once per change**, an unset edge as
+    /// unset, so the declaration keeps it (Ruling 10).
+    #[test]
+    fn a_scene_reserve_is_reported_once_per_change() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-reserve",
+                "import QtQuick\nimport Solium\nItem { property bool hidden: false\n Solium.surface.reserve.bottom: hidden ? 0 : 48 }\n",
+                "reserve-1",
+            );
+            let first = scene.take_reserve();
+            let again = scene.take_reserve();
+            scene.set_bool("hidden", true);
+            let hidden = scene.take_reserve();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (first, again, hidden),
+                (
+                    Some(SceneReserve {
+                        bottom: Some(48),
+                        ..SceneReserve::default()
+                    }),
+                    None,
+                    Some(SceneReserve {
+                        bottom: Some(0),
+                        ..SceneReserve::default()
+                    }),
+                ),
+                "(the first take, a second with no change, the take after the bar hid)"
+            );
+        });
+    }
+
+    /// **A negative scene reserve gives the edge back to the declaration**:
+    /// an edge the scene set and then set to `-1` is reported unset again
+    /// (Ruling 10).
+    #[test]
+    fn a_negative_scene_reserve_gives_the_edge_back_to_the_declaration() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-reserve-negative",
+                "import QtQuick\nimport Solium\nItem { property bool given: false\n Solium.surface.reserve.bottom: given ? -1 : 48 }\n",
+                "reserve-negative-1",
+            );
+            let first = scene.take_reserve();
+            scene.set_bool("given", true);
+            let given = scene.take_reserve();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (first, given),
+                (
+                    Some(SceneReserve {
+                        bottom: Some(48),
+                        ..SceneReserve::default()
+                    }),
+                    Some(SceneReserve::default()),
+                ),
+                "(the first take, the take after the scene gave the edge back)"
+            );
+        });
+    }
+
+    /// **A scene hosted on no monitor may bind a reserve, and reserves
+    /// nothing**: a window frame or the loading scene that writes
+    /// `Solium.surface.reserve` builds, and says nothing to take.
+    #[test]
+    fn an_unhosted_scene_may_bind_a_reserve_and_reserves_nothing() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-hosted-reserve-none");
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem { Solium.surface.reserve.bottom: 48 }\n",
+            )
+            .expect("writing the scene");
+            let mut scene = Scene::for_host(&path, 16, 16, None).expect("the scene builds");
+            let taken = scene.take_reserve();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(taken, None);
+        });
+    }
+
+    /// **A panel that grows out of the bar leaves the reserve as it was**:
+    /// the scene's reserve is the bar's edge, whatever the scene draws, so
+    /// quick settings opening over the windows reports no change, and its
+    /// items take presses where nothing did before. Illia's requirement for
+    /// primitive 3.
+    #[test]
+    fn a_panel_grown_out_of_the_bar_leaves_the_reserve_as_it_was() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-reserve-panel",
+                r"
+                import QtQuick
+                import Solium
+                Item {
+                    property bool open: false
+                    Solium.surface.reserve.bottom: 8
+                    MouseArea { x: 0; y: 24; width: 64; height: 8 }
+                    MouseArea { x: 0; y: 24 - height; width: 64; height: open ? 20 : 0 }
+                }
+                ",
+                "reserve-panel-1",
+            );
+            let reserved = scene.take_reserve();
+            let closed = scene.hit(10.0, 10.0);
+            scene.set_bool("open", true);
+            let opened = (scene.take_reserve(), scene.hit(10.0, 10.0));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (reserved, closed, opened),
+                (
+                    Some(SceneReserve {
+                        bottom: Some(8),
+                        ..SceneReserve::default()
+                    }),
+                    Hit::Nothing,
+                    (None, Hit::Press),
+                ),
+                "(the bar's reserve, the panel's place while it is closed, \
+                 (what opening it reported, the panel's place once it is open))"
+            );
         });
     }
 

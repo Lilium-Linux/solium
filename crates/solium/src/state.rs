@@ -99,6 +99,7 @@ mod close;
 mod commands;
 mod handlers;
 mod hit_test;
+mod hosted;
 mod keyboard;
 mod lock_screen;
 mod monitors;
@@ -391,6 +392,18 @@ pub(crate) struct Solium {
     /// `tests::real_client::reflow_on_close::hosted::the_scene_hears_the_pointer_leave_when_it_moves_off_its_items`.
     pub(crate) scene_hovered: Option<(crate::scripted::SurfaceId, Output)>,
     pub(crate) scene_hover_seen: Option<(crate::scripted::SurfaceId, Output)>,
+    /// Whether [`Self::settle_scenes`] is running, so nothing it runs runs
+    /// it again (Ruling 11): the layout pass it runs declares surfaces in
+    /// `tests::real_client::reflow_on_close::hosted::a_property_a_layout_handler_writes_reflows_the_windows_against_the_reserve_it_moved`.
+    settling_scenes: bool,
+    /// What hosted surfaces reserved when the layout last ran, which a
+    /// change is measured against.
+    /// `tests::real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`.
+    laid_out_reserves: hosted::Reserves,
+    /// Whether a declaration in the dispatch running now asks for the scenes
+    /// to be settled once that dispatch is done.
+    /// `tests::real_client::reflow_on_close::hosted::a_property_a_layout_handler_writes_reflows_the_windows_against_the_reserve_it_moved`.
+    scenes_to_settle: bool,
     // A window on its way out, and one that has been asked to close and not
     // gone, used to be two `HashMap<PaneId, Duration>` here. They are
     // `Pane::closing_at` and `Pane::asked_at` now: a timer about one window is
@@ -930,6 +943,9 @@ impl Solium {
             scene_press: None,
             scene_hovered: None,
             scene_hover_seen: None,
+            settling_scenes: false,
+            laid_out_reserves: hosted::Reserves::new(),
+            scenes_to_settle: false,
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
@@ -1587,6 +1603,10 @@ impl Solium {
         animating |= self.settle_leaving(now);
         // And one asked to close that is still here comes back.
         animating |= self.settle_refused(now);
+        // What the frame's own tick changed in a scene, read one pass later
+        // (Ruling 11):
+        // `tests::real_client::reflow_on_close::hosted::a_reserve_a_scene_changes_on_its_own_is_read_after_the_frame`.
+        self.settle_scenes();
         self.animating = animating;
         animating
     }
@@ -1814,12 +1834,14 @@ impl Solium {
                 surface.sync(&outputs, primary.as_ref());
             }
             self.redraw = true;
+            self.settle_scenes_once_dispatched();
         }
     }
 
     pub(crate) fn remove_surface(&mut self, name: &str) {
         if self.surfaces.remove(name) {
             self.redraw = true;
+            self.settle_scenes_once_dispatched();
         }
     }
 
@@ -1840,8 +1862,8 @@ impl Solium {
     /// A press a scene took holds the pointer for it, wherever the pointer
     /// goes, until every button is up (Ruling 7;
     /// `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`),
-    /// and what the scene asked for on the way is acted on in the same
-    /// dispatch
+    /// and what the scene asked for on the way is acted on once the input
+    /// dispatch is done, by [`Self::settle_scenes`]
     /// (`tests::real_client::a_click_on_a_hosted_button_is_acted_on_at_its_release`).
     ///
     /// `event` is `None` for a button Qt has no name for: a scene that takes
@@ -1871,7 +1893,6 @@ impl Solium {
                 }
             }
             self.redraw = true;
-            self.settle_surfaces();
             return true;
         }
         let asking = event.map_or(Asking::Press, |event| Asking::of(event.kind));
@@ -1930,7 +1951,6 @@ impl Solium {
             PointerKind::Release(_) | PointerKind::Wheel { .. } => {}
         }
         self.redraw = true;
-        self.settle_surfaces();
         true
     }
 
@@ -2111,6 +2131,10 @@ impl Solium {
         for surface in self.surfaces.iter_mut() {
             surface.sync(&outputs, primary.as_ref());
         }
+        // A scene built just now says what it reserves, and that is read in
+        // this dispatch, not at the next frame:
+        // `tests::real_client::a_scene_built_on_a_monitor_that_arrives_reserves_in_the_hotplugs_dispatch`.
+        self.settle_scenes_once_dispatched();
     }
 
     /// Every monitor and its rectangle, as `Surface::sync` takes them.

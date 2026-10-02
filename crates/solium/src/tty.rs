@@ -384,6 +384,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         |state: &State| state.solium.clock.now(),
         |state: &mut State, changed| {
             state.solium.redraw |= changed;
+            state.solium.settle_scenes();
         },
     )?;
 

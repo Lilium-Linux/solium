@@ -368,12 +368,13 @@ why it is made before Qt starts; `dev/README.md`, *QML on the GPU*, has how to
 force either one. See `docs/spikes/2026-09-04-qml-in-compositor.md` for the
 original measurement and the two Qt traps it hides.
 
-**A bar reserves its height only as a layer-shell client.** The work area is
-what every layer surface's exclusive zone leaves of a monitor, so windows are
-placed beside a client bar, never under it. A hosted shell reserves nothing
-yet: windows are placed under a hosted bar (`docs/shell-boundary.md`, "No
-reserved space"). And a fullscreen window covers the `top` layer, bars
-included, unless `fullscreen.covers` says otherwise.
+**A bar reserves its height whether it is a client or hosted.** The work area
+is what every layer surface's exclusive zone and every hosted surface's
+`reserve` leave of a monitor, so windows are placed beside a bar, never under
+it. A hosted surface's reserve is apart from its size: a whole-monitor shell
+reserves only its bar's edge (`docs/shell-boundary.md`, "Room of its own").
+And a fullscreen window covers the `top` layer, bars included, unless
+`fullscreen.covers` says otherwise.
 
 ## Form factors
 

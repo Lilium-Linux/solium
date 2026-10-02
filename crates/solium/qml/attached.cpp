@@ -79,6 +79,23 @@ SoliumMonitor *SoliumAttached::monitor() const
     return solium_monitor_row(hosting != nullptr ? hosting->monitor : QString());
 }
 
+SoliumSurfaceInfo *SoliumAttached::surface() const
+{
+    /* A scene that is not hosted gets one that nothing reads, so a binding to
+     * it is harmless.
+     * `qml::hosted::tests::an_unhosted_scene_may_bind_a_reserve_and_reserves_nothing`. */
+    static SoliumSurfaceInfo *inert = nullptr;
+    SoliumHosting *hosting = solium_hosting_of(m_item);
+    if (hosting != nullptr) {
+        return &hosting->surface_info;
+    }
+    if (inert == nullptr) {
+        inert = new SoliumSurfaceInfo();
+        QQmlEngine::setObjectOwnership(inert, QQmlEngine::CppOwnership);
+    }
+    return inert;
+}
+
 QVariant SoliumAttached::input() const
 {
     switch (m_input) {
@@ -261,4 +278,9 @@ void solium_qml_register_types()
      * shell's scene, a `Monitor.qml`, in every scene that imports `Solium`.
      * `qml::hosted::tests::a_shell_file_named_like_a_row_is_still_the_shells`. */
     qmlRegisterAnonymousType<SoliumMonitor>(SOLIUM_NATIVE_URI, 1);
+    /* The groups `Solium.surface.reserve` is reached through, nameless for
+     * the same reason.
+     * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
+    qmlRegisterAnonymousType<SoliumSurfaceInfo>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterAnonymousType<SoliumReserve>(SOLIUM_NATIVE_URI, 1);
 }

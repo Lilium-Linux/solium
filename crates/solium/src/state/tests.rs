@@ -2699,12 +2699,13 @@ mod real_client {
     /// **A click on a hosted button is acted on at its release**: the press
     /// holds the pointer for the scene (Ruling 7), the release that clicks the
     /// button reaches it through the hold, and the action the click set is
-    /// heard in that same dispatch. Tested with the Cyrillic group active
-    /// (#132). No client, so the scene is a real one (the #99 rule).
+    /// heard in that same dispatch, the release's, through the real input
+    /// path. Tested with the Cyrillic group active (#132). No client, so the
+    /// scene is a real one (the #99 rule).
     #[test]
     fn a_click_on_a_hosted_button_is_acted_on_at_its_release() {
         crate::qml::qt_test::on_the_qt_thread(|| {
-            use crate::qml::hosted::{PointerKind, ScenePointer};
+            use smithay::backend::input::ButtonState;
             crate::qml::start().expect("Qt starts");
             let directory = std::env::temp_dir().join("solium-state-hosted-click");
             let _ = std::fs::remove_dir_all(&directory);
@@ -2734,20 +2735,282 @@ mod real_client {
                 crate::scripted::Layer::Top,
                 crate::scripted::On::Rect(Rectangle::new((0, 0).into(), (1920, 30).into())),
             ));
-            let at = Point::<f64, Logical>::from((50.0, 15.0));
-            let event = |kind, buttons| ScenePointer {
-                kind,
-                buttons,
-                modifiers: 0,
-                time: 0,
-            };
-            assert!(
-                state.surface_pointer(true, at, Some(event(PointerKind::Press(0x1), 0x1))),
-                "the premise: the button takes the press"
-            );
-            assert!(state.surface_pointer(true, at, Some(event(PointerKind::Release(0x1), 0))));
-            assert_eq!(state.status, "bar clicked");
+            move_pointer(&mut state, (50.0, 15.0), 1);
+            let region = crate::monitor::union(&state.space).expect("a monitor");
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Pressed, 2);
+            let pressed = (state.scene_press.is_some(), state.status.clone());
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Released, 3);
             let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (pressed, state.status.as_str()),
+                ((true, String::new()), "bar clicked"),
+                "((the scene holds the press, what was heard at the press), what was heard at \
+                 the release)"
+            );
+        });
+    }
+
+    /// **A reserve an action's handler changes re-flows the windows in the
+    /// dispatch of the click that sent it** (Ruling 11): a bar's button asks
+    /// Lua to hide the bar, the handler declares it again with `hidden`, the
+    /// scene's `Solium.surface.reserve.top` follows, and the work area and
+    /// the layout move at the release, not a frame later. Tested with the
+    /// Cyrillic group active (#132). No client, so the scene is a real one
+    /// (the #99 rule).
+    #[test]
+    fn a_reserve_an_action_handler_changes_reflows_the_windows_in_the_clicks_dispatch() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            use smithay::backend::input::ButtonState;
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-hosted-action-reserve");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    property string action: \"\"\n    property bool hidden: false\n    Solium.surface.reserve.top: hidden ? 0 : 30\n    MouseArea { width: 100; height: 30; onClicked: parent.action = \"hide\" }\n}\n",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"layouts = 0
+sol.on("layout", function() layouts = layouts + 1 end)
+sol.on("surface", function(name, action)
+    sol.surface("bar", {{ scene = "{}", layer = "top", on = {{ x = 0, y = 0, w = 1920, h = 30 }}, interactive = true, properties = {{ hidden = true }} }})
+end)"#,
+                    path.display()
+                ),
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let output = one_screen(&mut state);
+            russian(&mut state);
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.declare_surface(crate::scripted::Declaration::for_test(
+                "bar",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::Rect(Rectangle::new((0, 0).into(), (1920, 30).into())),
+            ));
+            let layouts = |state: &Solium| -> u32 {
+                state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate("return tostring(layouts)"))
+                    .and_then(|said| said.parse().ok())
+                    .unwrap_or(0)
+            };
+            let shown = state.work_area_on(&output).map(|area| area.loc.y);
+            let passes = layouts(&state);
+            move_pointer(&mut state, (50.0, 15.0), 1);
+            let region = crate::monitor::union(&state.space).expect("a monitor");
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Pressed, 2);
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Released, 3);
+            let hidden = (
+                state.work_area_on(&output).map(|area| area.loc.y),
+                layouts(&state) - passes,
+            );
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (shown, hidden),
+                (Some(30), (Some(0), 1)),
+                "(the work area's top with the bar shown, (its top, the layout passes) once \
+                 the click's handler hid it)"
+            );
+        });
+    }
+
+    /// **Handlers that keep changing a reserve cannot hold a dispatch**
+    /// (Ruling 11): a scene that answers every change of `hidden` with
+    /// another action, and a handler that flips `hidden` at each one, are
+    /// read again in the click's dispatch for `SETTLE_ROUNDS` rounds and no
+    /// more, and the next settle carries on from there rather than losing
+    /// what was left. The handler stops by itself after 20 flips, so a
+    /// settle without the bound fails here instead of hanging. Tested with
+    /// the Cyrillic group active (#132). No client, so the scene is a real
+    /// one (the #99 rule).
+    #[test]
+    fn handlers_that_keep_changing_a_reserve_cannot_hold_the_clicks_dispatch() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            use smithay::backend::input::ButtonState;
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-hosted-reserve-ping-pong");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    property string action: \"\"\n    property bool hidden: false\n    onHiddenChanged: action = \"flip\"\n    Solium.surface.reserve.top: hidden ? 0 : 30\n    MouseArea { width: 100; height: 30; onClicked: parent.action = \"flip\" }\n}\n",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"layouts = 0
+flips = 0
+sol.on("layout", function() layouts = layouts + 1 end)
+sol.on("surface", function(name, action)
+    if flips < 20 then
+        flips = flips + 1
+        sol.surface("bar", {{ scene = "{}", layer = "top", on = {{ x = 0, y = 0, w = 1920, h = 30 }}, interactive = true, properties = {{ hidden = flips % 2 == 1 }} }})
+    end
+end)"#,
+                    path.display()
+                ),
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let _output = one_screen(&mut state);
+            russian(&mut state);
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.declare_surface(crate::scripted::Declaration::for_test(
+                "bar",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::Rect(Rectangle::new((0, 0).into(), (1920, 30).into())),
+            ));
+            let said = |state: &Solium, what: &str| -> u32 {
+                state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate(&format!("return tostring({what})")))
+                    .and_then(|said| said.parse().ok())
+                    .unwrap_or(0)
+            };
+            let passes = said(&state, "layouts");
+            move_pointer(&mut state, (50.0, 15.0), 1);
+            let region = crate::monitor::union(&state.space).expect("a monitor");
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Pressed, 2);
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Released, 3);
+            let at_the_click = (said(&state, "flips"), said(&state, "layouts") - passes);
+            state.settle_scenes();
+            let at_the_next_settle = (said(&state, "flips"), said(&state, "layouts") - passes);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (at_the_click, at_the_next_settle),
+                ((4, 3), (8, 7)),
+                "((the flips, the layout passes) once the click's dispatch was done, and once \
+                 the next settle was)"
+            );
+        });
+    }
+
+    /// **A scene an action's handler moves to the new primary reserves in
+    /// the click's dispatch** (Ruling 11): a bar on the primary monitor that
+    /// binds `Solium.surface.reserve.top`, and a button on it whose handler
+    /// makes the other monitor primary. The surfaces are placed once that
+    /// handler's dispatch is applied, inside the click's settle, and the
+    /// scene built there is read in that settle's next round, so the new
+    /// primary's work area loses the bar at the release, not a frame later.
+    /// Tested with the Cyrillic group active (#132). No client, so the scene
+    /// is a real one (the #99 rule).
+    #[test]
+    fn a_scene_an_action_moves_to_the_new_primary_reserves_in_the_clicks_dispatch() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            use smithay::backend::input::ButtonState;
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-hosted-action-primary");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let scene = directory.join("Scene.qml");
+            std::fs::write(
+                &scene,
+                "import QtQuick\nimport Solium\nItem {\n    property string action: \"\"\n    Solium.surface.reserve.top: 30\n    MouseArea { width: 100; height: 30; onClicked: parent.action = \"move\" }\n}\n",
+            )
+            .expect("writing the scene");
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"
+                    sol.surface("bar", {{ scene = "{scene}", layer = "top", on = "primary", interactive = true }})
+                    sol.on("surface", function(name, action)
+                        sol.monitors{{ {{ name = "{RIGHT_SCREEN}", primary = true }} }}
+                    end)
+                    "#,
+                    scene = scene.display()
+                ),
+            )
+            .expect("writing the test script");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let (left, right) = side_by_side(&mut state, "action-primary-left");
+            russian(&mut state);
+            state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            state.settle_monitors();
+            let tops = |state: &Solium| {
+                (
+                    state.work_area_on(&left).map(|area| area.loc.y),
+                    state.work_area_on(&right).map(|area| area.loc.y),
+                )
+            };
+            let before = tops(&state);
+            move_pointer(&mut state, (50.0, 15.0), 1);
+            let region = crate::monitor::union(&state.space).expect("a monitor");
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Pressed, 2);
+            crate::synth::send_button(&mut state, region, 0x110, ButtonState::Released, 3);
+            let after = tops(&state);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (before, after),
+                ((Some(30), Some(0)), (Some(0), Some(30))),
+                "((the left and right work areas' tops) before the click, and once its \
+                 handler made the right monitor primary)"
+            );
+        });
+    }
+
+    /// **A scene built on a monitor that arrives has its reserve read in the
+    /// hotplug's own dispatch**: a bar that binds
+    /// `Solium.surface.reserve.bottom` and declares no reserve in Lua leaves
+    /// its strip of the new monitor as soon as the hotplug is done, so
+    /// windows sent there are not laid out under the bar first and moved a
+    /// frame later. No client, so the scene is a real one (the #99 rule).
+    #[test]
+    fn a_scene_built_on_a_monitor_that_arrives_reserves_in_the_hotplugs_dispatch() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-hosted-hotplug-reserve");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem { Solium.surface.reserve.bottom: 48 }\n",
+            )
+            .expect("writing the scene");
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let left = one_screen(&mut state);
+            state.declare_surface(crate::scripted::Declaration::for_test(
+                "bar",
+                path,
+                crate::scripted::Layer::Top,
+                crate::scripted::On::EveryMonitor,
+            ));
+            let right = a_screen(&mut state, RIGHT_SCREEN, (1920, 0));
+            state.settle_monitors();
+            let heights = (
+                state.work_area_on(&left).map(|area| area.size.h),
+                state.work_area_on(&right).map(|area| area.size.h),
+            );
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                heights,
+                (Some(1032), Some(1032)),
+                "(the first monitor's work area height, the one that arrived)"
+            );
         });
     }
 
@@ -22553,6 +22816,469 @@ end)
                     ),
                     (true, true, true),
                     "(the scene heard the wheel, it heard the release, the hold let go)"
+                );
+            }
+
+            /// A surface on every monitor reserving `reserve`, its scene stood
+            /// in for by `stand`.
+            fn reserving(
+                desk: &mut Desk,
+                name: &str,
+                reserve: crate::scripted::Edges,
+                stand: Stand,
+            ) -> crate::scripted::SurfaceId {
+                let mut declared = crate::scripted::Declaration::for_test(
+                    name,
+                    std::path::PathBuf::from("/nonexistent/hosted-test.qml"),
+                    Scripted::Top,
+                    crate::scripted::On::EveryMonitor,
+                );
+                declared.reserve = reserve;
+                desk.state.declare_surface(declared);
+                let id = desk.state.surfaces.named(name).expect("declared");
+                desk.state
+                    .surfaces
+                    .get_mut(id)
+                    .expect("live")
+                    .stand_in(stand);
+                id
+            }
+
+            fn the_monitor(desk: &Desk) -> Output {
+                desk.state
+                    .space
+                    .outputs()
+                    .next()
+                    .cloned()
+                    .expect("a monitor")
+            }
+
+            fn bottom(edge: i32) -> crate::scripted::Edges {
+                crate::scripted::Edges {
+                    bottom: edge,
+                    ..Default::default()
+                }
+            }
+
+            /// The stand-in for surface `id`, to change what it reports.
+            fn stand_of(desk: &mut Desk, id: crate::scripted::SurfaceId) -> &mut Stand {
+                desk.state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(crate::scripted::Surface::stand_mut)
+                    .expect("a stand-in")
+            }
+
+            /// **#162: a declared reserve takes its edge out of the work area**,
+            /// and Lua's `sol.monitors()` and the scene's `Solium.monitor.area`
+            /// see the same work area. Ruling 10.
+            #[test]
+            fn a_declared_reserve_takes_its_edge_out_of_the_work_area() {
+                let mut desk = Desk::new();
+                reserving(&mut desk, "bar", bottom(48), Stand::solid());
+                let output = the_monitor(&desk);
+                let area = desk.state.work_area_on(&output).expect("a work area");
+                assert_eq!((area.loc.y, area.size.h), (0, 1032));
+                let lua = desk
+                    .state
+                    .snapshot()
+                    .monitors
+                    .first()
+                    .map(|monitor| monitor.area.h);
+                assert_eq!(
+                    lua,
+                    Some(1032.0),
+                    "sol.monitors() disagrees with the compositor"
+                );
+                let row = crate::models::monitors::rows(&desk.state)
+                    .first()
+                    .and_then(|row| row.values.get("area").cloned());
+                assert_eq!(
+                    row,
+                    Some(crate::models::monitors::rect(area)),
+                    "Solium.monitor.area disagrees with the compositor"
+                );
+            }
+
+            /// **Two surfaces reserving one edge take both** (Ruling 10): a
+            /// bar and a dock under it, on the bottom edge.
+            #[test]
+            fn two_surfaces_reserving_one_edge_take_both() {
+                let mut desk = Desk::new();
+                reserving(&mut desk, "bar", bottom(48), Stand::solid());
+                reserving(&mut desk, "dock", bottom(20), Stand::solid());
+                let output = the_monitor(&desk);
+                let area = desk.state.work_area_on(&output).expect("a work area");
+                assert_eq!((area.loc.y, area.size.h), (0, 1012));
+            }
+
+            /// **A reserve a scene changes on its own is read at the frame's
+            /// settle** (Ruling 11): a timer in the scene hides the bar with
+            /// nothing delivered to it, and the frame after re-flows the
+            /// layout once.
+            #[test]
+            fn a_reserve_a_scene_changes_on_its_own_is_read_after_the_frame() {
+                let mut desk = Desk::new();
+                desk.install(
+                    r#"layouts = 0
+sol.on("layout", function() layouts = layouts + 1; sol.status(tostring(layouts)) end)"#,
+                );
+                let bar = reserving(&mut desk, "bar", bottom(48), Stand::solid());
+                let before: u32 = desk.state.status.parse().unwrap_or(0);
+                stand_of(&mut desk, bar).reserve = Some(crate::scripted::SceneReserve {
+                    bottom: Some(0),
+                    ..Default::default()
+                });
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                let output = the_monitor(&desk);
+                assert_eq!(
+                    (
+                        desk.state.work_area_on(&output).map(|area| area.size.h),
+                        desk.state.status.parse::<u32>().unwrap_or(0) - before,
+                    ),
+                    (Some(1080), 1),
+                    "(the work area's height, the layout passes) after the frame"
+                );
+            }
+
+            /// **A reserving surface is drawn across its whole monitor**: its
+            /// own reserve does not shrink it.
+            #[test]
+            fn a_reserving_surface_is_drawn_across_the_whole_monitor() {
+                let mut desk = Desk::new();
+                let bar = reserving(&mut desk, "bar", bottom(48), Stand::solid());
+                let screen = Rectangle::new((0, 0).into(), (1920, 1080).into());
+                let drawn: Vec<Rectangle<i32, Logical>> =
+                    crate::render::stacked(&desk.state, screen, desk.state.clock.now())
+                        .into_iter()
+                        .filter_map(|each| match each {
+                            crate::render::Stacked::Surface(id, area, _) if id == bar => Some(area),
+                            _ => None,
+                        })
+                        .collect();
+                assert_eq!(drawn, vec![screen]);
+            }
+
+            /// **A reserve the scene sets wins for that edge, and runs `layout`
+            /// once** (Ruling 10, Ruling 11).
+            #[test]
+            fn a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once() {
+                let mut desk = Desk::new();
+                desk.install(
+                    r#"layouts = 0
+sol.on("layout", function() layouts = layouts + 1; sol.status(tostring(layouts)) end)"#,
+                );
+                let bar = reserving(
+                    &mut desk,
+                    "bar",
+                    crate::scripted::Edges {
+                        bottom: 48,
+                        top: 10,
+                        ..Default::default()
+                    },
+                    Stand::solid(),
+                );
+                let before: u32 = desk.state.status.parse().unwrap_or(0);
+                stand_of(&mut desk, bar).reserve = Some(crate::scripted::SceneReserve {
+                    bottom: Some(0),
+                    ..Default::default()
+                });
+                desk.state.settle_scenes();
+                let output = the_monitor(&desk);
+                let area = desk.state.work_area_on(&output).expect("a work area");
+                assert_eq!(
+                    (area.loc.y, area.size.h),
+                    (10, 1070),
+                    "the scene's bottom must win and the declared top stay"
+                );
+                let after: u32 = desk.state.status.parse().unwrap_or(0);
+                assert_eq!(after, before + 1, "layout must run exactly once");
+                desk.state.settle_scenes();
+                assert_eq!(
+                    desk.state.status.parse::<u32>().unwrap_or(0),
+                    after,
+                    "an unchanged reserve ran layout again"
+                );
+            }
+
+            /// Counts every `layout` pass, ahead of the tiling layout.
+            const LAYOUTS: &str = r#"layouts = 0
+sol.on("layout", function() layouts = layouts + 1 end)"#;
+
+            /// How many `layout` passes [`LAYOUTS`] has counted.
+            fn layouts(desk: &Desk) -> u32 {
+                desk.state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate("return tostring(layouts)"))
+                    .and_then(|said| said.parse().ok())
+                    .unwrap_or(0)
+            }
+
+            /// A bar across the bottom 48 of the monitor, and nothing else.
+            fn bottom_bar(at: Point<f64, Logical>) -> crate::qml::hosted::Hit {
+                if at.y >= 1032.0 {
+                    crate::qml::hosted::Hit::Press
+                } else {
+                    crate::qml::hosted::Hit::Nothing
+                }
+            }
+
+            /// That bar, and quick settings grown out of it over the windows:
+            /// 600..1300 x 532..1032.
+            fn bottom_bar_and_its_panel(at: Point<f64, Logical>) -> crate::qml::hosted::Hit {
+                let panel = (600.0..1300.0).contains(&at.x) && (532.0..1032.0).contains(&at.y);
+                if panel {
+                    crate::qml::hosted::Hit::Press
+                } else {
+                    bottom_bar(at)
+                }
+            }
+
+            /// Two windows tiled under a canvas on every monitor whose bar
+            /// reserves the bottom 48, every glide landed, with Russian the
+            /// active group and `before` run ahead of the tiling layout.
+            fn tiled_under_a_bar(
+                before: &str,
+                stand: Stand,
+            ) -> (Desk, [crate::pane::PaneId; 2], crate::scripted::SurfaceId) {
+                let mut desk = russian_desk();
+                let (_, _, first) = desk.open();
+                let (_, _, second) = desk.open();
+                desk.arrange("tiling", before);
+                let bar = reserving(&mut desk, "bar", bottom(48), stand);
+                desk.state.clock.advance(Duration::from_secs(2));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                (desk, [first, second], bar)
+            }
+
+            /// **A reserve the scene changes at a press re-flows the tiled
+            /// windows once, in the dispatch that delivered the press, from
+            /// that instant on the compositor's clock** (Ruling 11, Q4): the
+            /// bar hides, and the windows glide down into the room it gave
+            /// back with the layout's own motion, starting where they were.
+            /// Russian is the active group (#132).
+            #[test]
+            fn a_reserve_the_scene_changes_at_a_press_reflows_the_tiled_windows_once_from_that_instant()
+             {
+                let (mut desk, panes, bar) = tiled_under_a_bar(LAYOUTS, Stand::solid());
+                let placed = panes.map(|pane| desk.placed(pane));
+                assert!(
+                    placed.iter().all(|rect| rect.loc.y + rect.size.h <= 1032),
+                    "the premise: the windows are tiled above the bar: {placed:?}"
+                );
+                let passes = layouts(&desk);
+                let at_rest = desk.state.clock.now();
+                let shown = panes.map(|pane| drawn_now(&desk.state, pane, at_rest).rect.size.h);
+                move_pointer(&mut desk.state, (960.0, 1050.0), 10);
+                stand_of(&mut desk, bar).reserve = Some(crate::scripted::SceneReserve {
+                    bottom: Some(0),
+                    ..Default::default()
+                });
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                let now = desk.state.clock.now();
+                let started = panes.map(|pane| drawn_now(&desk.state, pane, now).rect.size.h);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    12,
+                );
+                let reflowed = panes.map(|pane| desk.placed(pane));
+                let midway = panes.map(|pane| {
+                    drawn_now(&desk.state, pane, now + Duration::from_millis(60))
+                        .rect
+                        .size
+                        .h
+                });
+                assert_eq!(
+                    layouts(&desk) - passes,
+                    1,
+                    "the reserve the press changed must run the layout exactly once"
+                );
+                assert_eq!(
+                    reflowed.map(|rect| rect.size.h - 48),
+                    placed.map(|rect| rect.size.h),
+                    "the windows did not take the room the bar gave back"
+                );
+                assert!(
+                    started
+                        .iter()
+                        .zip(&shown)
+                        .all(|(drawn, was)| (drawn - was).abs() < 1.0),
+                    "the glide must start where the windows were drawn, at the dispatch's \
+                     instant: drawn {started:?}, before the press {shown:?}"
+                );
+                assert!(
+                    midway
+                        .iter()
+                        .zip(shown.iter().zip(&reflowed))
+                        .all(|(drawn, (was, now))| {
+                            *drawn > was + 1.0 && *drawn < f64::from(now.size.h) - 1.0
+                        }),
+                    "60 ms on, the windows must be on their way, on the clock the press was \
+                     delivered on: drawn {midway:?}, from {shown:?} to {reflowed:?}"
+                );
+            }
+
+            /// **A panel growing out of the bar moves no window** (Illia's
+            /// requirement, primitive 3): a press on the bar opens quick
+            /// settings over the windows, inside the same canvas, and the
+            /// work area, the layout and every window stay as they were,
+            /// while the panel takes the presses over the window under it.
+            /// Russian is the active group (#132).
+            #[test]
+            fn a_panel_growing_out_of_the_bar_moves_no_window() {
+                let (mut desk, panes, bar) = tiled_under_a_bar(
+                    LAYOUTS,
+                    Stand {
+                        hit: bottom_bar,
+                        ..Stand::solid()
+                    },
+                );
+                let passes = layouts(&desk);
+                let placed = panes.map(|pane| desk.placed(pane));
+                let output = the_monitor(&desk);
+                let area = desk.state.work_area_on(&output);
+                let region = region(&desk);
+                move_pointer(&mut desk.state, (960.0, 1050.0), 10);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                stand_of(&mut desk, bar).hit = bottom_bar_and_its_panel;
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    12,
+                );
+                move_pointer(&mut desk.state, (800.0, 700.0), 13);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 14);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    15,
+                );
+                let pressed_on_the_panel = desk
+                    .state
+                    .surfaces
+                    .get(bar)
+                    .and_then(crate::scripted::Surface::stand)
+                    .is_some_and(|stand| {
+                        stand.seen.iter().any(|(at, event)| {
+                            let off = *at - Point::from((800.0, 700.0));
+                            matches!(event.kind, PointerKind::Press(0x1))
+                                && off.x.abs() < 0.5
+                                && off.y.abs() < 0.5
+                        })
+                    });
+                assert_eq!(
+                    (
+                        layouts(&desk) - passes,
+                        panes.map(|pane| desk.placed(pane)),
+                        desk.state.work_area_on(&output),
+                        pressed_on_the_panel,
+                    ),
+                    (0, placed, area, true),
+                    "(layout passes, the windows, the work area, whether the panel took the \
+                     press over the window) once quick settings opened"
+                );
+            }
+
+            /// **A reserve declared again, or taken away with its surface,
+            /// re-flows the windows once each**, in the dispatch of the
+            /// binding that said it: a key with Russian the active group
+            /// (#132) doubles the bar, and another takes it away.
+            #[test]
+            fn a_reserve_declared_again_or_taken_away_reflows_the_windows_once_each() {
+                const KEY_B: u32 = 56;
+                const KEY_N: u32 = 57;
+                let (mut desk, panes, _) = tiled_under_a_bar(
+                    &format!(
+                        r#"{LAYOUTS}
+sol.bind("super+b", function()
+    sol.surface("bar", {{ scene = "/nonexistent/hosted-test.qml", layer = "top", interactive = true, reserve = {{ bottom = 96 }} }})
+end)
+sol.bind("super+n", function() sol.surface("bar", false) end)"#
+                    ),
+                    Stand::solid(),
+                );
+                let heights = |desk: &Desk| panes.map(|pane| desk.placed(pane).size.h);
+                let chord = |desk: &mut Desk, key: u32, time: u32| {
+                    for (code, state, at) in [
+                        (SUPER_L, KeyState::Pressed, time),
+                        (key, KeyState::Pressed, time + 1),
+                        (key, KeyState::Released, time + 2),
+                        (SUPER_L, KeyState::Released, time + 3),
+                    ] {
+                        crate::input::key(&mut desk.state, code.into(), state, at);
+                    }
+                };
+                let (passes, tiled) = (layouts(&desk), heights(&desk));
+                chord(&mut desk, KEY_B, 10);
+                let (doubled, after_doubling) = (heights(&desk), layouts(&desk));
+                chord(&mut desk, KEY_N, 20);
+                let (gone, after_going) = (heights(&desk), layouts(&desk));
+                assert_eq!(
+                    (
+                        after_doubling - passes,
+                        doubled.map(|h| h + 48),
+                        after_going - after_doubling,
+                        gone.map(|h| h - 96),
+                    ),
+                    (1, tiled, 1, doubled),
+                    "(layout passes, heights + 48) once the bar doubled, and \
+                     (layout passes, heights - 96) once it went"
+                );
+            }
+
+            /// **A property a `layout` handler writes, which moves the
+            /// scene's reserve, re-flows the windows against the new one**:
+            /// the scenes are read once the handler's whole dispatch is
+            /// applied, not part way through it, where the places the same
+            /// pass asked for afterwards would put the windows back where
+            /// the old reserve left room.
+            #[test]
+            fn a_property_a_layout_handler_writes_reflows_the_windows_against_the_reserve_it_moved()
+            {
+                let mut desk = Desk::new();
+                let (_, _, pane) = desk.open();
+                desk.arrange(
+                    "tiling",
+                    r#"passes = 0
+sol.on("layout", function()
+    passes = passes + 1
+    sol.surface("bar", { scene = "/nonexistent/hosted-test.qml", layer = "top", interactive = true, properties = { pass = passes } })
+end)"#,
+                );
+                desk.state.trigger_relayout();
+                let whole = desk.placed(pane);
+                let bar = desk
+                    .state
+                    .surfaces
+                    .named("bar")
+                    .expect("the handler declared it");
+                desk.state
+                    .surfaces
+                    .get_mut(bar)
+                    .expect("live")
+                    .stand_in(Stand {
+                        reserve: Some(crate::scripted::SceneReserve {
+                            bottom: Some(48),
+                            ..Default::default()
+                        }),
+                        ..Stand::solid()
+                    });
+                desk.state.trigger_relayout();
+                assert_eq!(
+                    desk.placed(pane).size.h,
+                    whole.size.h - 48,
+                    "the window was placed against the reserve the scene had before"
                 );
             }
         }

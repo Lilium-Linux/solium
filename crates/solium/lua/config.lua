@@ -97,9 +97,11 @@ local defaults = {
     -- installing one and for what the compositor provides to a shell it
     -- hosts.
     --
-    -- What a hosted shell does not have yet: keyboard focus (#163); and room
-    -- of its own, since a bar reserves none and windows are placed under it
-    -- (#162).
+    -- Its bar keeps the windows out of its strip by saying so in the scene,
+    -- `Solium.surface.reserve.bottom: 48`, and quick settings growing out
+    -- of it move no window. See `a_panel_growing_out_of_the_bar_moves_no_window`.
+    --
+    -- What a hosted shell does not have yet: keyboard focus (#163).
     --
     -- A layer-shell bar (Waybar and the like) needs nothing here: it is an
     -- ordinary client, and you start it as one.

@@ -26,6 +26,43 @@ pub(super) fn anywhere_on(
         .any(|screen| crate::render::drawn_on(rect, screen))
 }
 
+/// What is left of `whole` once each edge has lost its layer-shell zone (the
+/// difference between `whole` and `zone`) plus what hosted surfaces reserve
+/// there, keeping at least one logical pixel on each axis (Ruling 10).
+/// `tests::a_reserve_adds_to_the_layer_zone_on_its_edge`,
+/// `tests::a_reserve_never_takes_the_whole_monitor`.
+pub(crate) fn within(
+    whole: Rectangle<i32, Logical>,
+    zone: Rectangle<i32, Logical>,
+    reserved: crate::scripted::Edges,
+) -> Rectangle<i32, Logical> {
+    // `min` then `max` rather than `clamp`, which panics on a monitor with
+    // no size yet: `tests::a_monitor_with_no_size_yet_is_reserved_on_without_a_panic`.
+    // Saturating, because a reserve is whatever a scene or a script says:
+    // `tests::a_reserve_too_large_for_any_monitor_leaves_one_pixel`.
+    let top = (zone.loc.y - whole.loc.y)
+        .saturating_add(reserved.top)
+        .min(whole.size.h - 1)
+        .max(0);
+    let left = (zone.loc.x - whole.loc.x)
+        .saturating_add(reserved.left)
+        .min(whole.size.w - 1)
+        .max(0);
+    let bottom =
+        ((whole.loc.y + whole.size.h) - (zone.loc.y + zone.size.h)).saturating_add(reserved.bottom);
+    let right =
+        ((whole.loc.x + whole.size.w) - (zone.loc.x + zone.size.w)).saturating_add(reserved.right);
+    let (width, height) = (whole.size.w, whole.size.h);
+    Rectangle::new(
+        (whole.loc.x + left, whole.loc.y + top).into(),
+        (
+            width.saturating_sub(left).saturating_sub(right).max(1),
+            height.saturating_sub(top).saturating_sub(bottom).max(1),
+        )
+            .into(),
+    )
+}
+
 impl Solium {
     /// The monitor the user is working on.
     ///
@@ -193,7 +230,9 @@ impl Solium {
         self.work_area_on(&self.active_output()?)
     }
 
-    /// The same, for a monitor you already have.
+    /// The same, for a monitor you already have: what layer-shell clients'
+    /// exclusive zones and hosted surfaces' reserves leave of it (Ruling 10).
+    /// `tests::real_client::reflow_on_close::hosted::a_declared_reserve_takes_its_edge_out_of_the_work_area`.
     pub(crate) fn work_area_on(&self, output: &Output) -> Option<Rectangle<i32, Logical>> {
         // The layer map's zone is in the output's own coordinates; every rect
         // the compositor works in is global. Without this offset a bar on the
@@ -201,7 +240,11 @@ impl Solium {
         // like the exclusive zone being applied to the wrong screen because it
         // is.
         let geometry = self.space.output_geometry(output)?;
-        let mut area = layer::work_area(output);
+        let mut area = within(
+            Rectangle::from_size(geometry.size),
+            layer::work_area(output),
+            self.reserved_on(output),
+        );
         area.loc += geometry.loc;
         Some(area)
     }
@@ -574,5 +617,90 @@ impl Solium {
                 held.move_left_tile(back);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use smithay::utils::{Logical, Rectangle};
+
+    use super::within;
+    use crate::scripted::Edges;
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    /// **A reserve adds to the layer-shell zone on its edge** (Ruling 10).
+    #[test]
+    fn a_reserve_adds_to_the_layer_zone_on_its_edge() {
+        let whole = rect(0, 0, 1920, 1080);
+        let zone = rect(0, 30, 1920, 1050);
+        assert_eq!(
+            within(
+                whole,
+                zone,
+                Edges {
+                    top: 20,
+                    bottom: 48,
+                    ..Edges::default()
+                }
+            ),
+            rect(0, 50, 1920, 982)
+        );
+    }
+
+    /// **A reserve never takes the whole monitor**: at least one logical
+    /// pixel is left on each axis (Ruling 10).
+    #[test]
+    fn a_reserve_never_takes_the_whole_monitor() {
+        let whole = rect(0, 0, 1920, 1080);
+        let area = within(
+            whole,
+            whole,
+            Edges {
+                top: 2000,
+                ..Edges::default()
+            },
+        );
+        assert!(area.size.h >= 1 && area.size.w == 1920, "{area:?}");
+    }
+
+    /// **A reserve too large for any monitor leaves one pixel**, beside a
+    /// layer-shell bar on the same edge and with two of them added
+    /// together, rather than overflowing (Ruling 10).
+    #[test]
+    fn a_reserve_too_large_for_any_monitor_leaves_one_pixel() {
+        let whole = rect(0, 0, 1920, 1080);
+        let zone = rect(0, 0, 1920, 1050);
+        let huge = Edges {
+            bottom: i32::MAX,
+            right: i32::MAX,
+            ..Edges::default()
+        };
+        assert_eq!(
+            (
+                within(whole, zone, huge),
+                within(whole, whole, huge.add(huge))
+            ),
+            (rect(0, 0, 1, 1), rect(0, 0, 1, 1))
+        );
+    }
+
+    /// **A monitor with no size yet still has a work area**, and reserving
+    /// on it does not panic.
+    #[test]
+    fn a_monitor_with_no_size_yet_is_reserved_on_without_a_panic() {
+        let none = rect(0, 0, 0, 0);
+        let area = within(
+            none,
+            none,
+            Edges {
+                top: 10,
+                left: 10,
+                ..Edges::default()
+            },
+        );
+        assert_eq!(area, rect(0, 0, 1, 1));
     }
 }

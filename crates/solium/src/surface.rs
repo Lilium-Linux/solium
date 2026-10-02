@@ -42,6 +42,7 @@ use crate::{
         paint::{Gpu, Placement},
     },
     render::{Drawn, Element},
+    scripted::SceneReserve,
 };
 
 /// How often the QML is checked for edits.
@@ -86,6 +87,9 @@ pub(crate) struct ShellSurface {
     /// The last hit asked of the scene.
     /// `tests::a_cached_hit_follows_the_scene_once_qt_has_run`.
     hit_cache: std::cell::Cell<Option<CachedHit>>,
+    /// What the scene last said it reserves.
+    /// `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`.
+    scene_reserve: SceneReserve,
 }
 
 /// One hit the scene answered: the point in the scene's own coordinates, the
@@ -165,6 +169,7 @@ impl ShellSurface {
             newest,
             checked: Duration::ZERO,
             hit_cache: std::cell::Cell::new(None),
+            scene_reserve: SceneReserve::default(),
         })
     }
 
@@ -210,6 +215,18 @@ impl ShellSurface {
     /// The pointer left this scene. `qml::hosted::tests::a_left_scene_drops_its_hover`.
     pub(crate) fn leave(&mut self) {
         self.scene.leave();
+    }
+
+    /// Read what the scene reserves, if it said something new.
+    /// `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`.
+    pub(crate) fn take_reserve(&mut self) {
+        if let Some(reserve) = self.scene.take_reserve() {
+            self.scene_reserve = reserve;
+        }
+    }
+
+    pub(crate) fn scene_reserve(&self) -> SceneReserve {
+        self.scene_reserve
     }
 
     /// Set a whole-number property on the scene.

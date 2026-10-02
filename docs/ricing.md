@@ -350,6 +350,14 @@ end)
 That is the whole of how the Developer Tweaks panel works, and it is entirely
 in `lua/tweaks.lua` — the compositor has no idea what a tweak is.
 
+`reserve = { bottom = 48 }` takes those edges out of the work area of every
+monitor the surface is on, whatever its size, so a bar scene drawn across the
+whole monitor reserves only its strip and the windows are placed above it. The
+scene can say it too, `Solium.surface.reserve.bottom: 48`, which wins for each
+edge it sets; [shell-boundary.md](shell-boundary.md), "Room of its own", has
+how the windows re-flow when it changes
+(`state::tests::real_client::reflow_on_close::hosted::a_declared_reserve_takes_its_edge_out_of_the_work_area`).
+
 **Place things on the `monitors` event, not at the top of your script.** Scripts
 load before the screens are known — on the hardware backend, before the GPU is
 even opened — so a rect computed at load time is computed against zeros. The

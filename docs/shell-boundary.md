@@ -242,6 +242,38 @@ A scene that wants its own coordinates subtracts `whole.x` and `whole.y`.
 `"flipped270"`, and not `"90"` or `"flipped-90"` as `sol.monitors{ ... }` takes
 it (`models::monitors::tests::a_turned_monitor_row_names_its_transform_as_smithay_does`).
 
+**Room of its own.** A surface reserves edges of its monitor whatever its
+size. Lua declares it, `reserve = { bottom = 48 }` on `sol.surface`, and the
+scene can say it too, `Solium.surface.reserve.bottom: bar.hidden ? 0 : 48`,
+which wins for each edge it sets
+(`state::tests::real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`).
+A negative value, such as `-1`, gives that edge back to the declaration
+(`qml::hosted::tests::a_negative_scene_reserve_gives_the_edge_back_to_the_declaration`).
+Each edge of the work area loses its layer-shell zone and every reserve on it,
+added together
+(`state::tests::real_client::reflow_on_close::hosted::two_surfaces_reserving_one_edge_take_both`),
+and `sol.monitors()` and `Solium.monitor.area` are what is left
+(`state::tests::real_client::reflow_on_close::hosted::a_declared_reserve_takes_its_edge_out_of_the_work_area`).
+The reserving surface itself still covers its whole monitor
+(`state::tests::real_client::reflow_on_close::hosted::a_reserving_surface_is_drawn_across_the_whole_monitor`),
+so quick settings, a popup or a morph can grow out of a bar over the windows
+without changing the reserve, and no window moves when it opens
+(`state::tests::real_client::reflow_on_close::hosted::a_panel_growing_out_of_the_bar_moves_no_window`,
+`qml::hosted::tests::a_panel_grown_out_of_the_bar_leaves_the_reserve_as_it_was`).
+When the reserve does change, the layout runs once, in the dispatch that
+changed it, and the windows glide into the new work area with the layout's
+own motion from that instant, on the compositor's clock, which is the clock
+the bar's animation runs on too
+(`state::tests::real_client::reflow_on_close::hosted::a_reserve_the_scene_changes_at_a_press_reflows_the_tiled_windows_once_from_that_instant`,
+`state::tests::real_client::reflow_on_close::hosted::a_reserve_declared_again_or_taken_away_reflows_the_windows_once_each`),
+and that includes a change a `sol.on("surface", ...)` handler makes, which
+re-flows the windows at the click that sent the action
+(`state::tests::real_client::a_reserve_an_action_handler_changes_reflows_the_windows_in_the_clicks_dispatch`).
+So bind it to where the bar is going, never to an animated value. A change
+the scene makes on its own, from a `Timer`, is read after the frame it was
+made in
+(`state::tests::real_client::reflow_on_close::hosted::a_reserve_a_scene_changes_on_its_own_is_read_after_the_frame`).
+
 **A way back to the configuration.** A scene sets a string property named
 `action`, the compositor takes it, and `sol.on("surface", function(name,
 action) ... end)` in Lua is told. Anything Lua can do — `sol.spawn`, switching
@@ -251,9 +283,6 @@ workspaces, any binding — a hosted shell can ask for this way.
 
 Said plainly, because a shell that loads is easy to mistake for one that works:
 
-- **No reserved space, and no placement.** The scene fills its whole
-  monitor, and a hosted bar does not take its strip out of the work area, so
-  windows are placed under it.
 - **No keyboard.** No keyboard focus and no grabs (#85): a launcher's text
   field cannot be typed into.
 - **No window list, and no icons.** Nothing tells a hosted scene which

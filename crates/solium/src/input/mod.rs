@@ -107,6 +107,10 @@ pub(crate) fn handle<B: InputBackend>(
         }
         _ => {}
     }
+    // What the event made the scenes say, read in the dispatch that
+    // delivered it (Ruling 11):
+    // `state::tests::real_client::reflow_on_close::hosted::a_reserve_the_scene_changes_at_a_press_reflows_the_tiled_windows_once_from_that_instant`.
+    state.settle_scenes();
 }
 
 /// Whether an event is somebody reaching for the machine, which turns every

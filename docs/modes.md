@@ -442,6 +442,8 @@ sol.windows()          -- every window: id, x, y, w, h, title, focused, monitor,
                        --                cramped, shown
 sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale,
                        --                 transform, focused, primary, power
+                       --   (x, y, w, h: the work area, less layer-shell
+                       --   bars and hosted reserves)
 sol.monitor()          -- the active monitor's work area
 sol.monitor(id)        -- the work area of the monitor that window is on
 sol.cursor()           -- { x, y }
@@ -620,7 +622,8 @@ named no output. It does not move, which is the whole point of it. See
 [shell-boundary.md](shell-boundary.md).
 
 `x`, `y`, `w`, `h` are the **work area** — the monitor less whatever bars have
-reserved — and `whole` is the monitor itself, which is what a wallpaper or a
+reserved, layer-shell clients and hosted surfaces alike — and `whole` is the
+monitor itself, which is what a wallpaper or a
 fullscreen window covers. Both are in the global space, so either can be handed
 straight to `sol.place`. Copy the rect before adding keys to it; the one you
 were given belongs to the snapshot.
