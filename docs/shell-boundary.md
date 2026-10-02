@@ -166,9 +166,13 @@ takes its instance with it
 It reads where it is from `Solium.monitor`, below; `screenInfo` is gone.
 
 **Clickable only where it takes input.** The compositor asks the live item
-tree under the pointer, so a point is the scene's only where a visible item
-takes input: a `MouseArea`, a pointer handler, a link in a `Text`, or an item
-marked `Solium.input: true`. The rest of a `Text` takes no press, a plain
+tree under the pointer, so a point is the scene's only where a visible,
+enabled item that is not fully transparent takes input: a `MouseArea`, a
+pointer handler, a link in a `Text`, or an item marked `Solium.input: true`.
+An item at opacity 0, itself or through an ancestor, takes nothing, though Qt
+would still deliver to it
+(`qml::hosted::tests::the_item_tree_decides_what_a_point_claims`). The rest of
+a `Text` takes no press, a plain
 label none at all
 (`qml::hosted::tests::a_text_takes_a_press_only_on_a_link`).
 `Solium.input: "hover"` takes the pointer's motion and

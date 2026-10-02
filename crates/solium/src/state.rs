@@ -1890,17 +1890,12 @@ impl Solium {
             return false;
         };
         if !surface.deliver(&output, area, location, event) {
-            // The area contained the point — `surface_claiming` said so — but
-            // no instance was built on that monitor: the scene file is not
-            // there (`scripted::tests::a_missing_scene_file_builds_nothing_until_it_is_there`),
-            // it would not load
-            // (`scripted::tests::a_scene_that_will_not_load_waits_for_another_scene_file`),
-            // the monitor was placed and the surfaces not yet synced to it, as
-            // a nested resize was until
-            // `tests::real_client::a_resize_that_brings_a_monitor_under_a_surface_gives_it_an_instance_there`,
-            // or, in a test binary, the sync ran off the Qt thread
-            // (`scripted::tests::a_surface_synced_off_the_qt_thread_builds_nothing`).
-            // Nothing is drawn there, so nothing is taken.
+            // A defence only: the claim already leaves out a monitor the
+            // surface has no instance on, where `Surface::hit` answers
+            // nothing
+            // (`scripted::tests::a_surface_with_no_instance_on_a_monitor_claims_nothing_there`),
+            // so a surface that claimed the point has an instance to take it.
+            // Nothing is drawn where there is none, so nothing is taken.
             return false;
         }
         match event.kind {

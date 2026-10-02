@@ -1,5 +1,7 @@
-//! The compositor's input in Qt's terms: mouse buttons, keyboard modifiers
-//! and, from Task 9, keys.
+//! The compositor's input in Qt's terms: mouse buttons and keyboard
+//! modifiers (`tests::the_mouse_buttons_map_onto_qt_bit_for_bit`,
+//! `tests::the_modifiers_map_onto_qt`), and, once a scene can take the
+//! keyboard (#163), keys.
 
 use smithay::input::keyboard::ModifiersState;
 

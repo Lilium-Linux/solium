@@ -672,7 +672,7 @@ mod tests {
 
     use super::{Declaration, Declared, Layer, On, Properties, Surfaces};
     use crate::json::Json;
-    use crate::qml::hosted::{PointerKind, ScenePointer};
+    use crate::qml::hosted::{Hit, PointerKind, ScenePointer};
     use crate::qml::qt_test::on_the_qt_thread;
 
     fn properties(pairs: &[(&str, Json)]) -> Properties {
@@ -1450,6 +1450,35 @@ mod tests {
                 surface.instance_count(),
                 2,
                 "the scene that appeared was taken for one that would not load"
+            );
+        });
+    }
+
+    /// **A surface claims nothing on a monitor it has no instance on**: with
+    /// its scene file missing none is built, and a point inside the area it
+    /// would be drawn across is nobody's, so what is under it keeps it.
+    #[test]
+    fn a_surface_with_no_instance_on_a_monitor_claims_nothing_there() {
+        on_the_qt_thread(|| {
+            let (left, _, outputs) = side_by_side("no-instance-left", "no-instance-right");
+            let mut surfaces = Surfaces::default();
+            surfaces.declare(Declaration::for_test(
+                "bar",
+                PathBuf::from("/nonexistent/solium-no-instance.qml"),
+                Layer::Top,
+                On::EveryMonitor,
+            ));
+            let id = surfaces.named("bar").expect("declared");
+            let surface = surfaces.get_mut(id).expect("live");
+            surface.sync(&outputs, Some(&left));
+            let area = Rectangle::new((0, 0).into(), (1920, 1080).into());
+            assert_eq!(
+                (
+                    surface.instance_count(),
+                    surface.hit(&left, area, (10.0, 10.0).into())
+                ),
+                (0, Hit::Nothing),
+                "(the instances built, what the surface claims inside its area)"
             );
         });
     }
