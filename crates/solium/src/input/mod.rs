@@ -840,7 +840,8 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     let button_state = event.state();
     let location = pointer.current_location();
     // The buttons held, before the lock's check, so they are right after it.
-    // `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`.
+    // `state::tests::real_client::reflow_on_close::hosted::a_right_press_on_a_scene_reaches_it_as_the_right_button_with_shift_held`,
+    // `state::tests::real_client::lock_focus::a_button_let_go_behind_the_lock_is_not_held_after_it`.
     let pressed = button_state == ButtonState::Pressed;
     let qt = crate::qml::keys::qt_button(button);
     if let Some(bit) = qt {

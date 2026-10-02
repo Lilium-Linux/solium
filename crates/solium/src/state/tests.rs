@@ -10558,6 +10558,59 @@ mod real_client {
             );
         }
 
+        /// **A button let go of behind the lock is not held after it**: the
+        /// buttons held are counted whether or not the session is locked, so
+        /// a scene pressed after the unlock is told only what is held then;
+        /// and behind the lock the scene hears nothing of the release, the
+        /// motion and the right click there. Tested with the Cyrillic group
+        /// active (#132); the scene is stood in for, beside these real
+        /// clients (the #99 test).
+        #[test]
+        fn a_button_let_go_behind_the_lock_is_not_held_after_it() {
+            use crate::qml::hosted::PointerKind;
+            use smithay::backend::input::ButtonState;
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let bar = stand_in(
+                &mut session.state,
+                "bar",
+                crate::scripted::Layer::Top,
+                Rectangle::new((0, 0).into(), (1920, 30).into()),
+                crate::scripted::Stand::solid(),
+            );
+            move_pointer(&mut session.state, (100.0, 15.0), 1);
+            let region = crate::monitor::union(&session.state.space).expect("a monitor");
+            crate::synth::send_button(&mut session.state, region, 0x110, ButtonState::Pressed, 2);
+
+            let lock = session.lock();
+            let at_the_lock = scene_events(&session.state, bar).len();
+            crate::synth::send_button(&mut session.state, region, 0x110, ButtonState::Released, 3);
+            move_pointer(&mut session.state, (200.0, 15.0), 4);
+            crate::synth::send_button(&mut session.state, region, 0x111, ButtonState::Pressed, 5);
+            crate::synth::send_button(&mut session.state, region, 0x111, ButtonState::Released, 6);
+            let behind = scene_events(&session.state, bar).len() - at_the_lock;
+
+            lock.unlock_and_destroy();
+            session
+                .locker
+                .pump(&mut session.display, &mut session.state);
+            session.app.pump(&mut session.display, &mut session.state);
+            assert!(
+                session.state.lock.is_none(),
+                "the premise: the lock client unlocked and the session did too"
+            );
+            crate::synth::send_button(&mut session.state, region, 0x111, ButtonState::Pressed, 7);
+            let last = scene_events(&session.state, bar)
+                .last()
+                .map(|event| (event.kind, event.buttons));
+            assert_eq!(
+                (behind, last),
+                (0, Some((PointerKind::Press(0x2), 0x2))),
+                "(what the scene heard behind the lock, what it was told of the right press \
+                 after it, and the buttons held then)"
+            );
+        }
+
         /// **Nothing captures the screen while the session is locked.**
         /// What is on it then is the lock screen, and a recording of that
         /// is the password's length and the rhythm it was typed at. Every

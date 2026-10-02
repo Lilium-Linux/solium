@@ -154,7 +154,8 @@ Each event carries its time, so a double press is a double-click and a
 The wheel with `super` held stays the compositor's
 (`state::tests::real_client::reflow_on_close::hosted::super_and_the_wheel_stay_the_compositors_over_a_scene`),
 and while the session is locked none of it reaches the scene
-(`state::tests::real_client::lock_focus::the_wheel_over_a_hosted_scene_is_not_the_scenes_while_locked`).
+(`state::tests::real_client::lock_focus::the_wheel_over_a_hosted_scene_is_not_the_scenes_while_locked`,
+`state::tests::real_client::lock_focus::a_button_let_go_behind_the_lock_is_not_held_after_it`).
 A press the scene held when the session locked is cancelled, not clicked: a
 `MouseArea` holding it hears `canceled`
 (`state::tests::real_client::lock_focus::the_lock_lets_go_of_a_hosted_scenes_press_and_its_hover`,
