@@ -22143,6 +22143,33 @@ end)
                 assert_eq!(left, Some(1));
             }
 
+            /// **A scene pressed under a pointer that has not moved still
+            /// hears it leave**: the scene came under a still pointer, took
+            /// the press, and was dragged off and let go of; the next motion
+            /// off it tells it.
+            #[test]
+            fn a_scene_pressed_under_a_still_pointer_hears_it_leave() {
+                let mut desk = russian_desk();
+                to(&mut desk, (100.0, 15.0), 1);
+                let bar = stood(&mut desk, "bar", Scripted::Top, bar(), Stand::solid());
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 2);
+                to(&mut desk, (100.0, 500.0), 3);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Released, 4);
+                to(&mut desk, (100.0, 501.0), 5);
+                let left = desk
+                    .state
+                    .surfaces
+                    .get(bar)
+                    .and_then(crate::scripted::Surface::stand)
+                    .map(|stand| stand.left);
+                assert_eq!(
+                    (presses(&desk, bar), left),
+                    (1, Some(1)),
+                    "(the presses the scene took, how many times it heard the pointer leave)"
+                );
+            }
+
             /// **The pointer keeps the shape of a press a scene holds**
             /// (Ruling 8, #108): dragged off a shell button onto a window's
             /// resize border, the press is still the scene's, so the pointer

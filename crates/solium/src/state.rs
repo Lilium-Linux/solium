@@ -1893,6 +1893,12 @@ impl Solium {
         match event.kind {
             PointerKind::Motion => self.scene_hover_seen = Some((id, output)),
             PointerKind::Press(_) => {
+                // A scene that came under a still pointer is hovered from its
+                // first press, so the motion that leaves it after the release
+                // tells it.
+                // `tests::real_client::reflow_on_close::hosted::a_scene_pressed_under_a_still_pointer_hears_it_leave`.
+                self.scene_hovered
+                    .get_or_insert_with(|| (id, output.clone()));
                 self.scene_press = Some(ScenePress {
                     surface: id,
                     output,
