@@ -873,16 +873,20 @@ pub(crate) fn scene_event(state: &Solium, kind: PointerKind) -> ScenePointer {
 /// And over a client's layer surface on top of a window, which is what the
 /// pointer is on there, as it is for a press (`pointer_button`'s
 /// `on_a_client`), and over a hosted scene where it takes a press, or while
-/// it holds one (Rulings 7 and 8), or holds a grab (Ruling 12).
+/// it holds one (Rulings 7 and 8), or holds a grab (Ruling 12), or holds the
+/// keyboard, which a click takes back and the pointer passing does not
+/// (Ruling 14).
 /// `focus_follows_mouse_does_not_reach_through_a_bar`,
 /// `state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`,
-/// `state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_no_window_takes_focus_frame_or_cursor_from_the_pointer`.
+/// `state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_no_window_takes_focus_frame_or_cursor_from_the_pointer`,
+/// `state::tests::real_client::reflow_on_close::hosted::the_pointer_crossing_a_window_does_not_end_the_shells_hold`.
 pub(crate) fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
     if !state.profile.focus_follows_mouse
         || grabbed
         || state.script_grab
         || state.scene_press.is_some()
         || state.hosted_grab.is_some()
+        || state.hosted_keyboard.is_some()
         || state.pointed_above(location)
     {
         return;

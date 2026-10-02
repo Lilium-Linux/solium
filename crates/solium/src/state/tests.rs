@@ -23566,6 +23566,44 @@ end)
                 );
             }
 
+            /// **Focus does not follow the mouse away from a scene holding
+            /// the keyboard** (Ruling 14): with focus following the mouse, as
+            /// a desktop has it, the pointer crossing another window leaves
+            /// the keyboard with the scene, the scene is not told to let go,
+            /// and the window the keyboard came from still reads as focused.
+            /// A click is what takes it back
+            /// (`clicking_a_window_ends_the_shells_hold`).
+            #[test]
+            fn the_pointer_crossing_a_window_does_not_end_the_shells_hold() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                let other = desk.open_surface();
+                let other_window = window(&desk, &other);
+                desk.state
+                    .space
+                    .map_element(other_window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                desk.state
+                    .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                desk.state.profile.focus_follows_mouse = true;
+                want(
+                    &mut desk,
+                    shell,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                move_pointer(&mut desk.state, (630.0, 555.0), 10);
+                assert_eq!(
+                    (
+                        desk.state.hosted_keyboard.is_some(),
+                        let_go(&desk, shell),
+                        keyboard_on(&desk),
+                        desk.focused(),
+                    ),
+                    (true, 0, None, other.pane),
+                    "(still held, the times the scene was told to let go, the keyboard, the \
+                     window read as focused)"
+                );
+            }
+
             /// **`sol.focus` ends the shell's hold**, as every explicit focus
             /// does (Ruling 14), and the window it focuses has the keyboard.
             #[test]

@@ -285,6 +285,9 @@ Clicking a window or `sol.focus` takes the keyboard back
 and so does locking the session; no scene holds it behind the lock, and one
 that asks there has it once the lock is gone
 (`state::tests::real_client::lock_focus::no_scene_holds_the_keyboard_while_the_session_is_locked`).
+The pointer crossing a window does not take it back, even with focus
+following the mouse
+(`state::tests::real_client::reflow_on_close::hosted::the_pointer_crossing_a_window_does_not_end_the_shells_hold`).
 One scene holds it at a time
 (`state::tests::real_client::reflow_on_close::hosted::a_hold_another_scene_takes_returns_to_the_window_the_first_took_it_from`).
 The compositor's own Qt loads no input method from your session, so IBus and
