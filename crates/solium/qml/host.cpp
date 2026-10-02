@@ -2602,12 +2602,13 @@ extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, 
     // undoes it, and so does a double-click being made. The double-click
     // event follows the press, as Qt sends it. That function is not reached
     // by an event sent straight to the window, and is not used for this:
-    // routing through QWindowSystemInterface would hand every press to the
-    // platform's cursor (qguiapplication.cpp:2451-2466), which on the GPU
-    // host is eglfs_kms moving a DRM cursor on a device the compositor is
-    // master of (qeglfskmsgbmcursor.cpp:119-122), and it keeps the last
-    // press process-wide, beside the frames' scenes, which still send
-    // straight to their windows. So the rule is kept per scene.
+    // routing through QWindowSystemInterface would hand every mouse event
+    // that is not synthetic to whatever cursor the platform has
+    // (qguiapplication.cpp:2451-2466), and it keeps the pointer's position,
+    // the last press's button and time and the window a press holds
+    // process-wide (:2408, :2416-2426, :2430-2446), state the frames'
+    // scenes, which still send straight to their windows, would share. So
+    // the rule is kept per scene.
     // `qml::hosted::tests::a_double_press_on_a_mouse_area_is_one_double_click`,
     // `qml::hosted::tests::two_presses_further_apart_than_the_interval_are_two_single_clicks`.
     const QStyleHints *hints = QGuiApplication::styleHints();
