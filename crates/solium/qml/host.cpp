@@ -2389,7 +2389,7 @@ extern "C" int solium_qml_scene_take_grab(SoliumQmlScene *scene, const char **na
 extern "C" int solium_qml_scene_grab_contains(const SoliumQmlScene *scene, double x, double y)
 {
     for (SoliumGrab *grab : active_grabs(scene)) {
-        QQuickItem *target = grab->target();
+        QQuickItem *target = grab->target_item();
         if (target != nullptr && target->isVisible()
             && target->contains(target->mapFromScene(QPointF(x, y)))) {
             return 1;

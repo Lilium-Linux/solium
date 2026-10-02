@@ -122,12 +122,24 @@ void SoliumGrab::setName(const QString &name)
     }
 }
 
-void SoliumGrab::setTarget(QQuickItem *target)
+void SoliumGrab::setTarget(QObject *target)
 {
     if (target != m_target) {
         m_target = target;
         emit targetChanged();
     }
+}
+
+QQuickItem *SoliumGrab::target_item() const
+{
+    if (auto *item = qobject_cast<QQuickItem *>(m_target.data())) {
+        return item;
+    }
+    if (m_target != nullptr && m_target->inherits("QQuickPopup")) {
+        auto *content = m_target->property("contentItem").value<QQuickItem *>();
+        return content != nullptr ? content->parentItem() : nullptr;
+    }
+    return nullptr;
 }
 
 void SoliumGrab::setActive(bool active)

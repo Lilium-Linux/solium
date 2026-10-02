@@ -149,7 +149,7 @@ class SoliumGrab : public QObject, public QQmlParserStatus
     Q_OBJECT
     Q_INTERFACES(QQmlParserStatus)
     Q_PROPERTY(QString name READ name WRITE setName NOTIFY nameChanged)
-    Q_PROPERTY(QQuickItem *target READ target WRITE setTarget NOTIFY targetChanged)
+    Q_PROPERTY(QObject *target READ target WRITE setTarget NOTIFY targetChanged)
     Q_PROPERTY(bool active READ active WRITE setActive NOTIFY activeChanged)
 public:
     explicit SoliumGrab(QObject *parent = nullptr) : QObject(parent) {}
@@ -158,8 +158,13 @@ public:
     void componentComplete() override;
     QString name() const { return m_name; }
     void setName(const QString &name);
-    QQuickItem *target() const { return m_target; }
-    void setTarget(QQuickItem *target);
+    QObject *target() const { return m_target; }
+    void setTarget(QObject *target);
+    /* The item a point is asked of: the target itself, or, for a Qt Quick
+     * Controls `Popup`, which is no item, the item Qt draws it as, its
+     * content item's parent.
+     * `qml::hosted::tests::a_controls_popup_is_a_grabs_target`. */
+    QQuickItem *target_item() const;
     bool active() const { return m_active; }
     void setActive(bool active);
     /* When it last became active, by a counter that only goes up.
@@ -176,7 +181,7 @@ signals:
 private:
     void mark();
     QString m_name;
-    QPointer<QQuickItem> m_target;
+    QPointer<QObject> m_target;
     bool m_active = false;
     quint64 m_activated = 0;
     SoliumHosting *m_hosting = nullptr;
