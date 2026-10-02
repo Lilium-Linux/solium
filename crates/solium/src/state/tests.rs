@@ -22145,6 +22145,49 @@ end)
                 assert_eq!(left, Some(1));
             }
 
+            /// **A window's frame is kept from the pointer only where a shell
+            /// takes a press over it, or holds one** (Ruling 8): on a shell
+            /// button over the window and while a press the shell took is
+            /// held, the frame under it is not what the pointer is on, as the
+            /// window is not; beside the button, or under a scene that takes
+            /// only hover, it is.
+            #[test]
+            fn the_frames_are_kept_from_the_pointer_only_where_a_shell_takes_a_press() {
+                let (mut desk, _, _) = window_under_a_scene(button_over_the_window);
+                let kept = |desk: &Desk, at: (f64, f64)| desk.state.frames_kept_from(at.into());
+                let on_the_button = kept(&desk, (630.0, 520.0));
+                let beside_it = kept(&desk, (630.0, 555.0));
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                let held = kept(&desk, (630.0, 555.0));
+                let (strip, _, _) = window_under_a_scene(hover_everywhere);
+                assert_eq!(
+                    (on_the_button, beside_it, held, kept(&strip, (630.0, 530.0))),
+                    (true, false, true, false),
+                    "(on a shell button over the window, beside it, beside it while the shell \
+                     holds a press, under a hover strip)"
+                );
+            }
+
+            /// **A frame the pointer hovered is told it left when the pointer
+            /// moves onto a shell button drawn over it**: the shell takes that
+            /// motion, and the frame under it still hears that it is no longer
+            /// what the pointer is on. A built frame needs Qt, which cannot
+            /// run beside this real client (the #99 test), so the frame's
+            /// hover is set by hand, as the pointer over its titlebar sets it.
+            #[test]
+            fn a_hovered_frame_hears_the_pointer_leave_onto_a_shell_button_over_it() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                move_pointer(&mut desk.state, (630.0, 555.0), 10);
+                desk.state.hovered_frame = Some(opened.pane);
+                move_pointer(&mut desk.state, (630.0, 520.0), 11);
+                assert_eq!(
+                    desk.state.hovered_frame, None,
+                    "the frame under the shell button is still hovered"
+                );
+            }
+
             /// **A scene pressed under a pointer that has not moved still
             /// hears it leave**: the scene came under a still pointer, took
             /// the press, and was dragged off and let go of; the next motion

@@ -1008,6 +1008,16 @@ impl Solium {
         )
     }
 
+    /// Whether the window frames are kept from the pointer at `location`:
+    /// something over the windows is what it is on there
+    /// ([`Self::pointed_above`]), or a scene holds a press (Ruling 7). A
+    /// scene that takes only hover leaves the frame under it the pointer, as
+    /// it leaves the window its press (Ruling 8).
+    /// `tests::real_client::reflow_on_close::hosted::the_frames_are_kept_from_the_pointer_only_where_a_shell_takes_a_press`.
+    pub(crate) fn frames_kept_from(&self, location: Point<f64, Logical>) -> bool {
+        self.scene_press.is_some() || self.pointed_above(location)
+    }
+
     /// Whether a client's layer surface is what is on top at `location`, over
     /// the windows and their chrome: a press there is the client's.
     pub(crate) fn client_above(&self, location: Point<f64, Logical>) -> bool {

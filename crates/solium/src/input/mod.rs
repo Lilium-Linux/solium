@@ -445,11 +445,14 @@ fn pointer_motion<B: InputBackend>(
     // it going past.
     if state.lock.is_none() {
         // Scripted surfaces above the windows see the pointer first, so a
-        // button on a bar lights up on hover. Then frames, then the ones
-        // below.
+        // button on a bar lights up on hover. Then frames, every time, so one
+        // a shell's button came over hears the pointer leave it
+        // (`state::tests::real_client::reflow_on_close::hosted::a_hovered_frame_hears_the_pointer_leave_onto_a_shell_button_over_it`).
+        // Then the ones below, if none above took it.
         let motion = scene_event(state, PointerKind::Motion);
-        if !state.surface_pointer(true, location, motion) {
-            hover_frame(state, location);
+        let above = state.surface_pointer(true, location, motion);
+        hover_frame(state, location);
+        if !above {
             state.surface_pointer(false, location, motion);
         }
         follow_pointer(state, location, pointer.is_grabbed());
@@ -531,8 +534,9 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
         // on the hardware and nowhere else.
         if state.lock.is_none() {
             let motion = scene_event(state, PointerKind::Motion);
-            if !state.surface_pointer(true, location, motion) {
-                hover_frame(state, location);
+            let above = state.surface_pointer(true, location, motion);
+            hover_frame(state, location);
+            if !above {
                 state.surface_pointer(false, location, motion);
             }
             follow_pointer(state, location, pointer.is_grabbed());
@@ -791,16 +795,17 @@ pub(crate) fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, 
 
 /// Let a window frame see the pointer, so its buttons light up on hover.
 ///
-/// The callers offer the pointer to a script's surfaces above the windows
-/// first. A client's layer surface on top here is asked through
-/// `client_above`, the predicate `follow_pointer` asks and
-/// `focus_follows_mouse_does_not_reach_through_a_bar` drives: under one, no
-/// frame is hovered. A built frame needs Qt, which this binary's tests cannot
-/// start, so this call itself is not driven by a test.
+/// Called on every motion while the session is unlocked, after a script's
+/// surfaces above the windows were offered it, whether or not one took it.
+/// Where `Solium::frames_kept_from` says the pointer is on something over the
+/// windows, or a scene holds a press, no frame is hovered, and the one that
+/// was is told it left
+/// (`state::tests::real_client::reflow_on_close::hosted::a_hovered_frame_hears_the_pointer_leave_onto_a_shell_button_over_it`,
+/// `state::tests::real_client::reflow_on_close::hosted::the_frames_are_kept_from_the_pointer_only_where_a_shell_takes_a_press`).
 fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
     // The whole window, not just the frame band: a decoration that reacts to
     // the cursor wants to know where it is while it crosses the client too.
-    let under = if state.client_above(location) {
+    let under = if state.frames_kept_from(location) {
         None
     } else {
         state.decorated_under(location)
