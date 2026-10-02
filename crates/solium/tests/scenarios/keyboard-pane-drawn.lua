@@ -19,11 +19,11 @@ local function accent(r, g, b, a)
     return a == 255 and b > r + 24 and b > g + 24
 end
 
-local function cue(what, serial, hold, duration)
+local function cue(what, serial, hold, duration, after)
     return {
         keyboard_indicator = {
             show = true,
-            cue = { what = what, serial = serial, hold = hold, duration = duration },
+            cue = { what = what, serial = serial, hold = hold, duration = duration, after = after },
         },
     }
 end
@@ -116,6 +116,23 @@ return {
                 local _, _, _, a = world.pixel("keyboard", 86, 94)
                 assert(a == 0, "not drawn when the panes are told not to")
                 assert(world.dormant.keyboard == true, "and dormant")
+            end,
+        },
+
+        -- A layout's pill shown over Caps Lock's hands back to it when it
+        -- goes, held, rather than leaving Caps Lock on with nothing shown.
+        { tell = { caret = { 100, 60, 2, 16 }, values = cue("layout", 6, false, 500, "caps") } },
+        { wait = 300 },
+        {
+            expect = function(world)
+                assert(accent(world.pixel("keyboard", 86, 94)), "the layout's pill")
+            end,
+        },
+        { wait = 1000 },
+        {
+            expect = function(world)
+                assert(accent(world.pixel("keyboard", 86, 94)), "Caps Lock's, past the layout's duration")
+                assert(world.dormant.keyboard == nil, "and still awake")
             end,
         },
     },

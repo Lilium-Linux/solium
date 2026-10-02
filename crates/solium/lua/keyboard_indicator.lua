@@ -149,8 +149,8 @@ local function panes(want, cue)
 end
 
 -- Show `what` ("caps", "layout", "num") where it belongs, or hide the pill
--- everywhere with "".
-function indicator.show(what)
+-- everywhere with "". A timed pill hands back to `after`, held, when it goes.
+function indicator.show(what, after)
     local s = settings()
     if s.show ~= "pane" and s.show ~= "surface" then
         return
@@ -166,6 +166,7 @@ function indicator.show(what)
         -- A lock's pill stays while the lock is on; a layout's goes.
         hold = what == "caps" or what == "num",
         duration = s.duration,
+        after = after,
     }
     local field = sol.text_input()
     local caret = field and field.x and field or nil
@@ -215,7 +216,11 @@ sol.on("keyboard", function(state, changed)
     elseif changed == "num" and s.num then
         indicator.show(state.num and "num" or "")
     elseif changed == "layout" and s.layout then
-        indicator.show("layout")
+        -- With a lock on, its pill comes back once the layout's has gone,
+        -- rather than leaving Caps Lock on with nothing shown
+        -- (`keyboard-surface.lua`, `keyboard-pane-drawn.lua`).
+        local after = (s.caps and state.caps and "caps") or (s.num and state.num and "num") or nil
+        indicator.show("layout", after)
     end
 end)
 

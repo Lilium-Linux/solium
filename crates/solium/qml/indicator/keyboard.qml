@@ -14,7 +14,7 @@ import Solium
 Item {
     id: root
 
-    // `{ what, serial, hold, duration }`, as `KeyboardPill` takes it.
+    // `{ what, serial, hold, duration, after }`, as `KeyboardPill` takes it.
     property var cue: ({})
 
     // Draws, and takes no input: the pointer goes to what is under it.

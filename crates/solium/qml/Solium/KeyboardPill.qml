@@ -14,7 +14,9 @@
 // `cue.what` is "caps", "layout", "num", or "" to hide at once. A cue is
 // taken when its `serial` is new, so writing the same cue again shows
 // nothing again. A held cue (`hold`) stays until the next one; any other
-// hides after `duration` milliseconds, by the Timer below.
+// hides after `duration` milliseconds, by the Timer below -- or, if it names
+// what comes `after` it, shows that instead, held: a layout's pill shown
+// over Caps Lock's hands back to `⇪`.
 //
 // `crates/solium/tests/scenarios/keyboard-surface-drawn.lua` and
 // `keyboard-pane-drawn.lua` draw it and read its pixels, through
@@ -27,7 +29,7 @@ Item {
     id: pill
 
     // What to show, from the configuration's policy:
-    // `{ what, serial, hold, duration }`.
+    // `{ what, serial, hold, duration, after }`.
     property var cue: ({})
 
     // Whether a new cue is shown at all. A pane's layer takes a cue only while
@@ -89,7 +91,14 @@ Item {
     Timer {
         id: hide
         interval: pill.cue && pill.cue.duration > 0 ? pill.cue.duration : 1200
-        onTriggered: pill.showing = false
+        // `keyboard-pane-drawn.lua`, "hands back to it".
+        onTriggered: {
+            if (pill.cue && pill.cue.after) {
+                pill.shown = pill.cue.after;
+            } else {
+                pill.showing = false;
+            }
+        }
     }
 
     opacity: pill.showing ? 1 : 0

@@ -49,6 +49,17 @@ return {
             end,
         },
 
+        -- A layout switch with Caps Lock on: the layout's pill, which hands
+        -- back to Caps Lock's when it goes.
+        { key = "shift+alt_l" },
+        {
+            expect = function(world)
+                local _, cue = pill(world)
+                assert(cue.what == "layout" and cue.after == "caps",
+                    "the layout's pill, handing back to Caps Lock's")
+            end,
+        },
+
         -- Caps Lock off: hidden at once.
         { key = "caps_lock" },
         {
