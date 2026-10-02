@@ -265,6 +265,9 @@ Text comes from the compositor's own keyboard state, so typing works with any
 layout active, Russian included
 (`input::tests::russian_typed_through_the_compositor_reaches_a_hosted_text_field`,
 `input::tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`),
+and with Control held a key is named by its Latin letter, as Qt names it, so
+`ctrl+a`, `ctrl+c` and `ctrl+v` work on any layout
+(`input::tests::ctrl_a_selects_all_in_a_hosted_text_field_on_russian`),
 and a key held repeats at the keyboard's own rate
 (`input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`).
 The compositor's bindings keep working, `super+q` on Russian among them,

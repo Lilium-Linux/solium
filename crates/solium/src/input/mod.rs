@@ -393,6 +393,13 @@ fn press(
 /// Cyrillic; Qt's name for it; the modifiers held; and its keycode.
 /// `tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`,
 /// `tests::the_scene_is_told_each_key_as_qt_names_it`.
+///
+/// With Control held, a key whose symbol is not Latin-1 is named by the
+/// Latin-1 letter a Latin layout has on it, as Qt names it itself
+/// (`QXkbCommon::keysymToQtKey`), so a field's `ctrl+a`, `ctrl+c` and
+/// `ctrl+v` work with Russian active; its text stays the active group's.
+/// `tests::with_control_held_a_cyrillic_letter_is_told_by_its_latin_name`,
+/// `tests::ctrl_a_selects_all_in_a_hosted_text_field_on_russian`.
 fn scene_key(
     handle: &smithay::input::keyboard::KeysymHandle<'_>,
     modifiers: &ModifiersState,
@@ -400,9 +407,13 @@ fn scene_key(
 ) -> crate::qml::hosted::SceneKey {
     let sym = handle.modified_sym();
     let text = xkb::keysym_to_utf8(sym);
+    let named = match handle.raw_latin_sym_or_raw_current_sym() {
+        Some(latin) if modifiers.ctrl && sym.raw() > 0xff && latin.raw() <= 0xff => latin,
+        _ => sym,
+    };
     crate::qml::hosted::SceneKey {
         pressed,
-        qt_key: crate::qml::keys::qt_key(sym, &text),
+        qt_key: crate::qml::keys::qt_key(named, &xkb::keysym_to_utf8(named)),
         modifiers: crate::qml::keys::qt_modifiers(modifiers),
         text,
         autorepeat: false,
@@ -2751,6 +2762,107 @@ mod tests {
             });
             let _ = std::fs::remove_dir_all(&directory);
             assert_eq!(typed.as_deref(), Some("йЦ"));
+        });
+    }
+
+    const A: u32 = 38;
+    const E: u32 = 26;
+
+    /// **With Control held, a letter of a layout that is not Latin is told
+    /// by its Latin name**, as Qt itself names it (`QXkbCommon::keysymToQtKey`),
+    /// so a field's `ctrl+a`, `ctrl+c` and `ctrl+v` work with Russian active
+    /// (#132); what the key types is still the Cyrillic letter.
+    #[test]
+    fn with_control_held_a_cyrillic_letter_is_told_by_its_latin_name() {
+        with_keyboard("held-ctrl", "us,ru", 1, "", |state| {
+            holding(state, &[], KeyPolicy::ExceptClaimed);
+            chord(state, &[CTRL, A]);
+            let pressed: Vec<(i32, u32, String)> = state
+                .scene_keys
+                .iter()
+                .filter(|key| key.pressed && key.code == A)
+                .map(|key| (key.qt_key, key.modifiers, key.text.clone()))
+                .collect();
+            assert_eq!(
+                pressed,
+                [(0x41, crate::qml::keys::QT_CONTROL, "ф".to_owned())],
+                "(the Qt key, the Qt modifiers, the text) of ctrl and the key that is A on us"
+            );
+        });
+    }
+
+    /// **#132, through the compositor: `ctrl+a` selects all in a hosted
+    /// `TextField` with Russian active**, so what is typed next replaces it.
+    #[test]
+    fn ctrl_a_selects_all_in_a_hosted_text_field_on_russian() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+            let directory = std::env::temp_dir().join("solium-keys-ctrl-field-scene");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a directory for the scene");
+            let path = directory.join("Search.qml");
+            std::fs::write(
+                &path,
+                r#"
+                import QtQuick
+                import QtQuick.Controls
+                import Solium
+                Item {
+                    readonly property string typed: field.text
+                    TextField {
+                        id: field
+                        width: 200; height: 30
+                        focus: true
+                        Solium.keyboard.wants: activeFocus
+                    }
+                }
+                "#,
+            )
+            .expect("writing the scene");
+            let typed = with_keyboard("ctrl-field", "us,ru", 1, "", |state| {
+                let output = Output::new(
+                    "ctrl-field-1".to_owned(),
+                    PhysicalProperties {
+                        size: (0, 0).into(),
+                        subpixel: Subpixel::Unknown,
+                        make: "solium".to_owned(),
+                        model: "ctrl-field".to_owned(),
+                    },
+                );
+                output.change_current_state(
+                    Some(Mode {
+                        size: (640, 480).into(),
+                        refresh: 60_000,
+                    }),
+                    None,
+                    Some(Scale::Fractional(1.0)),
+                    None,
+                );
+                state.space.map_output(&output, (0, 0));
+                state.declare_surface(crate::scripted::Declaration::for_test(
+                    "search",
+                    path.clone(),
+                    crate::scripted::Layer::Top,
+                    crate::scripted::On::EveryMonitor,
+                ));
+                state.settle_scenes();
+                chord(state, &[Q]);
+                chord(state, &[W]);
+                chord(state, &[CTRL, A]);
+                chord(state, &[E]);
+                let id = state.surfaces.named("search").expect("declared");
+                state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(|surface| surface.instance_mut(&output))
+                    .map(|instance| instance.scene_for_test().get_string_for_test("typed"))
+            });
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                typed.as_deref(),
+                Some("у"),
+                "йц, then ctrl+a, then у: the selection replaced"
+            );
         });
     }
 }
