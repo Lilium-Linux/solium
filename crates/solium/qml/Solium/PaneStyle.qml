@@ -209,6 +209,14 @@ Item {
     property bool onButton: false
     property string action: ""
 
+    // The `dormant` of the inline layer this scene draws, at the root where
+    // the compositor reads it: while it is true the layer is not drawn and
+    // keeps no image (`Layer.qml`). False in a manifest, which draws nothing.
+    // `decoration::tests::a_dormant_layer_draws_nothing_and_holds_no_buffer`.
+    readonly property bool dormant: style.layerIndex >= 0
+        && style.layerIndex < style.layers.length
+        && style.layers[style.layerIndex].dormant === true
+
     Component.onCompleted: style.showOneLayer()
     onLayerIndexChanged: style.showOneLayer()
 

@@ -7,6 +7,10 @@
 -- 2 by 16, in the pane: the capsule is 24 high, its top 6 below the caret,
 -- so its middle row is y = 94, and it is centred on x = 101, at least 42
 -- wide. (86, 94) is on the capsule, clear of the glyph in its middle.
+--
+-- And whether the layer is `dormant`, which spares a frame with no pill on
+-- show the layer's image and its blending over the client: dormant whenever
+-- nothing shows, awake from the cue that shows one.
 
 -- `Theme.accent`, opaque, whatever it is set to -- #0060c0 today, #936DFF
 -- once the theme turns violet: blue the strongest channel by a clear
@@ -37,6 +41,7 @@ return {
             expect = function(world)
                 local _, _, _, a = world.pixel("keyboard", 86, 94)
                 assert(a == 0, "a cue from before the caret came is not shown late")
+                assert(world.dormant.keyboard == true, "and the layer is dormant")
             end,
         },
 
@@ -49,6 +54,7 @@ return {
                 assert(accent(r, g, b, a), string.format("the capsule below the caret: %d %d %d %d", r, g, b, a))
                 local _, _, _, above = world.pixel("keyboard", 86, 50)
                 assert(above == 0, "and nothing above it")
+                assert(world.dormant.keyboard == nil, "awake while it shows")
             end,
         },
 
@@ -66,6 +72,7 @@ return {
             expect = function(world)
                 local _, _, _, a = world.pixel("keyboard", 86, 94)
                 assert(a == 0, "gone with the caret")
+                assert(world.dormant.keyboard == true, "and dormant at once")
             end,
         },
 
@@ -82,6 +89,7 @@ return {
             expect = function(world)
                 local _, _, _, a = world.pixel("keyboard", 86, 94)
                 assert(a == 0, "gone after its duration")
+                assert(world.dormant.keyboard == true, "and dormant once it has faded")
             end,
         },
 
@@ -107,6 +115,7 @@ return {
             expect = function(world)
                 local _, _, _, a = world.pixel("keyboard", 86, 94)
                 assert(a == 0, "not drawn when the panes are told not to")
+                assert(world.dormant.keyboard == true, "and dormant")
             end,
         },
     },

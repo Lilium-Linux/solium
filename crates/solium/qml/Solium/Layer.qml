@@ -52,4 +52,17 @@ Item {
 
     // For diagnostics: which layer a warning is about.
     property string name: ""
+
+    // Whether this layer has nothing to draw right now. A layer that is
+    // almost always empty -- a pill shown for a moment at a caret -- binds it,
+    // and while it is true the compositor draws nothing of it and keeps no
+    // image for it; the frame it turns false, the layer is drawn again. False
+    // unless bound, so a layer that never says is drawn as it always was.
+    // `decoration::tests::a_dormant_layer_draws_nothing_and_holds_no_buffer`.
+    //
+    // Read from the root of the layer's scene: `PaneStyle` hands an inline
+    // layer's on, and a delegated layer (`source:`) declares
+    // `property bool dormant` on its own file's root instead, as it declares
+    // `onButton`.
+    property bool dormant: false
 }

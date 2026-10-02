@@ -434,6 +434,10 @@ struct LayerScene {
     /// date by whichever depth was drawn first, and the other two would read
     /// "not resized" on the one frame they had to copy everything.
     buffer_size: (i32, i32),
+    /// Whether this layer said at its last frame that it had nothing to draw,
+    /// and so has let go of what it is drawn with: see [`LayerScene::sleeps`].
+    /// `tests::a_dormant_layer_draws_nothing_and_holds_no_buffer`.
+    asleep: bool,
 }
 
 /// A decoration animates on its own clock -- a border easing to a new colour, a
@@ -469,6 +473,17 @@ fn at<L: std::ops::Deref<Target = LayerScene>>(
     depth: Depth,
 ) -> impl Iterator<Item = L> {
     layers.rev().filter(move |layer| layer.depth == depth)
+}
+
+/// The layers of one depth a frame draws, in [`at`]'s order: all of them but a
+/// layer that says it is dormant, which is put to sleep as it is passed over.
+/// See [`LayerScene::sleeps`].
+/// `tests::a_dormant_layer_draws_nothing_and_holds_no_buffer`.
+fn awake_at<'a>(
+    layers: impl DoubleEndedIterator<Item = &'a mut LayerScene>,
+    depth: Depth,
+) -> impl Iterator<Item = &'a mut LayerScene> {
+    at(layers, depth).filter_map(LayerScene::awake)
 }
 
 /// One window's frame: every layer its style declares, each its own scene.
@@ -595,6 +610,7 @@ impl Decoration {
                 bleed: Bleed::default(),
                 overlay,
                 buffer_size: (0, 0),
+                asleep: false,
             }],
             insets,
             // A single QML file has no manifest either, and `client.radius` is
@@ -738,7 +754,7 @@ impl Decoration {
 
         let insets = self.insets;
         let mut animating = false;
-        for layer in at(self.layers.iter_mut(), depth) {
+        for layer in awake_at(self.layers.iter_mut(), depth) {
             // Per layer, because this is the whole of bleed: its own canvas,
             // its own buffer, and its own rectangle on screen.
             let spread = spread(drawing, layer.bleed);
@@ -793,7 +809,9 @@ impl Decoration {
     ///
     /// What [`Decoration::layer_elements`] draws, without a renderer — the same
     /// selection through the same [`at`], so the two cannot come to disagree
-    /// about which layers a depth has or which of them is on top.
+    /// about which layers a depth has or which of them is on top. Every layer
+    /// the style declares there, a dormant one included: which of them a
+    /// given frame draws is [`awake_at`]'s.
     pub(crate) fn layers_at(&self, depth: Depth) -> impl Iterator<Item = &str> {
         at(self.layers.iter(), depth).map(|layer| layer.name.as_str())
     }
@@ -1028,6 +1046,16 @@ impl Decoration {
     /// Tell every layer what a frame tells it.
     pub(crate) fn tell_as_a_frame_would(&mut self, look: &Look<'_>, width: i32, height: i32) {
         self.tell(look, width, height);
+    }
+
+    /// The name of every layer whose scene says it is `dormant` now: what
+    /// [`awake_at`] would leave out of the next frame.
+    pub(crate) fn dormant_layers(&self) -> Vec<String> {
+        self.layers
+            .iter()
+            .filter(|layer| layer.scene.get_bool("dormant"))
+            .map(|layer| layer.name.clone())
+            .collect()
     }
 
     /// Every layer rendered in software, by name: its pixels, premultiplied
@@ -1268,7 +1296,44 @@ impl LayerScene {
             bleed: spec.bleed,
             overlay,
             buffer_size: (0, 0),
+            asleep: false,
         })
+    }
+
+    /// Whether this layer has nothing to draw this frame, as its root's
+    /// `dormant` says -- and if so, nothing kept to draw it with.
+    ///
+    /// A layer that is almost always empty -- something shown for a moment
+    /// at a caret -- otherwise costs what any layer costs, all the time: a
+    /// buffer the size of its canvas, an element blended over the client
+    /// wherever the client damages, and in software the whole canvas copied
+    /// and uploaded at every step of a resize. A dormant one is not drawn at all,
+    /// and on the frame it goes to sleep it lets go of what it was drawn with:
+    /// in software its image, shrunk to one pixel, and the buffer it was
+    /// uploaded through, so waking is a resize that builds both again. On the
+    /// GPU path its scene keeps the buffer Qt last drew it into until it is
+    /// drawn again, and a layer dormant from its first frame never has one
+    /// larger than the pixel it is built at.
+    ///
+    /// A root that declares no `dormant` reads false, so a layer that never
+    /// says so is drawn as it always was.
+    /// `tests::a_dormant_layer_draws_nothing_and_holds_no_buffer`.
+    fn sleeps(&mut self) -> bool {
+        let dormant = self.scene.get_bool("dormant");
+        if dormant && !self.asleep {
+            self.buffer_size = (0, 0);
+            if let Backing::Memory(slot) = &mut self.backing {
+                *slot = None;
+                self.scene.resize(1, 1, 1.0);
+            }
+        }
+        self.asleep = dormant;
+        dormant
+    }
+
+    /// This layer, unless it is dormant: what [`awake_at`] keeps.
+    fn awake(&mut self) -> Option<&mut Self> {
+        if self.sleeps() { None } else { Some(self) }
     }
 
     /// This layer, drawn across `placement`, as an element.
@@ -2835,6 +2900,123 @@ mod tests {
             );
             assert_eq!(names(Depth::Above), ["over"]);
             assert!(names(Depth::Behind).is_empty());
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// The names of the layers a frame draws at `depth`, through the same
+    /// [`awake_at`] the draw goes through, so a dormant layer is put to sleep
+    /// here as it is there.
+    fn drawn_at(decoration: &mut Decoration, depth: Depth) -> Vec<String> {
+        awake_at(decoration.layers.iter_mut(), depth)
+            .map(|layer| layer.name.clone())
+            .collect()
+    }
+
+    /// **A dormant layer draws nothing and holds no buffer.** A layer whose
+    /// `dormant` is true -- an inline layer's `Layer`, read through
+    /// `PaneStyle`, or a delegated layer's own root -- is left out of what a
+    /// frame draws, and lets go of what it was drawn with: its next draw is a
+    /// resize, and in software its image is one pixel. Woken, it is drawn
+    /// again; a layer that never says so is drawn as it always was.
+    #[test]
+    fn a_dormant_layer_draws_nothing_and_holds_no_buffer() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "dormant",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            id: style
+
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                            Layer {
+                                depth: "above"
+                                name: "hint"
+                                dormant: style.values.hint !== true
+                                Item {}
+                            }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property var values: ({})
+                            readonly property bool dormant: values.bar === false
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            let mut values = Values::default();
+            let tell = |decoration: &mut Decoration, values: &Values| {
+                decoration.tell(
+                    &Look {
+                        title: "",
+                        focused: true,
+                        pointer_inside: false,
+                        caret: None,
+                        values,
+                    },
+                    60,
+                    88,
+                );
+            };
+            // What a draw at the pane's size leaves each layer holding.
+            for layer in &mut decoration.layers {
+                layer.buffer_size = (60, 88);
+            }
+
+            tell(&mut decoration, &values);
+            assert_eq!(
+                drawn_at(&mut decoration, Depth::Frame),
+                ["bar"],
+                "a layer that never says is drawn"
+            );
+            assert!(
+                drawn_at(&mut decoration, Depth::Above).is_empty(),
+                "a dormant one is not"
+            );
+            let [bar, hint] = &mut decoration.layers[..] else {
+                panic!("two layers")
+            };
+            assert_eq!(bar.buffer_size, (60, 88), "the one drawn keeps its own");
+            assert_eq!(
+                hint.buffer_size,
+                (0, 0),
+                "the dormant one's next draw is a resize"
+            );
+            if !qml::on_gpu() {
+                let rendered = hint.scene.render().expect("it renders");
+                assert_eq!(
+                    (rendered.stride, rendered.pixels.len()),
+                    (4, 4),
+                    "its image is one pixel"
+                );
+            }
+
+            values.merge(std::collections::BTreeMap::from([
+                ("hint".to_owned(), crate::json::Json::Bool(true)),
+                ("bar".to_owned(), crate::json::Json::Bool(false)),
+            ]));
+            tell(&mut decoration, &values);
+            assert_eq!(drawn_at(&mut decoration, Depth::Above), ["hint"], "woken");
+            assert!(
+                drawn_at(&mut decoration, Depth::Frame).is_empty(),
+                "and a delegated layer sleeps by its own root"
+            );
 
             let _ = std::fs::remove_dir_all(&dir);
         });

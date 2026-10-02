@@ -53,7 +53,8 @@
 //! window opened: `id`, `x`, `y`) and `unknown` (each setting `solium --check`
 //! would report: `key`, and the `meant` it suggests); or, on the Qt thread,
 //! `pixel(layer, x, y)`, the frame's layer of that name rendered, answering
-//! `r, g, b, a` -- the scene is the layer `"scene"`.
+//! `r, g, b, a` -- the scene is the layer `"scene"` -- and `dormant`, `true`
+//! by the name of each of the frame's layers that says it is dormant now.
 //! `tests::every_scenario_with_a_client_passes`,
 //! `tests::every_scenario_on_the_qt_thread_passes`.
 
@@ -419,6 +420,14 @@ fn on_the_qt_thread(path: &Path) {
         } else if let Ok(Some(ms)) = step.get::<Option<u64>>("wait") {
             tick(Duration::from_millis(ms));
         } else if let Ok(Some(check)) = step.get::<Option<Function>>("expect") {
+            let dormant = lua.create_table().expect("a table");
+            for name in decoration
+                .as_ref()
+                .map(|(built, _)| built.dormant_layers())
+                .unwrap_or_default()
+            {
+                dormant.set(name, true).expect("a layer's name");
+            }
             let mut layers = decoration
                 .as_mut()
                 .map(|(built, _)| built.rendered_layers())
@@ -448,6 +457,7 @@ fn on_the_qt_thread(path: &Path) {
                 .expect("pixel");
             let world = lua.create_table().expect("a table");
             world.set("pixel", pixel).expect("pixel");
+            world.set("dormant", dormant).expect("dormant");
             expect(path, index, &check, world);
         } else {
             panic!(

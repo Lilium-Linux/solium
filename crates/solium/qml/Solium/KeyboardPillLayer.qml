@@ -27,8 +27,10 @@
 // A layer of its own because it draws over the client, and a layer is where a
 // style draws over the client (`panes/README.md`, "Layers"): the `frame`
 // layer of most styles copies only its own band in software. It costs a
-// scene per window, which idles at a flag read; a style that leaves the line
-// out pays nothing.
+// scene per window, and while no pill is on show it is `dormant`: the
+// compositor draws nothing of it and keeps no image for it, so it costs no
+// buffer and no blending over the client. A style that leaves the line out
+// pays nothing at all.
 
 import QtQuick
 
@@ -47,6 +49,12 @@ Layer {
 
     // The gap between the caret and the capsule.
     readonly property int gap: 6
+
+    // Nothing to draw: no pill wanted, no caret here, or none on show and
+    // done fading. Awake from the moment a cue shows one -- `showing` turns
+    // true before the fade-in has moved its opacity -- so its first frame is
+    // drawn. `Layer.qml` says what dormant spares.
+    dormant: !(layer.wanted && layer.caret.valid && (pill.showing || pill.visible))
 
     Item {
         anchors.fill: parent

@@ -90,6 +90,7 @@ that; one already left bare stays bare until it is opened again.
 | `bleed` | how far past the pane this layer may paint. `24` for every side, or `{ "top": 48 }` for one. Zero by default |
 | `source` | a QML file in this folder, when the content is not inline |
 | `name` | for diagnostics: which layer a warning is about |
+| `dormant` | `true` while the layer has nothing to draw. False unless bound. See "What it costs" |
 
 Content is written inline or delegated with `source:`, and the syntax does not
 change between the two. Each layer is rasterised into a scene of its own and
@@ -144,6 +145,7 @@ Read back by the compositor:
 |---|---|
 | `action` | set to `"close"` or `"maximize"` to ask for it; cleared once taken |
 | `onButton` | `true` while the pointer is over a button. A press on the frame starts a window drag unless some layer says this |
+| `dormant` | `true` while the layer has nothing to draw, so it is not drawn and keeps no image. An inline layer binds it on its `Layer` and `PaneStyle` hands it on; a delegated layer declares `property bool dormant` on its own root |
 
 A layer declares only the ones it uses; one that positions nothing against the
 window declares no `bleedTop` and is handed a property it ignores.
@@ -200,6 +202,21 @@ Declare it only if you need it; the alternative is usually to reserve the
 couple of pixels you were painting over. A layer at `behind` or `above`, a
 layer with any bleed, and every layer of a style that reserves nothing are
 overlays already and need not say it. On the GPU the property changes nothing.
+
+**A layer that is usually empty can say so.** Every layer costs what its
+canvas costs whether or not anything is in it: a buffer that size, and an
+element blended over the client wherever the client changes, and in software
+the whole canvas copied and uploaded at every step of a resize. A layer that
+binds `dormant` to "nothing to show" is left out of the frame while it is
+true, so nothing of it is blended or uploaded, and on the frame it goes to
+sleep it lets go of its image, so waking is a resize that draws it afresh. On
+the GPU its scene keeps the buffer it was last drawn into until it is drawn
+again, and one dormant from its first frame never has one larger than a
+pixel. It
+is a general mechanism -- any layer may bind it, and nothing in the
+compositor knows what a layer is for -- and the keyboard pill below is the
+shipped user. Wake it from something it is told (`values`, `caret`,
+`focused`): a dormant layer's own animations ask for no frames.
 
 Animations need nothing declared. Qt is asked each frame whether the scene has
 anything new to draw, and the compositor draws only then -- so an idle layer
@@ -273,10 +290,12 @@ all, and the configuration draws its pill on a surface instead.
 
 It is a layer of its own because it draws over the client, and in software a
 `frame` layer that reserves a band copies only that band. So it costs one more
-scene per window, which idles at a flag read and is redrawn only when the pill
-changes; a style that leaves the line out pays nothing for it.
-`crates/solium/tests/scenarios/keyboard-pane-drawn.lua` draws it in `top` and
-reads its pixels.
+scene per window. While no pill is on show it is `dormant`, which is nearly
+always: not drawn, no image kept, nothing blended over the client. It is
+drawn only from the cue that shows a pill until that pill has faded. A style
+that leaves the line out pays nothing for it at all.
+`crates/solium/tests/scenarios/keyboard-pane-drawn.lua` draws it in `top`,
+reads its pixels, and reads when it is dormant.
 
 ## One QML file is still a decoration
 
