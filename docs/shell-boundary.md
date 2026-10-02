@@ -277,7 +277,10 @@ Written on a Qt Quick Controls
 Solium.keyboard.wants: activeFocus; TextField { focus: true } }`
 (`qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`);
 on anything that is neither an item nor a `Popup` it holds nothing, and the
-log says so. The
+log says so. Such a popup holds the pointer with a `Grab` and the keyboard at
+once: a press outside it dismisses it and the window under the pointer has
+the pointer back, and the keyboard once the field lets go
+(`state::tests::real_client::reflow_on_close::hosted::a_search_popup_holding_the_pointer_and_the_keyboard_gives_both_back_when_dismissed`). The
 window that had the keyboard loses it meanwhile, still reads as the focused
 window and is drawn focused, and gets it back when the field lets go
 (`state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`).

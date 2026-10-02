@@ -23902,6 +23902,106 @@ end)
                 );
             }
 
+            /// **A search popup holding the pointer and the keyboard at once
+            /// gives both back when it is dismissed** (Rulings 12 to 14), on
+            /// Russian (#132): the field types Cyrillic, Escape is the field's
+            /// and not its binding's, a press outside dismisses the popup and
+            /// is swallowed while the field still holds the keyboard, the
+            /// window has the pointer at once and the keyboard once the field
+            /// lets go, and the next click there, with no motion before it,
+            /// reaches it.
+            #[test]
+            fn a_search_popup_holding_the_pointer_and_the_keyboard_gives_both_back_when_dismissed()
+            {
+                const Q: u32 = 24;
+                const ESCAPE: u32 = 9;
+                let (mut desk, opened, menu) = grabbing(crate::scripted::OutsideClick::default());
+                desk.install(r#"sol.bind("Escape", function() sol.status("bound") end)"#);
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                let window = window(&desk, &opened);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                want(
+                    &mut desk,
+                    menu,
+                    crate::qml::hosted::KeyboardReport::Wanted(vec!["Escape".to_owned()]),
+                );
+                move_pointer(&mut desk.state, (630.0, 530.0), 10);
+                for (code, key_state, time) in [
+                    (Q, KeyState::Pressed, 11),
+                    (Q, KeyState::Released, 12),
+                    (ESCAPE, KeyState::Pressed, 13),
+                    (ESCAPE, KeyState::Released, 14),
+                ] {
+                    crate::input::key(&mut desk.state, code.into(), key_state, time);
+                }
+                let told: Vec<(u32, i32)> = desk
+                    .state
+                    .scene_keys
+                    .iter()
+                    .filter(|key| key.pressed)
+                    .map(|key| (key.code, key.qt_key))
+                    .collect();
+                let typed = desk
+                    .state
+                    .scene_keys
+                    .first()
+                    .map(|key| key.text.clone())
+                    .unwrap_or_default();
+                let held = (
+                    desk.state.hosted_grab.is_some(),
+                    desk.state.hosted_keyboard.is_some(),
+                    keyboard_on(&desk),
+                    pointer_focus(&desk),
+                );
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 15);
+                let pressed = (
+                    dismissed(&desk, menu),
+                    desk.state.hosted_grab.is_none(),
+                    desk.state.hosted_keyboard.is_some(),
+                    pointer_focus(&desk),
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    16,
+                );
+                want(&mut desk, menu, crate::qml::hosted::KeyboardReport::LetGo);
+                let closed = keyboard_on(&desk);
+                click_here(&mut desk, 17);
+                desk.pump();
+                let window = Some(window_id(&opened));
+                assert_eq!(
+                    (
+                        told,
+                        typed,
+                        std::mem::take(&mut desk.state.status),
+                        held,
+                        pressed,
+                        closed,
+                        desk.client.buttons.clone(),
+                    ),
+                    (
+                        vec![(Q, 0x0419), (ESCAPE, 0x0100_0000)],
+                        "й".to_owned(),
+                        String::new(),
+                        (true, true, None, None),
+                        (1, true, true, window),
+                        window,
+                        vec![(0x110, true), (0x110, false)],
+                    ),
+                    "(the keys the field was told, by keycode and Qt key, what it typed, what \
+                     the binding left, (the grab held, the keyboard held, the keyboard's surface, \
+                     the pointer's) while open, (the dismissals, the grab let go, the keyboard \
+                     still held, the pointer's surface) at the outside press, the keyboard's \
+                     surface once the field let go, the buttons the window was told)"
+                );
+            }
+
             /// **A monitor unplugged while its scene holds the keyboard gives
             /// it back**: the hold goes with its monitor, though the surface
             /// is still declared, and the window it came from has the
