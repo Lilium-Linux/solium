@@ -606,6 +606,87 @@ pub(crate) mod tests {
         });
     }
 
+    /// **A modal Qt Quick Controls popup takes every point of its scene
+    /// while it is open**, as Qt's own modality does: its dim covers the
+    /// whole scene and takes every press, so nothing under the surface is
+    /// clicked until it closes.
+    #[test]
+    fn a_modal_popup_takes_every_point_of_its_scene_while_it_is_open() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-modal",
+                r"
+                import QtQuick
+                import QtQuick.Controls
+                Item {
+                    readonly property int opened: dialog.opened ? 1 : 0
+                    Popup {
+                        id: dialog
+                        x: 10; y: 0; width: 20; height: 20; padding: 0
+                        modal: true
+                        visible: true
+                        enter: null; exit: null
+                        closePolicy: Popup.NoAutoClose
+                    }
+                }
+                ",
+                "modal-1",
+            );
+            let got = (
+                scene.get_int("opened"),
+                [(20.0, 10.0), (50.0, 10.0), (2.0, 30.0)].map(|(x, y)| scene.hit(x, y)),
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                got,
+                (1, [Hit::Press, Hit::Press, Hit::Press]),
+                "(the popup is open, [on it, beside it, in a far corner])"
+            );
+        });
+    }
+
+    /// **A Qt Quick Controls popup is laid out against the whole scene**:
+    /// one that keeps inside its window (`margins: 0`, as a `Menu`, a
+    /// `ToolTip` and a `ComboBox`'s list do) opens where it was asked and
+    /// claims the points there, not at the middle of the scene.
+    #[test]
+    fn a_controls_popup_is_laid_out_against_the_whole_scene() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-popup-bounds",
+                r"
+                import QtQuick
+                import QtQuick.Controls
+                Item {
+                    readonly property int opened: menu.opened ? 1 : 0
+                    Popup {
+                        id: menu
+                        x: 10; y: 0; width: 20; height: 20; padding: 0; margins: 0
+                        visible: true
+                        enter: null; exit: null
+                        closePolicy: Popup.NoAutoClose
+                        contentItem: MouseArea {}
+                    }
+                }
+                ",
+                "popup-bounds-1",
+            );
+            let got = (
+                scene.get_int("opened"),
+                scene.hit(20.0, 10.0),
+                scene.hit(50.0, 25.0),
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                got,
+                (1, Hit::Press, Hit::Nothing),
+                "(the popup is open, where it was asked, the middle of the scene)"
+            );
+        });
+    }
+
     /// **A scene told the pointer left un-hovers what it hovered.**
     #[test]
     fn a_left_scene_drops_its_hover() {

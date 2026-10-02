@@ -184,7 +184,13 @@ points it is drawn on, though Qt draws it in the window's overlay rather than
 under the scene's root
 (`qml::hosted::tests::an_open_controls_popup_claims_its_press`), and
 `Solium.input` written on the `Popup` is that item's
-(`qml::hosted::tests::solium_input_on_a_controls_popup_is_its_items`).
+(`qml::hosted::tests::solium_input_on_a_controls_popup_is_its_items`). A
+popup is laid out against the whole scene, so a `Menu` opens where it is
+asked to
+(`qml::hosted::tests::a_controls_popup_is_laid_out_against_the_whole_scene`),
+and a modal one takes every point of its scene while it is open, as Qt's own
+modality does
+(`qml::hosted::tests::a_modal_popup_takes_every_point_of_its_scene_while_it_is_open`).
 Everywhere else the window under the shell gets the press, and where the
 scene takes a press, the window under it does not have the pointer, nor the
 keyboard when focus follows the mouse. A press the scene took is its until

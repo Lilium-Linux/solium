@@ -701,6 +701,17 @@ static bool write_property_path(QObject *object, const QString &path, const QVar
  * for the caller to free — the caller allocated it and knows what else it has
  * attached by now, which is not a decision to make from in here.
  */
+/* The scene's window, and its content item with it: a window that is never
+ * shown gets no resize event, so Qt leaves the content item at 0x0, and the
+ * Qt Quick Controls overlay, which takes the content item's size and centres
+ * itself on the window, lays every popup out against a point in the middle
+ * of the scene. `qml::hosted::tests::a_controls_popup_is_laid_out_against_the_whole_scene`. */
+static void size_window(SoliumQmlScene *scene, int width, int height)
+{
+    scene->window->setGeometry(0, 0, width, height);
+    scene->window->contentItem()->setSize(QSizeF(width, height));
+}
+
 static bool load_component(SoliumQmlScene *scene, const char *qml_path,
                            const char *initial_json, const char **error)
 {
@@ -850,7 +861,7 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
     // Transparent, because the scene is composited over the desktop rather
     // than being a window in its own right.
     scene->window->setColor(Qt::transparent);
-    scene->window->setGeometry(0, 0, scene->width, scene->height);
+    size_window(scene, scene->width, scene->height);
 
     // initialize() is not called at all. It sets up RHI resources, returns
     // false under the software adaptation, and — worse — makes a GL context
@@ -1305,7 +1316,7 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int wi
     scene->control = new QQuickRenderControl();
     scene->window = new QQuickWindow(scene->control);
     scene->window->setColor(Qt::transparent);
-    scene->window->setGeometry(0, 0, scene->width, scene->height);
+    size_window(scene, scene->width, scene->height);
 
     // The RHI path *requires* initialize(); the software path forbids it. This
     // is the one line where the two genuinely diverge, and it also has the side
@@ -1536,7 +1547,7 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
         scene->scale = scale;
         const int logical_width = qMax(1, qRound(width / scale));
         const int logical_height = qMax(1, qRound(height / scale));
-        scene->window->setGeometry(0, 0, logical_width, logical_height);
+        size_window(scene, logical_width, logical_height);
         if (scene->root != nullptr) {
             scene->root->setWidth(logical_width);
             scene->root->setHeight(logical_height);
@@ -1571,7 +1582,7 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
     // real pixels as that monitor has.
     const int logical_width = qMax(1, qRound(width / scale));
     const int logical_height = qMax(1, qRound(height / scale));
-    scene->window->setGeometry(0, 0, logical_width, logical_height);
+    size_window(scene, logical_width, logical_height);
     if (scene->root != nullptr) {
         scene->root->setWidth(logical_width);
         scene->root->setHeight(logical_height);
@@ -1708,7 +1719,7 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
     // comment there for why it is that way round.
     const int logical_width = qMax(1, qRound(width / scale));
     const int logical_height = qMax(1, qRound(height / scale));
-    scene->window->setGeometry(0, 0, logical_width, logical_height);
+    size_window(scene, logical_width, logical_height);
     if (scene->root != nullptr) {
         scene->root->setWidth(logical_width);
         scene->root->setHeight(logical_height);
@@ -2652,8 +2663,11 @@ extern "C" int solium_qml_scene_hit(const SoliumQmlScene *scene, double x, doubl
     // A Qt Quick Controls popup (a Popup, a Menu, a ComboBox's list) is drawn
     // in the window's overlay, beside the root rather than under it. The
     // overlay itself takes every button, to close popups on a press outside
-    // them, so only the popups in it are asked.
-    // `qml::hosted::tests::an_open_controls_popup_claims_its_press`.
+    // them, so only what is in it is asked: its popups, a modal popup's dim,
+    // which covers the scene and so takes every point of it while the popup
+    // is open, and anything a scene put there.
+    // `qml::hosted::tests::an_open_controls_popup_claims_its_press`,
+    // `qml::hosted::tests::a_modal_popup_takes_every_point_of_its_scene_while_it_is_open`.
     for (QQuickItem *beside : scene->window->contentItem()->childItems()) {
         if (claim == 2) {
             break;
