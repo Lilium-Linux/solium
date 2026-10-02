@@ -167,8 +167,11 @@ It reads where it is from `Solium.monitor`, below; `screenInfo` is gone.
 
 **Clickable only where it takes input.** The compositor asks the live item
 tree under the pointer, so a point is the scene's only where a visible item
-takes input: a `MouseArea`, a pointer handler, or an item marked
-`Solium.input: true`. `Solium.input: "hover"` takes the pointer's motion and
+takes input: a `MouseArea`, a pointer handler, a link in a `Text`, or an item
+marked `Solium.input: true`. The rest of a `Text` takes no press, a plain
+label none at all
+(`qml::hosted::tests::a_text_takes_a_press_only_on_a_link`).
+`Solium.input: "hover"` takes the pointer's motion and
 leaves presses to what is under it, which is how an edge strip reveals a
 hidden dock; `Solium.input: false` takes an item out. An item's shape counts,
 through its `containmentMask`, so a rounded popup's corners pass clicks

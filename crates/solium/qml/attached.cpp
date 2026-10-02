@@ -5,6 +5,7 @@
 
 #include <QtQml/QQmlContext>
 #include <QtQml/QQmlEngine>
+#include <QtCore/QMetaObject>
 #include <QtQuick/QQuickItem>
 
 #include <algorithm>
@@ -125,15 +126,33 @@ bool takes_presses_itself(const QQuickItem *item)
     return false;
 }
 
-/* What one item claims for itself, before its children are asked. Its
- * handlers first: Qt gives an item with any pointer handler every mouse
- * button, to hand presses on to the handlers, so an item with only a
- * HoverHandler accepts every button and still takes no press itself, and
- * neither does one whose handlers are all disabled, since Qt hands a
- * disabled handler nothing.
+/* Whether `item` is a Text with a link at `local`, a point in its own
+ * coordinates. Qt gives every Text the left button (QQuickTextPrivate::init)
+ * and lets a press go unless a link is under it (QQuickText::mousePressEvent
+ * asks the same linkAt), so a Text takes a press there and nowhere else.
+ * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
+bool on_a_link(QQuickItem *item, const QPointF &local)
+{
+    if (!item->inherits("QQuickText")) {
+        return false;
+    }
+    QString link;
+    QMetaObject::invokeMethod(item, "linkAt", Qt::DirectConnection, Q_RETURN_ARG(QString, link),
+                              Q_ARG(qreal, local.x()), Q_ARG(qreal, local.y()));
+    return !link.isEmpty();
+}
+
+/* What one item claims for itself at `local`, a point in its own
+ * coordinates, before its children are asked. Its handlers first: Qt gives
+ * an item with any pointer handler every mouse button, to hand presses on to
+ * the handlers, so an item with only a HoverHandler accepts every button and
+ * still takes no press itself, and neither does one whose handlers are all
+ * disabled, since Qt hands a disabled handler nothing. A Text takes a press
+ * only on a link.
  * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`,
- * `qml::hosted::tests::a_disabled_handler_claims_nothing`. */
-int own_claim(QQuickItem *item)
+ * `qml::hosted::tests::a_disabled_handler_claims_nothing`,
+ * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
+int own_claim(QQuickItem *item, const QPointF &local)
 {
     auto *attached = qobject_cast<SoliumAttached *>(
         qmlAttachedPropertiesObject<SoliumAttachedType>(item, false));
@@ -157,12 +176,13 @@ int own_claim(QQuickItem *item)
         }
     }
     if (handlers) {
-        if (takes_presses_itself(item)) {
+        if (takes_presses_itself(item) || on_a_link(item, local)) {
             return 2;
         }
         return hover_handler ? 1 : 0;
     }
-    if (item->acceptedMouseButtons() != Qt::NoButton) {
+    if (on_a_link(item, local)
+        || (!item->inherits("QQuickText") && item->acceptedMouseButtons() != Qt::NoButton)) {
         return 2;
     }
     return item->acceptHoverEvents() ? 1 : 0;
@@ -175,11 +195,12 @@ int solium_claim_at(QQuickItem *item, const QPointF &scene_point)
     if (item == nullptr || !item->isVisible() || item->opacity() <= 0.0 || !item->isEnabled()) {
         return 0;
     }
-    const bool inside = item->contains(item->mapFromScene(scene_point));
+    const QPointF local = item->mapFromScene(scene_point);
+    const bool inside = item->contains(local);
     if (item->clip() && !inside) {
         return 0;
     }
-    int claim = inside ? own_claim(item) : 0;
+    int claim = inside ? own_claim(item, local) : 0;
     for (QQuickItem *child : item->childItems()) {
         if (claim == 2) {
             break;

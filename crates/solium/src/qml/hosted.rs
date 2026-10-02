@@ -357,6 +357,42 @@ pub(crate) mod tests {
         });
     }
 
+    /// **A `Text` takes a press only on a link**, as Qt gives it one: every
+    /// `Text` accepts the left button, to look for a link under a press, and
+    /// lets the press go where there is none. So a link takes the press,
+    /// with a `HoverHandler` beside it for the pointer's shape too; the rest
+    /// of that `Text` is only its hover; and a plain label takes nothing.
+    #[test]
+    fn a_text_takes_a_press_only_on_a_link() {
+        on_the_qt_thread(|| {
+            let (directory, scene) = hosted(
+                "solium-hosted-link",
+                r#"
+                import QtQuick
+                Item {
+                    Text {
+                        x: 0; y: 0; width: 64; height: 16
+                        textFormat: Text.StyledText
+                        text: "<a href=\"x\">xx</a>"
+                        onLinkActivated: (link) => {}
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    }
+                    Text { x: 0; y: 16; width: 64; height: 16; text: "label" }
+                }
+                "#,
+                "link-1",
+            );
+            let got = [(2.0, 8.0), (60.0, 8.0), (5.0, 24.0)].map(|(x, y)| scene.hit(x, y));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                got,
+                [Hit::Press, Hit::Hover, Hit::Nothing],
+                "[on the link, on its Text beside it, on a plain label]"
+            );
+        });
+    }
+
     /// **The Tweaks panel keeps a press on its empty part**: its background
     /// takes input, so a press between its entries is the panel's, not the
     /// window's under it.
