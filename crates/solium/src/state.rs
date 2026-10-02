@@ -409,8 +409,11 @@ pub(crate) struct Solium {
     /// `tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`.
     pub(crate) hosted_grab: Option<HostedGrab>,
     /// The buttons whose press the compositor swallowed, by evdev code, so
-    /// their release is swallowed too, wherever it lands.
-    /// `tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
+    /// their release is swallowed too, wherever it lands; forgotten at the
+    /// lock, behind which a release is the lock screen's.
+    /// `tests::real_client::reflow_on_close::hosted::a_swallowed_unnamed_press_swallows_its_release_off_the_scene`,
+    /// `tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
+    /// `tests::real_client::reflow_on_close::hosted::the_lock_forgets_the_presses_a_shell_swallowed`.
     pub(crate) swallowed: std::collections::HashSet<u32>,
     // A window on its way out, and one that has been asked to close and not
     // gone, used to be two `HashMap<PaneId, Duration>` here. They are

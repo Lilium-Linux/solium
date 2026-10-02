@@ -22917,6 +22917,73 @@ end)
                 );
             }
 
+            /// **The release of a button Qt has no name for, which a shell
+            /// swallowed the press of, is swallowed wherever it lands**: pressed
+            /// on a shell button over a window and let go of over the window,
+            /// the window is told of neither, so it never holds a release for a
+            /// press it was not sent.
+            #[test]
+            fn a_swallowed_unnamed_press_swallows_its_release_off_the_scene() {
+                let (mut desk, _, _, shell) = the_keyboard_beside_a_shell_button();
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x100, ButtonState::Pressed, 11);
+                move_pointer(&mut desk.state, (630.0, 555.0), 12);
+                let on_the_window = pointer_on(&desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x100,
+                    ButtonState::Released,
+                    13,
+                );
+                desk.pump();
+                assert_eq!(
+                    (
+                        on_the_window.is_some(),
+                        desk.client.buttons.clone(),
+                        presses(&desk, shell),
+                        desk.state.swallowed.is_empty(),
+                    ),
+                    (true, Vec::new(), 0, true),
+                    "(the window had the pointer at the release, the buttons it was told, \
+                     the presses the scene was told, the swallowed presses all let go)"
+                );
+            }
+
+            /// **The lock forgets the presses swallowed before it** (Ruling 12):
+            /// a release behind the lock is the lock screen's, so a press the
+            /// shell swallowed is never let go of through the shell, and after
+            /// the lock the same button clicked on a window reaches it whole.
+            #[test]
+            fn the_lock_forgets_the_presses_a_shell_swallowed() {
+                let (mut desk, _, _, _) = the_keyboard_beside_a_shell_button();
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x100, ButtonState::Pressed, 11);
+                let swallowed = desk.state.swallowed.contains(&0x100);
+                desk.state.release_grabs();
+                move_pointer(&mut desk.state, (630.0, 555.0), 12);
+                crate::synth::send_button(&mut desk.state, region, 0x100, ButtonState::Pressed, 13);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x100,
+                    ButtonState::Released,
+                    14,
+                );
+                desk.pump();
+                assert_eq!(
+                    (swallowed, desk.client.buttons.clone()),
+                    (true, vec![(0x100, true), (0x100, false)]),
+                    "(the shell swallowed the first press, what the window was told of the click after the lock)"
+                );
+            }
+
             fn inside_the_menu(at: Point<f64, Logical>) -> bool {
                 (100.0..300.0).contains(&at.x) && (30.0..230.0).contains(&at.y)
             }

@@ -174,9 +174,13 @@ impl Solium {
     /// matching serial and gives the keyboard to the menu's window. Once the
     /// keyboard grab is gone there is nothing left for it to match.
     pub(crate) fn release_grabs(&mut self) {
-        // A hosted scene's grab goes first, as the menus do.
-        // `state::tests::real_client::reflow_on_close::hosted::locking_the_session_dismisses_a_hosted_grab`.
+        // A hosted scene's grab goes first, as the menus do, and the presses
+        // swallowed before the lock are forgotten: their releases are the
+        // lock screen's.
+        // `state::tests::real_client::reflow_on_close::hosted::locking_the_session_dismisses_a_hosted_grab`,
+        // `state::tests::real_client::reflow_on_close::hosted::the_lock_forgets_the_presses_a_shell_swallowed`.
         self.dismiss_hosted_grab();
+        self.swallowed.clear();
         if let Some(mut grab) = self.popup_grab.take() {
             grab.ungrab(PopupUngrabStrategy::All);
         }

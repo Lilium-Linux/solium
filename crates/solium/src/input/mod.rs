@@ -903,7 +903,8 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
 
     // A grab a scene holds has the press first, and a press the compositor
     // swallowed has its release swallowed, wherever it lands (Ruling 12).
-    // `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
+    // `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
+    // `state::tests::real_client::reflow_on_close::hosted::a_swallowed_unnamed_press_swallows_its_release_off_the_scene`.
     match state.grab_button(location, button, pressed, scene) {
         GrabRoute::Taken => {
             state.redraw = true;
@@ -943,11 +944,16 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // first, even through a grab smithay started during it (Ruling 7):
     // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
     // A button Qt has no name for is swallowed where a scene takes a press,
-    // and the scene is not told of it:
-    // `state::tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_is_swallowed_where_a_shell_takes_a_press`.
+    // and the scene is not told of it, and so is its release, wherever it
+    // lands:
+    // `state::tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_is_swallowed_where_a_shell_takes_a_press`,
+    // `state::tests::real_client::reflow_on_close::hosted::a_swallowed_unnamed_press_swallows_its_release_off_the_scene`.
     if (state.scene_press.is_some() || !pointer.is_grabbed())
         && state.surface_pointer(true, location, scene)
     {
+        if scene.is_none() && pressed {
+            state.swallowed.insert(button);
+        }
         return;
     }
 
@@ -1177,6 +1183,9 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // desktop menu lives: they get the press only because nothing above
     // wanted it.
     if !pointer.is_grabbed() && !on_a_client && state.surface_pointer(false, location, scene) {
+        if scene.is_none() && pressed {
+            state.swallowed.insert(button);
+        }
         return;
     }
 
