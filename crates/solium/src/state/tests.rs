@@ -23472,6 +23472,86 @@ end)
                 );
             }
 
+            /// **A grab that begins while a button is held on a game whose
+            /// pointer is locked has the pointer once that button is let go
+            /// of** (Ruling 12): a screenshot key pressed while firing. The
+            /// press is the game's, so its release is too, and from the
+            /// motion after it the pointer moves and is the grab's scene's.
+            #[test]
+            fn a_grab_begun_during_a_press_on_a_locked_window_has_the_pointer_after_the_release() {
+                use zwp_pointer_constraints_v1::Lifetime;
+                let (mut desk, opened, menu) = grabbing(crate::scripted::OutsideClick::default());
+                report(&mut desk, menu, crate::qml::hosted::GrabReport::Released);
+                let pointer = desk.client.seat_pointer(&desk.qh);
+                let constraints = desk
+                    .client
+                    .pointer_constraints
+                    .clone()
+                    .expect("zwp_pointer_constraints_v1 bound");
+                let _locked = constraints.lock_pointer(
+                    &opened.surface,
+                    &pointer,
+                    None,
+                    Lifetime::Persistent,
+                    &desk.qh,
+                    (),
+                );
+                desk.pump();
+                let at = |desk: &Desk| {
+                    desk.state
+                        .seat
+                        .get_pointer()
+                        .map(|pointer| pointer.current_location())
+                        .unwrap_or_default()
+                };
+                move_pointer(&mut desk.state, (630.0, 530.0), 20);
+                move_pointer(&mut desk.state, (631.0, 531.0), 21);
+                let locked = at(&desk);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 22);
+                report(
+                    &mut desk,
+                    menu,
+                    crate::qml::hosted::GrabReport::Held("shot".to_owned()),
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    23,
+                );
+                desk.pump();
+                let before = scene_events(&desk.state, menu).len();
+                move_pointer(&mut desk.state, (700.0, 700.0), 24);
+                move_pointer(&mut desk.state, (701.0, 701.0), 25);
+                let heard = scene_events(&desk.state, menu)
+                    .iter()
+                    .skip(before)
+                    .filter(|event| event.kind == PointerKind::Motion)
+                    .count();
+                desk.pump();
+                assert_eq!(
+                    (
+                        locked,
+                        desk.client.buttons.clone(),
+                        at(&desk),
+                        heard,
+                        desk.state.hosted_grab.is_some(),
+                    ),
+                    (
+                        Point::from((630.0, 530.0)),
+                        vec![(0x110, true), (0x110, false)],
+                        Point::from((701.0, 701.0)),
+                        2,
+                        true,
+                    ),
+                    "(where the lock held the pointer, the buttons the game was told, where the \
+                     pointer is after the release, the motions the grab's scene heard after it, \
+                     the grab still held)"
+                );
+            }
+
             /// A surface on every monitor reserving `reserve`, its scene stood
             /// in for by `stand`.
             fn reserving(

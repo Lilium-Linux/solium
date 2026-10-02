@@ -603,6 +603,14 @@ fn held(
     wanted: Point<f64, Logical>,
     was: Point<f64, Logical>,
 ) -> (Point<f64, Logical>, bool) {
+    // While a hosted scene holds a grab, no window's constraint holds the
+    // pointer, nor is one granted: not even the one of a window a press
+    // still keeps the pointer on, through the grab smithay started for it
+    // (Ruling 12).
+    // `state::tests::real_client::reflow_on_close::hosted::a_grab_begun_during_a_press_on_a_locked_window_has_the_pointer_after_the_release`.
+    if state.hosted_grab.is_some() {
+        return (wanted, false);
+    }
     let Some(surface) = pointer.current_focus() else {
         return (wanted, false);
     };
